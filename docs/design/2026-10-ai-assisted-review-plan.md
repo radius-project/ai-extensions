@@ -195,7 +195,7 @@ Each high-tier path is there for a specific reason:
 - **The cloud test suite** in `packages/adapter-canvas/test/e2e-cloud/**` runs from `cloud-e2e.yml` with an Azure identity and a GitHub App token, and it creates and deletes real Azure resources. That workflow runs only nightly and on manual dispatch, never on a pull request, to keep fork code away from those credentials. So a change to these tests or their `support/` helpers first runs with credentials after it merges, and no pull request check exercises it beforehand. Tests elsewhere, including the `*.live.test.ts` files that `live-tests.yml` runs with a read-only token, stay in the low tier.
 - **The release scripts**, called by `publish.yml` and `release.yml`, decide what reaches users. A compromise there is a supply-chain attack, and a published version can't be cleanly taken back.
 
-For all five, passing tests don't show a change is safe. Tests check that the code does what we intended; the danger in these paths is what the code could also be made to do. A workflow that grants `contents: write` where `read` would do passes every test, and so does a generator that writes a wider OIDC subject, if we update the expected output along with it. A shell step that interpolates a pull request title works fine until someone opens a pull request with a malicious title. And our pull request CI can't run the real thing: it has no cloud credentials and doesn't publish, so the deploy, delete, and release steps first run for real after merge. Only a reviewer who reads for least privilege, scope, and untrusted input can catch these.
+For all five examples above, passing tests don't show a change is safe. Tests check that the code does what we intended; the danger in these paths is what the code could also be made to do. A workflow that grants `contents: write` where `read` would do passes every test. So does a generator that writes a wider OIDC subject, if we update the expected output along with it. A shell step that interpolates a pull request title works fine until someone opens a pull request with a malicious title. And our pull request CI can't run the real thing: it has no cloud credentials and doesn't publish, so the deploy, delete, and release steps first run for real after merge. Only a reviewer who reads for least privilege, scope, and untrusted input can catch these.
 
 The high tier also calls for a Max code review from Copilot, which the author or the human directing the agent must request by hand. Copilot sets the default effort level per repository, not per path, and we should keep that default at Balanced.
 
@@ -220,7 +220,7 @@ We should:
 
 #### Step 4.5: Let Copilot approve low-tier changes, after a trial
 
-[Copilot approvals](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-approvals) became generally available on October 28, 2026. A repository admin turns them on under [Settings > Copilot > Code review](https://docs.github.com/en/copilot/how-tos/copilot-on-github/set-up-copilot/configure-code-review#customizing-copilot-code-review-1), which has three Auto-approval settings:
+[Copilot approvals](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-approvals) became generally available on October 28, 2026. A repository admin can turn them on under [Settings > Copilot > Code review](https://docs.github.com/en/copilot/how-tos/copilot-on-github/set-up-copilot/configure-code-review#customizing-copilot-code-review-1), which has three Auto-approval settings:
 
 - **Allow Copilot to approve pull requests** lets Copilot submit an approving review.
 - **Allow Copilot approvals to count toward merge requirements** lets that approval satisfy the ruleset's required approval, the same way a teammate's would.
@@ -230,7 +230,7 @@ For example, with the globs `docs/**` and `**/*.md`, a pull request that changes
 
 The globs don't change which pull requests Copilot reviews. The `main` ruleset still requests a review on every non-draft pull request, and every review still includes Copilot's approval assessment in its summary comment. A new push dismisses Copilot's approval.
 
-We should roll it out in four parts:
+We should roll this plan out in four parts:
 
 - **Trial.** For at least four weeks and at least 30 low-tier pull requests, **leave approvals off and record Copilot's approval assessment for each pull request next to the human decision on the same commit**. Count any false approvals (where Copilot would approve, but a human asks for a real fix). Turn approvals on only if there are no false approvals in the trial period. If there are false approvals, update the review instructions and skills, then run a new trial.
 - **Allow-list.** Use the low tier's paths as the globs. Never include `.github/**`, any `AGENTS.md` or `copilot-instructions.md`, or any glob that overlaps a high-tier path. That rules out broad test globs such as `**/*.test.ts`, which would match the `*.test.ts` files under `packages/adapter-canvas/test/e2e-cloud/`; list the low-tier test folders by name instead.
@@ -249,7 +249,7 @@ These guards stop a tampered review from approving a pull request, but not from 
 
 ### Error handling
 
-We need every new check to fail closed. When something goes wrong, the pull request should fall back to needing a human, never to merging with less review.
+We need every new check to fail closed. "Fail closed" means that when a check breaks, it blocks the merge instead of letting the pull request through. When something goes wrong, the pull request should fall back to needing a human.
 
 - **Copilot doesn't review.** The review can fail to run because the author has no Copilot license, has run out of AI credits, or GitHub has an outage. Then there's no Copilot approval, and the ruleset's required approval must come from a human.
 - **The labeler fails or doesn't run.** Labels only inform reviewers. The approval globs and the Step 4.5 trusted-author check work from the changed files and the author, never from labels, so a missing or wrong label can't lower the bar.
@@ -281,6 +281,14 @@ In each case, "blocked" means GitHub won't allow the merge.
 | 8 | Team lookup fails | The trusted-author check runs with a token that can't read team membership. | The check fails, so the pull request is blocked. |
 | 9 | Agent of unknown origin | An agent opens a low-tier pull request, and the check can't confirm which team member started it. | Treated as untrusted: blocked until a human approves. |
 
+We also need to confirm these facts before the step that depends on each:
+
+- Does a Copilot approval satisfy the ruleset's code-owner review rule? (Step 4.5)
+- Can an instruction make Copilot code review load a skill on every review? (Step 1.2)
+- When a pull request has a file outside the globs, does Copilot still submit an approval that doesn't count, or none at all? (Step 4.5)
+- If we adopt a merge queue, do the new required checks need a `merge_group` trigger? (Step 3.2)
+- Who can see and correct what Copilot Memory stores? (Step 1.5)
+
 ## Security
 
 This proposal lets some changes merge without a human, so its main risk is a pull request that earns an approval it shouldn't.
@@ -293,11 +301,20 @@ This proposal lets some changes merge without a human, so its main risk is a pul
 
 ## Open questions
 
-- Does a Copilot approval satisfy the ruleset's code-owner review rule? (Step 4.5)
-- Can an instruction make Copilot code review load a skill on every review? (Step 1.2)
-- When a pull request has a file outside the globs, does Copilot still submit an approval that doesn't count, or none at all? (Step 4.5)
-- If we adopt a merge queue, do the new required checks need a `merge_group` trigger? (Step 3.2)
-- Who can see and correct what Copilot Memory stores? (Step 1.5)
+**Q: Who pays for reviews on every push?**
+Copilot bills each review to the pull request's author, so a busy pull request costs its author more with every push, and a re-review at Max costs about $10 (Step 2.1). Maintainers would also pay to review outside contributions. Proposed: watch spend during the Phase 2 rollout, then decide whether the organization should pay through a budget.
+
+**Q: Is the trial bar right?**
+Step 4.5 asks for four weeks, 30 low-tier pull requests, and zero false approvals. Someone has to record Copilot's assessment next to the human decision for each of those pull requests. Proposed: keep the bar, and name an owner for the record before the trial starts.
+
+**Q: Should an agent's pull request ever count as trusted?**
+Step 4.5 trusts an agent's pull request only when GitHub's records show a team member started the agent. The alternative is to require a human approval on every agent pull request. Proposed: keep the Step 4.5 rule, since the check fails closed when it can't tell.
+
+**Q: What happens when a required check is flaky?**
+Step 3.2 makes the Canvas Chromium and Windows jobs required. If one fails at random, it blocks merges that are otherwise ready. Proposed: rerun a failed job once, and if it fails at random again, quarantine the test with a tracking issue rather than drop the required check.
+
+**Q: Should we close the plugin build gap now?**
+Step 3.2 leaves the per-plugin `Build <plugin> dist` jobs unrequired, so a pull request that breaks one plugin's build can still merge. A separate `pr-gate` job (see [Alternatives considered](#alternatives-considered)) would close the gap without touching the release path. Proposed: decide whether to build it in Phase 3 or wait until ruleset upkeep forces it.
 
 ## Alternatives considered
 
