@@ -5702,10 +5702,8 @@ test.describe("Radius Canvas in Chromium", () => {
     notification = { ...notification, status: "success", finishedAt: 1700 };
     await page.clock.fastForward(6000);
     await expect(chip).toHaveText("todolist deployed to dev");
-    await expect(chip).toHaveAttribute(
-      "aria-label",
-      "todolist deployed to dev"
-    );
+    await expect(chip).toHaveAccessibleName("todolist deployed to dev");
+    await expect(chip).toHaveAttribute("title", "todolist deployed to dev");
     // Success stays in the canvas despite its run URL, so following the chip
     // performs the in-canvas navigation the dismissal has to survive.
     await expect(chip).toHaveAttribute("href", "/?page=deploying");

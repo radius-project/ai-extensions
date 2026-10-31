@@ -179,7 +179,8 @@ describe("operation chip polling", () => {
     expect(browser.chip.hidden).toBe(false);
     expect(browser.chip.className).toBe("rad-opchip rad-opchip--running");
     expect(browser.label.textContent).toBe("Setting up dev…");
-    expect(browser.chip.getAttribute("aria-label")).toBe(
+    expect(browser.chip.getAttribute("aria-label")).toBeNull();
+    expect(browser.chip.getAttribute("title")).toBe(
       "Creating the dev environment"
     );
     expect(browser.chip.getAttribute("title")).toBe(
@@ -198,7 +199,8 @@ describe("operation chip polling", () => {
     initializeOperationChip(browser.context);
     await flushPromises();
 
-    expect(browser.chip.getAttribute("aria-label")).toBe("Setting up dev…");
+    expect(browser.chip.getAttribute("aria-label")).toBeNull();
+    expect(browser.chip.getAttribute("title")).toBe("Setting up dev…");
   });
 
   it("renders without a label element on a trimmed page", async () => {
@@ -214,9 +216,8 @@ describe("operation chip polling", () => {
     await flushPromises();
 
     expect(chip.hidden).toBe(false);
-    expect(chip.getAttribute("aria-label")).toBe(
-      "Creating the dev environment"
-    );
+    expect(chip.getAttribute("aria-label")).toBeNull();
+    expect(chip.getAttribute("title")).toBe("Creating the dev environment");
   });
 
   it("stays hidden while the inline progress panel is on screen", async () => {
