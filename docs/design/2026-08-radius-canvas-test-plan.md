@@ -39,6 +39,8 @@ Start with the status table. Use the phase sections for the work still to come. 
 
 ## Required checks
 
+Shared AWS admission extends RF-08 and the registered-tool runtime contracts with default-off refusal before account interaction, HTTP gate ordering, required network fields, role-name/existing-role/both-selector retention on the in-memory operation request and the identity stage. Registered Continue/Retry exercises in-process saved legacy input through the real coordinator and proves explicit refusal before AWS authorization or configuration; valid retry selectors reach the chosen role with existing-role precedence. These complement the existing AWS Chromium journey, provider-conflict/trust tests and cooperative Stop matrices. They do not qualify nested AWS runtime shutdown, mutation recovery or automatic restart authorization; those remain deferred. AWS requests are not durably saved, and restart still refuses Continue/Retry with a missing request. Existing Azure/GitHub/workflow shutdown evidence remains unchanged.
+
 | Check                       | Required when                                                                    | What it protects                                                                                           |
 |-----------------------------|----------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
 | Focused module tests        | Every behavior change                                                            | Rules, validation, state changes, escaping, and error handling                                             |

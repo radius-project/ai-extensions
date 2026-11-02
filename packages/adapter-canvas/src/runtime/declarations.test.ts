@@ -183,9 +183,11 @@ describe("RU-03: tool declarations", () => {
         subscriptionId: { type: "string" },
         resourceGroup: { type: "string" },
         cluster: { type: "string" },
-        roleArn: { type: "string" },
+        roleName: { type: "string" },
+        existingRoleArn: { type: "string" },
         accountId: { type: "string" },
         region: { type: "string" },
+        vpcId: { type: "string" },
         subnetIds: { type: "string" }
       }
     });

@@ -57,7 +57,8 @@ const azure: Record<string, Schema> = {
   serviceManagementReference: text
 };
 const aws: Record<string, Schema> = {
-  roleArn: text,
+  roleName: text,
+  existingRoleArn: text,
   accountId: text,
   region: text,
   cluster: text,
@@ -103,10 +104,11 @@ export const ENVIRONMENT_SETUP_ARGUMENT_SCHEMA: Schema = {
         "repo",
         "environment",
         "provider",
-        "roleArn",
         "accountId",
         "region",
-        "cluster"
+        "cluster",
+        "vpcId",
+        "subnetIds"
       ]
     )
   ]
@@ -233,7 +235,7 @@ export const ENVIRONMENT_TOOL_DECLARATIONS = [
   {
     name: "radius_setup_environment",
     description:
-      "Configure and verify an Azure or AWS environment without opening Canvas. Setup never deploys. Specify repo, environment and provider. Azure requires tenantId, subscriptionId, resourceGroup and cluster; AWS requires roleArn, accountId, region and cluster. Do not mix provider-specific fields. Omit branch only for the session repository's current worktree branch. Account selection and sensitive consent use trusted host interaction, never tool arguments. Poll the returned operationId with radius_environment_status.",
+      "Configure and verify an Azure or AWS environment without opening Canvas. Setup never deploys. Specify repo, environment and provider. Azure requires tenantId, subscriptionId, resourceGroup and cluster. AWS requires the startup developer switch, accountId, region, cluster, vpcId, subnetIds and a valid roleName or existingRoleArn; existingRoleArn takes precedence when both selectors are supplied. Do not mix provider-specific fields. Omit branch only for the session repository's current worktree branch. Account selection and sensitive consent use trusted host interaction, never tool arguments. Poll the returned operationId with radius_environment_status.",
     parameters: ENVIRONMENT_SETUP_SCHEMA
   },
   {

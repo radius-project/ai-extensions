@@ -290,7 +290,7 @@
     },
     {
       "name": "radius_setup_environment",
-      "description": "Configure and verify an Azure or AWS environment without opening Canvas. Setup never deploys. Specify repo, environment and provider. Azure requires tenantId, subscriptionId, resourceGroup and cluster; AWS requires roleArn, accountId, region and cluster. Do not mix provider-specific fields. Omit branch only for the session repository's current worktree branch. Account selection and sensitive consent use trusted host interaction, never tool arguments. Poll the returned operationId with radius_environment_status.",
+      "description": "Configure and verify an Azure or AWS environment without opening Canvas. Setup never deploys. Specify repo, environment and provider. Azure requires tenantId, subscriptionId, resourceGroup and cluster. AWS requires the startup developer switch, accountId, region, cluster, vpcId, subnetIds and a valid roleName or existingRoleArn; existingRoleArn takes precedence when both selectors are supplied. Do not mix provider-specific fields. Omit branch only for the session repository's current worktree branch. Account selection and sensitive consent use trusted host interaction, never tool arguments. Poll the returned operationId with radius_environment_status.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -360,7 +360,11 @@
             "type": "string",
             "minLength": 1
           },
-          "roleArn": {
+          "roleName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "existingRoleArn": {
             "type": "string",
             "minLength": 1
           },

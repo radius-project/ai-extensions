@@ -49,7 +49,7 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
-function harness() {
+function harness(awsEnabled = true) {
   const registry = createRegistry();
   const owner = createEnvironmentExecutionOwner();
   const session = createSessionHolder();
@@ -58,6 +58,7 @@ function harness() {
   const schedule = vi.fn(() => true);
   const persist = vi.fn(async () => {});
   const start = createSetupStartService({
+    awsEnabled,
     isValidRepoSlug,
     isResourceGroupName,
     isAksClusterName,
@@ -157,6 +158,51 @@ function interactionId(result: EnvironmentToolResult): string {
 }
 
 describe("environment tool handlers", () => {
+  it("does not consult account readiness after disabled AWS reaches service admission", async () => {
+    const h = harness(false);
+    expect(
+      await h.tools.start({
+        ...target,
+        provider: "aws",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "eks",
+        vpcId: "vpc",
+        subnetIds: "subnet",
+        roleName: "fixture",
+        namespace: "INVALID"
+      })
+    ).toMatchObject({ kind: "refused", code: "provider-unsupported" });
+    expect(h.ports.workspace).toHaveBeenCalledOnce();
+    expect(h.ports.validateBranch).toHaveBeenCalledOnce();
+    expect(h.ports.account).not.toHaveBeenCalled();
+    expect(h.persist).not.toHaveBeenCalled();
+    expect(h.schedule).not.toHaveBeenCalled();
+  });
+  it("retains local branch preflight before disabled AWS admission", async () => {
+    const h = harness(false);
+    vi.mocked(h.ports.workspace).mockResolvedValue({
+      repo: "different/app",
+      branch: ""
+    });
+    expect(
+      await h.tools.start({
+        ...target,
+        provider: "aws",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "eks",
+        vpcId: "vpc",
+        subnetIds: "subnet",
+        roleName: "fixture"
+      })
+    ).toMatchObject({
+      kind: "interaction_required",
+      code: "setup-branch-required"
+    });
+    expect(h.ports.account).not.toHaveBeenCalled();
+    expect(h.persist).not.toHaveBeenCalled();
+  });
   it.each([
     { ...setup, tenantId: undefined },
     { ...setup, roleArn: "aws-only" },

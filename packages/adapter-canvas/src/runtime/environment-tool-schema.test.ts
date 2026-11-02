@@ -25,10 +25,12 @@ const aws = {
   repo: target.repo,
   environment: target.environment,
   provider: "aws",
-  roleArn: "arn:aws:iam::123456789012:role/fixture",
+  roleName: "fixture-role",
   accountId: "123456789012",
   region: "us-west-2",
-  cluster: "fixture"
+  cluster: "fixture",
+  vpcId: "vpc-fixture",
+  subnetIds: "subnet-a,subnet-b"
 };
 const resume = {
   ...target,
@@ -90,10 +92,11 @@ describe("strict environment handler argument contracts", () => {
     "repo",
     "environment",
     "provider",
-    "roleArn",
     "accountId",
     "region",
-    "cluster"
+    "cluster",
+    "vpcId",
+    "subnetIds"
   ])("requires AWS %s", (field) => {
     const input: Record<string, unknown> = { ...aws };
     delete input[field];
@@ -108,6 +111,8 @@ describe("strict environment handler argument contracts", () => {
     { ...azure, clientId: null },
     { ...azure, roleArn: "not-azure" },
     { ...aws, tenantId: "not-aws" },
+    { ...aws, roleArn: "arn:aws:iam::123456789012:role/legacy" },
+    { ...aws, awsEnabled: true },
     { ...azure, confirmed: true },
     { ...azure, githubLogin: "octocat" },
     { ...azure, selectionHandle: "panel-selection" },

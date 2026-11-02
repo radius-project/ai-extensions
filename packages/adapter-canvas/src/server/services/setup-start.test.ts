@@ -10,7 +10,8 @@ import {
   createOperation,
   buildStages,
   createRegistry,
-  finish
+  finish,
+  STAGE_AUTHORIZE_IDENTITY
 } from "../../operations.js";
 import {
   createSetupStartService,
@@ -27,9 +28,22 @@ const azure = {
   resourceGroup: "fixture-rg",
   cluster: "fixture-aks"
 };
-function harness() {
+const aws = {
+  provider: "aws",
+  repo: "fixture/app",
+  environment: "dev",
+  branch: "feature/setup",
+  roleName: "fixture-role",
+  accountId: "123456789012",
+  region: "us-west-2",
+  cluster: "fixture-eks",
+  vpcId: "vpc-fixture",
+  subnetIds: "subnet-a,subnet-b"
+};
+function harness(awsEnabled = true) {
   const registry = createRegistry();
   const deps: SetupStartDependencies = {
+    awsEnabled,
     isValidRepoSlug,
     isResourceGroupName,
     isAksClusterName,
@@ -64,6 +78,97 @@ function harness() {
   };
 }
 describe("shared setup admission", () => {
+  it.each([
+    [{}, "provider-unsupported"],
+    [{ namespace: "INVALID NAMESPACE" }, "provider-unsupported"],
+    [{ repo: "invalid" }, "invalid-repo"],
+    [{ environment: " " }, "environment-required"]
+  ])(
+    "preserves disabled AWS admission ordering for %j",
+    async (patch, code) => {
+      const h = harness(false);
+      const conflict = vi.spyOn(h.deps, "startConflict");
+      const create = vi.spyOn(h.deps, "createOperation");
+      expect(
+        await h.start({
+          data: { ...aws, ...patch },
+          claimAccount: h.claimAccount
+        })
+      ).toMatchObject({ status: 400, body: { code } });
+      expect(conflict).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      expect(h.claimAccount).not.toHaveBeenCalled();
+      expect(h.deps.persistOperations).not.toHaveBeenCalled();
+      expect(h.deps.scheduleEnvironmentOperation).not.toHaveBeenCalled();
+    }
+  );
+  it("keeps Azure available with AWS disabled", async () => {
+    const h = harness(false);
+    expect(
+      (await h.start({ data: azure, claimAccount: h.claimAccount })).status
+    ).toBe(202);
+  });
+  it.each([
+    { roleName: "fixture-role", existingRoleArn: "" },
+    {
+      roleName: "",
+      existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+    },
+    {
+      roleName: "fixture-role",
+      existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+    }
+  ])(
+    "retains both role selector fields and the AWS identity stage: %j",
+    async (selectors) => {
+      const h = harness();
+      expect(
+        (
+          await h.start({
+            data: { ...aws, ...selectors },
+            claimAccount: h.claimAccount
+          })
+        ).status
+      ).toBe(202);
+      const saved = h.registry.latest(aws.repo);
+      expect(saved.request.environment).toMatchObject({ ...aws, ...selectors });
+      expect(saved.request.environment).not.toHaveProperty("roleArn");
+      expect(saved.stages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: STAGE_AUTHORIZE_IDENTITY })
+        ])
+      );
+    }
+  );
+  it.each([
+    { accountId: "" },
+    { accountId: "123" },
+    { region: "" },
+    { region: "not-a-region" },
+    { cluster: "" },
+    { vpcId: "" },
+    { subnetIds: "" },
+    { roleName: "" },
+    { roleName: "invalid role" },
+    { roleName: "", existingRoleArn: "invalid" },
+    { roleName: "", roleArn: "arn:aws:iam::123456789012:role/legacy" }
+  ])(
+    "rejects invalid AWS domain input before account selection: %j",
+    async (patch) => {
+      const h = harness();
+      expect(
+        await h.start({
+          data: { ...aws, ...patch },
+          claimAccount: h.claimAccount
+        })
+      ).toMatchObject({
+        status: 400,
+        body: { code: "invalid-aws-operation-input" }
+      });
+      expect(h.claimAccount).not.toHaveBeenCalled();
+      expect(h.deps.persistOperations).not.toHaveBeenCalled();
+    }
+  );
   it("preserves optional environment configuration and journey provenance for continuation", async () => {
     const h = harness();
     const extra = {
@@ -97,35 +202,25 @@ describe("shared setup admission", () => {
       }
     });
   });
-  it.each(["invalid", ""])(
-    "rejects subscription %j after other Azure identity fields pass",
-    async (subscriptionId) => {
-      const h = harness();
-      expect(
-        await h.start({
-          data: { ...azure, subscriptionId },
-          claimAccount: h.claimAccount
-        })
-      ).toMatchObject({
-        status: 400,
-        body: { code: "invalid-azure-operation-input" }
-      });
-      expect(h.claimAccount).not.toHaveBeenCalled();
-    }
-  );
   it.each([
-    azure,
-    {
-      provider: "aws",
-      repo: "fixture/app",
-      environment: "dev",
-      branch: "feature/setup",
-      roleArn: "arn:aws:iam::123456789012:role/fixture",
-      accountId: "123456789012",
-      region: "us-west-2",
-      cluster: "fixture-eks"
-    }
-  ])(
+    { subscriptionId: "invalid" },
+    { subscriptionId: "" },
+    { tenantId: "" },
+    { cluster: "" }
+  ])("rejects invalid required Azure identity fields: %j", async (patch) => {
+    const h = harness();
+    expect(
+      await h.start({
+        data: { ...azure, ...patch },
+        claimAccount: h.claimAccount
+      })
+    ).toMatchObject({
+      status: 400,
+      body: { code: "invalid-azure-operation-input" }
+    });
+    expect(h.claimAccount).not.toHaveBeenCalled();
+  });
+  it.each([azure, aws])(
     "durably admits panel-free $provider work with its saved account",
     async (data) => {
       const h = harness();

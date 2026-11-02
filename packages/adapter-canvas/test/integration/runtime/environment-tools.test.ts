@@ -28,6 +28,8 @@ import {
   recordCommitState,
   toPersistedOperation,
   requireInput,
+  requestStop,
+  stopAtBoundary,
   pauseForProviderRestart,
   onOperationTerminal,
   STAGE_VERIFY
@@ -51,6 +53,7 @@ function deferred() {
 }
 async function composition(
   options: {
+    awsEnabled?: boolean;
     logins?: string[];
     select?: (message: string, options: string[]) => Promise<string | null>;
     confirm?: (message: string) => Promise<boolean>;
@@ -132,7 +135,11 @@ async function composition(
         createExecutor: async () => {
           await options.beforeLease?.();
           return options.leaseLogin ?
-              successfulSelectedGhExecutor({ login: options.leaseLogin, run })
+              successfulSelectedGhExecutor({
+                login: options.leaseLogin,
+                requiresKeyringSwitch: false,
+                run
+              })
             : executor;
         },
         getActiveKeyringLogin: async () => executor.login,
@@ -150,6 +157,7 @@ async function composition(
   );
   const runner = vi.fn(async () => {});
   const runtime = createTestCanvasServerRuntime({
+    awsEnabled: options.awsEnabled ?? false,
     executionOwner: owner,
     accountContext,
     ...(options.realSetup ? {} : { environmentOperationRunner: runner })
@@ -164,17 +172,18 @@ async function composition(
     repairRemediation: null,
     restoration: null
   }));
+  const readIdentity = vi.fn(async () => ({
+    accounts: (options.logins ?? ["saved-account"]).map((login) => ({
+      login,
+      active: login === "saved-account",
+      hasWorkflow: true,
+      hasPackages: true,
+      switchable: true,
+      acting: false
+    }))
+  }));
   const account = createDeploymentAccountResolver({
-    readIdentity: async () => ({
-      accounts: (options.logins ?? ["saved-account"]).map((login) => ({
-        login,
-        active: login === "saved-account",
-        hasWorkflow: true,
-        hasPackages: true,
-        switchable: true,
-        acting: false
-      }))
-    }),
+    readIdentity,
     readiness: {
       check: async (input) => {
         const result = await ready(input);
@@ -270,6 +279,7 @@ async function composition(
     persist,
     run,
     ready,
+    readIdentity,
     readExecutor,
     executor,
     accountContext,
@@ -279,6 +289,253 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it("refuses disabled AWS before identity reads or trusted account-choice interaction", async () => {
+    const select = vi.fn(async () => "saved-account");
+    const h = await composition({
+      logins: ["another", "saved-account"],
+      select
+    });
+    try {
+      expect(
+        await h.invoke("radius_setup_environment", {
+          ...target,
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks",
+          vpcId: "vpc",
+          subnetIds: "subnet",
+          roleName: "fixture",
+          namespace: "INVALID"
+        })
+      ).toMatchObject({ kind: "refused", code: "provider-unsupported" });
+      expect(h.readIdentity).not.toHaveBeenCalled();
+      expect(h.ready).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      expect(h.readExecutor).not.toHaveBeenCalled();
+      expect(h.persist).not.toHaveBeenCalled();
+      expect(h.runner).not.toHaveBeenCalled();
+      expect(h.run).not.toHaveBeenCalled();
+      expect(operations.latest(target.repo)).toBeFalsy();
+    } finally {
+      await h.extension.shutdown();
+    }
+  });
+  it.each([
+    { roleName: "fixture-role" },
+    { existingRoleArn: "arn:aws:iam::123456789012:role/existing" },
+    {
+      roleName: "fixture-role",
+      existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+    }
+  ])(
+    "retains AWS selectors through registered setup admission: %j",
+    async (selectors) => {
+      const h = await composition({ awsEnabled: true });
+      try {
+        const result = await h.invoke("radius_setup_environment", {
+          ...target,
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks",
+          vpcId: "vpc",
+          subnetIds: "subnet",
+          ...selectors
+        });
+        expect(result.kind).toBe("accepted");
+        await h.settled();
+        expect(
+          operations.latest(target.repo)?.request.environment
+        ).toMatchObject(selectors);
+        expect(h.runner).toHaveBeenCalledOnce();
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
+  it.each(["continue", "retry-setup"] as const)(
+    "rejects a saved legacy AWS request through registered %s and the real coordinator",
+    async (action) => {
+      const h = await composition({ awsEnabled: true, realSetup: true });
+      const op = createOperation({ ...target, provider: "aws" });
+      op.context.githubLogin = "saved-account";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: {
+          ...target,
+          provider: "aws",
+          branch: "feature/current",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks",
+          vpcId: "vpc",
+          subnetIds: "subnet",
+          roleArn: "arn:aws:iam::123456789012:role/legacy"
+        }
+      };
+      if (action === "continue") {
+        requestStop(op);
+        stopAtBoundary(op, "before-aws");
+      } else {
+        finish(op, "failed_partial", {
+          failure: { code: "operation-stalled", message: "lost contact" }
+        });
+      }
+      operations.put(op);
+      h.run.mockImplementation(async (args) => {
+        const path = args[1]?.replace(/^\//, "");
+        const body =
+          path === "user" ? { login: "saved-account" }
+          : path === "repos/fixture/app" ?
+            { full_name: target.repo, permissions: { admin: true } }
+          : path === "repos/fixture/app/environments/dev" ?
+            { name: "dev", id: 17 }
+          : undefined;
+        if (args[0] !== "api" || body === undefined)
+          throw new Error(`Unexpected GitHub command: ${args.join(" ")}`);
+        return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+      });
+      const cli = vi.spyOn(gh, "cliExec").mockImplementation(() => {
+        throw new Error(
+          "Legacy input must not invoke AWS or provider configuration"
+        );
+      });
+      try {
+        expect(
+          await h.invoke("radius_environment_control", {
+            ...target,
+            operationId: op.operationId,
+            action
+          })
+        ).toMatchObject({ kind: "accepted" });
+        await h.settled();
+        expect(op.failure).toMatchObject({
+          code: "invalid-aws-operation-input"
+        });
+        expect(cli).not.toHaveBeenCalled();
+        expect(
+          h.run.mock.calls.every(
+            ([args]) => args[0] === "api" && !args[1].includes("/variables")
+          )
+        ).toBe(true);
+        expect(op.context.awsRoleArn).toBeUndefined();
+        expect(op.verification).toBeUndefined();
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
+  it.each([
+    [{ roleName: "named-role" }, "named-role"],
+    [
+      { existingRoleArn: "arn:aws:iam::123456789012:role/picked-role" },
+      "picked-role"
+    ],
+    [
+      {
+        roleName: "named-role",
+        existingRoleArn: "arn:aws:iam::123456789012:role/picked-role"
+      },
+      "picked-role"
+    ]
+  ] as const)(
+    "retries runtime-owned AWS selectors with the intended role: %j",
+    async (selectors, expectedRole) => {
+      const h = await composition({ awsEnabled: true, realSetup: true });
+      const op = createOperation({ ...target, provider: "aws" });
+      op.context.githubLogin = "saved-account";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: {
+          ...target,
+          provider: "aws",
+          branch: "feature/current",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks",
+          vpcId: "vpc",
+          subnetIds: "subnet",
+          ...selectors
+        }
+      };
+      finish(op, "failed_partial", {
+        failure: { code: "operation-stalled", message: "lost contact" }
+      });
+      operations.put(op);
+      h.run.mockImplementation(async (args) => {
+        const path = args[1]?.replace(/^\//, "");
+        const body =
+          path === "user" ? { login: "saved-account" }
+          : path === "repos/fixture/app" ?
+            {
+              id: 23,
+              name: "app",
+              full_name: target.repo,
+              owner: { id: 11, login: "fixture" },
+              permissions: { admin: true }
+            }
+          : path === "repos/fixture/app/environments/dev" ?
+            { name: "dev", id: 17 }
+          : (
+            path === "repos/fixture/app/environments/dev/variables?per_page=100"
+          ) ?
+            { variables: [] }
+          : path === "repos/fixture/app/actions/oidc/customization/sub" ?
+            { use_default: true, use_immutable_subject: false }
+          : undefined;
+        if (args[0] !== "api" || body === undefined)
+          throw new Error(`Unexpected GitHub command: ${args.join(" ")}`);
+        return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+      });
+      const cli = vi
+        .spyOn(gh, "cliExec")
+        .mockImplementation((command, args, _options, callback) => {
+          expect(command).toBe("aws");
+          const key = args.slice(0, 2).join(" ");
+          if (key === "--version") callback(null, "aws-cli/2.17.0", "");
+          else if (key === "sts get-caller-identity")
+            callback(null, '{"Account":"123456789012"}', "");
+          else if (key === "eks describe-cluster")
+            callback(
+              null,
+              '{"cluster":{"accessConfig":{"authenticationMode":"API"}}}',
+              ""
+            );
+          else if (key === "iam get-role") {
+            callback(
+              Object.assign(new Error("AccessDenied"), { code: 1 }),
+              "",
+              "AccessDenied"
+            );
+          } else throw new Error(`Unexpected AWS command: ${args.join(" ")}`);
+          return new ChildProcess();
+        });
+      try {
+        expect(
+          await h.invoke("radius_environment_control", {
+            ...target,
+            operationId: op.operationId,
+            action: "retry-setup"
+          })
+        ).toMatchObject({ kind: "accepted" });
+        await h.settled();
+        expect(op.request.environment).toMatchObject(selectors);
+        expect(cli.mock.calls.at(-1)?.[1]).toEqual([
+          "iam",
+          "get-role",
+          "--role-name",
+          expectedRole,
+          "--output",
+          "json"
+        ]);
+        expect(op.failure?.code).toBe("aws-role-unreadable");
+        expect(op.verification).toBeUndefined();
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
   it.each(["shutdown", "target", "issued-success", "issued-error"] as const)(
     "preserves registered bypass authority and settlement at %s",
     async (boundary) => {
@@ -1672,7 +1929,7 @@ describe("registered environment tools with production runtime services", () => 
   ] as const)(
     "durably admits %s verify-only setup named %j without Canvas or local HTTP",
     async (provider, environment) => {
-      const h = await composition();
+      const h = await composition({ awsEnabled: true });
       try {
         const result = await h.invoke("radius_setup_environment", {
           ...target,
@@ -1686,10 +1943,12 @@ describe("registered environment tools with production runtime services", () => 
               cluster: "fixture-aks"
             }
           : {
-              roleArn: "arn:aws:iam::123456789012:role/fixture",
+              existingRoleArn: "arn:aws:iam::123456789012:role/fixture",
               accountId: "123456789012",
               region: "us-west-2",
-              cluster: "fixture-eks"
+              cluster: "fixture-eks",
+              vpcId: "vpc-fixture",
+              subnetIds: "subnet-a,subnet-b"
             })
         });
         expect(result).toMatchObject({
@@ -1744,6 +2003,7 @@ describe("registered environment tools with production runtime services", () => 
   it("uses a trusted target-bound account choice and rechecks it before admission", async () => {
     const select = vi.fn(async () => "saved-account");
     const h = await composition({
+      awsEnabled: true,
       logins: ["another", "saved-account"],
       select
     });
@@ -1751,10 +2011,12 @@ describe("registered environment tools with production runtime services", () => 
       const result = await h.invoke("radius_setup_environment", {
         ...target,
         provider: "aws",
-        roleArn: "fixture-role",
+        roleName: "fixture-role",
         accountId: "123456789012",
         region: "us-west-2",
-        cluster: "fixture"
+        cluster: "fixture",
+        vpcId: "vpc-fixture",
+        subnetIds: "subnet-a,subnet-b"
       });
       expect(result.kind).toBe("accepted");
       await h.settled();
