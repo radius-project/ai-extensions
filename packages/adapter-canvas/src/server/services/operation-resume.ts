@@ -192,7 +192,10 @@ export function createOperationResumeService(
               });
             },
             settleStop: () => {
-              if (!stopRequested) return undefined;
+              if (!stopRequested) {
+                pendingResumes.delete(current);
+                return undefined;
+              }
               const settle = async (): Promise<
                 SetupInputResumeResult<typeof current>
               > => {
