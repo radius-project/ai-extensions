@@ -10,8 +10,13 @@ interface EnvironmentTask {
   run(): Promise<void>;
   cancelled?(): void;
   failed(error: unknown): Promise<void>;
-  settling(): void;
-  settled(): void;
+  settling(): void | Promise<void>;
+  settled(): void | Promise<void>;
+}
+
+export interface EnvironmentDrainOutcome {
+  complete: boolean;
+  failures: string[];
 }
 
 interface TaskRecord {
@@ -71,6 +76,8 @@ export function createEnvironmentExecutionOwner(
   >();
   const shutdownListeners = new Set<{ listener: () => void }>();
   let shuttingDown = false;
+  let drainPromise: Promise<EnvironmentDrainOutcome> | undefined;
+  const finalizationFailures = new Set<string>();
   let generation = 0;
 
   function hasActiveEnvironmentTasks(instanceId: string | undefined): boolean {
@@ -87,20 +94,31 @@ export function createEnvironmentExecutionOwner(
     try {
       listener();
     } catch (error) {
+      finalizationFailures.add("shutdown callback failed");
       console.error(
         `[radius] setup shutdown callback failed: ${errorMessage(error)}`
       );
     }
   }
 
-  function shutdown(): void {
-    if (shuttingDown) return;
+  function shutdown(): Promise<EnvironmentDrainOutcome> {
+    if (drainPromise) return drainPromise;
     shuttingDown = true;
+    // Snapshot every admitted record, including superseded/queued records and
+    // detached scopes, before callbacks can change the operation map.
+    const records = [...activeRecords];
+    drainPromise = Promise.allSettled(
+      records.map((record) => record.promise)
+    ).then(() => ({
+      complete: finalizationFailures.size === 0,
+      failures: [...finalizationFailures]
+    }));
     for (const timer of reconciliationTimers.values())
       notifyShutdown(timer.cancel);
     reconciliationTimers.clear();
     for (const { listener } of shutdownListeners) notifyShutdown(listener);
     shutdownListeners.clear();
+    return drainPromise;
   }
 
   function onShutdown(listener: () => void): () => void {
@@ -171,6 +189,11 @@ export function createEnvironmentExecutionOwner(
       operationId: string,
       error: unknown
     ): void {
+      if (shuttingDown) {
+        finalizationFailures.add(
+          `operation ${operationId.replace(/[^a-zA-Z0-9_.-]/g, "?").slice(0, 80)}: finalization failed`
+        );
+      }
       console.error(
         `[radius] environment task finalization failed (operationId=${operationId}, ${scopeIdentity}): ${errorMessage(error)}`
       );
@@ -225,17 +248,17 @@ export function createEnvironmentExecutionOwner(
             return task.run();
           })
           .catch(task.failed)
-          .finally(() => {
+          .finally(async () => {
             if (tasks.get(operationId) === record) {
               try {
-                task.settling();
+                const settling = task.settling();
+                if (settling) await settling;
               } catch (error) {
                 reportFinalizationError(operationId, error);
               }
               if (tasks.get(operationId) === record) tasks.delete(operationId);
             }
             const active = activeTasks.get(instanceId);
-            activeRecords.delete(record);
             active?.delete(running);
             const deletionSettled = activeDeletions.delete(running);
             if (active?.size === 0) {
@@ -257,11 +280,13 @@ export function createEnvironmentExecutionOwner(
             }
             if (!tasks.has(operationId)) {
               try {
-                task.settled();
+                const settled = task.settled();
+                if (settled) await settled;
               } catch (error) {
                 reportFinalizationError(operationId, error);
               }
             }
+            activeRecords.delete(record);
           });
         const record: TaskRecord = {
           operationId,
@@ -310,7 +335,11 @@ export function createEnvironmentExecutionOwner(
 
   return {
     claimAdmission(operationId: string) {
-      if (admissions.has(operationId) || blockedAdmissions.has(operationId))
+      if (
+        shuttingDown ||
+        admissions.has(operationId) ||
+        blockedAdmissions.has(operationId)
+      )
         return null;
       const hadTask = [...activeRecords].some(
         (record) => record.operationId === operationId
@@ -359,6 +388,9 @@ export function createEnvironmentExecutionOwner(
     attachDeletion: (instanceId: string) => attachScope(instanceId, new Map()),
     attachRuntime: () => attachScope(),
     shutdown,
+    pendingOperationIds: () => [
+      ...new Set([...activeRecords].map(({ operationId }) => operationId))
+    ],
     onShutdown,
     hasActiveDeletionTasks,
     onDeletionTasksSettled: (instanceId: string, listener: () => void) =>

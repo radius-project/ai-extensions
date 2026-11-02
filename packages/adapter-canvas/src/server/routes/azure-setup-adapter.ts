@@ -22,7 +22,10 @@ function execution(
     get environment() {
       return workflow.operation.environment;
     },
-    runAz: workflow.runAz,
+    runAz: (args: string[]) => {
+      assertSetupExecutionActive(workflow.isStopped);
+      return workflow.runAz(args);
+    },
     sleep,
     stopBoundary: workflow.stopBoundary,
     checkpoint: workflow.checkpoint,
@@ -86,8 +89,13 @@ export function createAzureCredentialPorts(
 ): AzureCredentialPorts {
   const { operation } = workflow;
   const { operations } = dependencies;
+  const executionPorts = execution(
+    workflow,
+    operations.persist,
+    dependencies.sleep
+  );
   return {
-    ...execution(workflow, operations.persist, dependencies.sleep),
+    ...executionPorts,
     get environment() {
       return operation.environment;
     },
@@ -104,7 +112,7 @@ export function createAzureCredentialPorts(
     ensureServicePrincipal: (clientId, beforeCreate) =>
       dependencies.ensureServicePrincipal(
         clientId,
-        workflow.runAz,
+        executionPorts.runAz,
         {
           operation,
           persist: operations.persist,

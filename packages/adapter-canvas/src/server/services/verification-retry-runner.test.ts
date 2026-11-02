@@ -25,6 +25,53 @@ function deferred() {
 }
 
 describe("verification retry runtime shutdown", () => {
+  it.each(["saved", "save-failed", "shutdown", "identity-mismatch"] as const)(
+    "reuses a confirmed dispatch after an accepted save failure: %s",
+    async (followup) => {
+      const op = operation();
+      const first = runnerDependencies();
+      const persist = first.persist;
+      first.persist = async (target) => {
+        await persist(target);
+        return first.journal.persists !== 2;
+      };
+      await runVerificationRetry(op, "first-command", first);
+      expect(first.journal.commands.at(-1)?.outcome).toBe("persistence-failed");
+      const target = String(op.verification?.dispatchMutationTarget);
+      expect(
+        providerMutationRecord(op, "github_workflow.dispatch_retry", target)
+          ?.status
+      ).toBe("confirmed");
+      expect(op.verification?.runId).toBe("41");
+      expect(op.verification?.accountUnavailablePhase).toBe("dispatch");
+      let stopped = false;
+      const second = runnerDependencies({ isStopped: () => stopped });
+      const acquire = vi.spyOn(second, "createExecutor");
+      const save = second.persist;
+      second.persist = async (record) => {
+        await save(record);
+        if (followup === "shutdown") stopped = true;
+        return followup !== "save-failed";
+      };
+      if (followup === "identity-mismatch")
+        op.verification = { ...op.verification, runId: "42" };
+      op.endedAt = null;
+      op.state = "running";
+      await runVerificationRetry(op, "second-command", second);
+      expect(acquire).toHaveBeenCalledWith("alice");
+      expect(
+        second.journal.calls.filter(({ args }) => args[0] === "workflow")
+      ).toEqual([]);
+      expect(op.context?.githubLogin).toBe("alice");
+      expect(second.journal.monitored).toEqual(
+        followup === "saved" ? [op.operationId] : []
+      );
+      if (followup === "saved") {
+        expect(op.verification?.runId).toBe("41");
+        expect(op.verification?.dispatchMutationTarget).toBe(target);
+      }
+    }
+  );
   it.each(["baseline", "rejection"] as const)(
     "holds the selected executor until late %s authorization settles",
     async (phase) => {

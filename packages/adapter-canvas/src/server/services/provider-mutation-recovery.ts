@@ -334,6 +334,7 @@ async function reconcileMutation<T>(
       recordAttempts
     );
   }
+  if (outcome.state !== "applied") assertActive?.();
   if (outcome.state === "manual_required") {
     settleProviderMutation(
       operation,

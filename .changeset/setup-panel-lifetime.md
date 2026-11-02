@@ -19,3 +19,7 @@ Azure owner and provenance-tag propagation retries stop issuing writes and reads
 Service-principal, GitHub environment and workflow recovery also stop nested retries, commit-history pages and branch-absence reads after shutdown. Incomplete evidence stays unresolved rather than claiming absence or requiring manual recovery. Complete proof from a request already in flight can still settle; matching workflow content alone cannot authorize another history read.
 
 Verification dispatch and automatic run discovery stop further reads and monitoring after shutdown, without turning a late response into a setup failure. Sent requests retain their actual outcome; uncertain dispatches require inspection before another run can be sent, including after restart. Storage failures remain explicit.
+
+Session shutdown waits up to two seconds for detached setup tasks, acknowledgement saves and account restoration alongside closing panels. Incomplete settlement or teardown failures are reported and exit nonzero; external work that exceeds the deadline can still be interrupted and requires recovery inspection.
+
+Late absent or mismatched Azure recovery reads preserve unresolved evidence after shutdown. Caller-identity retries stop before another Azure invocation, and retrying an accepted verification dispatch after a save failure reuses its confirmed run rather than dispatching again.

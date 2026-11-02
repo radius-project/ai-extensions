@@ -41,6 +41,70 @@ function command(
 
 describe("provider mutation recovery", () => {
   it.each(
+    [0, 11].flatMap((attempts) =>
+      (["not_applied", "manual_required", "applied"] as const).map((state) => ({
+        attempts,
+        state
+      }))
+    )
+  )(
+    "preserves returned $state evidence after shutdown at $attempts attempts",
+    async ({ attempts, state }) => {
+      const operation = createOperation({ operationId: "op_late_reconcile" });
+      const mutation = prepareProviderMutation(operation, {
+        kind: "azure_role_assignment.create",
+        target: "assignment"
+      });
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "outcome_unknown",
+        "Lost acknowledgement"
+      );
+      if (attempts)
+        operation.providerRecovery.mutations[0].reconcileAttempts = attempts;
+      const original = structuredClone(operation.providerRecovery);
+      let stopped = false;
+      const persist = vi.fn(async () => {});
+      const recovery = createAzureRecoveryPort(
+        operation,
+        persist,
+        () => stopped
+      );
+      const pending = recovery.execute({
+        kind: mutation.kind,
+        target: mutation.target,
+        mutate: async () => {
+          throw new Error("No replay");
+        },
+        accept: () => "assignment",
+        reconcile: async () => {
+          stopped = true;
+          if (state === "manual_required")
+            return { state, guidance: "Mismatched provenance" };
+          if (state === "applied") return { state, value: "assignment" };
+          return { state, evidence: "Absent" };
+        }
+      });
+      if (state === "applied") {
+        await expect(pending).resolves.toMatchObject({
+          state: "applied",
+          recovered: true
+        });
+        expect(operation.providerRecovery.mutations[0].status).toBe(
+          "confirmed"
+        );
+        expect(persist).toHaveBeenCalledOnce();
+      } else {
+        await expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        expect(operation.providerRecovery).toEqual(original);
+        expect(persist).not.toHaveBeenCalled();
+      }
+    }
+  );
+  it.each(
     ["journal", "azure", "workflow"].flatMap((binding) =>
       [
         "throw",

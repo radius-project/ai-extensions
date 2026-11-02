@@ -158,6 +158,137 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("bounded runtime shutdown drain", () => {
+  it("waits after panel close for issued acknowledgement, durable save and selected-account restoration", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const provider = deferred();
+    const entered = deferred();
+    const save = deferred();
+    const saving = deferred();
+    const restore = deferred();
+    const restoring = deferred();
+    let activeLogin = "original";
+    const executor = successfulSelectedGhExecutor({ login: "selected" });
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async () => executor,
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        if (login === "original") {
+          restoring.resolve();
+          await restore.promise;
+        }
+        activeLogin = login;
+        return { ok: true };
+      },
+      resetIdentityCache: () => {}
+    });
+    const accountContext = createEnvironmentAccountContext(
+      "runtime",
+      coordinator
+    );
+    const op = createOperation({
+      operationId: "drain-lifetime",
+      repo: "fixture/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    const snapshots: (typeof op)[] = [];
+    const persist = vi
+      .spyOn(operations, "persist")
+      .mockImplementation(async () => {
+        saving.resolve();
+        await save.promise;
+        snapshots.push(structuredClone(op));
+      });
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext,
+      environmentOperationRunner: async () => {
+        const lease = await coordinator.withSelectedAccount(
+          "selected",
+          { ownerKey: "runtime", operationId: op.operationId },
+          async (selected) => {
+            const release = accountContext.registerExecutor(
+              op.operationId,
+              selected
+            );
+            try {
+              const mutation = prepareProviderMutation(op, {
+                kind: "azure_application.create",
+                target: "fixture-app"
+              });
+              entered.resolve();
+              await provider.promise;
+              settleProviderMutation(
+                op,
+                mutation.mutationId,
+                "confirmed",
+                "Issued write acknowledged",
+                "fixture-app-id"
+              );
+              await operations.persist();
+            } finally {
+              release();
+            }
+          }
+        );
+        expect(lease.restoration.state).toBe("restored");
+      }
+    });
+    const fake = createFakeDependencies();
+    const close = vi.fn();
+    const extension = await bootstrapRadiusExtension(
+      { ...fake.deps, ...runtime, executionOwner: owner },
+      {
+        createCanvas: (declaration) => declaration,
+        joinSession: async () => createFakeSession({ close })
+      }
+    );
+    let shutdown: ReturnType<typeof extension.shutdown> | undefined;
+    try {
+      await extension.canvases[0].open(context());
+      operations.put(op);
+      runtime.setupExecution.scheduleEnvironmentOperation(op);
+      await entered.promise;
+      await extension.canvases[0].onClose(context());
+      expect(runtime.servers.size).toBe(0);
+      shutdown = extension.shutdown();
+      let done = false;
+      void shutdown.then(() => {
+        done = true;
+      });
+      expect(close).not.toHaveBeenCalled();
+      expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+      provider.resolve();
+      await saving.promise;
+      expect(done).toBe(false);
+      expect(op.providerRecovery.mutations[0].status).toBe("confirmed");
+      expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+      save.resolve();
+      await restoring.promise;
+      expect(snapshots[0].providerRecovery.mutations[0].status).toBe(
+        "confirmed"
+      );
+      expect(done).toBe(false);
+      expect(close).not.toHaveBeenCalled();
+      expect(activeLogin).toBe("selected");
+      restore.resolve();
+      await expect(shutdown).resolves.toEqual({ complete: true, exitCode: 0 });
+      expect(activeLogin).toBe("original");
+      expect(close).toHaveBeenCalledOnce();
+      expect(persist).toHaveBeenCalledOnce();
+    } finally {
+      provider.resolve();
+      save.resolve();
+      restore.resolve();
+      await (shutdown ?? extension.shutdown());
+      await Promise.all(
+        [...runtime.servers.keys()].map((id) => runtime.stopServer(id, true))
+      );
+    }
+  });
+});
+
 describe("real server and fake SDK runtime ownership", () => {
   it.each([
     { panel: true, pauseAt: "iam create-role" },
@@ -1710,7 +1841,7 @@ describe("real server and fake SDK runtime ownership", () => {
         const unresolvedBeforeShutdown =
           innerDelay ? structuredClone(op.providerRecovery) : undefined;
         if (innerDelay) expect(innerReads).toBe(1);
-        await extension.shutdown();
+        const shutdown = extension.shutdown();
         expect(switchAccount).not.toHaveBeenCalled();
         expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         const callsAtShutdown = {
@@ -1726,6 +1857,7 @@ describe("real server and fake SDK runtime ownership", () => {
           expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         persistGate.resolve();
         await completed;
+        await shutdown;
         expect(op.endedAt).toBeNull();
         expect(op.failure).toBeNull();
         expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
@@ -2125,7 +2257,7 @@ describe("real server and fake SDK runtime ownership", () => {
           })
         ).toBe(true);
         expect(accountContext.getExecutor(op.operationId)).toBe(executor);
-        await extension.shutdown();
+        const shutdown = extension.shutdown();
         expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         const before = {
           gh: run.mock.calls.length,
@@ -2133,6 +2265,7 @@ describe("real server and fake SDK runtime ownership", () => {
         };
         gate.resolve();
         await completed;
+        await shutdown;
         expect(run.mock.calls.slice(before.gh)).toEqual([]);
         expect(runAz.mock.calls.slice(before.az)).toEqual([]);
         expect(op.providerRecovery).toEqual(original);
@@ -2272,8 +2405,8 @@ describe("real server and fake SDK runtime ownership", () => {
     });
     try {
       await runtime.entered.promise;
-      await runtime.extension.shutdown();
-      expect(runtime.session.close).toHaveBeenCalledOnce();
+      const shutdown = runtime.extension.shutdown();
+      expect(runtime.session.close).not.toHaveBeenCalled();
       expect(runtime.owner.hasActiveEnvironmentTasks(undefined)).toBe(true);
       expect(runtime.accountContext.getExecutor(op.operationId)).toBe(
         runtime.executor
@@ -2284,6 +2417,9 @@ describe("real server and fake SDK runtime ownership", () => {
         })
       ).toBe(false);
       expect(runtime.server.servers.size).toBe(0);
+      await runtime.settle();
+      await expect(shutdown).resolves.toEqual({ complete: true, exitCode: 0 });
+      expect(runtime.session.close).toHaveBeenCalledOnce();
     } finally {
       await runtime.settle();
       await completed;

@@ -545,7 +545,8 @@ describe("runtime setup execution", () => {
   it.each(["failure", "reconciliation"] as const)(
     "reports a %s persistence failure without preventing task settlement",
     async (kind) => {
-      const { ports, operation, settled, scope, timers } = fixture();
+      const { owner, ports, operation, settled, scope, timers } = fixture();
+      vi.spyOn(console, "error").mockImplementation(() => {});
       const op = operation();
       if (kind === "reconciliation") {
         prepareProviderMutation(op, {
@@ -572,11 +573,14 @@ describe("runtime setup execution", () => {
         expect(op.failure.code).toBe("server-owned-task-failed");
         expect(op.state).toBe("failed");
       }
+      await vi.waitFor(() => expect(console.error).toHaveBeenCalled());
+      await expect(owner.shutdown()).resolves.toMatchObject({ complete: true });
     }
   );
 
   it("does not terminalize an in-flight operation after shutdown marking", async () => {
-    const { ports, operation, settled, scope } = fixture();
+    const { owner, ports, operation, settled, scope } = fixture();
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const op = operation();
     ports.runOperation.mockImplementation(async () => {
       scope.markShuttingDown();
@@ -587,6 +591,7 @@ describe("runtime setup execution", () => {
     expect(scope.isShuttingDown()).toBe(true);
     expect(op.endedAt).toBeNull();
     expect(ports.persist).not.toHaveBeenCalled();
+    await expect(owner.shutdown()).resolves.toMatchObject({ complete: false });
   });
 
   it.each(["branch", "cleanup", "verification", "setup"] as const)(

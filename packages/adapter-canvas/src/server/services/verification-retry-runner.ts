@@ -616,6 +616,10 @@ export async function runVerificationRetry(
     );
     dependencies.setCommandState(operation, commandId, "running");
     if (!(await dependencies.persist(operation))) {
+      operation.verification = {
+        ...operation.verification,
+        accountUnavailablePhase: "dispatch"
+      };
       await failPersistence({
         operation,
         commandId,
