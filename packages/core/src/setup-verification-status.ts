@@ -392,6 +392,9 @@ export async function readSetupVerificationStatus<
             observation
           )
         : await dependencies.fetchRunLog(repo, runId, undefined, observation);
+      if (log === null)
+        errMsg +=
+          "\nThe verification log could not be read: logs are unavailable.";
     } catch (error) {
       const reason = dependencies.readLimitReason(error);
       if (

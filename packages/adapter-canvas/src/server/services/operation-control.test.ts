@@ -40,6 +40,7 @@ function deferred() {
 function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
   const operation = stoppedSetup();
   const dependencies: OperationsControlDependencies = {
+    stopPendingResume: () => null,
     claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     get: vi.fn((id) => (id === operation.operationId ? operation : null)),
     acquireForRetry: vi.fn<OperationsControlDependencies["acquireForRetry"]>(

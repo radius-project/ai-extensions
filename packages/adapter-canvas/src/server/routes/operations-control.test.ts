@@ -200,6 +200,7 @@ function dependencies(
     invalidatedListings: []
   };
   const base: OperationsControlDependencies = {
+    stopPendingResume: () => null,
     claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     reportOperationDiagnostic: () => {
       throw new Error("Unexpected operation control diagnostic");

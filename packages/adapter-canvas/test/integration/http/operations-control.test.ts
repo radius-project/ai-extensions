@@ -124,6 +124,7 @@ function start(): Harness {
 
   const routes = createTestRouteTable({
     ...createOperationsControlRoutes({
+      stopPendingResume: () => null,
       claimAdmission: owner.claimAdmission,
       isShuttingDown: () => shuttingDown.value,
       get: (operationId) => records.get(operationId) ?? null,

@@ -144,6 +144,9 @@ export type RepositoryLockResult =
 
 export interface OperationsControlDependencies {
   claimAdmission: EnvironmentExecutionOwner["claimAdmission"];
+  stopPendingResume(
+    operation: OperationRecord
+  ): Promise<OperationControlResult> | null;
   isShuttingDown?(): boolean;
   get(operationId: string): OperationRecord | null;
   // Takes the repository lock back for a retry of a record that already owns
@@ -397,6 +400,12 @@ async function handleStopOperation(
   const resolved = await resolveOperation(context, dependencies);
   if (!resolved) return;
   const { operationId, operation } = resolved;
+  const pendingResumeStop = dependencies.stopPendingResume(operation);
+  if (pendingResumeStop) {
+    const result = await pendingResumeStop;
+    sendJson(context, result.status, result.body);
+    return;
+  }
   if (isProviderRestartDecision(operation)) {
     const snapshot = snapshotRetryState(operation);
     stopProviderRestartDecision(operation);
@@ -1394,6 +1403,7 @@ export function createOperationsControlService(
 ): OperationControlService {
   for (const name of [
     "claimAdmission",
+    "stopPendingResume",
     "get",
     "acquireForRetry",
     "persistOperations",

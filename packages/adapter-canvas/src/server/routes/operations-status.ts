@@ -711,7 +711,7 @@ function requiredTemplateParameters(
 export async function handleResumeOperation(
   context: CanvasRequestContext,
   dependencies: OperationActionDependencies,
-  service = createOperationResumeService(dependencies)
+  service: OperationResumeService = createOperationResumeService(dependencies)
 ): Promise<void> {
   const parameters = requiredTemplateParameters(
     RESUME_OPERATION_ROUTE,

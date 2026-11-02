@@ -1,5 +1,14 @@
-import { resumeSetupInput, type SetupResumeInput } from "@radius-project/core";
+import {
+  resumeSetupInput,
+  type SetupInputResumeResult,
+  type SetupResumeInput
+} from "@radius-project/core";
 import { isDeepStrictEqual } from "node:util";
+import {
+  announceOperationTerminal,
+  applyStopRequest,
+  stopAtBoundary
+} from "../../operations.js";
 import type {
   OperationActionDependencies,
   OperationRecord
@@ -65,7 +74,11 @@ export async function finishSchedulingFailure(
 
 export function createOperationResumeService(
   dependencies: OperationResumeDependencies
-): OperationResumeService {
+): OperationResumeService & {
+  stopPendingResume(
+    operation: OperationRecord
+  ): Promise<OperationControlResult> | null;
+} {
   for (const name of [
     "getOperation",
     "claimAdmission",
@@ -82,7 +95,11 @@ export function createOperationResumeService(
       throw new Error(`Missing operation resume dependency: ${name}`);
     }
   }
-  return async (input, readInput, publish) => {
+  const pendingResumes = new WeakMap<
+    OperationRecord,
+    () => Promise<OperationControlResult> | null
+  >();
+  const resume: OperationResumeService = async (input, readInput, publish) => {
     const { operationId, instanceId, code } = input;
     const operation = dependencies.getOperation(operationId);
     const repo = operation?.repo;
@@ -113,6 +130,16 @@ export function createOperationResumeService(
       publish?.(result);
       return result;
     }
+    let stopRequested = false;
+    let resolveStop: (result: OperationControlResult) => void = () => {};
+    let rejectStop: (error: unknown) => void = () => {};
+    const stopResult = new Promise<OperationControlResult>(
+      (resolve, reject) => {
+        resolveStop = resolve;
+        rejectStop = reject;
+      }
+    );
+    let result: OperationControlResult | undefined;
     try {
       let ownsResume = () => true;
       const accepted = {
@@ -145,6 +172,59 @@ export function createOperationResumeService(
             prepared: () => {
               owned = structuredClone(current);
               ownsResume = () => isDeepStrictEqual(current, owned);
+              pendingResumes.set(current, () => {
+                if (stopRequested) return stopResult;
+                if (!isRecordCurrent(current) || !ownsResume())
+                  return Promise.resolve({
+                    status: 409,
+                    body: {
+                      code: "operation-resume-mismatch",
+                      error:
+                        "The operation changed while its input was being saved.",
+                      operationId
+                    }
+                  });
+                if (!admission?.canRestore()) return null;
+                applyStopRequest(current, { announce: false });
+                owned = structuredClone(current);
+                stopRequested = true;
+                return stopResult;
+              });
+            },
+            settleStop: () => {
+              if (!stopRequested) return undefined;
+              const settle = async (): Promise<
+                SetupInputResumeResult<typeof current>
+              > => {
+                // Stop owns only the exact prepared record, including its
+                // account and target. Never restore the pre-Stop prompt.
+                if (
+                  !isRecordCurrent(current) ||
+                  !admission?.canRestore() ||
+                  !ownsResume()
+                )
+                  return { state: "mismatch" };
+                stopAtBoundary(current, "input_resume", { announce: false });
+                owned = structuredClone(current);
+                try {
+                  await dependencies.persistOperations();
+                } catch (error) {
+                  admission.blockRecovery();
+                  console.error(
+                    `[radius operation-resume-stop-persist-failed] ${operationId}: ${dependencies.errorMessage(error)}`
+                  );
+                  return { state: "stop-persist-failed", error };
+                }
+                if (
+                  !isRecordCurrent(current) ||
+                  !admission.canRestore() ||
+                  !ownsResume()
+                )
+                  return { state: "mismatch" };
+                announceOperationTerminal(current);
+                return { state: "user-stopped", operation: current };
+              };
+              return settle();
             },
             restore: () => {
               if (
@@ -187,8 +267,30 @@ export function createOperationResumeService(
           )
       });
       if (outcome.state === "accepted") return accepted;
-      let result: OperationControlResult;
       switch (outcome.state) {
+        case "user-stopped":
+          result = {
+            status: 200,
+            body: {
+              code: "operation-stopped",
+              operationId,
+              statusUrl: `/api/operations/${encodeURIComponent(operationId)}`,
+              operation: dependencies.toClientView(outcome.operation)
+            }
+          };
+          break;
+        case "stop-persist-failed":
+          result = {
+            status: 500,
+            body: {
+              code: "operation-resume-stop-persist-failed",
+              error:
+                "No setup work was started, but Radius could not durably save the stopped operation. Inspect the saved operation before recovery.",
+              operationId,
+              detail: dependencies.errorMessage(outcome.error)
+            }
+          };
+          break;
         case "stopped":
           result = {
             status: 503,
@@ -270,10 +372,24 @@ export function createOperationResumeService(
             }
           };
       }
+      if (stopRequested) resolveStop(result);
       publish?.(result);
       return result;
+    } catch (error) {
+      if (stopRequested && !result) rejectStop(error);
+      throw error;
     } finally {
+      if (
+        operation &&
+        result?.body.code !== "operation-resume-stop-persist-failed"
+      )
+        pendingResumes.delete(operation);
+      if (stopRequested && result) resolveStop(result);
       admission?.release();
     }
   };
+  return Object.assign(resume, {
+    stopPendingResume: (operation: OperationRecord) =>
+      pendingResumes.get(operation)?.() ?? null
+  });
 }
