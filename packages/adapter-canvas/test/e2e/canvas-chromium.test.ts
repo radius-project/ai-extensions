@@ -1288,7 +1288,9 @@ test.describe("Radius Canvas in Chromium", () => {
         new URL(response.url()).pathname.endsWith("/dismiss") &&
         response.request().method() === "POST"
     );
-    await page.locator("#env-progress-dismiss").click();
+    const dismiss = page.locator("#env-progress-dismiss");
+    await expect(dismiss).toHaveAccessibleName("OK");
+    await dismiss.click();
     // The dismissal must target the very operation the delete route created, not
     // merely some `/dismiss` POST, or a stray dismissal would pass this assertion.
     const dismissal = await dismissRequest;
@@ -1303,6 +1305,37 @@ test.describe("Radius Canvas in Chromium", () => {
     await gotoCanvas(page, canvas, "environment");
     await expect(page.locator(".js-delete-env").first()).toBeVisible();
     await expect(page.locator("#env-progress-panel")).toBeHidden();
+  });
+
+  test("names the dismiss button Exit after a deletion that finished with warnings", async ({
+    page,
+    canvas
+  }) => {
+    await setScenarioWithoutActiveDeployment(canvas);
+    const deletion = canvas.driveEnvironmentDeletion({
+      state: "succeeded_with_warnings",
+      warning: "Kept the IAM role"
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.locator(".js-delete-env").first().click();
+    const deleteAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: "Delete environment" }).click();
+    const { operationId } = (await (await deleteAccepted).json()) as {
+      operationId: string;
+    };
+    await waitForOperationState(page, operationId, "running");
+    await deletion.release();
+    await waitForOperationState(page, operationId, "succeeded_with_warnings");
+
+    const dismiss = page.locator("#env-progress-dismiss");
+    await expect(dismiss).toBeVisible();
+    await expect(dismiss).toHaveText("Exit");
+    await expect(dismiss).toHaveAccessibleName("Exit");
   });
 
   test("surfaces a partial deletion failure with the Retry deletion action @safety", async ({
@@ -5767,6 +5800,12 @@ test.describe("Radius Canvas in Chromium", () => {
     const chip = page.locator("#rad-deploychip");
     await expect(chip).toBeVisible();
     await expect(chip).toHaveAttribute("href", runUrl);
+    // The chip is named by its short visible text, and the failure's own message
+    // is the description the browser exposes.
+    await expect(chip).toHaveAccessibleName("todolist deploy failed");
+    await expect(chip).toHaveAccessibleDescription(
+      "Bicep template failed to compile"
+    );
 
     const before = page.url();
     await chip.click();
