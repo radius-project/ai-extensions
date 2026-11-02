@@ -16,6 +16,7 @@ import {
   createOperationResumeService,
   type OperationResumeDependencies
 } from "./operation-resume.js";
+import { createOperationsControlService } from "./operation-control.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -60,7 +61,452 @@ function fixture(overrides: Partial<OperationResumeDependencies> = {}) {
   return { operation, dependencies, input, readInput };
 }
 
+function composeControls(
+  dependencies: OperationResumeDependencies,
+  resume = createOperationResumeService(dependencies)
+) {
+  const control = createOperationsControlService({
+    stopPendingResume: resume.stopPendingResume,
+    claimAdmission: dependencies.claimAdmission,
+    get: (id) => dependencies.getOperation(id) ?? null,
+    acquireForRetry: () => {
+      throw new Error("Stop must not reacquire ownership");
+    },
+    persistOperations: dependencies.persistOperations,
+    reportOperationDiagnostic: vi.fn(),
+    checkPullRequestMerge: async () => {
+      throw new Error("Unexpected merge read");
+    },
+    inspectVerificationWorkflow: async () => {
+      throw new Error("Unexpected workflow read");
+    },
+    cancelVerificationWorkflow: async () => {
+      throw new Error("Unexpected workflow cancellation");
+    },
+    schedule: () => {
+      throw new Error("Stop must not schedule work");
+    },
+    invalidateEnvironmentListing: () => {}
+  });
+  return { resume, control };
+}
+
 describe("direct operation input continuation", () => {
+  it("durably stops an unstarted resume when the real control accepts Stop during its save", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const entered = createDeferred<void>();
+    const held = createDeferred<void>();
+    let writes = 0;
+    let saved: unknown;
+    const { operation, dependencies, input, readInput } = fixture({
+      claimAdmission: owner.claimAdmission,
+      persistOperations: vi.fn(async () => {
+        const snapshot = structuredClone(operation);
+        if (++writes === 1) {
+          entered.resolve();
+          await held.promise;
+        }
+        saved = snapshot;
+      })
+    });
+    const services = composeControls(dependencies);
+    const resume = services.resume(input, readInput);
+    await entered.promise;
+    const stop = services.control({
+      operationId: input.operationId,
+      command: "stop"
+    });
+    await vi.waitFor(() => expect(operation.stopRequested).toBe(true));
+    held.resolve();
+    expect(await stop).toMatchObject({
+      status: 200,
+      body: { code: "operation-stopped" }
+    });
+    expect(await resume).toMatchObject({
+      status: 200,
+      body: { code: "operation-stopped" }
+    });
+    expect(operation).toMatchObject({
+      state: "cancelled",
+      inputRequired: null,
+      control: { stop: { boundary: "input_resume" } }
+    });
+    expect(saved).toEqual(operation);
+    expect(dependencies.scheduleEnvironmentOperation).not.toHaveBeenCalled();
+    const next = owner.claimAdmission(input.operationId);
+    expect(next).not.toBeNull();
+    next?.release();
+  });
+
+  it.each([
+    { initialFails: false, correctionFails: false },
+    { initialFails: true, correctionFails: false },
+    { initialFails: false, correctionFails: true },
+    { initialFails: true, correctionFails: true }
+  ])(
+    "shares durable Stop outcome without restoring a prompt (initialFails=$initialFails, correctionFails=$correctionFails)",
+    async ({ initialFails, correctionFails }) => {
+      const owner = createEnvironmentExecutionOwner();
+      const f = fixture({ claimAdmission: owner.claimAdmission });
+      f.operation.operationId = f.input.operationId =
+        "op_11111111-1111-4111-8111-111111111111";
+      f.operation.context = { githubLogin: "selected-account" };
+      const entered = createDeferred<void>();
+      const held = createDeferred<void>();
+      const correcting = createDeferred<void>();
+      const correction = createDeferred<void>();
+      let writes = 0;
+      let bytes = "";
+      const registry = createRegistry({
+        store: {
+          load: async () => null,
+          save: async (envelope) => {
+            writes++;
+            if (writes === 1) {
+              entered.resolve();
+              await held.promise;
+            } else {
+              correcting.resolve();
+              await correction.promise;
+              if (correctionFails) throw new Error("stop settlement offline");
+            }
+            bytes = JSON.stringify(envelope);
+            if (writes === 1 && initialFails)
+              throw new Error("initial save rejected after writing");
+          }
+        }
+      });
+      registry.put(f.operation);
+      f.dependencies.getOperation = (id) => registry.get(id);
+      f.dependencies.persistOperations = () => registry.persist();
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const services = composeControls(f.dependencies);
+      const pending = services.resume(f.input, f.readInput);
+      await entered.promise;
+      const stop = services.control({
+        operationId: f.input.operationId,
+        command: "stop"
+      });
+      await vi.waitFor(() => expect(f.operation.stopRequested).toBe(true));
+      const duplicate = composeControls(
+        f.dependencies,
+        services.resume
+      ).control({
+        operationId: f.input.operationId,
+        command: "stop"
+      });
+      let stopResponded = false;
+      void stop.then(() => {
+        stopResponded = true;
+      });
+      held.resolve();
+      await correcting.promise;
+      expect(stopResponded).toBe(false);
+      expect(f.operation.state).toBe("cancelled");
+      correction.resolve();
+      const result = await pending;
+      expect(result).toMatchObject({
+        status: correctionFails ? 500 : 200,
+        body: {
+          code:
+            correctionFails ?
+              "operation-resume-stop-persist-failed"
+            : "operation-stopped"
+        }
+      });
+      expect(await stop).toEqual(result);
+      expect(await duplicate).toMatchObject({
+        status: result.status,
+        body: { code: result.body.code }
+      });
+      expect(f.operation.context).toEqual({ githubLogin: "selected-account" });
+      expect(f.operation.inputRequired).toBeNull();
+      expect(
+        f.dependencies.scheduleEnvironmentOperation
+      ).not.toHaveBeenCalled();
+      expect(writes).toBe(2);
+      if (correctionFails) {
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining("operation-resume-stop-persist-failed")
+        );
+        expect(owner.claimAdmission(f.input.operationId)).toBeNull();
+        expect(JSON.parse(bytes).operations[0].state).toBe("running");
+        expect(
+          await services.control({
+            operationId: f.input.operationId,
+            command: "stop"
+          })
+        ).toMatchObject({
+          status: 500,
+          body: { code: "operation-resume-stop-persist-failed" }
+        });
+      } else {
+        expect(log).not.toHaveBeenCalled();
+        expect(JSON.parse(bytes).operations[0]).toMatchObject({
+          state: "cancelled",
+          control: { stop: { boundary: "input_resume" } }
+        });
+        const admission = owner.claimAdmission(f.input.operationId);
+        expect(admission).not.toBeNull();
+        admission?.release();
+      }
+    }
+  );
+
+  it.each([
+    "replacement",
+    "repository",
+    "account",
+    "prompt",
+    "task",
+    "shutdown"
+  ] as const)(
+    "does not overwrite %s while an unstarted Stop awaits resume persistence",
+    async (change) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = createDeferred<void>();
+      const held = createDeferred<void>();
+      const task = createDeferred<void>();
+      const settled = createDeferred<void>();
+      let shutdown = false;
+      const f = fixture({
+        claimAdmission: owner.claimAdmission,
+        isShuttingDown: () => shutdown,
+        persistOperations: vi.fn(async () => {
+          entered.resolve();
+          await held.promise;
+        })
+      });
+      let current = f.operation;
+      f.dependencies.getOperation = () => current;
+      const services = composeControls(f.dependencies);
+      const pending = services.resume(f.input, f.readInput);
+      await entered.promise;
+      const stop = services.control({
+        operationId: f.input.operationId,
+        command: "stop"
+      });
+      await vi.waitFor(() => expect(f.operation.stopRequested).toBe(true));
+      if (change === "replacement") current = structuredClone(f.operation);
+      if (change === "repository") f.operation.repo = "other/app";
+      if (change === "account")
+        f.operation.context = { githubLogin: "replacement" };
+      if (change === "prompt")
+        requireInput(f.operation, {
+          code: "app-selection-required",
+          checkpoint: "new"
+        });
+      if (change === "task")
+        owner.attach("competing").schedule(f.input.operationId, {
+          run: () => task.promise,
+          failed: async () => {
+            throw new Error("Unexpected task failure");
+          },
+          settling: () => {},
+          settled: () => settled.resolve()
+        });
+      if (change === "shutdown") shutdown = true;
+      const before = structuredClone(current);
+      held.resolve();
+      try {
+        const result = await pending;
+        expect(result).toMatchObject({
+          status: change === "shutdown" ? 200 : 409,
+          body: {
+            code:
+              change === "shutdown" ? "operation-stopped" : (
+                "operation-resume-mismatch"
+              )
+          }
+        });
+        expect(await stop).toEqual(result);
+        if (change === "shutdown") expect(current.state).toBe("cancelled");
+        else expect(current).toEqual(before);
+        expect(
+          f.dependencies.scheduleEnvironmentOperation
+        ).not.toHaveBeenCalled();
+        expect(f.dependencies.persistOperations).toHaveBeenCalledTimes(
+          change === "shutdown" ? 2 : 1
+        );
+      } finally {
+        task.resolve();
+        if (change === "task") await settled.promise;
+      }
+    }
+  );
+
+  it.each(["input", "after-save", "scheduled"] as const)(
+    "preserves cooperative Stop at the %s boundary",
+    async (phase) => {
+      const entered = createDeferred<void>();
+      const held = createDeferred<void>();
+      const f = fixture();
+      const read = f.readInput;
+      const readInput = async () => {
+        if (phase === "input") {
+          entered.resolve();
+          await held.promise;
+        }
+        return read();
+      };
+      f.dependencies.persistOperations = vi.fn(async () => {
+        if (phase === "after-save") {
+          entered.resolve();
+          await held.promise;
+        }
+      });
+      const services = composeControls(f.dependencies);
+      const pending = services.resume(f.input, readInput);
+      if (phase === "scheduled") await pending;
+      else await entered.promise;
+      const stop = services.control({
+        operationId: f.input.operationId,
+        command: "stop"
+      });
+      await vi.waitFor(() => expect(f.operation.stopRequested).toBe(true));
+      held.resolve();
+      const result = await stop;
+      expect(result.status).toBe(phase === "scheduled" ? 202 : 200);
+      expect((await pending).status).toBe(
+        phase === "input" ? 409
+        : phase === "after-save" ? 200
+        : 202
+      );
+      expect(f.dependencies.scheduleEnvironmentOperation).toHaveBeenCalledTimes(
+        phase === "scheduled" ? 1 : 0
+      );
+    }
+  );
+
+  it.each(["account", "task"] as const)(
+    "does not claim the pending resume's Stop after a competing %s changes ownership",
+    async (change) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = createDeferred<void>();
+      const held = createDeferred<void>();
+      const task = createDeferred<void>();
+      const settled = createDeferred<void>();
+      const f = fixture({
+        claimAdmission: owner.claimAdmission,
+        persistOperations: vi.fn(async () => {
+          entered.resolve();
+          await held.promise;
+        })
+      });
+      const services = composeControls(f.dependencies);
+      const pending = services.resume(f.input, f.readInput);
+      await entered.promise;
+      if (change === "account")
+        f.operation.context = { githubLogin: "new-account" };
+      else
+        owner.attach("competing").schedule(f.input.operationId, {
+          run: () => task.promise,
+          failed: async () => {
+            throw new Error("Unexpected task failure");
+          },
+          settling: () => {},
+          settled: () => settled.resolve()
+        });
+      const stop = services.control({
+        operationId: f.input.operationId,
+        command: "stop"
+      });
+      if (change === "account") {
+        expect(await stop).toMatchObject({ status: 409 });
+        expect(f.operation.stopRequested).toBe(false);
+      } else {
+        await vi.waitFor(() => expect(f.operation.stopRequested).toBe(true));
+      }
+      held.resolve();
+      try {
+        expect((await stop).status).toBe(change === "account" ? 409 : 202);
+        expect(await pending).toMatchObject({ status: 409 });
+        expect(
+          f.dependencies.scheduleEnvironmentOperation
+        ).not.toHaveBeenCalled();
+        expect(f.operation.state).toBe("running");
+      } finally {
+        task.resolve();
+        if (change === "task") await settled.promise;
+      }
+    }
+  );
+
+  it.each(["replacement", "task", "response"] as const)(
+    "preserves the saved Stop through a late %s change during settlement",
+    async (change) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = createDeferred<void>();
+      const held = createDeferred<void>();
+      const correcting = createDeferred<void>();
+      const correction = createDeferred<void>();
+      const task = createDeferred<void>();
+      const settled = createDeferred<void>();
+      let writes = 0;
+      let saved: unknown;
+      const f = fixture({
+        claimAdmission: owner.claimAdmission,
+        persistOperations: vi.fn(async () => {
+          if (++writes === 1) {
+            entered.resolve();
+            await held.promise;
+          } else {
+            saved = structuredClone(f.operation);
+            correcting.resolve();
+            await correction.promise;
+          }
+        })
+      });
+      let current = f.operation;
+      f.dependencies.getOperation = () => current;
+      const services = composeControls(f.dependencies);
+      const pending = services.resume(f.input, f.readInput, () => {
+        if (change === "response") throw new Error("client disconnected");
+      });
+      const outcome = pending.then(
+        (value) => value,
+        (error: unknown) => error
+      );
+      await entered.promise;
+      const stop = services.control({
+        operationId: f.input.operationId,
+        command: "stop"
+      });
+      await vi.waitFor(() => expect(f.operation.stopRequested).toBe(true));
+      held.resolve();
+      await correcting.promise;
+      if (change === "replacement")
+        current = { ...structuredClone(f.operation), repo: "other/app" };
+      if (change === "task")
+        owner.attach("competing").schedule(f.input.operationId, {
+          run: () => task.promise,
+          failed: async () => {
+            throw new Error("Unexpected task failure");
+          },
+          settling: () => {},
+          settled: () => settled.resolve()
+        });
+      const before = structuredClone(current);
+      correction.resolve();
+      try {
+        if (change === "response")
+          expect(await outcome).toEqual(new Error("client disconnected"));
+        else expect(await outcome).toMatchObject({ status: 409 });
+        expect(await stop).toMatchObject({
+          status: change === "response" ? 200 : 409
+        });
+        expect(current).toEqual(before);
+        expect(saved).toMatchObject({ state: "cancelled" });
+        expect(
+          f.dependencies.scheduleEnvironmentOperation
+        ).not.toHaveBeenCalled();
+      } finally {
+        task.resolve();
+        if (change === "task") await settled.promise;
+      }
+    }
+  );
+
   it.each([false, true])(
     "refuses competing admission and unsettled tasks before reading an answer (publish=%s)",
     async (publishing) => {

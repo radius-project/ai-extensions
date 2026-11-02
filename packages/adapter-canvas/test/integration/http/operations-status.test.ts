@@ -11,6 +11,7 @@ import {
   type OperationActionRecord
 } from "../../../src/server/routes/operations-status.js";
 import { createOperationResumeService } from "../../../src/server/services/operation-resume.js";
+import { createOperationsControlRoutes } from "../../../src/server/routes/operations-control.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import { createDeferred } from "../../support/browser/fakes.js";
 import {
@@ -208,8 +209,31 @@ function start(strictBrowserMutations = false): Harness {
     isShuttingDown: () => shuttingDown.value
   });
 
-  const routes = createTestRouteTable(
-    createOperationsStatusRoutes(
+  const routes = createTestRouteTable({
+    ...createOperationsControlRoutes({
+      stopPendingResume: resume.stopPendingResume,
+      claimAdmission: actionDependencies.claimAdmission,
+      get: (id) => records.get(id) ?? null,
+      acquireForRetry: () => {
+        throw new Error("Unexpected retry");
+      },
+      persistOperations,
+      reportOperationDiagnostic: () => {},
+      checkPullRequestMerge: async () => {
+        throw new Error("Unexpected merge read");
+      },
+      inspectVerificationWorkflow: async () => {
+        throw new Error("Unexpected workflow read");
+      },
+      cancelVerificationWorkflow: async () => {
+        throw new Error("Unexpected cancellation");
+      },
+      schedule: () => {
+        throw new Error("Stop cannot schedule work");
+      },
+      invalidateEnvironmentListing: () => {}
+    }),
+    ...createOperationsStatusRoutes(
       {
         latest: (repo) => {
           latestCalls.push(repo);
@@ -270,7 +294,7 @@ function start(strictBrowserMutations = false): Harness {
         );
       }
     )
-  );
+  });
 
   container = createCanvasServer({
     createHttpServer: (handler) => createServer(handler),
@@ -325,6 +349,72 @@ const VALID_AZURE_BODY = {
 };
 
 describe("operations-status real-loopback HIT (RF-08)", () => {
+  it("settles an accepted HTTP Stop while the resume save is held", async () => {
+    const harness = start(true);
+    const entry = await container!.getOrCreate("panel-a");
+    const operation: OperationActionRecord = createOperation({
+      provider: "azure",
+      repo: "octo/resume",
+      environment: "dev",
+      stages: buildStages()
+    });
+    operation.request = { azure: {} };
+    requireInput(operation, {
+      code: "app-selection-required",
+      checkpoint: "saved-input"
+    });
+    harness.records.set(operation.operationId, operation);
+    const held = createDeferred<void>();
+    harness.persistWait.value = held.promise;
+    const headers = {
+      Origin: entry.baseUrl,
+      "Sec-Fetch-Site": "same-origin",
+      "X-Radius-Mutation-Nonce": "browser-nonce"
+    };
+    const resume = fetch(
+      `${entry.baseUrl}/api/operations/${operation.operationId}/resume/app-selection-required`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          checkpoint: "saved-input",
+          repo: operation.repo,
+          environment: operation.environment,
+          provider: operation.provider,
+          appId: "chosen-app"
+        })
+      }
+    );
+    try {
+      await vi.waitFor(() => expect(harness.persistCalls).toHaveLength(1));
+      harness.persistWait.value = null;
+      const stop = fetch(
+        `${entry.baseUrl}/api/operations/${operation.operationId}/stop`,
+        { method: "POST", headers }
+      );
+      await vi.waitFor(() => expect(operation.stopRequested).toBe(true));
+      held.resolve();
+      const stopResponse = await stop;
+      expect(stopResponse.status).toBe(200);
+      expect(await stopResponse.json()).toMatchObject({
+        code: "operation-stopped"
+      });
+      const response = await resume;
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(await response.json()).toMatchObject({
+        code: "operation-stopped",
+        operation: { state: "cancelled" }
+      });
+      expect(operation.state).toBe("cancelled");
+      expect(harness.persistCalls).toHaveLength(2);
+      expect(harness.scheduled).toEqual([]);
+    } finally {
+      held.resolve();
+      await resume;
+    }
+  });
+
   it.each(["Todo-app-3", true])(
     "rejects malformed namespace value %j before registering setup work",
     async (namespace) => {

@@ -484,6 +484,30 @@ describe("direct core verification observation", () => {
     }
   );
 
+  it("reports unavailable null logs once in both failed response and persisted evidence", async () => {
+    const { ports } = fixture({
+      getRunDetail: async () => ({
+        status: "completed",
+        conclusion: "failure"
+      }),
+      fetchRunLog: async () => null
+    });
+    const result = await readSetupVerificationStatus(input, ports);
+    expect(result).toMatchObject({
+      state: "failed",
+      error:
+        "Credential verification failed (failure).\nThe verification log could not be read: logs are unavailable."
+    });
+    expect(ports.finish).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Object),
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({ evidence: result.error })
+      })
+    );
+    expect(ports.persistOperations).toHaveBeenCalledOnce();
+  });
+
   it("classifies and persists positive Azure RBAC evidence", async () => {
     const { ports, operation } = fixture({
       getRunDetail: async () => ({

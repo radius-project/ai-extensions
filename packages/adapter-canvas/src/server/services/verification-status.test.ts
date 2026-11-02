@@ -15,6 +15,7 @@ import {
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
   explainNoSubscriptions,
+  fetchRunLog,
   isSelectedGhAuthorizationError
 } from "../../deploy.js";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
@@ -95,6 +96,53 @@ function fixture() {
 }
 
 describe("direct verification binding", () => {
+  it.each([false, true])(
+    "handles unavailable production CLI logs without stale publication (stale=%s)",
+    async (stale) => {
+      const f = fixture();
+      const run = vi.fn(async () => {
+        if (stale) f.operation.verification.runId = 18;
+        return { code: 1, stdout: "", stderr: "logs not yet available" };
+      });
+      f.dependencies.getSelectedGitHubExecutor = () =>
+        successfulSelectedGhExecutor({ login: "saved-account", run });
+      f.dependencies.fetchRunLog = fetchRunLog;
+      f.getRunDetail.mockResolvedValue({
+        status: "completed",
+        conclusion: "failure"
+      });
+      let saved: unknown;
+      f.dependencies.persistOperations = vi.fn(async () => {
+        saved = structuredClone(f.operation);
+      });
+      const result = await f.service(f.input);
+      expect(run).toHaveBeenCalledOnce();
+      expect(run).toHaveBeenCalledWith(
+        ["run", "view", "17", "--log", "--repo", "fixture/app"],
+        expect.objectContaining({ timeout: 30000 })
+      );
+      if (stale) {
+        expect(result.body).toMatchObject({ state: "pending", runId: 18 });
+        expect(f.dependencies.persistOperations).not.toHaveBeenCalled();
+        expect(f.operation.state).toBe("running");
+      } else {
+        const warning =
+          "The verification log could not be read: logs are unavailable.";
+        expect(result.body).toMatchObject({
+          state: "failed",
+          runId: 17,
+          error: expect.stringContaining(warning)
+        });
+        expect(String(result.body.error).split(warning)).toHaveLength(2);
+        expect(saved).toMatchObject({
+          state: "failed_partial",
+          failure: { evidence: result.body.error }
+        });
+        expect(f.dependencies.persistOperations).toHaveBeenCalledOnce();
+      }
+    }
+  );
+
   it("constructs without observation or side effects and owns only its call lifetime", async () => {
     const f = fixture();
     expect(f.createScope).not.toHaveBeenCalled();

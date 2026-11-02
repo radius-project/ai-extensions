@@ -9,3 +9,5 @@ Reject setup answers when the original operation or panel attachment is removed,
 Refuse setup controls when their operation or original coordinator changes during admission. Wait for pending saves to settle before recovery, restore only an unchanged and unstarted request, and report a failed durable undo instead of accepting or starting stale work. Recheck only the affected operation after its admission settles, without restarting recovery for unrelated operations.
 
 Keep controls retryable when a previous task is still settling: return a temporary busy response instead of permanently blocking recovery, while preserving duplicate-command acceptance.
+
+Honor Stop while a setup answer is being saved without starting more setup work or leaving the operation running without a task. Report completion only after saving the stopped state; if that save fails, block further admission and show inspection guidance rather than claiming Stop was durable.

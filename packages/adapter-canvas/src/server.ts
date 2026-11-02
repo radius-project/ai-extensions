@@ -5664,6 +5664,7 @@ export function createProductionCanvasServerRuntime(
 
   const operationsControlDependencies: OperationsControlDependencies = {
     claimAdmission: executionOwner.claimAdmission,
+    stopPendingResume: sharedOperationResume.stopPendingResume,
     get: (operationId) => operations.get(operationId),
     acquireForRetry: (op) => operations.acquireForRetry(op),
     persistOperations: () => operations.persist(),

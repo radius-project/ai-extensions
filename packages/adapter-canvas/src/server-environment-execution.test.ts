@@ -186,6 +186,7 @@ describe("production coordinator scheduling scopes", () => {
     let writes = 0;
     const schedule = vi.fn(() => true);
     const service = createOperationsControlService({
+      stopPendingResume: () => null,
       claimAdmission: owner.claimAdmission,
       get: (id) => operations.get(id),
       acquireForRetry: (op) => operations.acquireForRetry(op),
@@ -1335,6 +1336,7 @@ describe("production coordinator scheduling scopes", () => {
       const get = vi.fn(() => op);
       const schedule = vi.fn(() => true);
       const service = createOperationsControlService({
+        stopPendingResume: () => null,
         claimAdmission: owner.claimAdmission,
         get,
         acquireForRetry: () => ({ ok: true }),

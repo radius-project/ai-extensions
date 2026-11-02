@@ -35,8 +35,13 @@ export type SetupInputResumeResult<
         | "stopped"
         | "accepted";
     }
+  | { state: "user-stopped"; operation: Operation }
   | { state: "expired"; operation: Operation; message: unknown }
-  | { state: "persist-failed" | "recovery-persist-failed"; error: unknown };
+  | {
+      state:
+        "persist-failed" | "recovery-persist-failed" | "stop-persist-failed";
+      error: unknown;
+    };
 
 export interface SetupInputResumePorts<Operation extends SetupResumeOperation> {
   isStopped?(): boolean;
@@ -45,6 +50,7 @@ export interface SetupInputResumePorts<Operation extends SetupResumeOperation> {
     prepared(): void;
     restore(): boolean;
     failed(error: unknown): void;
+    settleStop?(): Promise<SetupInputResumeResult<Operation>> | undefined;
   };
   readInput(): Promise<SetupResumeInput>;
   canResumeInput(
@@ -137,12 +143,16 @@ export async function resumeSetupInput<Operation extends SetupResumeOperation>(
   try {
     await ports.persist();
   } catch (error) {
+    const stop = recovery.settleStop?.();
+    if (stop) return stop;
     return correct(
       ports.isCurrent(operation) ?
         { state: "persist-failed", error }
       : { state: "mismatch" }
     );
   }
+  const stop = recovery.settleStop?.();
+  if (stop) return stop;
   if (ports.isStopped?.()) return { state: "stopped" };
   if (!ports.isCurrent(operation)) return correct({ state: "mismatch" });
   ports.accepted();
