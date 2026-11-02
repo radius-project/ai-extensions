@@ -163,10 +163,11 @@ export function initializeOperationChip(
     if (terminal && acknowledged(status.operationId)) return hide();
     chip.className = `rad-opchip ${operationChipTone(status.state)}`;
     if (label) label.textContent = text;
-    // The full sentence goes in the tooltip and the accessible name, so the
-    // three-word chip is never the only thing on offer.
+    // The full sentence goes in the tooltip, which is also the accessible
+    // description, so the three-word chip is never the only thing on offer.
+    // The accessible name stays the visible text, so a speech-input user can
+    // say what they see.
     chip.setAttribute("title", status.summary || text);
-    chip.setAttribute("aria-label", status.summary || text);
     chip.hidden = false;
     chip.dataset.operationId = status.operationId;
     chip.dataset.state = status.state;
