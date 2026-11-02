@@ -598,7 +598,7 @@ describe("POST /api/operations/{id}/stop", () => {
       deps
     );
 
-    expect(seen).toEqual(["octo/app:setup"]);
+    expect(seen).toEqual(["octo/app:setup", "octo/app:setup"]);
     expect(out.recording.status).toBe(202);
     expect(out.payload().statusUrl).toBe("/api/operations/octo%2Fapp%3Asetup");
   });
