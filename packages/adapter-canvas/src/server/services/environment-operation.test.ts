@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { buildGitHubTrustPolicy } from "@radius-project/core";
+import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import {
+  addLegacyStep,
   createOperation,
+  enterStage,
   prepareProviderMutation,
   promoteCreatedGitHubEnvironment,
   requestStop,
@@ -8,9 +12,12 @@ import {
   provenOwnedCleanupTargets,
   recordGitHubEnvironment,
   setCanonicalEnvironment,
+  setContext,
+  STAGE_AUTHORIZE_IDENTITY,
   unresolvedProviderMutations
 } from "../../operations.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import { createAwsEnvironmentAccess } from "./aws-environment-access.js";
 import {
   runEnvironmentOperationWorkflow,
   type EnvironmentOperationRecord,
@@ -1241,6 +1248,109 @@ describe("runEnvironmentOperationWorkflow", () => {
         error: "The signed-in AWS identity cannot create IAM roles.",
         code: "aws-role-create-denied"
       })
+    ]);
+    expect(test.posts).toEqual([]);
+  });
+
+  it("refuses another repository's Radius role through the real ownership check without writing to AWS", async () => {
+    const account = "123456789012";
+    const picked = `arn:aws:iam::${account}:role/radius-deploy-octo-web`;
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: {
+        environment: "production",
+        roleName: "",
+        existingRoleArn: picked,
+        accountId: account,
+        region: "us-west-2",
+        cluster: "eks-1"
+      }
+    };
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    const awsAnswers: Record<string, unknown> = {
+      "--version": "aws-cli/2.17.0 Python/3.11 Darwin/23",
+      "sts get-caller-identity": { Account: account },
+      "eks describe-cluster": {
+        cluster: { accessConfig: { authenticationMode: "API" } }
+      },
+      "iam get-role": {
+        Role: {
+          Arn: picked,
+          AssumeRolePolicyDocument: buildGitHubTrustPolicy(account, [
+            "repo:octo/web:environment:dev"
+          ]),
+          Tags: [
+            { Key: "radius-managed", Value: "true" },
+            { Key: "radius-repository", Value: "octo/web" }
+          ]
+        }
+      }
+    };
+    const githubAnswers: Record<string, GitHubJsonResponse> = {
+      "/repos/octo/app": {
+        ok: true,
+        status: 200,
+        json: { full_name: "octo/app", id: 42, owner: { id: 7 } }
+      },
+      "/repos/octo/app/actions/oidc/customization/sub": {
+        ok: false,
+        status: 404,
+        json: null
+      }
+    };
+    const awsCalls: string[] = [];
+    const access = createAwsEnvironmentAccess<EnvironmentOperationRecord>({
+      async runAws(args) {
+        const key = args.slice(0, 2).join(" ");
+        awsCalls.push(key);
+        const answer = awsAnswers[key];
+        if (answer === undefined) throw new Error(`unexpected aws ${key}`);
+        return {
+          code: 0,
+          stdout: typeof answer === "string" ? answer : JSON.stringify(answer),
+          stderr: ""
+        };
+      },
+      async runGitHubJson(path) {
+        const answer = githubAnswers[path];
+        if (!answer) throw new Error(`unexpected GitHub read ${path}`);
+        return answer;
+      },
+      sleep: async () => {},
+      isStopRequested: () => false,
+      operations: { enterStage, addLegacyStep, setContext },
+      store: { persist: async () => {} },
+      stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
+      errorMessage: (error) =>
+        error instanceof Error ? error.message : String(error)
+    });
+    const test = dependencies(op, {
+      setupAwsDeployIdentity: (target, request, received) =>
+        access.setup(target, request, received)
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(test.failures).toEqual([
+      expect.objectContaining({
+        status: 400,
+        code: "aws-role-other-repository",
+        error:
+          "Radius created IAM role radius-deploy-octo-web for octo/web, so it cannot be used for octo/app. Nothing was changed. Pick another role or let Radius create one. Nothing was created in AWS."
+      })
+    ]);
+    expect(awsCalls).toEqual([
+      "--version",
+      "sts get-caller-identity",
+      "eks describe-cluster",
+      "iam get-role"
     ]);
     expect(test.posts).toEqual([]);
   });

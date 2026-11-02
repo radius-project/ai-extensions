@@ -17,6 +17,9 @@ import {
 
 const ROLE_ARN = "arn:aws:iam::123456789012:role/platform-deploy";
 
+const rolesUrl = (accountId: string): string =>
+  `${LIST_AWS_ROLES_ENDPOINT}?accountId=${accountId}&repo=octo%2Fshop`;
+
 function json(body: unknown): HttpResponse {
   return {
     ok: true,
@@ -54,7 +57,6 @@ function page(
   const promptRoleSelection = vi.fn(prompt);
   const handle = initializeAwsDeployIdentity(browser.context, scope, {
     repo: "octo/shop",
-    defaultRoleName: "radius-deploy-octo-shop",
     environmentName: () => environment,
     promptRoleSelection
   });
@@ -136,18 +138,16 @@ describe("initializeAwsDeployIdentity", () => {
   it("pins a picked role, disables the name, and can return to a per-repo role", async () => {
     const view = page();
     view.handle.setProfile({ accountId: "123456789012", region: "us-west-2" });
-    view.browser.net.handle(
-      `${LIST_AWS_ROLES_ENDPOINT}?accountId=123456789012`,
-      () =>
-        json({
-          roles: [
-            {
-              arn: ROLE_ARN,
-              name: "platform-deploy",
-              trustedSubjects: ["repo:octo/api:environment:dev"]
-            }
-          ]
-        })
+    view.browser.net.handle(rolesUrl("123456789012"), () =>
+      json({
+        roles: [
+          {
+            arn: ROLE_ARN,
+            name: "platform-deploy",
+            trustedSubjects: ["repo:octo/api:environment:dev"]
+          }
+        ]
+      })
     );
     view.use.dispatch("click");
     await flush();
@@ -201,7 +201,7 @@ describe("initializeAwsDeployIdentity", () => {
     [
       "no roles",
       () => json({ roles: [] }),
-      "The signed-in identity cannot see any IAM roles."
+      "No IAM role in this account can be used for this repository."
     ],
     [
       "a network failure",
@@ -219,7 +219,7 @@ describe("initializeAwsDeployIdentity", () => {
     ]
   ])("reports %s next to the field", async (_label, handler, message) => {
     const view = page();
-    view.browser.net.handle(`${LIST_AWS_ROLES_ENDPOINT}?accountId=`, handler);
+    view.browser.net.handle(rolesUrl(""), handler);
     view.use.dispatch("click");
     await flush();
     expect(view.note.textContent).toBe(message);
@@ -229,7 +229,7 @@ describe("initializeAwsDeployIdentity", () => {
 
   it("pins a picked role on a page without the clear link", async () => {
     const view = page(undefined, ["aws-clear-role-link"]);
-    view.browser.net.handle(`${LIST_AWS_ROLES_ENDPOINT}?accountId=`, () =>
+    view.browser.net.handle(rolesUrl(""), () =>
       json({ roles: [{ arn: ROLE_ARN }] })
     );
     view.use.dispatch("click");
@@ -243,13 +243,14 @@ describe("initializeAwsDeployIdentity", () => {
 
   it("works with only its two inputs", () => {
     const browser = createFakeBrowser();
-    browser.document.add(createFakeInput("aws-role-name-input", "r"));
+    const name = createFakeInput("aws-role-name-input", "r");
+    name.setAttribute("data-default-name", "radius-deploy-octo-shop");
+    browser.document.add(name);
     browser.document.add(createFakeInput("aws-selected-role-arn", ""));
     const scope = beginEntry(browser.context, "aws-identity-inputs");
     if (!scope) throw new Error("Expected an entry scope.");
     const handle = initializeAwsDeployIdentity(browser.context, scope, {
       repo: "octo/shop",
-      defaultRoleName: "radius-deploy-octo-shop",
       environmentName: () => "dev",
       promptRoleSelection: async () => ({ createNew: true })
     });
@@ -260,6 +261,21 @@ describe("initializeAwsDeployIdentity", () => {
     });
   });
 
+  it("empties the name on unpin when the page renders no default", () => {
+    const browser = createFakeBrowser();
+    browser.document.add(createFakeInput("aws-role-name-input", "r"));
+    browser.document.add(createFakeInput("aws-selected-role-arn", ""));
+    const scope = beginEntry(browser.context, "aws-identity-no-default");
+    if (!scope) throw new Error("Expected an entry scope.");
+    const handle = initializeAwsDeployIdentity(browser.context, scope, {
+      repo: "octo/shop",
+      environmentName: () => "dev",
+      promptRoleSelection: async () => ({ createNew: true })
+    });
+    handle.setProfile({ accountId: "123456789012" });
+    expect(handle.request()).toEqual({ roleName: "", existingRoleArn: "" });
+  });
+
   it("is inert when the name input exists without its ARN input", () => {
     const browser = createFakeBrowser();
     browser.document.add(createFakeInput("aws-role-name-input", "r"));
@@ -267,7 +283,6 @@ describe("initializeAwsDeployIdentity", () => {
     if (!scope) throw new Error("Expected an entry scope.");
     const handle = initializeAwsDeployIdentity(browser.context, scope, {
       repo: "octo/shop",
-      defaultRoleName: "radius-deploy-octo-shop",
       environmentName: () => "dev",
       promptRoleSelection: async () => ({ createNew: true })
     });
@@ -280,7 +295,6 @@ describe("initializeAwsDeployIdentity", () => {
     if (!scope) throw new Error("Expected an entry scope.");
     const handle = initializeAwsDeployIdentity(browser.context, scope, {
       repo: "octo/shop",
-      defaultRoleName: "radius-deploy-octo-shop",
       environmentName: () => "dev",
       promptRoleSelection: async () => ({ createNew: true })
     });
@@ -293,7 +307,7 @@ describe("initializeAwsDeployIdentity", () => {
     const view = page(async () => ({
       appId: "arn:aws:iam::123456789012:role/x"
     }));
-    view.browser.net.handle(`${LIST_AWS_ROLES_ENDPOINT}?accountId=`, () =>
+    view.browser.net.handle(rolesUrl(""), () =>
       json({ roles: [{ arn: ROLE_ARN }] })
     );
     view.use.dispatch("click");
@@ -303,7 +317,7 @@ describe("initializeAwsDeployIdentity", () => {
 
   it("ignores a picker answer that is not a role", async () => {
     const view = page(async () => ({ createNew: true }));
-    view.browser.net.handle(`${LIST_AWS_ROLES_ENDPOINT}?accountId=`, () =>
+    view.browser.net.handle(rolesUrl(""), () =>
       json({ roles: [{ arn: ROLE_ARN }] })
     );
     view.use.dispatch("click");
@@ -315,7 +329,7 @@ describe("initializeAwsDeployIdentity", () => {
     const view = page(async () => {
       throw new Error("cancelled");
     });
-    view.browser.net.handle(`${LIST_AWS_ROLES_ENDPOINT}?accountId=`, () =>
+    view.browser.net.handle(rolesUrl(""), () =>
       json({ roles: [{ arn: ROLE_ARN }] })
     );
     view.use.dispatch("click");
@@ -340,10 +354,7 @@ describe("initializeAwsDeployIdentity", () => {
 
     function pendingLookup(view: ReturnType<typeof page>) {
       const response = deferred<HttpResponse>();
-      view.browser.net.handle(
-        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${ACCOUNT_A}`,
-        () => response.promise
-      );
+      view.browser.net.handle(rolesUrl(ACCOUNT_A), () => response.promise);
       view.handle.setProfile({ accountId: ACCOUNT_A, region: "us-west-2" });
       view.use.dispatch("click");
       return response;
@@ -400,10 +411,7 @@ describe("initializeAwsDeployIdentity", () => {
     it("does not pin a role picked for the previous account", async () => {
       const choice = deferred<AppPickerChoice>();
       const view = page(() => choice.promise);
-      view.browser.net.handle(
-        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${ACCOUNT_A}`,
-        roles
-      );
+      view.browser.net.handle(rolesUrl(ACCOUNT_A), roles);
       view.handle.setProfile({ accountId: ACCOUNT_A, region: "us-west-2" });
       view.use.dispatch("click");
       await flush();
@@ -426,10 +434,7 @@ describe("initializeAwsDeployIdentity", () => {
       const view = page();
       const first = pendingLookup(view);
       const second = deferred<HttpResponse>();
-      view.browser.net.handle(
-        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${ACCOUNT_A}`,
-        () => second.promise
-      );
+      view.browser.net.handle(rolesUrl(ACCOUNT_A), () => second.promise);
       view.use.dispatch("click");
       first.resolve(roles());
       await flush();

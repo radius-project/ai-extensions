@@ -484,6 +484,67 @@ describe("setupAwsDeployIdentity", () => {
     );
     expect(result).toMatchObject({ ok: false, code: "aws-role-missing" });
   });
+
+  it("refuses a picked role Radius created for another repository", async () => {
+    const other = `arn:aws:iam::${ACCOUNT}:role/radius-deploy-octo-api`;
+    const aws = fakeAws({
+      ...freeChecks,
+      "iam get-role": ok({
+        Role: {
+          Arn: other,
+          AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [
+            "repo:octo/api:environment:dev"
+          ]),
+          Tags: [
+            { Key: "Radius-Managed", Value: "true" },
+            { Key: "radius-repository", Value: "octo/api" }
+          ]
+        }
+      })
+    });
+    const result = await setupAwsDeployIdentity(
+      { ...request, existingRoleArn: other },
+      aws.ports
+    );
+    expect(result).toEqual({
+      ok: false,
+      code: "aws-role-other-repository",
+      message:
+        "Radius created IAM role radius-deploy-octo-api for octo/api, so it cannot be used for octo/shop. Nothing was changed. Pick another role or let Radius create one.",
+      created: []
+    });
+    expect(aws.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+      "--version",
+      "sts get-caller-identity",
+      "eks describe-cluster",
+      "iam get-role"
+    ]);
+  });
+
+  it("accepts a picked role Radius created for this repository in another case", async () => {
+    const aws = fakeAws({
+      ...freeChecks,
+      ...existingProvider,
+      "iam get-role": ok({
+        Role: {
+          ...managedRole([PROD]).Role,
+          Tags: [
+            { Key: "radius-managed", Value: "true" },
+            { Key: "radius-repository", Value: "Octo/Shop" }
+          ]
+        }
+      }),
+      "iam update-assume-role-policy": ok(),
+      "iam put-role-policy": ok(),
+      "eks create-access-entry": ok(),
+      "eks associate-access-policy": ok()
+    });
+    const result = await setupAwsDeployIdentity(
+      { ...request, existingRoleArn: ROLE_ARN },
+      aws.ports
+    );
+    expect(result).toMatchObject({ ok: true, roleCreated: false });
+  });
 });
 
 describe("setupAwsDeployIdentity failure paths", () => {

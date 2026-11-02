@@ -236,8 +236,9 @@ export function initializeDeployChip(
     if (text === "") return hide();
     const key = deployChipKey(status);
     if (key !== "" && acknowledged(key)) return hide();
-    // The failure's own message goes in the tooltip and the accessible name, so
-    // the three-word chip is never the only thing on offer.
+    // The failure's own message goes in the tooltip, which is also the
+    // accessible description, so the three-word chip is never the only thing on
+    // offer. The accessible name stays the visible text.
     const summary = status.error || text;
     // A failed run points at the job on GitHub, which is where the error
     // actually lives; everything else points back at the Deployments page. The
@@ -260,7 +261,6 @@ export function initializeDeployChip(
     chip.className = `rad-opchip ${tone}`;
     if (label) label.textContent = text;
     chip.setAttribute("title", summary);
-    chip.setAttribute("aria-label", summary);
     chip.setAttribute("href", runLink || DEPLOY_CHIP_HREF);
     chip.hidden = false;
     chip.dataset.deployKey = key;

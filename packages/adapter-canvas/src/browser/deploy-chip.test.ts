@@ -414,9 +414,8 @@ describe("deploy chip polling", () => {
     expect(browser.chip.hidden).toBe(false);
     expect(browser.chip.className).toBe("rad-opchip rad-opchip--running");
     expect(browser.label.textContent).toBe("Deploying storefront…");
-    expect(browser.chip.getAttribute("aria-label")).toBe(
-      "Deploying storefront…"
-    );
+    expect(browser.chip.getAttribute("aria-label")).toBeNull();
+    expect(browser.chip.getAttribute("title")).toBe("Deploying storefront…");
     expect(browser.chip.getAttribute("title")).toBe("Deploying storefront…");
     expect(browser.chip.getAttribute("href")).toBe(DEPLOY_CHIP_HREF);
     expect(browser.chip.dataset.status).toBe("in_progress");
@@ -457,7 +456,8 @@ describe("deploy chip polling", () => {
 
     expect(browser.chip.className).toBe("rad-opchip rad-opchip--failed");
     expect(browser.label.textContent).toBe("storefront deploy failed");
-    expect(browser.chip.getAttribute("aria-label")).toBe(
+    expect(browser.chip.getAttribute("aria-label")).toBeNull();
+    expect(browser.chip.getAttribute("title")).toBe(
       "Bicep template failed to compile"
     );
     expect(browser.chip.getAttribute("href")).toBe(RUN_URL);
@@ -529,7 +529,8 @@ describe("deploy chip polling", () => {
     await flushPromises();
 
     expect(chip.hidden).toBe(false);
-    expect(chip.getAttribute("aria-label")).toBe("Deploying storefront…");
+    expect(chip.getAttribute("aria-label")).toBeNull();
+    expect(chip.getAttribute("title")).toBe("Deploying storefront…");
   });
 
   it("stays hidden while the deploy progress modal is on screen", async () => {
@@ -987,9 +988,8 @@ describe("deploy chip polling", () => {
 
     expect(browser.chip.hidden).toBe(false);
     expect(browser.label.textContent).toBe("Deploying storefront…");
-    expect(browser.chip.getAttribute("aria-label")).toBe(
-      "Deploying storefront…"
-    );
+    expect(browser.chip.getAttribute("aria-label")).toBeNull();
+    expect(browser.chip.getAttribute("title")).toBe("Deploying storefront…");
   });
 
   it("honors a caller-supplied poll interval", async () => {

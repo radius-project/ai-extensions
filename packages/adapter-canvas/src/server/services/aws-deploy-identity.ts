@@ -21,6 +21,7 @@ import {
   mergeGitHubTrustSubject,
   parseAwsRoleArn,
   parsePolicyDocument,
+  radiusRoleRepository,
   removeGitHubTrustSubject,
   trustedGitHubSubjects,
   type PolicyDocument
@@ -301,6 +302,15 @@ export async function setupAwsDeployIdentity(
     return fail(
       "aws-role-not-radius-managed",
       `An IAM role named ${roleName} already exists, but Radius did not create it for ${request.repo}. No change was made. Either select that role deliberately with "use an existing role…", or choose a different name.`
+    );
+  }
+  // A role Radius created belongs to the repository in its tags, and that
+  // repository's own setup and cleanup assume no other repository uses it.
+  const owner = pickedArn ? radiusRoleRepository(role) : null;
+  if (owner !== null && owner.toLowerCase() !== request.repo.toLowerCase()) {
+    return fail(
+      "aws-role-other-repository",
+      `Radius created IAM role ${roleName} for ${owner}, so it cannot be used for ${request.repo}. Nothing was changed. Pick another role or let Radius create one.`
     );
   }
 
