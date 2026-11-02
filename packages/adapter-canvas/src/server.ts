@@ -4463,8 +4463,7 @@ export function createEnvironmentOperationExecution(
               }
             },
             setupAwsDeployIdentity: (operation, input, selectedExecutor) => {
-              if (executionOwner.isShuttingDown(instanceId))
-                throw new Error("Setup execution is shutting down.");
+              assertSetupExecutionActive(attachment.isShuttingDown);
               return awsEnvironmentAccess.setup(
                 operation,
                 input,

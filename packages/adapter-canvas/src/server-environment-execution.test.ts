@@ -716,8 +716,7 @@ describe("production coordinator scheduling scopes", () => {
             stderr: ""
           };
         if (command === "api /repos/fixture/app/environments/dev") {
-          if (when === "before")
-            owner.markEnvironmentInstanceShuttingDown("panel");
+          if (when === "before") owner.shutdown();
           return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
         }
         throw new Error(`Unexpected command: ${command}`);
@@ -750,7 +749,6 @@ describe("production coordinator scheduling scopes", () => {
         }
       );
       const configureEnvironment = vi.fn(unavailable);
-      const unregister = vi.spyOn(context, "unregisterExecutor");
       const handler = coordinator(owner, "panel", undefined, context, {
         authorizeAzure,
         configureEnvironment
@@ -762,7 +760,7 @@ describe("production coordinator scheduling scopes", () => {
           await Promise.race([entered.promise, done]);
           expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
           expect(authorizeAzure).toHaveBeenCalledOnce();
-          owner.markEnvironmentInstanceShuttingDown("panel");
+          owner.shutdown();
           expect(context.getExecutor(op.operationId)).toBe(executor);
         }
       } finally {
@@ -775,7 +773,6 @@ describe("production coordinator scheduling scopes", () => {
       expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
       expect(op.endedAt).toBeNull();
       expect(context.getExecutor(op.operationId)).toBeUndefined();
-      expect(unregister).toHaveBeenCalledExactlyOnceWith(op.operationId);
       expect(run.mock.calls.every(([args]) => !args.includes("--method"))).toBe(
         true
       );
@@ -783,13 +780,19 @@ describe("production coordinator scheduling scopes", () => {
   );
 
   it.each([
-    { shuttingDown: false, stopped: false, saveFailure: false },
-    { shuttingDown: true, stopped: false, saveFailure: false },
-    { shuttingDown: false, stopped: true, saveFailure: false },
-    { shuttingDown: false, stopped: true, saveFailure: true }
+    {
+      shuttingDown: false,
+      stopped: false,
+      saveFailure: false,
+      detached: false
+    },
+    { shuttingDown: true, stopped: false, saveFailure: false, detached: false },
+    { shuttingDown: false, stopped: true, saveFailure: false, detached: false },
+    { shuttingDown: false, stopped: true, saveFailure: true, detached: false },
+    { shuttingDown: false, stopped: false, saveFailure: false, detached: true }
   ])(
     "keeps AWS setup bound to its account and honors its outcome: %j",
-    async ({ shuttingDown, stopped, saveFailure }) => {
+    async ({ shuttingDown, stopped, saveFailure, detached }) => {
       const owner = createEnvironmentExecutionOwner();
       const op = createOperation({
         operationId: "op_aws",
@@ -836,7 +839,11 @@ describe("production coordinator scheduling scopes", () => {
             stderr: ""
           };
         if (command === "api /repos/fixture/app/environments/dev") {
-          if (shuttingDown) owner.markEnvironmentInstanceShuttingDown("panel");
+          if (shuttingDown) owner.shutdown();
+          if (detached) {
+            owner.markEnvironmentInstanceShuttingDown("panel");
+            handler.detach();
+          }
           return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
         }
         if (
@@ -2856,6 +2863,7 @@ describe("production coordinator scheduling scopes", () => {
       withSelectedAccount: unavailable
     });
     const execution = createEnvironmentOperationExecution({
+      awsEnvironmentAccess: { setup: unavailable },
       executionOwner: owner,
       scope,
       accountContext: account,
