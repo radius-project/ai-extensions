@@ -26,6 +26,11 @@ import {
 } from "../../../src/infra.js";
 import { DELETE_FAILED_STATUS } from "../../../src/server/services/delete-conflict.js";
 import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
+import {
+  CloudCommandError,
+  expectSuccess,
+  type CloudCommandResult
+} from "./cloud-command-port.js";
 
 /**
  * Workflow files `/api/deploy` must publish before it can dispatch.
@@ -341,6 +346,24 @@ export interface WorkflowRunControlPort {
   readonly readStatus: (runId: string) => Promise<WorkflowRunStatus>;
   readonly cancel: (runId: string) => Promise<void>;
   readonly waitUntilCompleted: (runId: string) => Promise<void>;
+}
+
+export function acceptWorkflowCancellation(
+  result: CloudCommandResult,
+  context: string
+): void {
+  if (result.timedOut) throw new CloudCommandError(context, result);
+  if (
+    result.code !== 0 &&
+    result.stderr.includes("(HTTP 409)") &&
+    result.stderr.includes(
+      "Cannot cancel a workflow run that has not been queued yet."
+    )
+  ) {
+    // The caller must still wait for terminal completion before cleanup.
+    return;
+  }
+  expectSuccess(result, context);
 }
 
 /**
