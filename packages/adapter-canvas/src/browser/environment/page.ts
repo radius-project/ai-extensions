@@ -39,7 +39,6 @@ import type { BrowserTeardown } from "../lifecycle.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
 import {
   KUBERNETES_NAMESPACE_ERROR,
-  buildAwsDeployRoleName,
   isAwsRoleName,
   isKubernetesNamespace
 } from "@radius-project/core/platforms";
@@ -201,7 +200,6 @@ export function initializeEnvironmentPage(
   const confirmDialog = createEnvironmentConfirmDialog(context);
   const awsIdentity = initializeAwsDeployIdentity(context, scope, {
     repo: state.repo,
-    defaultRoleName: buildAwsDeployRoleName(state.repo),
     environmentName: () => environmentInput.value,
     promptRoleSelection: discovery.promptAppSelection
   });

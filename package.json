@@ -46,7 +46,7 @@
     "demo:progress": "node packages/adapter-canvas/dev/run-demo.mjs"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.13.0",
+    "@axe-core/playwright": "^4.14.0",
     "@babel/core": "^8.0.7",
     "@babel/eslint-parser": "^8.0.7",
     "@babel/plugin-syntax-typescript": "^8.0.3",
@@ -59,10 +59,10 @@
     "@types/react-dom18": "npm:@types/react-dom@^18.3.1",
     "@vitest/coverage-v8": "catalog:",
     "esbuild": "^0.28.2",
-    "eslint": "^10.12.0",
+    "eslint": "^10.13.0",
     "globals": "^17.13.0",
     "markdown-table-formatter": "1.7.0",
-    "markdownlint-cli2": "0.23.3",
+    "markdownlint-cli2": "0.24.0",
     "prettier": "^3.9.10",
     "react18": "npm:react@18.3.1",
     "react-dom18": "npm:react-dom@18.3.1",

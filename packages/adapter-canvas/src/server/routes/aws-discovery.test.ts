@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
+import { buildGitHubTrustPolicy } from "@radius-project/core";
 import { createRequestContext } from "../request-context.js";
 import { SERVER_ROUTE_DECLARATIONS } from "../route-table.js";
 import {
@@ -10,13 +11,16 @@ import {
 import type { CanvasServerEntry } from "../types.js";
 
 const LIST_ROLES = "aws iam list-roles --output json";
+const GET_ROLE =
+  "aws iam get-role --role-name radius-deploy-octo-api --output json";
 
-function rolesCli(result: string | Error) {
+function rolesCli(script: Record<string, string | Error>) {
   const calls: string[] = [];
   const runCli: AwsDiscoveryRouteDependencies["runCli"] = (command, args) => {
     const line = [command, ...args].join(" ");
     calls.push(line);
-    if (line !== LIST_ROLES) throw new Error(`unscripted cli call: ${line}`);
+    const result = script[line];
+    if (result === undefined) throw new Error(`unscripted cli call: ${line}`);
     return result instanceof Error ?
         Promise.reject(result)
       : Promise.resolve(result);
@@ -61,7 +65,7 @@ async function listRoles(
 
 describe("aws-discovery routes", () => {
   it("owns exactly the AWS role list route", () => {
-    const routes = createAwsDiscoveryRoutes(rolesCli("{}"));
+    const routes = createAwsDiscoveryRoutes(rolesCli({}));
     expect(Object.keys(routes)).toEqual(["GET /api/list-aws-roles"]);
     expect(
       SERVER_ROUTE_DECLARATIONS.filter(
@@ -70,35 +74,48 @@ describe("aws-discovery routes", () => {
     ).toEqual(Object.keys(routes));
   });
 
-  it("answers the visible roles", async () => {
-    const cli = rolesCli(
-      JSON.stringify({
+  it("answers the roles the repository can use", async () => {
+    const cli = rolesCli({
+      [LIST_ROLES]: JSON.stringify({
         Roles: [
           {
-            RoleName: "radius-deploy-octo-app",
-            Arn: "arn:aws:iam::123456789012:role/radius-deploy-octo-app",
+            RoleName: "radius-deploy-octo-api",
+            Arn: "arn:aws:iam::123456789012:role/radius-deploy-octo-api",
             Path: "/",
-            AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
+            AssumeRolePolicyDocument: buildGitHubTrustPolicy("123456789012", [
+              "repo:octo/api:environment:dev"
+            ])
           }
         ]
+      }),
+      [GET_ROLE]: JSON.stringify({
+        Role: {
+          Tags: [
+            { Key: "radius-managed", Value: "true" },
+            { Key: "radius-repository", Value: "octo/api" }
+          ]
+        }
       })
-    );
+    });
 
     expect(
-      await listRoles("/api/list-aws-roles?accountId=123456789012", cli)
+      await listRoles(
+        "/api/list-aws-roles?accountId=123456789012&repo=octo%2Fapi",
+        cli
+      )
     ).toEqual({
       status: 200,
       body: {
         roles: [
           {
-            arn: "arn:aws:iam::123456789012:role/radius-deploy-octo-app",
-            name: "radius-deploy-octo-app",
-            trustedSubjects: []
+            arn: "arn:aws:iam::123456789012:role/radius-deploy-octo-api",
+            name: "radius-deploy-octo-api",
+            trustedSubjects: ["repo:octo/api:environment:dev"]
           }
         ]
       }
     });
-    expect(cli.calls).toEqual([LIST_ROLES]);
+    expect(cli.calls).toEqual([LIST_ROLES, GET_ROLE]);
   });
 
   it.each([new Error("AccessDenied"), "AccessDenied"])(

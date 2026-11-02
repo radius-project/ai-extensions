@@ -1,7 +1,5 @@
-import {
-  buildAwsDeployRoleName,
-  buildEnvironmentSuffix
-} from "@radius-project/core";
+import { buildEnvironmentSuffix } from "@radius-project/core";
+import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
 import {
   resolveOidcSubject,
   type GitHubJsonResponse
@@ -143,7 +141,7 @@ export function createAwsEnvironmentAccess<Operation>(
           accountId: text(input.accountId),
           region: text(input.region),
           cluster: text(input.cluster),
-          roleName: text(input.roleName) || buildAwsDeployRoleName(repo),
+          roleName: text(input.roleName) || defaultAwsDeployRoleName(repo),
           existingRoleArn: text(input.existingRoleArn),
           subjects
         },
