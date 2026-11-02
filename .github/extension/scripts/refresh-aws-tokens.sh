@@ -136,8 +136,9 @@ refresh_eks_token() {
         --from-file=kubeconfig="${KUBECONFIG_FILE}" \
         --from-file=token="${EKS_TOKEN_FILE}" || return 1
     # Runner steps such as the routes Gateway cleanup read the same kubeconfig.
-    cp "${KUBECONFIG_FILE}" "${RADIUS_TARGET_KUBECONFIG}.new" &&
-        mv "${RADIUS_TARGET_KUBECONFIG}.new" "${RADIUS_TARGET_KUBECONFIG}"
+    # Moving it out of the token directory leaves no partial copy outside that
+    # directory if the watcher is stopped mid-refresh.
+    mv "${KUBECONFIG_FILE}" "${RADIUS_TARGET_KUBECONFIG}"
 }
 
 refresh_tokens() {

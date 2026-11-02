@@ -108,6 +108,16 @@ case "${1:-}" in
         done
         ;;
     apply)
+        count=0
+        if [[ -f "${APPLY_COUNT_FILE}" ]]; then
+            count="$(cat "${APPLY_COUNT_FILE}")"
+        fi
+        ((count += 1))
+        printf '%s' "${count}" >"${APPLY_COUNT_FILE}"
+        if [[ " ${APPLY_FAILURES:-} " == *" ${count} "* ]]; then
+            cat >/dev/null
+            exit 1
+        fi
         cat >>"${KUBECTL_APPLY_FILE}"
         ;;
     *)
@@ -144,6 +154,7 @@ export CURL_COUNT_FILE="${TEMP_DIR}/curl-count"
 export AWS_COUNT_FILE="${TEMP_DIR}/aws-count"
 export AWS_ENV_FILE="${TEMP_DIR}/aws-env"
 export KUBECTL_APPLY_FILE="${TEMP_DIR}/kubectl-apply"
+export APPLY_COUNT_FILE="${TEMP_DIR}/apply-count"
 export SLEEP_FILE="${TEMP_DIR}/sleeps"
 unset AWS_TOKEN_REFRESH_INTERVAL_SECONDS
 
@@ -154,7 +165,7 @@ fail() {
 
 reset() {
     rm -f "${ARGV_FILE}" "${CURL_COUNT_FILE}" "${AWS_COUNT_FILE}" \
-        "${AWS_ENV_FILE}" "${KUBECTL_APPLY_FILE}" "${SLEEP_FILE}"
+        "${AWS_ENV_FILE}" "${KUBECTL_APPLY_FILE}" "${APPLY_COUNT_FILE}" "${SLEEP_FILE}"
     printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: Q0EtREFUQQ==\n    server: https://eks.example\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: old-token\n' \
         >"${RADIUS_TARGET_KUBECONFIG}"
 }
@@ -193,6 +204,28 @@ check_runner_files_removed() {
     if [[ -n "$(ls -A "${RUNNER_TEMP}")" ]]; then
         fail "expected the token files to be removed from RUNNER_TEMP"
     fi
+}
+
+# Stops a watcher and returns its exit status, or 124 after force-stopping one
+# still running after the given seconds, so a stuck watcher fails the test
+# instead of hanging it.
+cancel_watcher() {
+    local pid="$1"
+    local limit="$2"
+    local status=0
+
+    kill "${pid}"
+    for _ in $(seq 1 $((limit * 20))); do
+        kill -0 "${pid}" 2>/dev/null || break
+        /bin/sleep 0.05
+    done
+    if kill -0 "${pid}" 2>/dev/null; then
+        kill -KILL "${pid}" 2>/dev/null || true
+        wait "${pid}" 2>/dev/null || true
+        return 124
+    fi
+    wait "${pid}" 2>/dev/null || status=$?
+    return "${status}"
 }
 
 # --prepare refreshes both tokens once.
@@ -269,6 +302,59 @@ fi
     fail "expected a failed refresh to keep the previous kubeconfig"
 check_runner_files_removed
 
+# A failed Secret update fails prepare and keeps the previous runner kubeconfig.
+# The first apply updates aws-oidc-token and the second target-kubeconfig.
+for failed_apply in 1 2; do
+    reset
+    before="$(cat "${RADIUS_TARGET_KUBECONFIG}")"
+    if output="$(APPLY_FAILURES="${failed_apply}" bash "${SCRIPT}" --prepare 2>&1)"; then
+        fail "expected prepare to fail when Secret update ${failed_apply} fails"
+    fi
+    [[ "${output}" == *"Could not refresh the GitHub or EKS token."* ]] ||
+        fail "expected an actionable error when Secret update ${failed_apply} fails, got: ${output}"
+    [[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${before}" ]] ||
+        fail "expected failed Secret update ${failed_apply} to keep the previous kubeconfig"
+    if [[ "${failed_apply}" == "1" && -f "${AWS_COUNT_FILE}" ]]; then
+        fail "expected no EKS token after the OIDC Secret update failed"
+    fi
+    check_runner_files_removed
+done
+
+# A failed OIDC Secret update skips the EKS refresh and retries after 15 seconds.
+reset
+output="$(APPLY_FAILURES="1" bash "${SCRIPT}" --watch 3 2>&1)"
+[[ "$(sleeps)" == "120 15 120" ]] ||
+    fail "expected a 15-second retry after a failed OIDC Secret update, got '$(sleeps)'"
+[[ "$(grep -c '^::warning::AWS token refresh failed; retrying\.$' <<<"${output}")" == "1" ]] ||
+    fail "expected one failure warning after a failed OIDC Secret update, got: ${output}"
+[[ "$(cat "${AWS_COUNT_FILE}")" == "2" ]] ||
+    fail "expected no EKS refresh in the cycle whose OIDC Secret update failed"
+[[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "$(expected_kubeconfig eks-token-2)" ]] ||
+    fail "expected the retried refreshes to update the runner kubeconfig"
+check_runner_files_removed
+
+# A failed target-kubeconfig Secret update keeps the previous runner kubeconfig,
+# and the retry 15 seconds later writes the new token to both.
+reset
+before="$(cat "${RADIUS_TARGET_KUBECONFIG}")"
+APPLY_FAILURES="2" bash "${SCRIPT}" --watch 1 >/dev/null 2>&1
+[[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${before}" ]] ||
+    fail "expected a failed target-kubeconfig Secret update to keep the runner kubeconfig"
+reset
+APPLY_FAILURES="2" bash "${SCRIPT}" --watch 2 >/dev/null 2>&1
+[[ "$(sleeps)" == "120 15" ]] ||
+    fail "expected a 15-second retry after a failed target-kubeconfig Secret update, got '$(sleeps)'"
+[[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "$(expected_kubeconfig eks-token-2)" ]] ||
+    fail "expected the retry to write its EKS token to the runner kubeconfig"
+expected_apply="$(
+    printf 'secret=aws-oidc-token\ntoken<<\noidc-token-1\n>>\n'
+    expected_updates oidc-token-2 eks-token-2
+)"
+[[ "$(cat "${KUBECTL_APPLY_FILE}")" == "${expected_apply}" ]] ||
+    fail "expected the retry to write its EKS token to the target-kubeconfig Secret, got:
+$(cat "${KUBECTL_APPLY_FILE}")"
+check_runner_files_removed
+
 # Missing configuration fails before any request.
 reset
 for variable in RADIUS_AWS_ROLE_ARN RADIUS_AWS_REGION RADIUS_TARGET_KUBECONFIG; do
@@ -300,18 +386,80 @@ cp "${TEMP_DIR}/bin/curl" "${TEMP_DIR}/bin/aws" "${TEMP_DIR}/bin/kubectl" "${idl
 PATH="${idle_bin}:${ORIGINAL_PATH}" bash "${SCRIPT}" --watch &
 watcher_pid=$!
 /bin/sleep 0.5
-kill "${watcher_pid}"
-stopped=0
-for _ in $(seq 1 60); do
-    if ! kill -0 "${watcher_pid}" 2>/dev/null; then
-        stopped=1
-        break
-    fi
-    /bin/sleep 0.05
-done
-wait "${watcher_pid}" 2>/dev/null || true
-[[ "${stopped}" == "1" ]] || fail "expected a cancelled watcher to stop without waiting for its interval"
+status=0
+cancel_watcher "${watcher_pid}" 3 || status=$?
+[[ "${status}" == "0" ]] ||
+    fail "expected a cancelled watcher to stop without waiting for its interval, got ${status}"
 check_runner_files_removed
+
+# A watcher cancelled during a call cannot run its TERM trap until that call
+# returns, so it stops once the call ends, which the call's own timeout bounds.
+# It must then exit without starting another call, leave no child running, and
+# leave no token outside its token directory. Each wrapper holds the command it
+# names for BLOCK_SECONDS, then runs the normal stub.
+readonly BLOCK_SECONDS=2
+busy_bin="${TEMP_DIR}/busy-bin"
+mkdir -p "${busy_bin}"
+for command in curl aws kubectl cp mv; do
+    target="${TEMP_DIR}/bin/${command}"
+    [[ -x "${target}" ]] || target="/bin/${command}"
+    cat >"${busy_bin}/${command}" <<EOF
+#!/bin/bash
+pattern="^(\${BLOCK_IN})( |\$)"
+if [[ "${command} \${1:-}" =~ \${pattern} ]]; then
+    printf '%s' "\$\$" >"\${BLOCK_PID_FILE}"
+    /bin/sleep ${BLOCK_SECONDS}
+fi
+exec "${target}" "\$@"
+EOF
+    chmod +x "${busy_bin}/${command}"
+done
+export BLOCK_PID_FILE="${TEMP_DIR}/blocked-pid"
+
+# Each case is the blocked command pattern, the last call the stubs should log,
+# and the runner kubeconfig left behind. "cp|mv" blocks the kubeconfig write,
+# which follows the concurrent `kubectl create | kubectl apply` of its Secret.
+cancel_cases=(
+    "curl;curl;old"
+    "aws;aws;old"
+    "kubectl apply;kubectl apply;old"
+    "cp|mv;kubectl;new"
+)
+for cancel_case in "${cancel_cases[@]}"; do
+    IFS=';' read -r blocked last_call kubeconfig_state <<<"${cancel_case}"
+    reset
+    rm -f "${BLOCK_PID_FILE}"
+    before="$(cat "${RADIUS_TARGET_KUBECONFIG}")"
+    BLOCK_IN="${blocked}" PATH="${busy_bin}:${TEMP_DIR}/bin:${ORIGINAL_PATH}" \
+        bash "${SCRIPT}" --watch >/dev/null 2>&1 &
+    watcher_pid=$!
+    for _ in $(seq 1 100); do
+        [[ -s "${BLOCK_PID_FILE}" ]] && break
+        /bin/sleep 0.05
+    done
+    [[ -s "${BLOCK_PID_FILE}" ]] || fail "expected the watcher to call ${blocked}"
+    blocked_pid="$(cat "${BLOCK_PID_FILE}")"
+    status=0
+    cancel_watcher "${watcher_pid}" $((BLOCK_SECONDS + 3)) || status=$?
+    [[ "${status}" == "0" ]] ||
+        fail "expected a watcher cancelled during ${blocked} to exit cleanly once that call returned, got ${status}"
+    if kill -0 "${blocked_pid}" 2>/dev/null; then
+        fail "expected no ${blocked} process to remain after the watcher stopped"
+    fi
+    [[ "$(tail -n 1 "${ARGV_FILE}")" == "${last_call}"* ]] ||
+        fail "expected no call after ${blocked} once the watcher was cancelled, last was: $(tail -n 1 "${ARGV_FILE}")"
+    if [[ "${kubeconfig_state}" == "old" ]]; then
+        expected="${before}"
+    else
+        expected="$(expected_kubeconfig eks-token-1)"
+    fi
+    [[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${expected}" ]] ||
+        fail "expected a complete runner kubeconfig after cancelling during ${blocked}"
+    if compgen -G "${RADIUS_TARGET_KUBECONFIG}?*" >/dev/null; then
+        fail "expected no staged kubeconfig next to the runner kubeconfig after cancelling during ${blocked}"
+    fi
+    check_runner_files_removed
+done
 
 # The actions start the AWS refresher only when given the deploy role, and the
 # AWS workflows pass it and point the kubeconfig at the refreshed token key.
