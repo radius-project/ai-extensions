@@ -382,6 +382,7 @@ export async function readSetupVerificationStatus<
       errMsg += " Failed step: " + failed.map((s) => s.name).join(", ") + ".";
     if (readNotice) errMsg += "\n" + readNotice;
     let log: string | null = null;
+    let logUnavailable = "logs are unavailable.";
     try {
       log =
         selectedExecutor ?
@@ -392,9 +393,6 @@ export async function readSetupVerificationStatus<
             observation
           )
         : await dependencies.fetchRunLog(repo, runId, undefined, observation);
-      if (log === null)
-        errMsg +=
-          "\nThe verification log could not be read: logs are unavailable.";
     } catch (error) {
       const reason = dependencies.readLimitReason(error);
       if (
@@ -402,12 +400,13 @@ export async function readSetupVerificationStatus<
         dependencies.isSelectedGitHubAuthorizationError(error)
       )
         throw error;
-      errMsg +=
-        "\nThe verification log could not be read: " +
-        (reason === "timeout" ? "the read timed out."
+      logUnavailable =
+        reason === "timeout" ? "the read timed out."
         : reason === "output-limit" ? "the output limit was exceeded."
-        : diagnostic(dependencies.errorMessage(error)));
+        : diagnostic(dependencies.errorMessage(error));
     }
+    if (log === null)
+      errMsg += "\nThe verification log could not be read: " + logUnavailable;
     if (dependencies.observationStopped()) {
       return result(
         { state: "pending", error: "Workflow observation stopped." },

@@ -92,6 +92,52 @@ function composeControls(
 }
 
 describe("direct operation input continuation", () => {
+  it("uses normal prompt Stop while correcting a rejected resume save", async () => {
+    const entered = createDeferred<void>();
+    const held = createDeferred<void>();
+    let writes = 0;
+    let saved: unknown;
+    const f = fixture();
+    f.operation.operationId = f.input.operationId =
+      "op_11111111-1111-4111-8111-111111111111";
+    const registry = createRegistry({
+      store: {
+        load: async () => null,
+        save: async (envelope) => {
+          const write = ++writes;
+          if (write === 1) throw new Error("initial save failed");
+          if (write === 2) {
+            entered.resolve();
+            await held.promise;
+          }
+          saved = structuredClone(envelope);
+        }
+      }
+    });
+    registry.put(f.operation);
+    f.dependencies.persistOperations = () => registry.persist();
+    const services = composeControls(f.dependencies);
+    const pending = services.resume(f.input, f.readInput);
+    await entered.promise;
+    const stop = services.control({
+      operationId: f.input.operationId,
+      command: "stop"
+    });
+    await vi.waitFor(() => expect(f.operation.state).toBe("cancelled"));
+    held.resolve();
+    expect(await stop).toMatchObject({
+      status: 200,
+      body: { code: "operation-stopped" }
+    });
+    expect(await pending).toMatchObject({
+      status: 500,
+      body: { code: "operation-resume-persist-failed" }
+    });
+    expect(f.operation.state).toBe("cancelled");
+    expect(f.dependencies.scheduleEnvironmentOperation).not.toHaveBeenCalled();
+    expect(saved).toMatchObject({ operations: [{ state: "cancelled" }] });
+  });
+
   it("durably stops an unstarted resume when the real control accepts Stop during its save", async () => {
     const owner = createEnvironmentExecutionOwner();
     const entered = createDeferred<void>();
@@ -432,7 +478,7 @@ describe("direct operation input continuation", () => {
     }
   );
 
-  it.each(["replacement", "task", "response"] as const)(
+  it.each(["replacement", "task", "response", "projection"] as const)(
     "preserves the saved Stop through a late %s change during settlement",
     async (change) => {
       const owner = createEnvironmentExecutionOwner();
@@ -459,6 +505,10 @@ describe("direct operation input continuation", () => {
       });
       let current = f.operation;
       f.dependencies.getOperation = () => current;
+      if (change === "projection")
+        f.dependencies.toClientView = () => {
+          throw new Error("projection failed");
+        };
       const services = composeControls(f.dependencies);
       const pending = services.resume(f.input, f.readInput, () => {
         if (change === "response") throw new Error("client disconnected");
@@ -472,6 +522,10 @@ describe("direct operation input continuation", () => {
         operationId: f.input.operationId,
         command: "stop"
       });
+      const stopOutcome = stop.then(
+        (value) => value,
+        (error: unknown) => error
+      );
       await vi.waitFor(() => expect(f.operation.stopRequested).toBe(true));
       held.resolve();
       await correcting.promise;
@@ -491,10 +545,15 @@ describe("direct operation input continuation", () => {
       try {
         if (change === "response")
           expect(await outcome).toEqual(new Error("client disconnected"));
+        else if (change === "projection")
+          expect(await outcome).toEqual(new Error("projection failed"));
         else expect(await outcome).toMatchObject({ status: 409 });
-        expect(await stop).toMatchObject({
-          status: change === "response" ? 200 : 409
-        });
+        if (change === "projection")
+          expect(await stopOutcome).toEqual(new Error("projection failed"));
+        else
+          expect(await stopOutcome).toMatchObject({
+            status: change === "response" ? 200 : 409
+          });
         expect(current).toEqual(before);
         expect(saved).toMatchObject({ state: "cancelled" });
         expect(
