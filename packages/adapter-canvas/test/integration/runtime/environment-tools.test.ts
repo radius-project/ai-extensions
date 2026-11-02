@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChildProcess } from "node:child_process";
 import { createHarness } from "@radius-project/adapter-shared/test-support/ghcr-bootstrap";
+import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
 import * as gh from "../../../src/gh.js";
+import {
+  AZURE_SERVICE_MANAGEMENT_REFERENCE_PROMPT,
+  createAzureAppCreateContinuation
+} from "../../../src/azure-app-create-continuation.js";
+import { resolveOidcSubject } from "../../../src/azure-oidc.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
 import {
   createGitHubAccountReadinessService,
@@ -26,6 +32,8 @@ import {
 } from "../../support/server/operation-fixtures.js";
 import {
   createOperation,
+  enterStage,
+  STAGE_AUTHORIZE_IDENTITY,
   finish,
   operations,
   recordAzureApp,
@@ -37,6 +45,7 @@ import {
   stopAtBoundary,
   setContext,
   setCloudContext,
+  setAzureAppCreateContinuation,
   pauseForProviderRestart,
   onOperationTerminal,
   STAGE_VERIFY
@@ -310,6 +319,255 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it("interrupts a registered accepted Azure continuation at its held validation read without advancing durable state", async () => {
+    const h = await composition({ realSetup: true });
+    const entered = deferred();
+    const gate = deferred();
+    const subscriptionId = "11111111-1111-4111-8111-111111111111";
+    const tenantId = "22222222-2222-4222-8222-222222222222";
+    const callerId = "33333333-3333-4333-8333-333333333333";
+    const serviceManagementReference = "44444444-4444-4444-8444-444444444444";
+    const repository = {
+      id: 23,
+      full_name: target.repo,
+      owner: { id: 11 },
+      permissions: { admin: true }
+    };
+    const subjectConfig = {
+      use_default: true,
+      use_immutable_subject: false
+    };
+    const oidcSuffix = buildEnvironmentSuffix(target.environment);
+    const oidc = await resolveOidcSubject(
+      {
+        targetRepo: target.repo,
+        envName: target.environment,
+        suffix: oidcSuffix
+      },
+      async (path) => {
+        if (path === "/repos/fixture/app")
+          return { ok: true, json: repository };
+        if (path === "/repos/fixture/app/actions/oidc/customization/sub")
+          return { ok: true, json: subjectConfig };
+        throw new Error(`Unexpected fixture OIDC request: ${path}`);
+      }
+    );
+    const op = createOperation({ ...target, provider: "azure" });
+    op.context.githubLogin = h.executor.login;
+    op.request = {
+      needsAzureCredentials: true,
+      github: { login: h.executor.login },
+      azure: {
+        subscriptionId,
+        tenantId,
+        resourceGroup: "fixture-group",
+        cluster: "fixture-cluster"
+      },
+      environment: {
+        ...target,
+        provider: "azure",
+        branch: "feature/current",
+        subscriptionId,
+        tenantId,
+        resourceGroup: "fixture-group",
+        cluster: "fixture-cluster"
+      }
+    };
+    op.resumeRequest = structuredClone(op.request);
+    enterStage(op, STAGE_AUTHORIZE_IDENTITY);
+    requireInput(op, AZURE_SERVICE_MANAGEMENT_REFERENCE_PROMPT);
+    const continuation = createAzureAppCreateContinuation(
+      {
+        operationId: op.operationId,
+        request: {
+          ...target,
+          operationEnvironment: target.environment,
+          requestedSubscriptionId: subscriptionId,
+          requestedTenantId: tenantId,
+          resourceGroup: "fixture-group",
+          clusterResourceGroup: "",
+          clusterName: "fixture-cluster",
+          explicitAppId: "",
+          createNewApp: false,
+          appNameProvided: false,
+          requestedAppName: "",
+          requestedClientId: ""
+        },
+        githubExecutor: {
+          login: h.executor.login,
+          credentialSource: h.executor.credentialSource,
+          requiresKeyringSwitch: h.executor.requiresKeyringSwitch,
+          scopes: [...h.executor.scopes]
+        },
+        resolved: {
+          subscriptionId,
+          tenantId,
+          oidcSuffix,
+          callerIdentity: { kind: "user" },
+          oidc
+        }
+      },
+      "radius-deploy-fixture-app",
+      callerId,
+      op.inputRequired.requestedAt
+    );
+    expect(continuation).not.toBeNull();
+    expect(setAzureAppCreateContinuation(op, continuation)).toEqual(
+      continuation
+    );
+    operations.put(op);
+    const snapshots: ReturnType<typeof toPersistedOperation>[] = [];
+    h.persist.mockImplementation(async () => {
+      snapshots.push(structuredClone(toPersistedOperation(op)));
+    });
+    h.run.mockImplementation(async (args) => {
+      const path = args[1]?.replace(/^\//, "");
+      const body =
+        path === "user" ? { login: h.executor.login }
+        : path === "repos/fixture/app" ? repository
+        : path === "repos/fixture/app/environments/dev" ?
+          { name: "dev", id: 17 }
+        : path === "repos/fixture/app/actions/oidc/customization/sub" ?
+          subjectConfig
+        : undefined;
+      if (args[0] !== "api" || body === undefined)
+        throw new Error(`Unexpected GitHub command: ${args.join(" ")}`);
+      return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+    });
+    const runAz = vi.fn(async (args: string[]) => {
+      if (args.join(" ") === "account show --output json") {
+        entered.resolve();
+        await gate.promise;
+        return JSON.stringify({
+          id: subscriptionId,
+          tenantId,
+          user: { type: "user" }
+        });
+      }
+      if (args.join(" ") === "ad signed-in-user show --query id -o tsv")
+        return callerId;
+      throw new Error(`Unexpected Azure command: ${args.join(" ")}`);
+    });
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (command, args, _options, callback) => {
+        expect(command).toBe("az");
+        void runAz(args).then(
+          (stdout) => callback(null, stdout, ""),
+          (error: unknown) =>
+            callback(
+              error instanceof Error ? error : new Error(String(error)),
+              "",
+              ""
+            )
+        );
+        return new ChildProcess();
+      }
+    );
+    const lease = vi.spyOn(h.accountContext.coordinator, "withSelectedAccount");
+    const packages = vi.spyOn(h.executor, "packageCredentials");
+    const diagnostics = vi.spyOn(operations, "report");
+    const network = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => {
+        throw new Error("Unexpected network request");
+      });
+    let closing: ReturnType<typeof h.extension.shutdown> | undefined;
+    try {
+      await operations.persist();
+      const identity = { ...target, operationId: op.operationId };
+      const status = await h.invoke("radius_environment_status", identity);
+      if (!("interaction" in status) || !status.interaction?.supported)
+        throw new Error("Expected current registered continuation prompt");
+      expect(
+        await h.invoke("radius_environment_control", {
+          ...identity,
+          action: "resume",
+          provider: "azure",
+          checkpoint: status.interaction.checkpoint,
+          interactionId: status.interaction.interactionId,
+          answer: {
+            code: status.interaction.code,
+            serviceManagementReference
+          }
+        })
+      ).toMatchObject({ kind: "accepted" });
+      const reachedValidation = await Promise.race([
+        entered.promise.then(() => true),
+        h.settled().then(() => false)
+      ]);
+      expect(
+        reachedValidation,
+        JSON.stringify({
+          failure: op.failure,
+          azure: runAz.mock.calls,
+          github: h.run.mock.calls
+        })
+      ).toBe(true);
+      expect(runAz.mock.calls).toEqual([
+        [["account", "show", "--output", "json"]]
+      ]);
+      const durable = structuredClone(snapshots.at(-1));
+      expect(durable).toMatchObject({
+        state: "running",
+        inputRequired: null,
+        azureAppCreateContinuation: {
+          ...continuation,
+          acceptedPrompt: continuation?.prompt
+        },
+        resumeRequest: { azure: { serviceManagementReference } }
+      });
+      expect(op.inputRequired).toBeNull();
+      expect(op.azureAppCreateContinuation).toBeUndefined();
+      const mutations = structuredClone(op.providerRecovery);
+      const artifacts = structuredClone(op.setupArtifacts);
+      const calls = {
+        gh: h.run.mock.calls.map(([args]) => [...args]),
+        packages: packages.mock.calls.length,
+        saves: snapshots.length
+      };
+      expect(h.accountContext.getExecutor(op.operationId)).toBe(h.executor);
+      expect(h.owner.hasActiveEnvironmentTasks(undefined)).toBe(true);
+      const executing = lease.mock.results.at(-1);
+      if (executing?.type !== "return")
+        throw new Error("Expected real selected-account execution");
+      closing = h.extension.shutdown();
+      expect(h.owner.isShuttingDown()).toBe(true);
+      expect(h.accountContext.getExecutor(op.operationId)).toBe(h.executor);
+      gate.resolve();
+      await expect.soft(executing.value).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      await closing;
+      await h.settled();
+      expect
+        .soft(runAz.mock.calls)
+        .toEqual([[["account", "show", "--output", "json"]]]);
+      expect
+        .soft(h.run.mock.calls.map(([args]) => [...args]))
+        .toEqual(calls.gh);
+      expect.soft(packages).toHaveBeenCalledTimes(calls.packages);
+      expect.soft(snapshots).toHaveLength(calls.saves);
+      expect.soft(snapshots.at(-1)).toEqual(durable);
+      expect(op.providerRecovery).toEqual(mutations);
+      expect(op.setupArtifacts).toEqual(artifacts);
+      expect(op.state).toBe("running");
+      expect(op.endedAt).toBeNull();
+      expect(op.failure).toBeNull();
+      expect(op.azureAppCreateContinuation).toBeUndefined();
+      expect(h.accountContext.getExecutor(op.operationId)).toBeUndefined();
+      expect(h.owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
+      expect(diagnostics).not.toHaveBeenCalled();
+      expect(h.reportError).not.toHaveBeenCalled();
+      expect(network).not.toHaveBeenCalled();
+      expect(h.runner).not.toHaveBeenCalled();
+      expect(h.runtime.servers.size).toBe(0);
+    } finally {
+      gate.resolve();
+      await (closing ?? h.extension.shutdown());
+      await h.settled();
+    }
+  });
+
   it.each(["control-only", "setup-context"] as const)(
     "accepts concurrent registered Stops through the real serialized control service during %s progress",
     async (progress) => {
