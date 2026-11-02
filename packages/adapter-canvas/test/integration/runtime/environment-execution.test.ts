@@ -159,6 +159,203 @@ afterEach(() => {
 });
 
 describe("real server and fake SDK runtime ownership", () => {
+  it.each([
+    { panel: true, pauseAt: "iam create-role" },
+    { panel: false, pauseAt: "eks associate-access-policy" }
+  ])(
+    "retains production AWS access and its selected account after panel=$panel, pausing at $pauseAt",
+    async ({ panel, pauseAt }) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = deferred();
+      const gate = deferred();
+      const roleArn = "arn:aws:iam::123456789012:role/radius-deploy";
+      const op = createOperation({
+        operationId: "op_aws_lifetime",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      op.context.githubLogin = "saved-account";
+      op.request = {
+        github: { login: "different-panel-account" },
+        environment: {
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop",
+          roleName: "radius-deploy",
+          vpcId: "vpc-fixture",
+          subnetIds: ["subnet-a", "subnet-b"]
+        }
+      };
+      operations.put(op);
+      const snapshots: unknown[] = [];
+      const reports = vi
+        .spyOn(operations, "report")
+        .mockImplementation(() => {});
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        snapshots.push(structuredClone(toPersistedOperation(op)));
+      });
+      const unexpected = async (): Promise<never> => {
+        throw new Error("Unexpected external access");
+      };
+      const fetcher = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(unexpected);
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        let body: object;
+        if (command === "api user") body = { login: "saved-account" };
+        else if (
+          command === "api repos/fixture/app" ||
+          command === "api /repos/fixture/app"
+        ) {
+          body = {
+            full_name: "fixture/app",
+            id: 42,
+            owner: { id: 7 },
+            permissions: { admin: true }
+          };
+        } else if (command === "api /repos/fixture/app/environments/dev") {
+          entered.resolve();
+          await gate.promise;
+          body = { name: "dev", id: 17 };
+        } else if (
+          command ===
+          "api /repos/fixture/app/environments/dev/variables?per_page=100"
+        )
+          body = { variables: [] };
+        else if (
+          command === "api /repos/fixture/app/actions/oidc/customization/sub"
+        )
+          body = { use_default: true, use_immutable_subject: false };
+        else throw new Error(`Unexpected selected command: ${command}`);
+        return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const acquire = vi.fn(async (login: string) => {
+        expect(login).toBe("saved-account");
+        return executor;
+      });
+      const accountContext = createEnvironmentAccountContext(
+        "aws-runtime",
+        createGitHubAccountCoordinator({
+          createExecutor: acquire,
+          getActiveKeyringLogin: async () => "original",
+          switchKeyringAccount: unexpected,
+          resetIdentityCache: () => {}
+        })
+      );
+      const responses: Record<string, object | string> = {
+        "--version": "aws-cli/2.17.0",
+        "sts get-caller-identity": { Account: "123456789012" },
+        "eks describe-cluster": {
+          cluster: { accessConfig: { authenticationMode: "API" } }
+        },
+        "iam list-open-id-connect-providers": { OpenIDConnectProviderList: [] },
+        "iam create-open-id-connect-provider": {},
+        "iam create-role": { Role: { Arn: roleArn } },
+        "iam put-role-policy": {},
+        "eks create-access-entry": {},
+        "eks associate-access-policy": {}
+      };
+      const cli = vi
+        .spyOn(gh, "cliExec")
+        .mockImplementation((command, args, _options, callback) => {
+          expect(command).toBe("aws");
+          const key = args.slice(0, 2).join(" ");
+          if (key === "iam get-role") {
+            callback(
+              Object.assign(new Error("NoSuchEntity"), { code: 254 }),
+              "",
+              "NoSuchEntity"
+            );
+          } else {
+            const response = responses[key];
+            if (response === undefined)
+              throw new Error(`Unexpected AWS command: ${args.join(" ")}`);
+            if (key === pauseAt) requestStop(op);
+            callback(
+              null,
+              typeof response === "string" ? response : (
+                JSON.stringify(response)
+              ),
+              ""
+            );
+          }
+          return new ChildProcess();
+        });
+      const runtime = createTestCanvasServerRuntime({
+        awsEnabled: true,
+        executionOwner: owner,
+        accountContext
+      });
+      const fake = createFakeDependencies();
+      const extension = await bootstrapRadiusExtension(
+        { ...fake.deps, ...runtime, executionOwner: owner },
+        {
+          createCanvas: (declaration) => declaration,
+          joinSession: async () => createFakeSession()
+        }
+      );
+      const canvas = extension.canvases[0];
+      let completed: Promise<void> | undefined;
+      try {
+        if (panel) await canvas.open(context());
+        runtime.setupExecution.scheduleEnvironmentOperation(op);
+        completed = new Promise<void>((resolve) => {
+          const stop = owner.onEnvironmentTasksSettled(undefined, () => {
+            stop();
+            resolve();
+          });
+        });
+        await Promise.race([entered.promise, completed]);
+        expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+        if (panel) {
+          await canvas.onClose(context());
+          await vi.waitFor(() => expect(runtime.servers.size).toBe(0));
+          await canvas.open(context());
+        }
+        expect(cli).not.toHaveBeenCalled();
+        gate.resolve();
+        await completed;
+        expect(acquire).toHaveBeenCalledOnce();
+        expect(op.failure, JSON.stringify(reports.mock.calls)).toBeNull();
+        expect(cli.mock.calls.at(-1)?.[1].slice(0, 2).join(" ")).toBe(pauseAt);
+        expect(op.control.stop.boundary).toBe("after-aws-deploy-identity");
+        expect(op.state).toBe("cancelled");
+        expect(op.failure).toBeNull();
+        const saved = snapshots.map(fromPersistedOperation);
+        expect(saved.some((record) => record.state === "cancelled")).toBe(true);
+        if (panel) {
+          expect(
+            op.steps.some((step: { label?: string }) =>
+              step.label?.includes("Created before the pause:")
+            )
+          ).toBe(true);
+        } else {
+          expect(op.context.awsRoleArn).toBe(roleArn);
+          expect(op.context.awsTrustSubjects).toEqual([
+            "repo:fixture/app:environment:dev",
+            "repo:fixture@7/app@42:environment:dev"
+          ]);
+        }
+        expect(
+          run.mock.calls.every(([args]) => !args.includes("--method"))
+        ).toBe(true);
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
+      } finally {
+        gate.resolve();
+        await completed;
+        await extension.shutdown();
+      }
+    }
+  );
+
   it.each(["setup", "verification", "cleanup"] as const)(
     "never invokes a queued %s runner for a replacement record",
     async (kind) => {
