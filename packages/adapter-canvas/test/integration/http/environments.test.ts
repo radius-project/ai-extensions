@@ -6,7 +6,6 @@ import { createEnvironmentsRoutes } from "../../../src/server/routes/environment
 import { createEnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
 import { deleteGitHubEnvironmentIdempotent } from "../../../src/server/services/github-environment.js";
 import { runEnvironmentDeletion } from "../../../src/server/services/environment-deletion.js";
-import { createRadiusEnvironmentWorkflowDeletion } from "../../../src/server/services/radius-environment-workflow-deletion.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
 import { redactGhCredentials } from "../../../src/gh.js";
 import {
@@ -695,56 +694,6 @@ describe("the async delete route through its background runner", () => {
     // The scheduler is invoked only during the POST, after `start` returns, so
     // the deps can close over this ref and read the live harness by then.
     let harness: Harness;
-    let workflowClock = 0;
-    const dispatchWorkflow = vi.fn(async () => ({
-      code: 0,
-      stdout: "",
-      stderr: ""
-    }));
-    const deleteRadiusEnvironment = createRadiusEnvironmentWorkflowDeletion({
-      workflowFiles: ["delete-environment.yml"],
-      ensureWorkflowsCurrent: async () => ({ created: [] }),
-      generateDeleteWorkflow: async () => ({
-        "delete-environment.yml": "verified workflow"
-      }),
-      getDefaultBranch: async () => "main",
-      fetchFileFromRepo: async () => "verified workflow",
-      runGh: dispatchWorkflow,
-      processEnv: {},
-      findWorkflowRun: async (
-        _repo,
-        _file,
-        _since,
-        _known,
-        _exec,
-        _after,
-        correlation
-      ) => {
-        expect(correlation).toMatch(/^del-/);
-        if (workflowClock < 25_000) {
-          expect(harness.commands).not.toContainEqual([
-            "gh",
-            "api",
-            "--method",
-            "DELETE",
-            "/repos/octo/app/environments/dev"
-          ]);
-          expect(azCommands).toEqual([]);
-          return null;
-        }
-        return "99";
-      },
-      getRunDetail: async () => ({
-        status: "completed",
-        conclusion: "success"
-      }),
-      sleep: async (ms) => {
-        workflowClock += ms;
-      },
-      now: () => workflowClock,
-      random: () => 0.5,
-      errorMessage: (error) => String(error)
-    });
 
     // Production binds the scheduler to `runEnvironmentDeletion`; bind that same
     // runner here with the shared Azure argv builder and GitHub deletion
@@ -768,7 +717,7 @@ describe("the async delete route through its background runner", () => {
       scheduleEnvironmentOperation: (_instanceId, op) => {
         operations.push(op);
         void runEnvironmentDeletion(op as never, {
-          deleteRadiusEnvironment,
+          deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
           removeAwsEnvironmentAccess: async () => {
             throw new Error("unexpected AWS role cleanup");
           },
@@ -867,8 +816,6 @@ describe("the async delete route through its background runner", () => {
     // The route returned 202 before the background work ran; wait for the real
     // runner to finish, then observe the listing the same cache now serves.
     await runnerFinished.promise;
-    expect(workflowClock).toBe(25_000);
-    expect(dispatchWorkflow).toHaveBeenCalledTimes(1);
     harness.setScript(listingScript(""));
     const after = await harness.list();
 

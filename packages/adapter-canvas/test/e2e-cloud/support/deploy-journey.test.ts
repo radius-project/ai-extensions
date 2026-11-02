@@ -264,6 +264,15 @@ describe("workflow run ownership", () => {
     ).not.toThrow();
   });
 
+  it("rejects a timed-out cancellation even with a zero exit code", () => {
+    expect(() =>
+      acceptWorkflowCancellation(
+        { code: 0, stdout: "", stderr: "", timedOut: true },
+        "cancel"
+      )
+    ).toThrow(/cancel/);
+  });
+
   it.each([
     ["HTTP 403: cancellation denied", false],
     ["HTTP 409: a different conflict", false],

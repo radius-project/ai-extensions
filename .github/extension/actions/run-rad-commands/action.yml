@@ -279,8 +279,6 @@ runs:
         # extension-generated parameters that the template does not declare.
         # shellcheck source=deploy-parameters.sh
         source "$GITHUB_ACTION_PATH/deploy-parameters.sh"
-        # shellcheck source=deploy-reconnect.sh
-        source "$GITHUB_ACTION_PATH/deploy-reconnect.sh"
 
         # Secret values that must never reach the logs or the uploaded artifact:
         # the registry password (the runner GITHUB_TOKEN) and every value in the
@@ -465,7 +463,7 @@ runs:
                 fi
                 start_live_deploy_progress "$APP_FILE" "$ENVIRONMENT"
               fi
-              if ! record "$idx" "$cmd" radius_deploy_with_reconnect "${CMD_ARGV[@]}" "${EXTRA_PARAMS[@]}"; then
+              if ! record "$idx" "$cmd" rad "${CMD_ARGV[@]}" "${EXTRA_PARAMS[@]}"; then
                 stop_live_deploy_progress || true
                 OVERALL_OUTCOME="command_failed"
                 OVERALL_EXIT=1
@@ -518,7 +516,7 @@ runs:
           # not written into the result artifact.
           start_live_deploy_progress "$APP_FILE" "$ENVIRONMENT"
           if ! record 0 "deploy $APP_FILE --environment $ENVIRONMENT" \
-              radius_deploy_with_reconnect deploy "$APP_FILE" --environment "$ENVIRONMENT" "${DEPLOY_PARAMS[@]}"; then
+              rad deploy "$APP_FILE" --environment "$ENVIRONMENT" "${DEPLOY_PARAMS[@]}"; then
             stop_live_deploy_progress || true
             OVERALL_OUTCOME="command_failed"
             OVERALL_EXIT=1

@@ -27,6 +27,7 @@ import {
 import { DELETE_FAILED_STATUS } from "../../../src/server/services/delete-conflict.js";
 import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
 import {
+  CloudCommandError,
   expectSuccess,
   type CloudCommandResult
 } from "./cloud-command-port.js";
@@ -351,9 +352,9 @@ export function acceptWorkflowCancellation(
   result: CloudCommandResult,
   context: string
 ): void {
+  if (result.timedOut) throw new CloudCommandError(context, result);
   if (
     result.code !== 0 &&
-    result.timedOut !== true &&
     result.stderr.includes("(HTTP 409)") &&
     result.stderr.includes(
       "Cannot cancel a workflow run that has not been queued yet."
