@@ -220,6 +220,7 @@ jobs:
 
           # Refresh the EKS token right before deploy (EKS tokens are short-lived
           # and the one minted earlier may have expired during install).
+          SECRET_FILES=(--from-file=kubeconfig="$TARGET_KUBECONFIG")
           if [ -n "${{ vars.AWS_ROLE_ARN }}" ] && [ -n "${{ vars.AWS_EKS_CLUSTER_NAME }}" ]; then
             echo "Generating fresh EKS token..."
             CLUSTER="${{ vars.AWS_EKS_CLUSTER_NAME }}"
@@ -227,7 +228,14 @@ jobs:
             ENDPOINT=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.endpoint' --output text)
             CA_DATA=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.certificateAuthority.data' --output text)
             TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -r '.status.token')
-            printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: %s\n' "$CA_DATA" "$ENDPOINT" "$TOKEN" > "$TARGET_KUBECONFIG"
+            # tokenFile is where the pods see this Secret's token key. The run
+            # action's token refresher keeps both the key and the inline token
+            # current: the Go clients re-read tokenFile, and the Deployment Engine
+            # re-reads the kubeconfig.
+            printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: %s\n    tokenFile: /etc/radius/target-kubeconfig/token\n' "$CA_DATA" "$ENDPOINT" "$TOKEN" > "$TARGET_KUBECONFIG"
+            TOKEN_FILE=$(mktemp "$RUNNER_TEMP/eks-token.XXXXXX")
+            printf '%s' "$TOKEN" > "$TOKEN_FILE"
+            SECRET_FILES+=(--from-file=token="$TOKEN_FILE")
           fi
 
           # Update the secret the chart mounted at install with the refreshed
@@ -240,7 +248,8 @@ jobs:
           # provider). The Terraform state backend deliberately stays on the
           # control-plane cluster, so no backend override is needed here.
           kubectl create secret generic target-kubeconfig --namespace radius-system \
-            --from-file=kubeconfig="$TARGET_KUBECONFIG" --dry-run=client -o yaml | kubectl apply -f -
+            "${SECRET_FILES[@]}" --dry-run=client -o yaml | kubectl apply -f -
+          rm -f "${TOKEN_FILE:-}"
           for deploy in applications-rp dynamic-rp bicep-de; do
             kubectl rollout restart deployment/$deploy -n radius-system
           done
@@ -459,6 +468,9 @@ jobs:
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           build-arch-mode: ${{ env.TARGET_CLUSTER_ARCH_MODE }}
           build-fallback-platforms: ${{ env.TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN }}
+          aws-eks-cluster-name: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       # Publish status on failure too: an empty Deployed tab is least helpful
       # exactly when a deploy failed and the user is trying to see which
