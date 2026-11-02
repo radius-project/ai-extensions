@@ -166,6 +166,7 @@ import {
   readOptionalDispatchedWorkflowRunId,
   readWorkflowRunStatus,
   quiesceOwnedWorkflowRuns,
+  acceptWorkflowCancellation,
   repositoryListingPath,
   requireDeploymentDeleted,
   requireWorkflowRunId,
@@ -291,7 +292,7 @@ async function waitForOwnedWorkflowRuns(
   await quiesceOwnedWorkflowRuns(runIds, {
     readStatus: status,
     cancel: async (runId) => {
-      expectSuccess(
+      acceptWorkflowCancellation(
         await commands.runGh([
           "api",
           "--method",

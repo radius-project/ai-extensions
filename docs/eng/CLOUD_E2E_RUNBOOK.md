@@ -43,6 +43,10 @@ Federated credential creation uses the same six-attempt Azure budget. After a de
 
 That last one matters more than it looks. The product commits a deploy workflow to the fixture repository and dispatches it. That workflow runs _there_, not here, so its failure is invisible in this job's own log.
 
+Environment deletion waits up to two minutes for the dispatched workflow to appear, matching its unique correlation ID on every read. It does not dispatch another deletion if the run is slow to appear. Once found, the workflow has a separate 30-minute completion limit. If fixture cleanup receives GitHub's HTTP `409` response that a run has not been queued yet, it still waits for that run to finish before it removes any resources.
+
+Application deployment reconnects through a new Radius CLI process after a confirmed terminal recipe failure whose error is `Connection reset by peer`. It repeats the same deploy arguments at most twice, with delays of 2 and 4 seconds. It does not retry an uncertain result, an unstructured connection error, an authorization error, another recipe error, or a non-deploy command. All attempts remain in the command output, and a final failure still fails the workflow.
+
 ## Product regression
 
 The thing the tier exists to catch: the product built a request that real Azure, Entra, or GitHub rejected, and no hermetic test could have known.

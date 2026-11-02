@@ -193,9 +193,17 @@ export function createRadiusEnvironmentWorkflowDeletion(
     }
     // Resolve and monitor the dispatched run so credential removal only starts
     // after the Radius environment is actually gone.
-    let runId: number | string | null = null;
-    for (const delay of [0, 2000, 4000]) {
-      if (delay > 0) await dependencies.sleep(delay);
+    const heartbeat = async (): Promise<void> => {
+      if (!onHeartbeat) return;
+      try {
+        await onHeartbeat();
+      } catch {
+        // A heartbeat failure must never abort an in-flight deletion.
+      }
+    };
+    const discoveryDeadline = dependencies.now() + 2 * 60 * 1000;
+    let runId: number | string | null;
+    while (true) {
       runId = await dependencies.findWorkflowRun(
         repo,
         DELETE_ENV_DISPATCHER_FILE,
@@ -206,6 +214,10 @@ export function createRadiusEnvironmentWorkflowDeletion(
         correlationId
       );
       if (runId) break;
+      await heartbeat();
+      const remainingMs = discoveryDeadline - dependencies.now();
+      if (remainingMs <= 0) break;
+      await dependencies.sleep(Math.min(5000, remainingMs));
     }
     if (!runId) {
       return {
@@ -229,13 +241,7 @@ export function createRadiusEnvironmentWorkflowDeletion(
         );
         return classified;
       }
-      if (onHeartbeat) {
-        try {
-          await onHeartbeat();
-        } catch {
-          // A heartbeat failure must never abort an in-flight deletion.
-        }
-      }
+      await heartbeat();
       await dependencies.sleep(Math.min(delayMs, 15000));
       delayMs = Math.min(Math.ceil(delayMs * 1.5), 15000);
     }

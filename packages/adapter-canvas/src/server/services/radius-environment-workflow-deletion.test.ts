@@ -253,7 +253,7 @@ describe("deleting a Radius environment through its workflow", () => {
   it("looks for the run again before giving up on it", async () => {
     const found = harness({}, { runs: [null, null, "7"] });
     expect(await found.run()).toEqual({ outcome: "deleted" });
-    expect(found.sleeps).toEqual([2000, 4000]);
+    expect(found.sleeps).toEqual([5000, 5000]);
 
     const lost = harness({}, { runs: [null] });
     expect(await lost.run()).toEqual({
@@ -261,6 +261,56 @@ describe("deleting a Radius environment through its workflow", () => {
       detail:
         "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
     });
+    expect(lost.sleeps.reduce((total, ms) => total + ms, 0)).toBe(120_000);
+    expect(lost.calls).toHaveLength(1);
+    expect(lost.dependencies.getRunDetail).not.toHaveBeenCalled();
+  });
+
+  it("finds a delayed run with the original correlation and keeps the operation alive", async () => {
+    const heartbeat = vi.fn().mockRejectedValue(new Error("lost heartbeat"));
+    const h = harness({}, { runs: [null, null, null, null, null, "7"] });
+    expect(await h.run(heartbeat)).toEqual({ outcome: "deleted" });
+    expect(h.sleeps).toEqual([5000, 5000, 5000, 5000, 5000]);
+    expect(heartbeat).toHaveBeenCalledTimes(5);
+    expect(h.calls).toHaveLength(1);
+    const attempts = vi.mocked(h.dependencies.findWorkflowRun).mock.calls;
+    expect(attempts).toHaveLength(6);
+    for (const attempt of attempts) expect(attempt).toEqual(attempts[0]);
+  });
+
+  it("accepts a run at the discovery deadline", async () => {
+    let reads = 0;
+    const h = harness({
+      findWorkflowRun: vi.fn(async () => (++reads === 25 ? "7" : null))
+    });
+    expect(await h.run()).toEqual({ outcome: "deleted" });
+    expect(h.sleeps.reduce((total, ms) => total + ms, 0)).toBe(120_000);
+  });
+
+  it("counts time spent on heartbeats in the discovery budget", async () => {
+    let clock = 0;
+    const h = harness({ now: () => clock }, { runs: [null] });
+    expect(
+      await h.run(async () => {
+        clock += 120_001;
+      })
+    ).toMatchObject({
+      outcome: "failed"
+    });
+    expect(h.sleeps).toEqual([]);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("does not redispatch or monitor a different run after a discovery read fails", async () => {
+    const error = new Error("workflow listing denied");
+    const h = harness({
+      findWorkflowRun: vi.fn(async () => {
+        throw error;
+      })
+    });
+    await expect(h.run()).rejects.toBe(error);
+    expect(h.calls).toHaveLength(1);
+    expect(h.dependencies.getRunDetail).not.toHaveBeenCalled();
   });
 
   it("polls with backoff and heartbeats until the run completes", async () => {
