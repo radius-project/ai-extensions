@@ -62,7 +62,14 @@ function boundPort(server: HttpServer): number {
 function closeServer(server: HttpServer, force: boolean): Promise<void> {
   if (force) server.closeAllConnections?.();
   return new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
+    server.close((error) => {
+      if (
+        error &&
+        !("code" in error && error.code === "ERR_SERVER_NOT_RUNNING")
+      )
+        reject(error);
+      else resolve();
+    });
   });
 }
 

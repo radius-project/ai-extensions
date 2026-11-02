@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 describe("server scaffolding real-loopback HIT", () => {
-  it("propagates a real socket close error while releasing the instance once", async () => {
+  it("tolerates an already closed real socket while releasing the instance once", async () => {
     const stopped: string[] = [];
     container = createCanvasServer({
       createHttpServer: (handler) => createServer(handler),
@@ -43,9 +43,7 @@ describe("server scaffolding real-loopback HIT", () => {
     await new Promise<void>((resolve, reject) => {
       entry.server.close((error) => (error ? reject(error) : resolve()));
     });
-    await expect(container.stop("panel", true)).rejects.toMatchObject({
-      code: "ERR_SERVER_NOT_RUNNING"
-    });
+    await expect(container.stop("panel", true)).resolves.toBeUndefined();
     expect(stopped).toEqual(["panel"]);
     expect(container.instances.size).toBe(0);
     await container.stop("panel", true);
