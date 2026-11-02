@@ -10,7 +10,6 @@
 export interface PortalContext {
   subscriptionId: string;
   resourceGroup: string;
-  region: string;
   clusterName?: string;
 }
 
