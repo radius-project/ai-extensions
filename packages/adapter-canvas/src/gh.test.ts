@@ -1365,6 +1365,92 @@ describe("GitHub CLI version compatibility", () => {
 });
 
 describe("selected GitHub executor", { concurrent: false }, () => {
+  it.each([false, true])(
+    "checks command authority after held identity verification (stale=%s)",
+    async (stale) => {
+      const gh = await loadGh("linux", {
+        token: "selected-injected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        apiLogin: "tokuser",
+        commandResult: { stdout: "{}" }
+      });
+      const executor = await gh.createSelectedGhExecutor("tokuser");
+      childProcess.execFile.mockClear();
+      let completeIdentity = () => {};
+      childProcess.execFile.mockImplementationOnce(
+        (_file, args, _options, callback) => {
+          expect(args).toEqual(["api", "user", "--jq", ".login"]);
+          completeIdentity = () => callback(null, "tokuser", "");
+          return { stdin: { end() {} } };
+        }
+      );
+      const beforeExecute = vi.fn(() => {
+        if (stale) throw new Error("Authorization expired");
+      });
+      const pending = executor.run(
+        ["api", "--method", "POST", "repos/fixture/app/actions/runs/42/cancel"],
+        { beforeExecute }
+      );
+      expect(beforeExecute).not.toHaveBeenCalled();
+      expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+      completeIdentity();
+      if (stale) await expect(pending).rejects.toThrow("Authorization expired");
+      else await expect(pending).resolves.toMatchObject({ code: 0 });
+      expect(beforeExecute).toHaveBeenCalledOnce();
+      expect(childProcess.execFile).toHaveBeenCalledTimes(stale ? 1 : 2);
+      if (!stale)
+        expect(childProcess.execFile.mock.calls[1][2]).not.toHaveProperty(
+          "beforeExecute"
+        );
+    }
+  );
+
+  it.each(["identity", "response", "rejection", "active"] as const)(
+    "guards selected JSON reads at final command and settlement: %s",
+    async (boundary) => {
+      const gh = await loadGh("linux", {
+        token: "selected-injected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        apiLogin: "tokuser",
+        commandResult: { stdout: "{}" }
+      });
+      const executor = await gh.createSelectedGhExecutor("tokuser");
+      let stopped = false;
+      const assertActive = () => {
+        if (stopped) throw new Error("read interrupted");
+      };
+      childProcess.execFile.mockClear();
+      childProcess.execFile.mockImplementation(
+        (_file, args, options, callback) => {
+          expect(options).not.toHaveProperty("beforeExecute");
+          if (args.join(" ") === "api user --jq .login") {
+            if (boundary === "identity") stopped = true;
+            callback(null, "tokuser", "");
+          } else {
+            if (boundary !== "active") stopped = true;
+            callback(
+              boundary === "rejection" ? new Error("denied") : null,
+              "{}",
+              ""
+            );
+          }
+          return { stdin: { end() {} } };
+        }
+      );
+      const result = gh.selectedGhApiJson(
+        executor,
+        "/repos/fixture/app",
+        assertActive
+      );
+      if (boundary === "active")
+        await expect(result).resolves.toMatchObject({ ok: true, json: {} });
+      else await expect(result).rejects.toThrow("read interrupted");
+      expect(childProcess.execFile).toHaveBeenCalledTimes(
+        boundary === "identity" ? 1 : 2
+      );
+    }
+  );
+
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();

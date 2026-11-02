@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { RADIUS_REF } from "@radius-project/core";
-import { buildRadiusAppProvenanceTags } from "../../../src/azure-oidc.js";
+import { RADIUS_REF, buildEnvironmentSuffix } from "@radius-project/core";
+import {
+  buildRadiusAppProvenanceTags,
+  resolveOidcSubject
+} from "../../../src/azure-oidc.js";
+import { createAzureAppCreateContinuation } from "../../../src/azure-app-create-continuation.js";
 import { generateVerifyWorkflow } from "../../../src/infra.js";
 import {
   encodeWorkflowContent,
@@ -159,6 +163,185 @@ afterEach(() => {
 });
 
 describe("bounded runtime shutdown drain", () => {
+  it("drains real accepted Azure validation without later reads or overwriting its durable checkpoint", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const entered = deferred();
+    const released = deferred();
+    const calls: string[] = [];
+    const order: string[] = [];
+    let activeLogin = "original";
+    const subscriptionId = "11111111-1111-4111-8111-111111111111";
+    const tenantId = "33333333-3333-4333-8333-333333333333";
+    const repoBody = {
+      full_name: "fixture/app",
+      id: 23,
+      owner: { id: 11 },
+      permissions: { admin: true }
+    };
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      run: async (args) => {
+        calls.push(`gh ${args.join(" ")}`);
+        const path = args[1]?.replace(/^\//, "");
+        const json =
+          path === "user" ? { login: "saved-account" }
+          : path === "repos/fixture/app" ? repoBody
+          : path === "repos/fixture/app/environments/dev" ?
+            { name: "dev", id: 17 }
+          : null;
+        if (!json)
+          throw new Error(`Unexpected GitHub request ${args.join(" ")}`);
+        return { code: 0, stdout: JSON.stringify(json), stderr: "" };
+      }
+    });
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async () => executor,
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        order.push(`switch:${login}`);
+        activeLogin = login;
+        return { ok: true };
+      },
+      resetIdentityCache: () => {}
+    });
+    const accountContext = createEnvironmentAccountContext(
+      "runtime",
+      coordinator
+    );
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext
+    });
+    const op = createOperation({
+      operationId: "op_continuation_shutdown",
+      repo: "fixture/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    op.context.githubLogin = executor.login;
+    op.currentStage = STAGE_AUTHORIZE_IDENTITY;
+    op.state = "running";
+    const azure = {
+      resourceGroup: "fixture-group",
+      cluster: "fixture-cluster",
+      subscriptionId,
+      serviceManagementReference: "66666666-6666-4666-8666-666666666666"
+    };
+    op.request = { needsAzureCredentials: true, azure, environment: {} };
+    const saved = createAzureAppCreateContinuation(
+      {
+        operationId: op.operationId,
+        request: {
+          repo: op.repo,
+          environment: "dev",
+          operationEnvironment: "dev",
+          requestedSubscriptionId: subscriptionId,
+          requestedTenantId: "",
+          resourceGroup: azure.resourceGroup,
+          clusterName: azure.cluster,
+          clusterResourceGroup: "",
+          explicitAppId: "",
+          createNewApp: false,
+          appNameProvided: false,
+          requestedAppName: "",
+          requestedClientId: ""
+        },
+        githubExecutor: executor,
+        resolved: {
+          subscriptionId,
+          tenantId,
+          oidcSuffix: buildEnvironmentSuffix("dev"),
+          callerIdentity: { kind: "user" },
+          oidc: await resolveOidcSubject(
+            {
+              targetRepo: op.repo,
+              envName: "dev",
+              suffix: buildEnvironmentSuffix("dev")
+            },
+            async (path) =>
+              path === "/repos/fixture/app" ?
+                { ok: true, status: 200, json: repoBody }
+              : { ok: false, status: 404, json: null }
+          )
+        }
+      },
+      "radius-deploy-fixture-app",
+      "44444444-4444-4444-8444-444444444444",
+      "2026-10-14T10:00:00.000Z"
+    );
+    if (!saved) throw new Error("Invalid accepted continuation");
+    op.azureAppCreateContinuation = { ...saved, acceptedPrompt: saved.prompt };
+    operations.put(op);
+    let durable = toPersistedOperation(op);
+    const persist = vi
+      .spyOn(operations, "persist")
+      .mockImplementation(async () => {
+        durable = structuredClone(toPersistedOperation(op));
+      });
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (command, args, _options, callback) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        expect(command).toBe("az");
+        expect(args).toEqual(["account", "show", "--output", "json"]);
+        entered.resolve();
+        void released.promise.then(() => {
+          order.push("read-settled");
+          callback(
+            null,
+            JSON.stringify({
+              id: subscriptionId,
+              tenantId,
+              user: { type: "user" }
+            }),
+            ""
+          );
+        });
+        return new ChildProcess();
+      }
+    );
+    const fake = createFakeDependencies();
+    const extension = await bootstrapRadiusExtension(
+      { ...fake.deps, ...runtime, executionOwner: owner },
+      {
+        createCanvas: (declaration) => declaration,
+        joinSession: async () => createFakeSession()
+      }
+    );
+    try {
+      expect(runtime.setupExecution.scheduleEnvironmentOperation(op)).toBe(
+        true
+      );
+      await entered.promise;
+      const checkpoint = structuredClone(durable);
+      const issued = [...calls];
+      const saves = persist.mock.calls.length;
+      expect(checkpoint.azureAppCreateContinuation).toMatchObject({
+        acceptedPrompt: saved.prompt
+      });
+      expect(op.azureAppCreateContinuation).toBeUndefined();
+      expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+      const shutdown = extension.shutdown();
+      released.resolve();
+      await expect(shutdown).resolves.toEqual({ complete: true, exitCode: 0 });
+      expect(calls).toEqual(issued);
+      expect(durable).toEqual(checkpoint);
+      expect(persist).toHaveBeenCalledTimes(saves);
+      expect(op.endedAt).toBeFalsy();
+      expect(op.failure).toBeFalsy();
+      expect(op.providerRecovery.mutations).toEqual([]);
+      expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
+      expect(activeLogin).toBe("original");
+      expect(order).toEqual([
+        "switch:saved-account",
+        "read-settled",
+        "switch:original"
+      ]);
+    } finally {
+      released.resolve();
+      await extension.shutdown();
+    }
+  });
+
   it("waits after panel close for issued acknowledgement, durable save and selected-account restoration", async () => {
     const owner = createEnvironmentExecutionOwner();
     const provider = deferred();

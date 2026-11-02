@@ -167,7 +167,8 @@ export interface AzureAutoSetupExternalPort {
   } | null>;
   preflightRepoAdmin(
     repo: string,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<string>;
   preflightGhcrPackageWriteAccess(
     executor?: SelectedGhExecutor
@@ -176,7 +177,8 @@ export interface AzureAutoSetupExternalPort {
   >;
   runGitHubJson(
     apiPath: string,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<GitHubJsonResponse>;
   runAz(args: string[]): Promise<AzureAutoSetupCommandResult>;
 }

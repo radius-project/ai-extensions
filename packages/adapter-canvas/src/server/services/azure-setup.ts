@@ -1,4 +1,5 @@
 import {
+  assertSetupExecutionActive,
   continuationMatchesLiveContext,
   isSetupExecutionInterrupted,
   runAzureSetup
@@ -185,6 +186,16 @@ async function runAzureSetupService(
   dependencies: AzureSetupDependencies,
   complete: (outcome: SetupOutcome) => void
 ): Promise<void> {
+  const active = () => assertSetupExecutionActive(dependencies.isStopped);
+  const read = async <T>(work: () => Promise<T>): Promise<T> => {
+    active();
+    try {
+      return await work();
+    } finally {
+      active();
+    }
+  };
+  active();
   let operation: AzureAutoSetupOperation | null = null;
   let finalizationStarted = false;
   let steps: string[] = [];
@@ -500,6 +511,7 @@ async function runAzureSetupService(
         return;
       }
     }
+    active();
     const continuationInputRequired = operation.inputRequired;
     const continuationOperationState = operation.state;
     if (operation.inputRequired) {
@@ -553,7 +565,7 @@ async function runAzureSetupService(
       );
       dependencies.operations.setAzureAppCreateContinuation(operation, null);
     }
-    await selectedExecutor.verifyIdentity();
+    await read(() => selectedExecutor.verifyIdentity());
     if (
       appCreateContinuation &&
       !(await continuationMatchesLiveContext(
@@ -561,9 +573,15 @@ async function runAzureSetupService(
         targetRepo,
         environment,
         {
-          runAz: dependencies.external.runAz,
+          runAz: (args) => read(() => dependencies.external.runAz(args)),
           runGitHubJson: (path) =>
-            dependencies.external.runGitHubJson(path, selectedExecutor),
+            read(() =>
+              dependencies.external.runGitHubJson(
+                path,
+                selectedExecutor,
+                active
+              )
+            ),
           deepEqual: setupIdentityEqual
         }
       ))
@@ -597,18 +615,20 @@ async function runAzureSetupService(
     const reconcilingProviderMutation =
       unresolvedProviderMutations(operation).length > 0;
     if (!reconcilingProviderMutation && !appCreateContinuation) {
-      const accessMessage = await dependencies.external.preflightRepoAdmin(
-        targetRepo,
-        selectedExecutor
+      const accessMessage = await read(() =>
+        dependencies.external.preflightRepoAdmin(
+          targetRepo,
+          selectedExecutor,
+          active
+        )
       );
       if (accessMessage) {
         await fail(403, accessMessage, "repo-admin-required");
         return;
       }
-      const packageAccess =
-        await dependencies.external.preflightGhcrPackageWriteAccess(
-          selectedExecutor
-        );
+      const packageAccess = await read(() =>
+        dependencies.external.preflightGhcrPackageWriteAccess(selectedExecutor)
+      );
       if (!packageAccess.ok) {
         await fail(
           packageAccess.status,

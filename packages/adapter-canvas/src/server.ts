@@ -655,11 +655,12 @@ function record(value: unknown): Record<string, unknown> {
 // the default `gh` credentials, the same identity the rest of the deploy uses.
 async function runGitHubJsonRequest(
   apiPath: string,
-  executor?: SelectedGhExecutor
+  executor?: SelectedGhExecutor,
+  assertActive?: () => void
 ): Promise<GitHubJsonResponse> {
   const result =
     executor ?
-      await selectedGhApiJson(executor, apiPath)
+      await selectedGhApiJson(executor, apiPath, assertActive)
     : await ghApiJson(apiPath, {
         headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
       });
@@ -3491,13 +3492,28 @@ export async function finalizeSetupFailure(
 export async function preflightRepoAdmin(
   repo: string,
   executor?: SelectedGhExecutor,
-  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION,
+  assertActive?: () => void
 ): Promise<string> {
+  const read = async <T>(work: () => Promise<T>): Promise<T> => {
+    assertActive?.();
+    try {
+      return await work();
+    } finally {
+      assertActive?.();
+    }
+  };
   const result = await preflightSetupRepository(repo, {
     read: (path) =>
-      executor ? selectedGhApiJson(executor, path) : ghApiJson(path),
+      read(() =>
+        executor ?
+          selectedGhApiJson(executor, path, assertActive)
+        : ghApiJson(path)
+      ),
     fallbackLogin: async () =>
-      executor ? executor.login : (await getGitHubIdentity()).actingLogin,
+      executor ?
+        executor.login
+      : (await read(() => getGitHubIdentity())).actingLogin,
     isAppLogin: isGitHubAppBotLogin,
     probes: GITHUB_APP_ACCESS_PROBES,
     optionalString,
@@ -6081,8 +6097,13 @@ export function createProductionCanvasServerRuntime(
       getSelectedGitHubExecutor: (operationId) =>
         accountContext.getExecutor(operationId),
       getGitHubIdentity,
-      preflightRepoAdmin: (repo, executor) =>
-        preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+      preflightRepoAdmin: (repo, executor, assertActive) =>
+        preflightRepoAdmin(
+          repo,
+          executor,
+          GH_COMMAND_PRESENTATION,
+          assertActive
+        ),
       preflightGhcrPackageWriteAccess: (executor) =>
         preflightGhcrPackageWriteAccess(
           getGhPackageCredentials,
@@ -6090,8 +6111,8 @@ export function createProductionCanvasServerRuntime(
           executor,
           GH_COMMAND_PRESENTATION
         ),
-      runGitHubJson: (apiPath, executor) =>
-        runGitHubJsonRequest(apiPath, executor),
+      runGitHubJson: (apiPath, executor, assertActive) =>
+        runGitHubJsonRequest(apiPath, executor, assertActive),
       runAz: (args) => runCliCommand("az", args)
     },
     tempFile: {
