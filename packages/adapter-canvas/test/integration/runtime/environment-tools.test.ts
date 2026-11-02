@@ -69,6 +69,7 @@ async function composition(
     beforeLease?: () => Promise<void>;
     leaseLogin?: string;
     readiness?: GitHubAccountReadinessService;
+    controlCheck?: () => void;
     cancellationRun?: (
       args: string[]
     ) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -219,6 +220,18 @@ async function composition(
     executionOwner: owner,
     environment: createEnvironmentTools({
       ...runtime.environmentServices,
+      control: (input, publish) =>
+        runtime.environmentServices.control(
+          {
+            ...input,
+            isCurrent: () => {
+              const current = input.isCurrent?.() !== false;
+              options.controlCheck?.();
+              return current;
+            }
+          },
+          publish
+        ),
       resume: async (...args) => {
         await options.beforeResume?.();
         const [input, read, publish] = args;
@@ -295,6 +308,83 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it.each(
+    (["retarget", "replacement", "shutdown"] as const).flatMap((change) =>
+      (["before-admission", "after-check"] as const).map((boundary) => ({
+        change,
+        boundary
+      }))
+    )
+  )(
+    "keeps real registered Stop authority through $change at $boundary",
+    async ({ change, boundary }) => {
+      let queued = false;
+      const op = createOperation({ ...target, provider: "azure" });
+      op.context.githubLogin = "saved-account";
+      const replacement = structuredClone(op);
+      const h = await composition({
+        controlCheck: () => {
+          if (queued) return;
+          queued = true;
+          const changeAuthority = () => {
+            if (change === "retarget") op.environment = "replacement";
+            if (change === "replacement") operations.put(replacement);
+            if (change === "shutdown") h.owner.shutdown();
+          };
+          if (boundary === "after-check") queueMicrotask(changeAuthority);
+          else changeAuthority();
+        }
+      });
+      operations.put(op);
+      const snapshots: ReturnType<typeof toPersistedOperation>[] = [];
+      const authorityAtSave: boolean[] = [];
+      h.persist.mockImplementation(async () => {
+        const current = operations.get(op.operationId);
+        if (!current) throw new Error("Missing operation");
+        authorityAtSave.push(
+          !h.owner.isShuttingDown() &&
+            current === op &&
+            op.environment === target.environment
+        );
+        snapshots.push(structuredClone(toPersistedOperation(current)));
+      });
+      const originalStop = structuredClone(op.control.stop);
+      try {
+        const result = await h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action: "stop"
+        });
+        if (boundary === "before-admission") {
+          expect(result).toMatchObject({
+            code:
+              change === "shutdown" ?
+                "operation-shutting-down"
+              : "operation-context-changed"
+          });
+          expect(op.control.stop).toEqual(originalStop);
+          expect(snapshots).toEqual([]);
+        } else {
+          expect(result).toMatchObject({
+            kind: "accepted",
+            code: "operation-stop-pending"
+          });
+          expect(snapshots).toHaveLength(1);
+          expect(authorityAtSave).toEqual([true]);
+          expect(snapshots[0].environment).toBe(target.environment);
+          expect(snapshots[0].control.stop.requestedAt).toBeTruthy();
+        }
+        expect(replacement.control.stop).toEqual(originalStop);
+        expect(h.readIdentity).not.toHaveBeenCalled();
+        expect(h.ready).not.toHaveBeenCalled();
+        expect(h.readExecutor).not.toHaveBeenCalled();
+        expect(h.runner).not.toHaveBeenCalled();
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
+
   it("reports a real inconclusive GHCR probe without selecting another account or starting setup", async () => {
     const select = vi.fn(async () => "saved-account");
     const probe = vi.fn(async () => {
@@ -817,6 +907,88 @@ describe("registered environment tools with production runtime services", () => 
       }
     }
   );
+
+  it("durably settles a registered Stop and duplicate Stop during the same runtime's held resume save", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const controlEntered = deferred();
+    const h = await composition({ controlCheck: controlEntered.resolve });
+    const op = createOperation({ ...target, provider: "azure" });
+    op.context.githubLogin = h.executor.login;
+    op.request = { azure: {} };
+    requireInput(op, {
+      code: "service-management-reference-required",
+      checkpoint: "reference"
+    });
+    operations.put(op);
+    const snapshots: ReturnType<typeof toPersistedOperation>[] = [];
+    h.persist.mockImplementation(async () => {
+      snapshots.push(structuredClone(toPersistedOperation(op)));
+      if (snapshots.length === 1) {
+        entered.resolve();
+        await gate.promise;
+      }
+    });
+    let resume: Promise<EnvironmentToolResult> | undefined;
+    let stop: Promise<EnvironmentToolResult> | undefined;
+    let duplicate: Promise<EnvironmentToolResult> | undefined;
+    try {
+      const identity = { ...target, operationId: op.operationId };
+      const status = await h.invoke("radius_environment_status", identity);
+      if (!("interaction" in status) || !status.interaction)
+        throw new Error("Missing registered input interaction");
+      resume = h.invoke("radius_environment_control", {
+        ...identity,
+        action: "resume",
+        provider: "azure",
+        checkpoint: "reference",
+        interactionId: status.interaction.interactionId,
+        answer: {
+          code: "service-management-reference-required",
+          serviceManagementReference: "approved"
+        }
+      });
+      await entered.promise;
+      const accountCalls = h.readExecutor.mock.calls.length;
+      stop = h.invoke("radius_environment_control", {
+        ...identity,
+        action: "stop"
+      });
+      const reached = await Promise.race([
+        controlEntered.promise.then(() => true),
+        stop.then(() => false)
+      ]);
+      expect(reached).toBe(true);
+      duplicate = h.invoke("radius_environment_control", {
+        ...identity,
+        action: "stop"
+      });
+      gate.resolve();
+      expect(await stop).toMatchObject({
+        kind: "accepted",
+        code: "operation-stopped"
+      });
+      expect(await duplicate).toMatchObject({
+        kind: "accepted",
+        code: "operation-stopped"
+      });
+      await resume;
+      expect(op.state).toBe("cancelled");
+      expect(op.inputRequired).toBeNull();
+      expect(snapshots.at(-1)?.state).toBe("cancelled");
+      expect(snapshots.at(-1)?.control.stop.requestedAt).toBeTruthy();
+      expect(h.runner).not.toHaveBeenCalled();
+      expect(h.run).not.toHaveBeenCalled();
+      expect(h.readExecutor).toHaveBeenCalledTimes(accountCalls);
+      const admission = h.owner.claimAdmission(op.operationId);
+      expect(admission).not.toBeNull();
+      admission?.release();
+    } finally {
+      gate.resolve();
+      await Promise.all([resume, stop, duplicate]);
+      await h.extension.shutdown();
+    }
+  });
 
   it.each(
     ["read", "save"].flatMap((boundary) =>

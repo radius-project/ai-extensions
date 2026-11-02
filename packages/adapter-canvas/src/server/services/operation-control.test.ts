@@ -76,6 +76,79 @@ function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
 }
 
 describe("direct operation control service", () => {
+  it.each(["authority", "retarget", "replacement", "shutdown"] as const)(
+    "records Stop synchronously before a queued %s change",
+    async (change) => {
+      const operation = newOperation();
+      const originalEnvironment = operation.environment;
+      const replacement = structuredClone(operation);
+      let record = operation;
+      let current = true;
+      let shuttingDown = false;
+      let queued = false;
+      const snapshots: OperationRecord[] = [];
+      const authorityAtSave: boolean[] = [];
+      const { dependencies } = fixture({
+        get: () => record,
+        isShuttingDown: () => shuttingDown,
+        persistOperations: vi.fn(async () => {
+          authorityAtSave.push(
+            current && !shuttingDown && record === operation
+          );
+          snapshots.push(structuredClone(record));
+        })
+      });
+      const result = await createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "stop",
+        isCurrent: () => {
+          const valid = current;
+          if (!queued) {
+            queued = true;
+            queueMicrotask(() => {
+              current = false;
+              if (change === "retarget") operation.environment = "replacement";
+              if (change === "replacement") record = replacement;
+              if (change === "shutdown") shuttingDown = true;
+            });
+          }
+          return valid;
+        }
+      });
+      expect(result).toMatchObject({
+        status: 202,
+        body: { code: "operation-stop-pending" }
+      });
+      expect(snapshots).toHaveLength(1);
+      expect(authorityAtSave).toEqual([true]);
+      expect(snapshots[0].environment).toBe(originalEnvironment);
+      expect(snapshots[0].stopRequested).toBe(true);
+      expect(replacement.stopRequested).toBe(false);
+      expect(dependencies.acquireForRetry).not.toHaveBeenCalled();
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+    }
+  );
+
+  it("rechecks authority at the final synchronous Stop boundary", async () => {
+    const operation = newOperation();
+    const before = structuredClone(operation);
+    const { dependencies } = fixture({ get: () => operation });
+    const isCurrent = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
+    expect(
+      await createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "stop",
+        isCurrent
+      })
+    ).toMatchObject({
+      status: 409,
+      body: { code: "operation-context-changed" }
+    });
+    expect(operation).toEqual(before);
+    expect(dependencies.persistOperations).not.toHaveBeenCalled();
+    expect(dependencies.acquireForRetry).not.toHaveBeenCalled();
+  });
+
   it("propagates registry unavailability after the Stop save without guessing workflow status", async () => {
     const operation = newOperation();
     operation.context = { githubLogin: "alice" };

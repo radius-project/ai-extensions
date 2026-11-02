@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isValidRepoSlug, isUuid } from "../azure-oidc.js";
-import { canExitSetup } from "../operations.js";
+import { canExitSetup, getOperationControl } from "../operations.js";
 import type { SelectedGhExecutor } from "../gh.js";
 import type { OperationRecord } from "../server/routes/operations-status.js";
 import type {
@@ -481,19 +481,23 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
         const target = targetOf(args);
         const operation = lookup(target);
         const key = `control:${target.operationId}`;
-        if (pending.has(key))
+        const action = text(args.action);
+        const cooperativeStop = action === "stop";
+        if (!cooperativeStop && pending.has(key))
           return refused(
             "operation-interaction-pending",
             "A command or host interaction is already pending for this operation."
           );
-        pending.add(key);
+        if (!cooperativeStop) pending.add(key);
         try {
           let snapshot = fingerprint(operation);
           const isCurrent = () => current(operation, snapshot);
-          const action = text(args.action);
           // Cooperative Stop must not reacquire the running setup's account lease.
           if (action === "stop") {
-            if (!environmentActions(operation).includes("stop")) {
+            if (
+              !environmentActions(operation).includes("stop") &&
+              !getOperationControl(operation)?.stop.requestedAt
+            ) {
               return refused(
                 "operation-command-ineligible",
                 "The command is not currently eligible for this setup operation."
@@ -754,7 +758,7 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
           }
           return outcome(result, target);
         } finally {
-          pending.delete(key);
+          if (!cooperativeStop) pending.delete(key);
         }
       });
     }

@@ -12,6 +12,7 @@ import {
   createRegistry,
   finish,
   requireInput,
+  requestStop,
   setVerificationWorkflowState
 } from "../operations.js";
 import {
@@ -623,6 +624,48 @@ describe("environment tool handlers", () => {
       code: "operation-context-changed"
     });
   });
+  it("lets Stop reach shared control during a pending resume without releasing the other controls' interaction lock", async () => {
+    const h = harness();
+    h.prompt();
+    const prompt = await h.tools.status(h.identity);
+    const entered = deferred<void>();
+    const gate = deferred<void>();
+    vi.mocked(h.ports.resume).mockImplementation(async () => {
+      entered.resolve();
+      await gate.promise;
+      return h.accepted();
+    });
+    vi.mocked(h.ports.control).mockImplementation(() => {
+      requestStop(h.op);
+      return h.accepted();
+    });
+    const resumeInput = {
+      ...h.identity,
+      action: "resume",
+      provider: "azure",
+      checkpoint: "selection",
+      interactionId: interactionId(prompt),
+      answer: { code: "app-selection-required", createNew: true }
+    };
+    const resume = h.tools.control(resumeInput);
+    try {
+      await entered.promise;
+      const accounts = vi.mocked(h.ports.account).mock.calls.length;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await h.tools.control({ ...h.identity, action: "stop" });
+        expect(result.kind, JSON.stringify(result)).toBe("accepted");
+        expect(await h.tools.control(resumeInput)).toMatchObject({
+          code: "operation-interaction-pending"
+        });
+      }
+      expect(h.ports.control).toHaveBeenCalledTimes(2);
+      expect(h.ports.account).toHaveBeenCalledTimes(accounts);
+    } finally {
+      gate.resolve();
+      await resume;
+    }
+  });
+
   it("reuses only the same live input occurrence and consumes its typed answer once", async () => {
     const h = harness();
     h.prompt();
