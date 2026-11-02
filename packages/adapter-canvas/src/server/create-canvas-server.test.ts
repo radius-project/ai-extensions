@@ -300,8 +300,8 @@ describe("createCanvasServer (SU-02)", () => {
     expect(observedAtStop).toEqual([{ instances: 0, closeCalls: 1 }]);
   });
 
-  it.each(["throws", "callback"] as const)(
-    "signals the stopped hook and propagates a socket close failure: %s",
+  it.each(["throws", "callback", "coded-failure", "already-closed"] as const)(
+    "signals the stopped hook and reports the socket close outcome: %s",
     async (failure) => {
       const { container, dependencies, fakeServers } = setup();
       const stopped: string[] = [];
@@ -309,11 +309,23 @@ describe("createCanvasServer (SU-02)", () => {
       await container.getOrCreate("panel-a");
       fakeServers[0].close = (callback) => {
         if (failure === "throws") throw new Error("close failed");
-        callback?.(new Error("close failed"));
+        callback?.(
+          failure === "callback" ?
+            new Error("close failed")
+          : Object.assign(new Error("close failed"), {
+              code:
+                failure === "already-closed" ?
+                  "ERR_SERVER_NOT_RUNNING"
+                : "ECLOSE"
+            })
+        );
         return fakeServers[0];
       };
 
-      await expect(container.stop("panel-a")).rejects.toThrow("close failed");
+      if (failure === "already-closed")
+        await expect(container.stop("panel-a")).resolves.toBeUndefined();
+      else
+        await expect(container.stop("panel-a")).rejects.toThrow("close failed");
 
       expect(stopped).toEqual(["panel-a"]);
       expect(container.instances.size).toBe(0);
@@ -377,6 +389,28 @@ function bindHarness(failures: readonly number[]) {
 }
 
 describe("createCanvasServer bind failure (SU-02)", () => {
+  it("preserves the bind failure when the socket never started", async () => {
+    const { container, dependencies } = bindHarness([2]);
+    const create = dependencies.createHttpServer;
+    dependencies.createHttpServer = (handler) => {
+      const server = create(handler);
+      server.close = (callback) => {
+        callback?.(
+          Object.assign(new Error("Server is not running."), {
+            code: "ERR_SERVER_NOT_RUNNING"
+          })
+        );
+        return server;
+      };
+      return server;
+    };
+
+    await expect(container.getOrCreate("panel")).rejects.toEqual(
+      new Error("bind failed: 0")
+    );
+    expect(container.instances.size).toBe(0);
+  });
+
   it("reports both bind and cleanup failures without losing the startup cause", async () => {
     const { container, dependencies } = bindHarness([2]);
     const create = dependencies.createHttpServer;
