@@ -52,7 +52,7 @@ We want reviews to move faster without getting careless. To get there, we must:
 
 ### Non-goals
 
-We will not let any change merge without a human approval until Step 4.5's trial succeeds and its other conditions are met. After that, only low-risk changes from trusted authors may merge on a Copilot approval. As we continue to gather data and iterate on our process, we may consider whether we will allow Copilot approvals on medium risk changes from trusted contributors.
+We will not let any change merge without a human approval until Step 4.5's trial succeeds and its other conditions are met. After that, only low-risk changes from trusted authors may merge on a Copilot approval. As we continue to gather data and iterate on our process, we may consider whether we will allow Copilot approvals on medium risk changes from trusted contributors. Step 4.7 covers how we suspend Copilot approvals if one goes wrong, and how we decide to turn them back on.
 
 ## Design
 
@@ -247,6 +247,30 @@ Copilot code review reads instructions and skills from the pull request's head b
 
 These guards stop a tampered review from approving a pull request, but not from shaping what Copilot says. A fork that rewrites the instructions can still get a review that calls a risky change safe, and that comment can sway the human who reviews it. We should have the Step 4.2 labeler add a `review-instructions-changed` label and a comment whenever a pull request touches the instruction, skill, prompt, or `AGENTS.md` paths, telling the human reviewer to set Copilot's review aside and read the change themselves.
 
+#### Step 4.7: Suspend Copilot approvals when one goes wrong
+
+We need a way to stop merging on Copilot approvals as soon as one lets a bad change through, and a clear bar for starting again. Without one, a single miss leaves us choosing between ignoring it and arguing over what to do while approvals keep counting.
+
+We should suspend approvals when a change that merged on a Copilot approval:
+
+- had to be reverted or hot-fixed for a defect a human reviewer would reasonably have caught,
+- touched a path that belongs in the medium or high tier, which means a glob was too broad, or
+- came from an author the trusted-author check should have rejected.
+
+Any maintainer can suspend approvals immediately, without a vote, by turning off "Allow Copilot approvals to count toward merge requirements." That one setting puts every pull request back on a human approval. Copilot keeps reviewing every push and keeps writing its approval assessment, so we lose no data while approvals are off.
+
+The maintainer who suspends approvals opens a tracking issue that links the merged pull request, says what Copilot missed, and names the cause: a glob that was too broad, a gap in the review instructions or skills, a miss by Copilot itself, or a bug in the trusted-author check.
+
+To turn approvals back on, we should:
+
+1. Fix the cause, whether that means the globs, the instructions and skills, or the check.
+2. Run a shorter trial: at least two weeks and at least 15 low-tier pull requests with zero false approvals, recorded the same way as the Step 4.5 trial.
+3. Have a maintainer record the result on the tracking issue, close it, and turn the setting back on.
+
+If we suspend approvals a second time within 90 days, we should rerun the full Step 4.5 trial instead of the shorter one.
+
+Some misses won't cause a visible failure. To catch those, a maintainer should review a sample of up to five Copilot-approved merges each month and treat any change they would have blocked as a trigger.
+
 ### Error handling
 
 We need every new check to fail closed. "Fail closed" means that when a check breaks, it blocks the merge instead of letting the pull request through. When something goes wrong, the pull request should fall back to needing a human.
@@ -280,6 +304,7 @@ In each case, "blocked" means GitHub won't allow the merge.
 | 7 | Instruction change | A pull request edits `.github/instructions/code-review.instructions.md` along with a docs file. | Copilot's approval doesn't count, and the labeler adds `review-instructions-changed` and its comment. |
 | 8 | Team lookup fails | The trusted-author check runs with a token that can't read team membership. | The check fails, so the pull request is blocked. |
 | 9 | Agent of unknown origin | An agent opens a low-tier pull request, and the check can't confirm which team member started it. | Treated as untrusted: blocked until a human approves. |
+| 10 | Approvals suspended | A maintainer turns off "Allow Copilot approvals to count toward merge requirements," then Copilot approves a trusted author's low-tier pull request. | Blocked until a human approves (Step 4.7). |
 
 We also need to confirm these facts before the step that depends on each:
 
@@ -296,7 +321,7 @@ This proposal lets some changes merge without a human, so its main risk is a pul
 - **Tampered review instructions.** Copilot reads instructions and skills from the pull request's head branch, so a fork can rewrite them. Step 4.6 keeps those paths out of the approval globs, requires a maintainer to approve changes to them, and flags them for the human reviewer.
 - **The labeler's trigger.** On a fork pull request, the `pull_request` trigger gets a read-only token, so the labeler needs `pull_request_target`. That trigger runs with a write token in our repository, so the labeling job must never check out or run the pull request's code, and should request only `pull-requests: write`.
 - **The token for team lookups.** The default `GITHUB_TOKEN` can't read organization team membership, so the trusted-author check needs a GitHub App token with organization `members: read`. That token belongs in a job that runs no pull request code.
-- **Wider merge rights.** Copilot approvals count only for low-tier paths, only for trusted authors, and only after the trial and the acceptance cases pass. Every other change keeps a human approval.
+- **Wider merge rights.** Copilot approvals count only for low-tier paths, only for trusted authors, and only after the trial and the acceptance cases pass. Any maintainer can suspend them at once (Step 4.7). Every other change keeps a human approval.
 - **Copilot Memory.** A wrong fact in memory would steer later reviews without anyone seeing it, so Step 1.5 asks who can audit what it stores.
 
 ## Open questions
@@ -315,6 +340,9 @@ Step 3.2 makes the Canvas Chromium and Windows jobs required. If one fails at ra
 
 **Q: Should we close the plugin build gap now?**
 Step 3.2 leaves the per-plugin `Build <plugin> dist` jobs unrequired, so a pull request that breaks one plugin's build can still merge. A separate `pr-gate` job (see [Alternatives considered](#alternatives-considered)) would close the gap without touching the release path. Proposed: decide whether to build it in Phase 3 or wait until ruleset upkeep forces it.
+
+**Q: Are the suspension window and audit size right?**
+Step 4.7 sends us back to the full trial after a second suspension within 90 days, and has a maintainer sample up to five Copilot-approved merges each month. A longer window or a larger sample catches more but costs more maintainer time. Proposed: start with these numbers and revisit them after the first three months of approvals.
 
 ## Alternatives considered
 
