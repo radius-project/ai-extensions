@@ -1927,7 +1927,7 @@ describe("real server and fake SDK runtime ownership", () => {
         ownerKey: "runtime",
         ports: {
           probePackageAccess: async () => ({
-            ok: true,
+            state: "allowed",
             detail: "Fixture package access is available."
           })
         }

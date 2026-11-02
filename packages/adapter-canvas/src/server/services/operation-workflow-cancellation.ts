@@ -94,7 +94,6 @@ export async function cancelOperationWorkflow(
         ownedVerification = structuredClone(operation.verification);
         try {
           await dependencies.persistOperations();
-          assertCurrent();
         } catch (error) {
           restoreVerification();
           if (error instanceof WorkflowCancellationRefusal)
@@ -105,6 +104,7 @@ export async function cancelOperationWorkflow(
             detail: errorMessage(error)
           });
         }
+        assertCurrent();
         return response(200, "workflow-status-checked", {
           statusUrl: `/api/operations/${encodeURIComponent(operationId)}`,
           operation: toClientView(operation)

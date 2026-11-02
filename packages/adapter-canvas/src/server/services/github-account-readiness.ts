@@ -32,7 +32,9 @@ export interface GitHubAccountReadiness {
   login: string;
   credentialSource: SelectedGhCredentialSource | null;
   summary:
-    "Ready to configure deployments" | "Additional GitHub access is required";
+    | "Ready to configure deployments"
+    | "Additional GitHub access is required"
+    | "GitHub access could not be verified";
   checks: {
     repository: GitHubReadinessCheck;
     workflow: GitHubReadinessCheck;
@@ -61,7 +63,7 @@ export interface GitHubAccountReadinessService {
 }
 
 export interface GitHubPackageAccessProbeResult {
-  ok: boolean;
+  state: "allowed" | "denied" | "unavailable";
   detail: string;
 }
 
@@ -115,7 +117,7 @@ export async function probeGhcrPackageWriteAccess(
       ""
     );
   } catch {
-    return { ok: false, detail: "The GHCR package owner is invalid." };
+    return { state: "denied", detail: "The GHCR package owner is invalid." };
   }
   const credentials = executor.packageCredentials();
   let response: PackageTokenResponse;
@@ -137,14 +139,18 @@ export async function probeGhcrPackageWriteAccess(
     );
   } catch {
     return {
-      ok: false,
+      state: "unavailable",
       detail: "GitHub Packages authorization could not be verified."
     };
   }
   if (!response.ok) {
+    const denied = response.status === 401 || response.status === 403;
     return {
-      ok: false,
-      detail: "GitHub Packages rejected the selected account."
+      state: denied ? "denied" : "unavailable",
+      detail:
+        denied ?
+          "GitHub Packages rejected the selected account."
+        : "GitHub Packages authorization could not be verified."
     };
   }
   let token = "";
@@ -155,16 +161,16 @@ export async function probeGhcrPackageWriteAccess(
         Reflect.get(body, "token") ?? Reflect.get(body, "access_token");
       if (typeof value === "string") token = value;
     }
-    if (!token) throw new Error("missing registry token");
+    if (!token.trim()) throw new Error("missing registry token");
   } catch {
     return {
-      ok: false,
+      state: "unavailable",
       detail: "GitHub Packages returned an invalid authorization response."
     };
   }
-  let uploadLocation: string;
+  let uploadResponse: PackageTokenResponse;
   try {
-    const uploadResponse = await fetchToken(
+    uploadResponse = await fetchToken(
       `https://ghcr.io/v2/${packagePath}/blobs/uploads/`,
       {
         method: "POST",
@@ -175,13 +181,24 @@ export async function probeGhcrPackageWriteAccess(
         signal
       }
     );
-    if (!uploadResponse.ok && uploadResponse.status !== 202) {
+    if (uploadResponse.status !== 202) {
+      const denied =
+        uploadResponse.status === 401 || uploadResponse.status === 403;
       return {
-        ok: false,
+        state: denied ? "denied" : "unavailable",
         detail:
-          "GitHub Packages did not grant push access to the selected account."
+          denied ?
+            "GitHub Packages did not grant push access to the selected account."
+          : "GitHub Packages authorization could not be verified."
       };
     }
+  } catch {
+    return {
+      state: "unavailable",
+      detail: "GitHub Packages authorization could not be verified."
+    };
+  }
+  try {
     const location = uploadResponse.headers?.get("location") || "";
     const resolved = new URL(location, "https://ghcr.io");
     if (
@@ -190,38 +207,30 @@ export async function probeGhcrPackageWriteAccess(
       resolved.hostname !== "ghcr.io"
     ) {
       return {
-        ok: false,
+        state: "allowed",
         detail:
           "GitHub Packages granted an upload session that Radius could not safely clean up."
       };
     }
-    uploadLocation = resolved.href;
-  } catch {
-    return {
-      ok: false,
-      detail: "GitHub Packages authorization could not be verified."
-    };
-  }
-  try {
-    const cleanup = await fetchToken(uploadLocation, {
+    const cleanup = await fetchToken(resolved.href, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
       signal
     });
     if (!cleanup.ok && cleanup.status !== 404 && cleanup.status !== 405) {
       return {
-        ok: true,
+        state: "allowed",
         detail: `GitHub Packages accepted push authorization from @${credentials.username}. The empty upload session could not be cancelled and will expire without creating a package artifact.`
       };
     }
   } catch {
     return {
-      ok: true,
+      state: "allowed",
       detail: `GitHub Packages accepted push authorization from @${credentials.username}. The empty upload session could not be cancelled and will expire without creating a package artifact.`
     };
   }
   return {
-    ok: true,
+    state: "allowed",
     detail: `GitHub Packages accepted push authorization for the state package from @${credentials.username}. The deploy workflow's own token is checked separately when credentials are verified.`
   };
 }
@@ -236,6 +245,19 @@ function errorCheck(detail: string): GitHubReadinessCheck {
 
 function readyCheck(detail: string): GitHubReadinessCheck {
   return { state: "ready", detail };
+}
+
+function packageAccessCheck(
+  access: GitHubPackageAccessProbeResult
+): GitHubReadinessCheck {
+  switch (access.state) {
+    case "allowed":
+      return readyCheck(access.detail);
+    case "denied":
+      return failedCheck(access.detail);
+    case "unavailable":
+      return errorCheck(access.detail);
+  }
 }
 
 function hasScope(executor: SelectedGhExecutor, scope: string): boolean {
@@ -430,7 +452,7 @@ export function createGitHubAccountReadinessService(
               repository.ready && workflowReady && hasPackagesScope ?
                 await ports.probePackageAccess(executor, repo, environment)
               : null;
-            const packagesReady = packageAccess?.ok === true;
+            const packagesReady = packageAccess?.state === "allowed";
             const checks: GitHubAccountReadiness["checks"] = {
               identity: readyCheck(
                 `Pinned GitHub commands resolve exactly to @${executor.login}.`
@@ -444,20 +466,14 @@ export function createGitHubAccountReadinessService(
                 : failedCheck(`@${executor.login} is missing workflow access.`),
               environment: repository.environment,
               packages:
-                packagesReady ?
-                  readyCheck(
-                    packageAccess?.detail ||
-                      "GitHub Packages granted pull and push access."
-                  )
+                packageAccess !== null ?
+                  packageAccessCheck(packageAccess)
                 : failedCheck(
                     !hasPackagesScope ?
                       `@${executor.login} is missing GitHub Packages write access.`
                     : !repository.ready ?
                       "GitHub Packages access was not checked because repository administration is not ready."
-                    : !workflowReady ?
-                      "GitHub Packages access was not checked because workflow access is not ready."
-                    : packageAccess?.detail ||
-                      "GitHub Packages push access is missing."
+                    : "GitHub Packages access was not checked because workflow access is not ready."
                   )
             };
             const ready = repository.ready && workflowReady && packagesReady;
@@ -466,7 +482,7 @@ export function createGitHubAccountReadinessService(
               checks,
               needsWorkflow: !workflowReady,
               needsPackages:
-                !hasPackagesScope || (packageAccess !== null && !packagesReady),
+                !hasPackagesScope || packageAccess?.state === "denied",
               repositoryReady: repository.ready
             };
           },
@@ -487,25 +503,32 @@ export function createGitHubAccountReadinessService(
             };
         const ready = lease.value.ready && restorationReady;
         const repair =
-          restorationReady ?
-            repairGuidance(
+          !restorationReady ?
+            {
+              repair: lease.restoration.guidance,
+              remediation: null
+            }
+          : checks.packages.state === "error" ?
+            {
+              repair:
+                "GitHub Packages access could not be verified. Check connectivity and GitHub service availability, then retry with the same account.",
+              remediation: null
+            }
+          : repairGuidance(
               lease.selectedLogin,
               lease.value.needsWorkflow,
               lease.value.needsPackages,
               lease.value.repositoryReady,
               ghCommandPresentation
-            )
-          : {
-              repair: lease.restoration.guidance,
-              remediation: null
-            };
+            );
         return {
           ready,
           login: lease.selectedLogin,
           credentialSource: lease.credentialSource,
           summary:
-            ready ?
-              "Ready to configure deployments"
+            ready ? "Ready to configure deployments"
+            : checks.packages.state === "error" ?
+              "GitHub access could not be verified"
             : "Additional GitHub access is required",
           checks,
           repair: repair.repair,

@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createGitHubAccountReadinessService,
   createGitHubSelectionHandleStore,
-  probeGhcrPackageWriteAccess
+  probeGhcrPackageWriteAccess,
+  type GitHubPackageAccessProbeResult
 } from "./github-account-readiness.js";
 import { createGitHubAccountCoordinator } from "./github-account-coordinator.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
@@ -12,6 +13,7 @@ import type {
   GitHubAccountLeaseResult
 } from "./github-account-coordinator.js";
 import type { SelectedGhCommandResult, SelectedGhExecutor } from "../../gh.js";
+import { createDeploymentAccountResolver } from "../../runtime/deployment-account.js";
 
 function selectedExecutor(input: {
   login?: string;
@@ -71,8 +73,8 @@ function coordinator(
 
 function readinessService(
   accountCoordinator: GitHubAccountCoordinator,
-  packageAccess = {
-    ok: true,
+  packageAccess: GitHubPackageAccessProbeResult = {
+    state: "allowed",
     detail: "GitHub Packages granted pull and push access."
   }
 ) {
@@ -85,6 +87,144 @@ function readinessService(
 }
 
 describe("GitHub account readiness", () => {
+  it.each(
+    (["allowed", "denied", "unavailable"] as const).flatMap((outcome) =>
+      (["discovery", "saved", "stale"] as const).map((mode) => ({
+        outcome,
+        mode
+      }))
+    )
+  )(
+    "preserves $outcome package access through real $mode account selection",
+    async ({ outcome, mode }) => {
+      const calls: string[] = [];
+      let current = true;
+      const choose = vi.fn(async () => "second");
+      const createExecutor = vi.fn(async (login: string) =>
+        selectedExecutor({ login })
+      );
+      const accountCoordinator = createGitHubAccountCoordinator({
+        createExecutor: async (login) => ({
+          ...selectedExecutor({ login }),
+          requiresKeyringSwitch: false
+        }),
+        getActiveKeyringLogin: async () => "first",
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache() {}
+      });
+      const readiness = createGitHubAccountReadinessService(
+        accountCoordinator,
+        {
+          ownerKey: "runtime",
+          ports: {
+            probePackageAccess: (executor, repo, environment) =>
+              probeGhcrPackageWriteAccess(
+                executor,
+                repo,
+                environment,
+                async () => {
+                  calls.push(executor.login);
+                  if (mode === "stale") current = false;
+                  if (executor.login === "first" && outcome === "unavailable")
+                    throw new Error(
+                      "network unavailable; client_secret=fixture-value"
+                    );
+                  if (executor.login === "first" && outcome === "denied")
+                    return { ok: false, status: 403, json: async () => ({}) };
+                  return {
+                    ok: true,
+                    status: 202,
+                    headers: { get: () => "/upload" },
+                    json: async () => ({ token: "opaque" })
+                  };
+                }
+              )
+          }
+        }
+      );
+      const resolve = createDeploymentAccountResolver({
+        readIdentity: async () => ({
+          accounts: ["first", "second"].map((login) => ({
+            login,
+            hasWorkflow: true,
+            hasPackages: true,
+            switchable: true,
+            acting: false
+          }))
+        }),
+        readiness,
+        choose,
+        createExecutor,
+        redactDiagnostic: (value) => value
+      });
+      const result = await resolve({
+        target: { repo: "octo/app", environment: "dev" },
+        ...(mode === "saved" ? { savedLogin: "first" } : {}),
+        isCurrent: () => current
+      });
+      if (mode === "stale") {
+        expect(result).toEqual({ state: "stopped" });
+      } else if (outcome === "unavailable") {
+        expect(result).toEqual({
+          state: "unavailable",
+          message: "GitHub Packages authorization could not be verified."
+        });
+      } else if (mode === "saved" && outcome === "denied") {
+        expect(result).toMatchObject({
+          state: "reauthorization-required",
+          login: "first",
+          message: "GitHub Packages rejected the selected account."
+        });
+      } else {
+        expect(result).toMatchObject({
+          state: "selected",
+          login: mode === "saved" ? "first" : "second"
+        });
+        expect(createExecutor).toHaveBeenCalledExactlyOnceWith(
+          mode === "saved" ? "first" : "second"
+        );
+      }
+      if (mode === "discovery" && outcome === "allowed")
+        expect(choose).toHaveBeenCalledExactlyOnceWith({
+          target: { repo: "octo/app", environment: "dev" },
+          logins: ["first", "second"]
+        });
+      else expect(choose).not.toHaveBeenCalled();
+      if (result.state !== "selected") {
+        expect(createExecutor).not.toHaveBeenCalled();
+        expect(calls.every((login) => login === "first")).toBe(true);
+      }
+    }
+  );
+
+  it("presents an inconclusive package check as an error with retry guidance, not a scope repair", async () => {
+    const service = readinessService(coordinator(selectedExecutor({})), {
+      state: "unavailable",
+      detail: "GitHub Packages authorization could not be verified."
+    });
+    expect(
+      await service.check({
+        repo: "octo/app",
+        environment: "dev",
+        login: "octocat"
+      })
+    ).toMatchObject({
+      ready: false,
+      summary: "GitHub access could not be verified",
+      checks: {
+        packages: {
+          state: "error",
+          detail: "GitHub Packages authorization could not be verified."
+        }
+      },
+      repair:
+        "GitHub Packages access could not be verified. Check connectivity and GitHub service availability, then retry with the same account.",
+      repairRemediation: null
+    });
+  });
+
   it("reports one ready result when every selected-account capability passes", async () => {
     const accountCoordinator = coordinator(selectedExecutor({}));
     const lease = vi.spyOn(accountCoordinator, "withSelectedAccount");
@@ -349,7 +489,7 @@ describe("GitHub account readiness", () => {
   it("reports missing workflow and package access without using another account", async () => {
     const probePackageAccess = vi.fn(() =>
       Promise.resolve({
-        ok: false,
+        state: "denied" as const,
         detail: "GitHub Packages push access is missing."
       })
     );
@@ -390,7 +530,7 @@ describe("GitHub account readiness", () => {
         ownerKey: "runtime",
         ports: {
           probePackageAccess: () =>
-            Promise.resolve({ ok: false, detail: "not checked" })
+            Promise.resolve({ state: "denied", detail: "not checked" })
         },
         ghCommandPresentation: {
           kind: "absolute",
@@ -459,7 +599,7 @@ describe("GitHub account readiness", () => {
   it("skips package probing until repository administration is ready", async () => {
     const probePackageAccess = vi.fn(() =>
       Promise.resolve({
-        ok: true,
+        state: "allowed" as const,
         detail: "GitHub Packages push access is available."
       })
     );
@@ -494,7 +634,7 @@ describe("GitHub account readiness", () => {
   it("skips package probing until workflow access is ready", async () => {
     const probePackageAccess = vi.fn(() =>
       Promise.resolve({
-        ok: true,
+        state: "allowed" as const,
         detail: "GitHub Packages push access is available."
       })
     );
@@ -641,6 +781,87 @@ describe("GitHub account readiness", () => {
 });
 
 describe("GHCR package access probe", () => {
+  it.each(
+    (["token", "upload"] as const).flatMap((endpoint) =>
+      [undefined, 200, 400, 401, 403, 404, 408, 429, 500, 503].map(
+        (status) => ({
+          endpoint,
+          status
+        })
+      )
+    )
+  )(
+    "distinguishes confirmed denial from unavailable $endpoint response $status",
+    async ({ endpoint, status }) => {
+      let calls = 0;
+      const result = await probeGhcrPackageWriteAccess(
+        selectedExecutor({}),
+        "octo/app",
+        "dev",
+        async () => {
+          calls++;
+          if (endpoint === "upload" && calls === 1)
+            return { ok: true, json: async () => ({ token: "opaque" }) };
+          return {
+            ok: status === 200,
+            status,
+            json: async () => {
+              throw new Error("client_secret=fixture-value");
+            }
+          };
+        }
+      );
+      const denied = status === 401 || status === 403;
+      expect(result.state).toBe(denied ? "denied" : "unavailable");
+      expect(result.detail).not.toContain("fixture-value");
+      expect(calls).toBe(endpoint === "token" ? 1 : 2);
+    }
+  );
+
+  it.each([null, "unexpected", {}, { token: 42 }, { token: " " }])(
+    "treats a malformed authorization body as unavailable: %j",
+    async (body) => {
+      const fetcher = vi.fn(async () => ({ ok: true, json: async () => body }));
+      expect(
+        await probeGhcrPackageWriteAccess(
+          selectedExecutor({}),
+          "octo/app",
+          "dev",
+          fetcher
+        )
+      ).toEqual({
+        state: "unavailable",
+        detail: "GitHub Packages returned an invalid authorization response."
+      });
+      expect(fetcher).toHaveBeenCalledOnce();
+    }
+  );
+
+  it("keeps confirmed push access when a malformed cleanup URL cannot be parsed", async () => {
+    let calls = 0;
+    const result = await probeGhcrPackageWriteAccess(
+      selectedExecutor({}),
+      "octo/app",
+      "dev",
+      async () => {
+        calls++;
+        return calls === 1 ?
+            { ok: true, json: async () => ({ token: "opaque" }) }
+          : {
+              ok: true,
+              status: 202,
+              headers: { get: () => "https://[" },
+              json: async () => ({})
+            };
+      }
+    );
+    expect(result.state).toBe("allowed");
+    expect(result.detail).toContain(
+      "empty upload session could not be cancelled"
+    );
+    expect(calls).toBe(2);
+  });
+
   it("verifies push with a cancellable upload session for the exact state package", async () => {
     const requests: Array<{
       url: string;
@@ -684,7 +905,7 @@ describe("GHCR package access probe", () => {
     );
 
     expect(result).toEqual({
-      ok: true,
+      state: "allowed",
       detail:
         "GitHub Packages accepted push authorization for the state package from @octocat. The deploy workflow's own token is checked separately when credentials are verified."
     });
@@ -719,7 +940,7 @@ describe("GHCR package access probe", () => {
       async () => ({ ok: true, json: async () => ({}) })
     );
     expect(result).toEqual({
-      ok: false,
+      state: "denied",
       detail: "The GHCR package owner is invalid."
     });
   });
@@ -730,26 +951,29 @@ describe("GHCR package access probe", () => {
       async () => {
         throw new Error("offline");
       },
-      "GitHub Packages authorization could not be verified."
+      "GitHub Packages authorization could not be verified.",
+      "unavailable"
     ],
     [
       "a rejected credential",
-      async () => ({ ok: false, json: async () => ({}) }),
-      "GitHub Packages rejected the selected account."
+      async () => ({ ok: false, status: 401, json: async () => ({}) }),
+      "GitHub Packages rejected the selected account.",
+      "denied"
     ],
     [
       "a missing registry token",
       async () => ({ ok: true, json: async () => ({}) }),
-      "GitHub Packages returned an invalid authorization response."
+      "GitHub Packages returned an invalid authorization response.",
+      "unavailable"
     ]
-  ] as const)("fails safely for %s", async (_label, fetcher, detail) => {
+  ] as const)("fails safely for %s", async (_label, fetcher, detail, state) => {
     const result = await probeGhcrPackageWriteAccess(
       selectedExecutor({}),
       "octo/app",
       "dev",
       fetcher
     );
-    expect(result).toEqual({ ok: false, detail });
+    expect(result).toEqual({ state, detail });
   });
 
   it("rejects an upload session when push is not authorized", async () => {
@@ -766,14 +990,14 @@ describe("GHCR package access probe", () => {
       }
     );
     expect(result).toEqual({
-      ok: false,
+      state: "denied",
       detail:
         "GitHub Packages did not grant push access to the selected account."
     });
   });
 
   it.each(["", "https://example.test/upload"])(
-    "rejects an unsafe upload cleanup location %s",
+    "retains confirmed authorization without following an unsafe cleanup location %s",
     async (location) => {
       let call = 0;
       const result = await probeGhcrPackageWriteAccess(
@@ -793,10 +1017,11 @@ describe("GHCR package access probe", () => {
         }
       );
       expect(result).toEqual({
-        ok: false,
+        state: "allowed",
         detail:
           "GitHub Packages granted an upload session that Radius could not safely clean up."
       });
+      expect(call).toBe(2);
     }
   );
 
@@ -838,7 +1063,7 @@ describe("GHCR package access probe", () => {
         }
       );
       expect(result).toEqual({
-        ok: true,
+        state: "allowed",
         detail:
           "GitHub Packages accepted push authorization from @octocat. The empty upload session could not be cancelled and will expire without creating a package artifact."
       });
@@ -870,7 +1095,7 @@ describe("GHCR package access probe", () => {
       }
     );
     expect(result).toEqual({
-      ok: true,
+      state: "allowed",
       detail:
         "GitHub Packages accepted push authorization for the state package from @octocat. The deploy workflow's own token is checked separately when credentials are verified."
     });
@@ -894,7 +1119,7 @@ describe("GHCR package access probe", () => {
       }
     );
     expect(result).toEqual({
-      ok: false,
+      state: "unavailable",
       detail: "GitHub Packages authorization could not be verified."
     });
   });
@@ -922,7 +1147,7 @@ describe("GHCR package access probe", () => {
       1
     );
     expect(result).toEqual({
-      ok: false,
+      state: "unavailable",
       detail: "GitHub Packages authorization could not be verified."
     });
   });

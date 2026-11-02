@@ -54,6 +54,93 @@ function deferred() {
 }
 
 describe("production environment owner HTTP binding", () => {
+  it("returns unavailable GHCR readiness without a selection handle or scope repair over HTTP", async () => {
+    const executor = successfulSelectedGhExecutor({
+      requiresKeyringSwitch: false,
+      run: async (args) => {
+        if (args.join(" ") !== "api repos/fixture/app")
+          throw new Error("Unexpected repository command");
+        return {
+          code: 0,
+          stdout: '{"permissions":{"admin":true}}',
+          stderr: ""
+        };
+      }
+    });
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async () => executor,
+      getActiveKeyringLogin: async () => executor.login,
+      switchKeyringAccount: async () => {
+        throw new Error("Unexpected switch");
+      },
+      resetIdentityCache() {}
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: createEnvironmentAccountContext(
+        "http-readiness",
+        coordinator
+      )
+    });
+    const loopbackFetch = globalThis.fetch;
+    const registry = vi.fn(
+      async () => new Response("client_secret=fixture-value", { status: 503 })
+    );
+    vi.stubGlobal(
+      "fetch",
+      (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        if (String(input).startsWith("https://ghcr.io/")) return registry();
+        if (String(input).startsWith("http://127.0.0.1:"))
+          return loopbackFetch(input, init);
+        throw new Error("Unexpected network destination");
+      }
+    );
+    try {
+      const entry = await runtime.getOrCreateServer("readiness", "environment");
+      const response = await fetch(`${entry.baseUrl}/api/github-account`, {
+        method: "POST",
+        headers: {
+          origin: entry.baseUrl,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+        },
+        body: JSON.stringify({
+          repo: "fixture/app",
+          environment: "dev",
+          login: executor.login
+        })
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
+      const body = await response.json();
+      expect(body).toMatchObject({
+        success: true,
+        readiness: {
+          ready: false,
+          summary: "GitHub access could not be verified",
+          checks: {
+            packages: {
+              state: "error",
+              detail: "GitHub Packages authorization could not be verified."
+            }
+          },
+          repair: expect.stringContaining("retry with the same account"),
+          repairRemediation: null
+        }
+      });
+      expect(body.selectionHandle).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain("fixture-value");
+      expect(JSON.stringify(body)).not.toContain("auth refresh");
+      expect(registry).toHaveBeenCalledOnce();
+    } finally {
+      await runtime.stopServer("readiness", true);
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each(
     ["shutdown", "changed-run"].flatMap((change) =>
       ["stop", "cancel-workflow"].flatMap((action) =>

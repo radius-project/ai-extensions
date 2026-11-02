@@ -3,6 +3,11 @@ import { ChildProcess } from "node:child_process";
 import { createHarness } from "@radius-project/adapter-shared/test-support/ghcr-bootstrap";
 import * as gh from "../../../src/gh.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
+import {
+  createGitHubAccountReadinessService,
+  probeGhcrPackageWriteAccess,
+  type GitHubAccountReadinessService
+} from "../../../src/server/services/github-account-readiness.js";
 import { bootstrapRadiusExtension } from "../../../src/runtime/bootstrap.js";
 import { createEnvironmentTools } from "../../../src/runtime/environment-tools.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
@@ -63,6 +68,7 @@ async function composition(
     realSetup?: boolean;
     beforeLease?: () => Promise<void>;
     leaseLogin?: string;
+    readiness?: GitHubAccountReadinessService;
     cancellationRun?: (
       args: string[]
     ) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -184,7 +190,7 @@ async function composition(
   }));
   const account = createDeploymentAccountResolver({
     readIdentity,
-    readiness: {
+    readiness: options.readiness ?? {
       check: async (input) => {
         const result = await ready(input);
         const check = { state: "ready" as const, detail: "Ready" };
@@ -289,6 +295,119 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it("reports a real inconclusive GHCR probe without selecting another account or starting setup", async () => {
+    const select = vi.fn(async () => "saved-account");
+    const probe = vi.fn(async () => {
+      throw new Error("network timeout client_secret=fixture-value");
+    });
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async (login) =>
+        successfulSelectedGhExecutor({
+          login,
+          requiresKeyringSwitch: false,
+          run: async () => ({
+            code: 0,
+            stdout: '{"permissions":{"admin":true}}',
+            stderr: ""
+          })
+        }),
+      getActiveKeyringLogin: async () => "first",
+      switchKeyringAccount: async () => {
+        throw new Error("Unexpected switch");
+      },
+      resetIdentityCache() {}
+    });
+    const h = await composition({
+      awsEnabled: true,
+      logins: ["first", "saved-account"],
+      select,
+      readiness: createGitHubAccountReadinessService(coordinator, {
+        ownerKey: "tools-runtime",
+        ports: {
+          probePackageAccess: (executor, repo, environment) =>
+            probeGhcrPackageWriteAccess(executor, repo, environment, probe)
+        }
+      })
+    });
+    try {
+      const result = await h.invoke("radius_setup_environment", {
+        ...target,
+        provider: "aws",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "eks",
+        vpcId: "vpc",
+        subnetIds: "subnet",
+        roleName: "fixture"
+      });
+      expect(result.kind).toBe("unavailable");
+      expect(JSON.stringify(result)).toContain(
+        "GitHub Packages authorization could not be verified"
+      );
+      expect(JSON.stringify(result)).not.toContain("fixture-value");
+      expect(probe).toHaveBeenCalledOnce();
+      expect(select).not.toHaveBeenCalled();
+      expect(h.readExecutor).not.toHaveBeenCalled();
+      expect(h.persist).not.toHaveBeenCalled();
+      expect(h.runner).not.toHaveBeenCalled();
+      expect(operations.latest(target.repo)).toBeFalsy();
+    } finally {
+      await h.extension.shutdown();
+    }
+  });
+
+  it.each(["active", "inactive"] as const)(
+    "keeps the registered tool's saved %s observation after shutdown during persistence",
+    async (observed) => {
+      const h = await composition({
+        confirm: async () => true,
+        cancellationRun: async (args) => {
+          if (args[0] !== "run")
+            throw new Error("Unexpected cancellation mutation");
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              status: observed === "active" ? "in_progress" : "completed"
+            }),
+            stderr: ""
+          };
+        }
+      });
+      const op = stoppedSetup({ repo: target.repo });
+      op.context = { githubLogin: h.executor.login };
+      op.verification = { runId: "42", workflowState: "unknown" };
+      operations.put(op);
+      const snapshots: ReturnType<typeof toPersistedOperation>[] = [];
+      h.persist.mockImplementation(async () => {
+        snapshots.push(structuredClone(toPersistedOperation(op)));
+        h.owner.shutdown();
+      });
+      try {
+        expect(
+          await h.invoke("radius_environment_control", {
+            ...target,
+            operationId: op.operationId,
+            action: "cancel-workflow"
+          })
+        ).toMatchObject({ code: "operation-shutting-down" });
+        expect(snapshots).toHaveLength(1);
+        expect(snapshots[0].verification).toMatchObject({
+          runId: "42",
+          workflowState: observed
+        });
+        expect(toPersistedOperation(op).verification).toEqual(
+          snapshots[0].verification
+        );
+        await operations.persist();
+        expect(snapshots[1].verification).toEqual(snapshots[0].verification);
+        expect(h.run).toHaveBeenCalledOnce();
+        expect(op.control.commands).toEqual([]);
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
+
   it("refuses disabled AWS before identity reads or trusted account-choice interaction", async () => {
     const select = vi.fn(async () => "saved-account");
     const h = await composition({

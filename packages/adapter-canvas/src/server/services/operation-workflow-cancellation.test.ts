@@ -374,6 +374,96 @@ describe("run-bound workflow cancellation", () => {
     });
   });
 
+  it.each(
+    (["unknown", "cancelling"] as const).flatMap((before) =>
+      (["active", "inactive"] as const).flatMap((observed) =>
+        (["authority", "shutdown"] as const).map((change) => ({
+          before,
+          observed,
+          change
+        }))
+      )
+    )
+  )(
+    "retains durably observed $observed from $before after $change changes during save",
+    async ({ before, observed, change }) => {
+      const h = fixture();
+      h.operation.verification = { runId: "42", workflowState: before };
+      let current = true;
+      const snapshots: ReturnType<typeof toPersistedOperation>[] = [];
+      h.run.mockResolvedValue({
+        code: 0,
+        stdout: JSON.stringify({
+          status: observed === "active" ? "in_progress" : "completed"
+        }),
+        stderr: ""
+      });
+      h.persist.mockImplementation(async () => {
+        snapshots.push(structuredClone(toPersistedOperation(h.operation)));
+        if (change === "shutdown") h.owner.shutdown();
+        else current = false;
+      });
+
+      expect(
+        await h.control({ ...h.input, isCurrent: () => current })
+      ).toMatchObject({
+        status: change === "shutdown" ? 503 : 409,
+        body: {
+          code:
+            change === "shutdown" ?
+              "operation-shutting-down"
+            : "operation-context-changed"
+        }
+      });
+      expect(snapshots).toHaveLength(1);
+      expect(snapshots[0].verification).toMatchObject({
+        runId: "42",
+        workflowState: observed
+      });
+      expect(toPersistedOperation(h.operation).verification).toEqual(
+        snapshots[0].verification
+      );
+      // A later store flush must not resurrect the older observation.
+      await h.persist();
+      expect(snapshots[1].verification).toEqual(snapshots[0].verification);
+      expect(h.run).toHaveBeenCalledTimes(1);
+      expect(h.operation.control.commands).toEqual([]);
+    }
+  );
+
+  it.each(["owned", "replacement", "retargeted"] as const)(
+    "rolls back only the owned unsaved observation after a failed save: %s",
+    async (ownership) => {
+      const h = fixture();
+      h.operation.verification = { runId: "42", workflowState: "unknown" };
+      const replacement = structuredClone(h.operation);
+      replacement.verification = { runId: "43", workflowState: "inactive" };
+      h.persist.mockImplementationOnce(async () => {
+        if (ownership === "replacement") h.replace(replacement);
+        if (ownership === "retargeted")
+          h.operation.verification = replacement.verification;
+        throw new Error("observation save failed");
+      });
+      expect(await h.control(h.input)).toMatchObject({
+        status: 500,
+        body: { code: "workflow-status-persist-failed" }
+      });
+      expect(h.operation.verification).toEqual({
+        runId: ownership === "retargeted" ? "43" : "42",
+        workflowState:
+          ownership === "owned" ? "unknown"
+          : ownership === "replacement" ? "active"
+          : "inactive"
+      });
+      expect(replacement.verification).toEqual({
+        runId: "43",
+        workflowState: "inactive"
+      });
+      expect(h.persist).toHaveBeenCalledOnce();
+      expect(h.run).toHaveBeenCalledOnce();
+      expect(h.operation.control.commands).toEqual([]);
+    }
+  );
   it.each(["success", "failure", "throw", "completion"] as const)(
     "settles issued %s despite shutdown without overwriting the replacement run",
     async (outcome) => {

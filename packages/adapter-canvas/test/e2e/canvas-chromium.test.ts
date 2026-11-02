@@ -3145,6 +3145,48 @@ test.describe("Radius Canvas in Chromium", () => {
     );
   });
 
+  test("presents a GHCR outage as unavailable and rechecks the same account without scope repair", async ({
+    page,
+    canvas
+  }) => {
+    const harnessFetch = globalThis.fetch;
+    let unavailable = true;
+    let registryRequests = 0;
+    globalThis.fetch = async (input, init) => {
+      if (String(input).startsWith("https://ghcr.io/") && unavailable) {
+        registryRequests++;
+        return new Response("client_secret=fixture-value", { status: 503 });
+      }
+      return harnessFetch(input, init);
+    };
+    try {
+      await gotoCanvas(page, canvas, "environment");
+      await openEnvironmentWizard(page);
+      const note = page.locator("#env-gh-identity-note");
+      await expect(note).toContainText("GitHub access could not be verified");
+      await expect(page.locator("#env-gh-repair")).toContainText(
+        "retry with the same account"
+      );
+      await expect(page.locator("#env-gh-repair")).not.toContainText(
+        "auth refresh"
+      );
+      await expect(page.locator("#deploy-btn")).toBeDisabled();
+      await expect(page.locator("body")).not.toContainText("fixture-value");
+      await expectNoWcagViolations(page);
+      expect(registryRequests).toBeGreaterThan(0);
+
+      unavailable = false;
+      const recheck = page.getByRole("button", { name: "Re-check" });
+      await recheck.focus();
+      await expect(recheck).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(note).toContainText("Ready to configure deployments");
+      await expectNoWcagViolations(page);
+    } finally {
+      globalThis.fetch = harnessFetch;
+    }
+  });
+
   test("recovers from the scope warning when Re-check is activated by keyboard", async ({
     page,
     canvas
