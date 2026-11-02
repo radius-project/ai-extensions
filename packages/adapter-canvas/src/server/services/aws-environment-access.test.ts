@@ -104,6 +104,7 @@ function harness(
   }> = [];
   const events: unknown[][] = [];
   let clock = Date.parse("2026-10-30T12:00:00Z");
+  let writtenTrust: unknown = undefined;
   const access = createAwsEnvironmentAccess<Operation>({
     async runAws(args) {
       awsCalls.push(args);
@@ -116,7 +117,26 @@ function harness(
           : scripted[0]
         : scripted;
       if (!result) throw new Error(`unexpected aws ${args.join(" ")}`);
-      if (command === pauseDuring) stopRequested = true;
+      // `command@n` pauses during the nth call of that command.
+      const count = awsCalls.filter(
+        (call) => call.slice(0, 2).join(" ") === command
+      ).length;
+      if (command === pauseDuring || `${command}@${count}` === pauseDuring) {
+        stopRequested = true;
+      }
+      // IAM shows a trust update to the reads that follow it.
+      if (command === "iam update-assume-role-policy" && result.code === 0) {
+        writtenTrust = JSON.parse(
+          args[args.indexOf("--policy-document") + 1] ?? "null"
+        );
+      }
+      if (command === "iam get-role" && writtenTrust !== undefined) {
+        const record = JSON.parse(result.stdout || "{}");
+        return ok({
+          ...record,
+          Role: { ...record.Role, AssumeRolePolicyDocument: writtenTrust }
+        });
+      }
       return result;
     },
     async runGitHubJson(path, executor) {
@@ -569,8 +589,23 @@ describe("the deploy identity lock during setup", () => {
     for (const write of writes) {
       expect(commands[commands.indexOf(write) - 1]).toBe("iam get-policy");
     }
+    // One read confirms the new lock, then one before each write.
     expect(commands.filter((c) => c === "iam get-policy")).toHaveLength(
-      writes.length
+      writes.length + 1
+    );
+  });
+
+  it("runs no write when the pause arrives during the lock check before it", async () => {
+    // The first read confirms the new lock; the second is the check before
+    // the first write.
+    const h = harness(happyPath, defaultSubject, "iam get-policy@2");
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toEqual({ ok: false, stopped: true });
+    expect(h.commands()).not.toContain("iam create-open-id-connect-provider");
+    expect(h.steps().at(-1)).toBe(
+      "⏸️ Paused before any AWS change. Nothing was created in AWS."
     );
   });
 
@@ -744,6 +779,7 @@ describe("the deploy identity lock during setup", () => {
       ...happyPath,
       "iam get-policy": [
         lockPolicy("LOCK1"),
+        lockPolicy("LOCK1"),
         lockPolicy("LOCK2", { Description: OTHER_HOLDER })
       ]
     });
@@ -765,7 +801,7 @@ describe("the deploy identity lock during setup", () => {
   it("says nothing was created when the lock is lost before the first write", async () => {
     const h = harness({
       ...happyPath,
-      "iam get-policy": fail("NoSuchEntity: gone")
+      "iam get-policy": [lockPolicy("LOCK1"), fail("NoSuchEntity: gone")]
     });
 
     const result = await h.access.setup(operation, input, EXECUTOR);
@@ -807,9 +843,12 @@ describe("the deploy identity lock during removal", () => {
     expect(h.commands()).toEqual([
       "sts get-caller-identity",
       "iam create-policy",
+      "iam get-policy",
       "iam get-role",
       "iam get-policy",
       "iam update-assume-role-policy",
+      // IAM shows the write before the lock can be handed on.
+      "iam get-role",
       "iam get-policy",
       "iam delete-role-policy",
       "iam get-policy",
@@ -888,7 +927,7 @@ describe("the deploy identity lock during removal", () => {
   it("stops and reports when the lock is lost before a write", async () => {
     const h = harness({
       ...signedIn,
-      "iam get-policy": [lockPolicy("LOCK2")]
+      "iam get-policy": [lockPolicy("LOCK1"), lockPolicy("LOCK2")]
     });
 
     const result = await h.access.remove(removal);
@@ -944,10 +983,14 @@ describe("the deploy identity lock during removal", () => {
 
 // IAM as two concurrent setups see it: one account, one role, and the lock's
 // name uniqueness. Every call yields first, so the setups interleave.
-function sharedIam() {
+// `staleReads` makes the reads right after each trust write still return the
+// trust from before it, as IAM's eventually consistent reads can.
+function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
   let role: { trust: unknown } | null = {
     trust: buildGitHubTrustPolicy(ACCOUNT, [])
   };
+  let previousTrust: unknown = role.trust;
+  let stale = 0;
   const locks = new Map<string, { id: string; description: string }>();
   let created = 0;
   const writes: string[] = [];
@@ -979,13 +1022,15 @@ function sharedIam() {
       case "iam delete-policy":
         locks.delete(`radius-lock-${ROLE}`);
         return ok();
-      case "iam get-role":
+      case "iam get-role": {
+        const trust = stale > 0 ? previousTrust : role?.trust;
+        if (stale > 0) stale -= 1;
         return role ?
             ok({
               Role: {
                 Arn: ROLE_ARN,
                 CreateDate: "2026-10-01T00:00:00Z",
-                AssumeRolePolicyDocument: role.trust,
+                AssumeRolePolicyDocument: trust,
                 Tags: [
                   { Key: "radius-managed", Value: "true" },
                   { Key: "radius-repository", Value: "octo/shop" }
@@ -993,6 +1038,7 @@ function sharedIam() {
               }
             })
           : fail("NoSuchEntity");
+      }
       case "iam list-open-id-connect-providers":
         return ok({
           OpenIDConnectProviderList: [
@@ -1005,6 +1051,8 @@ function sharedIam() {
         return ok({ ClientIDList: ["sts.amazonaws.com"] });
       case "iam update-assume-role-policy":
         writes.push(command);
+        previousTrust = role?.trust;
+        stale = staleReads;
         role = { trust: JSON.parse(value("--policy-document")) };
         return ok();
       case "iam put-role-policy":
@@ -1053,33 +1101,39 @@ function sharedIam() {
 }
 
 describe("two setups on one deploy identity at the same time", () => {
-  it("keeps both environments' subjects in the trust policy", async () => {
-    const iam = sharedIam();
-    // Two canvas panels, each with its own server, sharing one AWS account.
-    const first = iam.access();
-    const second = iam.access();
-    const dev = { id: "op-dev" };
-    const prod = { id: "op-prod" };
+  it.each([
+    ["IAM shows each write at once", 0],
+    ["IAM shows each write only after two more reads", 2]
+  ])(
+    "keeps both environments' subjects in the trust policy when %s",
+    async (_label, staleReads) => {
+      const iam = sharedIam({ staleReads });
+      // Two canvas panels, each with its own server, sharing one AWS account.
+      const first = iam.access();
+      const second = iam.access();
+      const dev = { id: "op-dev" };
+      const prod = { id: "op-prod" };
 
-    const setups = [
-      first.setup(dev, { ...input, environment: "dev" }, EXECUTOR),
-      second.setup(prod, { ...input, environment: "prod" }, EXECUTOR)
-    ];
-    // Each setup holds the lock until its caller releases it, as the
-    // coordinator does after Configure environment.
-    const finished = setups.map((setup, index) =>
-      setup.then(async (result) => {
-        await (index === 0 ? first.release(dev) : second.release(prod));
-        return result;
-      })
-    );
-    const results = await Promise.all(finished);
+      const setups = [
+        first.setup(dev, { ...input, environment: "dev" }, EXECUTOR),
+        second.setup(prod, { ...input, environment: "prod" }, EXECUTOR)
+      ];
+      // Each setup holds the lock until its caller releases it, as the
+      // coordinator does after Configure environment.
+      const finished = setups.map((setup, index) =>
+        setup.then(async (result) => {
+          await (index === 0 ? first.release(dev) : second.release(prod));
+          return result;
+        })
+      );
+      const results = await Promise.all(finished);
 
-    expect(results.map((result) => result.ok)).toEqual([true, true]);
-    expect(iam.trusted().sort()).toEqual([
-      "repo:octo@7/shop@42:environment:dev",
-      "repo:octo@7/shop@42:environment:prod"
-    ]);
-    expect(iam.writes).toHaveLength(2);
-  });
+      expect(results.map((result) => result.ok)).toEqual([true, true]);
+      expect(iam.trusted().sort()).toEqual([
+        "repo:octo@7/shop@42:environment:dev",
+        "repo:octo@7/shop@42:environment:prod"
+      ]);
+      expect(iam.writes).toHaveLength(2);
+    }
+  );
 });

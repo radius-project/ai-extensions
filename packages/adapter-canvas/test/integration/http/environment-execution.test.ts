@@ -257,7 +257,7 @@ describe("production environment owner HTTP binding", () => {
       operations.put(op);
 
       const response = await fetch(
-        `${entry.baseUrl}/api/operations/${op.operationId}/aws-lock/remove`,
+        `${entry.baseUrl}/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`,
         {
           method: "POST",
           headers: {

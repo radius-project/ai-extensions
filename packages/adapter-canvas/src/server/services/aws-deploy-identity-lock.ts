@@ -27,6 +27,8 @@ import type { AwsCommandResult } from "./aws-deploy-identity.js";
 // person confirming the holder stopped is what closes it.
 
 export const AWS_LOCK_POLL_MS = 5000;
+// Waits while a lock this run just created is not yet readable in IAM.
+export const LOCK_VISIBLE_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
 
 export interface AwsLockWait {
   readonly policyArn: string;
@@ -178,6 +180,42 @@ function heldLock(
   };
 }
 
+// IAM is eventually consistent, so a policy it just created can read as
+// missing for a few seconds. Every later check reads the lock, so it has to be
+// readable first, or the first write would stop as if the lock were removed.
+async function awaitLockVisible(
+  policyArn: string,
+  policyId: string,
+  roleName: string,
+  ports: AwsLockPorts
+): Promise<{ code: string; message: string } | null> {
+  for (let attempt = 0; ; attempt++) {
+    const get = await ports.runAws([
+      "iam",
+      "get-policy",
+      "--policy-arn",
+      policyArn,
+      "--output",
+      "json"
+    ]);
+    if (succeeded(get)) {
+      if (text(readPolicy(get.stdout), "PolicyId") === policyId) return null;
+      return {
+        code: "aws-lock-lost",
+        message: `The lock Radius just created on IAM role ${roleName} was replaced before it could be confirmed. Nothing else was changed. Retry.`
+      };
+    }
+    const delay = LOCK_VISIBLE_RETRY_DELAYS_MS[attempt];
+    if (!NO_SUCH_ENTITY.test(get.stderr) || delay === undefined) {
+      return {
+        code: "aws-lock-unconfirmed",
+        message: `Radius created the lock on IAM role ${roleName} but could not read it back (${detail(get)}), so it stopped before changing the role. If no other Radius run is changing this role, run ${deleteCommand(policyArn)}, then retry.`
+      };
+    }
+    await ports.sleep(delay);
+  }
+}
+
 /**
  * Take the lock on one deploy identity, waiting while another run holds it.
  * The caller must already have confirmed the CLI session is in `accountId`,
@@ -215,6 +253,13 @@ export async function acquireAwsDeployIdentityLock(
           message: `Radius created the lock on IAM role ${roleName} but AWS did not return its ID, so it cannot tell its own lock from the next one. Nothing else was changed. Run ${deleteCommand(policyArn)}, then retry.`
         };
       }
+      const visible = await awaitLockVisible(
+        policyArn,
+        policyId,
+        roleName,
+        ports
+      );
+      if (visible) return { ok: false, ...visible };
       return {
         ok: true,
         lock: heldLock(policyArn, policyId, roleName, ports.runAws)

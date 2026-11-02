@@ -2023,12 +2023,17 @@ describe("handleRemoveAwsLock", () => {
     const op = waiting();
     const removed: unknown[] = [];
 
-    const out = await drive(handleRemoveAwsLock, op, "aws-lock/remove", {
-      removeAwsDeployIdentityLock: async (lock) => {
-        removed.push(lock);
-        return { ok: true, removed: true };
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async (lock) => {
+          removed.push(lock);
+          return { ok: true, removed: true };
+        }
       }
-    });
+    );
 
     expect(out.recording.status).toBe(200);
     expect(out.payload()).toMatchObject({
@@ -2050,18 +2055,46 @@ describe("handleRemoveAwsLock", () => {
     expect(out.journal.persistCalls).toBe(1);
   });
 
+  it.each([
+    ["names another lock", "aws-lock/remove?policyId=LOCK1"],
+    ["names no lock", "aws-lock/remove"]
+  ])(
+    "refuses a confirmation that %s, without touching AWS",
+    async (_label, action) => {
+      const op = waiting();
+      const out = await drive(handleRemoveAwsLock, op, action);
+      expect(out.recording.status).toBe(409);
+      expect(out.payload()).toMatchObject({
+        code: "aws-lock-changed",
+        error:
+          "The lock changed since it was shown: another run now holds a new one. Nothing was removed."
+      });
+      expect(out.journal.persistCalls).toBe(0);
+    }
+  );
+
   it("says when the lock was already gone", async () => {
-    const out = await drive(handleRemoveAwsLock, waiting(), "aws-lock/remove", {
-      removeAwsDeployIdentityLock: async () => ({ ok: true, removed: false })
-    });
+    const out = await drive(
+      handleRemoveAwsLock,
+      waiting(),
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async () => ({ ok: true, removed: false })
+      }
+    );
     expect(out.payload().code).toBe("aws-lock-already-removed");
   });
 
   it("still answers success when the record cannot be saved", async () => {
-    const out = await drive(handleRemoveAwsLock, waiting(), "aws-lock/remove", {
-      removeAwsDeployIdentityLock: async () => ({ ok: true, removed: true }),
-      persistOperations: () => Promise.reject(new Error("disk full"))
-    });
+    const out = await drive(
+      handleRemoveAwsLock,
+      waiting(),
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async () => ({ ok: true, removed: true }),
+        persistOperations: () => Promise.reject(new Error("disk full"))
+      }
+    );
     expect(out.recording.status).toBe(200);
     expect(out.payload().detail).toBe(
       "The lock was removed, but Radius could not save that on this run: disk full"
@@ -2091,9 +2124,14 @@ describe("handleRemoveAwsLock", () => {
     "refuses with the reason on %s and keeps offering removal",
     async (_l, remove, code, error) => {
       const op = waiting();
-      const out = await drive(handleRemoveAwsLock, op, "aws-lock/remove", {
-        removeAwsDeployIdentityLock: remove
-      });
+      const out = await drive(
+        handleRemoveAwsLock,
+        op,
+        "aws-lock/remove?policyId=LOCK0",
+        {
+          removeAwsDeployIdentityLock: remove
+        }
+      );
       expect(out.recording.status).toBe(409);
       expect(out.payload()).toMatchObject({ code, error });
       expect(op).toMatchObject({
@@ -2115,7 +2153,11 @@ describe("handleRemoveAwsLock", () => {
       }
     ]
   ])("refuses %s without touching AWS", async (_label, build) => {
-    const out = await drive(handleRemoveAwsLock, build(), "aws-lock/remove");
+    const out = await drive(
+      handleRemoveAwsLock,
+      build(),
+      "aws-lock/remove?policyId=LOCK0"
+    );
     expect(out.recording.status).toBe(409);
     expect(out.payload().code).toBe("aws-lock-not-removable");
   });

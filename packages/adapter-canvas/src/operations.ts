@@ -4484,7 +4484,8 @@ function removeAwsLockAction(op: any, base: string): any | null {
     cancelLabel: "Keep waiting",
     description: `${wait.holder} has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
     method: "POST",
-    path: `${base}/aws-lock/remove`,
+    // Names the lock shown, so a confirmation that outlives it is refused.
+    path: `${base}/aws-lock/remove?policyId=${encodeURIComponent(wait.policyId)}`,
     pending: false
   };
 }

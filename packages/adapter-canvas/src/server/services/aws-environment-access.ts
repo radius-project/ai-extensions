@@ -266,6 +266,8 @@ export function createAwsEnvironmentAccess<Operation>(
                 lockLost ||= lost;
                 return lockLostResult(lost);
               }
+              // A pause that arrived during the check still stops this write.
+              if (dependencies.isStopRequested(operation)) return PAUSED;
             }
             return dependencies.runAws(args);
           },
@@ -407,6 +409,7 @@ export function createAwsEnvironmentAccess<Operation>(
               }
               return dependencies.runAws(args);
             },
+            sleep: dependencies.sleep,
             acquireLock: async ({ accountId, roleName }) => {
               const taken = await lock(
                 {

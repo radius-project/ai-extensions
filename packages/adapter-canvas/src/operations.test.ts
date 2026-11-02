@@ -8371,7 +8371,7 @@ describe("Remove lock for an AWS deploy identity lock", () => {
       cancelLabel: "Keep waiting",
       description: `${LOCK.holder} has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`
     });
-    expect(actions[0].path).toMatch(/\/aws-lock\/remove$/);
+    expect(actions[0].path).toMatch(/\/aws-lock\/remove\?policyId=LOCK0$/);
   });
 
   it("offers it alone on a live deletion waiting for an old lock", () => {

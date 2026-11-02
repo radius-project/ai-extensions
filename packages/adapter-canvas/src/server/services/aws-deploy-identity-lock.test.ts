@@ -91,10 +91,22 @@ const acquire = (iam: ReturnType<typeof fakeIam>) =>
     iam.ports
   );
 
+// A run holding LOCK1. Acquiring reads the lock back once; `script` answers
+// every read after that.
 async function held(
   script: Record<string, AwsCommandResult | AwsCommandResult[]>
 ) {
-  const iam = fakeIam({ "iam create-policy": policy("LOCK1"), ...script });
+  const later = script["iam get-policy"];
+  const iam = fakeIam({
+    "iam create-policy": policy("LOCK1"),
+    ...script,
+    "iam get-policy": [
+      policy("LOCK1"),
+      ...(later === undefined ? []
+      : Array.isArray(later) ? later
+      : [later])
+    ]
+  });
   const result = await acquire(iam);
   if (!result.ok) throw new Error("expected the lock");
   return { iam, lock: result.lock };
@@ -102,7 +114,10 @@ async function held(
 
 describe("acquireAwsDeployIdentityLock", () => {
   it("creates the lock policy naming its holder and keeps its ID", async () => {
-    const iam = fakeIam({ "iam create-policy": policy("LOCK1") });
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": policy("LOCK1")
+    });
 
     const result = await acquire(iam);
 
@@ -123,7 +138,61 @@ describe("acquireAwsDeployIdentityLock", () => {
     expect(
       JSON.parse(create[create.indexOf("--policy-document") + 1] ?? "")
     ).toMatchObject({ Statement: [{ Effect: "Deny", Resource: LOCK_ARN }] });
+    expect(iam.commands()).toEqual(["iam create-policy", "iam get-policy"]);
     expect(iam.waits).toEqual([]);
+  });
+
+  it("waits until IAM can read a lock it just created", async () => {
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": [MISSING, MISSING, policy("LOCK1")]
+    });
+
+    expect(await acquire(iam)).toMatchObject({
+      ok: true,
+      lock: { policyId: "LOCK1" }
+    });
+    expect(iam.sleeps).toEqual([500, 1000]);
+  });
+
+  it("stops without deleting a lock IAM never shows", async () => {
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": MISSING
+    });
+
+    const result = await acquire(iam);
+
+    expect(result).toMatchObject({ ok: false, code: "aws-lock-unconfirmed" });
+    expect("message" in result && result.message).toContain(
+      `aws iam delete-policy --policy-arn ${LOCK_ARN}`
+    );
+    expect(iam.sleeps).toEqual([500, 1000, 2000, 4000, 8000]);
+    expect(iam.commands()).not.toContain("iam delete-policy");
+  });
+
+  it("stops at once when the new lock cannot be read for another reason", async () => {
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": DENIED
+    });
+    expect(await acquire(iam)).toMatchObject({
+      ok: false,
+      code: "aws-lock-unconfirmed"
+    });
+    expect(iam.sleeps).toEqual([]);
+  });
+
+  it("stops when the new lock was already replaced by another run's", async () => {
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": policy("LOCK2")
+    });
+    expect(await acquire(iam)).toMatchObject({
+      ok: false,
+      code: "aws-lock-lost"
+    });
+    expect(iam.commands()).not.toContain("iam delete-policy");
   });
 
   it("stops before any write and names the permissions when CreatePolicy is denied", async () => {
@@ -183,10 +252,17 @@ describe("acquireAwsDeployIdentityLock", () => {
   it("waits while another run holds the lock, then takes it", async () => {
     const iam = fakeIam({
       "iam create-policy": [EXISTS, EXISTS, policy("LOCK2")],
-      "iam get-policy": policy("LOCK1", {
-        Description: OTHER,
-        CreateDate: "2026-10-30T11:58:00Z"
-      })
+      "iam get-policy": [
+        policy("LOCK1", {
+          Description: OTHER,
+          CreateDate: "2026-10-30T11:58:00Z"
+        }),
+        policy("LOCK1", {
+          Description: OTHER,
+          CreateDate: "2026-10-30T11:58:00Z"
+        }),
+        policy("LOCK2")
+      ]
     });
 
     const result = await acquire(iam);
@@ -257,7 +333,7 @@ describe("acquireAwsDeployIdentityLock", () => {
   it("tries again without reporting a holder when the lock vanished between create and read", async () => {
     const iam = fakeIam({
       "iam create-policy": [EXISTS, policy("LOCK2")],
-      "iam get-policy": MISSING
+      "iam get-policy": [MISSING, policy("LOCK2")]
     });
     expect(await acquire(iam)).toMatchObject({ ok: true });
     expect(iam.waits).toEqual([]);
@@ -337,6 +413,7 @@ describe("a held deploy identity lock", () => {
 
     expect(iam.commands()).toEqual([
       "iam create-policy",
+      "iam get-policy",
       "iam get-policy",
       "iam delete-policy"
     ]);

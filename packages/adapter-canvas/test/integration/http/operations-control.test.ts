@@ -1020,7 +1020,7 @@ describe("removing an abandoned AWS lock over the socket", () => {
       );
       expect(offered).toMatchObject({
         label: "Remove lock",
-        path: `/api/operations/${op.operationId}/aws-lock/remove`,
+        path: `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`,
         requiresConfirmation: true,
         confirmLabel: "Remove lock",
         cancelLabel: "Keep waiting"
@@ -1044,6 +1044,28 @@ describe("removing an abandoned AWS lock over the socket", () => {
     }
   );
 
+  it("refuses a confirmation for a lock another run has since replaced", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness, newOperation());
+    setContext(op, { awsLockWait: { ...LOCK, removable: true } });
+    const shown = action(
+      await poll(entry.baseUrl, `/api/operations/${op.operationId}`),
+      "remove-aws-lock"
+    );
+    // While the dialog is open, the old holder releases and another run's
+    // lock becomes the one this run waits for.
+    setContext(op, {
+      awsLockWait: { ...LOCK, policyId: "LOCK1", removable: true }
+    });
+
+    const response = await post(entry.baseUrl, shown!.path);
+
+    expect(response.status).toBe(409);
+    expect((await body(response)).code).toBe("aws-lock-changed");
+    expect(harness.removedLocks).toEqual([]);
+  });
+
   it("refuses a lock that is not yet old enough, without touching AWS", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
@@ -1058,7 +1080,7 @@ describe("removing an abandoned AWS lock over the socket", () => {
     ).toBeUndefined();
     const response = await post(
       entry.baseUrl,
-      `/api/operations/${op.operationId}/aws-lock/remove`
+      `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`
     );
     expect(response.status).toBe(409);
     expect(harness.removedLocks).toEqual([]);
@@ -1072,7 +1094,7 @@ describe("removing an abandoned AWS lock over the socket", () => {
 
     const response = await post(
       entry.baseUrl,
-      `/api/operations/${op.operationId}/aws-lock/remove`,
+      `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`,
       { Origin: new URL(entry.baseUrl).origin }
     );
 

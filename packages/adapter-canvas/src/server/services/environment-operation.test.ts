@@ -1366,6 +1366,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       "sts get-caller-identity",
       "eks describe-cluster",
       "iam create-policy",
+      "iam get-policy",
       "iam get-role",
       "iam get-policy",
       "iam delete-policy"

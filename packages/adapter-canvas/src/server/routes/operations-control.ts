@@ -568,6 +568,18 @@ export async function handleRemoveAwsLock(
     });
     return;
   }
+  // The developer confirmed that one holder stopped. If another run has taken
+  // a new lock since the dialog opened, that confirmation says nothing about it.
+  if (context.url.searchParams.get("policyId") !== wait.policyId) {
+    sendJson(context, 409, {
+      error:
+        "The lock changed since it was shown: another run now holds a new one. Nothing was removed.",
+      code: "aws-lock-changed",
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
   let result: Awaited<
     ReturnType<OperationsControlDependencies["removeAwsDeployIdentityLock"]>
   >;

@@ -122,6 +122,58 @@ const RESOURCE_IN_USE = /ResourceInUseException/;
 
 const LIMIT_EXCEEDED = /LimitExceeded/;
 
+// IAM is eventually consistent. A run that releases the lock right after
+// writing the trust policy could let the next holder read the policy from
+// before that write and overwrite it. So the writer waits until IAM shows its
+// own write before it goes on, and stops when IAM never does.
+export const TRUST_VISIBLE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+
+function sameSubjects(a: readonly string[], b: readonly string[]): boolean {
+  const left = [...a].sort();
+  const right = [...b].sort();
+  return (
+    left.length === right.length &&
+    left.every((subject, index) => subject === right[index])
+  );
+}
+
+async function awaitTrustVisible(
+  ports: Pick<AwsDeployIdentityPorts, "runAws" | "sleep">,
+  roleName: string,
+  accountId: string,
+  written: PolicyDocument
+): Promise<string | null> {
+  const expected = trustedGitHubSubjects(written, accountId);
+  for (let attempt = 0; ; attempt++) {
+    const getRole = await ports.runAws([
+      "iam",
+      "get-role",
+      "--role-name",
+      roleName,
+      "--output",
+      "json"
+    ]);
+    const record = parseJson(getRole.stdout);
+    let shown: string[] | null = null;
+    if (succeeded(getRole) && isRecord(record) && isRecord(record.Role)) {
+      try {
+        shown = trustedGitHubSubjects(
+          parsePolicyDocument(record.Role.AssumeRolePolicyDocument),
+          accountId
+        );
+      } catch {
+        shown = null;
+      }
+    }
+    if (shown && sameSubjects(shown, expected)) return null;
+    const delay = TRUST_VISIBLE_RETRY_DELAYS_MS[attempt];
+    if (delay === undefined) {
+      return `IAM did not show the updated trust policy of IAM role ${roleName} after the update, so Radius stopped before another run could read the old one.`;
+    }
+    await ports.sleep(delay);
+  }
+}
+
 // Whether an existing access entry was created for the current role, judged
 // by whether it is newer than the role.
 async function accessEntryOwner(
@@ -516,6 +568,18 @@ export async function setupAwsDeployIdentity(
             );
       }
       created.push(`trust for ${subjectList} on ${roleName}`);
+      const unconfirmed = await awaitTrustVisible(
+        ports,
+        roleName,
+        accountId,
+        trust.policy
+      );
+      if (unconfirmed) {
+        return fail(
+          "aws-role-trust-unconfirmed",
+          `${unconfirmed} Retry setup.`
+        );
+      }
     }
   }
 
@@ -666,7 +730,7 @@ export type AwsDeployIdentityRemovalResult =
  */
 export async function removeAwsEnvironmentFromRole(
   request: AwsDeployIdentityRemovalRequest,
-  ports: Pick<AwsDeployIdentityPorts, "runAws" | "acquireLock">
+  ports: Pick<AwsDeployIdentityPorts, "runAws" | "acquireLock" | "sleep">
 ): Promise<AwsDeployIdentityRemovalResult> {
   const parsed = parseAwsRoleArn(request.roleArn);
   if (!parsed) {
@@ -781,6 +845,15 @@ export async function removeAwsEnvironmentFromRole(
     removed.push(
       ...removedSubjects.map((subject) => `trust subject ${subject}`)
     );
+    const unconfirmed = await awaitTrustVisible(
+      ports,
+      roleName,
+      accountId,
+      policy
+    );
+    if (unconfirmed) {
+      return { ok: false, message: `${unconfirmed} Retry the deletion.` };
+    }
   }
   const policyName = buildAwsEnvironmentPolicyName(request.environment);
   const deletePolicy = await ports.runAws([

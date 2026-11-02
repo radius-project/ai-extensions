@@ -63,7 +63,16 @@ type Script = Record<string, AwsCommandResult | AwsCommandResult[]>;
 
 // Answers each `aws` command by its first three words, and throws on any
 // command the scenario did not script.
-function fakeAws(script: Script, lockResult: AwsLockResult = { ok: true }) {
+// After a successful trust update, `iam get-role` shows the written trust, as
+// IAM does once the write is visible. `staleReads` delays that by that many
+// reads, the way an eventually consistent read can.
+function fakeAws(
+  script: Script,
+  lockResult: AwsLockResult = { ok: true },
+  { staleReads = 0 }: { staleReads?: number } = {}
+) {
+  let writtenTrust: unknown = undefined;
+  let stale = staleReads;
   const calls: string[][] = [];
   const steps: string[] = [];
   const sleeps: number[] = [];
@@ -91,6 +100,24 @@ function fakeAws(script: Script, lockResult: AwsLockResult = { ok: true }) {
             : scripted[0]
           : scripted;
         if (!result) throw new Error(`unexpected aws ${args.join(" ")}`);
+        if (key === "iam update-assume-role-policy" && result.code === 0) {
+          writtenTrust = JSON.parse(
+            args[args.indexOf("--policy-document") + 1] ?? "null"
+          );
+          stale = staleReads;
+          return result;
+        }
+        if (key === "iam get-role" && writtenTrust !== undefined) {
+          if (stale > 0) {
+            stale -= 1;
+            return result;
+          }
+          const record = JSON.parse(result.stdout || "{}");
+          return ok({
+            ...record,
+            Role: { ...record.Role, AssumeRolePolicyDocument: writtenTrust }
+          });
+        }
         return result;
       },
       step(text: string) {
@@ -1456,5 +1483,93 @@ describe("deploy identity lock order", () => {
       aws.ports
     );
     expect(aws.locks).toEqual([]);
+  });
+});
+
+describe("waiting for IAM to show a trust policy write", () => {
+  const reusedRole: Script = {
+    ...happyPath,
+    "iam get-role": ok(managedRole([PROD])),
+    ...existingProvider,
+    "iam update-assume-role-policy": ok(),
+    "eks create-access-entry": fail("ResourceInUseException: exists"),
+    "eks describe-access-entry": entryCreatedAt("2026-10-02T00:00:00Z"),
+    "eks associate-access-policy": fail("ResourceInUseException: exists")
+  };
+  const getRoleCount = (aws: ReturnType<typeof fakeAws>) =>
+    aws.calls.filter((args) => args[1] === "get-role").length;
+
+  it("rereads the role until IAM shows the write before setup goes on", async () => {
+    const aws = fakeAws(reusedRole, { ok: true }, { staleReads: 2 });
+
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(aws.sleeps).toEqual([1000, 2000]);
+    // One read before the write, then two stale reads and the fresh one.
+    expect(getRoleCount(aws)).toBe(4);
+    const commands = aws.calls.map((args) => args.slice(0, 2).join(" "));
+    expect(commands.indexOf("iam put-role-policy")).toBeGreaterThan(
+      commands.lastIndexOf("iam get-role")
+    );
+  });
+
+  it("stops setup when IAM never shows the write", async () => {
+    const aws = fakeAws(reusedRole, { ok: true }, { staleReads: 99 });
+
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-role-trust-unconfirmed",
+      message: `IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped before another run could read the old one. Retry setup.`,
+      created: [`trust for ${DEV} on ${ROLE}`]
+    });
+    expect(aws.sleeps).toEqual([1000, 2000, 4000, 8000]);
+    expect(aws.find("iam put-role-policy")).toBeUndefined();
+  });
+
+  it("keeps waiting when a reread fails or returns no trust policy", async () => {
+    const aws = fakeAws(
+      {
+        ...reusedRole,
+        "iam get-role": [
+          ok(managedRole([PROD])),
+          fail("Throttling"),
+          ok({ Role: { AssumeRolePolicyDocument: "%7Bnot json" } }),
+          ok(managedRole([PROD]))
+        ]
+      },
+      { ok: true },
+      { staleReads: 2 }
+    );
+
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(aws.sleeps).toEqual([1000, 2000]);
+  });
+
+  it("waits on delete too, and stops the deletion when IAM never shows the write", async () => {
+    const script: Script = {
+      "sts get-caller-identity": ok({ Account: ACCOUNT }),
+      "iam get-role": ok(managedRole([DEV, PROD])),
+      "iam update-assume-role-policy": ok(),
+      "iam delete-role-policy": ok()
+    };
+    const removal = { roleArn: ROLE_ARN, environment: "dev", subjects: [DEV] };
+
+    const settled = fakeAws(script, { ok: true }, { staleReads: 1 });
+    expect(
+      await removeAwsEnvironmentFromRole(removal, settled.ports)
+    ).toMatchObject({ ok: true });
+    expect(settled.sleeps).toEqual([1000]);
+
+    const never = fakeAws(script, { ok: true }, { staleReads: 99 });
+    expect(await removeAwsEnvironmentFromRole(removal, never.ports)).toEqual({
+      ok: false,
+      message: `IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped before another run could read the old one. Retry the deletion.`
+    });
+    expect(never.find("iam delete-role-policy")).toBeUndefined();
   });
 });
