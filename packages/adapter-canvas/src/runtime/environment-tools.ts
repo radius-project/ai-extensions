@@ -173,6 +173,20 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
       fingerprint(operation) === snapshot
     );
   }
+  function controlAuthority(
+    operation: OperationRecord,
+    target: EnvironmentTarget & { operationId: string },
+    configuration: () => string
+  ): () => boolean {
+    const authorizedConfiguration = configuration();
+    return () =>
+      !ports.owner.isShuttingDown() &&
+      ports.getOperation(target.operationId) === operation &&
+      operation.operationId === target.operationId &&
+      operation.repo === target.repo &&
+      operation.environment === target.environment &&
+      configuration() === authorizedConfiguration;
+  }
   function promptFor(
     operation: OperationRecord
   ): EnvironmentRequiredInteraction | undefined {
@@ -507,7 +521,14 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
               await ports.control({
                 operationId: target.operationId,
                 command: "stop",
-                isCurrent
+                // Progress and an earlier Stop do not change who may stop this target.
+                isCurrent: controlAuthority(operation, target, () =>
+                  JSON.stringify([
+                    operation.kind,
+                    operation.provider,
+                    savedLogin(operation)
+                  ])
+                )
               }),
               target
             );
@@ -713,19 +734,12 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
               operation.providerRecovery,
               operation.setupArtifacts
             ]);
-          const authorizedConfiguration = configuration();
           const result = await ports.control({
             operationId: target.operationId,
             ...command,
             ...(cancellationTarget ? { cancellationTarget } : {}),
             // The service owns command-state changes after handoff.
-            isCurrent: () =>
-              !ports.owner.isShuttingDown() &&
-              ports.getOperation(target.operationId) === operation &&
-              operation.operationId === target.operationId &&
-              operation.repo === target.repo &&
-              operation.environment === target.environment &&
-              configuration() === authorizedConfiguration
+            isCurrent: controlAuthority(operation, target, configuration)
           });
           if (result.body.cancellation) {
             const evidence = result.body.cancellation;

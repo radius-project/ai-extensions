@@ -35,6 +35,8 @@ import {
   requireInput,
   requestStop,
   stopAtBoundary,
+  setContext,
+  setCloudContext,
   pauseForProviderRestart,
   onOperationTerminal,
   STAGE_VERIFY
@@ -308,6 +310,52 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it.each(["control-only", "setup-context"] as const)(
+    "accepts concurrent registered Stops through the real serialized control service during %s progress",
+    async (progress) => {
+      const h = await composition();
+      const op = createOperation({ ...target, provider: "azure" });
+      op.context.githubLogin = "saved-account";
+      operations.put(op);
+      const snapshots: ReturnType<typeof toPersistedOperation>[] = [];
+      h.persist.mockImplementation(async () => {
+        if (progress === "setup-context") {
+          setContext(op, { clientId: "resolved-app", appName: "setup-app" });
+          setCloudContext(op, "azure", {
+            subscriptionId: "resolved-subscription"
+          });
+        }
+        snapshots.push(structuredClone(toPersistedOperation(op)));
+      });
+      const input = {
+        ...target,
+        operationId: op.operationId,
+        action: "stop"
+      };
+      try {
+        const results = await Promise.all([
+          h.invoke("radius_environment_control", input),
+          h.invoke("radius_environment_control", input)
+        ]);
+        expect(results).toMatchObject([
+          { kind: "accepted", code: "operation-stop-pending" },
+          { kind: "accepted", code: "operation-stop-pending" }
+        ]);
+        expect(snapshots).toHaveLength(2);
+        expect(snapshots[0].control.stop.requestedAt).toBeTruthy();
+        expect(snapshots[1].control.stop.requestedAt).toBe(
+          snapshots[0].control.stop.requestedAt
+        );
+        expect(h.readIdentity).not.toHaveBeenCalled();
+        expect(h.ready).not.toHaveBeenCalled();
+        expect(h.readExecutor).not.toHaveBeenCalled();
+        expect(h.runner).not.toHaveBeenCalled();
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
+
   it.each(
     (["retarget", "replacement", "shutdown"] as const).flatMap((change) =>
       (["before-admission", "after-check"] as const).map((boundary) => ({

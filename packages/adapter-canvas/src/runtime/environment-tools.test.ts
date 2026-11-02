@@ -984,31 +984,38 @@ describe("environment tool handlers", () => {
       expect(schedule).not.toHaveBeenCalled();
     }
   );
-  it.each([
-    "service-progress",
-    "shutdown",
-    "replacement",
-    "operation-id",
-    "repository",
-    "environment",
-    "provider",
-    "account",
-    "context",
-    "request",
-    "resume-request",
-    "provider-recovery",
-    "artifacts",
-    "kind"
-  ] as const)(
-    "keeps service admission bound to its target during %s",
-    async (change) => {
+  it.each(
+    (
+      [
+        "service-progress",
+        "shutdown",
+        "replacement",
+        "operation-id",
+        "repository",
+        "environment",
+        "provider",
+        "account",
+        "context",
+        "request",
+        "resume-request",
+        "provider-recovery",
+        "artifacts",
+        "kind"
+      ] as const
+    ).flatMap((change) =>
+      (["continue", "stop"] as const).map((action) => ({ change, action }))
+    )
+  )(
+    "keeps $action service admission bound to its target during $change",
+    async ({ change, action }) => {
       const h = harness();
-      const op = h.stopped();
+      const op = action === "stop" ? h.op : h.stopped();
       vi.mocked(h.ports.control).mockImplementation(async (input) => {
         expect(input.isCurrent?.()).toBe(true);
         switch (change) {
           case "service-progress":
-            op.state = "running";
+            requestStop(op);
+            op.state = action === "stop" ? "cancelled" : "running";
             op.verification = { acquisitionProvisionalToken: "owned-retry" };
             break;
           case "shutdown":
@@ -1054,10 +1061,18 @@ describe("environment tool handlers", () => {
             op.kind = "delete";
             break;
         }
-        expect(input.isCurrent?.()).toBe(change === "service-progress");
+        const progress =
+          change === "service-progress" ||
+          (action === "stop" &&
+            (change === "context" ||
+              change === "request" ||
+              change === "resume-request" ||
+              change === "provider-recovery" ||
+              change === "artifacts"));
+        expect(input.isCurrent?.()).toBe(progress);
         return h.accepted();
       });
-      await h.tools.control({ ...h.identity, action: "continue" });
+      await h.tools.control({ ...h.identity, action });
       expect(h.ports.control).toHaveBeenCalledOnce();
     }
   );
