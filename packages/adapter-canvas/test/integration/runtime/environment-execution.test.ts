@@ -2429,6 +2429,78 @@ describe("real server and fake SDK runtime ownership", () => {
     expect(op.endedAt).toBeNull();
   });
 
+  it("shares pending headless resume Stop settlement with the production control service", async () => {
+    const runtime = await composition();
+    const op = runtime.recoverDelete();
+    op.kind = "create";
+    op.request = { azure: {} };
+    requireInput(op, {
+      code: "app-selection-required",
+      checkpoint: "selection"
+    });
+    const saving = deferred();
+    const saved = deferred();
+    const snapshots: (typeof op)[] = [];
+    vi.spyOn(operations, "persist").mockImplementation(async () => {
+      const snapshot = structuredClone(op);
+      if (snapshots.length === 0) {
+        saving.resolve();
+        await saved.promise;
+      }
+      snapshots.push(snapshot);
+    });
+    const register = vi.spyOn(runtime.accountContext, "registerExecutor");
+    const schedule = vi.fn(
+      runtime.server.setupExecution.scheduleEnvironmentOperation
+    );
+    const resume = runtime.server.operationResume(
+      {
+        operationId: op.operationId,
+        code: "app-selection-required",
+        isCurrent: () => !runtime.owner.isShuttingDown(),
+        schedule
+      },
+      async () => ({
+        repo: op.repo,
+        environment: op.environment,
+        provider: "azure",
+        checkpoint: "selection",
+        createNew: false,
+        appId: "selected-app"
+      })
+    );
+    try {
+      await saving.promise;
+      const stop = runtime.server.operationControl({
+        operationId: op.operationId,
+        command: "stop"
+      });
+      await vi.waitFor(() => expect(op.stopRequested).toBe(true));
+      saved.resolve();
+      await expect(stop).resolves.toMatchObject({
+        status: 200,
+        body: { code: "operation-stopped" }
+      });
+      await expect(resume).resolves.toMatchObject({
+        status: 200,
+        body: { code: "operation-stopped" }
+      });
+      expect(snapshots.at(-1)).toEqual(op);
+      expect(op).toMatchObject({
+        state: "cancelled",
+        inputRequired: null,
+        control: { stop: { boundary: "input_resume" } }
+      });
+      expect(schedule).not.toHaveBeenCalled();
+      expect(register).not.toHaveBeenCalled();
+      expect(runtime.owner.pendingOperationIds()).toEqual([]);
+      expect(runtime.server.servers.size).toBe(0);
+    } finally {
+      saved.resolve();
+      await resume;
+      await runtime.cleanup();
+    }
+  });
   it("resumes tied setup input through the production runtime with no presentation", async () => {
     const runtime = await composition();
     const op = runtime.recoverDelete();
