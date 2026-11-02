@@ -360,20 +360,56 @@ describe("workflow publication recovery decisions", () => {
   );
 
   it.each([
-    { state: "not_applied" },
-    { state: "not_applied", diagnostic: "Branch deletion was refused." },
     {
-      state: "not_applied",
-      result: { code: 1, stdout: "", stderr: "Deletion denied." }
+      name: "no detail",
+      removal: { state: "not_applied" },
+      expectedDetail: ""
     },
     {
-      state: "not_applied",
-      result: { code: 1, stdout: "Deletion rejected.", stderr: "" }
+      name: "diagnostic before stderr and stdout",
+      removal: {
+        state: "not_applied",
+        diagnostic: "Branch deletion was refused.",
+        result: {
+          code: 1,
+          stdout: "Deletion rejected.",
+          stderr: "Deletion denied."
+        }
+      },
+      expectedDetail: "Branch deletion was refused. "
     },
-    { state: "cancelled" }
-  ] satisfies RecoverableMutationResult<never>[])(
-    "blocks downstream rollback when recovered branch removal returns $state",
-    async (removal) => {
+    {
+      name: "stderr before stdout",
+      removal: {
+        state: "not_applied",
+        result: {
+          code: 1,
+          stdout: "Deletion rejected.",
+          stderr: "Deletion denied."
+        }
+      },
+      expectedDetail: "Deletion denied. "
+    },
+    {
+      name: "stdout fallback",
+      removal: {
+        state: "not_applied",
+        result: { code: 1, stdout: "Deletion rejected.", stderr: "" }
+      },
+      expectedDetail: "Deletion rejected. "
+    },
+    {
+      name: "cancellation",
+      removal: { state: "cancelled" },
+      expectedDetail: "The removal was cancelled. "
+    }
+  ] satisfies {
+    name: string;
+    removal: RecoverableMutationResult<never>;
+    expectedDetail: string;
+  }[])(
+    "persists manual guidance with $name and blocks downstream rollback",
+    async ({ removal, expectedDetail }) => {
       const h = recoveringBranchHarness();
       const recovery = h.recovery;
       const execute = recovery.execute;
@@ -382,29 +418,30 @@ describe("workflow publication recovery decisions", () => {
           Promise.resolve(removal)
         : execute(input);
 
+      const expectedGuidance =
+        'Radius could not confirm removal of recovered setup branch "saved" in octo/app. ' +
+        expectedDetail +
+        "It will not repeat the delete or remove the remaining setup resources. Review that exact branch before starting setup again.";
       await expect(
         createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
           path,
           "content",
           "message"
         )
-      ).rejects.toMatchObject({ code: "provider-mutation-manual-required" });
+      ).rejects.toMatchObject({
+        code: "provider-mutation-manual-required",
+        message: expectedGuidance
+      });
       expect(h.transcript).not.toContain("rollback");
-      expect(h.transcript).toContainEqual([
-        "manual",
-        "github_branch.create",
-        "octo/app\0saved\0base",
-        expect.stringContaining("could not confirm removal")
-      ]);
-      expect(h.transcript.at(-1)).toBe("persist");
-      if ("diagnostic" in removal && removal.diagnostic) {
-        expect(h.transcript).toContainEqual([
+      expect(h.transcript.slice(-2)).toEqual([
+        [
           "manual",
           "github_branch.create",
           "octo/app\0saved\0base",
-          expect.stringContaining(removal.diagnostic)
-        ]);
-      }
+          expectedGuidance
+        ],
+        "persist"
+      ]);
     }
   );
 
