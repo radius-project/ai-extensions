@@ -23,3 +23,5 @@ Verification dispatch and automatic run discovery stop further reads and monitor
 Session shutdown waits up to two seconds for detached setup tasks, acknowledgement saves and account restoration alongside closing panels. Incomplete settlement or teardown failures are reported and exit nonzero; external work that exceeds the deadline can still be interrupted and requires recovery inspection.
 
 Late absent or mismatched Azure recovery reads preserve unresolved evidence after shutdown. Caller-identity retries stop before another Azure invocation, and retrying an accepted verification dispatch after a save failure reuses its confirmed run rather than dispatching again.
+
+Resumed Azure setup stops continuation validation, nested repository checks and preflight work after shutdown without turning late reads into failure cleanup or overwriting its saved checkpoint.

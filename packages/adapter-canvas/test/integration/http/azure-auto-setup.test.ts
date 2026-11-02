@@ -1070,6 +1070,84 @@ describe("Azure setup recovery and public operation resume contracts (RF-03)", (
     expect(setup.operation.azureAppCreateContinuation).toBeUndefined();
   });
 
+  it("retains the accepted durable checkpoint when public resume is interrupted during Azure validation", async () => {
+    const setup = await successfulSetup(
+      true,
+      { type: "user" },
+      {
+        requireSmrPrompt: true,
+        publicResume: true
+      }
+    );
+    expect((await authorize(JSON.stringify(CREATE_BODY))).status).toBe(400);
+    setup.restorePersistedOperation();
+    let enter = () => {};
+    let release = () => {};
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stopped = false;
+    setup.dependencies.isStopped = () => stopped;
+    const read = setup.dependencies.external.runAz;
+    setup.dependencies.external.runAz = async (args) => {
+      const result = await read(args);
+      expect(args).toEqual(["account", "show", "--output", "json"]);
+      enter();
+      await released;
+      return result;
+    };
+    const response = await fetch(
+      `${setup.running.baseUrl}/api/operations/op_http_smr/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          repo: "octo/app",
+          environment: "dev",
+          provider: "azure",
+          serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+        })
+      }
+    );
+    const rejected = expect(setup.scheduledAttempt()).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    try {
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({
+        operationId: "op_http_smr",
+        statusUrl: "/api/operations/op_http_smr"
+      });
+      await entered;
+      const durable = structuredClone(setup.persistedOperation());
+      const az = [...setup.azCalls];
+      const github = [...setup.githubCalls];
+      expect(durable).toMatchObject({
+        state: "running",
+        azureAppCreateContinuation: {
+          acceptedPrompt: { code: "service-management-reference-required" }
+        }
+      });
+      expect(setup.operation.azureAppCreateContinuation).toBeUndefined();
+      stopped = true;
+      release();
+      await rejected;
+      expect(setup.persistedOperation()).toEqual(durable);
+      expect(setup.azCalls).toEqual(az);
+      expect(setup.githubCalls).toEqual(github);
+      expect(setup.operation.operationId).toBe("op_http_smr");
+      expect(setup.operation).toHaveProperty("endedAt", null);
+    } finally {
+      stopped = true;
+      release();
+      await rejected;
+    }
+  });
+
   it("creates and owns the app registration when the CLI is a service principal", async () => {
     const { unmatchedCalls, azCalls } = await successfulSetup(true, {
       type: "servicePrincipal",

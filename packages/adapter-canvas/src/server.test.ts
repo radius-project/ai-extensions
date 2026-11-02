@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import * as gh from "./gh.js";
 import {
+  assertSetupExecutionActive,
   remediationView,
   DEPLOY_RAD_COMMANDS_STEP as CORE_DEPLOY_RAD_COMMANDS_STEP
 } from "@radius-project/core";
@@ -6822,6 +6824,60 @@ describe("deploy failures that may leave a run in flight", () => {
 });
 
 describe("GitHub App repository preflight", () => {
+  it.each([false, true])(
+    "retains ambient fallback identity behavior with optional shutdown guard (stopped=%s)",
+    async (stopDuringIdentity) => {
+      let stopped = false;
+      const read = vi
+        .spyOn(gh, "ghApiJson")
+        .mockImplementation(async (path) => {
+          if (path === "user")
+            return { ok: false, status: 401, json: null, text: "", stderr: "" };
+          expect(path).toBe("repos/octo/app");
+          return {
+            ok: true,
+            status: 200,
+            json: { permissions: { admin: true } },
+            text: "",
+            stderr: ""
+          };
+        });
+      vi.spyOn(gh, "getGitHubIdentity").mockImplementation(async () => {
+        stopped = stopDuringIdentity;
+        return {
+          actingLogin: "fixture-user",
+          displayLogin: "fixture-user",
+          mismatch: false,
+          actingHasWorkflow: true,
+          actingHasPackages: true,
+          packagesLogin: "fixture-user",
+          packagesHasWrite: true,
+          packagesCredentialSource: "keyring",
+          reason: "",
+          accounts: []
+        };
+      });
+      try {
+        const pending = preflightRepoAdmin(
+          "octo/app",
+          undefined,
+          undefined,
+          stopDuringIdentity ?
+            () => assertSetupExecutionActive(() => stopped)
+          : undefined
+        );
+        if (stopDuringIdentity)
+          await expect(pending).rejects.toMatchObject({
+            code: "setup-execution-interrupted"
+          });
+        else await expect(pending).resolves.toBe("");
+        expect(read).toHaveBeenCalledTimes(stopDuringIdentity ? 1 : 2);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    }
+  );
+
   function appExecutor(
     responses: Record<string, { code: number; stdout: string; stderr: string }>
   ) {
@@ -6868,6 +6924,58 @@ describe("GitHub App repository preflight", () => {
       path,
       { code: 0, stdout: "[]", stderr: "" }
     ])
+  );
+
+  it.each(["user", "repos/octo/app", ...gitHubAppAccessProbePaths("octo/app")])(
+    "stops nested repository preflight after held %s settlement",
+    async (heldPath) => {
+      for (const outcome of ["success", "denied", "rejected"] as const) {
+        const { executor, calls } = appExecutor({
+          user: {
+            code: 0,
+            stdout: '{"login":"radius-cloud-e2e[bot]"}',
+            stderr: ""
+          },
+          "repos/octo/app": REPO_OK,
+          ...PROBES_OK
+        });
+        let enter = () => {};
+        let release = () => {};
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let stopped = false;
+        const run = executor.run;
+        executor.run = async (args) => {
+          const result = await run(args);
+          if (args[1] !== heldPath) return result;
+          enter();
+          await released;
+          if (outcome === "rejected") throw new Error("read rejected");
+          return outcome === "denied" ?
+              { code: 1, stdout: "", stderr: "HTTP 403" }
+            : result;
+        };
+        const pending = preflightRepoAdmin(
+          "octo/app",
+          executor,
+          undefined,
+          () => assertSetupExecutionActive(() => stopped)
+        );
+        const rejected = expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        await entered;
+        const issued = [...calls];
+        stopped = true;
+        release();
+        await rejected;
+        expect(calls).toEqual(issued);
+      }
+    }
   );
 
   it("clears an installation that can read every resource it will configure", async () => {

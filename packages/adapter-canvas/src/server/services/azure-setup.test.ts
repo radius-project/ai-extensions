@@ -13,6 +13,12 @@ import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import { createAzureSetupService } from "./azure-setup.js";
 import { setupStageResult } from "./setup-outcome.js";
 import type { AzureAutoSetupDependencies } from "../routes/azure-auto-setup-types.js";
+import { buildEnvironmentSuffix } from "@radius-project/core";
+import { resolveOidcSubject } from "../../azure-oidc.js";
+import {
+  createAzureAppCreateContinuation,
+  normalizeAzureAppCreateContinuation
+} from "../../azure-app-create-continuation.js";
 
 const request = {
   repo: "octo/app",
@@ -46,6 +52,348 @@ function fixture() {
   });
   return { operation, dependencies, finalize };
 }
+
+describe("accepted Azure continuation shutdown", () => {
+  function deferred() {
+    let resolve = () => {};
+    const promise = new Promise<void>((complete) => {
+      resolve = complete;
+    });
+    return { promise, resolve };
+  }
+  async function continuationFixture(caller: "user" | "servicePrincipal") {
+    const test = fixture();
+    const executor = successfulSelectedGhExecutor();
+    const calls: string[] = [];
+    let stopped = false;
+    const account = {
+      id: request.subscriptionId,
+      tenantId: "11111111-1111-1111-1111-111111111111",
+      user: {
+        type: caller,
+        name: "55555555-5555-5555-5555-555555555555"
+      }
+    };
+    const github = async (path: string) => {
+      if (path === "/repos/octo/app")
+        return {
+          ok: true,
+          status: 200,
+          json: { full_name: "octo/app", id: 5, owner: { id: 7 } }
+        };
+      if (path === "/repos/octo/app/actions/oidc/customization/sub")
+        return { ok: false, status: 404, json: null };
+      throw new Error(`Unexpected GitHub request ${path}`);
+    };
+    const oidc = await resolveOidcSubject(
+      {
+        targetRepo: request.repo,
+        envName: "dev",
+        suffix: buildEnvironmentSuffix("dev")
+      },
+      github
+    );
+    const saved = createAzureAppCreateContinuation(
+      {
+        operationId: test.operation.operationId,
+        request: {
+          repo: request.repo,
+          environment: "dev",
+          operationEnvironment: "dev",
+          requestedSubscriptionId: request.subscriptionId,
+          requestedTenantId: "",
+          resourceGroup: request.resourceGroup,
+          clusterName: request.cluster,
+          clusterResourceGroup: "",
+          explicitAppId: "",
+          createNewApp: false,
+          appNameProvided: false,
+          requestedAppName: "",
+          requestedClientId: ""
+        },
+        githubExecutor: executor,
+        resolved: {
+          subscriptionId: request.subscriptionId,
+          tenantId: account.tenantId,
+          oidcSuffix: buildEnvironmentSuffix("dev"),
+          oidc,
+          callerIdentity:
+            caller === "user" ?
+              { kind: "user" }
+            : { kind: "servicePrincipal", appId: account.user.name }
+        }
+      },
+      "radius-deploy-octo-app",
+      "44444444-4444-4444-4444-444444444444",
+      "2026-10-14T10:00:00.000Z"
+    );
+    if (!saved) throw new Error("Invalid continuation fixture");
+    test.operation.state = "running";
+    test.operation.azureAppCreateContinuation = {
+      ...saved,
+      acceptedPrompt: saved.prompt
+    };
+    expect(
+      normalizeAzureAppCreateContinuation(
+        test.operation.azureAppCreateContinuation
+      )
+    ).not.toBeNull();
+    test.dependencies.isStopped = () => stopped;
+    test.dependencies.external.getSelectedGitHubExecutor = () => executor;
+    executor.verifyIdentity = async () => {
+      calls.push("identity");
+    };
+    test.dependencies.external.runAz = async (args) => {
+      calls.push(args[0] === "account" ? "account" : "caller");
+      if (args[0] === "account")
+        return { code: 0, stdout: JSON.stringify(account), stderr: "" };
+      if (
+        args[0] === "ad" &&
+        args[1] === (caller === "user" ? "signed-in-user" : "sp") &&
+        args[2] === "show"
+      )
+        return { code: 0, stdout: saved.resolved.callerObjectId, stderr: "" };
+      throw new Error(`Unexpected Azure command ${args.join(" ")}`);
+    };
+    test.dependencies.external.runGitHubJson = async (path) => {
+      calls.push(path.endsWith("/sub") ? "customization" : "repository");
+      return github(path);
+    };
+    test.dependencies.external.preflightRepoAdmin = async () => {
+      calls.push("preflight");
+      return "";
+    };
+    test.dependencies.external.preflightGhcrPackageWriteAccess = async () => {
+      calls.push("packages");
+      return { ok: true };
+    };
+    return {
+      ...test,
+      executor,
+      calls,
+      stop: () => {
+        stopped = true;
+      },
+      run: () =>
+        createAzureSetupService(test.dependencies)({
+          data: {
+            ...request,
+            operationId: test.operation.operationId,
+            serviceManagementReference: "66666666-6666-6666-6666-666666666666"
+          }
+        })
+    };
+  }
+
+  it.each(["user", "servicePrincipal"] as const)(
+    "does not consume accepted input when already stopped (%s)",
+    async (caller) => {
+      const test = await continuationFixture(caller);
+      test.operation.inputRequired =
+        test.operation.azureAppCreateContinuation.prompt;
+      const before = structuredClone(test.operation);
+      test.dependencies.operations.resumeAfterInput = vi.fn();
+      test.dependencies.operations.enterStage = vi.fn();
+      test.stop();
+      await expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(test.operation).toEqual(before);
+      expect(test.calls).toEqual([]);
+      expect(
+        test.dependencies.operations.resumeAfterInput
+      ).not.toHaveBeenCalled();
+      expect(test.dependencies.operations.enterStage).not.toHaveBeenCalled();
+      expect(test.finalize).not.toHaveBeenCalled();
+    }
+  );
+
+  for (const caller of ["user", "servicePrincipal"] as const) {
+    it.each([
+      "identity",
+      "account",
+      "caller",
+      "repository",
+      "customization"
+    ] as const)(
+      `stops after held ${caller} %s validation without another call or checkpoint`,
+      async (boundary) => {
+        const test = await continuationFixture(caller);
+        const entered = deferred();
+        const release = deferred();
+        const hold = async <T>(name: string, work: () => Promise<T>) => {
+          const result = await work();
+          if (name === boundary) {
+            entered.resolve();
+            await release.promise;
+          }
+          return result;
+        };
+        const verify = test.executor.verifyIdentity;
+        test.executor.verifyIdentity = () => hold("identity", verify);
+        const az = test.dependencies.external.runAz;
+        test.dependencies.external.runAz = (args) =>
+          hold(args[0] === "account" ? "account" : "caller", () => az(args));
+        const github = test.dependencies.external.runGitHubJson;
+        test.dependencies.external.runGitHubJson = (path, executor) =>
+          hold(path.endsWith("/sub") ? "customization" : "repository", () =>
+            github(path, executor)
+          );
+        const pending = test.run();
+        const rejection = expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        await entered.promise;
+        const issued = [...test.calls];
+        test.stop();
+        release.resolve();
+        await rejection;
+        expect(test.calls).toEqual(issued);
+        expect(test.finalize).not.toHaveBeenCalled();
+        expect(test.dependencies.operations.persist).not.toHaveBeenCalled();
+      }
+    );
+  }
+  it.each([
+    "identity",
+    "account",
+    "caller",
+    "repository",
+    "customization",
+    "preflight",
+    "packages"
+  ] as const)(
+    "interruption wins over a rejected %s read without failure cleanup",
+    async (boundary) => {
+      const test = await continuationFixture("user");
+      const reject = async () => {
+        test.stop();
+        throw new Error("read denied");
+      };
+      if (boundary === "identity") test.executor.verifyIdentity = reject;
+      if (boundary === "account" || boundary === "caller") {
+        const az = test.dependencies.external.runAz;
+        test.dependencies.external.runAz = (args) =>
+          (args[0] === "account") === (boundary === "account") ?
+            reject()
+          : az(args);
+      }
+      if (boundary === "repository" || boundary === "customization") {
+        const github = test.dependencies.external.runGitHubJson;
+        test.dependencies.external.runGitHubJson = (path) =>
+          path.endsWith("/sub") === (boundary === "customization") ?
+            reject()
+          : github(path);
+      }
+      if (boundary === "preflight" || boundary === "packages") {
+        test.dependencies.external.runAz = async () => ({
+          code: 0,
+          stdout: "{}",
+          stderr: ""
+        });
+        if (boundary === "preflight")
+          test.dependencies.external.preflightRepoAdmin = reject;
+        else
+          test.dependencies.external.preflightGhcrPackageWriteAccess = reject;
+      }
+      await expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(test.finalize).not.toHaveBeenCalled();
+      expect(test.dependencies.operations.persist).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["mismatch", "malformed", "failed"] as const)(
+    "does not interpret late %s account evidence as a continuation fallback",
+    async (result) => {
+      const test = await continuationFixture("user");
+      test.dependencies.external.runAz = async () => {
+        test.stop();
+        return {
+          code: result === "failed" ? 1 : 0,
+          stdout:
+            result === "malformed" ? "{"
+            : result === "mismatch" ?
+              JSON.stringify({
+                id: "77777777-7777-4777-8777-777777777777",
+                tenantId: "11111111-1111-1111-1111-111111111111",
+                user: { type: "user" }
+              })
+            : "",
+          stderr: "denied"
+        };
+      };
+      await expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(test.calls).toEqual(["identity"]);
+      expect(test.finalize).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["preflight", "packages"] as const)(
+    "does not interpret late %s denial or launch the next phase",
+    async (boundary) => {
+      const test = await continuationFixture("user");
+      test.dependencies.external.runAz = async () => ({
+        code: 0,
+        stdout: "{}",
+        stderr: ""
+      });
+      if (boundary === "preflight")
+        test.dependencies.external.preflightRepoAdmin = async () => {
+          test.stop();
+          return "denied";
+        };
+      else
+        test.dependencies.external.preflightGhcrPackageWriteAccess =
+          async () => {
+            test.stop();
+            return { ok: false, status: 403, error: "denied", code: "denied" };
+          };
+      await expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(test.finalize).not.toHaveBeenCalled();
+      expect(test.dependencies.operations.persist).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["response", "delay"] as const)(
+    "stops OIDC retry admission after shutdown during %s",
+    async (boundary) => {
+      vi.useFakeTimers();
+      try {
+        const test = await continuationFixture("user");
+        const received = deferred();
+        const read = vi.fn(async () => {
+          if (boundary === "response") test.stop();
+          received.resolve();
+          return { ok: false, status: 503, json: null };
+        });
+        test.dependencies.external.runGitHubJson = read;
+        const pending = test.run();
+        const rejected = expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        await received.promise;
+        if (boundary === "delay") {
+          await vi.advanceTimersByTimeAsync(0);
+          expect(vi.getTimerCount()).toBe(1);
+          test.stop();
+          await vi.advanceTimersByTimeAsync(300);
+        }
+        await rejected;
+        expect(read).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+        expect(test.finalize).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+});
 
 describe("transport-independent Azure setup", () => {
   it("does not restore a prompt continuation after the operation terminalizes during app creation", async () => {
