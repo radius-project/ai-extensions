@@ -406,9 +406,31 @@ async function handleStopOperation(
   context: OperationControlContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
-  const resolved = await resolveOperation(context, dependencies);
+  const resolved = resolveOperation(context, dependencies);
   if (!resolved) return;
   const { operationId, operation } = resolved;
+  const repo = operation.repo;
+  const environment = operation.environment;
+  const callerCurrent = context.isCurrent?.() ?? true;
+  if (dependencies.isShuttingDown?.()) {
+    sendJson(context, 503, {
+      code: "operation-shutting-down",
+      error:
+        "The session is shutting down. No Stop was recorded; review the saved operation before continuing in a new session.",
+      operationId
+    });
+    return;
+  }
+  if (
+    !callerCurrent ||
+    dependencies.get(operationId) !== operation ||
+    operation.operationId !== operationId ||
+    operation.repo !== repo ||
+    operation.environment !== environment
+  ) {
+    publishStale(context);
+    return;
+  }
   const pendingResumeStop = dependencies.stopPendingResume(operation);
   if (pendingResumeStop) {
     const result = await pendingResumeStop;

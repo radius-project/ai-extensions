@@ -149,6 +149,60 @@ describe("direct operation control service", () => {
     expect(dependencies.acquireForRetry).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "replacement",
+    "operation-id",
+    "repository",
+    "environment",
+    "shutdown"
+  ] as const)(
+    "refuses %s at the final Stop check before consulting pending resume ownership",
+    async (change) => {
+      const operation = newOperation();
+      const operationId = operation.operationId;
+      const before = structuredClone(operation.control);
+      let record = operation;
+      let shuttingDown = false;
+      let checks = 0;
+      const stopPendingResume = vi.fn(() => null);
+      const { dependencies } = fixture({
+        get: () => record,
+        stopPendingResume,
+        isShuttingDown: () => shuttingDown
+      });
+      const result = await createOperationsControlService(dependencies)({
+        operationId,
+        command: "stop",
+        isCurrent: () => {
+          if (++checks === 2) {
+            if (change === "replacement") record = structuredClone(operation);
+            if (change === "operation-id")
+              operation.operationId = "replacement";
+            if (change === "repository") operation.repo = "fixture/other";
+            if (change === "environment") operation.environment = "other";
+            if (change === "shutdown") shuttingDown = true;
+          }
+          return true;
+        }
+      });
+      expect(result).toMatchObject({
+        status: change === "shutdown" ? 503 : 409,
+        body: {
+          code:
+            change === "shutdown" ?
+              "operation-shutting-down"
+            : "operation-context-changed"
+        }
+      });
+      expect(operation.control).toEqual(before);
+      expect(record.control).toEqual(before);
+      expect(stopPendingResume).not.toHaveBeenCalled();
+      expect(dependencies.persistOperations).not.toHaveBeenCalled();
+      expect(dependencies.acquireForRetry).not.toHaveBeenCalled();
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+    }
+  );
+
   it("propagates registry unavailability after the Stop save without guessing workflow status", async () => {
     const operation = newOperation();
     operation.context = { githubLogin: "alice" };

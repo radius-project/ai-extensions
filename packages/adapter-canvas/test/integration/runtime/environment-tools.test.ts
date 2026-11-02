@@ -413,10 +413,11 @@ describe("registered environment tools with production runtime services", () => 
           expect(op.control.stop).toEqual(originalStop);
           expect(snapshots).toEqual([]);
         } else {
-          expect(result).toMatchObject({
-            kind: "accepted",
-            code: "operation-stop-pending"
-          });
+          expect(result).toMatchObject(
+            change === "retarget" ?
+              { kind: "refused", code: "operation-target-mismatch" }
+            : { kind: "accepted", code: "operation-stop-pending" }
+          );
           expect(snapshots).toHaveLength(1);
           expect(authorityAtSave).toEqual([true]);
           expect(snapshots[0].environment).toBe(target.environment);
@@ -1139,7 +1140,7 @@ describe("registered environment tools with production runtime services", () => 
           expect(op.request.azure.serviceManagementReference).toBe("approved");
         }
         const claim = h.owner.claimAdmission(op.operationId);
-        expect(claim === null).toBe(correctionFails);
+        expect(claim === null).toBe(correctionFails || change === "shutdown");
         claim?.release();
       } finally {
         gate.resolve();

@@ -952,6 +952,7 @@ describe("environment tool handlers", () => {
       h.registry.put(op);
       const schedule = vi.fn(() => true);
       h.ports.control = createOperationsControlService({
+        stopPendingResume: () => null,
         get: (id) => h.registry.get(id),
         claimAdmission: h.owner.claimAdmission,
         acquireForRetry: (operation) => h.registry.acquireForRetry(operation),

@@ -37,6 +37,7 @@ function fixture() {
   const persist = vi.fn(async () => {});
   const diagnostic = vi.fn();
   const dependencies: OperationsControlDependencies = {
+    stopPendingResume: () => null,
     claimAdmission: owner.claimAdmission,
     isShuttingDown: owner.isShuttingDown,
     get: () => current,
@@ -160,7 +161,9 @@ describe("run-bound workflow cancellation", () => {
         });
         expect(h.run).toHaveBeenCalledTimes(1);
         const claim = h.owner.claimAdmission(h.operation.operationId);
-        expect(claim === null).toBe(change === "correction-failure");
+        expect(claim === null).toBe(
+          change === "correction-failure" || change === "shutdown"
+        );
         claim?.release();
       } finally {
         release();
