@@ -155,10 +155,10 @@ export function initializeGraphChip(
     if (text === "") return hide();
     chip.className = "rad-opchip rad-opchip--running";
     if (label) label.textContent = text;
-    // The stage's own narration goes in the tooltip and the accessible name, so
-    // the short chip is never the only thing on offer.
+    // The stage's own narration goes in the tooltip, which is also the
+    // accessible description, so the short chip is never the only thing on
+    // offer. The accessible name stays the visible text.
     chip.setAttribute("title", status.detail || text);
-    chip.setAttribute("aria-label", status.detail || text);
     chip.setAttribute("href", graphChipHref(status.view));
     chip.hidden = false;
     chip.dataset.view = status.view;

@@ -145,7 +145,7 @@ export function environmentsPaneMarkup(
          sits next to it. -->
     <div id="env-progress-actions" class="env-progress__actions" style="display:none;">
       <div id="env-progress-bottom-buttons" class="env-progress__bottom-buttons"></div>
-      <button type="button" id="env-progress-dismiss" class="rad-btn rad-btn--secondary" aria-label="Dismiss completed environment setup progress">Dismiss</button>
+      <button type="button" id="env-progress-dismiss" class="rad-btn rad-btn--secondary" title="Dismiss completed environment setup progress">Dismiss</button>
     </div>
   </div>
   <div id="env-diagnostics-modal" role="dialog" aria-modal="true" aria-labelledby="env-diagnostics-title" aria-describedby="env-diagnostics-intro" style="display:none; position:fixed; inset:0; z-index:1004; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
