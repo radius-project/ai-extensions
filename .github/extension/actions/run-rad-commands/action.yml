@@ -59,6 +59,20 @@ inputs:
     description: Periodically refresh the Azure workload identity token while commands run.
     required: false
     default: "false"
+  aws-role-arn:
+    description: >-
+      AWS deploy role. When set, the GitHub OIDC token, and the EKS token when
+      aws-eks-cluster-name is set, are refreshed while commands run.
+    required: false
+    default: ""
+  aws-eks-cluster-name:
+    description: EKS cluster whose token is refreshed. Requires aws-role-arn.
+    required: false
+    default: ""
+  aws-region:
+    description: Region of the EKS cluster. Required with aws-role-arn.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -158,6 +172,9 @@ runs:
         # the script) so values with quotes/newlines can't break the shell.
         RADIUS_DEPLOY_PARAMS: ${{ inputs.deploy-params }}
         REFRESH_AZURE_OIDC_TOKEN: ${{ inputs.azure-oidc-token-refresh }}
+        RADIUS_AWS_ROLE_ARN: ${{ inputs.aws-role-arn }}
+        RADIUS_AWS_EKS_CLUSTER_NAME: ${{ inputs.aws-eks-cluster-name }}
+        RADIUS_AWS_REGION: ${{ inputs.aws-region }}
       run: |
         # pipefail so a failed `rad` whose output is piped through `tee` is detected
         # via PIPESTATUS rather than masked by tee's exit code.
@@ -362,6 +379,14 @@ runs:
           OIDC_REFRESH_PID=$!
         }
 
+        start_aws_token_refresh() {
+          [ -n "$RADIUS_AWS_ROLE_ARN" ] || return 0
+          AWS_TOKEN_REFRESH_SCRIPT="$GITHUB_ACTION_PATH/../../scripts/refresh-aws-tokens.sh"
+          bash "$AWS_TOKEN_REFRESH_SCRIPT" --prepare || return 1
+          bash "$AWS_TOKEN_REFRESH_SCRIPT" --watch &
+          OIDC_REFRESH_PID=$!
+        }
+
         if [ -n "${RAD_COMMANDS//[[:space:]]/}" ]; then
           # Caller-supplied commands: a single command string or a JSON array, run in
           # order with the `rad` prefix omitted.
@@ -392,6 +417,11 @@ runs:
           done
 
           if [ "$REQUESTED" -gt 0 ] && ! start_azure_oidc_refresh; then
+            OVERALL_OUTCOME="command_failed"
+            OVERALL_EXIT=1
+            exit 1
+          fi
+          if [ "$REQUESTED" -gt 0 ] && ! start_aws_token_refresh; then
             OVERALL_OUTCOME="command_failed"
             OVERALL_EXIT=1
             exit 1
@@ -489,6 +519,11 @@ runs:
           # so values with special characters are not mangled by the shell.
           REQUESTED=1
           if ! start_azure_oidc_refresh; then
+            OVERALL_OUTCOME="command_failed"
+            OVERALL_EXIT=1
+            exit 1
+          fi
+          if ! start_aws_token_refresh; then
             OVERALL_OUTCOME="command_failed"
             OVERALL_EXIT=1
             exit 1
