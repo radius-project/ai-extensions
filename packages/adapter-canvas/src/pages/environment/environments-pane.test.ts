@@ -317,9 +317,11 @@ describe("environmentsPaneMarkup", () => {
     expect(actions).toContain(
       '<div id="env-progress-bottom-buttons" class="env-progress__bottom-buttons"></div>'
     );
+    // The accessible name is the visible text, so speech input can name it.
     expect(actions).toContain(
-      'aria-label="Dismiss completed environment setup progress"'
+      'title="Dismiss completed environment setup progress">Dismiss</button>'
     );
+    expect(actions).not.toContain("aria-label");
     // Only the acknowledgement is static: every other control in this row is
     // whatever the operation record projected.
     expect(actions.match(/<button/g) ?? []).toHaveLength(1);
