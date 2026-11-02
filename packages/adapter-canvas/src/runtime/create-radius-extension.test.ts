@@ -883,6 +883,111 @@ describe("RU-21: operation-aware host keepalive", () => {
 // RU-18 (extension half): shutdown closes every server and tears down the
 // session exactly once, even under a duplicate/concurrent call.
 describe("RU-18: shutdown is idempotent and closes every server exactly once", () => {
+  it("reports a rejected task finalizer and still tears down the session", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ext, deps } = setup();
+    const close = vi.fn();
+    ext.attachSession(createFakeSession({ close }));
+    let release = () => {};
+    let started = () => {};
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    deps.executionOwner.attachRuntime().schedule("failed-finalizer", {
+      run: async () => {
+        started();
+        await held;
+      },
+      failed: async () => {},
+      settling: () => {},
+      settled: async () => {
+        throw new Error("sensitive provider diagnostic");
+      }
+    });
+    await entered;
+    const stopping = ext.shutdown();
+    release();
+    await expect(stopping).resolves.toEqual({ complete: false, exitCode: 1 });
+    expect(close).toHaveBeenCalledOnce();
+    expect(deps.logError).toHaveBeenCalledExactlyOnceWith(
+      "Radius setup drain failed: operation failed-finalizer: finalization failed"
+    );
+    vi.restoreAllMocks();
+  });
+  it.each(["throws", "rejects"] as const)(
+    "returns failure when session teardown %s",
+    async (failure) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { ext } = setup();
+      ext.attachSession(
+        createFakeSession({
+          close: () => {
+            if (failure === "throws") throw new Error("session close failed");
+            return Promise.reject(new Error("session close failed"));
+          }
+        })
+      );
+      await expect(ext.shutdown()).resolves.toEqual({
+        complete: false,
+        exitCode: 1
+      });
+      vi.restoreAllMocks();
+    }
+  );
+  it.each([1999, 2000, 2001])(
+    "uses a single 2000ms task/server deadline for settlement at %dms",
+    async (delay) => {
+      vi.useFakeTimers();
+      try {
+        const { ext, deps } = setup();
+        const scope = deps.executionOwner.attachRuntime();
+        let release = () => {};
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        scope.schedule("held-operation", {
+          run: () => held,
+          failed: async () => {},
+          settling: () => {},
+          settled: () => {}
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        deps.servers.set(
+          "held-panel",
+          createFakeServerEntry("held-panel", "deployed")
+        );
+        vi.mocked(deps.stopServer).mockImplementation(() => held);
+        const close = vi.fn();
+        ext.attachSession(createFakeSession({ close }));
+        const stopping = ext.shutdown("SIGTERM");
+        expect(ext.shutdown("SIGINT")).toBe(stopping);
+        setTimeout(release, delay);
+        let outcome: unknown;
+        void stopping.then((value) => {
+          outcome = value;
+        });
+        await vi.advanceTimersByTimeAsync(1998);
+        expect(outcome).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(2);
+        expect(outcome).toMatchObject({
+          complete: delay < 2000,
+          exitCode: delay < 2000 ? 0 : 1
+        });
+        expect(close).toHaveBeenCalledOnce();
+        if (delay >= 2000)
+          expect(deps.logError).toHaveBeenCalledWith(
+            expect.stringContaining("held-operation")
+          );
+        await vi.advanceTimersByTimeAsync(1);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
   it.each(["rejects", "throws", "marking throws"] as const)(
     "reports a server stop that %s and still closes its sibling and session once",
     async (failure) => {
@@ -909,7 +1014,7 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
 
       const stopping = ext.shutdown("SIGTERM");
       expect(ext.shutdown("SIGINT")).toBe(stopping);
-      await stopping;
+      await expect(stopping).resolves.toEqual({ complete: false, exitCode: 1 });
       await ext.shutdown("SIGTERM");
 
       expect(deps.logError).toHaveBeenCalledExactlyOnceWith(
@@ -963,7 +1068,10 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
     const session = createFakeSession({ close } as never);
     ext.attachSession(session);
 
-    await ext.shutdown("SIGTERM");
+    await expect(ext.shutdown("SIGTERM")).resolves.toEqual({
+      complete: true,
+      exitCode: 0
+    });
     await ext.shutdown("SIGTERM");
     expect(close).toHaveBeenCalledTimes(1);
   });
@@ -1056,6 +1164,9 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
       page: "graph",
       state: {}
     });
-    await expect(ext.shutdown("SIGTERM")).resolves.toBeUndefined();
+    await expect(ext.shutdown("SIGTERM")).resolves.toEqual({
+      complete: false,
+      exitCode: 1
+    });
   });
 });

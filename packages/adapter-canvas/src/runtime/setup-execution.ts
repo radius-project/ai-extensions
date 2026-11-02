@@ -122,6 +122,7 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
         operationId,
         message: errorMessage(error)
       });
+      throw error;
     }
   }
 
@@ -169,7 +170,7 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
             operationId,
             message: errorMessage(error)
           });
-          return;
+          throw error;
         }
         if (current && reopenProviderReconciliation(current)) {
           if (

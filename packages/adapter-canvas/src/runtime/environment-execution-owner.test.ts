@@ -38,6 +38,163 @@ afterEach(() => {
 });
 
 describe("runtime environment execution ownership", () => {
+  it("releases synchronous task ownership before the settled callback's consumer resumes", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const completed = deferred();
+    owner.attachRuntime().schedule("op", {
+      ...task(async () => {}),
+      settled: () => completed.resolve()
+    });
+    await completed.promise;
+    const admission = owner.claimAdmission("op");
+    expect(admission?.hadTask).toBe(false);
+    expect(admission?.canRestore()).toBe(true);
+    admission?.release();
+    await expect(owner.shutdown()).resolves.toMatchObject({ complete: true });
+  });
+  it("waits for an asynchronous settling callback before completing the drain", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const finalizing = deferred();
+    const finalized = deferred();
+    owner.attachRuntime().schedule("op", {
+      ...task(async () => {}),
+      settling: async () => {
+        finalizing.resolve();
+        await finalized.promise;
+      }
+    });
+    await finalizing.promise;
+    let done = false;
+    const shutdown = owner.shutdown();
+    void shutdown.then(() => {
+      done = true;
+    });
+    await Promise.resolve();
+    expect(done).toBe(false);
+    expect(owner.pendingOperationIds()).toEqual(["op"]);
+    finalized.resolve();
+    await expect(shutdown).resolves.toMatchObject({ complete: true });
+  });
+  it("does not include a historical failed finalizer in a later clean drain", async () => {
+    const logged = deferred();
+    vi.spyOn(console, "error").mockImplementation(() => logged.resolve());
+    const owner = createEnvironmentExecutionOwner();
+    owner.attachRuntime().schedule("old-operation", {
+      ...task(async () => {
+        throw new Error("provider failed");
+      }),
+      failed: async () => {
+        throw new Error("old settlement failed");
+      }
+    });
+    await logged.promise;
+    expect(owner.pendingOperationIds()).toEqual([]);
+    await expect(owner.shutdown()).resolves.toEqual({
+      complete: true,
+      failures: []
+    });
+  });
+  it.each(["failed", "settling", "settled"] as const)(
+    "reports a rejected %s finalizer as an incomplete drain",
+    async (boundary) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const owner = createEnvironmentExecutionOwner({
+        deferTask: async () => {},
+        microtask: queueMicrotask,
+        reconciliationTimer: () => vi.fn()
+      });
+      const started = deferred();
+      const held = deferred();
+      const work = task(async () => {
+        started.resolve();
+        await held.promise;
+        if (boundary === "failed") throw new Error("work failed");
+      });
+      owner.attachRuntime().schedule("op", {
+        ...work,
+        [boundary]: async () => {
+          throw new Error("finalizer failed");
+        }
+      });
+      await started.promise;
+      const drain = owner.shutdown();
+      held.resolve();
+      await expect(drain).resolves.toEqual({
+        complete: false,
+        failures: ["operation op: finalization failed"]
+      });
+      expect(owner.pendingOperationIds()).toEqual([]);
+    }
+  );
+  it("counts a normally handled task failure as settled", async () => {
+    const owner = createEnvironmentExecutionOwner({
+      deferTask: async () => {},
+      microtask: queueMicrotask,
+      reconciliationTimer: () => vi.fn()
+    });
+    const started = deferred();
+    const held = deferred();
+    const work = task(async () => {
+      started.resolve();
+      await held.promise;
+      throw new Error("provider failed");
+    });
+    owner.attachRuntime().schedule("op", work);
+    await started.promise;
+    const drain = owner.shutdown();
+    held.resolve();
+    await expect(drain).resolves.toEqual({ complete: true, failures: [] });
+    expect(work.failed).toHaveBeenCalledOnce();
+  });
+  it("drains detached, headless and queued records through async finalizers", async () => {
+    const owner = createEnvironmentExecutionOwner({
+      deferTask: async () => {},
+      microtask: queueMicrotask,
+      reconciliationTimer: () => vi.fn()
+    });
+    const panel = owner.attach("closed");
+    const headless = owner.attachRuntime();
+    const firstStarted = deferred();
+    const provider = deferred();
+    const restoration = deferred();
+    const finalizer = deferred();
+    const first = task(async () => {
+      firstStarted.resolve();
+      await provider.promise;
+    });
+    panel.schedule("op", first);
+    await firstStarted.promise;
+    panel.detach();
+    const queued = { ...task(async () => {}), cancelled: vi.fn() };
+    headless.schedule("op", queued);
+    headless.schedule("other", {
+      ...task(async () => {
+        await restoration.promise;
+      }),
+      settled: () => finalizer.promise
+    });
+    await Promise.resolve();
+    let done = false;
+    const shutdown = owner.shutdown();
+    const drain = shutdown.then((outcome) => {
+      done = true;
+      return outcome;
+    });
+    expect(owner.claimAdmission("late")).toBeNull();
+    expect(() =>
+      headless.schedule(
+        "late",
+        task(async () => {})
+      )
+    ).toThrow(/shutting down/);
+    provider.resolve();
+    restoration.resolve();
+    await vi.waitFor(() => expect(queued.cancelled).toHaveBeenCalledOnce());
+    expect(done).toBe(false);
+    finalizer.resolve();
+    await expect(drain).resolves.toEqual({ complete: true, failures: [] });
+    expect(owner.shutdown()).toBe(shutdown);
+  });
   it.each(["operation", "repo", "environment"] as const)(
     "replaces stale reconciliation %s without letting its callback consume the new timer",
     (change) => {

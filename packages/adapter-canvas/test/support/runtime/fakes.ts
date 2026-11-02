@@ -207,12 +207,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       entry.observation?.stop();
       servers.delete(instanceId);
       if (force) entry.server.closeAllConnections?.();
-      await new Promise<void>((resolve) => {
-        try {
-          entry.server.close(() => resolve());
-        } catch {
-          resolve();
-        }
+      await new Promise<void>((resolve, reject) => {
+        entry.server.close((error) => (error ? reject(error) : resolve()));
       });
     }),
     getLastWebviewActivityAt: vi.fn(() => lastWebviewActivityAt),
