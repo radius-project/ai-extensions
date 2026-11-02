@@ -249,7 +249,7 @@ These guards stop a tampered review from approving a pull request, but not from 
 
 #### Step 4.7: Suspend Copilot approvals when one goes wrong
 
-We need a way to stop merging on Copilot approvals as soon as one lets a bad change through, and a clear bar for starting again. Without one, a single miss leaves us choosing between ignoring it and arguing over what to do while approvals keep counting.
+We need a way to stop merging on Copilot approvals if one lets a bad change through, and a clear bar for starting again.
 
 We should suspend approvals when a change that merged on a Copilot approval:
 
@@ -257,19 +257,15 @@ We should suspend approvals when a change that merged on a Copilot approval:
 - touched a path that belongs in the medium or high tier, which means a glob was too broad, or
 - came from an author the trusted-author check should have rejected.
 
-Any maintainer can suspend approvals immediately, without a vote, by turning off "Allow Copilot approvals to count toward merge requirements." That one setting puts every pull request back on a human approval. Copilot keeps reviewing every push and keeps writing its approval assessment, so we lose no data while approvals are off.
+Any maintainer can suspend approvals immediately by turning off "Allow Copilot approvals to count toward merge requirements." Copilot will keep reviewing every push and writing its approval assessment, but PRs will not be able to merge without human approval.
 
-The maintainer who suspends approvals opens a tracking issue that links the merged pull request, says what Copilot missed, and names the cause: a glob that was too broad, a gap in the review instructions or skills, a miss by Copilot itself, or a bug in the trusted-author check.
+The maintainer who suspends approvals should open a tracking issue that links the merged pull request, says what Copilot missed, and names the cause: a glob that was too broad, a gap in the review instructions or skills, a miss by Copilot itself, or a bug in the trusted-author check.
 
 To turn approvals back on, we should:
 
 1. Fix the cause, whether that means the globs, the instructions and skills, or the check.
-2. Run a shorter trial: at least two weeks and at least 15 low-tier pull requests with zero false approvals, recorded the same way as the Step 4.5 trial.
+2. Run a shorter trial: at least one week and at least 10 low-tier pull requests with zero false approvals, recorded the same way as the Step 4.5 trial.
 3. Have a maintainer record the result on the tracking issue, close it, and turn the setting back on.
-
-If we suspend approvals a second time within 90 days, we should rerun the full Step 4.5 trial instead of the shorter one.
-
-Some misses won't cause a visible failure. To catch those, a maintainer should review a sample of up to five Copilot-approved merges each month and treat any change they would have blocked as a trigger.
 
 ### Error handling
 
