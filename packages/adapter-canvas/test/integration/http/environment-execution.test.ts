@@ -194,19 +194,25 @@ describe("production environment owner HTTP binding", () => {
       ].join("\n")
     );
     await fs.chmod(path.join(fakeBin, "aws"), 0o755);
+    // Let Node parse Windows command-line quotes before recording argv.
+    await fs.writeFile(
+      path.join(fakeBin, "aws.cjs"),
+      [
+        'const fs = require("node:fs");',
+        "const args = process.argv.slice(2);",
+        'fs.appendFileSync(process.env.FAKE_AWS_LOG, `${args.join(" ")}\\n`);',
+        'if (args.length === 1 && args[0] === "--version") {',
+        '  console.log("aws-cli/2.17.0 Python/3.11 Windows/10");',
+        "} else {",
+        '  console.error("fake aws: not signed in");',
+        "  process.exitCode = 3;",
+        "}",
+        ""
+      ].join("\n")
+    );
     await fs.writeFile(
       path.join(fakeBin, "aws.cmd"),
-      [
-        "@echo off",
-        'echo %*>>"%FAKE_AWS_LOG%"',
-        'if "%1"=="--version" (',
-        "  echo aws-cli/2.17.0 Python/3.11 Windows/10",
-        "  exit /b 0",
-        ")",
-        "echo fake aws: not signed in 1>&2",
-        "exit /b 3",
-        ""
-      ].join("\r\n")
+      ["@echo off", `"${process.execPath}" "%~dp0aws.cjs" %*`, ""].join("\r\n")
     );
     const run = vi.fn(async (args: string[]) => {
       const command = args.join(" ");
