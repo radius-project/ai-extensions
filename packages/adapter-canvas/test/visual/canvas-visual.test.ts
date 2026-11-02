@@ -747,6 +747,11 @@ test.describe("Radius Canvas visual baselines", () => {
               exact: true
             })
         ).toBeVisible();
+        await expect(page.locator("#deploy-env-select")).toHaveValue(
+          "fixture-environment"
+        );
+        await expect(page.locator("#deploy-now-btn")).toHaveText("Deploy");
+        await expect(page.locator("#deploy-now-btn")).toBeEnabled();
         await screenshot(page, `vi-07-deploy-${status}-${theme}.png`);
       });
     }
