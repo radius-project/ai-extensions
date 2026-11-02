@@ -24,7 +24,6 @@ describe("azure platform", () => {
     const ctx = {
       subscriptionId: "11111111-2222-3333-4444-555555555555",
       resourceGroup: "radius-rg",
-      region: "eastus",
       clusterName: "radius-aks"
     };
 
@@ -271,8 +270,7 @@ describe("azure platform", () => {
     it("portalUrl does not crash with missing context fields", () => {
       const minCtx = {
         subscriptionId: "sub",
-        resourceGroup: "rg",
-        region: "eastus"
+        resourceGroup: "rg"
       };
       expect(() => azure.portalUrl("apps/Deployment", minCtx)).not.toThrow();
     });
@@ -280,8 +278,7 @@ describe("azure platform", () => {
     it("portalUrl does not crash with null resourceType", () => {
       const ctx = {
         subscriptionId: "sub",
-        resourceGroup: "rg",
-        region: "eastus"
+        resourceGroup: "rg"
       };
       expect(() =>
         azure.portalUrl(null as unknown as string, ctx)
@@ -291,8 +288,7 @@ describe("azure platform", () => {
     it("portalUrl does not crash with undefined resourceType", () => {
       const ctx = {
         subscriptionId: "sub",
-        resourceGroup: "rg",
-        region: "eastus"
+        resourceGroup: "rg"
       };
       expect(() =>
         azure.portalUrl(undefined as unknown as string, ctx)
