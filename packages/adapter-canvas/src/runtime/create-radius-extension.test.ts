@@ -883,6 +883,33 @@ describe("RU-21: operation-aware host keepalive", () => {
 // RU-18 (extension half): shutdown closes every server and tears down the
 // session exactly once, even under a duplicate/concurrent call.
 describe("RU-18: shutdown is idempotent and closes every server exactly once", () => {
+  it("reports a server-only timeout without inventing a pending operation", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ext, deps } = setup();
+      deps.servers.set(
+        "held-panel",
+        createFakeServerEntry("held-panel", "deployed")
+      );
+      let release = () => {};
+      vi.mocked(deps.stopServer).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          })
+      );
+      const stopping = ext.shutdown();
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(stopping).resolves.toEqual({ complete: false, exitCode: 1 });
+      expect(deps.logError).toHaveBeenCalledWith(
+        expect.stringContaining("pending operations: none")
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      release();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("reports a rejected task finalizer and still tears down the session", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { ext, deps } = setup();
