@@ -3679,6 +3679,40 @@ describe("AWS cluster discovery", () => {
     expect(page.customs["aws-namespace-custom"].value).toBe("team-a");
   });
 
+  it("holds a saved selection when AWS doesn't describe its cluster", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(
+      awsPayload({
+        clusters: [
+          awsCluster("eks-1", {
+            usable: false,
+            unusableReason: "not-described",
+            describeErrorKind: "other"
+          }),
+          awsCluster("eks-2")
+        ]
+      })
+    );
+    discovery.answer(
+      awsPayload({ clusters: [awsCluster("eks-1"), awsCluster("eks-2")] })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(SAVED, "aws");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.selects["aws-cluster-select"].value).toBe("");
+    expect(fakeText(page.awsClusterNote)).not.toContain("wasn't found");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION, {
+      keepSelection: true
+    });
+
+    expect(discovery.requests[1]).toHaveProperty("cluster", "eks-1");
+    expect(handle?.currentInfraSelection("aws")).toEqual(SAVED);
+  });
+
   it("drops a saved selection when discovery moves to another account or region", async () => {
     const page = renderDiscoveryPage();
     const discovery = scriptedDiscovery(page);
@@ -3983,6 +4017,23 @@ describe("AWS cluster discovery", () => {
       await flushPromises();
 
       expect(page.awsNamespaceNote.hidden).toBe(false);
+    });
+
+    it("hides a custom namespace typed for the previous cluster", async () => {
+      const { page, discovery } = await discoverTwoClusters();
+      discovery.answer(awsPayload({ clusters: TWO_CLUSTERS }));
+      const namespaceSelect = page.selects["aws-namespace-select"];
+      const custom = page.customs["aws-namespace-custom"];
+      namespaceSelect.value = "__custom__";
+      namespaceSelect.dispatch("change");
+      custom.value = "team-x";
+      expect(custom.style.display).toBe("");
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      expect(namespaceSelect.value).toBe("default");
+      expect(custom.style.display).toBe("none");
     });
 
     it("drops the namespaces of a cluster that is no longer selected", async () => {

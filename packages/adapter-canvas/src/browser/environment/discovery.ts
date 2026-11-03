@@ -1409,9 +1409,14 @@ export function initializeDiscoveryPanel(
     } else if (
       !awsClusterInfo.some((item) => item.id === heldCluster && item.usable)
     ) {
-      heldAwsSelection = null;
+      const heldInfo = awsClusterInfo.find((item) => item.id === heldCluster);
+      // A cluster that AWS didn't describe may still be usable, so its
+      // selection stays held for the next discovery.
+      if (heldInfo?.unusableReason !== "not-described") {
+        heldAwsSelection = null;
+      }
       awsInfrastructure.showCluster("", "defaults");
-      if (!awsClusterInfo.some((item) => item.id === heldCluster)) {
+      if (heldInfo === undefined) {
         noteLines.push(awsMissingClusterNoteLine(heldCluster, region));
       }
     } else if (kinds.subnets !== undefined) {
@@ -1450,6 +1455,10 @@ export function initializeDiscoveryPanel(
       "Select namespace…"
     );
     selectOfferedValue(context, "aws-namespace-select", "default");
+    // Setting the value doesn't fire the select's change handler, so hide a
+    // custom name typed for the previous list here.
+    const custom = context.dom.inputById("aws-namespace-custom");
+    if (custom) custom.style.display = "none";
     const listed =
       data.errors?.namespaces === undefined &&
       data.errorKinds?.namespaces === undefined &&
