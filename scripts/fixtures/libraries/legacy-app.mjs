@@ -22,7 +22,7 @@ createRoot(globalThis.document.getElementById("root")).render(
     graph: {
       name: "context-free",
       resources: [
-        { ...web, connections: [{ ...dependency, direction: "Inbound" }] },
+        { ...web, connections: [{ id: dependency.id, direction: "Inbound" }] },
         dependency
       ]
     }

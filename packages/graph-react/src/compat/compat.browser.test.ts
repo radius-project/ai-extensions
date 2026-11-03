@@ -41,7 +41,12 @@ function mount() {
 const graph: AppGraphData = {
   name: "not-an-application-id",
   resources: [
-    { ...web, connections: [{ ...dependency, direction: "Inbound" }] },
+    {
+      ...web,
+      connections: [
+        { ...dependency, type: "Contoso.Net/widgets", direction: "Inbound" }
+      ]
+    },
     dependency
   ]
 };

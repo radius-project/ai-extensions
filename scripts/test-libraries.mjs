@@ -384,6 +384,13 @@ async function exerciseBrowser(consumer, legacyNodeOnly = false) {
       1
     );
     assert.equal(
+      await page.locator(".react-flow__edge").getAttribute("data-id"),
+      JSON.stringify([
+        "/planes/radius/local/resourceGroups/demo/providers/Applications.Core/gateways/edge",
+        "/planes/radius/local/resourceGroups/demo/providers/Applications.Core/containers/web"
+      ])
+    );
+    assert.equal(
       await page
         .locator(
           ".rad-node__badge,.rad-node__icon,.rad-node__status,[data-radius-details]"

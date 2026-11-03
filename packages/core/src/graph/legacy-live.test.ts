@@ -17,6 +17,49 @@ const context = {
 
 describe("explicit legacy live graph adaptation", () => {
   it.each([
+    ["Applications.Core/gateways", undefined, false],
+    ["Radius.Compute/routes", undefined, false],
+    ["APPLICATIONS.CORE/GATEWAYS", "Other/widgets", false],
+    ["Radius.Compute/routes", "Contoso.Net/routes", false],
+    ["Contoso.Net/gateways", "Applications.Core/gateways", true],
+    ["Contoso.Net/routes", "Radius.Compute/routes", true],
+    [
+      "Applications.Core/gateways/parent/children",
+      "Applications.Core/gateways",
+      true
+    ]
+  ])(
+    "uses ID type %s instead of supplied type %s",
+    (idType, suppliedType, ownerFirst) => {
+      const dependency = {
+        id: prefix + idType + "/dependency",
+        name: "dependency",
+        type: "Unrelated/displayType"
+      };
+      const input = {
+        resources: [
+          {
+            ...web,
+            connections: [
+              {
+                id: dependency.id,
+                direction: "Inbound",
+                ...(suppliedType === undefined ? {} : { type: suppliedType })
+              }
+            ]
+          },
+          dependency
+        ]
+      };
+      const before = structuredClone(input);
+      const result = normalizeLegacyLiveGraph(input);
+      expect(result.resources[ownerFirst ? 0 : 1].connections).toEqual([
+        { id: ownerFirst ? dependency.id : web.id, direction: "Outbound" }
+      ]);
+      expect(input).toEqual(before);
+    }
+  );
+  it.each([
     ["Applications.Datastores/redisCaches", "Outbound", false],
     ["Applications.Datastores/redisCaches", "Inbound", true],
     ["Applications.Core/gateways", "Inbound", false],
@@ -162,6 +205,28 @@ describe("explicit legacy live graph adaptation", () => {
       "duplicate-resource",
       "invalid-connection",
       "unresolved-connection",
+      "unresolved-connection"
+    ]);
+  });
+  it("does not trust a special supplied type when the connection ID is missing or invalid", () => {
+    const result = normalizeLegacyLiveGraph({
+      resources: [
+        {
+          ...web,
+          connections: [
+            { type: "Applications.Core/gateways", direction: "Inbound" },
+            {
+              id: "invalid-id",
+              type: "Radius.Compute/routes",
+              direction: "Inbound"
+            }
+          ]
+        }
+      ]
+    });
+    expect(result.resources[0].connections).toEqual([]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "invalid-connection",
       "unresolved-connection"
     ]);
   });

@@ -1,4 +1,5 @@
 import { graphContextKey, normalizeLiveResources } from "./live.js";
+import { parseResourceId } from "../domain/resource-id.js";
 import type { GraphContext, LegacyLiveGraph, LiveGraph } from "./contracts.js";
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -7,7 +8,7 @@ function record(value: unknown): value is Record<string, unknown> {
 
 /**
  * Legacy UCP graph payloads reverse ordinary connections. Only the exact
- * gateway/route connection types use the other orientation for Inbound.
+ * gateway/route types parsed from connection IDs use the other orientation.
  * The default live normalizer keeps its source -> target contract unchanged.
  */
 export function normalizeLegacyLiveGraph(value: unknown): LegacyLiveGraph;
@@ -31,9 +32,9 @@ export function normalizeLegacyLiveGraph(
       connections: resource.connections.map((connection: unknown) => {
         if (!record(connection)) return connection;
         const type =
-          typeof connection.type === "string" ?
-            connection.type.toLowerCase()
-          : "";
+          typeof connection.id === "string" ?
+            parseResourceId(connection.id)?.type.toLowerCase()
+          : undefined;
         const special =
           type === "applications.core/gateways" ||
           type === "radius.compute/routes";
