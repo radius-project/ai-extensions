@@ -148,7 +148,7 @@ describe("discoverAwsResources", () => {
     expect(result).toEqual({
       clusters: [],
       resourceGroups: [],
-      namespaces: ["default", "kube-system", "radius-system"],
+      namespaces: ["default"],
       vpcs: [],
       subnets: []
     });
@@ -452,7 +452,7 @@ describe("parseAwsCluster", () => {
 });
 
 describe("discoverAwsResources edge cases", () => {
-  it("treats empty CLI output as nothing found and keeps the default namespaces", async () => {
+  it("treats empty CLI output as nothing found and keeps the default namespace", async () => {
     const { dependencies } = fakes({
       "aws eks list-clusters": JSON.stringify(["shop"]),
       "aws eks describe-cluster --name shop": cluster("vpc-1"),
@@ -469,11 +469,7 @@ describe("discoverAwsResources edge cases", () => {
     );
     expect(result.vpcs).toEqual([]);
     expect(result.subnets).toEqual([]);
-    expect(result.namespaces).toEqual([
-      "default",
-      "kube-system",
-      "radius-system"
-    ]);
+    expect(result.namespaces).toEqual(["default"]);
     expect(result.errors).toBeUndefined();
   });
 

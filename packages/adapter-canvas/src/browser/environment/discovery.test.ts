@@ -3886,7 +3886,7 @@ describe("AWS cluster discovery", () => {
     expect(discovery.requests[1]).not.toHaveProperty("cluster");
   });
 
-  it("notes that the namespace list shows common names when the cluster's namespaces can't be read", async () => {
+  it("notes that the namespace list has only default when the cluster's namespaces can't be read", async () => {
     const page = renderDiscoveryPage();
     const discovery = scriptedDiscovery(page);
     discovery.answer(
@@ -3902,7 +3902,7 @@ describe("AWS cluster discovery", () => {
 
     expect(page.awsNamespaceNote.hidden).toBe(false);
     expect(fakeText(page.awsNamespaceNote)).toBe(
-      "Can't list the namespaces in eks-1. The list shows common namespace names, which may not exist in the cluster."
+      "Can't list the namespaces in eks-1. Use default, or enter a custom namespace. Deploy creates the namespace if the cluster doesn't have it."
     );
     expect(page.awsNamespaceNote.textContent).not.toContain("connection");
 
@@ -3983,7 +3983,33 @@ describe("AWS cluster discovery", () => {
       expect(page.selects["aws-cluster-select"].value).toBe("eks-2");
     });
 
-    it("shows the common names and the note when the request fails", async () => {
+    it("blocks Create until the namespaces of that cluster are read", async () => {
+      const page = renderDiscoveryPage();
+      const discovery = scriptedDiscovery(page);
+      discovery.answer(awsPayload({ clusters: TWO_CLUSTERS }));
+      // The page reads the error each time the panel reports a change.
+      const createErrors: string[] = [];
+      let handle: DiscoveryPanelHandle | null = null;
+      handle = initializeDiscoveryPanel(page.browser.context, {
+        mutationNonce: "",
+        onInfrastructureChange: () => {
+          createErrors.push(handle?.awsInfrastructureError() ?? "");
+        }
+      });
+      await handle?.discoverResources("aws", ACCOUNT, REGION);
+      const release = discovery.hold();
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      expect(createErrors.at(-1)).toBe("Wait for the namespace list to load.");
+      release(awsPayload({ clusters: TWO_CLUSTERS }));
+      await flushPromises();
+
+      expect(createErrors.at(-1)).toBe("");
+    });
+
+    it("shows only default and the note when the request fails", async () => {
       const { page, discovery } = await discoverTwoClusters();
       discovery.fail("network down");
 
@@ -3993,8 +4019,13 @@ describe("AWS cluster discovery", () => {
       const namespaceSelect = page.selects["aws-namespace-select"];
       expect(namespaceSelect.disabled).toBe(false);
       expect(namespaceSelect.value).toBe("default");
+      expect(
+        optionValues(namespaceSelect).filter(
+          (value) => value !== "" && value !== "__custom__"
+        )
+      ).toEqual(["default"]);
       expect(fakeText(page.awsNamespaceNote)).toBe(
-        "Can't list the namespaces in eks-2. The list shows common namespace names, which may not exist in the cluster."
+        "Can't list the namespaces in eks-2. Use default, or enter a custom namespace. Deploy creates the namespace if the cluster doesn't have it."
       );
     });
 
@@ -4090,6 +4121,7 @@ describe("AWS cluster discovery", () => {
       expect(values).toContain("team-full");
       expect(values).not.toContain("team-stale");
       expect(namespaceSelect.disabled).toBe(false);
+      expect(handle?.awsInfrastructureError()).toBe("");
     });
   });
 });

@@ -250,10 +250,10 @@ export function awsClusterPresentation(
 
 /**
  * The note under Namespace when the namespaces of a cluster couldn't be listed
- * and the list shows the default names instead.
+ * and the list shows only default instead.
  */
 export function awsNamespaceFallbackNote(cluster: string): string {
-  return `Can't list the namespaces in ${cluster}. The list shows common namespace names, which may not exist in the cluster.`;
+  return `Can't list the namespaces in ${cluster}. Use default, or enter a custom namespace. Deploy creates the namespace if the cluster doesn't have it.`;
 }
 
 export function awsMissingClusterNoteLine(

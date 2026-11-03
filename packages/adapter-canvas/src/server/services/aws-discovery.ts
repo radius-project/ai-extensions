@@ -31,11 +31,7 @@ import { mapWithLimit } from "./map-with-limit.js";
 const AWS_CLI_TIMEOUT_MS = 20000;
 const KUBECTL_TIMEOUT_MS = 10000;
 const USABLE_CLUSTER_STATUSES = new Set(["ACTIVE", "UPDATING"]);
-export const AWS_DEFAULT_NAMESPACES = [
-  "default",
-  "kube-system",
-  "radius-system"
-];
+export const AWS_DEFAULT_NAMESPACES = ["default"];
 
 export interface AwsDiscoveryRequest {
   accountId?: string;

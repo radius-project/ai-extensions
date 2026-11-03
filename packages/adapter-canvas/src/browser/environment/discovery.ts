@@ -47,11 +47,7 @@ export const LIST_APP_REGISTRATIONS_ENDPOINT =
   "/api/list-azure-app-registrations";
 export const APP_SERVES_REPOS_ENDPOINT = "/api/azure-app-serves-repos";
 export const SERVES_LABEL_CONCURRENCY = 6;
-export const DEFAULT_NAMESPACES: readonly string[] = [
-  "default",
-  "kube-system",
-  "radius-system"
-];
+export const DEFAULT_NAMESPACES: readonly string[] = ["default"];
 
 export const COMBO_PAIRS: readonly (readonly [string, string])[] = [
   ["azure-namespace-select", "azure-namespace-custom"],
@@ -118,7 +114,8 @@ export interface DiscoveryPanelHandle {
   // it. An AWS selection that no discovery has restored yet stays held for the
   // account and region it belongs to. Otherwise the selection on screen is held.
   preserveInfraSelection(provider: "azure" | "aws"): void;
-  // The AWS subnet or cluster problem that keeps Create Environment disabled.
+  // The AWS subnet, cluster, or namespace-read problem that keeps Create
+  // Environment disabled.
   awsInfrastructureError(): string;
   teardown(): void;
 }
@@ -768,6 +765,9 @@ export function initializeDiscoveryPanel(
   // Only the newest AWS namespace request may change the namespace list. An
   // AWS discovery also bumps it, because that discovery lists namespaces too.
   let awsNamespaceToken = 0;
+  // The token of the namespace read that a cluster pick started. Create stays
+  // blocked while it matches awsNamespaceToken.
+  let awsNamespaceReadToken: number | null = null;
   // A saved namespace survives one extra discovery round trip: the first,
   // untargeted request cannot list namespaces, so the restored value has to be
   // reapplied once the follow-up request returns the cluster's real list.
@@ -1441,7 +1441,7 @@ export function initializeDiscoveryPanel(
 
   // Show the namespaces in a response for the cluster on screen, with
   // "default" selected. The server lists them only for a usable cluster. When
-  // it can't, the list has the default names, and a note says so.
+  // it can't, the list has only "default", and a note says so.
   const showAwsNamespaces = (raw: unknown, data: DiscoveryData): void => {
     const cluster = context.dom.selectById(AWS_CLUSTER_SELECT_ID)?.value ?? "";
     renderSelect(
@@ -1486,6 +1486,8 @@ export function initializeDiscoveryPanel(
           "Discovering namespaces…"
         );
       }
+      awsNamespaceReadToken = token;
+      options.onInfrastructureChange?.();
       const account = discoveryAccounts.aws;
       try {
         const response = await context.net.fetch(DISCOVER_ENDPOINT, {
@@ -1500,7 +1502,7 @@ export function initializeDiscoveryPanel(
         });
         raw = await response.json();
       } catch {
-        // A failed request shows the default names and the note.
+        // A failed request shows default and the note.
       }
       if (
         !scope.active ||
@@ -1512,6 +1514,10 @@ export function initializeDiscoveryPanel(
     }
     if (namespaceSelect) namespaceSelect.disabled = false;
     showAwsNamespaces(raw, toDiscoveryData(raw));
+    if (awsNamespaceReadToken === token) {
+      awsNamespaceReadToken = null;
+      options.onInfrastructureChange?.();
+    }
   };
 
   // A cluster the developer picks replaces the held one. A namespace the
@@ -1616,7 +1622,11 @@ export function initializeDiscoveryPanel(
             line.text
           : `${line.text} ${line.command}`;
       }
-      return awsInfrastructure.validationError();
+      const infrastructureError = awsInfrastructure.validationError();
+      if (infrastructureError !== "") return infrastructureError;
+      return awsNamespaceReadToken === awsNamespaceToken ?
+          "Wait for the namespace list to load."
+        : "";
     },
     teardown() {
       for (const slot of Object.values(remediations)) {

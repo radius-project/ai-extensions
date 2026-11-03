@@ -445,7 +445,7 @@ describe("azure-discovery routes (SU-08)", () => {
 
   describe("POST /api/discover", () => {
     const SUB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-    const NS_TRIPLE = ["default", "kube-system", "radius-system"];
+    const AWS_FALLBACK_NAMESPACES = ["default"];
     // The shape every failing arm answers with. Pinned once so each refusal
     // below asserts the whole body rather than only its `error` field.
     const REFUSAL = {
@@ -1018,7 +1018,7 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [],
         resourceGroups: [],
-        namespaces: NS_TRIPLE,
+        namespaces: AWS_FALLBACK_NAMESPACES,
         vpcs: [],
         subnets: [],
         errors: {
@@ -1103,7 +1103,7 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [],
         resourceGroups: [],
-        namespaces: NS_TRIPLE,
+        namespaces: AWS_FALLBACK_NAMESPACES,
         vpcs: [],
         subnets: []
       });
