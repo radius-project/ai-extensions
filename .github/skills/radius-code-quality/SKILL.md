@@ -140,6 +140,10 @@ Every pull request must apply the following matrix using the test plan's current
 
 Documentation-only changes do not require product tests unless they change executable examples, generated inputs, test configuration, or claimed behavior. For all other pull requests, omitting required pull-request evidence from a matching row requires a written explanation that the evidence is structurally inapplicable to the change; inconvenience, implementation size, coverage at another layer, or a scheduled row is not sufficient.
 
+Required evidence must be in the same pull request as the change it covers. A test in another pull request, stacked or not, does not count, even when that pull request exercises the same code. When you split, move, or rebase changes between pull requests, apply this matrix again to each resulting pull request.
+
+List the evidence in the pull request description's **Test evidence** section: one line per matching row, naming the checked-in test or giving the written explanation for its omission.
+
 ## Coverage policy
 
 - The goal is **100% line, statement, function, and branch coverage for every new or changed production-code path that is reachable through a real seam**.
