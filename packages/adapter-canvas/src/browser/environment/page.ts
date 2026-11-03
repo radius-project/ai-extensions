@@ -288,7 +288,7 @@ export function initializeEnvironmentPage(
           withWarnings ?
             "Environment deleted with warnings"
           : "Environment deleted",
-        message: `${outcome}\n\nIts trust subject and permission policy were removed from the deploy IAM role. The role itself was kept, because it serves every environment in this repository. If nothing needs it, delete it in the `,
+        message: `${outcome}\n\nThe progress panel lists what was removed from the deploy IAM role and the cluster's access, and what was kept. Radius never deletes the role itself, because other environments or repositories may use it. If nothing needs it, delete it in the `,
         messageLink: {
           label: "AWS IAM console",
           href: "https://console.aws.amazon.com/iam/home#/roles",

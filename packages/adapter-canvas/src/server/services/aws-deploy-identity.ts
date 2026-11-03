@@ -23,6 +23,7 @@ import {
   parsePolicyDocument,
   radiusRoleRepository,
   removeGitHubTrustSubject,
+  namesOneEnvironment,
   trustAllowsOnlySubjects,
   trustedGitHubSubjects,
   type PolicyDocument
@@ -800,14 +801,96 @@ type AccessEntryOutcome =
   | { readonly kind: "absent" }
   | { readonly kind: "failed"; readonly message: string };
 
-interface AccessEntryRequest {
-  repo: string;
-  role: Record<string, unknown>;
+// The role's access entry on the environment's cluster.
+interface AccessEntryTarget {
   roleArn: string;
   roleName: string;
-  accountId: string;
   region: string;
   cluster: string;
+}
+
+function entryLabel({ roleName, cluster }: AccessEntryTarget): string {
+  return `the access entry for ${roleName} on ${cluster}`;
+}
+
+function deleteEntryCommand({
+  roleArn,
+  region,
+  cluster
+}: AccessEntryTarget): string {
+  return `aws eks delete-access-entry --cluster-name ${cluster} --principal-arn ${roleArn} --region ${region}`;
+}
+
+function entryArgs({ roleArn, region, cluster }: AccessEntryTarget): string[] {
+  return [
+    "--cluster-name",
+    cluster,
+    "--principal-arn",
+    roleArn,
+    "--region",
+    region
+  ];
+}
+
+// Whether the entry exists, and whether setup tagged it as its own.
+async function readAccessEntry(
+  target: AccessEntryTarget,
+  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
+): Promise<
+  | { kind: "absent" }
+  | { kind: "unreadable"; detail: string }
+  | { kind: "present"; tagged: boolean }
+> {
+  const describe = await ports.runAws([
+    "eks",
+    "describe-access-entry",
+    ...entryArgs(target),
+    "--output",
+    "json"
+  ]);
+  if (!succeeded(describe)) {
+    return RESOURCE_NOT_FOUND.test(describe.stderr) ?
+        { kind: "absent" }
+      : { kind: "unreadable", detail: detail(describe) };
+  }
+  const described = parseJson(describe.stdout);
+  const tags =
+    (
+      isRecord(described) &&
+      isRecord(described.accessEntry) &&
+      isRecord(described.accessEntry.tags)
+    ) ?
+      described.accessEntry.tags
+    : {};
+  return { kind: "present", tagged: tags[AWS_MANAGED_TAG] === "true" };
+}
+
+async function deleteAccessEntry(
+  target: AccessEntryTarget,
+  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
+): Promise<AccessEntryOutcome> {
+  const deleteEntry = await ports.runAws([
+    "eks",
+    "delete-access-entry",
+    ...entryArgs(target)
+  ]);
+  if (succeeded(deleteEntry)) {
+    return {
+      kind: "removed",
+      text: `access entry for ${target.roleName} on ${target.cluster}`
+    };
+  }
+  if (RESOURCE_NOT_FOUND.test(deleteEntry.stderr)) return { kind: "absent" };
+  return {
+    kind: "failed",
+    message: `Could not delete ${entryLabel(target)} (${detail(deleteEntry)}).`
+  };
+}
+
+interface AccessEntryRequest extends AccessEntryTarget {
+  repo: string;
+  role: Record<string, unknown>;
+  accountId: string;
   // The role's trust after this environment's subjects are removed.
   remainingTrust: PolicyDocument;
 }
@@ -823,7 +906,7 @@ async function removeUnusedAccessEntry(
   request: AccessEntryRequest,
   ports: AwsDeployIdentityRemovalPorts
 ): Promise<AccessEntryOutcome> {
-  const { roleArn, roleName, accountId, region, cluster } = request;
+  const { roleName, accountId, region, cluster } = request;
   if (!isRadiusManagedRole(request.role, request.repo)) {
     return {
       kind: "kept",
@@ -836,44 +919,20 @@ async function removeUnusedAccessEntry(
       text: `Kept any access entry for ${roleName}, because this environment doesn't record its cluster. Remove it in the EKS console if nothing else uses it.`
     };
   }
-  const entry = `the access entry for ${roleName} on ${cluster}`;
-  const byHand = `If nothing else uses it, run: aws eks delete-access-entry --cluster-name ${cluster} --principal-arn ${roleArn} --region ${region}`;
-  const entryArgs = [
-    "--cluster-name",
-    cluster,
-    "--principal-arn",
-    roleArn,
-    "--region",
-    region
-  ];
-  const describe = await ports.runAws([
-    "eks",
-    "describe-access-entry",
-    ...entryArgs,
-    "--output",
-    "json"
-  ]);
-  if (!succeeded(describe)) {
-    return RESOURCE_NOT_FOUND.test(describe.stderr) ?
-        { kind: "absent" }
-      : {
-          kind: "warning",
-          text: `Kept ${entry}, because Radius couldn't read it (${detail(describe)}). ${byHand}`
-        };
+  const entry = entryLabel(request);
+  const byHand = `If nothing else uses it, run: ${deleteEntryCommand(request)}`;
+  const found = await readAccessEntry(request, ports);
+  if (found.kind === "absent") return found;
+  if (found.kind === "unreadable") {
+    return {
+      kind: "warning",
+      text: `Kept ${entry}, because Radius couldn't read it (${found.detail}). ${byHand}`
+    };
   }
-  const described = parseJson(describe.stdout);
-  const tags =
-    (
-      isRecord(described) &&
-      isRecord(described.accessEntry) &&
-      isRecord(described.accessEntry.tags)
-    ) ?
-      described.accessEntry.tags
-    : {};
-  if (tags[AWS_MANAGED_TAG] !== "true") {
+  if (!found.tagged) {
     return {
       kind: "kept",
-      text: `${entry}, because Radius setup didn't create it. ${byHand}`
+      text: `${entry}, because it doesn't have the Radius tag. Entries created before Radius tagged them are kept too. ${byHand}`
     };
   }
   const listing = await ports.listOtherEnvironments();
@@ -903,22 +962,34 @@ async function removeUnusedAccessEntry(
       text: `${entry}, because the role's trust policy lets in more than this repository's other environments. ${byHand}`
     };
   }
-  const deleteEntry = await ports.runAws([
-    "eks",
-    "delete-access-entry",
-    ...entryArgs
-  ]);
-  if (succeeded(deleteEntry)) {
+  return deleteAccessEntry(request, ports);
+}
+
+// An access entry whose role is gone grants nothing: EKS ties an entry to the
+// role's unique ID, and a role created later with the same name is a different
+// principal. EKS doesn't remove it with the role, so remove the one setup
+// tagged, and name any other.
+async function removeOrphanedAccessEntry(
+  target: AccessEntryTarget,
+  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
+): Promise<AccessEntryOutcome> {
+  if (!target.cluster || !target.region) return { kind: "absent" };
+  const found = await readAccessEntry(target, ports);
+  if (found.kind === "absent") return found;
+  const remove = `It grants nothing now that the role is gone. To remove it, run: ${deleteEntryCommand(target)}`;
+  if (found.kind === "unreadable") {
     return {
-      kind: "removed",
-      text: `access entry for ${roleName} on ${cluster}`
+      kind: "warning",
+      text: `Kept ${entryLabel(target)}, because Radius couldn't read it (${found.detail}). ${remove}`
     };
   }
-  if (RESOURCE_NOT_FOUND.test(deleteEntry.stderr)) return { kind: "absent" };
-  return {
-    kind: "failed",
-    message: `Could not delete ${entry} (${detail(deleteEntry)}).`
-  };
+  if (!found.tagged) {
+    return {
+      kind: "warning",
+      text: `Kept ${entryLabel(target)}, because it doesn't have the Radius tag. ${remove}`
+    };
+  }
+  return deleteAccessEntry(target, ports);
 }
 
 function stoppedPartWay(
@@ -993,14 +1064,25 @@ export async function removeAwsEnvironmentFromRole(
     "--output",
     "json"
   ]);
+  const entryTarget = {
+    roleArn: request.roleArn.trim(),
+    roleName,
+    region: request.region.trim(),
+    cluster: request.cluster.trim()
+  };
   if (!succeeded(getRole)) {
     if (NO_SUCH_ENTITY.test(getRole.stderr)) {
+      const orphan = await removeOrphanedAccessEntry(entryTarget, ports);
+      if (orphan.kind === "failed") {
+        return stoppedPartWay(orphan.message, [], [entryLabel(entryTarget)]);
+      }
       return {
         ok: true,
-        removed: [],
+        removed: orphan.kind === "removed" ? [orphan.text] : [],
         kept: [],
         warnings: [
-          `IAM role ${roleName} was already gone, so there was nothing to remove from it.`
+          `IAM role ${roleName} was already gone, so there was nothing to remove from it.`,
+          ...(orphan.kind === "warning" ? [orphan.text] : [])
         ]
       };
     }
@@ -1028,11 +1110,19 @@ export async function removeAwsEnvironmentFromRole(
   }
   const policyName = buildAwsEnvironmentPolicyName(request.environment);
   const policyLabel = `policy ${policyName}`;
+  // Only a subject that names a repository and this environment is this
+  // environment's alone. Any other, such as `repository_id:<id>` from a custom
+  // OIDC template, is presented by other environments or repositories too.
+  const owned = request.subjects.filter((subject) =>
+    namesOneEnvironment(subject, request.environment)
+  );
   let policy: PolicyDocument;
+  let trusted: string[];
   const removedSubjects: string[] = [];
   try {
     policy = parsePolicyDocument(role.AssumeRolePolicyDocument);
-    for (const subject of request.subjects) {
+    trusted = trustedGitHubSubjects(policy, accountId);
+    for (const subject of owned) {
       const removal = removeGitHubTrustSubject(policy, accountId, subject);
       policy = removal.policy;
       if (removal.removed) removedSubjects.push(subject);
@@ -1040,9 +1130,15 @@ export async function removeAwsEnvironmentFromRole(
   } catch (error) {
     return {
       ok: false,
-      message: `Could not read the trust policy of IAM role ${roleName} (${error instanceof Error ? error.message : String(error)}). Nothing was changed. Fix the policy or your access and retry, or by hand remove ${request.subjects.join(", ")} from its trust policy and delete its ${policyLabel}.`
+      message: `Could not read the trust policy of IAM role ${roleName} (${error instanceof Error ? error.message : String(error)}). Nothing was changed. Fix the policy or your access and retry, or by hand ${owned.length > 0 ? `remove ${owned.join(", ")} from its trust policy and ` : ""}delete its ${policyLabel}.`
     };
   }
+  const shared = request.subjects
+    .filter((subject) => !owned.includes(subject) && trusted.includes(subject))
+    .map(
+      (subject) =>
+        `Kept trust subject ${subject}, because it doesn't name one repository and the environment ${request.environment}, so other environments or repositories may present it too. If nothing else needs it, remove it from the role's trust policy by hand.`
+    );
   const subjectLabels = removedSubjects.map(
     (subject) => `trust subject ${subject}`
   );
@@ -1097,26 +1193,22 @@ export async function removeAwsEnvironmentFromRole(
   ];
   const entry = await removeUnusedAccessEntry(
     {
+      ...entryTarget,
       repo: request.repo,
       role,
       roleArn: role.Arn,
-      roleName,
       accountId,
-      region: request.region.trim(),
-      cluster: request.cluster.trim(),
       remainingTrust: policy
     },
     ports
   );
   if (entry.kind === "failed") {
-    return stoppedPartWay(entry.message, removed, [
-      `the access entry for ${roleName} on ${request.cluster.trim()}`
-    ]);
+    return stoppedPartWay(entry.message, removed, [entryLabel(entryTarget)]);
   }
   return {
     ok: true,
     removed: entry.kind === "removed" ? [...removed, entry.text] : removed,
     kept: entry.kind === "kept" ? [...kept, entry.text] : kept,
-    warnings: entry.kind === "warning" ? [entry.text] : []
+    warnings: [...shared, ...(entry.kind === "warning" ? [entry.text] : [])]
   };
 }

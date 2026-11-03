@@ -14,7 +14,7 @@ import {
 } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
-  claimantFromVariables,
+  loadEnvironmentClaims,
   type NamespaceClaimsPorts
 } from "../routes/create-environment-namespace-claims.js";
 import {
@@ -23,7 +23,6 @@ import {
   type AwsCommandResult,
   type AwsDeployIdentityRemovalResult,
   type AwsEnvironmentListing,
-  type AwsEnvironmentUsage,
   type AwsLockResult
 } from "./aws-deploy-identity.js";
 import { parseTrustSubjects } from "./environment-target.js";
@@ -262,39 +261,29 @@ export function createAwsEnvironmentAccess<Operation>(
     environment: string,
     repository: GitHubRepositoryIdentity
   ): Promise<AwsEnvironmentListing> {
-    const names = await dependencies.environments.listEnvironmentNames(repo);
-    if (!names.ok) return names;
-    const others: AwsEnvironmentUsage[] = [];
-    for (const name of names.names) {
-      if (name.toLowerCase() === environment.toLowerCase()) continue;
-      const read = await dependencies.environments.readEnvironmentVariables(
-        repo,
-        name
-      );
-      if (!read.ok) return read;
-      const reading = claimantFromVariables(name, read.variables);
-      if (reading.kind === "indeterminate") {
-        return {
-          ok: false,
-          reason: `environment "${name}" does not record ${reading.missing}.`
-        };
-      }
-      if (reading.kind === "claim" && reading.claimant.provider === "aws") {
-        others.push({
-          name,
-          accountId: reading.claimant.accountId,
-          region: reading.claimant.region,
-          cluster: reading.claimant.cluster,
+    const loaded = await loadEnvironmentClaims(repo, dependencies.environments);
+    if (!loaded.ok) return loaded;
+    return {
+      ok: true,
+      environments: loaded.claims
+        .filter(
+          ({ claimant }) =>
+            claimant.provider === "aws" &&
+            claimant.environment.toLowerCase() !== environment.toLowerCase()
+        )
+        .map(({ claimant, variables }) => ({
+          name: claimant.environment,
+          accountId: claimant.accountId,
+          region: claimant.region,
+          cluster: claimant.cluster,
           // Only subjects proven to be this repository's. Another may be
           // presented by other repositories too, so the access entry has to
           // stay while the role trusts it.
           trustSubjects: parseTrustSubjects(
-            read.variables[AWS_TRUST_SUBJECTS_VARIABLE]
+            variables[AWS_TRUST_SUBJECTS_VARIABLE]
           ).filter((subject) => namesRepositoryEnvironment(subject, repository))
-        });
-      }
-    }
-    return { ok: true, environments: others };
+        }))
+    };
   }
 
   // Record what exists in AWS, save it, and hand the pause to the caller.
@@ -507,25 +496,17 @@ export function createAwsEnvironmentAccess<Operation>(
     }) {
       // The recorded list covers a repository renamed since setup. The
       // current subjects cover what Repair added after an OIDC subject
-      // change, which the recorded list doesn't name. They are removed only
-      // when the template names this repository and environment, because
-      // otherwise other environments or repositories present them too. A
-      // GitHub read failure throws, so the delete stops with the GitHub
-      // environment kept.
+      // change, which the recorded list doesn't name. The removal keeps any
+      // that other environments or repositories may present too. A GitHub
+      // read failure throws, so the delete stops with the GitHub environment
+      // kept.
       const oidc = await resolveOidc(repo, environment);
-      const current = oidc.federatedCredentials
-        .map((credential) => credential.subject)
-        .filter((subject) => !trustSubjects.includes(subject));
-      const own = current.filter((subject) =>
-        namesRepositoryEnvironment(subject, oidc)
-      );
-      const subjects = [...new Set([...trustSubjects, ...own])];
-      const shared = current
-        .filter((subject) => !own.includes(subject))
-        .map(
-          (subject) =>
-            `Radius didn't remove trust subject ${subject}, because it doesn't name both this repository and an environment, so other environments or repositories may use it. If nothing else needs it, remove it from the role's trust policy by hand.`
-        );
+      const subjects = [
+        ...new Set([
+          ...trustSubjects,
+          ...oidc.federatedCredentials.map((credential) => credential.subject)
+        ])
+      ];
       // Boxed so the closures below and this function see one value.
       const state: {
         lock: AwsDeployIdentityLock | null;
@@ -533,7 +514,7 @@ export function createAwsEnvironmentAccess<Operation>(
         writes: string[];
       } = { lock: null, lost: null, writes: [] };
       try {
-        const removal = await removeAwsEnvironmentFromRole(
+        const result = await removeAwsEnvironmentFromRole(
           { repo, roleArn, environment, subjects, region, cluster },
           {
             runAws: async (args) => {
@@ -575,10 +556,6 @@ export function createAwsEnvironmentAccess<Operation>(
               listOtherAwsEnvironments(repo, environment, oidc)
           }
         );
-        const result =
-          removal.ok && shared.length > 0 ?
-            { ...removal, warnings: [...removal.warnings, ...shared] }
-          : removal;
         if (result.ok && !state.lost && whileLocked) {
           state.lost = (await state.lock?.verify()) ?? null;
           if (!state.lost) await whileLocked(result);

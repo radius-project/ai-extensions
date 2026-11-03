@@ -3,6 +3,8 @@
 // permission policy, and the AWS CLI version gate. No I/O: callers run the
 // `aws` CLI and hand the parsed documents in.
 
+import { buildEnvironmentSuffix } from "./oidc-subject.js";
+
 export const AWS_CLI_MINIMUM_VERSION = "2.15.3";
 export const AWS_CLI_INSTALL_URL =
   "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html";
@@ -367,6 +369,22 @@ export interface GitHubRepositoryIdentity {
   readonly repoId: number;
 }
 
+// A subject's `key:value` claims, or null when it is malformed or a value is
+// empty or a wildcard, since such a subject can't be tied to one workflow.
+function subjectClaims(subject: string): Array<[string, string]> | null {
+  const parts = subject.split(":");
+  if (parts.length < 4 || parts.length % 2 !== 0) return null;
+  const claims: Array<[string, string]> = [];
+  for (let index = 0; index < parts.length; index += 2) {
+    const value = parts[index + 1];
+    if (!value || /[*?]/.test(value)) return null;
+    claims.push([parts[index], value]);
+  }
+  return claims;
+}
+
+const REPOSITORY_CLAIMS = new Set(["repo", "repository", "repository_id"]);
+
 /**
  * Whether a GitHub OIDC subject names this repository and an environment, so
  * no other repository or a workflow outside an environment presents it. The
@@ -379,29 +397,47 @@ export function namesRepositoryEnvironment(
   subject: string,
   repository: GitHubRepositoryIdentity
 ): boolean {
-  const parts = subject.split(":");
-  if (parts.length < 4 || parts.length % 2 !== 0) return false;
+  const claims = subjectClaims(subject);
+  if (!claims) return false;
   const [owner = "", name = ""] = repository.fullName.toLowerCase().split("/");
   const slugs = [
     `${owner}/${name}`,
     `${owner}@${repository.ownerId}/${name}@${repository.repoId}`
   ];
-  let environment = false;
-  let named = false;
-  for (let index = 0; index < parts.length; index += 2) {
-    const key = parts[index];
-    const value = parts[index + 1] ?? "";
-    if (value === "" || /[*?]/.test(value)) return false;
-    if (key === "environment") environment = true;
-    if (
-      ((key === "repo" || key === "repository") &&
-        slugs.includes(value.toLowerCase())) ||
-      (key === "repository_id" && value === String(repository.repoId))
-    ) {
-      named = true;
-    }
-  }
-  return environment && named;
+  return (
+    claims.some(([key]) => key === "environment") &&
+    claims.some(
+      ([key, value]) =>
+        ((key === "repo" || key === "repository") &&
+          slugs.includes(value.toLowerCase())) ||
+        (key === "repository_id" && value === String(repository.repoId))
+    )
+  );
+}
+
+/**
+ * Whether a GitHub OIDC subject names a repository and exactly the environment
+ * `environment`, so only that one environment presents it. GitHub environment
+ * names are unique in a repository regardless of case. The repository may be
+ * named by an older name from before a rename. A subject with no repository,
+ * such as an owner-wide one, or with no environment is presented by other
+ * repositories or environments too.
+ */
+export function namesOneEnvironment(
+  subject: string,
+  environment: string
+): boolean {
+  const claims = subjectClaims(subject);
+  if (!claims) return false;
+  const encoded = buildEnvironmentSuffix(environment)
+    .slice("environment:".length)
+    .toLowerCase();
+  const environments = claims.filter(([key]) => key === "environment");
+  return (
+    environments.length === 1 &&
+    environments[0][1].toLowerCase() === encoded &&
+    claims.some(([key]) => REPOSITORY_CLAIMS.has(key))
+  );
 }
 
 function githubTrustStatement(

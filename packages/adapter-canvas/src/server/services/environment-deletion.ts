@@ -207,13 +207,14 @@ export interface AwsRoleAccessRemoval {
   warnings: readonly string[];
 }
 
-interface DeletionOperation {
+export interface DeletionOperation {
   operationId: string;
   provider?: string;
   repo?: string;
   environment?: string;
   currentStage?: string | null;
   stages: Array<{ id: string; state: string }>;
+  steps: Array<{ stage?: unknown; label?: unknown }>;
   request?: {
     clientId?: string;
     tenantId?: string;
@@ -406,9 +407,10 @@ export async function runEnvironmentDeletion(
   // still see the environment and add its subjects back. For the same reason,
   // a retry whose GitHub environment delete is still pending removes the
   // subjects again first. The removal is idempotent.
+  const awsStageState = stageState(op, STAGE_DELETE_AWS_ROLE_ACCESS);
   const awsStagePending = stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS);
   if (
-    stageState(op, STAGE_DELETE_AWS_ROLE_ACCESS) !== null &&
+    awsStageState !== null &&
     (awsStagePending || stagePending(op, STAGE_DELETE_GITHUB_ENV))
   ) {
     enterStage(op, STAGE_DELETE_AWS_ROLE_ACCESS);
@@ -424,6 +426,14 @@ export async function runEnvironmentDeletion(
     await ports.persist();
     let removal;
     let stopped = false;
+    // What went wrong in the work run under the lock, after the AWS removal
+    // succeeded. It is not an AWS failure, so it is rethrown once the AWS
+    // outcome is recorded, as a save or GitHub failure would be without the
+    // lock.
+    const lockedWork: { failed: boolean; error: unknown } = {
+      failed: false,
+      error: null
+    };
     try {
       removal = await ports.removeAwsEnvironmentAccess({
         repo,
@@ -450,16 +460,25 @@ export async function runEnvironmentDeletion(
         },
         whileLocked: async (removed) => {
           setContext(op, { awsLockWait: null });
-          recordAwsRoleAccessRemoval(op, removed);
-          await ports.persist();
-          stopped = await deleteGitHubEnvironmentStage(
+          recordAwsRoleAccessRemoval(
             op,
-            ports,
-            repo,
-            environment,
-            Number(op.request?.repoId)
+            removed,
+            awsStagePending ? null : awsStageState
           );
-          await ports.persist();
+          try {
+            await ports.persist();
+            stopped = await deleteGitHubEnvironmentStage(
+              op,
+              ports,
+              repo,
+              environment,
+              Number(op.request?.repoId)
+            );
+            await ports.persist();
+          } catch (error) {
+            lockedWork.failed = true;
+            lockedWork.error = error;
+          }
         }
       });
     } catch (error) {
@@ -502,6 +521,7 @@ export async function runEnvironmentDeletion(
       setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "warning");
     }
     await ports.persist();
+    if (lockedWork.failed) throw lockedWork.error;
     if (stopped) return;
   }
 
@@ -704,11 +724,40 @@ export async function runEnvironmentDeletion(
 }
 
 // Record what the role cleanup removed, kept, and could not confirm, and close
-// its stage.
+// its stage. A recheck before a retried GitHub environment delete passes the
+// stage's earlier verdict: it adds only what it removed this time and any new
+// warning, since the earlier pass already listed what was kept.
 function recordAwsRoleAccessRemoval(
   op: DeletionOperation,
-  removal: AwsRoleAccessRemoval
+  removal: AwsRoleAccessRemoval,
+  recheckOf: string | null
 ): void {
+  if (recheckOf !== null) {
+    const listed = new Set(
+      op.steps
+        .filter((step) => step.stage === STAGE_DELETE_AWS_ROLE_ACCESS)
+        .map((step) => step.label)
+    );
+    for (const item of removal.removed) {
+      addStep(op, {
+        stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+        kind: "mutation",
+        label: `Removed ${item}`,
+        state: "succeeded"
+      });
+    }
+    for (const warning of removal.warnings) {
+      if (listed.has(warning)) continue;
+      addStep(op, {
+        stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+        kind: "warning",
+        label: warning,
+        warning: { code: "aws-role-cleanup-warning", message: warning }
+      });
+    }
+    setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, recheckOf);
+    return;
+  }
   if (removal.removed.length === 0) {
     addStep(op, {
       stage: STAGE_DELETE_AWS_ROLE_ACCESS,

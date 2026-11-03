@@ -6,7 +6,10 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
 import { createEnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
 import { deleteGitHubEnvironmentIdempotent } from "../../../src/server/services/github-environment.js";
-import { runEnvironmentDeletion } from "../../../src/server/services/environment-deletion.js";
+import {
+  runEnvironmentDeletion,
+  type DeletionOperation
+} from "../../../src/server/services/environment-deletion.js";
 import { createAwsEnvironmentAccess } from "../../../src/server/services/aws-environment-access.js";
 import { createEnvironmentTargetReader } from "../../../src/server/services/environment-target.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
@@ -27,6 +30,7 @@ import {
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { EnvironmentsDependencies } from "../../../src/server/routes/environments.js";
+import type { DeleteOperationRecord } from "../../../src/server/routes/environments-types.js";
 import type { EnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
 
 // The environment picker reads a repo-scoped, short-TTL cached listing. A
@@ -674,6 +678,31 @@ describe("environment listing cache after environment cleanup", () => {
 // route serves, so the picker stops offering the deleted environment. Only the
 // leaf CLI/identity ports are faked; the route, the operation model, the runner,
 // the shared delete primitive, and the cache are all production code.
+// The route builds its operation with `createOperation` and hands that record
+// to the scheduler, typed as the route sees it. Keep each record typed as the
+// deletion runner reads it, and give the runner exactly the one the route
+// scheduled.
+function trackDeletions(): {
+  createOperation(input: unknown): DeleteOperationRecord;
+  scheduled(op: DeleteOperationRecord): DeletionOperation;
+} {
+  const created = new Map<string, DeletionOperation>();
+  return {
+    createOperation(input) {
+      const record = createOperation(input);
+      created.set(record.operationId, record);
+      return record;
+    },
+    scheduled(op) {
+      const deletion = created.get(op.operationId);
+      if (deletion !== op) {
+        throw new Error(`operation ${op.operationId} was not created here`);
+      }
+      return deletion;
+    }
+  };
+}
+
 describe("the async delete route through its background runner", () => {
   /** A deferred the test resolves once the scheduled runner has finished. */
   function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -703,6 +732,7 @@ describe("the async delete route through its background runner", () => {
     // Production binds the scheduler to `runEnvironmentDeletion`; bind that same
     // runner here with the shared Azure argv builder and GitHub deletion
     // primitive used by the composition root.
+    const deletions = trackDeletions();
     const deleteDeps: Partial<EnvironmentsDependencies> = {
       discoverEnvironmentTarget: async () => ({
         provider: "azure",
@@ -710,10 +740,7 @@ describe("the async delete route through its background runner", () => {
         tenantId: "tenant-1",
         repoId: 7
       }),
-      createOperation: (input) =>
-        createOperation(input) as ReturnType<
-          NonNullable<EnvironmentsDependencies["createOperation"]>
-        >,
+      createOperation: deletions.createOperation,
       buildDeleteStages: (options) => buildDeleteStages(options),
       startOperation: (op) => ({ ok: true as const, operation: op }),
       toClientView: (op) => toClientView(op),
@@ -721,7 +748,7 @@ describe("the async delete route through its background runner", () => {
       logError: () => {},
       scheduleEnvironmentOperation: (_instanceId, op) => {
         operations.push(op);
-        void runEnvironmentDeletion(op as never, {
+        void runEnvironmentDeletion(deletions.scheduled(op), {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
           removeAwsEnvironmentAccess: async () => {
             throw new Error("unexpected AWS role cleanup");
@@ -911,16 +938,11 @@ describe("the async delete route through its background runner", () => {
   it("keeps the environment listed and ends failed_partial when the github delete fails", async () => {
     const runnerFinished = deferred();
     let harness: Harness;
-    let capturedOp:
-      | {
-          state: string;
-          failure?: { code?: string; message?: string };
-          stages: Array<{ id: string; state: string }>;
-        }
-      | undefined;
+    let capturedOp: DeletionOperation | undefined;
     const stageState = (id: string): string | undefined =>
       capturedOp?.stages.find((entry) => entry.id === id)?.state;
 
+    const deletions = trackDeletions();
     const deleteDeps: Partial<EnvironmentsDependencies> = {
       discoverEnvironmentTarget: async () => ({
         provider: "azure",
@@ -928,18 +950,15 @@ describe("the async delete route through its background runner", () => {
         tenantId: "tenant-1",
         repoId: 7
       }),
-      createOperation: (input) =>
-        createOperation(input) as ReturnType<
-          NonNullable<EnvironmentsDependencies["createOperation"]>
-        >,
+      createOperation: deletions.createOperation,
       buildDeleteStages: (options) => buildDeleteStages(options),
       startOperation: (op) => ({ ok: true as const, operation: op }),
       toClientView: (op) => toClientView(op),
       persistOperations: async () => {},
       logError: () => {},
       scheduleEnvironmentOperation: (_instanceId, op) => {
-        capturedOp = op as unknown as typeof capturedOp;
-        void runEnvironmentDeletion(op as never, {
+        capturedOp = deletions.scheduled(op);
+        void runEnvironmentDeletion(capturedOp, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
           removeAwsEnvironmentAccess: async () => {
             throw new Error("unexpected AWS role cleanup");
@@ -1030,7 +1049,9 @@ describe("the async delete route through its background runner", () => {
     // The operation ended as a retryable partial failure at the GitHub stage,
     // with the completed earlier stages retained so a retry resumes there.
     expect(capturedOp?.state).toBe("failed_partial");
-    expect(capturedOp?.failure?.code).toBe("github-env-delete-failed");
+    expect(capturedOp?.failure).toMatchObject({
+      code: "github-env-delete-failed"
+    });
     expect(stageState(STAGE_DELETE_RADIUS_ENV)).toBe("succeeded");
     expect(stageState(STAGE_DELETE_CREDENTIAL)).toBe("succeeded");
     expect(stageState(STAGE_DELETE_GITHUB_ENV)).toBe("failed");
@@ -1152,17 +1173,17 @@ describe("the async delete route through its background runner", () => {
           ok: true,
           names: ["dev", "prod"]
         }),
-        readEnvironmentVariables: async (_repo, name) => {
-          if (name !== "prod") throw new Error(`unexpected read of ${name}`);
-          return {
-            ok: true,
-            variables: Object.fromEntries(
+        readEnvironmentVariables: async (_repo, name) => ({
+          ok: true,
+          variables: Object.fromEntries(
+            (name === "prod" ?
               awsVariables("storefront", prod)
-                .split("\n")
-                .map((line) => line.split("\t"))
+            : awsVariables("shop", dev)
             )
-          };
-        }
+              .split("\n")
+              .map((line) => line.split("\t"))
+          )
+        })
       },
       sleep: async () => {},
       now: () => Date.parse("2026-11-03T12:00:00Z"),
@@ -1179,26 +1200,22 @@ describe("the async delete route through its background runner", () => {
       errorMessage: (error) =>
         error instanceof Error ? error.message : String(error)
     });
-    let capturedOp:
-      | { state: string; steps: Array<{ stage: string; label: string }> }
-      | undefined;
+    let capturedOp: DeletionOperation | undefined;
+    const deletions = trackDeletions();
     const deleteDeps: Partial<EnvironmentsDependencies> = {
       awsEnabled: true,
       discoverEnvironmentTarget: createEnvironmentTargetReader(async () =>
         awsVariables("shop", dev)
       ),
-      createOperation: (input) =>
-        createOperation(input) as ReturnType<
-          NonNullable<EnvironmentsDependencies["createOperation"]>
-        >,
+      createOperation: deletions.createOperation,
       buildDeleteStages: (options) => buildDeleteStages(options),
       startOperation: (op) => ({ ok: true as const, operation: op }),
       toClientView: (op) => toClientView(op),
       persistOperations: async () => {},
       logError: () => {},
       scheduleEnvironmentOperation: (_instanceId, op) => {
-        capturedOp = op as unknown as typeof capturedOp;
-        void runEnvironmentDeletion(op as never, {
+        capturedOp = deletions.scheduled(op);
+        void runEnvironmentDeletion(capturedOp, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
           removeAwsEnvironmentAccess: access.remove,
           deleteStatePackage: async () => "deleted",
@@ -1238,6 +1255,7 @@ describe("the async delete route through its background runner", () => {
     expect(response.status).toBe(202);
     await runnerFinished.promise;
 
+    expect(capturedOp?.failure).toBeNull();
     expect(capturedOp?.state).toBe("succeeded");
     expect(awsCommands).toContainEqual([
       "eks",
@@ -1251,7 +1269,7 @@ describe("the async delete route through its background runner", () => {
     ]);
     expect(
       capturedOp?.steps
-        .filter((step) => step.stage === STAGE_DELETE_AWS_ROLE_ACCESS)
+        ?.filter((step) => step.stage === STAGE_DELETE_AWS_ROLE_ACCESS)
         .map((step) => step.label)
     ).toEqual(
       expect.arrayContaining([

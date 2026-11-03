@@ -674,6 +674,8 @@ describe("AWS environment access removal", () => {
     }
   );
 
+  const sharedWarning = (subject: string) =>
+    `Kept trust subject ${subject}, because it doesn't name one repository and the environment dev, so other environments or repositories may present it too. If nothing else needs it, remove it from the role's trust policy by hand.`;
   const customTemplate = (
     includeClaimKeys: string[]
   ): Record<string, GitHubJsonResponse> => ({
@@ -715,9 +717,7 @@ describe("AWS environment access removal", () => {
       expect(result).toMatchObject({
         ok: true,
         removed: [`trust subject ${DEV}`, "policy radius-deploy-dev"],
-        warnings: [
-          `Radius didn't remove trust subject ${shared}, because it doesn't name both this repository and an environment, so other environments or repositories may use it. If nothing else needs it, remove it from the role's trust policy by hand.`
-        ]
+        warnings: [sharedWarning(shared)]
       });
       expect(remainingTrust(h)).toEqual([shared, PROD]);
     }
@@ -749,8 +749,56 @@ describe("AWS environment access removal", () => {
     });
   });
 
+  // Two environments set up under the `repository_id` template both record
+  // `repository_id:42`, and both use it to assume the role.
+  it("keeps a recorded subject another environment records too", async () => {
+    const h = harness(
+      roleTrusting(["repository_id:42", PROD]),
+      customTemplate(["repository_id"])
+    );
+
+    const result = await h.access.remove({
+      repo: "octo/shop",
+      environment: "dev",
+      roleArn: ROLE_ARN,
+      trustSubjects: ["repository_id:42"],
+      ...cluster
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      removed: ["policy radius-deploy-dev"],
+      warnings: [sharedWarning("repository_id:42")]
+    });
+    expect(h.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  it("doesn't warn about a shared subject the role doesn't trust", async () => {
+    const h = harness(
+      roleTrusting([DEV, PROD]),
+      customTemplate(["repository_owner"])
+    );
+
+    const result = await h.access.remove({
+      repo: "octo/shop",
+      environment: "dev",
+      roleArn: ROLE_ARN,
+      trustSubjects: [DEV],
+      ...cluster
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      removed: [`trust subject ${DEV}`, "policy radius-deploy-dev"],
+      warnings: []
+    });
+  });
+
   it("passes the shared-subject warning to the work run under the lock", async () => {
-    const h = harness(roleTrusting([DEV, PROD]), customTemplate(["repo"]));
+    const h = harness(
+      roleTrusting([DEV, "repo:octo/shop", PROD]),
+      customTemplate(["repo"])
+    );
     const seen: unknown[] = [];
 
     await h.access.remove({
@@ -853,7 +901,7 @@ describe("AWS environment access removal of the cluster's access entry", () => {
       ok: true,
       removed: expect.arrayContaining([`access entry for ${ROLE} on shop`])
     });
-    expect(h.environmentReads).toEqual(["prod", "azure", "handmade"]);
+    expect(h.environmentReads).toEqual(["DEV", "prod", "azure", "handmade"]);
     const commands = h.commands();
     // The lock is checked right before the entry delete, and released after.
     expect(

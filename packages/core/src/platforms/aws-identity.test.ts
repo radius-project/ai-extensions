@@ -31,6 +31,7 @@ import {
   parseAwsRoleArn,
   parsePolicyDocument,
   radiusRoleRepository,
+  namesOneEnvironment,
   namesRepositoryEnvironment,
   removeGitHubTrustSubject,
   trustAllowsOnlySubjects,
@@ -570,6 +571,36 @@ describe("trust policy", () => {
         Statement: [github({ StringLike: { [`${GITHUB}:sub`]: PROD } })]
       };
       expect(trustAllowsOnlySubjects(policy, ACCOUNT, [PROD])).toBe(true);
+    });
+  });
+
+  describe("namesOneEnvironment", () => {
+    it.each([
+      ["the name form", "repo:octo/shop:environment:dev"],
+      ["the ID form", "repo:octo@7/shop@42:environment:dev"],
+      ["an older name from before a rename", "repo:octo/old:environment:dev"],
+      ["a repository ID", "repository_id:42:environment:dev"],
+      ["the environment in another case", "repo:octo/shop:environment:DEV"]
+    ])("accepts %s", (_label, subject) => {
+      expect(namesOneEnvironment(subject, "dev")).toBe(true);
+    });
+
+    it("matches an environment name with a colon by its encoded form", () => {
+      expect(
+        namesOneEnvironment("repo:octo/shop:environment:a%3Ab", "a:b")
+      ).toBe(true);
+    });
+
+    it.each([
+      ["no environment", "repository_id:42"],
+      ["no repository", "repository_owner:octo:environment:dev"],
+      ["another environment", "repo:octo/shop:environment:prod"],
+      ["two environments", "repo:octo/shop:environment:dev:environment:dev"],
+      ["a wildcard", "repo:octo/shop:environment:*"],
+      ["an empty value", "repo::environment:dev"],
+      ["a malformed subject", "repo:octo/shop:environment"]
+    ])("rejects %s", (_label, subject) => {
+      expect(namesOneEnvironment(subject, "dev")).toBe(false);
     });
   });
 

@@ -1358,6 +1358,151 @@ describe("removeAwsEnvironmentFromRole", () => {
     });
   });
 
+  // EKS keeps an access entry after its role is deleted. It grants nothing,
+  // since a role created later with the same name is a new principal.
+  describe("when the role is already gone", () => {
+    const GONE = `IAM role ${ROLE} was already gone, so there was nothing to remove from it.`;
+    const ORPHAN = `It grants nothing now that the role is gone. To remove it, run: aws eks delete-access-entry --cluster-name shop --principal-arn ${ROLE_ARN} --region us-west-2`;
+    const roleGone: Script = {
+      ...signedIn,
+      "iam get-role": fail("NoSuchEntity")
+    };
+
+    it("removes the entry setup tagged on the environment's cluster", async () => {
+      const aws = fakeAws({
+        ...roleGone,
+        ...taggedEntry,
+        "eks delete-access-entry": ok()
+      });
+      expect(await remove(aws)).toEqual({
+        ok: true,
+        removed: [`access entry for ${ROLE} on shop`],
+        kept: [],
+        warnings: [GONE]
+      });
+      expect(aws.find("eks delete-access-entry")).toContain(ROLE_ARN);
+    });
+
+    it.each([
+      [
+        "it has no Radius tag",
+        ok({ accessEntry: { tags: {} } }),
+        `Kept ${ENTRY}, because it doesn't have the Radius tag. ${ORPHAN}`
+      ],
+      [
+        "it can't be read",
+        fail("AccessDeniedException"),
+        `Kept ${ENTRY}, because Radius couldn't read it (AccessDeniedException). ${ORPHAN}`
+      ]
+    ])(
+      "keeps the entry and says how to remove it when %s",
+      async (_label, described, warning) => {
+        const aws = fakeAws({
+          ...roleGone,
+          "eks describe-access-entry": described
+        });
+        expect(await remove(aws)).toEqual({
+          ok: true,
+          removed: [],
+          kept: [],
+          warnings: [GONE, warning]
+        });
+        expect(aws.find("eks delete-access-entry")).toBeUndefined();
+      }
+    );
+
+    it("doesn't look for an entry when the environment recorded no cluster", async () => {
+      const aws = fakeAws(roleGone);
+      await remove(aws, null, { cluster: "" });
+      expect(aws.find("eks describe-access-entry")).toBeUndefined();
+    });
+
+    it("says the entry is still there when deleting it fails", async () => {
+      const aws = fakeAws({
+        ...roleGone,
+        ...taggedEntry,
+        "eks delete-access-entry": fail("AccessDeniedException")
+      });
+      expect(await remove(aws)).toEqual({
+        ok: false,
+        message: `Could not delete ${ENTRY} (AccessDeniedException). Nothing was removed. Still there: ${ENTRY}. Retry removes what's still there.`
+      });
+    });
+  });
+
+  describe("a subject other environments or repositories present too", () => {
+    const SHARED = "repository_id:22";
+    const sharedWarning = (subject: string) =>
+      `Kept trust subject ${subject}, because it doesn't name one repository and the environment dev, so other environments or repositories may present it too. If nothing else needs it, remove it from the role's trust policy by hand.`;
+
+    it.each([
+      ["has no environment", SHARED],
+      ["has no repository", "repository_owner:octo:environment:dev"],
+      ["names another environment", "repo:octo/shop:environment:prod"],
+      ["is a wildcard", "repo:octo/shop:environment:*"]
+    ])(
+      "keeps a trusted subject that %s, and warns",
+      async (_label, subject) => {
+        const aws = fakeAws({
+          ...signedIn,
+          "iam get-role": ok(managedRole([DEV, subject])),
+          "iam update-assume-role-policy": ok(),
+          "iam delete-role-policy": ok()
+        });
+        const result = await remove(aws, null, { subjects: [DEV, subject] });
+        expect(result).toMatchObject({
+          ok: true,
+          removed: [`trust subject ${DEV}`, "policy radius-deploy-dev"],
+          warnings: [sharedWarning(subject)]
+        });
+        expect(trustedGitHubSubjects(writtenTrust(aws), ACCOUNT)).toEqual([
+          subject
+        ]);
+      }
+    );
+
+    it("doesn't change the trust or warn about a shared subject the role doesn't trust", async () => {
+      const aws = fakeAws({
+        ...signedIn,
+        "iam get-role": ok(managedRole([PROD])),
+        "iam delete-role-policy": ok()
+      });
+      expect(await remove(aws, null, { subjects: [SHARED] })).toMatchObject({
+        ok: true,
+        removed: ["policy radius-deploy-dev"],
+        warnings: []
+      });
+      expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+    });
+
+    it("removes a subject from before a rename that names this environment", async () => {
+      const renamed = "repo:octo/old-shop:environment:DEV";
+      const aws = fakeAws({
+        ...signedIn,
+        "iam get-role": ok(managedRole([renamed, PROD])),
+        "iam update-assume-role-policy": ok(),
+        "iam delete-role-policy": ok()
+      });
+      expect(await remove(aws, null, { subjects: [renamed] })).toMatchObject({
+        ok: true,
+        removed: [`trust subject ${renamed}`, "policy radius-deploy-dev"]
+      });
+    });
+
+    it("names only this environment's subjects to remove by hand when the trust policy is unreadable", async () => {
+      const aws = fakeAws({
+        ...signedIn,
+        "iam get-role": ok({
+          Role: { Arn: ROLE_ARN, AssumeRolePolicyDocument: "{not json" }
+        })
+      });
+      const result = await remove(aws, null, { subjects: [SHARED] });
+      expect(!result.ok && result.message).toMatch(
+        /retry, or by hand delete its policy radius-deploy-dev\.$/
+      );
+    });
+  });
+
   it("stops without writing and names what to remove by hand when the trust policy is unreadable", async () => {
     const aws = fakeAws({
       ...signedIn,
@@ -1618,7 +1763,7 @@ describe("removeAwsEnvironmentFromRole", () => {
         });
         const result = await remove(aws);
         expect(result.ok && result.kept).toContain(
-          `${ENTRY}, because Radius setup didn't create it. ${BY_HAND}`
+          `${ENTRY}, because it doesn't have the Radius tag. Entries created before Radius tagged them are kept too. ${BY_HAND}`
         );
         expect(aws.find("eks delete-access-entry")).toBeUndefined();
       }
