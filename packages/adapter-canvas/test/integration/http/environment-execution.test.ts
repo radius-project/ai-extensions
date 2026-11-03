@@ -675,34 +675,30 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
     ].join("\n")
   );
   await fs.chmod(path.join(fakeBin, "aws"), 0o755);
-  const cmdEcho = (text: string) =>
-    text.replace(/[&|<>^%"]/g, (character) =>
-      character === "%" ? "%%" : `^${character}`
-    );
-  const cmdCases = Object.entries(answers).flatMap(([command, answer]) => {
-    const [first, second] = command.split(" ");
-    const test =
-      second ?
-        `if "%1 %2"=="${first} ${second}"`
-      : `if "%1"=="${first}" if "%2"==""`;
-    return [
-      `${test} (`,
-      ...(answer.stdout ? [`  echo ${cmdEcho(answer.stdout)}`] : []),
-      ...(answer.stderr ? [`  echo ${cmdEcho(answer.stderr)} 1>&2`] : []),
-      `  exit /b ${answer.code ?? 0}`,
-      ")"
-    ];
-  });
+  // On Windows, Node parses the command line's quotes before argv is
+  // recorded and matched, so quoted arguments arrive whole (#1151).
+  await fs.writeFile(
+    path.join(fakeBin, "aws.cjs"),
+    [
+      'const fs = require("node:fs");',
+      `const answers = ${JSON.stringify(answers)};`,
+      "const args = process.argv.slice(2);",
+      'fs.appendFileSync(process.env.FAKE_AWS_LOG, `${args.join(" ")}\\n`);',
+      'const answer = answers[args.slice(0, 2).join(" ")];',
+      "if (answer) {",
+      "  if (answer.stdout) console.log(answer.stdout);",
+      "  if (answer.stderr) console.error(answer.stderr);",
+      "  process.exitCode = answer.code ?? 0;",
+      "} else {",
+      '  console.error("fake aws: refused");',
+      "  process.exitCode = 3;",
+      "}",
+      ""
+    ].join("\n")
+  );
   await fs.writeFile(
     path.join(fakeBin, "aws.cmd"),
-    [
-      "@echo off",
-      'echo %*>>"%FAKE_AWS_LOG%"',
-      ...cmdCases,
-      "echo fake aws: refused 1>&2",
-      "exit /b 3",
-      ""
-    ].join("\r\n")
+    ["@echo off", `"${process.execPath}" "%~dp0aws.cjs" %*`, ""].join("\r\n")
   );
   process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
   process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";

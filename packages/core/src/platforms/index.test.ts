@@ -31,7 +31,7 @@ describe("getPlatform", () => {
 
 describe("generatePortalUrl", () => {
   // The deep link is built from a fixed placeholder context. Nothing populates
-  // a real subscription, resource group, region, or cluster, so these assert the
+  // a real subscription, resource group, or cluster, so these assert the
   // placeholder contract rather than state-driven substitution.
   it("returns an azure portal URL built from a full ARM resource ID", () => {
     const armId =
