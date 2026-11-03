@@ -683,6 +683,15 @@ export async function runEnvironmentDeletion(
       label: `Radius doesn't delete IAM role ${roleName} or the account's GitHub identity provider, because other environments, repositories, or services may use them.`,
       state: "succeeded"
     });
+    // AWS keeps a final snapshot of every database it deleted with the apps.
+    // It holds the app's data, so Radius leaves it, and only says it exists.
+    const region = String(op.request?.region || "").trim();
+    addStep(op, {
+      stage: STAGE_REVIEW_IAM_ROLE,
+      kind: "observation",
+      label: `Kept the final snapshots AWS took of databases deleted with this environment's apps. They hold the apps' data, and AWS bills for them until you delete them. Find them under Snapshots in the RDS console, or run: aws rds describe-db-snapshots --snapshot-type manual${region ? ` --region ${region}` : ""}`,
+      state: "succeeded"
+    });
     setStageState(op, STAGE_REVIEW_IAM_ROLE, "succeeded");
     await ports.persist();
   }

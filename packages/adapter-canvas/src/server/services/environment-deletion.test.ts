@@ -532,7 +532,8 @@ describe("runEnvironmentDeletion — AWS", () => {
         "Removed trust subject repo:octo/app:environment:dev",
         "Removed access entry for radius-deploy-octo-app on shop",
         "Kept IAM role radius-deploy-octo-app",
-        "Radius doesn't delete IAM role radius-deploy-octo-app or the account's GitHub identity provider, because other environments, repositories, or services may use them."
+        "Radius doesn't delete IAM role radius-deploy-octo-app or the account's GitHub identity provider, because other environments, repositories, or services may use them.",
+        "Kept the final snapshots AWS took of databases deleted with this environment's apps. They hold the apps' data, and AWS bills for them until you delete them. Find them under Snapshots in the RDS console, or run: aws rds describe-db-snapshots --snapshot-type manual --region us-west-2"
       ])
     );
     expect(labels).not.toContain(
@@ -851,6 +852,46 @@ describe("runEnvironmentDeletion — AWS", () => {
           step.label === "Could not release the lock on the IAM role"
       )
     ).toBe(true);
+  });
+
+  it.each([
+    ["no region recorded", undefined],
+    ["an empty region", " "]
+  ])(
+    "names the snapshots without a region for %s, even when the role was already gone",
+    async (_label, region) => {
+      const op = makeAwsOp();
+      op.request = { ...op.request, region };
+      await runEnvironmentDeletion(
+        op,
+        makePorts({
+          removeAwsEnvironmentAccess: removing({
+            ...nothing,
+            warnings: ["IAM role radius-deploy-octo-app was already gone."]
+          })
+        })
+      );
+      expect(
+        op.steps.find((step: { label: string }) =>
+          step.label.startsWith("Kept the final snapshots")
+        )
+      ).toMatchObject({
+        stage: STAGE_REVIEW_IAM_ROLE,
+        label: expect.stringMatching(
+          /run: aws rds describe-db-snapshots --snapshot-type manual$/
+        )
+      });
+    }
+  );
+
+  it("never mentions database snapshots for an Azure environment", async () => {
+    const op = makeOp();
+    await runEnvironmentDeletion(op, makePorts());
+    expect(
+      op.steps.some((step: { label: string }) =>
+        step.label.includes("snapshot")
+      )
+    ).toBe(false);
   });
 
   it("reports a role that held nothing for the environment", async () => {
