@@ -8,3 +8,5 @@ Add explicit legacy public compatibility contracts without changing strict live 
 Preserve optional application/environment predicate arguments and provider-discovery resource-type names and descriptions.
 
 Determine the legacy gateway/route direction rule from the canonical parsed connection ID, not an optional or conflicting supplied connection type.
+
+Insert nodes and directed edges into the canonical layout engine in stable identity order so input order and fresh mounts do not change positions.

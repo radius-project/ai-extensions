@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import { GRAPH_NODE_HEIGHT, GRAPH_NODE_WIDTH, layoutGraph } from "./layout.js";
 import { buildGraph, resolveGraphSettings } from "./build.js";
 import { createFakeDagre } from "../test/support/dagre.js";
+import dagre from "dagre";
 
 function graph() {
   return buildGraph(resolveGraphSettings(), [
@@ -18,8 +19,59 @@ function graph() {
 }
 
 describe("layoutGraph", () => {
+  it.each([false, true])(
+    "places %s connected topology independently of input order with real Dagre",
+    (connected) => {
+      const resources = [
+        { id: "c", connections: connected ? [{ id: "a" }, { id: "b" }] : [] },
+        { id: "a", connections: connected ? [{ id: "b" }] : [] },
+        { id: "b" }
+      ];
+      const first = buildGraph(resolveGraphSettings(), resources);
+      const reversed = buildGraph(
+        resolveGraphSettings(),
+        [...resources].reverse().map((resource) => ({
+          ...resource,
+          connections:
+            resource.connections ? [...resource.connections].reverse() : []
+        }))
+      );
+      const firstOrder = first.nodes.map((node) => node.id);
+      expect(layoutGraph(dagre, first.nodes, first.edges)).toBeNull();
+      expect(layoutGraph(dagre, reversed.nodes, reversed.edges)).toBeNull();
+      expect(
+        Object.fromEntries(first.nodes.map((node) => [node.id, node.position]))
+      ).toEqual(
+        Object.fromEntries(
+          reversed.nodes.map((node) => [node.id, node.position])
+        )
+      );
+      expect(first.nodes.map((node) => node.id)).toEqual(firstOrder);
+    }
+  );
+  it("uses identity order for degraded layout without reordering input arrays", () => {
+    const built = graph();
+    built.nodes.reverse();
+    layoutGraph(null, built.nodes, built.edges);
+    expect(built.nodes.map((node) => [node.id, node.position.y])).toEqual([
+      ["c", 332],
+      ["b", 166],
+      ["a", 0]
+    ]);
+  });
   it("accepts an empty graph without reporting a missing layout", () => {
     expect(layoutGraph(createFakeDagre(), [], [])).toBeNull();
+  });
+  it("keeps repeated directed edges equivalent without mutating their input order", () => {
+    const built = graph();
+    const edges = [built.edges[0], built.edges[0]];
+    const engine = createFakeDagre();
+    layoutGraph(engine, built.nodes, edges);
+    expect(engine.graphs[0].edges).toEqual([
+      { source: "a", target: "b" },
+      { source: "a", target: "b" }
+    ]);
+    expect(edges).toEqual([built.edges[0], built.edges[0]]);
   });
 
   it("lays the graph out top to bottom with the card footprint", () => {

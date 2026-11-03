@@ -649,7 +649,7 @@ describe("public host-neutral React API", () => {
     expect(phases).toEqual([
       {
         flowMounted: false,
-        ids: ["app/web", "app/db"]
+        ids: ["app/db", "app/web"]
       }
     ]);
     expect(db.getBoundingClientRect().top).toBeGreaterThan(

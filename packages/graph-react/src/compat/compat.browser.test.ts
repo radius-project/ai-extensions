@@ -52,6 +52,75 @@ const graph: AppGraphData = {
 };
 
 describe("public legacy compatibility components", () => {
+  it.each([false, true])(
+    "keeps actual %s connected graph positions stable across reversed input and fresh roots",
+    async (connected) => {
+      const first = mount();
+      const second = mount();
+      const left = {
+        ...web,
+        id: prefix + "Applications.Core/containers/core-app",
+        name: "core-app"
+      };
+      const right = {
+        ...web,
+        id: prefix + "Radius.Core/containers/radius-app",
+        name: "radius-app",
+        type: "Radius.Core/containers"
+      };
+      const third = {
+        ...web,
+        id: prefix + "Radius.Compute/containers/third",
+        name: "third"
+      };
+      const resources: AppGraphData["resources"] = [
+        {
+          ...left,
+          connections:
+            connected ?
+              [
+                { ...right, direction: "Inbound" as const },
+                { ...third, direction: "Inbound" as const }
+              ]
+            : []
+        },
+        right,
+        third
+      ];
+      first.root.render(h(AppGraph, { graph: { name: "first", resources } }));
+      second.root.render(
+        h(AppGraph, {
+          graph: {
+            name: "reversed",
+            resources: [...resources].reverse().map((resource) => ({
+              ...resource,
+              connections:
+                resource.connections ? [...resource.connections].reverse() : []
+            }))
+          }
+        })
+      );
+      const positions = (element: HTMLElement) =>
+        Object.fromEntries(
+          Array.from(
+            element.querySelectorAll<HTMLElement>(".react-flow__node")
+          ).map((node) => [node.getAttribute("data-id"), node.style.transform])
+        );
+      await waitFor(() => {
+        for (const { element } of [first, second]) {
+          expect(element.querySelectorAll(".react-flow__node")).toHaveLength(3);
+          expect(element.querySelectorAll(".react-flow__edge")).toHaveLength(
+            connected ? 2 : 0
+          );
+          for (const node of element.querySelectorAll(".react-flow__node")) {
+            expect(node.getBoundingClientRect().width).toBeGreaterThan(0);
+            expect(node.getBoundingClientRect().height).toBeGreaterThan(0);
+          }
+        }
+        expect(positions(first.element)).toEqual(positions(second.element));
+      });
+    }
+  );
   it("renders a data-only ResourceNode in a real Flow11 provider without Flow12 context", async () => {
     const { element, root } = mount();
     root.render(h(ReactFlowProvider, null, h(ResourceNode, { data: web })));
