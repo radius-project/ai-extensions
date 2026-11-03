@@ -199,9 +199,11 @@ export interface EnvironmentDeletionFailure {
 }
 
 // The terminal a driven deletion should reach: a clean success that walks every
-// stage to succeeded, or a partial failure that fails the first stage.
+// stage to succeeded, a success that records one warning step, or a partial
+// failure that fails the first stage.
 export type EnvironmentDeletionOutcome =
   | { state: "succeeded" }
+  | { state: "succeeded_with_warnings"; warning: string }
   | { state: "failed_partial"; failure: EnvironmentDeletionFailure };
 
 // Hands the test a release it can await: it resolves only once the runner has
@@ -1755,6 +1757,7 @@ export class CanvasHarness {
       awsLockWait: {
         ...lock,
         holder: "The setup of environment prod in fixture/app",
+        holderOperationId: "op_chromium_aws_lock_holder",
         since: "2026-10-30T11:00:00Z",
         removable: true
       }
@@ -1920,10 +1923,16 @@ export class CanvasHarness {
         releaseRunner = resolve;
         signalArrived?.();
       });
-      if (outcome.state === "succeeded") {
+      if (outcome.state !== "failed_partial") {
         for (const stage of op.stages) {
           ops.enterStage(op, stage.id);
           ops.setStageState(op, stage.id, "succeeded");
+        }
+        if (outcome.state === "succeeded_with_warnings") {
+          ops.addStep(op, {
+            label: outcome.warning,
+            warning: { code: "harness-warning", message: outcome.warning }
+          });
         }
         ops.finishSucceeded(op, "succeeded");
       } else {

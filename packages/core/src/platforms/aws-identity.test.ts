@@ -16,6 +16,7 @@ import {
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
   describeAwsLockHolder,
+  formatAwsLockTime,
   eksAcceptsAccessEntries,
   eksAuthenticationMode,
   githubOidcProviderArn,
@@ -717,5 +718,16 @@ describe("deploy identity lock", () => {
 
   it("offers removal after ten minutes", () => {
     expect(AWS_LOCK_REMOVABLE_AFTER_MS).toBe(600000);
+  });
+});
+
+describe("formatAwsLockTime", () => {
+  it.each([
+    ["2026-10-30T11:58:30Z", "2026-10-30 11:58 UTC"],
+    ["2026-10-30T04:58:30-07:00", "2026-10-30 11:58 UTC"],
+    ["", "an unknown time"],
+    ["not a date", "an unknown time"]
+  ])("formats %j as %s", (since, text) => {
+    expect(formatAwsLockTime(since)).toBe(text);
   });
 });

@@ -12,14 +12,25 @@ import { createTestCanvasServerRuntime } from "../../support/server/production-r
 import {
   configureOperationStore,
   createOperation,
+  fromPersistedOperation,
+  toPersistedOperation,
+  reconcileRestoredOperation,
+  projectOperationActions,
+  recordGitHubEnvironment,
+  recordCommittedWorkflowFile,
+  recordCommitState,
+  recordAzureApp,
   requireInput,
   finish,
+  pauseForProviderRestart,
+  onOperationTerminal,
   operations,
   setContext,
   OPERATION_SCHEMA_VERSION,
   setVerificationWorkflowState,
   STAGE_DELETE_RADIUS_ENV,
   STAGE_AUTHORIZE_IDENTITY,
+  STAGE_VERIFY,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
 import {
@@ -29,14 +40,661 @@ import {
 } from "../../../src/operation-store.js";
 
 afterEach(async () => {
+  onOperationTerminal(null);
   vi.restoreAllMocks();
   operations.clear();
   await configureOperationStore(disabledOperationStore());
 });
 
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe("production environment owner HTTP binding", () => {
-  it.each(["azure", "environment"] as const)(
-    "reaches the real %s setup service without its former setup POST",
+  it("returns unavailable GHCR readiness without a selection handle or scope repair over HTTP", async () => {
+    const executor = successfulSelectedGhExecutor({
+      requiresKeyringSwitch: false,
+      run: async (args) => {
+        if (args.join(" ") !== "api repos/fixture/app")
+          throw new Error("Unexpected repository command");
+        return {
+          code: 0,
+          stdout: '{"permissions":{"admin":true}}',
+          stderr: ""
+        };
+      }
+    });
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async () => executor,
+      getActiveKeyringLogin: async () => executor.login,
+      switchKeyringAccount: async () => {
+        throw new Error("Unexpected switch");
+      },
+      resetIdentityCache() {}
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: createEnvironmentAccountContext(
+        "http-readiness",
+        coordinator
+      )
+    });
+    const loopbackFetch = globalThis.fetch;
+    const registry = vi.fn(
+      async () => new Response("client_secret=fixture-value", { status: 503 })
+    );
+    vi.stubGlobal(
+      "fetch",
+      (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        if (String(input).startsWith("https://ghcr.io/")) return registry();
+        if (String(input).startsWith("http://127.0.0.1:"))
+          return loopbackFetch(input, init);
+        throw new Error("Unexpected network destination");
+      }
+    );
+    try {
+      const entry = await runtime.getOrCreateServer("readiness", "environment");
+      const response = await fetch(`${entry.baseUrl}/api/github-account`, {
+        method: "POST",
+        headers: {
+          origin: entry.baseUrl,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+        },
+        body: JSON.stringify({
+          repo: "fixture/app",
+          environment: "dev",
+          login: executor.login
+        })
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
+      const body = await response.json();
+      expect(body).toMatchObject({
+        success: true,
+        readiness: {
+          ready: false,
+          summary: "GitHub access could not be verified",
+          checks: {
+            packages: {
+              state: "error",
+              detail: "GitHub Packages authorization could not be verified."
+            }
+          },
+          repair: expect.stringContaining("retry with the same account"),
+          repairRemediation: null
+        }
+      });
+      expect(body.selectionHandle).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain("fixture-value");
+      expect(JSON.stringify(body)).not.toContain("auth refresh");
+      expect(registry).toHaveBeenCalledOnce();
+    } finally {
+      await runtime.stopServer("readiness", true);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(
+    ["shutdown", "changed-run"].flatMap((change) =>
+      ["stop", "cancel-workflow"].flatMap((action) =>
+        (action === "stop" ? [false, true] : [false]).map((reject) => ({
+          change,
+          action,
+          reject
+        }))
+      )
+    )
+  )(
+    "refuses $action over HTTP after $change during status read (reject=$reject)",
+    async ({ change, action, reject }) => {
+      const entered = deferred();
+      const gate = deferred();
+      const owner = createEnvironmentExecutionOwner();
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] !== "run") throw new Error("Unexpected cancellation POST");
+        entered.resolve();
+        await gate.promise;
+        if (reject) throw new Error("late network failure");
+        return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache() {}
+      });
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext: createEnvironmentAccountContext(
+          "http-cancellation",
+          coordinator
+        )
+      });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.verification = { runId: "42", workflowState: "active" };
+      if (action === "stop") {
+        op.resumeRequest = {
+          environment: {
+            repo: op.repo,
+            environment: op.environment,
+            provider: "azure"
+          }
+        };
+        op.currentStage = STAGE_VERIFY;
+        pauseForProviderRestart(op);
+      } else finish(op, "cancelled");
+      operations.put(op);
+      let pending: Promise<Response> | undefined;
+      try {
+        const entry = await runtime.getOrCreateServer("cancel", "environment");
+        const persist = vi
+          .spyOn(operations, "persist")
+          .mockResolvedValue(undefined);
+        const announce = vi.fn();
+        onOperationTerminal(announce);
+        pending = fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/${action}`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        await entered.promise;
+        if (change === "shutdown") owner.shutdown();
+        else op.verification = { runId: "43", workflowState: "active" };
+        gate.resolve();
+        const response = await pending;
+        expect(response.status).toBe(change === "shutdown" ? 503 : 409);
+        expect(response.headers.get("content-type")).toContain(
+          "application/json"
+        );
+        expect(response.headers.get("cache-control")).toContain("no-store");
+        expect(await response.json()).toMatchObject({
+          code:
+            change === "shutdown" ?
+              "operation-shutting-down"
+            : "operation-context-changed"
+        });
+        expect(run).toHaveBeenCalledTimes(1);
+        if (action === "stop") {
+          expect(op.state).toBe("cancelled");
+          expect(persist).toHaveBeenCalledTimes(1);
+          expect(announce).not.toHaveBeenCalled();
+        }
+        expect(op.verification).toEqual({
+          runId: change === "shutdown" ? "42" : "43",
+          workflowState: "active"
+        });
+      } finally {
+        gate.resolve();
+        await pending;
+        await runtime.stopServer("cancel", true);
+      }
+    }
+  );
+
+  it.each(["timeout", "confirmed"] as const)(
+    "refuses a fresh HTTP retry after shutdown and restored %s dispatch",
+    async (acknowledgement) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = deferred();
+      const gate = deferred();
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] === "run" && args[1] === "list")
+          return { code: 0, stdout: "[]", stderr: "" };
+        if (args[0] !== "workflow")
+          throw new Error(`Unexpected command: ${args.join(" ")}`);
+        entered.resolve();
+        await gate.promise;
+        if (acknowledgement === "confirmed")
+          return {
+            code: 0,
+            stdout: "https://github.com/fixture/app/actions/runs/17",
+            stderr: ""
+          };
+        return { code: 1, stdout: "", stderr: "timeout", timedOut: true };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext("http-verify", {
+        createReadOnlyExecutor: async () => executor,
+        withSelectedAccount: async () => {
+          throw new Error("Unexpected account switch");
+        }
+      });
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext: account
+      });
+      const entry = await runtime.getOrCreateServer("verify", "environment");
+      const op = createOperation({
+        operationId: "op_http-verify",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.currentStage = STAGE_VERIFY;
+      recordAzureApp(op, {
+        state: "reused",
+        appId: "11111111-1111-4111-8111-111111111111"
+      });
+      recordCommittedWorkflowFile(op, {
+        path: ".github/workflows/radius-verify-credentials.yml",
+        branch: "main",
+        mode: "default_branch",
+        commitSha: "c".repeat(40),
+        blobSha: "b".repeat(40),
+        contentSha256: "d".repeat(64),
+        previousBlobSha: null,
+        previousBlobKnown: true
+      });
+      recordCommitState(op, { mode: "default_branch", branch: "main" });
+      op.verification = {
+        workflow: "radius-verify-credentials.yml",
+        ref: "main",
+        environment: "dev",
+        operationMarker: op.operationId,
+        runId: "16"
+      };
+      finish(op, "failed_partial", {
+        failure: {
+          code: "verify-run-failed",
+          stage: STAGE_VERIFY,
+          message: "Failed verification",
+          classification: "user-fixable"
+        }
+      });
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      let done = Promise.resolve();
+      try {
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/retry/verification`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        expect(response.status, JSON.stringify(await response.json())).toBe(
+          202
+        );
+        done = new Promise<void>((resolve) => {
+          const stop = owner.onEnvironmentTasksSettled("verify", () => {
+            stop();
+            resolve();
+          });
+        });
+        await Promise.race([entered.promise, done]);
+        expect(run).toHaveBeenCalledTimes(2);
+        owner.shutdown();
+        gate.resolve();
+        await done;
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(op.endedAt).toBeNull();
+        expect(op.failure).toBeNull();
+        expect(op.providerRecovery.mutations.at(-1)?.status).toBe(
+          acknowledgement === "confirmed" ? "confirmed" : "outcome_unknown"
+        );
+        expect(account.getExecutor(op.operationId)).toBeUndefined();
+      } finally {
+        gate.resolve();
+        await done;
+        owner.shutdown();
+        await runtime.stopServer("verify", true);
+      }
+      const restored = fromPersistedOperation(toPersistedOperation(op));
+      reconcileRestoredOperation(restored);
+      operations.put(restored);
+      const commandsBeforeRetry = structuredClone(restored.control.commands);
+      if (acknowledgement === "confirmed") {
+        expect(restored).toMatchObject({
+          state: "action_required",
+          recoveryState: "provider_restart_decision",
+          terminal: { reason: "provider-restart-decision" },
+          verification: {
+            runId: "17",
+            runUrl: "https://github.com/fixture/app/actions/runs/17"
+          }
+        });
+        expect(
+          projectOperationActions(restored).map((action) => action.id)
+        ).toEqual(["continue-setup", "stop"]);
+      }
+      const restarted = createTestCanvasServerRuntime({
+        executionOwner: createEnvironmentExecutionOwner(),
+        accountContext: account
+      });
+      const restartedEntry = await restarted.getOrCreateServer(
+        "restored",
+        "environment"
+      );
+      try {
+        const response = await fetch(
+          `${restartedEntry.baseUrl}/api/operations/${op.operationId}/retry/verification`,
+          {
+            method: "POST",
+            headers: {
+              origin: restartedEntry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                restartedEntry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        const body = await response.json();
+        expect(response.status, JSON.stringify(body)).toBe(409);
+        expect(body.code).toBe("verification-retry-not-retryable");
+        expect(restored.providerRecovery.mutations.at(-1)?.status).toBe(
+          acknowledgement === "confirmed" ? "confirmed" : "manual_required"
+        );
+        expect(restored.control.commands).toEqual(commandsBeforeRetry);
+        expect(run).toHaveBeenCalledTimes(2);
+      } finally {
+        await restarted.stopServer("restored", true);
+      }
+    }
+  );
+
+  it("projects the latest saved operation without repository context through the production status route", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const unavailable = async (): Promise<never> => {
+      throw new Error("Unexpected account lookup");
+    };
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: createEnvironmentAccountContext("latest-status", {
+        createReadOnlyExecutor: unavailable,
+        withSelectedAccount: unavailable
+      })
+    });
+    const entry = await runtime.getOrCreateServer(
+      "latest-status",
+      "environment"
+    );
+    try {
+      const empty = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(empty.status).toBe(200);
+      expect(await empty.json()).toEqual({ operation: null });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      finish(op, "failed");
+      op.request = { private: "never-return-this" };
+      operations.put(op);
+      const response = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const result = await response.json();
+      expect(result).toMatchObject({
+        operation: {
+          operationId: op.operationId,
+          repo: op.repo,
+          environment: op.environment,
+          state: "failed"
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("never-return-this");
+      const beforeExport = Date.now();
+      const diagnostic = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/diagnostics`
+      );
+      expect(diagnostic.status).toBe(200);
+      expect(diagnostic.headers.get("content-disposition")).toContain(
+        "attachment;"
+      );
+      expect(diagnostic.headers.get("cache-control")).toBe("no-store");
+      const exported = await diagnostic.json();
+      expect(Date.parse(exported.generatedAt)).toBeGreaterThanOrEqual(
+        beforeExport
+      );
+      expect(Date.parse(exported.generatedAt)).toBeLessThanOrEqual(Date.now());
+      expect(JSON.stringify(exported)).not.toContain("never-return-this");
+      expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("latest-status", true);
+    }
+  });
+
+  it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = () => {};
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const run = vi.fn(async (): Promise<never> => {
+      throw new Error("Unexpected cleanup command after shutdown");
+    });
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      run
+    });
+    const account = createEnvironmentAccountContext(
+      "http-cleanup",
+      createGitHubAccountCoordinator({
+        createExecutor: async () => {
+          entered();
+          await gate;
+          return executor;
+        },
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected keyring switch");
+        },
+        resetIdentityCache: () => {}
+      })
+    );
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: account
+    });
+    const entry = await runtime.getOrCreateServer("cleanup", "environment");
+    const op = createOperation({
+      operationId: "http-cleanup",
+      repo: "fixture/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    op.context.githubLogin = executor.login;
+    recordGitHubEnvironment(op, {
+      state: "created",
+      origin: "this_operation",
+      repo: op.repo,
+      name: op.environment,
+      providerId: "17"
+    });
+    finish(op, "failed");
+    operations.put(op);
+    vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+    let done = Promise.resolve();
+    try {
+      const response = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
+        {
+          method: "POST",
+          headers: {
+            origin: entry.baseUrl,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+          }
+        }
+      );
+      expect(response.status).toBe(202);
+      expect(await response.json()).toMatchObject({
+        operationId: op.operationId
+      });
+      done = new Promise<void>((resolve) => {
+        const stop = owner.onEnvironmentTasksSettled("cleanup", () => {
+          stop();
+          resolve();
+        });
+      });
+      await waiting;
+      owner.shutdown();
+      release();
+      await done;
+      expect(run).not.toHaveBeenCalled();
+      expect(op.endedAt).toBeNull();
+      expect(op.control.commands.at(-1)?.state).toBe("running");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+    } finally {
+      release();
+      await done;
+      owner.shutdown();
+      await runtime.stopServer("cleanup", true);
+    }
+  });
+
+  it.each(["open", "closed-before-account", "closed-during-read"] as const)(
+    "keeps shared verification observation alive across panel closure (%s)",
+    async (lifetime) => {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered = () => {};
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const run = vi.fn(async (args: string[]) => {
+        const endpoint = args[1];
+        if (endpoint === "repos/fixture/app/actions/runs/17") {
+          entered();
+          await gate;
+        } else if (
+          endpoint !==
+          "repos/fixture/app/actions/runs/17/jobs?per_page=100&page=1"
+        ) {
+          throw new Error(`Unexpected selected command: ${args.join(" ")}`);
+        }
+        expect(args).toEqual(["api", endpoint, "--include", "--method", "GET"]);
+        return {
+          code: 0,
+          stdout:
+            "HTTP/2 200\n\n" +
+            JSON.stringify(
+              endpoint.endsWith("/17") ?
+                { status: "completed", conclusion: "success" }
+              : { jobs: [] }
+            ),
+          stderr: ""
+        };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext("panel-observation", {
+        createReadOnlyExecutor: async () => {
+          if (lifetime === "closed-before-account") {
+            entered();
+            await gate;
+          }
+          return executor;
+        },
+        withSelectedAccount: async () => {
+          throw new Error("Unexpected write lease");
+        }
+      });
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext: account
+      });
+      const op = createOperation({
+        operationId: "op_direct_monitor",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.currentStage = STAGE_VERIFY;
+      op.recoveryState = "verification_pending";
+      op.context.githubLogin = "saved-account";
+      op.verification = {
+        runId: "17",
+        workflow: "verify.yml",
+        ref: "topic",
+        environment: "dev",
+        dispatchedAt: Date.now()
+      };
+      operations.put(op);
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockResolvedValue(undefined);
+      const fetcher = vi.spyOn(globalThis, "fetch");
+      const entry = await runtime.getOrCreateServer("monitor", "environment");
+      const done = new Promise<void>((resolve) => {
+        const unsubscribe = owner.onEnvironmentTasksSettled("monitor", () => {
+          unsubscribe();
+          resolve();
+        });
+      });
+      try {
+        await Promise.race([waiting, done]);
+        expect(op.failure).toBeNull();
+        if (lifetime !== "open") await runtime.stopServer("monitor", true);
+        release();
+        await done;
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(persist).toHaveBeenCalledOnce();
+        expect(account.getExecutor(op.operationId)).toBeUndefined();
+        expect(entry.observation?.stopped).toBe(lifetime !== "open");
+        expect(op.state).toBe("succeeded");
+        expect(op.failure).toBeNull();
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(runtime.getLastWebviewActivityAt()).toBe(0);
+      } finally {
+        release();
+        await done;
+        await runtime.stopServer("monitor", true);
+      }
+    }
+  );
+
+  it.each(["azure", "environment", "repository-refusal"] as const)(
+    "enforces the real %s admission or setup outcome without the former setup POST",
     async (stage) => {
       const run = vi.fn(async (args: string[]) => {
         const command = args.join(" ");
@@ -51,7 +709,7 @@ describe("production environment owner HTTP binding", () => {
             code: 0,
             stdout: JSON.stringify({
               full_name: "fixture/app",
-              permissions: { admin: true }
+              permissions: { admin: stage !== "repository-refusal" }
             }),
             stderr: ""
           };
@@ -154,11 +812,21 @@ describe("production environment owner HTTP binding", () => {
         expect(response.status).toBe(202);
         await settled;
         expect(forbidden).toEqual([]);
-        expect(op.failure.message).toContain(
-          stage === "azure" ?
-            "repo, resourceGroup, and cluster are required."
-          : "namespace fixture refusal"
-        );
+        if (stage === "repository-refusal") {
+          expect(op.failure.code).toBe("repo-admin-required");
+          expect(op.failure.message).toContain("saved-account");
+          expect(
+            run.mock.calls.some(([args]) =>
+              args.some((arg) => arg.includes("/environments"))
+            )
+          ).toBe(false);
+        } else {
+          expect(op.failure.message).toContain(
+            stage === "azure" ?
+              "repo, resourceGroup, and cluster are required."
+            : "namespace fixture refusal"
+          );
+        }
         expect(op.state).toBe("failed");
         expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
         expect(
@@ -392,7 +1060,7 @@ describe("production environment owner HTTP binding", () => {
     }
   );
 
-  it("keeps recovery's server-owned transport out of webview activity and surfaces refusal", async () => {
+  it("keeps direct recovery out of webview activity and surfaces admission refusal", async () => {
     const op = createOperation({
       operationId: "op_rollback_transport",
       repo: "fixture/rollback",
@@ -408,7 +1076,7 @@ describe("production environment owner HTTP binding", () => {
       executionOwner: createEnvironmentExecutionOwner()
     });
     try {
-      const entry = await runtime.getOrCreateServer("rollback", "environment");
+      await runtime.getOrCreateServer("rollback", "environment");
       await vi.waitFor(() =>
         expect(report).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -418,14 +1086,8 @@ describe("production environment owner HTTP binding", () => {
           })
         )
       );
-      expect(fetcher).toHaveBeenCalledWith(
-        `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            "X-Radius-Server-Owned": expect.any(String)
-          })
-        })
-      );
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(op.control.commands).toEqual([]);
       expect(runtime.getLastWebviewActivityAt()).toBe(0);
       expect(op.state).toBe("failed");
     } finally {
@@ -597,26 +1259,37 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
-  it("preserves transport authorization before malformed setup bodies and browser mutation gates", async () => {
+  it("treats removed setup endpoints as unmatched without setup side effects or forged-header authority", async () => {
     const owner = createEnvironmentExecutionOwner();
     const runtime = createTestCanvasServerRuntime({ executionOwner: owner });
     const entry = await runtime.getOrCreateServer("auth", "environment");
     try {
+      const unknown = await fetch(entry.baseUrl + "/api/unknown-setup-route");
+      const unknownBody = await unknown.text();
       for (const path of ["/api/azure-auto-setup", "/api/create-environment"]) {
-        const response = await fetch(entry.baseUrl + path, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Origin: entry.baseUrl,
-            "Sec-Fetch-Site": "same-origin",
-            "X-Radius-Mutation-Nonce": String(entry.state.browserMutationNonce)
-          },
-          body: "{"
-        });
-        expect(response.status).toBe(403);
-        expect(await response.json()).toMatchObject({
-          code: "server-owned-operation-required"
-        });
+        for (const forgedHeader of [false, true]) {
+          const response = await fetch(entry.baseUrl + path, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Origin: entry.baseUrl,
+              "Sec-Fetch-Site": "same-origin",
+              "X-Radius-Mutation-Nonce": String(
+                entry.state.browserMutationNonce
+              ),
+              ...(forgedHeader ?
+                { "X-Radius-Server-Owned": "forged-token" }
+              : {})
+            },
+            body: "{"
+          });
+          expect(response.status).toBe(unknown.status);
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toBe(
+            "text/html; charset=utf-8"
+          );
+          expect(await response.text()).toBe(unknownBody);
+        }
       }
       const crossSite = await fetch(entry.baseUrl + "/api/operations", {
         method: "POST",
@@ -675,34 +1348,30 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
     ].join("\n")
   );
   await fs.chmod(path.join(fakeBin, "aws"), 0o755);
-  const cmdEcho = (text: string) =>
-    text.replace(/[&|<>^%"]/g, (character) =>
-      character === "%" ? "%%" : `^${character}`
-    );
-  const cmdCases = Object.entries(answers).flatMap(([command, answer]) => {
-    const [first, second] = command.split(" ");
-    const test =
-      second ?
-        `if "%1 %2"=="${first} ${second}"`
-      : `if "%1"=="${first}" if "%2"==""`;
-    return [
-      `${test} (`,
-      ...(answer.stdout ? [`  echo ${cmdEcho(answer.stdout)}`] : []),
-      ...(answer.stderr ? [`  echo ${cmdEcho(answer.stderr)} 1>&2`] : []),
-      `  exit /b ${answer.code ?? 0}`,
-      ")"
-    ];
-  });
+  // On Windows, Node parses the command line's quotes before argv is
+  // recorded and matched, so quoted arguments arrive whole (#1151).
+  await fs.writeFile(
+    path.join(fakeBin, "aws.cjs"),
+    [
+      'const fs = require("node:fs");',
+      `const answers = ${JSON.stringify(answers)};`,
+      "const args = process.argv.slice(2);",
+      'fs.appendFileSync(process.env.FAKE_AWS_LOG, `${args.join(" ")}\\n`);',
+      'const answer = answers[args.slice(0, 2).join(" ")];',
+      "if (answer) {",
+      "  if (answer.stdout) console.log(answer.stdout);",
+      "  if (answer.stderr) console.error(answer.stderr);",
+      "  process.exitCode = answer.code ?? 0;",
+      "} else {",
+      '  console.error("fake aws: refused");',
+      "  process.exitCode = 3;",
+      "}",
+      ""
+    ].join("\n")
+  );
   await fs.writeFile(
     path.join(fakeBin, "aws.cmd"),
-    [
-      "@echo off",
-      'echo %*>>"%FAKE_AWS_LOG%"',
-      ...cmdCases,
-      "echo fake aws: refused 1>&2",
-      "exit /b 3",
-      ""
-    ].join("\r\n")
+    ["@echo off", `"${process.execPath}" "%~dp0aws.cjs" %*`, ""].join("\r\n")
   );
   process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
   process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";

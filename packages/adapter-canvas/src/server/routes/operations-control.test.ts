@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   createOperationsControlRoutes,
@@ -38,6 +39,8 @@ import {
   recordCleanupState,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
+  prepareProviderMutation,
+  settleProviderMutation,
   pauseForProviderRestart,
   requestStop,
   requireInput,
@@ -63,6 +66,10 @@ import {
   type OperationFixture
 } from "../../../test/support/server/operation-fixtures.js";
 import type { CanvasServerEntry } from "../types.js";
+import type {
+  WorkflowCancellationTarget,
+  WorkflowCancellationAuthority
+} from "../services/workflow-cancellation-target.js";
 
 // The terminal announcement is a single process-wide listener, so every test
 // that touches it registers its own and clears it afterwards.
@@ -135,21 +142,6 @@ function controlPath(op: { operationId: string }, action: string): string {
   return `/api/operations/${op.operationId}/${action}`;
 }
 
-function verificationRunId(operation: {
-  verification?: unknown;
-  [key: string]: unknown;
-}): string {
-  const verification = operation.verification;
-  if (
-    !verification ||
-    typeof verification !== "object" ||
-    !("runId" in verification)
-  ) {
-    throw new Error("test operation has no verification run");
-  }
-  return String(verification.runId);
-}
-
 async function call(
   handler: ControlHandler,
   path: string,
@@ -200,6 +192,11 @@ function dependencies(
     invalidatedListings: []
   };
   const base: OperationsControlDependencies = {
+    stopPendingResume: () => null,
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
+    reportOperationDiagnostic: () => {
+      throw new Error("Unexpected operation control diagnostic");
+    },
     get: () => {
       throw new Error("get not stubbed");
     },
@@ -214,12 +211,16 @@ function dependencies(
     inspectVerificationWorkflow: () => Promise.resolve("inactive"),
     cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: ({ kind, instanceId, commandId }) => {
+      if (instanceId === undefined) {
+        throw new Error("HTTP control lost its attachment identity");
+      }
       journal.scheduled.push({ kind, instanceId, commandId });
       return true;
     },
     invalidateEnvironmentListing: (repo) => {
       journal.invalidatedListings.push(repo);
     },
+    awsEnabled: true,
     removeAwsDeployIdentityLock: () => {
       throw new Error("removeAwsDeployIdentityLock not stubbed");
     }
@@ -441,16 +442,17 @@ describe("POST /api/operations/{id}/stop", () => {
       }
     });
 
-    expect(out.recording.status).toBe(200);
+    expect(out.recording.status).toBe(500);
     expect(out.payload()).toMatchObject({
-      code: "operation-stopped-workflow-status-unknown",
-      detail:
-        "GitHub unavailable Radius also could not save the unknown workflow status: disk gone"
+      code: "workflow-status-persist-failed",
+      stopRecorded: true,
+      detail: "disk gone",
+      observationError: "GitHub unavailable"
     });
     expect(verificationWorkflowState(op)).toBe("unknown");
-    expect(announced).toEqual([op.operationId]);
+    expect(announced).toEqual([]);
     expect(
-      out.payload().operation.actions.map((action: { id: string }) => action.id)
+      toClientView(op).actions.map((action: { id: string }) => action.id)
     ).not.toContain("rollback");
   });
 
@@ -604,7 +606,7 @@ describe("POST /api/operations/{id}/stop", () => {
       deps
     );
 
-    expect(seen).toEqual(["octo/app:setup"]);
+    expect(seen).toEqual(["octo/app:setup", "octo/app:setup"]);
     expect(out.recording.status).toBe(202);
     expect(out.payload().statusUrl).toBe("/api/operations/octo%2Fapp%3Asetup");
   });
@@ -1093,8 +1095,10 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
 
   it("keeps the terminal record when the scheduling-failure write also fails", async () => {
     const op = retryableSetup();
+    const reportOperationDiagnostic = vi.fn();
     let calls = 0;
     const out = await drive(handleRetryOperation, op, "retry/setup", {
+      reportOperationDiagnostic,
       persistOperations: () => {
         calls += 1;
         return calls === 1 ?
@@ -1107,6 +1111,11 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(out.recording.status).toBe(202);
     expect(op.state).toBe("failed");
     expect(calls).toBe(2);
+    expect(reportOperationDiagnostic).toHaveBeenCalledExactlyOnceWith({
+      operationId: op.operationId,
+      code: "operation-control-recovery-persist-failed",
+      message: "disk gone"
+    });
   });
 
   it("refuses a retry kind it does not implement", async () => {
@@ -1225,6 +1234,12 @@ describe("POST /api/operations/{id}/continue", () => {
   });
 
   describe("POST /api/operations/{id}/cancel-workflow", () => {
+    function stoppedSetup() {
+      const operation = newOperation();
+      operation.context = { githubLogin: "saved-account" };
+      finish(operation, "cancelled");
+      return operation;
+    }
     it("cancels only the exact run after setup is stopped", async () => {
       const op = stoppedSetup();
       op.verification = { runId: "42" };
@@ -1232,8 +1247,8 @@ describe("POST /api/operations/{id}/continue", () => {
       const seen: string[] = [];
 
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
-        cancelVerificationWorkflow: (operation) => {
-          seen.push(verificationRunId(operation));
+        cancelVerificationWorkflow: (target) => {
+          seen.push(target.runId);
           return Promise.resolve("inactive");
         }
       });
@@ -1251,7 +1266,11 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let cancellations = 0;
       const dependencies = {
-        cancelVerificationWorkflow: () => {
+        cancelVerificationWorkflow: (
+          _target: WorkflowCancellationTarget,
+          authority: WorkflowCancellationAuthority
+        ) => {
+          authority.issued();
           cancellations += 1;
           if (cancellations === 1) {
             return Promise.reject(new Error("GitHub temporarily unavailable"));
@@ -1354,6 +1373,7 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let cancellations = 0;
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        reportOperationDiagnostic: vi.fn(),
         persistOperations: () => Promise.reject(new Error("disk gone")),
         cancelVerificationWorkflow: () => {
           cancellations += 1;
@@ -1363,8 +1383,7 @@ describe("POST /api/operations/{id}/continue", () => {
 
       expect(out.recording.status).toBe(500);
       expect(out.payload()).toMatchObject({
-        code: "workflow-cancel-persist-failed",
-        detail: "disk gone"
+        code: "operation-control-recovery-persist-failed"
       });
       expect(cancellations).toBe(0);
       expect(verificationWorkflowState(op)).toBe("active");
@@ -1381,21 +1400,23 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let persists = 0;
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        reportOperationDiagnostic: vi.fn(),
         persistOperations: () => {
           persists += 1;
           return persists === 1 ?
               Promise.resolve()
             : Promise.reject(new Error("disk gone"));
         },
-        cancelVerificationWorkflow: () =>
-          Promise.reject(new Error("GitHub unavailable"))
+        cancelVerificationWorkflow: (_target, authority) => {
+          authority.issued();
+          return Promise.reject(new Error("GitHub unavailable"));
+        }
       });
 
-      expect(out.recording.status).toBe(502);
+      expect(out.recording.status).toBe(500);
       expect(out.payload()).toMatchObject({
-        code: "workflow-cancel-failed",
-        detail:
-          "GitHub unavailable Radius also could not save the workflow status: disk gone"
+        code: "workflow-cancel-result-persist-failed",
+        detail: "GitHub unavailable"
       });
       expect(verificationWorkflowState(op)).toBe("unknown");
     });
@@ -1440,6 +1461,25 @@ describe("POST /api/operations/{id}/continue", () => {
 });
 
 describe("POST /api/operations/{id}/rollback", () => {
+  it("refuses downstream deletion when recovered branch removal was not applied", async () => {
+    const op = stoppedSetup();
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_branch.delete",
+      target: "fixture/app\0setup-branch\0original-head"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "not_applied",
+      "The recorded branch remains."
+    );
+    const out = await drive(handleRollbackOperation, op, "rollback");
+    expect(out.payload()).toMatchObject({
+      code: "rollback-provider-outcome-unknown"
+    });
+    expect(out.journal.scheduled).toEqual([]);
+  });
+
   it("accepts a rollback for a stopped attempt and schedules it once", async () => {
     const op = stoppedSetup();
     const out = await drive(handleRollbackOperation, op, "rollback");
@@ -1543,8 +1583,10 @@ describe("POST /api/operations/{id}/rollback", () => {
 
   it("still restores the decision when the follow-up write also fails", async () => {
     const op = stoppedSetup();
+    const reportOperationDiagnostic = vi.fn();
     let allowFirstWrite = true;
     const out = await drive(handleRollbackOperation, op, "rollback", {
+      reportOperationDiagnostic,
       schedule: () => false,
       persistOperations: () => {
         if (allowFirstWrite) {
@@ -1560,6 +1602,11 @@ describe("POST /api/operations/{id}/rollback", () => {
     expect(out.recording.status).toBe(503);
     expect(op.state).toBe("cancelled");
     expect(op.control.attempts.cleanup).toBe(0);
+    expect(reportOperationDiagnostic).toHaveBeenCalledExactlyOnceWith({
+      operationId: op.operationId,
+      code: "operation-control-recovery-persist-failed",
+      message: "store offline"
+    });
   });
 });
 
@@ -2055,23 +2102,59 @@ describe("handleRemoveAwsLock", () => {
     expect(out.journal.persistCalls).toBe(1);
   });
 
+  it("refuses a confirmation that names another lock, without touching AWS", async () => {
+    const op = waiting();
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK1"
+    );
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "aws-lock-changed",
+      error:
+        "The lock changed since it was shown: another run now holds a new one. Nothing was removed."
+    });
+    expect(out.journal.persistCalls).toBe(0);
+  });
+
   it.each([
-    ["names another lock", "aws-lock/remove?policyId=LOCK1"],
-    ["names no lock", "aws-lock/remove"]
+    ["no policy ID", "aws-lock/remove"],
+    ["an empty policy ID", "aws-lock/remove?policyId="]
   ])(
-    "refuses a confirmation that %s, without touching AWS",
+    "rejects a request with %s as invalid, without touching AWS",
     async (_label, action) => {
       const op = waiting();
       const out = await drive(handleRemoveAwsLock, op, action);
-      expect(out.recording.status).toBe(409);
+      expect(out.recording.status).toBe(400);
       expect(out.payload()).toMatchObject({
-        code: "aws-lock-changed",
-        error:
-          "The lock changed since it was shown: another run now holds a new one. Nothing was removed."
+        code: "aws-lock-invalid",
+        error: "Name the lock to remove by its policy ID."
+      });
+      expect(op).toMatchObject({
+        context: { awsLockWait: { removable: true } }
       });
       expect(out.journal.persistCalls).toBe(0);
     }
   );
+
+  it("refuses to remove a lock while AWS is switched off", async () => {
+    const op = waiting();
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK0",
+      { awsEnabled: false }
+    );
+    expect(out.recording.status).toBe(400);
+    expect(out.payload()).toMatchObject({
+      code: "provider-unsupported",
+      error:
+        "AWS environments aren't supported yet, so Radius removed no AWS lock."
+    });
+    expect(op).toMatchObject({ context: { awsLockWait: { removable: true } } });
+    expect(out.journal.persistCalls).toBe(0);
+  });
 
   it("says when the lock was already gone", async () => {
     const out = await drive(
@@ -2165,7 +2248,7 @@ describe("handleRemoveAwsLock", () => {
   it("answers 404 for an unknown operation", async () => {
     const out = await call(
       handleRemoveAwsLock,
-      "/api/operations/missing/aws-lock/remove",
+      "/api/operations/missing/aws-lock/remove?policyId=LOCK0",
       dependencies({ get: () => null })
     );
     expect(out.recording.status).toBe(404);

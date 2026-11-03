@@ -40,6 +40,8 @@ export interface AwsCommandResult {
   code: number | string;
   stdout: string;
   stderr: string;
+  // The CLI ran past its time limit and was stopped, so its output is empty.
+  timedOut?: boolean;
 }
 
 export interface AwsDeployIdentityPorts {
@@ -101,7 +103,13 @@ function succeeded(result: AwsCommandResult): boolean {
 }
 
 function detail(result: AwsCommandResult): string {
-  return (result.stderr || result.stdout || "").trim() || "no output";
+  const output = (result.stderr || result.stdout || "").trim();
+  if (result.timedOut) {
+    return output ?
+        `the AWS CLI call timed out (${output})`
+      : "the AWS CLI call timed out";
+  }
+  return output || "no output";
 }
 
 function parseJson(text: string): unknown {
@@ -124,8 +132,10 @@ const LIMIT_EXCEEDED = /LimitExceeded/;
 
 // IAM is eventually consistent. A run that releases the lock right after
 // writing the trust policy could let the next holder read the policy from
-// before that write and overwrite it. So the writer waits until IAM shows its
-// own write before it goes on, and stops when IAM never does.
+// before that write and overwrite it. So the writer waits until its own read
+// shows the write before it goes on, and stops when it never does. That makes
+// a stale read less likely, but IAM does not promise the next holder's read
+// is as current, so it cannot rule one out.
 export const TRUST_VISIBLE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
 
 function sameSubjects(a: readonly string[], b: readonly string[]): boolean {
@@ -168,7 +178,7 @@ async function awaitTrustVisible(
     if (shown && sameSubjects(shown, expected)) return null;
     const delay = TRUST_VISIBLE_RETRY_DELAYS_MS[attempt];
     if (delay === undefined) {
-      return `IAM did not show the updated trust policy of IAM role ${roleName} after the update, so Radius stopped before another run could read the old one.`;
+      return `IAM did not show the updated trust policy of IAM role ${roleName} after the update, so Radius stopped.`;
     }
     await ports.sleep(delay);
   }

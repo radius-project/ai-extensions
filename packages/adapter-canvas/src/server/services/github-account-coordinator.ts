@@ -15,6 +15,7 @@ export interface GitHubAccountCoordinatorPorts {
 export interface GitHubAccountLeaseMetadata {
   ownerKey: string;
   operationId?: string;
+  assertActive?(): void;
 }
 
 export interface GitHubAccountRestoration {
@@ -22,6 +23,17 @@ export interface GitHubAccountRestoration {
   originalLogin: string | null;
   currentLogin: string | null;
   guidance: string | null;
+}
+
+export class GitHubAccountRestorationError extends Error {
+  constructor(
+    message: string,
+    readonly restoration: GitHubAccountRestoration,
+    cause: unknown
+  ) {
+    super(message, { cause });
+    this.name = "GitHubAccountRestorationError";
+  }
 }
 
 export interface GitHubAccountLeaseResult<T> {
@@ -206,15 +218,21 @@ export function createGitHubAccountCoordinator(
 
   const withSelectedAccount = async <T>(
     login: string,
-    _metadata: GitHubAccountLeaseMetadata,
+    metadata: GitHubAccountLeaseMetadata,
     work: (executor: SelectedGhExecutor) => Promise<T>,
     timeoutMs = 5000
   ): Promise<GitHubAccountLeaseResult<T>> => {
+    const active = () => metadata.assertActive?.();
+    active();
     await assertRestorationReady();
+    active();
     const executor = await ports.createExecutor(login);
+    active();
     if (!executor.requiresKeyringSwitch) {
       const activeLogin = await ports.getActiveKeyringLogin();
+      active();
       await executor.verifyIdentity();
+      active();
       return {
         value: await work(executor),
         selectedLogin: executor.login,
@@ -230,8 +248,11 @@ export function createGitHubAccountCoordinator(
     }
     const release = await acquire(timeoutMs);
     try {
+      active();
       await assertRestorationReady();
+      active();
       const originalLogin = await ports.getActiveKeyringLogin();
+      active();
       if (!originalLogin) {
         throw new Error(
           "Radius could not determine the original GitHub CLI account and did not switch accounts."
@@ -239,6 +260,7 @@ export function createGitHubAccountCoordinator(
       }
       if (originalLogin === executor.login) {
         await executor.verifyIdentity();
+        active();
         return {
           value: await work(executor),
           selectedLogin: executor.login,
@@ -264,7 +286,9 @@ export function createGitHubAccountCoordinator(
       let outcome: { ok: true; value: T } | { ok: false; error: unknown };
       try {
         ports.resetIdentityCache();
+        active();
         const selectedActiveLogin = await ports.getActiveKeyringLogin();
+        active();
         if (selectedActiveLogin !== executor.login) {
           throw new Error(
             `GitHub CLI account switch failed: expected @${executor.login}, received @${
@@ -273,6 +297,7 @@ export function createGitHubAccountCoordinator(
           );
         }
         await executor.verifyIdentity();
+        active();
         outcome = { ok: true, value: await work(executor) };
       } catch (error) {
         outcome = { ok: false, error };
@@ -282,11 +307,14 @@ export function createGitHubAccountCoordinator(
       if (restoration.state === "failed") blockedRestoration = restoration;
       if (!outcome.ok) {
         if (restoration.state === "restored") throw outcome.error;
-        throw new Error(
-          `${executor.errorMessage(outcome.error)} GitHub account restoration also failed. ${
-            restoration.guidance || ""
-          }`.trim(),
-          { cause: outcome.error }
+        throw new GitHubAccountRestorationError(
+          `${executor.errorMessage(outcome.error)} ${
+            restoration.state === "failed" ?
+              "GitHub account restoration also failed."
+            : "The GitHub CLI account changed externally."
+          } ${restoration.guidance || ""}`.trim(),
+          restoration,
+          outcome.error
         );
       }
       return {

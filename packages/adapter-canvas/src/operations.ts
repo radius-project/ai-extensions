@@ -25,6 +25,7 @@
 //      `failure.evidence`, fenced, and never in a label.
 
 import { createHash, randomUUID } from "node:crypto";
+import { formatAwsLockTime } from "@radius-project/core";
 import {
   disabledOperationStore,
   PERSISTED_OPERATIONS_VERSION,
@@ -262,7 +263,19 @@ export type OperationCommandState = "accepted" | "running" | "finished";
 export type OperationAttemptKind =
   "setup" | "verification" | "cleanup" | "deletion";
 
+export interface WorkflowCancellationTarget {
+  readonly operationId: string;
+  readonly commandId: string;
+  readonly cancellationAttempt: number;
+  readonly repo: string;
+  readonly environment: string;
+  readonly login: string;
+  readonly runId: string;
+  readonly verificationAttempt: number;
+}
+
 export type OperationCommandRecord = {
+  workflowCancellation?: WorkflowCancellationTarget;
   kind: OperationCommandKind;
   commandId: string;
   attempt: number;
@@ -670,12 +683,25 @@ export function providerRecoveryManualGuidance(op: any): string | null {
   const manualMutation = recovery.mutations.find(
     (entry) => entry.status === "manual_required"
   );
-  if (recovery.state !== "manual_required" && !manualMutation) return null;
-  return (
-    recovery.guidance ||
-    manualMutation?.evidence ||
-    "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+  if (recovery.state === "manual_required" || manualMutation) {
+    return (
+      recovery.guidance ||
+      manualMutation?.evidence ||
+      "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+    );
+  }
+  const unappliedBranchDeletion = recovery.mutations.find(
+    (entry) =>
+      entry.kind === "github_branch.delete" && entry.status === "not_applied"
   );
+  if (unappliedBranchDeletion) {
+    const guidance =
+      "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again.";
+    return unappliedBranchDeletion.evidence ?
+        `${guidance} Details: ${unappliedBranchDeletion.evidence}`
+      : guidance;
+  }
+  return null;
 }
 
 export function terminalizeProviderManualRequired(
@@ -874,8 +900,36 @@ export function readOperationControl(value: any): OperationControlRecord {
         state: entry.state,
         acceptedAt: isoOrNull(entry.acceptedAt) || nowIso(),
         completedAt: isoOrNull(entry.completedAt),
-        outcome: isoOrNull(entry.outcome)
+        outcome: isoOrNull(entry.outcome),
+        ...(isWorkflowCancellationTarget(entry.workflowCancellation) ?
+          { workflowCancellation: structuredClone(entry.workflowCancellation) }
+        : {})
       });
+    }
+
+    function isWorkflowCancellationTarget(
+      value: unknown
+    ): value is WorkflowCancellationTarget {
+      if (!value || typeof value !== "object") return false;
+      const record = value as Record<string, unknown>;
+      return (
+        [
+          "operationId",
+          "commandId",
+          "repo",
+          "environment",
+          "login",
+          "runId"
+        ].every(
+          (key) => typeof record[key] === "string" && record[key].length > 0
+        ) &&
+        ["cancellationAttempt", "verificationAttempt"].every(
+          (key) =>
+            typeof record[key] === "number" &&
+            Number.isSafeInteger(record[key]) &&
+            record[key] >= 0
+        )
+      );
     }
   }
   if (Array.isArray(value.outcomes)) {
@@ -4441,6 +4495,7 @@ export function removableAwsLockWait(op: any): {
   policyArn: string;
   policyId: string;
   holder: string;
+  holderOperationId: string;
   since: string;
 } | null {
   const wait = op?.context?.awsLockWait;
@@ -4460,6 +4515,8 @@ export function removableAwsLockWait(op: any): {
     policyArn: wait.policyArn,
     policyId: wait.policyId,
     since: typeof wait.since === "string" ? wait.since : "",
+    holderOperationId:
+      typeof wait.holderOperationId === "string" ? wait.holderOperationId : "",
     holder:
       typeof wait.holder === "string" && wait.holder ?
         wait.holder
@@ -4482,7 +4539,7 @@ function removeAwsLockAction(op: any, base: string): any | null {
     confirmTitle: "Remove the lock on the deploy identity?",
     confirmLabel: "Remove lock",
     cancelLabel: "Keep waiting",
-    description: `${wait.holder} has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
+    description: `${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""} has held the lock since ${formatAwsLockTime(wait.since)}. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
     method: "POST",
     // Names the lock shown, so a confirmation that outlives it is refused.
     path: `${base}/aws-lock/remove?policyId=${encodeURIComponent(wait.policyId)}`,

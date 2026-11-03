@@ -745,3 +745,11 @@ export function awsLockHolderLabel(holder: AwsLockHolder | null): string {
     : holder.repo || "an unnamed environment";
   return `The ${holder.action} of ${target}`;
 }
+
+/** When IAM created a lock, for a person: `2026-10-30 11:58 UTC`. */
+export function formatAwsLockTime(since: string): string {
+  const time = Date.parse(since);
+  return isNaN(time) ? "an unknown time" : (
+      `${new Date(time).toISOString().slice(0, 16).replace("T", " ")} UTC`
+    );
+}

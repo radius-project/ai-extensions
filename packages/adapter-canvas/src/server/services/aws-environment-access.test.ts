@@ -8,6 +8,12 @@ import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
 import { createAwsEnvironmentAccess } from "./aws-environment-access.js";
+import {
+  addLegacyStep,
+  buildStages,
+  createOperation,
+  finishSucceeded
+} from "../../operations.js";
 
 const ACCOUNT = "123456789012";
 const ROLE = "radius-deploy-octo-shop";
@@ -94,7 +100,8 @@ function harness(
   aws: Record<string, Answer>,
   github: Record<string, GitHubJsonResponse> = defaultSubject,
   // The customer pauses while this AWS command, or the last GitHub read, runs.
-  pauseDuring?: string
+  pauseDuring?: string,
+  persistError?: Error
 ) {
   let stopRequested = false;
   const awsCalls: string[][] = [];
@@ -154,6 +161,7 @@ function harness(
     async sleep(milliseconds) {
       events.push(["sleep", milliseconds]);
       clock += milliseconds;
+      if (pauseDuring === "sleep") stopRequested = true;
     },
     operations: {
       enterStage: (operation, stage) => {
@@ -172,6 +180,7 @@ function harness(
     store: {
       persist: async () => {
         events.push(["persist"]);
+        if (persistError) throw persistError;
       }
     },
     stageAuthorizeIdentity: STAGE,
@@ -218,6 +227,58 @@ const input = {
 };
 
 describe("AWS environment access setup", () => {
+  it("preserves partial progress when paused during the EKS retry delay", async () => {
+    const h = harness(
+      {
+        ...happyPath,
+        "eks create-access-entry": fail("InvalidParameterException")
+      },
+      defaultSubject,
+      "sleep"
+    );
+
+    await expect(h.access.setup(operation, input, EXECUTOR)).resolves.toEqual({
+      ok: false,
+      stopped: true
+    });
+
+    expect(h.events).toContainEqual(["sleep", 2000]);
+    expect(
+      h.awsCalls.filter(
+        (args) => args.slice(0, 2).join(" ") === "eks create-access-entry"
+      )
+    ).toHaveLength(1);
+    expect(h.find("eks associate-access-policy")).toBeUndefined();
+    expect(h.events).toContainEqual([
+      "step",
+      operation.id,
+      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, policy radius-deploy-dev on ${ROLE}.`,
+      STAGE
+    ]);
+    expect(h.events.at(-1)).toEqual(["persist"]);
+  });
+
+  it.each([
+    "github",
+    "iam create-role",
+    "eks associate-access-policy",
+    undefined
+  ])(
+    "propagates persistence failure rather than claiming a saved pause or success (%s)",
+    async (pauseDuring) => {
+      const error = new Error("AWS progress storage unavailable");
+      const h = harness(happyPath, defaultSubject, pauseDuring, error);
+
+      await expect(h.access.setup(operation, input, EXECUTOR)).rejects.toBe(
+        error
+      );
+      expect(h.events.at(-1)).toEqual(["persist"]);
+      if (pauseDuring === "github") expect(h.awsCalls).toEqual([]);
+      if (pauseDuring === "iam create-role")
+        expect(h.find("iam put-role-policy")).toBeUndefined();
+    }
+  );
+
   it.each([
     [false, [DEV, DEV_ID]],
     [true, [DEV_ID]]
@@ -547,6 +608,7 @@ describe("AWS environment access removal", () => {
 });
 
 describe("the deploy identity lock during setup", () => {
+  const RECOVERY = `Check that "aws iam get-policy --policy-arn ${LOCK_ARN} --query Policy.PolicyId --output text" prints LOCK1, which is this run's lock, and only then run: aws iam delete-policy --policy-arn ${LOCK_ARN}`;
   const OTHER_HOLDER =
     '{"repo":"octo/shop","environment":"prod","action":"setup","operationId":"op-2"}';
   const EXISTS = fail("EntityAlreadyExists: radius-lock exists");
@@ -573,6 +635,33 @@ describe("the deploy identity lock during setup", () => {
     expect(h.steps()).toContain(
       `🔒 Locked IAM role ${ROLE}, so no other Radius run changes its trust policy until this setup finishes.`
     );
+  });
+
+  it("saves the lock on the operation before its first write", async () => {
+    const persistsAtFirstWrite: number[] = [];
+    const script: Record<string, Answer> = { ...happyPath };
+    const firstWrite = script["iam create-open-id-connect-provider"];
+    Object.defineProperty(script, "iam create-open-id-connect-provider", {
+      get() {
+        persistsAtFirstWrite.push(
+          h.events.filter(([kind]) => kind === "persist").length
+        );
+        return firstWrite;
+      }
+    });
+    const h = harness(script);
+
+    await h.access.setup(operation, input, EXECUTOR);
+
+    const lockRecorded = h.events.findIndex(
+      ([kind, , patch]) =>
+        kind === "setContext" &&
+        typeof patch === "object" &&
+        patch !== null &&
+        "awsDeployIdentityLock" in patch
+    );
+    expect(h.events[lockRecorded + 2]).toEqual(["persist"]);
+    expect(persistsAtFirstWrite[0]).toBeGreaterThan(0);
   });
 
   it("checks the lock before every write", async () => {
@@ -632,18 +721,75 @@ describe("the deploy identity lock during setup", () => {
     expect(h.events).toEqual([]);
   });
 
-  it("reports a lock it could not release, with the command to remove it", async () => {
+  it("reports a lock it could not release with the policy ID to check, and keeps it to release later", async () => {
     const h = harness({
       ...happyPath,
-      "iam delete-policy": fail("AccessDenied: iam:DeletePolicy")
+      "iam delete-policy": [fail("AccessDenied: iam:DeletePolicy"), ok()]
     });
     await h.access.setup(operation, input, EXECUTOR);
 
     await h.access.release(operation);
 
     expect(h.steps().at(-1)).toBe(
-      `⚠️ Radius could not release the lock on IAM role ${ROLE} because the signed-in AWS identity is not allowed iam:DeletePolicy. Other runs wait for it until it is removed. Run: aws iam delete-policy --policy-arn ${LOCK_ARN}`
+      `⚠️ This setup is done with IAM role ${ROLE}, but Radius could not release its lock because the signed-in AWS identity is not allowed iam:DeletePolicy. Other runs wait for this lock until it is removed. ${RECOVERY}`
     );
+    expect(h.events).not.toContainEqual([
+      "setContext",
+      "op-1",
+      { awsDeployIdentityLock: null }
+    ]);
+
+    await h.access.release(operation);
+
+    expect(h.commands().filter((c) => c === "iam delete-policy")).toHaveLength(
+      2
+    );
+    expect(h.events.slice(-2)).toEqual([
+      ["setContext", "op-1", { awsDeployIdentityLock: null }],
+      ["persist"]
+    ]);
+  });
+
+  it("clears a lock that was removed before release, saying so", async () => {
+    const h = harness({
+      ...happyPath,
+      "iam get-policy": [
+        ...Array.from({ length: 6 }, () => lockPolicy("LOCK1")),
+        fail("NoSuchEntity: gone")
+      ]
+    });
+    await h.access.setup(operation, input, EXECUTOR);
+
+    await h.access.release(operation);
+
+    expect(h.commands()).not.toContain("iam delete-policy");
+    expect(h.steps().at(-1)).toBe(
+      `⚠️ This setup is done with IAM role ${ROLE}, but its lock had already been removed, so there was nothing to release. Another run may have changed the role while this one held it.`
+    );
+    expect(h.events.slice(-3)).toEqual([
+      ["setContext", "op-1", { awsDeployIdentityLock: null }],
+      ["step", "op-1", h.steps().at(-1), STAGE],
+      ["persist"]
+    ]);
+  });
+
+  it("reports a failure to save after a release that did not finish", async () => {
+    const h = harness(
+      { ...happyPath, "iam delete-policy": fail("AccessDenied") },
+      defaultSubject,
+      undefined,
+      new Error("disk full")
+    );
+    await expect(h.access.setup(operation, input, EXECUTOR)).rejects.toThrow(
+      "disk full"
+    );
+
+    await h.access.release(operation);
+
+    expect(h.steps().slice(-2)).toEqual([
+      expect.stringContaining("but Radius could not release its lock"),
+      "⚠️ Radius could not save this setup after it tried to release the lock on the deploy identity: disk full"
+    ]);
   });
 
   it("reports rather than throws when releasing fails unexpectedly", async () => {
@@ -653,7 +799,29 @@ describe("the deploy identity lock during setup", () => {
     await expect(h.access.release(operation)).resolves.toBeUndefined();
 
     expect(h.steps().at(-1)).toBe(
-      `⚠️ Radius could not release the lock on the deploy identity: unexpected aws iam delete-policy --policy-arn ${LOCK_ARN}. Other runs wait for it until it is removed. Run: aws iam delete-policy --policy-arn ${LOCK_ARN}`
+      `⚠️ Radius could not release the lock on the deploy identity: unexpected aws iam delete-policy --policy-arn ${LOCK_ARN}. Other runs wait for this lock until it is removed. ${RECOVERY}`
+    );
+  });
+
+  it("reports a failure to save after a release on its own", async () => {
+    const h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      new Error("disk full")
+    );
+    // The save right after locking fails, so setup stops before any write,
+    // still holding the lock for the release.
+    await expect(h.access.setup(operation, input, EXECUTOR)).rejects.toThrow(
+      "disk full"
+    );
+    expect(h.commands()).not.toContain("iam create-open-id-connect-provider");
+
+    await h.access.release(operation);
+
+    expect(h.commands().at(-1)).toBe("iam delete-policy");
+    expect(h.steps().at(-1)).toBe(
+      "⚠️ Radius could not save this setup after it released the lock on the deploy identity: disk full"
     );
   });
 
@@ -703,7 +871,7 @@ describe("the deploy identity lock during setup", () => {
 
     const waiting = h.steps().filter((text) => String(text).startsWith("⏳"));
     expect(waiting).toEqual([
-      `⏳ Waiting for the lock on IAM role ${ROLE}. The setup of environment prod in octo/shop has held it since 2026-10-30 11:58 UTC.`
+      `⏳ Waiting for the lock on IAM role ${ROLE}. The setup of environment prod in octo/shop (operation op-2) has held it since 2026-10-30 11:58 UTC.`
     ]);
     expect(h.events).toContainEqual(["touch", "op-1"]);
     expect(h.events).toContainEqual([
@@ -714,6 +882,7 @@ describe("the deploy identity lock during setup", () => {
           policyArn: LOCK_ARN,
           policyId: "LOCK0",
           holder: "The setup of environment prod in octo/shop",
+          holderOperationId: "op-2",
           since: "2026-10-30T11:58:30Z",
           removable: false
         }
@@ -739,8 +908,48 @@ describe("the deploy identity lock during setup", () => {
     await h.access.setup(operation, input, EXECUTOR);
 
     expect(h.steps()).toContain(
-      `⚠️ The lock on IAM role ${ROLE} has been held for more than 10 minutes. If that run has stopped, use Remove lock.`
+      `⏳ The lock on IAM role ${ROLE} is 10 or more minutes old. Another run has held it since 2026-10-30 11:00 UTC. If that run has stopped, use Remove lock.`
     );
+  });
+
+  it("finishes a setup that waited past 10 minutes as succeeded, with no warning", async () => {
+    const h = harness({
+      ...happyPath,
+      "iam create-policy": [EXISTS, EXISTS, lockPolicy("LOCK1")],
+      "iam get-policy": [
+        lockPolicy("LOCK0", {
+          Description: OTHER_HOLDER,
+          CreateDate: "2026-10-30T11:55:00Z"
+        }),
+        lockPolicy("LOCK0", {
+          Description: OTHER_HOLDER,
+          CreateDate: "2026-10-30T11:45:00Z"
+        }),
+        lockPolicy("LOCK1")
+      ]
+    });
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+    await h.access.release(operation);
+
+    expect(h.steps()).toContain(
+      `⏳ The lock on IAM role ${ROLE} is 10 or more minutes old. The setup of environment prod in octo/shop (operation op-2) has held it since 2026-10-30 11:45 UTC. If that run has stopped, use Remove lock.`
+    );
+    // The same lines on a real operation record.
+    const record = createOperation({
+      provider: "aws",
+      repo: "octo/shop",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    for (const text of h.steps()) addLegacyStep(record, text, STAGE);
+    finishSucceeded(record);
+    expect(record.state).toBe("succeeded");
+    expect(
+      record.steps.filter((step: { state: string }) => step.state === "warning")
+    ).toEqual([]);
   });
 
   it("names an unknown time when IAM reports none", async () => {
@@ -792,7 +1001,7 @@ describe("the deploy identity lock during setup", () => {
       code: "aws-lock-lost"
     });
     expect("error" in result && result.error).toBe(
-      `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds it (The setup of environment prod in octo/shop). Radius stopped before changing the role. Created before setup stopped: the GitHub identity provider in account ${ACCOUNT}. Retry setup to finish, or remove them in the AWS console if you will not retry.`
+      `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (The setup of environment prod in octo/shop), so Radius stopped. Before it stopped, this run made these AWS changes: the GitHub identity provider in account ${ACCOUNT}. Another run may have changed them since, so check the role before you retry.`
     );
     expect(h.commands()).not.toContain("iam create-role");
     expect(h.roleRecorded()).toBe(false);
@@ -807,8 +1016,8 @@ describe("the deploy identity lock during setup", () => {
     const result = await h.access.setup(operation, input, EXECUTOR);
 
     expect(result).toMatchObject({ ok: false, code: "aws-lock-lost" });
-    expect("error" in result && result.error).toMatch(
-      /Nothing was created in AWS\.$/
+    expect("error" in result && result.error).toBe(
+      `The lock on IAM role ${ROLE} was removed while this run held it, so Radius stopped before changing the role.`
     );
     expect(h.commands()).not.toContain("iam create-open-id-connect-provider");
   });
@@ -934,10 +1143,46 @@ describe("the deploy identity lock during removal", () => {
 
     expect(result).toEqual({
       ok: false,
-      message: `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds it (Another run). Radius stopped before changing the role.`
+      message: `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (Another run), so Radius stopped before changing the role.`
     });
     expect(h.commands()).not.toContain("iam update-assume-role-policy");
     expect(h.commands()).not.toContain("iam delete-policy");
+  });
+
+  it("lists the writes that ran when the lock is lost after one", async () => {
+    const h = harness({
+      ...signedIn,
+      "iam get-policy": [
+        lockPolicy("LOCK1"),
+        lockPolicy("LOCK1"),
+        lockPolicy("LOCK2")
+      ]
+    });
+
+    const result = await h.access.remove(removal);
+
+    expect(result).toEqual({
+      ok: false,
+      message: `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (Another run), so Radius stopped. Before it stopped, this run made these AWS changes: aws iam update-assume-role-policy. Another run may have changed them since, so check the role before you retry.`
+    });
+    expect(h.commands()).not.toContain("iam delete-role-policy");
+  });
+
+  it("warns, naming the lock, when it was already gone at release", async () => {
+    const h = harness({
+      ...signedIn,
+      "iam get-policy": [
+        lockPolicy("LOCK1"),
+        lockPolicy("LOCK1"),
+        lockPolicy("LOCK1"),
+        fail("NoSuchEntity: gone")
+      ]
+    });
+
+    expect(await h.access.remove(removal)).toMatchObject({
+      ok: true,
+      lockWarning: `This deletion is done with IAM role ${ROLE}, but its lock had already been removed, so there was nothing to release. Another run may have changed the role while this one held it.`
+    });
   });
 
   it("finishes the removal but warns when the lock cannot be released", async () => {
@@ -966,7 +1211,9 @@ describe("the deploy identity lock during removal", () => {
 
     expect(result.ok).toBe(false);
     expect("message" in result && result.message).toMatch(
-      /^Failed to remove .* Throttling Radius could not release the lock/
+      new RegExp(
+        `^Failed to remove .* Throttling This deletion is done with IAM role ${ROLE}, but Radius could not release its lock: ServiceFailure\\.`
+      )
     );
   });
 
@@ -1205,7 +1452,7 @@ describe("repairing an environment's trust under the lock", () => {
     [
       true,
       "2026-10-30T11:00:00Z",
-      ` If that run has stopped, remove its lock with: aws iam delete-policy --policy-arn ${LOCK_ARN}`
+      ` If that run has stopped, check that "aws iam get-policy --policy-arn ${LOCK_ARN} --query Policy.PolicyId --output text" prints LOCK0, the lock shown here, and only then run: aws iam delete-policy --policy-arn ${LOCK_ARN}`
     ]
   ])(
     "refuses at once, naming the holder, when another run holds the lock (removable %s)",
@@ -1221,7 +1468,7 @@ describe("repairing an environment's trust under the lock", () => {
       expect(result).toEqual({
         ok: false,
         code: "aws-lock-busy",
-        message: `The setup of environment prod in octo/shop is changing IAM role ${ROLE} (it has held the role's lock since ${created.slice(0, 16).replace("T", " ")} UTC), so Radius changed nothing. Try again once it finishes.${ending}`
+        message: `The setup of environment prod in octo/shop (operation op-2) is changing IAM role ${ROLE} (it has held the role's lock since ${created.slice(0, 16).replace("T", " ")} UTC), so Radius changed nothing. Try again once it finishes.${ending}`
       });
       expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
       expect(h.commands()).not.toContain("iam get-role");
@@ -1262,7 +1509,9 @@ describe("repairing an environment's trust under the lock", () => {
     const result = await h.access.repair(repairInput);
     expect(result).toMatchObject({ ok: false, code: "aws-role-trust-denied" });
     expect("message" in result && result.message).toMatch(
-      /AccessDenied Radius could not release the lock/
+      new RegExp(
+        `AccessDenied This repair is done with IAM role ${ROLE}, but Radius could not release its lock: ServiceFailure\\.`
+      )
     );
   });
 });

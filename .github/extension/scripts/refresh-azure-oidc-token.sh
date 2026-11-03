@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# shellcheck source=.github/extension/scripts/token-refresh-watch.sh
+source "$(dirname "${BASH_SOURCE[0]}")/token-refresh-watch.sh"
+
 readonly MODE="${1:-}"
 readonly MAX_REFRESHES="${2:-0}"
 readonly AUDIENCE="api://AzureADTokenExchange"
@@ -16,16 +19,6 @@ readonly CONSUMERS=(applications-rp dynamic-rp bicep-de)
 readonly REFRESH_INTERVAL_SECONDS="${AZURE_OIDC_REFRESH_INTERVAL_SECONDS:-120}"
 readonly CONNECT_TIMEOUT_SECONDS=5
 readonly REQUEST_TIMEOUT_SECONDS=20
-SLEEP_PID=""
-
-# The watcher is idle between refreshes and bash defers traps until the current
-# foreground command returns, so cancel the sleep instead of waiting it out.
-stop_watcher() {
-    if [[ -n "${SLEEP_PID}" ]]; then
-        kill "${SLEEP_PID}" 2>/dev/null || true
-    fi
-    exit 0
-}
 
 for variable in ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL; do
     if [[ -z "${!variable:-}" ]]; then
@@ -81,24 +74,10 @@ case "${MODE}" in
         echo "Azure OIDC token refreshed and consumers restarted."
         ;;
     --watch)
-        trap stop_watcher TERM INT
-        refreshes=0
-        while true; do
-            sleep "${REFRESH_INTERVAL_SECONDS}" &
-            SLEEP_PID=$!
-            wait "${SLEEP_PID}" || true
-            SLEEP_PID=""
-            if refresh_token; then
-                echo "Azure OIDC token refreshed."
-            else
-                echo "::warning::Azure OIDC token refresh failed; retrying." >&2
-            fi
-
-            ((refreshes += 1))
-            if ((MAX_REFRESHES > 0 && refreshes >= MAX_REFRESHES)); then
-                break
-            fi
-        done
+        watch_token_refresh refresh_token \
+            "Azure OIDC token refreshed." \
+            "Azure OIDC token refresh failed; retrying." \
+            "${REFRESH_INTERVAL_SECONDS}" "${MAX_REFRESHES}"
         ;;
     *)
         echo "Usage: $0 --prepare | --watch [refresh-count]" >&2

@@ -901,6 +901,44 @@ describe("provider mutation recovery journal", () => {
     );
   });
 
+  it.each([null, "", "HTTP 403"])(
+    "keeps branch-review instructions in the restored failure and cleanup refusals with evidence %j",
+    (evidence) => {
+      const op = createOperation({
+        operationId: "op_recovery",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_branch.delete",
+        target: "octo/app\0setup-branch\0original-head"
+      });
+      settleProviderMutation(op, mutation.mutationId, "not_applied", evidence);
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(op))
+      );
+      const guidance =
+        "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again." +
+        (evidence ? ` Details: ${evidence}` : "");
+
+      expect(toClientView(restored).failure.message).toBe(guidance);
+      expect(canStartRollback(restored)).toEqual({
+        ok: false,
+        code: "rollback-provider-outcome-unknown",
+        detail: guidance
+      });
+      expect(canRetryCleanup(restored)).toEqual({
+        ok: false,
+        code: "cleanup-retry-provider-outcome-unknown",
+        detail: guidance
+      });
+      expect(projectOperationActions(restored)).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: "rollback" })])
+      );
+    }
+  );
+
   it("preserves rollback admission when an uncertain branch deletion is restored", () => {
     const op = createOperation({
       operationId: "op_recovery",
@@ -8330,6 +8368,7 @@ describe("Remove lock for an AWS deploy identity lock", () => {
     policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
     policyId: "LOCK0",
     holder: "The setup of environment prod in octo/shop",
+    holderOperationId: "op-holder",
     since: "2026-10-30T11:00:00Z"
   };
   const setup = (wait: unknown) => {
@@ -8369,7 +8408,7 @@ describe("Remove lock for an AWS deploy identity lock", () => {
       confirmTitle: "Remove the lock on the deploy identity?",
       confirmLabel: "Remove lock",
       cancelLabel: "Keep waiting",
-      description: `${LOCK.holder} has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`
+      description: `${LOCK.holder} (operation op-holder) has held the lock since 2026-10-30 11:00 UTC. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`
     });
     expect(actions[0].path).toMatch(/\/aws-lock\/remove\?policyId=LOCK0$/);
   });
@@ -8416,7 +8455,17 @@ describe("Remove lock for an AWS deploy identity lock", () => {
       policyArn: LOCK.policyArn,
       policyId: LOCK.policyId,
       holder: "Another run",
+      holderOperationId: "",
       since: ""
     });
+    expect(
+      projectOperationActions(
+        setup({
+          policyArn: LOCK.policyArn,
+          policyId: LOCK.policyId,
+          removable: true
+        })
+      )[0].description
+    ).toMatch(/^Another run has held the lock since an unknown time\. /);
   });
 });

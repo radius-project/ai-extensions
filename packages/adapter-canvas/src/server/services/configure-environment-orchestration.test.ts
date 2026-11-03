@@ -1,39 +1,39 @@
-import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import {
   runEnvironmentOperationWorkflow,
   type EnvironmentOperationWorkflowDependencies
-} from "../../../src/server/services/environment-operation.js";
-import type { SetupOutcome } from "../../../src/server/services/setup-outcome.js";
-import { configureCredentialProvenanceStore } from "../../../src/credential-provenance.js";
-import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
-import type { AzureAutoSetupOperation } from "../../../src/server/routes/azure-auto-setup-types.js";
+} from "./environment-operation.js";
+import type { SetupOutcome } from "./setup-outcome.js";
+import { configureCredentialProvenanceStore } from "../../credential-provenance.js";
+import { createAzureSetupService } from "./azure-setup.js";
+import type { AzureAutoSetupOperation } from "../routes/azure-auto-setup-types.js";
 import {
   createParityAzureFixture,
   parityAzureRequest,
   parityClientId,
   runDirectParityConfiguration,
   unexpectedParityCall
-} from "../../support/server/setup-parity.js";
-import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
-import { createRequestHandler } from "../../../src/server/create-request-handler.js";
+} from "../../../test/support/server/setup-parity.js";
 import {
-  createCreateEnvironmentRoutes,
-  handleCreateEnvironment
-} from "../../../src/server/routes/create-environment.js";
-import { isValidRepoSlug } from "../../../src/azure-oidc.js";
-import { createSelectedNamespaceClaimsPorts } from "../../../src/server/routes/create-environment-namespace-claims.js";
+  createConfigureEnvironmentService,
+  type ConfigureEnvironmentDependencies
+} from "./configure-environment.js";
+import type { SetupInput } from "./setup-outcome.js";
+import type { CreateEnvironmentRequestData } from "../routes/create-environment-refusals.js";
+import { isValidRepoSlug } from "../../azure-oidc.js";
+import { createSelectedNamespaceClaimsPorts } from "../routes/create-environment-namespace-claims.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
-} from "../../../src/verification-plan.js";
+} from "../../verification-plan.js";
 import {
   finalizeSetupFailure,
   guardStopBoundary,
   persistBestEffort,
   persistMutationCheckpoint
-} from "../../../src/server.js";
+} from "../../server.js";
 import {
   createSetupArtifactLedger,
   addLegacyStep,
@@ -47,34 +47,27 @@ import {
   setCanonicalEnvironment,
   setStageState,
   settleProviderMutation
-} from "../../../src/operations.js";
-import type { SetupArtifactLedger } from "../../../src/operations.js";
-import { createTestRouteTable } from "../../support/server/route-table.js";
-import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
-import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
-import type { CanvasState } from "../../../src/shared.js";
-import type { GhCommandPresentation } from "../../../src/gh-command-display.js";
-import type {
-  CreateEnvironmentDependencies,
-  CreateEnvironmentInstanceEntry
-} from "../../../src/server/routes/create-environment.js";
+} from "../../operations.js";
+import type { SetupArtifactLedger } from "../../operations.js";
+import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import type { CanvasState } from "../../shared.js";
+import type { GhCommandPresentation } from "../../gh-command-display.js";
+import type { CreateEnvironmentInstanceEntry } from "./configure-environment.js";
 import type {
   CreateEnvironmentCommandResult,
   CreateEnvironmentOperation,
   GhcrPreflightResult
-} from "../../../src/server/routes/create-environment-types.js";
-import type { WorkflowFileReadResult } from "../../../src/verification-plan.js";
+} from "../routes/create-environment-types.js";
+import type { WorkflowFileReadResult } from "../../verification-plan.js";
 
-let container: CanvasServerContainer | undefined;
+let activeHarness: Harness | undefined;
 
 afterEach(async () => {
-  await container?.stopAll();
-  container = undefined;
+  activeHarness = undefined;
   await configureCredentialProvenanceStore(null);
   vi.useRealTimers();
 });
 
-const SERVER_OWNED_TOKEN = "loopback-token-for-this-instance";
 const STAGE_IDENTITY = "authorize-identity";
 const STAGE_CONFIGURE = "configure-environment";
 const STAGE_VERIFY = "verify";
@@ -87,7 +80,6 @@ interface GhRule {
 interface Script {
   pairedProvider?: "azure" | "aws";
   direct?: boolean;
-  directHandler?: boolean;
   trace?(entry: unknown): void;
   ghCommandPresentation?: GhCommandPresentation;
   onGhCommand?(command: string): void;
@@ -125,10 +117,9 @@ interface Script {
 }
 
 interface Harness {
-  dependencies: CreateEnvironmentDependencies;
+  dependencies: ConfigureEnvironmentDependencies;
   azure: ReturnType<typeof createParityAzureFixture> | undefined;
   persisted: unknown[];
-  baseUrl: string;
   /** Claim reads that travelled the account pinned to the operation. */
   selectedClaimCalls: string[];
   /** Every ambient `cliExec` invocation, so a regression to it is observable. */
@@ -157,7 +148,11 @@ interface Harness {
   cleanupErrors: string[];
   /** Whether each finalizeSetupFailure was handed a pinned environment reader. */
   cleanupReaders: boolean[];
-  cleanupReads: Array<{ code: number; stdout: string; stderr: string }>;
+  cleanupReads: Array<{
+    code: number | string;
+    stdout: string;
+    stderr: string;
+  }>;
 }
 
 const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
@@ -330,8 +325,11 @@ function start(script: Script = {}): Harness {
   const failures: Array<Record<string, unknown>> = [];
   const cleanupErrors: string[] = [];
   const cleanupReaders: boolean[] = [];
-  const cleanupReads: Array<{ code: number; stdout: string; stderr: string }> =
-    [];
+  const cleanupReads: Array<{
+    code: number | string;
+    stdout: string;
+    stderr: string;
+  }> = [];
   let persistCalls = 0;
 
   // `stages` and `steps` are present because the real stop guard closes the
@@ -368,7 +366,7 @@ function start(script: Script = {}): Harness {
             namespace: "application"
           }
         : {
-            roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+            existingRoleArn: "arn:aws:iam::123456789012:role/radius-deploy",
             region: "us-west-2",
             accountId: "123456789012",
             cluster: "cluster",
@@ -555,11 +553,9 @@ function start(script: Script = {}): Harness {
 
   const entry: CreateEnvironmentInstanceEntry = { state };
 
-  const dependencies: CreateEnvironmentDependencies = {
+  const dependencies: ConfigureEnvironmentDependencies = {
     ghCommandPresentation: script.ghCommandPresentation,
     // --- request scope: read per request, exactly as server.ts does ---
-    isServerOwnedRequest: (_instanceId, request) =>
-      request.headers["x-radius-server-owned"] === SERVER_OWNED_TOKEN,
     readInstanceEntry: () => (script.direct ? undefined : entry),
     getSelectedGitHubExecutor: () => ({
       ...successfulSelectedGhExecutor({ run: async (args) => runGhArgs(args) }),
@@ -661,7 +657,7 @@ function start(script: Script = {}): Harness {
       script.trace?.(["step", text]);
     },
     finalizeSetupFailure: async (_operation, input) => {
-      failures.push(input);
+      failures.push({ ...input });
       journal.push(`finalizeSetupFailure:${String(input.code)}`);
       // The cleanup's identity gate cannot run without a reader, and a reader
       // that is not the operation's own account answers for the wrong login.
@@ -713,6 +709,7 @@ function start(script: Script = {}): Harness {
     // Also the real helper: whether a stop is honored, and what the record and
     // the response look like when it is, is production behavior this suite
     // exercises over the socket rather than restates.
+    isShuttingDown: () => false,
     guardStopBoundary: (input) => {
       journal.push(`stopBoundary:${input.boundary}`);
       return guardStopBoundary(input);
@@ -995,42 +992,10 @@ function start(script: Script = {}): Harness {
       )
     : undefined;
 
-  if (!script.direct) {
-    const routes = createTestRouteTable({
-      ...(script.directHandler ?
-        {
-          "POST /api/create-environment": (context) =>
-            handleCreateEnvironment(context, dependencies)
-        }
-      : createCreateEnvironmentRoutes(dependencies)),
-      ...(azure ? createAzureAutoSetupRoutes(azure.dependencies) : {})
-    });
-    container = createCanvasServer({
-      createHttpServer: (handler) => createServer(handler),
-      createRequestHandler: ({ instanceId, instances, markActivity }) =>
-        createRequestHandler({
-          instanceId,
-          instances,
-          routes,
-          markActivity,
-          handleUnmatchedRequest: (_request, response) => {
-            response.writeHead(404);
-            response.end("unmatched");
-          }
-        }),
-      createState: () => state,
-      defaultPage: "graph",
-      now: () => Date.now(),
-      preferredPort: async () => 0,
-      prepareIdentity: () => {}
-    });
-  }
-
-  return {
+  const harness: Harness = {
     dependencies,
     azure,
     persisted,
-    baseUrl: "",
     selectedClaimCalls,
     ambientCliCalls,
     journal,
@@ -1049,24 +1014,24 @@ function start(script: Script = {}): Harness {
     cleanupReaders,
     cleanupReads
   };
+  activeHarness = harness;
+  return harness;
 }
 
-async function post(
-  body: unknown,
-  options: { serverOwned?: boolean } = {}
-): Promise<Response> {
-  const entry = await container!.getOrCreate("panel-a");
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json"
-  };
-  if (options.serverOwned !== false) {
-    headers["X-Radius-Server-Owned"] = SERVER_OWNED_TOKEN;
+async function configure(body: unknown): Promise<SetupOutcome> {
+  if (!activeHarness) throw new Error("Configuration fixture was not started.");
+  let input: SetupInput<CreateEnvironmentRequestData>;
+  try {
+    input = {
+      data: JSON.parse(typeof body === "string" ? body : JSON.stringify(body))
+    };
+  } catch (error) {
+    input = { error };
   }
-  return fetch(`${entry.baseUrl}/api/create-environment`, {
-    method: "POST",
-    headers,
-    body: typeof body === "string" ? body : JSON.stringify(body)
-  });
+  return createConfigureEnvironmentService(activeHarness.dependencies)(
+    input,
+    "panel-a"
+  );
 }
 
 /** Escapes a value used inside a `RegExp`, so a name is matched literally. */
@@ -1087,7 +1052,7 @@ function ghCallsExcludingNamespaceClaimLookup(
   );
 }
 
-describe("matched direct-core and Canvas setup parity", () => {
+describe("matched headless and panel-bound setup service parity", () => {
   const snapshot = (value: unknown): unknown =>
     JSON.parse(JSON.stringify(value));
   const asRecord = (value: unknown): Record<string, unknown> => {
@@ -1099,13 +1064,13 @@ describe("matched direct-core and Canvas setup parity", () => {
   async function runFixture(
     provider: "azure" | "aws",
     mode: "direct" | "protected",
-    transport: "direct-core" | "canvas"
+    binding: "headless" | "panel"
   ) {
     const trace: unknown[] = [];
     const results: unknown[] = [];
     const harness = start({
       pairedProvider: provider,
-      direct: transport === "direct-core",
+      direct: binding === "headless",
       ...(mode === "protected" ?
         {
           gh: [
@@ -1143,6 +1108,7 @@ describe("matched direct-core and Canvas setup parity", () => {
         respond: unexpectedParityCall
       });
     const dependencies: EnvironmentOperationWorkflowDependencies = {
+      isStopped: d.isShuttingDown,
       preflightRepoAdmin: d.preflightRepoAdmin,
       preflightGhcrPackageWriteAccess: d.preflightGhcrPackageWriteAccess,
       readGitHubJson: d.readGitHubJson,
@@ -1167,7 +1133,7 @@ describe("matched direct-core and Canvas setup parity", () => {
       // setup would have prepared.
       setupAwsDeployIdentity: async (_op, request) => ({
         ok: true,
-        roleArn: String(request.roleArn),
+        roleArn: String(request.existingRoleArn),
         subjects: []
       }),
       releaseAwsDeployIdentity: async () => {},
@@ -1186,7 +1152,7 @@ describe("matched direct-core and Canvas setup parity", () => {
     ): Promise<SetupOutcome> {
       trace.push(["stage-request", stage, snapshot(request)]);
       let outcome: SetupOutcome;
-      if (transport === "direct-core") {
+      if (binding === "headless") {
         if (stage === "azure") {
           if (!azure) throw new Error("AWS must not authorize Azure.");
           outcome = await azure.runDirect(request);
@@ -1194,32 +1160,17 @@ describe("matched direct-core and Canvas setup parity", () => {
           outcome = await runDirectParityConfiguration(request, d);
         }
       } else {
-        if (!container) throw new Error("Loopback server was not created.");
-        const path =
-          stage === "azure" ?
-            "/api/azure-auto-setup"
-          : "/api/create-environment";
-        const entry = await container.getOrCreate("panel-a");
-        const response = await fetch(`${entry.baseUrl}${path}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Radius-Server-Owned": SERVER_OWNED_TOKEN
-          },
-          body: JSON.stringify(request)
-        });
-        const body = asRecord(await response.json());
-        expect(response.headers.get("content-type")).toBe("application/json");
-        outcome = {
-          kind:
-            body.reconciling ? "reconciling"
-            : body.inputRequired ? "input-required"
-            : body.cancelled ? "stopped"
-            : response.ok ? "completed"
-            : "failed",
-          status: response.status,
-          body
-        };
+        if (stage === "azure") {
+          if (!azure) throw new Error("AWS must not authorize Azure.");
+          outcome = await createAzureSetupService(azure.dependencies)({
+            data: request
+          });
+        } else {
+          outcome = await createConfigureEnvironmentService(d)(
+            { data: request },
+            "panel-a"
+          );
+        }
       }
       expect(outcome.status, JSON.stringify(outcome.body)).toBe(200);
       const body = outcome.body;
@@ -1324,13 +1275,13 @@ describe("matched direct-core and Canvas setup parity", () => {
     { provider: "azure", mode: "direct" },
     { provider: "aws", mode: "protected" }
   ] as const)(
-    "matches $provider identity/configuration and $mode publication via direct core orchestration and real routes",
+    "matches $provider identity/configuration and $mode publication with and without panel projection",
     async ({ provider, mode }) => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(1700000000000);
-      const direct = await runFixture(provider, mode, "direct-core");
-      expect(container).toBeUndefined();
-      const canvas = await runFixture(provider, mode, "canvas");
+      const direct = await runFixture(provider, mode, "headless");
+
+      const canvas = await runFixture(provider, mode, "panel");
       expect(canvas.results).toEqual(direct.results);
       expect(canvas.trace).toEqual(direct.trace);
       expect(canvas.durable).toEqual(direct.durable);
@@ -1346,7 +1297,7 @@ describe("matched direct-core and Canvas setup parity", () => {
     "checkpoint",
     "selected-refusal"
   ] as const)(
-    "matches Azure %s outcomes, exact effects and durable records through the shared service and HTTP",
+    "matches Azure %s outcomes, exact effects and durable records through direct and panel-bound services",
     async (scenario) => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(1700000000000);
@@ -1456,23 +1407,12 @@ describe("matched direct-core and Canvas setup parity", () => {
             const outcome = await azure.runDirect(request);
             return { status: outcome.status, body: outcome.body };
           }
-          if (!container) throw new Error("Missing HTTP container");
-          const entry = await container.getOrCreate("panel-a");
-          const response = await fetch(
-            `${entry.baseUrl}/api/azure-auto-setup`,
-            {
-              method: "POST",
-              headers: {
-                "content-type": "application/json",
-                "X-Radius-Server-Owned": SERVER_OWNED_TOKEN
-              },
-              body: JSON.stringify(request)
-            }
-          );
-          expect(response.headers.get("content-type")).toBe("application/json");
+          const response = await createAzureSetupService(azure.dependencies)({
+            data: request
+          });
           return {
             status: response.status,
-            body: asRecord(await response.json())
+            body: asRecord(response.body)
           };
         };
         const first = await invokeAzure();
@@ -1610,16 +1550,18 @@ describe("matched direct-core and Canvas setup parity", () => {
         error: "at unchanged"
       });
       const direct = await run(true);
-      expect(container).toBeUndefined();
-      const http = await run(false);
-      expect(normalize(http)).toEqual(normalize(direct));
+
+      const panelBound = await run(false);
+      expect(normalize(panelBound)).toEqual(normalize(direct));
     }
   );
 
   it.each(["present", "closed", "replaced"] as const)(
-    "projects direct configuration lazily into only its own instance (%s)",
+    "projects direct configuration only into its current attachment generation (%s)",
     async (state) => {
       const harness = start({ direct: true });
+      const owner = createEnvironmentExecutionOwner();
+      const attachment = owner.attach("own");
       const original = { state: {} as CanvasState };
       const replacement = { state: {} as CanvasState };
       const other = { state: {} as CanvasState };
@@ -1635,24 +1577,24 @@ describe("matched direct-core and Canvas setup parity", () => {
       harness.setJournalHook((entry) => {
         if (entry === "dispatchVerifyWorkflow") {
           if (state === "closed") entries.delete("own");
-          if (state === "replaced") entries.set("own", replacement);
+          if (state === "replaced") {
+            entries.set("own", replacement);
+            owner.attach("own");
+          }
         }
       });
-      const outcome = await runDirectParityConfiguration(
-        { repo: "octo/app" },
-        harness.dependencies,
-        "own"
-      );
+      const outcome = await createConfigureEnvironmentService(
+        harness.dependencies
+      )({ data: { repo: "octo/app" } }, "own", attachment.isCurrent);
       expect(outcome).toMatchObject({ kind: "completed", status: 200 });
-      expect(reads).toEqual(["own"]);
+      expect(reads).toEqual(state === "replaced" ? [] : ["own"]);
       expect(other.state).toEqual({});
-      if (state === "closed") expect(original.state).toEqual({});
-      else
-        expect(
-          (state === "replaced" ? replacement : original).state.verifyRunId
-        ).toBe("4242");
-      if (state === "replaced") expect(original.state).toEqual({});
-      expect(container).toBeUndefined();
+      if (state === "present") expect(original.state.verifyRunId).toBe("4242");
+      else expect(original.state).toEqual({});
+      expect(replacement.state).toEqual({});
+      expect(harness.operation).toMatchObject({
+        verification: { runId: "4242" }
+      });
     }
   );
 
@@ -1746,10 +1688,10 @@ describe("matched direct-core and Canvas setup parity", () => {
             const outcome = await runDirectParityConfiguration(data, d);
             return { status: outcome.status, body: outcome.body };
           }
-          const response = await post(data);
+          const response = await configure(data);
           return {
             status: response.status,
-            body: asRecord(await response.json())
+            body: asRecord(response.body)
           };
         };
         const results = [await invoke()];
@@ -1822,7 +1764,7 @@ describe("matched direct-core and Canvas setup parity", () => {
         );
       };
       const direct = await run(true);
-      expect(container).toBeUndefined();
+
       expect(await run(false)).toEqual(direct);
     }
   );
@@ -1847,7 +1789,6 @@ describe("matched direct-core and Canvas setup parity", () => {
       "requires a written request body"
     );
     expect(azure.provenance.size).toBe(0);
-    expect(container).toBeUndefined();
   });
 
   it("releases the fixture provenance lock and preserves the original failure", async () => {
@@ -1888,16 +1829,16 @@ describe("matched direct-core and Canvas setup parity", () => {
   });
 });
 
-it("reports a failing configuration finalizer once without hanging HTTP", async () => {
+it("reports a failing configuration finalizer once without leaving the service pending", async () => {
   const harness = start({ defaultBranch: null });
   let finalizations = 0;
   harness.dependencies.finalizeSetupFailure = async () => {
     finalizations++;
     throw new Error("private cleanup detail");
   };
-  const response = await post({ repo: "octo/app" });
+  const response = await configure({ repo: "octo/app" });
   expect(response.status).toBe(500);
-  expect(await response.json()).toMatchObject({ code: "setup-handler-failed" });
+  expect(response.body).toMatchObject({ code: "setup-handler-failed" });
   expect(finalizations).toBe(1);
   expect(harness.journal).toContain("diagnostic:setup-handler-failed");
 });
@@ -1925,7 +1866,6 @@ it("keeps the Azure cleanup runner available when direct configuration cannot pu
   });
   expect(runAz).toHaveBeenCalledExactlyOnceWith(["cleanup"]);
   expect(harness.failures).toHaveLength(1);
-  expect(container).toBeUndefined();
 });
 
 describe("publication baseline parity", () => {
@@ -1998,8 +1938,9 @@ describe("publication baseline parity", () => {
           } else trace.push(JSON.parse(JSON.stringify(entry)));
         }
       });
-      const response = await post({ repo: "octo/app" });
-      const body = await response.json();
+      const response = await configure({ repo: "octo/app" });
+      // Preserve the serialized-outcome golden from before transport removal.
+      const body = JSON.parse(JSON.stringify(response.body));
       expect(response.status).toBe(200);
       expect(body.steps).toEqual(harness.steps);
       expect(harness.ambientCliCalls).toEqual([]);
@@ -2040,87 +1981,14 @@ describe("publication baseline parity", () => {
   );
 });
 
-describe("create-environment real-loopback HIT: the server-owned gate", () => {
-  it("supports the exported handler without a prebuilt service", async () => {
-    const harness = start({ directHandler: true });
-    const response = await post({});
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
-      error: "No target repository specified."
-    });
-    expect(harness.failures).toEqual([]);
-    expect(harness.ghCalls).toEqual([]);
-  });
-
-  it("settles authorization failures without parsing or finalizing setup", async () => {
-    const harness = start({ directHandler: true });
-    const report = vi.fn();
-    harness.dependencies.reportOperationDiagnostic = report;
-    harness.dependencies.isServerOwnedRequest = () => {
-      throw new Error("private authorization failure");
-    };
-    const response = await post("not-json");
-    expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({
-      code: "setup-handler-failed",
-      error:
-        "Setup could not finish reporting its outcome. Inspect the operation before retrying."
-    });
-    expect(report).toHaveBeenCalledExactlyOnceWith({
-      code: "setup-handler-failed",
-      message: "private authorization failure"
-    });
-    expect(harness.failures).toEqual([]);
-    expect(harness.ghCalls).toEqual([]);
-  });
-
-  it("refuses a request that arrives without the server-owned token", async () => {
-    const harness = start();
-
-    const response = await post({ repo: "octo/app" }, { serverOwned: false });
-
-    expect(response.status).toBe(403);
-    // The header is set before the status line, so it survives on the refusal.
-    expect(response.headers.get("content-type")).toBe("application/json");
-    expect(await response.json()).toEqual({
-      error: "This endpoint is reserved for server-owned operations.",
-      code: "server-owned-operation-required"
-    });
-    // Refused before the body is read and before any operation is touched.
-    expect(harness.journal).toEqual([]);
-    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
-  });
-
-  it("serves the same request over the same socket once it carries the token", async () => {
-    const harness = start();
-
-    const response = await post({ repo: "octo/app" });
-
-    expect(response.status).toBe(200);
-    expect(harness.journal).toContain("preflightRepoAdmin");
-  });
-
-  it("still falls through for methods the route table does not declare", async () => {
-    start();
-    const entry = await container!.getOrCreate("panel-a");
-
-    const response = await fetch(`${entry.baseUrl}/api/create-environment`, {
-      method: "GET",
-      headers: { "X-Radius-Server-Owned": SERVER_OWNED_TOKEN }
-    });
-
-    expect(response.status).toBe(404);
-  });
-});
-
-describe("create-environment real-loopback HIT: the refusal ladder on the wire", () => {
+describe("environment configuration service: the refusal ladder", () => {
   it("refuses 400 when no repository was supplied", async () => {
     start();
 
-    const response = await post({});
+    const response = await configure({});
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error: "No target repository specified."
     });
   });
@@ -2128,10 +1996,10 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
   it("refuses 400 for a repository that is not owner/repo", async () => {
     start();
 
-    const response = await post({ repo: "octo" });
+    const response = await configure({ repo: "octo" });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error: 'Invalid repository "octo". Expected "owner/repo".',
       code: "invalid-repo"
     });
@@ -2153,7 +2021,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       }
     });
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "prod",
       provider: "azure",
@@ -2163,7 +2031,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
     });
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error:
         'Namespace "payments" on cluster "aks-1" already belongs to environment "dev". Radius allows one environment per namespace, so choose a different namespace or deploy to "dev".',
       code: "namespace-already-claimed",
@@ -2178,7 +2046,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
   it("refuses 409 and changes nothing when the namespace claims cannot be read", async () => {
     const harness = start({ namespaceClaimsFailure: "gh: forbidden" });
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "prod",
       provider: "azure",
@@ -2188,7 +2056,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
     });
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error:
         "Radius created nothing because it could not confirm which namespaces octo/app's environments already use: gh: forbidden",
       code: "namespace-claims-unavailable"
@@ -2216,7 +2084,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       }
     });
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "prod",
       provider: "azure",
@@ -2255,7 +2123,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       }
     });
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "prod",
       provider: "azure",
@@ -2265,7 +2133,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
     });
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "namespace-already-claimed",
       environment: "team a/dev"
     });
@@ -2278,7 +2146,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
   it("refuses 409 when no GitHub account is pinned to the operation", async () => {
     const harness = start({ noPinnedNamespaceAccount: true });
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "prod",
       provider: "azure",
@@ -2288,7 +2156,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
     });
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error:
         "Radius created nothing because it could not confirm which namespaces octo/app's environments already use: the GitHub account pinned to this setup is unavailable.",
       code: "namespace-claims-unavailable"
@@ -2299,10 +2167,10 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
   it("answers the unhandled-error envelope when the body is not JSON", async () => {
     const harness = start();
 
-    const response = await post("not json at all");
+    const response = await configure("not json at all");
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "create-environment-unhandled"
     });
     expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
@@ -2313,10 +2181,10 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       repoAdminRefusal: "You need admin on octo/app."
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error: "You need admin on octo/app.",
       code: "repo-admin-required"
     });
@@ -2333,10 +2201,10 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error: "Your token cannot write packages.",
       code: "ghcr-package-write-required"
     });
@@ -2379,7 +2247,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
         ]
       });
 
-      const response = await post({
+      const response = await configure({
         repo: "octo/app",
         environment: "dev",
         operationEnvironment: "dev",
@@ -2421,7 +2289,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       ]
     });
 
-    await post({
+    await configure({
       repo: "octo/app",
       environment: "dev",
       operationEnvironment: "dev",
@@ -2462,7 +2330,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       ]
     });
 
-    await post({
+    await configure({
       repo: "octo/app",
       environment: "dev",
       operationEnvironment: "dev",
@@ -2477,7 +2345,68 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
   });
 });
 
-describe("create-environment real-loopback HIT: the seven-step workflow", () => {
+describe("environment configuration service: the seven-step workflow", () => {
+  it.each(["success", "timeout", "rejected", "persistence-error"] as const)(
+    "retains initial dispatch evidence without post-shutdown publication (%s)",
+    async (outcome) => {
+      const harness = start({
+        dispatchResults: [
+          {
+            code: outcome === "success" ? 0 : 1,
+            stdout:
+              outcome === "success" ?
+                "https://github.com/octo/app/actions/runs/4242"
+              : "",
+            stderr: outcome === "rejected" ? "HTTP 403" : "timeout",
+            timedOut: outcome === "timeout" || outcome === "persistence-error"
+          }
+        ]
+      });
+      let stopped = false;
+      harness.dependencies.isShuttingDown = () => stopped;
+      const guard = harness.dependencies.guardStopBoundary;
+      harness.dependencies.guardStopBoundary = async (input) => {
+        if (!stopped) return guard(input);
+        input.respond(503, { code: "setup-shutting-down" });
+        return false;
+      };
+      harness.setJournalHook((entry) => {
+        if (entry === "dispatchVerifyWorkflow") stopped = true;
+      });
+      const persist = harness.dependencies.persistOperations;
+      harness.dependencies.persistOperations = async () => {
+        await persist();
+        if (stopped && outcome === "persistence-error")
+          throw new Error("acknowledgement journal unavailable");
+      };
+      const pending = configure({ repo: "octo/app" });
+      if (outcome === "persistence-error")
+        await expect(pending).resolves.toMatchObject({
+          kind: "failed",
+          status: 500
+        });
+      else
+        await expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+      expect(
+        harness.ghCalls.filter((call) => call.startsWith("run list "))
+      ).toHaveLength(1);
+      expect(
+        harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+      ).toHaveLength(1);
+      expect(harness.failures).toEqual([]);
+      expect(harness.finished).toEqual([]);
+      expect(
+        harness.operation.providerRecovery?.mutations?.at(-1)?.status
+      ).toBe(
+        outcome === "success" ? "confirmed"
+        : outcome === "rejected" ? "not_applied"
+        : "outcome_unknown"
+      );
+      expect(harness.state.verifyRunId).toBeUndefined();
+    }
+  );
   it.each([false, true])(
     "keeps an optional template failure nonfatal only without a pending workflow PUT: pending=%s",
     async (pending) => {
@@ -2562,13 +2491,13 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         });
       };
 
-      const response = await post({
+      const response = await configure({
         operationId: harness.operation.operationId,
         repo: "octo/app",
         environment: "dev",
         provider: "azure"
       });
-      const body = await response.json();
+      const body = response.body;
 
       expect(generatorCalls).toBe(1);
       expect(cleanupCalls).toBe(0);
@@ -2615,11 +2544,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("answers a single synchronous 200 describing the whole run", async () => {
     start();
 
-    const response = await post({ repo: "octo/app", environment: "dev" });
+    const response = await configure({ repo: "octo/app", environment: "dev" });
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toBe("application/json");
-    const payload = (await response.json()) as Record<string, unknown>;
+    const payload = response.body as Record<string, unknown>;
     expect(payload).toMatchObject({
       success: true,
       operationId: "op-http",
@@ -2641,8 +2569,8 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("reports verification dispatch without implying the environment is ready", async () => {
     const harness = start();
 
-    const response = await post({ repo: "octo/app", environment: "dev" });
-    const payload = (await response.json()) as { steps: string[] };
+    const response = await configure({ repo: "octo/app", environment: "dev" });
+    const payload = response.body as { steps: string[] };
 
     expect(payload.steps).toContain("✅ Credential verification dispatched.");
     const dispatchStep = payload.steps.find((step) =>
@@ -2677,14 +2605,14 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("dispatches against the confirmed non-main default branch", async () => {
     const harness = start({ defaultBranch: "trunk" });
 
-    const response = await post({ repo: "octo/app", environment: "dev" });
+    const response = await configure({ repo: "octo/app", environment: "dev" });
 
     expect(response.status).toBe(200);
     expect(
       harness.ghCalls.find((call) => call.startsWith("workflow run "))
     ).toContain("--ref trunk");
     expect(harness.operation.verification).toMatchObject({ ref: "trunk" });
-    const payload = (await response.json()) as { steps: string[] };
+    const payload = response.body as { steps: string[] };
     expect(payload.steps).toEqual(
       expect.arrayContaining([
         expect.stringContaining('repository "octo/app", ref "trunk"')
@@ -2702,10 +2630,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       azureCredential: () => ({ clientId: "c", tenantId: "t" })
     });
 
-    const response = await post({ repo: "octo/app", environment: "dev" });
+    const response = await configure({ repo: "octo/app", environment: "dev" });
 
     expect(response.status).toBe(200);
-    const payload = (await response.json()) as Record<string, unknown>;
+    const payload = response.body as Record<string, unknown>;
     expect(payload).toMatchObject({
       success: true,
       verifySkipped: true,
@@ -2765,7 +2693,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       }
     });
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "dev",
       operationEnvironment: "dev",
@@ -2773,7 +2701,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       cancelled: true,
       code: "operation-stopped"
     });
@@ -2829,7 +2757,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       harness.operation.provider = provider;
       prepareVerifyWorkflowRecovery(harness.operation);
 
-      const response = await post({
+      const response = await configure({
         repo: "octo/app",
         environment: "dev",
         operationEnvironment: "dev",
@@ -2838,7 +2766,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       });
 
       expect(response.status).toBe(200);
-      const payload = (await response.json()) as Record<string, unknown>;
+      const payload = response.body as Record<string, unknown>;
       expect(payload).toMatchObject({
         success: true,
         verifySkipped: true,
@@ -2878,7 +2806,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     });
     prepareVerifyWorkflowRecovery(harness.operation);
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "dev",
       operationEnvironment: "dev",
@@ -2894,7 +2822,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     // `operations.test.ts`: the same property, observed as call order.
     const harness = start();
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(
       harness.journal.indexOf("preflightGhcrPackageWriteAccess")
@@ -2912,7 +2840,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     // creation never needed one.
     const harness = start();
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(200);
     const variableSets = harness.ghCalls.filter((call) =>
@@ -2928,7 +2856,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("checks whether the GitHub environment exists before creating it", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     const lookup = harness.ghCalls.indexOf(
       "api /repos/octo/app/environments/dev"
@@ -2943,13 +2871,50 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     );
   });
 
+  it("interrupts configuration-stage environment creation after a held intent save without cleanup", async () => {
+    const harness = start();
+    let stopped = false;
+    let entered = () => {};
+    let release = () => {};
+    const prepared = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const saved: string[] = [];
+    harness.dependencies.isShuttingDown = () => stopped;
+    harness.dependencies.persistOperations = async () => {
+      const mutation = harness.operation.providerRecovery?.mutations?.at(-1);
+      if (mutation?.kind !== "github_environment.put") return;
+      saved.push(mutation.status);
+      if (mutation.status === "prepared") {
+        entered();
+        await gate;
+      }
+    };
+    const pending = configure({ repo: "octo/app" });
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    await prepared;
+    const calls = [...harness.ghCalls];
+    stopped = true;
+    release();
+    await rejected;
+    expect(harness.ghCalls).toEqual(calls);
+    expect(saved).toEqual(["prepared", "not_applied"]);
+    expect(harness.failures).toEqual([]);
+    expect(harness.finished).toEqual([]);
+  });
+
   it("fails before workflow mutation when the default branch cannot be resolved", async () => {
     const harness = start({ defaultBranch: null });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error:
         "Could not determine the default branch for octo/app, so Radius did not commit workflow files with guessed deletion provenance.",
       code: "default-branch-unavailable"
@@ -2973,7 +2938,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(harness.journal).toContain("recordGitHubEnvironment:reused");
     expect(harness.operation.setupArtifacts.githubEnvironment).toMatchObject({
@@ -3003,7 +2968,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     // The proof is settled in memory first, then the mutation checkpoint saves
     // that ownership before the stop boundary can return.
@@ -3049,7 +3014,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(harness.operation.setupArtifacts.githubEnvironment).toMatchObject({
       state: "created_candidate",
@@ -3071,7 +3036,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("fails closed when promoted ownership cannot be checkpointed", async () => {
     const harness = start({ persistRejectsAfter: 3 });
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     const promoted = harness.journal.indexOf(
       "promoteCreatedGitHubEnvironment:true"
@@ -3103,13 +3068,13 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "production"
     });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       environment: "Production",
       stateRegistry: "ghcr.io/octo/app/radius-state-Production"
     });
@@ -3155,7 +3120,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       }
     });
 
-    const response = await post({
+    const response = await configure({
       repo: "octo/app",
       environment: "Production",
       operationEnvironment: "production",
@@ -3163,7 +3128,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       environment: "Production"
     });
     expect(
@@ -3190,10 +3155,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       error:
         'Could not resolve GitHub environment "dev". HTTP 500: upstream unavailable',
       code: "create-environment-unhandled"
@@ -3231,10 +3196,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         ]
       });
 
-      const response = await post({ repo: "octo/app" });
+      const response = await configure({ repo: "octo/app" });
 
       expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({
+      expect(response.body).toMatchObject({
         error: `Could not confirm repository "octo/app" before creating GitHub environment "dev". ${detail}`,
         code: "create-environment-unhandled"
       });
@@ -3258,10 +3223,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       error:
         'GitHub created environment "dev" but did not report its canonical name. The environment was left in place because Radius cannot prove this request created it.',
       code: "create-environment-unhandled"
@@ -3305,10 +3270,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         exerciseCleanupDelete: true
       });
 
-      const response = await post({ repo: "octo/app" });
+      const response = await configure({ repo: "octo/app" });
 
       expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({
+      expect(response.body).toMatchObject({
         error: "state setup failed",
         code: "create-environment-unhandled"
       });
@@ -3319,7 +3284,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("tags the environment as Radius-managed and drops the cached listing", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(harness.ghCalls).toContain(
       "variable set RADIUS_MANAGED --body true --env dev --repo octo/app"
@@ -3338,10 +3303,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "create-environment-unhandled"
     });
     expect(harness.failures).toContainEqual(
@@ -3357,7 +3322,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("records the credential profile the request names", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app", profileName: "work" });
+    await configure({ repo: "octo/app", profileName: "work" });
 
     expect(harness.ghCalls).toContain(
       "variable set RADIUS_CREDENTIAL_PROFILE --body work --env dev --repo octo/app"
@@ -3371,7 +3336,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       azureCredential: () => ({ clientId: "c", tenantId: "t" })
     });
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(harness.ghCalls).toContain(
       "variable set AZURE_CLIENT_ID --body c --env dev --repo octo/app"
@@ -3386,7 +3351,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("sets the AWS values, with a default region, for an AWS environment", async () => {
     const harness = start();
 
-    await post({
+    await configure({
       repo: "octo/app",
       provider: "aws",
       roleArn: "arn:aws:iam::1"
@@ -3417,14 +3382,14 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
           }
         }
       });
-      const response = await post({
+      const response = await configure({
         repo: "octo/app",
         provider,
         roleArn: "arn:aws:iam::1",
         accountId: "1"
       });
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({
+      expect(response.body).toMatchObject({
         cancelled: true,
         code: "operation-stopped",
         boundary: "after-provider-configuration"
@@ -3441,17 +3406,17 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     // `||`, not `??`: "" is not a usable GitHub environment name.
     const harness = start();
 
-    const response = await post({ repo: "octo/app", environment: "" });
+    const response = await configure({ repo: "octo/app", environment: "" });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ environment: "dev" });
+    expect(response.body).toMatchObject({ environment: "dev" });
     expect(harness.ghCalls).toContain("api /repos/octo/app/environments/dev");
   });
 
   it("records every committed workflow file against the default branch", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     // Every file carries the provenance a later rollback verifies against:
     // the commit it created, the blob GitHub stored, the digest of the bytes
@@ -3507,7 +3472,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       }))
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(200);
     expect(
@@ -3522,7 +3487,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("records the commit point only after the verify dispatch succeeded", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     const dispatch = harness.journal.indexOf("dispatchVerifyWorkflow");
     expect(dispatch).toBeGreaterThan(-1);
@@ -3545,7 +3510,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   it("persists the run URL returned by the dispatch without discovery polling", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(harness.state).toMatchObject({
       deployDispatchedAt: 1700000000000,
@@ -3567,10 +3532,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       gh: [{ match: /^run list /, result: { code: 0, stdout: "<html>" } }]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(502);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "verify-baseline-read-failed"
     });
     expect(harness.state.verifyRunId).toBeUndefined();
@@ -3587,10 +3552,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(502);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "verify-baseline-read-failed"
     });
     expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
@@ -3607,10 +3572,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "verify-dispatch-failed",
       error: expect.stringContaining("SAML enforcement")
     });
@@ -3663,7 +3628,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app", environment: "dev" });
+    const response = await configure({ repo: "octo/app", environment: "dev" });
 
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(harness.state.verifyRunId).toBeUndefined();
@@ -3701,7 +3666,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app", environment: "dev" });
+    const response = await configure({ repo: "octo/app", environment: "dev" });
 
     expect(response.status).toBe(200);
     expect(harness.operation.verification).toMatchObject({
@@ -3726,7 +3691,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app", environment: "dev" });
+    const response = await configure({ repo: "octo/app", environment: "dev" });
 
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(harness.operation).toMatchObject({
@@ -3751,7 +3716,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(harness.operation).toMatchObject({
@@ -3819,7 +3784,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       "The provider request ended without a response."
     );
 
-    await post({ repo: "octo/app", environment: "dev" });
+    await configure({ repo: "octo/app", environment: "dev" });
 
     expect(
       operation.providerRecovery?.mutations?.find(
@@ -3852,10 +3817,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
-    const payload = (await response.json()) as { error: string; code: string };
+    const payload = response.body as { error: string; code: string };
     expect(payload.code).toBe("verify-workflow-commit-failed");
     expect(payload.error).toContain(
       "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
@@ -3876,8 +3841,8 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
-    const payload = (await response.json()) as { code: string; error: string };
+    const response = await configure({ repo: "octo/app" });
+    const payload = response.body as { code: string; error: string };
 
     expect(response.status).toBe(400);
     expect(payload.code).toBe("verify-workflow-commit-failed");
@@ -3911,10 +3876,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
-    const payload = (await response.json()) as { error: string };
+    const payload = response.body as { error: string };
     expect(payload.error).toContain(
       "fork the repository and start a new Copilot session from the fork's GitHub URL"
     );
@@ -3931,7 +3896,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     // A 500 can be reported after GitHub already accepted the write, so the
     // write is reconciled against the repository rather than replayed, and the
@@ -3976,8 +3941,8 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
-    const payload = await response.json();
+    const response = await configure({ repo: "octo/app" });
+    const payload = response.body;
 
     expect(payload).toMatchObject({ success: true });
     expect(response.status).toBe(200);
@@ -4005,10 +3970,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ]
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "verify-dispatch-failed"
     });
     expect(
@@ -4017,7 +3982,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   });
 });
 
-describe("create-environment real-loopback HIT: the protected-branch path", () => {
+describe("environment configuration service: the protected-branch path", () => {
   // Only the commit that targets the default branch is rejected; the retry the
   // committer makes against the pull-request branch is allowed through, which
   // is what a real protected branch does.
@@ -4041,10 +4006,10 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
   it("discovers first-time setup verification without dispatching or waiting for merge", async () => {
     const harness = start(protectedScript);
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       success: true,
       actionRequired: false,
       pullRequestUrl: "https://github.com/octo/app/pull/7",
@@ -4086,7 +4051,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       recoveryMarker: "preserved"
     };
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(200);
     expect(harness.operation.verification).toMatchObject({
@@ -4099,6 +4064,39 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     });
   });
 
+  it("stops automatic setup-branch discovery without publishing its late result", async () => {
+    let stopped = false;
+    const harness = start({
+      ...protectedScript,
+      onGhCommand: (command) => {
+        if (command.startsWith("run list ")) stopped = true;
+      }
+    });
+    harness.dependencies.isShuttingDown = () => stopped;
+    const guard = harness.dependencies.guardStopBoundary;
+    harness.dependencies.guardStopBoundary = async (input) => {
+      if (!stopped) return guard(input);
+      input.respond(503, { code: "setup-shutting-down" });
+      return false;
+    };
+    await expect(configure({ repo: "octo/app" })).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("run list "))
+    ).toHaveLength(1);
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("workflow run "))
+    ).toBe(false);
+    expect(harness.operation.verification).toMatchObject({
+      event: "push",
+      runId: null
+    });
+    expect(harness.state.verifyRunId).toBeUndefined();
+    expect(harness.failures).toEqual([]);
+    expect(harness.finished).toEqual([]);
+  });
+
   it("keeps merge-required guidance when the default dispatcher has a legacy chain", async () => {
     const harness = start({
       ...protectedScript,
@@ -4108,9 +4106,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       actionRequired: true,
       verifyRunUrl: ""
     });
@@ -4134,9 +4132,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       actionRequired: true,
       verifyRunUrl: ""
     });
@@ -4167,8 +4165,8 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       legacyDeleteResult: false
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(String(body.error)).toContain(
@@ -4186,8 +4184,8 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       legacyDeleteResult: false
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(String(body.error)).toContain(
@@ -4206,8 +4204,8 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       legacyDeleteResult: "cancelled"
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
@@ -4229,8 +4227,8 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       code: "operation-stopped",
@@ -4270,8 +4268,8 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
         harness.operation.stopRequested = true;
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(response.status).toBe(202);
     expect(body).toMatchObject({
@@ -4286,7 +4284,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
 
     harness.journal.length = 0;
     harness.ghCalls.length = 0;
-    const recoveryResponse = await post({ repo: "octo/app" });
+    const recoveryResponse = await configure({ repo: "octo/app" });
 
     expect(recoveryResponse.status).toBe(202);
     expect(harness.journal).not.toContain("preflightRepoAdmin");
@@ -4301,7 +4299,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
   it("deletes the legacy deploy workflow on the pull request branch", async () => {
     const harness = start(protectedScript);
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(harness.journal).toContain("deleteLegacyDeployWorkflow");
     expect(harness.journal).toContain(
@@ -4321,9 +4319,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       actionRequired: false,
       pullRequestUrl: "https://github.com/octo/app/pull/7",
       pullRequestBranch: null
@@ -4358,9 +4356,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({ actionRequired: true });
+    expect(response.body).toMatchObject({ actionRequired: true });
     expect(
       harness.steps.some((step) =>
         step.includes("still auto-runs after verification")
@@ -4382,9 +4380,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({ actionRequired: false });
+    expect(response.body).toMatchObject({ actionRequired: false });
     expect(harness.steps).toContain(
       '\u2139\ufe0f Credential verification is running against branch "radius/setup-dev-workflows-op-http", ' +
         'so it is not waiting for the merge. Merging the pull request above puts the workflows on "main".'
@@ -4421,9 +4419,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({ actionRequired: true });
+    expect(response.body).toMatchObject({ actionRequired: true });
     expect(
       harness.steps.filter((step) => step.startsWith("\u{1F449}"))
     ).toEqual([
@@ -4454,7 +4452,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       azureCredential: () => ({ clientId: "c", tenantId: "t" })
     });
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(
       harness.steps.filter((step) => step.startsWith("\u{1F449}"))
@@ -4491,7 +4489,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(400);
     expect(
@@ -4517,9 +4515,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       azureCredential: () => ({ clientId: "c", tenantId: "t" })
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({ actionRequired: true });
+    expect(response.body).toMatchObject({ actionRequired: true });
     expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([
       '👉 Merge the pull request above to put the workflows on "main", and finish the ' +
         "cloud credentials above. Credential verification is waiting on both, so merging " +
@@ -4566,9 +4564,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
         harness.operation.stopRequested = true;
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       cancelled: true,
       boundary: "before-verification-dispatch"
     });
@@ -4595,7 +4593,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       pullRequest: { ok: false, stderr: "HTTP 422: already exists" }
     });
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(
       harness.steps.filter((step) => step.startsWith("\u{1F449}"))
@@ -4613,9 +4611,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       pullRequest: { ok: false, stderr: "HTTP 422: already exists" }
     });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       actionRequired: false,
       pullRequestUrl: "",
       pullRequestBranch: null
@@ -4634,7 +4632,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
   });
 });
 
-describe("create-environment real-loopback HIT: the cancellation gates", () => {
+describe("environment configuration service: the cancellation gates", () => {
   it("answers 500 and stops touching GitHub when a checkpoint cannot be saved", async () => {
     // Admission persists once and succeeds; the next write is the first
     // checkpoint, which runs immediately after the environment is created.
@@ -4644,10 +4642,10 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     // resources at all.
     const harness = start({ persistRejectsAfter: 3 });
 
-    const response = await post({ repo: "octo/app" });
+    const response = await configure({ repo: "octo/app" });
 
     expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error:
         "Radius changed no further cloud resources because it could not save the setup recovery record.",
       code: "operation-persistence-failed"
@@ -4665,7 +4663,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
   it("persists every completed mutation group on the successful path", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(
       harness.journal.filter((entry) => entry === "checkpoint")
@@ -4675,7 +4673,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
   it("passes every safe boundary in order when no stop is recorded", async () => {
     const harness = start();
 
-    await post({ repo: "octo/app" });
+    await configure({ repo: "octo/app" });
 
     expect(
       harness.journal.filter((entry) => entry.startsWith("stopBoundary:"))
@@ -4713,8 +4711,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     // records it: the executor observes it at its next safe boundary.
     harness.operation.stopRequested = true;
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
@@ -4768,8 +4766,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
           harness.operation.stopRequested = true;
       });
 
-      const response = await post({ repo: "octo/app" });
-      const body = (await response.json()) as Record<string, unknown>;
+      const response = await configure({ repo: "octo/app" });
+      const body = response.body as Record<string, unknown>;
 
       expect(response.status).toBe(200);
       expect(body).toMatchObject({
@@ -4809,8 +4807,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
         harness.operation.stopRequested = true;
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
@@ -4835,8 +4833,11 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
         harness.operation.stopRequested = true;
     });
 
-    const response = await post({ repo: "octo/app", profileName: "default" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({
+      repo: "octo/app",
+      profileName: "default"
+    });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       cancelled: true,
@@ -4855,8 +4856,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
         harness.operation.stopRequested = true;
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       cancelled: true,
@@ -4903,8 +4904,11 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
           harness.operation.stopRequested = true;
       });
 
-      const response = await post({ repo: "octo/app", profileName: "default" });
-      const body = (await response.json()) as Record<string, unknown>;
+      const response = await configure({
+        repo: "octo/app",
+        profileName: "default"
+      });
+      const body = response.body as Record<string, unknown>;
 
       expect(body).toMatchObject({
         cancelled: true,
@@ -4926,8 +4930,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
         harness.operation.stopRequested = true;
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       cancelled: true,
@@ -4978,8 +4982,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
         harness.operation.stopRequested = true;
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       cancelled: true,
@@ -5016,8 +5020,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
           harness.operation.stopRequested = true;
       });
 
-      const response = await post({ repo: "octo/app" });
-      const body = (await response.json()) as Record<string, unknown>;
+      const response = await configure({ repo: "octo/app" });
+      const body = response.body as Record<string, unknown>;
 
       expect(body).toMatchObject({
         cancelled: true,
@@ -5044,8 +5048,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
         harness.operation.stopRequested = true;
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       cancelled: true,
@@ -5065,8 +5069,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       }
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
@@ -5093,8 +5097,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       }
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       code: "operation-stopped",
@@ -5114,8 +5118,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       }
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       code: "operation-stopped",
@@ -5132,8 +5136,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       }
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       code: "operation-stopped",
@@ -5174,8 +5178,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       }
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       code: "operation-stopped",
@@ -5202,8 +5206,8 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       }
     });
 
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
+    const response = await configure({ repo: "octo/app" });
+    const body = response.body as Record<string, unknown>;
 
     expect(body).toMatchObject({
       code: "operation-stopped",
