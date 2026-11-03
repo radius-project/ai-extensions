@@ -16,6 +16,10 @@ export interface AwsTrustRepairState {
 }
 
 export interface AwsTrustRepairDependencies {
+  // The AWS developer switch. Repair changes an IAM role through the
+  // developer's AWS CLI, so it is refused when AWS is off, like every other
+  // AWS route.
+  awsEnabled: boolean;
   readInstanceState(instanceId: string): AwsTrustRepairState | undefined;
   // The failure kind for a deploy that failed at cloud sign-in.
   cloudAuthDriftKind: string;
@@ -48,6 +52,16 @@ export function createAwsTrustRepairService(
 } {
   return {
     async repair({ instanceId, generation }) {
+      if (!dependencies.awsEnabled) {
+        return {
+          status: 400,
+          body: {
+            code: "provider-unsupported",
+            error:
+              "AWS environments aren't supported yet, so Radius repaired nothing."
+          }
+        };
+      }
       const state = dependencies.readInstanceState(instanceId);
       const repo = state?.deployAttempt?.targetRepo || state?.deployingRepo;
       const environment =

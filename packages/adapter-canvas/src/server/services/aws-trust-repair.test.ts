@@ -33,6 +33,7 @@ function service(
   const reads: unknown[] = [];
   const repairs: unknown[] = [];
   const repair = createAwsTrustRepairService({
+    awsEnabled: true,
     readInstanceState: (instanceId) => {
       expect(instanceId).toBe("panel-a");
       return state;
@@ -59,6 +60,25 @@ function service(
 }
 
 describe("AWS trust repair service", () => {
+  it("refuses while the AWS developer switch is off, without reading anything", async () => {
+    const test = service(failedSignIn, {
+      awsEnabled: false,
+      readInstanceState: () => {
+        throw new Error("Unexpected state read");
+      }
+    });
+    expect(await test.run()).toEqual({
+      status: 400,
+      body: {
+        code: "provider-unsupported",
+        error:
+          "AWS environments aren't supported yet, so Radius repaired nothing."
+      }
+    });
+    expect(test.reads).toEqual([]);
+    expect(test.repairs).toEqual([]);
+  });
+
   it.each([
     ["an earlier deploy", 3],
     ["no deploy", -1]

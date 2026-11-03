@@ -6013,6 +6013,7 @@ export function createProductionCanvasServerRuntime(
       }),
     readProcessEnv: () => process.env,
     awsTrustRepair: createAwsTrustRepairService({
+      awsEnabled,
       readInstanceState: (instanceId) =>
         canvasServer.instances.get(instanceId)?.state,
       cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,

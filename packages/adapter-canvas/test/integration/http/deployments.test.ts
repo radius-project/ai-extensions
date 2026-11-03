@@ -133,7 +133,8 @@ function start(
       DeploymentsDependencies,
       "triggerDeployRepairHandoff" | "triggerDeployFailureNotice"
     >
-  > = {}
+  > = {},
+  { awsEnabled = true }: { awsEnabled?: boolean } = {}
 ): Harness {
   const state: CanvasState = {};
   const cache = new Map<string, DeployListCacheEntry>();
@@ -184,6 +185,7 @@ function start(
     added: []
   };
   const awsTrustRepair = createAwsTrustRepairService({
+    awsEnabled,
     readInstanceState: () => readInstanceState(),
     cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
     readEnvironmentTarget: async () => environmentTarget,
@@ -2236,6 +2238,34 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
       code: "repair-not-applicable"
+    });
+    expect(harness.trustRepairs).toEqual([]);
+  });
+
+  it("refuses Repair while the AWS developer switch is off, changing nothing", async () => {
+    const harness = start({}, { awsEnabled: false });
+    failedSignIn(harness.state);
+    harness.setEnvironmentTarget({
+      provider: "aws",
+      clientId: "",
+      tenantId: "",
+      repoId: 0,
+      roleArn: ROLE_ARN,
+      trustSubjects: []
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy/repair-aws-trust",
+      JSON.stringify({ generation: 3 })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      code: "provider-unsupported",
+      error:
+        "AWS environments aren't supported yet, so Radius repaired nothing."
     });
     expect(harness.trustRepairs).toEqual([]);
   });
