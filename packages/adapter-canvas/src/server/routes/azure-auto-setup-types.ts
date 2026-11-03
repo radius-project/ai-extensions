@@ -1,4 +1,3 @@
-import type { IncomingMessage } from "node:http";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type {
   CallerIdentity,
@@ -189,7 +188,6 @@ export interface AzureAutoSetupTempFilePort {
 }
 
 export interface AzureAutoSetupDependencies {
-  isServerOwnedRequest(instanceId: string, request: IncomingMessage): boolean;
   operations: AzureAutoSetupOperationPort;
   external: AzureAutoSetupExternalPort;
   tempFile: AzureAutoSetupTempFilePort;
