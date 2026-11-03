@@ -61,6 +61,7 @@ export interface ArtifactSmokeResult {
   closeCount: number;
   stderr: string;
   renderedPage: string;
+  exitCode: number;
 }
 
 function waitForExit(child: ChildProcess): Promise<number | null> {
@@ -73,7 +74,8 @@ function waitForExit(child: ChildProcess): Promise<number | null> {
 export async function runArtifactSmoke(
   artifactPath: string,
   timeoutMs = 20_000,
-  artifactRoot = dirname(artifactPath)
+  artifactRoot = dirname(artifactPath),
+  shutdownBehavior: "clean" | "hung-session" | "failed-session" = "clean"
 ): Promise<ArtifactSmokeResult> {
   const root = mkdtempSync(join(tmpdir(), "radius-artifact-smoke-"));
   const fakeRad = join(root, process.platform === "win32" ? "rad.exe" : "rad");
@@ -109,7 +111,8 @@ export async function runArtifactSmoke(
         RADIUS_ARTIFACT_WORKSPACE: root,
         RADIUS_RAD_BINARY: fakeRad,
         RADIUS_RAD_SKIP_VERSION_CHECK: "1",
-        RADIUS_CANVAS_DEV: "0"
+        RADIUS_CANVAS_DEV: "0",
+        RADIUS_ARTIFACT_SHUTDOWN: shutdownBehavior
       },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
       windowsHide: true
@@ -186,23 +189,25 @@ export async function runArtifactSmoke(
     ) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 20));
     }
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
     const exitCode = await Promise.race([
       exitPromise,
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () =>
-            reject(new Error("Artifact did not shut down within 5 seconds")),
-          Math.max(0, exitDeadline - Date.now())
-        )
+      new Promise<never>(
+        (_, reject) =>
+          (exitTimer = setTimeout(
+            () =>
+              reject(new Error("Artifact did not shut down within 5 seconds")),
+            Math.max(0, exitDeadline - Date.now())
+          ))
       )
-    ]);
+    ]).finally(() => clearTimeout(exitTimer));
     if (failure) throw failure;
-    if (exitCode !== 0) {
+    if (exitCode !== (shutdownBehavior === "clean" ? 0 : 1)) {
       throw new Error(
         `Artifact subprocess exited with ${exitCode}. stderr: ${stderr.slice(-2000)}`
       );
     }
-    return { registration, closeCount, stderr, renderedPage };
+    return { registration, closeCount, stderr, renderedPage, exitCode };
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGKILL");

@@ -61,12 +61,15 @@ function boundPort(server: HttpServer): number {
 
 function closeServer(server: HttpServer, force: boolean): Promise<void> {
   if (force) server.closeAllConnections?.();
-  return new Promise((resolve) => {
-    try {
-      server.close(() => resolve());
-    } catch {
-      resolve();
-    }
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (
+        error &&
+        !("code" in error && error.code === "ERR_SERVER_NOT_RUNNING")
+      )
+        reject(error);
+      else resolve();
+    });
   });
 }
 
@@ -106,7 +109,15 @@ export function createCanvasServer(
       try {
         await listenOn(server, 0);
       } catch (error) {
-        await closeServer(server, true);
+        try {
+          await closeServer(server, true);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Canvas server startup and cleanup failed.",
+            { cause: cleanupError }
+          );
+        }
         throw error;
       }
     }
@@ -199,8 +210,11 @@ export function createCanvasServer(
       if (!entry) return;
       entry.observation?.stop();
       instances.delete(instanceId);
-      await closeServer(entry.server, force);
-      dependencies.onStopped?.(instanceId);
+      try {
+        await closeServer(entry.server, force);
+      } finally {
+        dependencies.onStopped?.(instanceId);
+      }
     })();
     stopping.set(instanceId, work);
     void work.then(

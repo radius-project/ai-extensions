@@ -84,6 +84,7 @@ describe("Azure auto-setup dependency composition", () => {
     const sleep = vi.fn(async () => {});
 
     const composed = composeAzureAutoSetupDependencies({
+      isStopped: () => false,
       lifecycle,
       progress,
       artifacts,

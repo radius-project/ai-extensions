@@ -115,7 +115,13 @@ export async function joinSession(declaration) {
     log: () => undefined,
     rpc: { canvas: { open: async () => ({}) } },
     metadata: { snapshot: async () => ({}) },
-    close: () => send({ type: "shutdown", closeCount: 1 })
+    close: async () => {
+      await send({ type: "shutdown", closeCount: 1 });
+      if (process.env.RADIUS_ARTIFACT_SHUTDOWN === "hung-session")
+        await new Promise(() => {});
+      if (process.env.RADIUS_ARTIFACT_SHUTDOWN === "failed-session")
+        throw new Error("Controlled session teardown failure");
+    }
   };
 }
 

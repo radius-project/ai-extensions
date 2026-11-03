@@ -80,7 +80,8 @@ function harness(
   aws: Record<string, AwsCommandResult>,
   github: Record<string, GitHubJsonResponse> = defaultSubject,
   // The customer pauses while this AWS command, or the last GitHub read, runs.
-  pauseDuring?: string
+  pauseDuring?: string,
+  persistError?: Error
 ) {
   let stopRequested = false;
   const awsCalls: string[][] = [];
@@ -110,6 +111,7 @@ function harness(
     isStopRequested: () => stopRequested,
     async sleep(milliseconds) {
       events.push(["sleep", milliseconds]);
+      if (pauseDuring === "sleep") stopRequested = true;
     },
     operations: {
       enterStage: (operation, stage) => {
@@ -125,6 +127,7 @@ function harness(
     store: {
       persist: async () => {
         events.push(["persist"]);
+        if (persistError) throw persistError;
       }
     },
     stageAuthorizeIdentity: STAGE,
@@ -147,6 +150,58 @@ const input = {
 };
 
 describe("AWS environment access setup", () => {
+  it("preserves partial progress when paused during the EKS retry delay", async () => {
+    const h = harness(
+      {
+        ...happyPath,
+        "eks create-access-entry": fail("InvalidParameterException")
+      },
+      defaultSubject,
+      "sleep"
+    );
+
+    await expect(h.access.setup(operation, input, EXECUTOR)).resolves.toEqual({
+      ok: false,
+      stopped: true
+    });
+
+    expect(h.events).toContainEqual(["sleep", 2000]);
+    expect(
+      h.awsCalls.filter(
+        (args) => args.slice(0, 2).join(" ") === "eks create-access-entry"
+      )
+    ).toHaveLength(1);
+    expect(h.find("eks associate-access-policy")).toBeUndefined();
+    expect(h.events).toContainEqual([
+      "step",
+      operation.id,
+      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, policy radius-deploy-dev on ${ROLE}.`,
+      STAGE
+    ]);
+    expect(h.events.at(-1)).toEqual(["persist"]);
+  });
+
+  it.each([
+    "github",
+    "iam create-role",
+    "eks associate-access-policy",
+    undefined
+  ])(
+    "propagates persistence failure rather than claiming a saved pause or success (%s)",
+    async (pauseDuring) => {
+      const error = new Error("AWS progress storage unavailable");
+      const h = harness(happyPath, defaultSubject, pauseDuring, error);
+
+      await expect(h.access.setup(operation, input, EXECUTOR)).rejects.toBe(
+        error
+      );
+      expect(h.events.at(-1)).toEqual(["persist"]);
+      if (pauseDuring === "github") expect(h.awsCalls).toEqual([]);
+      if (pauseDuring === "iam create-role")
+        expect(h.find("iam put-role-policy")).toBeUndefined();
+    }
+  );
+
   it.each([
     [false, [DEV, DEV_ID]],
     [true, [DEV_ID]]

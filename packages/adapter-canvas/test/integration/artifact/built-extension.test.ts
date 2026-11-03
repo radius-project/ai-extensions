@@ -318,9 +318,25 @@ describe("P0-C built Radius extension artifact", () => {
     smoke = await runArtifactSmoke(ARTIFACT, 20_000, DIST);
   }, 30_000);
 
+  it.each(["hung-session", "failed-session"] as const)(
+    "exits nonzero on incomplete %s teardown despite repeated signals",
+    async (behavior) => {
+      const failed = await runArtifactSmoke(ARTIFACT, 20_000, DIST, behavior);
+      expect(failed.exitCode).toBe(1);
+      expect(failed.closeCount).toBe(1);
+      expect(failed.stderr).toContain(
+        behavior === "hung-session" ?
+          "Radius session teardown incomplete after 2000ms"
+        : "session teardown error: Controlled session teardown failure"
+      );
+      expect(failed.stderr).not.toMatch(/unhandledRejection|uncaughtException/);
+    }
+  );
+
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
     expect(smoke.registration).toEqual(EXPECTED_REGISTRATION);
     expect(smoke.closeCount).toBe(1);
+    expect(smoke.exitCode).toBe(0);
     // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
     // and reports them only on stderr. The harness already requires exit code 0;
     // here we require graceful shutdown and reject crash-shaped diagnostics

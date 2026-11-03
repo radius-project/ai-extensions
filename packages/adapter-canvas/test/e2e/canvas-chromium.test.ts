@@ -3361,12 +3361,13 @@ test.describe("Radius Canvas in Chromium", () => {
     });
 
     const accounts = canvas.accountContext;
+    let releaseExecutor: (() => void) | undefined;
     try {
       const lease = await accounts.coordinator.withSelectedAccount(
         "repo-user",
         { ownerKey: accounts.ownerKey, operationId },
         async (executor) => {
-          accounts.registerExecutor(operationId, executor);
+          releaseExecutor = accounts.registerExecutor(operationId, executor);
         }
       );
       expect(lease.restoration).toMatchObject({
@@ -3409,7 +3410,7 @@ test.describe("Radius Canvas in Chromium", () => {
         ).toEqual([expect.objectContaining({ matched: true, exitCode: 0 })]);
       }
     } finally {
-      accounts.unregisterExecutor(operationId);
+      releaseExecutor?.();
     }
   });
 
@@ -4193,7 +4194,11 @@ test.describe("Radius Canvas in Chromium", () => {
             stderr: "Request_ResourceNotFound: directory not ready"
           };
         },
-        { operation, persist: () => ops.operations.persist() },
+        {
+          isStopped: () => false,
+          operation,
+          persist: () => ops.operations.persist()
+        },
         async () => true,
         async () => {}
       );
@@ -6408,7 +6413,7 @@ test.describe("Radius Canvas in Chromium", () => {
     const accounts = canvas.accountContext;
     const executor =
       await accounts.coordinator.createReadOnlyExecutor("repo-user");
-    accounts.registerExecutor(operationId, executor);
+    const releaseExecutor = accounts.registerExecutor(operationId, executor);
     let operationReads = 0;
     await page.route(/\/api\/operations\?repo=/, async (route) => {
       operationReads++;
@@ -6461,7 +6466,7 @@ test.describe("Radius Canvas in Chromium", () => {
       ).toBeHidden();
       await expectNoWcagViolations(page);
     } finally {
-      accounts.unregisterExecutor(operationId);
+      releaseExecutor();
     }
   });
 

@@ -1,4 +1,5 @@
 import {
+  assertSetupExecutionActive,
   runSetupCoordinator,
   type SetupCoordinatorPorts
 } from "@radius-project/core";
@@ -53,6 +54,7 @@ export interface EnvironmentOperationRequest {
 }
 
 export interface EnvironmentOperationWorkflowDependencies {
+  isStopped(): boolean;
   preflightRepoAdmin(
     repo: string,
     executor: SelectedGhExecutor
@@ -121,7 +123,7 @@ export interface EnvironmentOperationWorkflowDependencies {
     | { ok: false; status: number; error: string; code: string }
     | { ok: false; stopped: true }
   >;
-  instanceId: string;
+  instanceId?: string;
   now(): number;
 }
 
@@ -140,6 +142,7 @@ async function failResolution(
   dependencies: EnvironmentOperationWorkflowDependencies,
   error: unknown
 ): Promise<{ shouldMonitor: false }> {
+  assertSetupExecutionActive(dependencies.isStopped);
   const unresolvedMutation = unresolvedProviderMutations(operation)[0];
   if (unresolvedMutation) {
     return recordProviderReconciliationFailure(
@@ -266,6 +269,7 @@ export function createSetupCoordinatorPorts(
         runGh: (args) => executor.run(args),
         now: dependencies.now,
         mutationRecovery: {
+          isStopped: dependencies.isStopped,
           operation,
           persist: dependencies.persistProviderMutation
         },
@@ -315,6 +319,7 @@ export function createSetupCoordinatorPorts(
       );
     },
     reconcileFailure: (mutationId, error) => {
+      assertSetupExecutionActive(dependencies.isStopped);
       const live = unresolvedProviderMutations(operation).find(
         (mutation) => mutation.mutationId === mutationId
       );
