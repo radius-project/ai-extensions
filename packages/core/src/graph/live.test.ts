@@ -22,6 +22,47 @@ const db = {
 };
 
 describe("live UCP graph normalization", () => {
+  it.each([
+    "Radius.Core/applications",
+    "Applications.Core/applications",
+    "applications.core/APPLICATIONS"
+  ])("preserves the original %s application identity and context", (type) => {
+    const selected = { ...context, applicationId: id(type, "application") };
+    const original = structuredClone(selected);
+    const graph = normalizeLiveGraph({ resources: [web] }, selected);
+    expect(graph.context).toEqual(original);
+    expect(JSON.parse(graphContextKey(selected))).toEqual([
+      selected.connectionId,
+      selected.plane.type,
+      selected.plane.name,
+      selected.applicationId
+    ]);
+    expect(selected).toEqual(original);
+    expect(graph.resources[0]).not.toHaveProperty("diffHash");
+  });
+  it.each(["Radius.Core", "Applications.Core"])(
+    "rejects invalid %s application types, namespaces, planes and nesting",
+    (namespace) => {
+      for (const applicationId of [
+        id(`${namespace}/environments`, "application"),
+        id(`${namespace}.Other/applications`, "application"),
+        id(`Other.${namespace}/applications`, "application"),
+        id(`${namespace}/applications`, "application") + "/children/nested",
+        id(`${namespace}/applications`, "application").replace(
+          "/radius/local/",
+          "/radius/other/"
+        ),
+        id(`${namespace}/applications`, "application").replace(
+          "/radius/local/",
+          "/other/local/"
+        )
+      ]) {
+        expect(() =>
+          normalizeLiveGraph({ resources: [] }, { ...context, applicationId })
+        ).toThrow(TypeError);
+      }
+    }
+  );
   it("accepts no hashes, keeps full identity and raw status, and does not apply Canvas filtering", () => {
     const image = {
       id: id("Radius.Compute/containerImages", "image"),
