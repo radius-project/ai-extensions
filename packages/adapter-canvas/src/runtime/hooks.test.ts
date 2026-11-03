@@ -30,22 +30,34 @@ describe("failure report handoff guidance", () => {
   it.each([
     {
       name: "model authoring",
-      message: appBicepHandoffMessage("acme/widgets")
+      message: () => appBicepHandoffMessage("acme/widgets")
+    },
+    {
+      name: "model refresh",
+      message: () => appModelRefreshMessage(modelStatus("acme/widgets", "main"))
+    },
+    {
+      name: "unverified model refresh",
+      message: () =>
+        appModelUnverifiedMessage(
+          modelStatus("acme/widgets", "main", { status: "manually-edited" })
+        )
     },
     {
       name: "deploy repair",
-      message: deployRepairHandoffMessage("acme/widgets", "main")
+      message: () => deployRepairHandoffMessage("acme/widgets", "main")
     },
     {
       name: "unconfirmed deploy",
-      message: deployFailureNoticeMessage("acme/widgets", "main")
+      message: () => deployFailureNoticeMessage("acme/widgets", "main")
     }
   ])(
     "carries the report flow only in the agent-facing $name prompt",
     ({ message }) => {
-      expect(message.prompt).toContain(RADIUS_FAILURE_REPORT_CONTEXT);
-      expect(message.displayPrompt).not.toContain("radius-report-issue");
-      expect(message.displayPrompt).not.toContain("submitting");
+      const rendered = message();
+      expect(rendered.prompt).toContain(RADIUS_FAILURE_REPORT_CONTEXT);
+      expect(rendered.displayPrompt).not.toContain("radius-report-issue");
+      expect(rendered.displayPrompt).not.toContain("submitting");
     }
   );
 });
@@ -742,16 +754,26 @@ describe("deployFailureNoticePrompt", () => {
     expect(out).not.toMatch(/repair and redeploy/i);
   });
 
-  it("points the user at the run when one is known", () => {
+  it("points the user at the run when one is known without claiming the remote deploy failed", () => {
     const out = deployFailureNoticePrompt("octo/app", "main", failure);
+    expect(out).toContain("remote deployment outcome is unknown");
+    expect(out).toContain(
+      "Do not claim that the remote deployment itself failed."
+    );
+    expect(out).toContain("leave the remote deployment outcome unknown");
     expect(out).toContain("check the Actions tab for its real outcome");
+    expect(out).not.toContain("Tell the user the deploy failed");
   });
 
-  it("guides a dispatch failure with no run toward the Actions tab", () => {
+  it("guides an unconfirmed dispatch with no run toward the Actions tab while keeping the remote outcome unknown", () => {
     const out = deployFailureNoticePrompt("octo/app", "main", {
       error: "failed to dispatch"
     });
-    expect(out).toContain("failed to start");
+    expect(out).toContain(
+      "deploy dispatch or run lookup could not confirm a workflow run"
+    );
+    expect(out).toContain("leave the remote deployment outcome unknown");
+    expect(out).not.toContain("Tell the user the deploy failed");
     expect(out).not.toContain("Workflow run");
   });
 
