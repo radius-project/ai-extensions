@@ -263,6 +263,10 @@ export async function runSetupCoordinator(
   // environment has written the GitHub environment. Until then a delete that
   // checks which environments use a cluster could not see this one, and could
   // remove the cluster access this setup just granted.
+  //
+  // A resume with `outstanding` work skips the deploy identity step, so it
+  // takes no lock and runs the rest of setup without one. That resume path
+  // belongs to #1096.
   const awsLocked = target.provider === "aws" && !outstanding;
   try {
     if (awsLocked) {
