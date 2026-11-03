@@ -45,6 +45,8 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
   operationId(operation: Operation): string;
   operations: {
     enterStage(operation: Operation, stage: string): void;
+    // Put a started stage back to not started after a pause.
+    reopenStage(operation: Operation, stage: string): void;
     addLegacyStep(operation: Operation, text: string, stage: string): void;
     setContext(operation: Operation, patch: Record<string, unknown>): void;
     // Record activity without a step, so a long wait is not taken as stale.
@@ -239,6 +241,16 @@ export function createAwsEnvironmentAccess<Operation>(
       : "⏸️ Paused before any AWS change. Nothing was created in AWS.";
   }
 
+  // The deploy identity is not ready, so the stage is not done: the pause
+  // shows it not started, and Continue runs it again.
+  function pausedBeforeReady(
+    operation: Operation,
+    created: readonly string[]
+  ): Promise<AwsEnvironmentSetupResult> {
+    operations.reopenStage(operation, stage);
+    return paused(operation, pausedLine(created));
+  }
+
   return {
     async setup(operation, input, executor) {
       operations.enterStage(operation, stage);
@@ -248,7 +260,7 @@ export function createAwsEnvironmentAccess<Operation>(
       try {
         subjects = await resolveSubjects(repo, environment, executor);
         if (dependencies.isStopRequested(operation)) {
-          return paused(operation, pausedLine([]));
+          return pausedBeforeReady(operation, []);
         }
       } catch (error) {
         return {
@@ -366,7 +378,7 @@ export function createAwsEnvironmentAccess<Operation>(
             `⏸️ Paused after AWS setup finished. ${result.roleArn} is ready for this environment.`
           );
         }
-        return paused(operation, pausedLine(result.created));
+        return pausedBeforeReady(operation, result.created);
       }
       await dependencies.store.persist();
       if (!result.ok) {

@@ -1483,6 +1483,8 @@ export function enterStage(op: any, stageId: any): any {
   if (!op) return op;
   let seen = false;
   for (const stage of op.stages) {
+    // Work is running again, so no stage waits to be reopened any more.
+    delete stage.reopened;
     if (stage.id === stageId) {
       stage.state = "running";
       seen = true;
@@ -1504,6 +1506,21 @@ export function setStageState(op: any, stageId: any, state: any): any {
   if (!op) return op;
   const stage = op.stages.find((s) => s.id === stageId);
   if (stage) stage.state = state;
+  return op;
+}
+
+/**
+ * Put a started stage back to not started, because a pause arrived before its
+ * work was done and Continue runs it again. A pause then shows it pending,
+ * where a stage that never started shows skipped.
+ */
+export function reopenStage(op: any, stageId: any): any {
+  if (!op) return op;
+  const stage = op.stages.find((s) => s.id === stageId);
+  if (stage) {
+    stage.state = "pending";
+    stage.reopened = true;
+  }
   return op;
 }
 
@@ -3205,6 +3222,7 @@ export const SETUP_RESUME_STEPS = Object.freeze([
   "service_principal",
   "federated_credentials",
   "role_assignments",
+  "aws_deploy_identity",
   "github_environment",
   "workflow_commit",
   "verification"
@@ -3212,6 +3230,17 @@ export const SETUP_RESUME_STEPS = Object.freeze([
 
 /** The first step the ledger does not already prove finished. */
 export function nextIncompleteSetupStep(op: any): string {
+  // An AWS continuation always runs Authorize deploy identity again: it takes
+  // the deploy identity lock and holds it through Configure environment (see
+  // runSetupCoordinator). Only the restart decision that monitors the saved
+  // verification run skips it.
+  if (
+    op?.provider === "aws" &&
+    op.stages?.some((stage: any) => stage?.id === STAGE_AUTHORIZE_IDENTITY) &&
+    !(isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY)
+  ) {
+    return "aws_deploy_identity";
+  }
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return "azure_app";
   // A rolled-back artifact is incomplete again: cleanup proved it is gone, so
@@ -3236,7 +3265,8 @@ const SETUP_IDENTITY_RESUME_STEPS = Object.freeze([
   "azure_app",
   "service_principal",
   "federated_credentials",
-  "role_assignments"
+  "role_assignments",
+  "aws_deploy_identity"
 ]);
 
 export type SetupContinuationPlan = {
@@ -4179,6 +4209,7 @@ const SETUP_STEP_LABELS: Record<string, string> = {
   service_principal: "Create the Service Principal",
   federated_credentials: "Add the federated credentials",
   role_assignments: "Grant the Azure role assignments",
+  aws_deploy_identity: "Authorize the deploy identity",
   github_environment: "Configure the GitHub environment",
   workflow_commit: "Commit the deploy workflows",
   verification: "Verify the credentials"
@@ -4984,6 +5015,8 @@ export function finish(
   if (failure) op.failure = failure;
   for (const stage of op.stages) {
     if (stage.state === "pending") {
+      // Reopened by a pause before the stage's work was done: Continue runs it.
+      if (state === "cancelled" && stage.reopened === true) continue;
       // Never entered, so genuinely skipped whatever the outcome.
       stage.state = "skipped";
     } else if (stage.state === "running") {

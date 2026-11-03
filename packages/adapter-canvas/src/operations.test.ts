@@ -3,6 +3,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
+  applySetupResumePoint,
+  reopenStage,
+  setupStepLabel,
   onOperationTerminal,
   isStale,
   VERIFY_STALE_AFTER_MS,
@@ -4802,6 +4805,64 @@ describe("durable stop", () => {
     expect(op.state).toBe("cancelled");
   });
 
+  it("shows a reopened stage not started after a pause, and Continue clears the mark", () => {
+    const op = newOp({ provider: "aws" });
+    enterStage(op, STAGE_AUTHORIZE_IDENTITY);
+    reopenStage(op, STAGE_AUTHORIZE_IDENTITY);
+    requestStop(op);
+    stopAtBoundary(op, "after-aws-deploy-identity");
+    expect(op.stages.map((stage) => [stage.id, stage.state])).toEqual([
+      [STAGE_AUTHORIZE_IDENTITY, "pending"],
+      [STAGE_CONFIGURE_ENVIRONMENT, "skipped"],
+      [STAGE_VERIFY, "skipped"]
+    ]);
+
+    beginRetryAttempt(op, "setup");
+    applySetupResumePoint(op, "aws_deploy_identity");
+    expect(op.stages[0]).toEqual({
+      id: STAGE_AUTHORIZE_IDENTITY,
+      label: "Authorize deploy identity",
+      state: "running"
+    });
+  });
+
+  it("skips a reopened stage when the operation ends any way other than a pause", () => {
+    const op = newOp({ provider: "aws" });
+    enterStage(op, STAGE_AUTHORIZE_IDENTITY);
+    reopenStage(op, STAGE_AUTHORIZE_IDENTITY);
+    finish(op, "failed", { failure: { code: "x", message: "x" } });
+    expect(op.stages[0].state).toBe("skipped");
+  });
+
+  it("ignores a reopen without an operation or for a stage it does not have", () => {
+    expect(reopenStage(null, STAGE_AUTHORIZE_IDENTITY)).toBeNull();
+    const op = newOp({ stages: buildStages({ includeIdentity: false }) });
+    reopenStage(op, STAGE_AUTHORIZE_IDENTITY);
+    expect(op.stages.map((stage) => stage.state)).toEqual([
+      "pending",
+      "pending"
+    ]);
+  });
+
+  // Azure output is unchanged on purpose: only the AWS pause path reopens.
+  it.each([
+    ["before any stage started", null, "skipped"],
+    ["during Authorize deploy identity", STAGE_AUTHORIZE_IDENTITY, "succeeded"]
+  ])(
+    "keeps an Azure pause %s showing what it showed before",
+    (_label, entered, verdict) => {
+      const op = newOp();
+      if (entered) enterStage(op, entered);
+      requestStop(op);
+      stopAtBoundary(op, "after-app-registration");
+      expect(op.stages.map((stage) => stage.state)).toEqual([
+        verdict,
+        "skipped",
+        "skipped"
+      ]);
+    }
+  );
+
   it("loses the race to a continuation that was saved first", () => {
     const op = newOp();
     requireInput(op, { code: "app-selection-required", message: "Pick one." });
@@ -5255,7 +5316,84 @@ describe("retry eligibility", () => {
       repo: "contoso/store",
       environment: "dev"
     });
-    expect(nextIncompleteSetupStep(aws)).toBe("github_environment");
+    expect(nextIncompleteSetupStep(aws)).toBe("aws_deploy_identity");
+  });
+
+  describe("an AWS continuation", () => {
+    const awsOp = () =>
+      createOperation({
+        provider: "aws",
+        repo: "contoso/store",
+        environment: "dev",
+        stages: buildStages({ includeIdentity: true })
+      });
+
+    it("resumes from Authorize deploy identity wherever setup stopped, because it takes the lock again", () => {
+      const op = awsOp();
+      expect(nextIncompleteSetupStep(op)).toBe("aws_deploy_identity");
+      recordGitHubEnvironment(op, { state: "created", repo: "r", name: "dev" });
+      expect(nextIncompleteSetupStep(op)).toBe("aws_deploy_identity");
+      recordCommittedWorkflowFile(op, {
+        path: ".github/workflows/verify.yml",
+        mode: "default_branch",
+        branch: "main"
+      });
+      expect(nextIncompleteSetupStep(op)).toBe("aws_deploy_identity");
+      expect(setupStepLabel("aws_deploy_identity")).toBe(
+        "Authorize the deploy identity"
+      );
+    });
+
+    it("keeps the ledger walk when there is no identity stage to rerun", () => {
+      const op = createOperation({
+        provider: "aws",
+        repo: "contoso/store",
+        environment: "dev",
+        stages: buildStages({ includeIdentity: false })
+      });
+      expect(nextIncompleteSetupStep(op)).toBe("github_environment");
+    });
+
+    it("keeps monitoring the saved run after a restart at Verify credentials", () => {
+      const op = addSafeResumeRequest(awsOp());
+      recordGitHubEnvironment(op, { state: "created", repo: "r", name: "dev" });
+      recordCommittedWorkflowFile(op, {
+        path: ".github/workflows/verify.yml",
+        mode: "default_branch",
+        branch: "main"
+      });
+      enterStage(op, STAGE_VERIFY);
+      pauseForProviderRestart(op);
+      expect(nextIncompleteSetupStep(op)).toBe("verification");
+
+      // Any other stop at Verify credentials still reruns the identity.
+      const stopped = addSafeResumeRequest(awsOp());
+      enterStage(stopped, STAGE_VERIFY);
+      requestStop(stopped);
+      stopAtBoundary(stopped, "verification-observation");
+      expect(nextIncompleteSetupStep(stopped)).toBe("aws_deploy_identity");
+    });
+
+    it("positions Continue on Authorize deploy identity with every later stage pending", () => {
+      const op = awsOp();
+      recordGitHubEnvironment(op, { state: "created", repo: "r", name: "dev" });
+      enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
+      requestStop(op);
+      stopAtBoundary(op, "after-github-environment");
+
+      expect(applySetupResumePoint(op, nextIncompleteSetupStep(op))).toEqual({
+        resumeFrom: "aws_deploy_identity",
+        stage: STAGE_AUTHORIZE_IDENTITY,
+        runIdentity: true,
+        runEnvironment: true
+      });
+      expect(op.stages.map((stage) => [stage.id, stage.state])).toEqual([
+        [STAGE_AUTHORIZE_IDENTITY, "running"],
+        [STAGE_CONFIGURE_ENVIRONMENT, "pending"],
+        [STAGE_VERIFY, "pending"]
+      ]);
+      expect(op.currentStage).toBe(STAGE_AUTHORIZE_IDENTITY);
+    });
   });
 
   it("retries only unresolved resources Radius proved it created", () => {

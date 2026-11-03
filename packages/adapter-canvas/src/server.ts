@@ -171,6 +171,7 @@ import {
   OPERATION_KIND_DELETE,
   matchDeleteOperationEnvironment,
   enterStage,
+  reopenStage,
   setStageState,
   hasWarnings,
   addLegacyStep,
@@ -5633,6 +5634,7 @@ export function createProductionCanvasServerRuntime(
       operationId: (operation) => operation.operationId,
       operations: {
         enterStage,
+        reopenStage,
         addLegacyStep,
         setContext,
         touch: (operation) => {

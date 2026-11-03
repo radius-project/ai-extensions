@@ -167,6 +167,9 @@ function harness(
       enterStage: (operation, stage) => {
         events.push(["enterStage", operation.id, stage]);
       },
+      reopenStage: (operation, stage) => {
+        events.push(["reopenStage", operation.id, stage]);
+      },
       addLegacyStep: (operation, text, stage) => {
         events.push(["step", operation.id, text, stage]);
       },
@@ -451,7 +454,16 @@ describe("pausing AWS environment access setup", () => {
     expect(steps(h).at(-1)).toBe(
       "⏸️ Paused before any AWS change. Nothing was created in AWS."
     );
-    expect(h.events.at(-1)).toEqual(["persist"]);
+    expect(h.events.slice(-3)).toEqual([
+      ["reopenStage", "op-1", STAGE],
+      [
+        "step",
+        "op-1",
+        "⏸️ Paused before any AWS change. Nothing was created in AWS.",
+        STAGE
+      ],
+      ["persist"]
+    ]);
     expect(h.roleRecorded()).toBe(false);
   });
 
@@ -469,6 +481,7 @@ describe("pausing AWS environment access setup", () => {
     expect(steps(h).at(-1)).toBe(
       `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}.`
     );
+    expect(h.events).toContainEqual(["reopenStage", "op-1", STAGE]);
     expect(h.events.at(-1)).toEqual(["persist"]);
     expect(h.roleRecorded()).toBe(false);
   });
@@ -488,6 +501,8 @@ describe("pausing AWS environment access setup", () => {
     expect(steps(h).at(-1)).toBe(
       `⏸️ Paused after AWS setup finished. ${ROLE_ARN} is ready for this environment.`
     );
+    // The deploy identity is ready, so its stage stays done.
+    expect(h.events.map(([kind]) => kind)).not.toContain("reopenStage");
     expect(h.events.at(-1)).toEqual(["persist"]);
   });
 
@@ -981,6 +996,17 @@ describe("the deploy identity lock during setup", () => {
     expect(h.steps().at(-1)).toBe(
       "⏸️ Paused before any AWS change. Nothing was created in AWS."
     );
+    // The lock was never taken, so Authorize deploy identity has not started.
+    expect(h.events.slice(-3)).toEqual([
+      ["reopenStage", "op-1", STAGE],
+      [
+        "step",
+        "op-1",
+        "⏸️ Paused before any AWS change. Nothing was created in AWS.",
+        STAGE
+      ],
+      ["persist"]
+    ]);
   });
 
   it("stops before the next write when its lock is removed, naming what it created", async () => {
@@ -1336,6 +1362,7 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
         },
         operations: {
           enterStage: () => {},
+          reopenStage: () => {},
           addLegacyStep: () => {},
           setContext: () => {},
           touch: () => {}
