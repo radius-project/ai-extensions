@@ -25,6 +25,7 @@
 //      `failure.evidence`, fenced, and never in a label.
 
 import { createHash, randomUUID } from "node:crypto";
+import { formatAwsLockTime } from "@radius-project/core";
 import {
   disabledOperationStore,
   PERSISTED_OPERATIONS_VERSION,
@@ -4454,6 +4455,7 @@ export function removableAwsLockWait(op: any): {
   policyArn: string;
   policyId: string;
   holder: string;
+  holderOperationId: string;
   since: string;
 } | null {
   const wait = op?.context?.awsLockWait;
@@ -4473,6 +4475,8 @@ export function removableAwsLockWait(op: any): {
     policyArn: wait.policyArn,
     policyId: wait.policyId,
     since: typeof wait.since === "string" ? wait.since : "",
+    holderOperationId:
+      typeof wait.holderOperationId === "string" ? wait.holderOperationId : "",
     holder:
       typeof wait.holder === "string" && wait.holder ?
         wait.holder
@@ -4495,7 +4499,7 @@ function removeAwsLockAction(op: any, base: string): any | null {
     confirmTitle: "Remove the lock on the deploy identity?",
     confirmLabel: "Remove lock",
     cancelLabel: "Keep waiting",
-    description: `${wait.holder} has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
+    description: `${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""} has held the lock since ${formatAwsLockTime(wait.since)}. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
     method: "POST",
     // Names the lock shown, so a confirmation that outlives it is refused.
     path: `${base}/aws-lock/remove?policyId=${encodeURIComponent(wait.policyId)}`,

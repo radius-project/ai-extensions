@@ -8368,6 +8368,7 @@ describe("Remove lock for an AWS deploy identity lock", () => {
     policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
     policyId: "LOCK0",
     holder: "The setup of environment prod in octo/shop",
+    holderOperationId: "op-holder",
     since: "2026-10-30T11:00:00Z"
   };
   const setup = (wait: unknown) => {
@@ -8407,7 +8408,7 @@ describe("Remove lock for an AWS deploy identity lock", () => {
       confirmTitle: "Remove the lock on the deploy identity?",
       confirmLabel: "Remove lock",
       cancelLabel: "Keep waiting",
-      description: `${LOCK.holder} has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`
+      description: `${LOCK.holder} (operation op-holder) has held the lock since 2026-10-30 11:00 UTC. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`
     });
     expect(actions[0].path).toMatch(/\/aws-lock\/remove\?policyId=LOCK0$/);
   });
@@ -8454,7 +8455,17 @@ describe("Remove lock for an AWS deploy identity lock", () => {
       policyArn: LOCK.policyArn,
       policyId: LOCK.policyId,
       holder: "Another run",
+      holderOperationId: "",
       since: ""
     });
+    expect(
+      projectOperationActions(
+        setup({
+          policyArn: LOCK.policyArn,
+          policyId: LOCK.policyId,
+          removable: true
+        })
+      )[0].description
+    ).toMatch(/^Another run has held the lock since an unknown time\. /);
   });
 });

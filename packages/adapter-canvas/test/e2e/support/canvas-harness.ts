@@ -1757,6 +1757,7 @@ export class CanvasHarness {
       awsLockWait: {
         ...lock,
         holder: "The setup of environment prod in fixture/app",
+        holderOperationId: "op_chromium_aws_lock_holder",
         since: "2026-10-30T11:00:00Z",
         removable: true
       }

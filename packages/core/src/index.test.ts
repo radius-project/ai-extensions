@@ -155,6 +155,7 @@ const EXPECTED_FUNCTIONS = [
   "describeAwsLockHolder",
   "parseAwsLockHolder",
   "awsLockHolderLabel",
+  "formatAwsLockTime",
   "parseAwsVpcs",
   "parseAwsSubnets",
   "awsSubnetZones",

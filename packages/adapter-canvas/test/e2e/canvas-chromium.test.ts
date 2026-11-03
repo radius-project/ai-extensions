@@ -3999,7 +3999,7 @@ test.describe("Radius Canvas in Chromium", () => {
       const removeLock = page.getByRole("button", { name: "Remove lock" });
       await expect(removeLock).toBeVisible();
       await expect(removeLock).toHaveAccessibleDescription(
-        "The setup of environment prod in fixture/app has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy."
+        "The setup of environment prod in fixture/app (operation op_chromium_aws_lock_holder) has held the lock since 2026-10-30 11:00 UTC. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy."
       );
       await expect(
         page.getByRole("button", { name: "Pause setup" })
