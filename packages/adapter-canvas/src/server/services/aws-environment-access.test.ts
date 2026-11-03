@@ -87,6 +87,12 @@ function githubSubjects(
           { sub_claim_prefix: "repo:octo@7/shop@42" }
         : {})
       }
+    },
+    // GitHub's stored spelling, which Repair builds the subjects from.
+    "/repos/octo/shop/environments/dev": {
+      ok: true,
+      status: 200,
+      json: { name: "dev" }
     }
   };
 }
@@ -1439,6 +1445,7 @@ describe("repairing an environment's trust under the lock", () => {
     ).toMatchObject({ action: "repair", environment: "dev" });
     // The subjects come from GitHub, with the ambient account.
     expect(h.githubCalls).toEqual([
+      { path: "/repos/octo/shop/environments/dev", executor: undefined },
       { path: "/repos/octo/shop", executor: undefined },
       {
         path: "/repos/octo/shop/actions/oidc/customization/sub",
@@ -1513,5 +1520,80 @@ describe("repairing an environment's trust under the lock", () => {
         `AccessDenied This repair is done with IAM role ${ROLE}, but Radius could not release its lock: ServiceFailure\\.`
       )
     );
+  });
+
+  it("builds the subjects from GitHub's spelling of the environment", async () => {
+    const h = harness(missingId, {
+      ...defaultSubject,
+      "/repos/octo/shop/environments/DEV": {
+        ok: true,
+        status: 200,
+        json: { name: "dev" }
+      }
+    });
+
+    expect(
+      await h.access.repair({ ...repairInput, environment: "DEV" })
+    ).toMatchObject({ ok: true, added: [DEV_ID] });
+    const create = h.find("iam create-policy") ?? [];
+    expect(
+      JSON.parse(create[create.indexOf("--description") + 1] ?? "")
+    ).toMatchObject({ environment: "dev" });
+  });
+
+  it.each([
+    [
+      "cannot be read",
+      { ok: false, status: 404, stderr: "Not Found" },
+      "Not Found"
+    ],
+    [
+      "has no name",
+      { ok: true, status: 200, json: {} },
+      "GitHub reported no name"
+    ],
+    ["fails without a message", { ok: false, status: 502 }, "HTTP 502"],
+    ["fails with no status", { ok: false }, "HTTP unknown"]
+  ])(
+    "changes nothing when the environment %s",
+    async (_label, answer, reason) => {
+      const h = harness(missingId, {
+        ...defaultSubject,
+        "/repos/octo/shop/environments/dev": answer
+      });
+
+      expect(await h.access.repair(repairInput)).toEqual({
+        ok: false,
+        code: "github-environment-unreadable",
+        message: `Radius could not read GitHub environment "dev" (${reason}), so it changed nothing.`
+      });
+      expect(h.awsCalls).toEqual([]);
+    }
+  );
+
+  it("gives up quickly, without waiting, when IAM will not say who holds the lock", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": fail("EntityAlreadyExists"),
+      "iam get-policy": fail("NoSuchEntity: gone")
+    });
+
+    expect(await h.access.repair(repairInput)).toEqual({
+      ok: false,
+      code: "aws-lock-busy",
+      message: `Radius could not take the lock on IAM role ${ROLE} right away, so it changed nothing. Another run may hold it, or IAM is slow to answer. Try again in a moment.`
+    });
+    expect(h.events.filter(([kind]) => kind === "sleep")).toHaveLength(2);
+    expect(h.commands()).not.toContain("iam get-role");
+  });
+
+  it("still takes a lock released between IAM's create and read", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": [fail("EntityAlreadyExists"), lockPolicy("LOCK1")],
+      "iam get-policy": [fail("NoSuchEntity: gone"), lockPolicy("LOCK1")]
+    });
+
+    expect(await h.access.repair(repairInput)).toMatchObject({ ok: true });
   });
 });

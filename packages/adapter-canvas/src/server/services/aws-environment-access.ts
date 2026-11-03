@@ -170,6 +170,10 @@ function lockLostMessage(
     : `${loss.reason}, so Radius stopped. Before it stopped, this run made these AWS changes: ${changes.join(", ")}. Another run may have changed them since, so check the role before you retry.`;
 }
 
+// How many times a lock attempt that does not wait for another run may pause
+// and try again before it gives up.
+const LOCK_NOT_WAITING_SLEEPS = 2;
+
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -285,18 +289,33 @@ export function createAwsEnvironmentAccess<Operation>(
         sleep: dependencies.sleep,
         acquireLock: async ({ accountId, roleName }) => {
           let busy: AwsLockWait | null = null;
+          // Without a listener the caller answers inside one request, so it
+          // tries only a little longer: enough for a lock released between
+          // IAM's create and read, or one slow IAM answer.
+          let sleeps = 0;
+          const gaveUp = () =>
+            waiting === null && sleeps >= LOCK_NOT_WAITING_SLEEPS;
           const taken = await lock(
             { accountId, roleName, ...holder },
-            () => busy !== null,
+            () => busy !== null || gaveUp(),
             async (wait, line) => {
               if (waiting) await waiting(wait, line);
               else busy = wait;
             },
             async (milliseconds) => {
-              if (busy === null) await dependencies.sleep(milliseconds);
+              if (busy !== null) return;
+              sleeps += 1;
+              await dependencies.sleep(milliseconds);
             }
           );
           if (busy !== null) return lockBusy(roleName, busy);
+          if (!taken.ok && gaveUp()) {
+            return {
+              ok: false,
+              code: "aws-lock-busy",
+              message: `Radius could not take the lock on IAM role ${roleName} right away, so it changed nothing. Another run may hold it, or IAM is slow to answer. Try again in a moment.`
+            };
+          }
           if (!taken.ok) return taken;
           state.lock = taken.lock;
           return { ok: true };
@@ -560,7 +579,21 @@ export function createAwsEnvironmentAccess<Operation>(
         : { ok: false, message: `${result.message} ${released.message}` };
     },
 
-    async repair({ repo, environment, roleArn }) {
+    async repair({ repo, environment: requested, roleArn }) {
+      // GitHub finds an environment by name in any casing, but its tokens
+      // carry the stored spelling, so the subjects are built from that.
+      const lookup = await dependencies.runGitHubJson(
+        `/repos/${repo}/environments/${encodeURIComponent(requested)}`
+      );
+      const stored = lookup.ok ? text(lookup.json?.name) : "";
+      if (!stored) {
+        return {
+          ok: false,
+          code: "github-environment-unreadable",
+          message: `Radius could not read GitHub environment "${requested}" (${lookup.ok ? "GitHub reported no name" : lookup.stderr || `HTTP ${lookup.status ?? "unknown"}`}), so it changed nothing.`
+        };
+      }
+      const environment = stored;
       // Always from GitHub: AWS_TRUST_SUBJECTS is editable by anyone with
       // admin on the repository, so it cannot decide what Repair trusts.
       const subjects = await resolveSubjects(repo, environment);

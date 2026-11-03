@@ -4128,8 +4128,19 @@ test.describe("Radius Canvas in Chromium", () => {
           `AWS_TRUST_SUBJECTS\t${JSON.stringify([subject])}`
         ].join("\n")
       });
-      // Repair works the subjects out from GitHub, not from the variable.
+      // Repair works the subjects out from GitHub, not from the variable,
+      // using GitHub's stored spelling of the environment.
       scenario.commands.unshift(
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/environments/${environment}`,
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28"
+          ],
+          stdout: JSON.stringify({ name: environment })
+        },
         {
           tool: "gh",
           args: [
