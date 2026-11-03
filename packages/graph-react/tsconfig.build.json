@@ -14,7 +14,9 @@
   },
   "files": [
     "src/index.ts",
-    "src/brand.ts"
+    "src/brand.ts",
+    "src/compat/index.ts",
+    "src/compat/reactflow11.ts"
   ],
   "include": []
 }

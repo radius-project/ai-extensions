@@ -30,7 +30,7 @@ const resource = (
   properties
 });
 const discovery = {
-  Name: "applications",
+  Name: "Applications.Core/applications",
   APIVersions: { older: { Schema: { type: "object" } }, newer: {} },
   APIVersionList: ["newer", "older"]
 };
@@ -97,7 +97,7 @@ describe("public Radius query operations", () => {
         typeName: "applications"
       })
     ).toEqual({
-      Name: "applications",
+      Name: "Applications.Core/applications",
       Description:
         "This is the applications resource type from the Applications.Core provider. It allows you to define and manage applications resources within your Radius applications.",
       ResourceProviderNamespace: "Applications.Core",
@@ -462,6 +462,7 @@ describe("public Radius query operations", () => {
       if (path.includes("/resourceTypes/")) throw new Error("not served");
       return { value: [{ name: "Other", resourceTypes: { widgets: {} } }] };
     });
+
     expect(await client.listResourceTypes()).toEqual({ value: [] });
     expect(
       (
@@ -471,6 +472,31 @@ describe("public Radius query operations", () => {
         })
       ).APIVersions
     ).toEqual({});
+  });
+
+  it("preserves provider fallback full names and supplied descriptions", async () => {
+    const { client } = harness(({ path }) => {
+      if (path.includes("/resourceTypes/")) throw new Error("not served");
+      return {
+        value: [
+          {
+            name: "Other",
+            resourceTypes: {
+              widgets: {
+                description: "Provider description",
+                apiVersions: { preview: {} }
+              }
+            }
+          }
+        ]
+      };
+    });
+    const type = await client.getResourceType({
+      namespace: "Other",
+      typeName: "widgets"
+    });
+    expect(type.Name).toBe("Other/widgets");
+    expect(type.Description).toBe("Provider description");
   });
 
   it("propagates AbortError even without a signal through discovery and partial merges", async () => {

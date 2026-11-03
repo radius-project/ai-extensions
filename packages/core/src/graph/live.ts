@@ -82,6 +82,16 @@ export function normalizeLiveGraph(
   context: GraphContext
 ): LiveGraph {
   graphContextKey(context);
+  return {
+    kind: "live",
+    context: { ...context, plane: { ...context.plane } },
+    ...normalizeLiveResources(value)
+  };
+}
+
+export function normalizeLiveResources(
+  value: unknown
+): Pick<LiveGraph, "resources" | "warnings"> {
   if (!record(value) || !Array.isArray(value.resources)) {
     throw new TypeError("Live graph resources must be an array.");
   }
@@ -186,8 +196,6 @@ export function normalizeLiveGraph(
     else targetsBySource.set(source, [target]);
   }
   return {
-    kind: "live",
-    context: { ...context, plane: { ...context.plane } },
     resources: resources.map((resource) => ({
       ...resource,
       connections: (targetsBySource.get(resource.id) ?? []).map((target) => ({

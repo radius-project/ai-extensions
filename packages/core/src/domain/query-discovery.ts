@@ -90,8 +90,11 @@ export function createDiscovery(session: QuerySession) {
         });
       const apiVersions = versions(definition.apiVersions ?? {});
       return {
-        Name: typeName,
-        Description: `This is the ${typeName} resource type from the ${namespace} provider. It allows you to define and manage ${typeName} resources within your Radius applications.`,
+        Name: `${namespace}/${typeName}`,
+        Description:
+          typeof definition.description === "string" ?
+            definition.description
+          : `This is the ${typeName} resource type from the ${namespace} provider. It allows you to define and manage ${typeName} resources within your Radius applications.`,
         ResourceProviderNamespace: namespace,
         APIVersions: apiVersions,
         APIVersionList: Object.keys(apiVersions)

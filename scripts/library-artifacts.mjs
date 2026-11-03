@@ -10,6 +10,8 @@ const publicExports = {
   "@radius-project/graph-react": {
     ".": "./dist/index",
     "./brand": "./dist/brand",
+    "./compat": "./dist/compat/index",
+    "./compat/reactflow11": "./dist/compat/reactflow11",
     "./base.css": "./dist/base.css",
     "./styles.css": "./dist/styles.css",
     "./package.json": "./package.json"
@@ -22,7 +24,9 @@ const legacyTypeExports = {
     domain: ["dist/domain/index.d.ts"]
   },
   "@radius-project/graph-react": {
-    brand: ["dist/brand.d.ts"]
+    brand: ["dist/brand.d.ts"],
+    compat: ["dist/compat/index.d.ts"],
+    "compat/reactflow11": ["dist/compat/reactflow11.d.ts"]
   }
 };
 
@@ -69,7 +73,11 @@ export function validateLibraryManifest(manifest, name, coreVersion) {
     assert.equal(manifest.dependencies["react-dom"], undefined);
     assert.deepEqual(manifest.peerDependencies, {
       react: "^18.3.1 || ^19.2.8",
-      "react-dom": "^18.3.1 || ^19.2.8"
+      "react-dom": "^18.3.1 || ^19.2.8",
+      reactflow: "^11.11.4"
+    });
+    assert.deepEqual(manifest.peerDependenciesMeta, {
+      reactflow: { optional: true }
     });
     assert.deepEqual(manifest.sideEffects, ["**/*.css"]);
   }
@@ -83,6 +91,7 @@ export function libraryExternalImports(directory) {
         "react",
         "react-dom/client",
         "@xyflow/react",
+        "reactflow",
         "@radius-project/core/graph",
         "@radius-project/core/domain"
       ];

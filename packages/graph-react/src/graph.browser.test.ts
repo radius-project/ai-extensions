@@ -359,7 +359,7 @@ describe("public host-neutral React API", () => {
           graph: {
             kind: "live",
             context: { ...context, applicationId: prefix + type + "/app" },
-            resources: [resource],
+            resources: [{ ...resource, connections: [] }],
             warnings: []
           },
           callbacks: { onError: (error) => errors.push(error) }
@@ -394,7 +394,7 @@ describe("public host-neutral React API", () => {
             graph: {
               kind: "live",
               context: { ...context, applicationId },
-              resources: [resource],
+              resources: [{ ...resource, connections: [] }],
               warnings: []
             },
             callbacks: { onError: (error) => errors.push(error) }
@@ -1514,6 +1514,10 @@ describe("graph view in a real browser", () => {
       /^data:image\/svg\+xml/
     );
     expect(web.querySelector(".rad-node__badge")).toBeNull();
+    expect(web.getAttribute("data-radius-icon")).toBe(
+      web.querySelector(".rad-node__icon")?.getAttribute("src")
+    );
+    expect(web.hasAttribute("data-radius-badge")).toBe(false);
     expect(web.querySelector(".rad-node__head")?.className).toBe(
       "rad-node__head"
     );
@@ -1603,12 +1607,12 @@ describe("graph view in a real browser", () => {
   });
 
   it.each([
-    ["in_progress", "In progress"],
-    ["success", "Deployed"],
-    ["failed", "Failed"]
+    ["in_progress", "In progress", "progress"],
+    ["success", "Deployed", "success"],
+    ["failed", "Failed", "failed"]
   ])(
     "labels the %s badge for assistive technology",
-    async (deployStatus, alt) => {
+    async (deployStatus, alt, renderedKind) => {
       mount({
         deployMode: true,
         resources: [{ id: "web", name: "web", deployStatus }]
@@ -1617,6 +1621,7 @@ describe("graph view in a real browser", () => {
       const badge = within(web).getByAltText(alt);
       expect(badge.className).toBe("rad-node__badge");
       expect(badge.getAttribute("src")).toMatch(/^data:image\/svg\+xml/);
+      expect(web.getAttribute("data-radius-badge")).toBe(renderedKind);
       expect(web.querySelector(".rad-node__head")?.className).toBe(
         "rad-node__head rad-node__head--with-badge"
       );

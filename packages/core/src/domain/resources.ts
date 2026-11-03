@@ -80,12 +80,12 @@ const environments = [
   "Radius.Core/environments"
 ];
 
-export function isApplicationType(type: string): boolean {
-  return applications.includes(type);
+export function isApplicationType(type?: string): boolean {
+  return type !== undefined && applications.includes(type);
 }
 
-export function isEnvironmentType(type: string): boolean {
-  return environments.includes(type);
+export function isEnvironmentType(type?: string): boolean {
+  return type !== undefined && environments.includes(type);
 }
 
 /** Legacy-first order is stable, independent of the requested equivalent. */

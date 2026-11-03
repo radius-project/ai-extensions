@@ -18,7 +18,10 @@ const compiler = join(
 );
 const packages = [
   { directory: "core", entries: ["graph/index", "domain/index"] },
-  { directory: "graph-react", entries: ["index", "brand"] }
+  {
+    directory: "graph-react",
+    entries: ["index", "brand", "compat/index", "compat/reactflow11"]
+  }
 ];
 
 for (const { directory, entries } of packages) {

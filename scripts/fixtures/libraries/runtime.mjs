@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { createElement, version } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { RadiusGraph, mountRadiusGraph } from "@radius-project/graph-react";
+import { AppGraph } from "@radius-project/graph-react/compat";
 
 import {
   RADIUS_BRAND_MARK,
@@ -32,6 +33,13 @@ assert.equal(parseResourceId(context.applicationId).name, "demo");
 assert.equal(typeof graphContextKey(context), "string");
 assert.throws(() => normalizeLiveGraph({}, context), /resources/);
 assert.equal(typeof mountRadiusGraph, "function");
+assert.throws(() => require.resolve("reactflow"), { code: "MODULE_NOT_FOUND" });
+assert.match(
+  renderToStaticMarkup(
+    createElement(AppGraph, { graph: { name: "context-free", resources: [] } })
+  ),
+  /legacy-live/
+);
 const requests = [];
 const client = createRadiusQueryClient(
   {

@@ -78,9 +78,39 @@ export interface LiveGraph {
   readonly warnings: readonly LiveGraphWarning[];
 }
 
+/** Explicit context-free compatibility input, not a selected live query. */
+export interface LegacyLiveGraph {
+  readonly kind: "legacy-live";
+  readonly resources: readonly LiveGraphResource[];
+  readonly warnings: readonly LiveGraphWarning[];
+}
+
+export interface LegacyConnection {
+  id: string;
+  name: string;
+  type: string;
+  provider: string;
+  direction: "Outbound" | "Inbound";
+}
+
+export interface LegacyResource {
+  id: string;
+  name: string;
+  type: string;
+  provider: string;
+  provisioningState: string;
+  resources?: LegacyResource[];
+  connections?: LegacyConnection[];
+}
+
+export interface LegacyAppGraphData {
+  name: string;
+  resources: LegacyResource[];
+}
+
 export interface ModeledGraph {
   readonly kind: "modeled" | "planned" | "deployed-projection" | "diff";
   readonly resources: readonly GraphResource[];
 }
 
-export type RadiusGraphData = LiveGraph | ModeledGraph;
+export type RadiusGraphData = LiveGraph | LegacyLiveGraph | ModeledGraph;

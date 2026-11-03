@@ -1,5 +1,7 @@
 export { parseResourceId } from "./resource-id.js";
 export type { ResourceId, ResourceIdSegment } from "./resource-id.js";
+export { parseLegacyResourceId } from "./legacy-resource-id.js";
+export type { LegacyResourceId } from "./legacy-resource-id.js";
 export { awsConsoleUrl, consoleNameForUrl } from "./aws-console.js";
 export type { CloudConsoleName } from "./aws-console.js";
 export {

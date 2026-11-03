@@ -19,6 +19,8 @@ describe("shared resource and recipe contracts", () => {
     }
   );
   it("uses exact type membership without treating unknown types as equivalents", () => {
+    expect(isApplicationType()).toBe(false);
+    expect(isEnvironmentType()).toBe(false);
     expect(isApplicationType("Applications.Core/applications")).toBe(true);
     expect(isApplicationType("Radius.Core/environments")).toBe(false);
     expect(isEnvironmentType("Radius.Core/environments")).toBe(true);

@@ -73,6 +73,7 @@ export const RADIUS_DIFF_STATUS_COLORS: Readonly<Record<string, NodeColors>> = {
 // modeled, planned, diff and deployed pages each set a different subset.
 export interface GraphOptions {
   liveMode?: boolean;
+  legacyMode?: boolean;
   diffMode?: boolean;
   deployMode?: boolean;
   plannedMode?: boolean;
@@ -91,6 +92,7 @@ export interface GraphOptions {
 // re-derives "planned or deployed means resolved" or "no branch means main".
 export interface GraphSettings {
   readonly liveMode: boolean;
+  readonly legacyMode: boolean;
   readonly diffMode: boolean;
   readonly deployMode: boolean;
   readonly plannedMode: boolean;
@@ -196,6 +198,7 @@ export function resolveGraphSettings(
   const branch = options.branch || "main";
   return {
     liveMode: options.liveMode === true,
+    legacyMode: options.legacyMode === true,
     diffMode: options.diffMode || false,
     deployMode,
     plannedMode,
@@ -396,8 +399,8 @@ export function buildGraph(
         radiusSelectResolvedResource(resource, ownedOutputIds, id)
       : null;
     const shortType =
-      resolved ?
-        radiusResolvedDisplayLabel(resolved)
+      resolved ? radiusResolvedDisplayLabel(resolved)
+      : settings.legacyMode ? resource.type || ""
       : radiusFormatTypeLabel(resource.type);
     const sourceBranch =
       settings.diffMode && resource.diffStatus === "removed" ?
@@ -411,7 +414,7 @@ export function buildGraph(
       borderWidth: 2.5,
       borderStyle: settings.plannedMode ? "dashed" : "solid",
       bgColor: colors.bg,
-      icon: resourceIcon.src,
+      icon: settings.legacyMode ? "" : resourceIcon.src,
       iconMonochrome: resourceIcon.monochrome,
       nodeName: resource.name || id,
       typeLabel: shortType,

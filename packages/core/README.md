@@ -31,6 +31,14 @@ The port receives `{ connectionId, plane, method, path, signal }`. Paths include
 
 `aggregateRecipes(environment, packsById)` uses only supplied data. It retains inline recipe order and duplicates, then linked-pack order. Pack lookup is case-insensitive, with the last matching key retained; missing packs are skipped. Hosts must load packs and report loading failures separately.
 
+## Legacy public contracts
+
+`parseLegacyResourceId` from `/domain` calls the canonical parser and projects `LegacyResourceId`: `{ plane, group, type, name }`. `plane` is the plane name, `group` is the resource group, and `type` is the full namespace/type. Values retain their original casing. This projection accepts only a Radius plane, one resource-group scope, and one resource segment. It rejects ARM, AWS, global, missing-group, and nested IDs rather than truncating them. Legal names with dots, underscores, and digits are accepted; rejecting these names was a defect in the old restricted parser. `isApplicationType` and `isEnvironmentType` accept an omitted type and return `false`.
+
+`normalizeLegacyLiveGraph` from `/graph` adapts the explicitly selected legacy graph policy once. Ordinary Outbound connections point from dependency to owner; ordinary Inbound connections point from owner to dependency. Only an Inbound connection whose full type is exactly `Applications.Core/gateways` or `Radius.Compute/routes`, compared case-insensitively, points from dependency to owner. Similar names in other namespaces are ordinary types. This does not change `normalizeLiveGraph` direction semantics.
+
+Without a context, the legacy normalizer returns the explicit `legacy-live` graph variant; it does not invent an application or connection ID. With a real `GraphContext`, it applies the same strict context validation as `normalizeLiveGraph`. Both paths retain resource IDs, names, full types, and raw provisioning states without Canvas filtering. They never mutate the input. Self and dangling connections are dropped with warnings, identical resources are coalesced with a warning, conflicting duplicates fail, and duplicate presentation edges are coalesced. These are deliberate corrections to old graph defects, not preservation of invalid edges.
+
 ## Workspace architecture
 
 Radius Canvas is the application-modeling and deployment product for the GitHub Copilot app. This document describes how the code is laid out after the modularization refactor (see [`docs/design/radius-extension-modularization.md`](../../docs/design/radius-extension-modularization.md)) and gives step-by-step guides for the three changes contributors make most often: **adding a compute platform**, **adding a canvas action/tool**, and **adding a whole new UI adapter**.

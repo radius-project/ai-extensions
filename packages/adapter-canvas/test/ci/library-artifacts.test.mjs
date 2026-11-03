@@ -39,7 +39,9 @@ function manifest() {
     type: "module",
     typesVersions: {
       "*": {
-        brand: ["dist/brand.d.ts"]
+        brand: ["dist/brand.d.ts"],
+        compat: ["dist/compat/index.d.ts"],
+        "compat/reactflow11": ["dist/compat/reactflow11.d.ts"]
       }
     },
     exports: {
@@ -54,6 +56,16 @@ function manifest() {
         import: "./dist/brand.js",
         default: "./dist/brand.js"
       },
+      "./compat": {
+        types: "./dist/compat/index.d.ts",
+        import: "./dist/compat/index.js",
+        default: "./dist/compat/index.js"
+      },
+      "./compat/reactflow11": {
+        types: "./dist/compat/reactflow11.d.ts",
+        import: "./dist/compat/reactflow11.js",
+        default: "./dist/compat/reactflow11.js"
+      },
       "./base.css": "./dist/base.css",
       "./styles.css": "./dist/styles.css",
       "./package.json": "./package.json"
@@ -64,8 +76,10 @@ function manifest() {
     },
     peerDependencies: {
       react: "^18.3.1 || ^19.2.8",
-      "react-dom": "^18.3.1 || ^19.2.8"
+      "react-dom": "^18.3.1 || ^19.2.8",
+      reactflow: "^11.11.4"
     },
+    peerDependenciesMeta: { reactflow: { optional: true } },
     sideEffects: ["**/*.css"]
   };
 }
