@@ -88,7 +88,7 @@ function coordinator(
   operationControl: OperationControlService = unavailable,
   awsEnvironmentAccess: Parameters<
     typeof createInstanceRequestCoordinator
-  >[3]["awsEnvironmentAccess"] = { setup: unavailable }
+  >[3]["awsEnvironmentAccess"] = { setup: unavailable, release: unavailable }
 ) {
   return createInstanceRequestCoordinator(
     instanceId,
@@ -273,7 +273,9 @@ describe("production coordinator scheduling scopes", () => {
       schedule,
       invalidateEnvironmentListing: () => {
         throw new Error("Unexpected invalidation");
-      }
+      },
+      awsEnabled: true,
+      removeAwsDeployIdentityLock: unavailable
     });
     const pending = service({
       operationId: original.operationId,
@@ -883,6 +885,7 @@ describe("production coordinator scheduling scopes", () => {
           code: "aws-cli-missing"
         };
       });
+      const release = vi.fn(async () => {});
       const configureEnvironment = vi.fn(unavailable);
       const handler = coordinator(
         owner,
@@ -892,13 +895,18 @@ describe("production coordinator scheduling scopes", () => {
         { authorizeAzure: unavailable, configureEnvironment },
         undefined,
         undefined,
-        { setup }
+        { setup, release }
       );
       const done = settled(owner, "panel");
       handler.scheduleEnvironmentOperation(op);
       await done;
 
       expect(configureEnvironment).not.toHaveBeenCalled();
+      // Released whether setup failed or paused, since a lock left behind
+      // blocks every other run on the deploy identity. A setup stopped by
+      // shutdown never ran, so it took no lock.
+      if (shuttingDown) expect(release).not.toHaveBeenCalled();
+      else expect(release).toHaveBeenCalledExactlyOnceWith(op);
       if (shuttingDown) {
         expect(setup).not.toHaveBeenCalled();
         expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
@@ -1084,7 +1092,7 @@ describe("production coordinator scheduling scopes", () => {
   ] as const)("requires the explicit %s dependency", (name) => {
     const dependencies = {
       awsEnabled: false,
-      awsEnvironmentAccess: { setup: unavailable },
+      awsEnvironmentAccess: { setup: unavailable, release: unavailable },
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: createEnvironmentAccountContext("runtime", {
         createReadOnlyExecutor: unavailable,
@@ -2033,7 +2041,9 @@ describe("production coordinator scheduling scopes", () => {
         schedule,
         invalidateEnvironmentListing: () => {
           throw new Error("Unexpected invalidation");
-        }
+        },
+        awsEnabled: true,
+        removeAwsDeployIdentityLock: unavailable
       });
       const report = vi.spyOn(operations, "report");
       const handler = coordinator(
@@ -2863,7 +2873,7 @@ describe("production coordinator scheduling scopes", () => {
       withSelectedAccount: unavailable
     });
     const execution = createEnvironmentOperationExecution({
-      awsEnvironmentAccess: { setup: unavailable },
+      awsEnvironmentAccess: { setup: unavailable, release: unavailable },
       executionOwner: owner,
       scope,
       accountContext: account,

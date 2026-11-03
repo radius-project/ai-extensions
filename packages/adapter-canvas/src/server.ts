@@ -120,6 +120,7 @@ import {
   createAwsEnvironmentAccess,
   type AwsEnvironmentAccess
 } from "./server/services/aws-environment-access.js";
+import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identity-lock.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
@@ -174,6 +175,7 @@ import {
   hasWarnings,
   addLegacyStep,
   setContext,
+  touchOperation,
   setCanonicalEnvironment,
   setCloudContext,
   getSetupArtifactLedger,
@@ -4062,7 +4064,7 @@ function productionEnvironmentDeletionPorts(
 export interface EnvironmentOperationExecutionDependencies {
   awsEnvironmentAccess: Pick<
     AwsEnvironmentAccess<EnvironmentOperationRecord>,
-    "setup"
+    "setup" | "release"
   >;
   executionOwner: EnvironmentExecutionOwner;
   scope: ReturnType<EnvironmentExecutionOwner["attachRuntime"]>;
@@ -4116,7 +4118,10 @@ export function createEnvironmentOperationExecution(
   const instanceId = dependencies.presentation?.instanceId;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
-  if (typeof awsEnvironmentAccess?.setup !== "function")
+  if (
+    typeof awsEnvironmentAccess?.setup !== "function" ||
+    typeof awsEnvironmentAccess.release !== "function"
+  )
     throw new Error(
       "Missing request coordinator dependency: awsEnvironmentAccess"
     );
@@ -4460,6 +4465,10 @@ export function createEnvironmentOperationExecution(
                 selectedExecutor
               );
             },
+            // Runs during shutdown too: a lock left behind blocks every other
+            // run on this deploy identity until someone removes it.
+            releaseAwsDeployIdentity: (operation) =>
+              awsEnvironmentAccess.release(operation),
             now: () => Date.now()
           });
         },
@@ -5619,8 +5628,17 @@ export function createProductionCanvasServerRuntime(
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
       sleep: sleepMs,
+      now: () => Date.now(),
       isStopRequested: shouldStop,
-      operations: { enterStage, addLegacyStep, setContext },
+      operationId: (operation) => operation.operationId,
+      operations: {
+        enterStage,
+        addLegacyStep,
+        setContext,
+        touch: (operation) => {
+          touchOperation(operation);
+        }
+      },
       store: operations,
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage
@@ -5823,6 +5841,9 @@ export function createProductionCanvasServerRuntime(
     stopPendingResume: sharedOperationResume.stopPendingResume,
     isShuttingDown: () => executionOwner.isShuttingDown(),
     get: (operationId) => operations.get(operationId),
+    awsEnabled,
+    removeAwsDeployIdentityLock: (lock) =>
+      removeAwsDeployIdentityLock(lock, runAwsCli),
     acquireForRetry: (op) => operations.acquireForRetry(op),
     persistOperations: () => operations.persist(),
     reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),

@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { admitSetupCommand } from "@radius-project/core";
 import {
   acceptCommand,
+  addStep,
   announceOperationTerminal,
   applyDeletionRetry,
   applySetupResumePoint,
@@ -22,8 +23,10 @@ import {
   finish,
   isProviderRestartDecision,
   markVerificationRetryAcquisition,
+  removableAwsLockWait,
   rollbackRetryAttempt,
   setCommandState,
+  setContext,
   setStageState,
   setVerificationWorkflowState,
   snapshotRetryState,
@@ -83,8 +86,16 @@ export interface OperationControlInput {
   isCurrent?(): boolean;
   instanceId?: string;
   command:
-    "stop" | "continue" | "cancel-workflow" | "rollback" | "exit" | "retry";
+    | "stop"
+    | "continue"
+    | "cancel-workflow"
+    | "rollback"
+    | "exit"
+    | "retry"
+    | "remove-aws-lock";
   retryKind?: string;
+  // Remove lock only: the lock policy ID the developer was shown.
+  policyId?: string;
   abandon?: boolean;
 }
 
@@ -196,6 +207,18 @@ export interface OperationsControlDependencies {
     target: WorkflowCancellationTarget,
     authority: WorkflowCancellationAuthority
   ): Promise<"inactive" | "cancelling">;
+  // The AWS developer switch. Remove lock deletes an IAM policy through the
+  // developer's AWS CLI, so it is refused when AWS is off, like every other
+  // AWS route.
+  awsEnabled: boolean;
+  // Delete the AWS deploy identity lock with exactly this policy ID.
+  removeAwsDeployIdentityLock(lock: {
+    policyArn: string;
+    policyId: string;
+  }): Promise<
+    | { ok: true; removed: boolean }
+    | { ok: false; code: string; message: string }
+  >;
 }
 
 // Typed views of the model's `any`-shaped exports, pinned once here so the
@@ -389,6 +412,107 @@ function resolveOperation(
     return null;
   }
   return { operationId, operation, params };
+}
+
+/**
+ * Remove the AWS deploy identity lock a live setup or deletion is waiting for,
+ * after a person confirmed its holder stopped. Only the lock the run last saw
+ * is removed, so a lock another run took since then stays.
+ */
+async function handleRemoveAwsLock(
+  context: OperationControlContext,
+  dependencies: OperationsControlDependencies
+): Promise<void> {
+  if (!dependencies.awsEnabled) {
+    sendJson(context, 400, {
+      error:
+        "AWS environments aren't supported yet, so Radius removed no AWS lock.",
+      code: "provider-unsupported",
+      operationId: context.operationId
+    });
+    return;
+  }
+  if (!context.policyId) {
+    sendJson(context, 400, {
+      error: "Name the lock to remove by its policy ID.",
+      code: "aws-lock-invalid",
+      operationId: context.operationId
+    });
+    return;
+  }
+  const resolved = resolveOperation(context, dependencies, {
+    allowDelete: true
+  });
+  if (!resolved) return;
+  const { operationId, operation } = resolved;
+  const wait = removableAwsLockWait(operation);
+  if (!wait) {
+    sendJson(context, 409, {
+      error:
+        "This run is not waiting for a lock that has been held long enough to remove.",
+      code: "aws-lock-not-removable",
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  // The developer confirmed that one holder stopped. If another run has taken
+  // a new lock since the dialog opened, that confirmation says nothing about it.
+  if (context.policyId !== wait.policyId) {
+    sendJson(context, 409, {
+      error:
+        "The lock changed since it was shown: another run now holds a new one. Nothing was removed.",
+      code: "aws-lock-changed",
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  let result: Awaited<
+    ReturnType<OperationsControlDependencies["removeAwsDeployIdentityLock"]>
+  >;
+  try {
+    result = await dependencies.removeAwsDeployIdentityLock({
+      policyArn: wait.policyArn,
+      policyId: wait.policyId
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      code: "aws-lock-remove-failed",
+      message: `Radius could not remove the lock: ${errorMessage(error)}`
+    };
+  }
+  if (!result.ok) {
+    sendJson(context, 409, {
+      error: result.message,
+      code: result.code,
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  // The waiting run takes a new lock at its next poll. Until then the panel
+  // must not offer to remove a lock that is already gone.
+  setContext(operation, { awsLockWait: { ...wait, removable: false } });
+  addStep(operation, {
+    kind: "mutation",
+    label: `Removed the lock on the deploy identity held by: ${wait.holder}.`,
+    state: "succeeded"
+  });
+  let detail: string | undefined;
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    detail = `The lock was removed, but Radius could not save that on this run: ${errorMessage(error)}`;
+  }
+  sendJson(context, 200, {
+    operationId,
+    code: result.removed ? "aws-lock-removed" : "aws-lock-already-removed",
+    ...(detail ? { detail } : {}),
+    statusUrl: statusUrlFor(operationId),
+    operation: clientView(operation)
+  });
 }
 
 /**
@@ -1363,6 +1487,9 @@ function handleRetryOperation(
 export function createOperationsControlService(
   dependencies: OperationsControlDependencies
 ): OperationControlService {
+  if (typeof dependencies.awsEnabled !== "boolean") {
+    throw new Error("Missing operation control dependency: awsEnabled");
+  }
   for (const name of [
     "claimAdmission",
     "stopPendingResume",
@@ -1374,7 +1501,8 @@ export function createOperationsControlService(
     "inspectVerificationWorkflow",
     "cancelVerificationWorkflow",
     "schedule",
-    "invalidateEnvironmentListing"
+    "invalidateEnvironmentListing",
+    "removeAwsDeployIdentityLock"
   ] as const) {
     if (typeof dependencies[name] !== "function") {
       throw new Error(`Missing operation control dependency: ${name}`);
@@ -1386,7 +1514,8 @@ export function createOperationsControlService(
     "cancel-workflow": handleCancelWorkflow,
     rollback: handleRollbackOperation,
     exit: handleExitOperation,
-    retry: handleRetryOperation
+    retry: handleRetryOperation,
+    "remove-aws-lock": handleRemoveAwsLock
   };
   const operationMutations = new Map<string, Promise<OperationControlResult>>();
   return (input, publish) => {

@@ -62,6 +62,10 @@ function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
     },
     schedule: vi.fn(() => true),
     invalidateEnvironmentListing: vi.fn(),
+    awsEnabled: true,
+    removeAwsDeployIdentityLock: vi.fn(async () => {
+      throw new Error("Unexpected AWS lock removal");
+    }),
     ...overrides
   };
   return {
@@ -1047,6 +1051,14 @@ describe("direct operation control service", () => {
       );
     }
   );
+
+  it("requires the AWS switch to be a boolean", () => {
+    const { dependencies } = fixture();
+    Reflect.deleteProperty(dependencies, "awsEnabled");
+    expect(() => createOperationsControlService(dependencies)).toThrow(
+      "Missing operation control dependency: awsEnabled"
+    );
+  });
 
   it("constructs without reading records, saving, or scheduling recovery", () => {
     const { dependencies } = fixture();

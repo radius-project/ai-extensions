@@ -197,8 +197,25 @@ const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
   continue_setup: "Continuing setup…",
   retry_setup: "Retrying setup…",
   retry_deletion: "Retrying deletion…",
-  exit_setup: "Closing this setup and removing the resources Radius created…"
+  exit_setup: "Closing this setup and removing the resources Radius created…",
+  remove_aws_lock: "Removing the lock…"
 };
+
+// What a Remove lock answer means once it lands. The run keeps waiting or
+// takes the lock on its own, so the result is a status, not a terminal step.
+// A refusal because the run no longer waits on a removable lock means the
+// lock already stopped blocking it, which is what the person wanted.
+function removeLockOutcome(ok: boolean, payload: unknown): string | null {
+  const code = readString(payload, "code");
+  if (ok) {
+    return code === "aws-lock-already-removed" ?
+        "The lock was already gone. This run continues."
+      : "Lock removed. This run continues.";
+  }
+  return code === "aws-lock-not-removable" ?
+      "The lock is no longer blocking this run, so nothing was removed."
+    : null;
+}
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set([
   "succeeded",
@@ -851,7 +868,10 @@ function visibleOperationActions(
 ): readonly OperationAction[] {
   if (operation === null) return [];
   if (operation.kind !== "delete") return operation.actions;
-  return operation.actions.filter((action) => action.kind === "retry_deletion");
+  return operation.actions.filter(
+    (action) =>
+      action.kind === "retry_deletion" || action.kind === "remove_aws_lock"
+  );
 }
 
 /**
@@ -2076,6 +2096,15 @@ export function initializeEnvironmentOperations(
         if (!commandIsActive()) return;
         setCommandBusy(false);
         const updated = parseResponse(result.payload);
+        const lockOutcome =
+          action.kind === "remove_aws_lock" ?
+            removeLockOutcome(result.ok, result.payload)
+          : null;
+        if (lockOutcome !== null) setCommandStatus(lockOutcome);
+        if (!result.ok && lockOutcome !== null) {
+          if (updated) renderProgress(updated);
+          return;
+        }
         if (!result.ok) {
           setCommandStatus("");
           setCommandError(

@@ -1276,6 +1276,9 @@ describe("registered environment tools with production runtime services", () => 
               '{"cluster":{"accessConfig":{"authenticationMode":"API"}}}',
               ""
             );
+          else if (key === "iam create-policy" || key === "iam get-policy")
+            callback(null, '{"Policy":{"PolicyId":"LOCK1"}}', "");
+          else if (key === "iam delete-policy") callback(null, "", "");
           else if (key === "iam get-role") {
             callback(
               Object.assign(new Error("AccessDenied"), { code: 1 }),
@@ -1295,14 +1298,12 @@ describe("registered environment tools with production runtime services", () => 
         ).toMatchObject({ kind: "accepted" });
         await h.settled();
         expect(op.request.environment).toMatchObject(selectors);
-        expect(cli.mock.calls.at(-1)?.[1]).toEqual([
-          "iam",
-          "get-role",
-          "--role-name",
-          expectedRole,
-          "--output",
-          "json"
-        ]);
+        const awsArgs = cli.mock.calls.map(([, args]) => args);
+        expect(awsArgs.filter((args) => args[1] === "get-role").at(-1)).toEqual(
+          ["iam", "get-role", "--role-name", expectedRole, "--output", "json"]
+        );
+        // The deploy identity lock is released when the retry fails.
+        expect(awsArgs.at(-1)?.slice(0, 2)).toEqual(["iam", "delete-policy"]);
         expect(op.failure?.code).toBe("aws-role-unreadable");
         expect(op.verification).toBeUndefined();
       } finally {

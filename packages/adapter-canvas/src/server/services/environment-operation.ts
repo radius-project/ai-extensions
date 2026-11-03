@@ -125,6 +125,10 @@ export interface EnvironmentOperationWorkflowDependencies {
     | { ok: false; status: number; error: string; code: string }
     | { ok: false; stopped: true }
   >;
+  // AWS only: release the deploy identity lock setup took. Never throws.
+  releaseAwsDeployIdentity(
+    operation: EnvironmentOperationRecord
+  ): Promise<void>;
   instanceId?: string;
   now(): number;
 }
@@ -385,6 +389,7 @@ export function createSetupCoordinatorPorts(
             }
           };
     },
+    releaseAws: () => dependencies.releaseAwsDeployIdentity(operation),
     configureEnvironment: async (request) =>
       setupStageResult(
         await dependencies.setupServices.configureEnvironment(
