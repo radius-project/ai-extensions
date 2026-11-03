@@ -163,7 +163,7 @@ afterEach(() => {
 });
 
 describe("bounded runtime shutdown drain", () => {
-  it("drains real accepted Azure validation without later reads or overwriting its durable checkpoint", async () => {
+  it.each(["initial", "accepted"])("fences %s Azure reads", async (mode) => {
     const owner = createEnvironmentExecutionOwner();
     const entered = deferred();
     const released = deferred();
@@ -270,7 +270,11 @@ describe("bounded runtime shutdown drain", () => {
       "2026-10-14T10:00:00.000Z"
     );
     if (!saved) throw new Error("Invalid accepted continuation");
-    op.azureAppCreateContinuation = { ...saved, acceptedPrompt: saved.prompt };
+    if (mode === "accepted")
+      op.azureAppCreateContinuation = {
+        ...saved,
+        acceptedPrompt: saved.prompt
+      };
     operations.put(op);
     let durable = toPersistedOperation(op);
     const persist = vi
@@ -282,6 +286,16 @@ describe("bounded runtime shutdown drain", () => {
       (command, args, _options, callback) => {
         calls.push(`${command} ${args.join(" ")}`);
         expect(command).toBe("az");
+        if (mode === "initial" && args[1] === "set") {
+          expect(args).toEqual([
+            "account",
+            "set",
+            "--subscription",
+            subscriptionId
+          ]);
+          callback(null, "", "");
+          return new ChildProcess();
+        }
         expect(args).toEqual(["account", "show", "--output", "json"]);
         entered.resolve();
         void released.promise.then(() => {
@@ -315,14 +329,21 @@ describe("bounded runtime shutdown drain", () => {
       const checkpoint = structuredClone(durable);
       const issued = [...calls];
       const saves = persist.mock.calls.length;
-      expect(checkpoint.azureAppCreateContinuation).toMatchObject({
-        acceptedPrompt: saved.prompt
-      });
+      if (mode === "accepted")
+        expect(checkpoint.azureAppCreateContinuation).toMatchObject({
+          acceptedPrompt: saved.prompt
+        });
+      else expect(checkpoint.azureAppCreateContinuation).toBeUndefined();
       expect(op.azureAppCreateContinuation).toBeUndefined();
       expect(accountContext.getExecutor(op.operationId)).toBe(executor);
       const shutdown = extension.shutdown();
+      expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+      expect(activeLogin).toBe("saved-account");
       released.resolve();
-      await expect(shutdown).resolves.toEqual({ complete: true, exitCode: 0 });
+      await expect(shutdown).resolves.toEqual({
+        complete: true,
+        exitCode: 0
+      });
       expect(calls).toEqual(issued);
       expect(durable).toEqual(checkpoint);
       expect(persist).toHaveBeenCalledTimes(saves);

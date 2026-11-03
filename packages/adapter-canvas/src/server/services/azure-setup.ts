@@ -648,7 +648,9 @@ async function runAzureSetupService(
       respond: (status, body) => complete({ kind: "failed", status, body }),
       runAz: (args) => dependencies.external.runAz(args),
       runGitHubJson: (apiPath) =>
-        dependencies.external.runGitHubJson(apiPath, selectedExecutor),
+        read(() =>
+          dependencies.external.runGitHubJson(apiPath, selectedExecutor, active)
+        ),
       fail,
       stopBoundary,
       checkpoint

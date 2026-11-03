@@ -17,6 +17,7 @@ export default defineConfig({
       "src/server/services/azure-setup-recovery.test.ts",
       "src/server/services/configure-environment-orchestration.test.ts",
       "../core/src/setup-azure-{account,application,credentials,service-principal}.test.ts",
+      "../core/src/setup-azure.test.ts",
       "../core/src/setup-{environment*,github-preflight,workflow*,verification-*}.test.ts",
       "../adapter-shared/src/{ghcr-bootstrap,setup-workflow-content}.test.ts",
       "src/server/routes/setup-environment*.test.ts",
