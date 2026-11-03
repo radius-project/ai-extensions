@@ -352,15 +352,20 @@ let gracefulShutdownStarted = false;
 async function gracefulShutdown(signal: string): Promise<void> {
   if (gracefulShutdownStarted) return;
   gracefulShutdownStarted = true;
-  await radiusExtension.shutdown(signal);
-  // Give async close callbacks a tick, then exit cleanly.
-  setTimeout(() => process.exit(0), 50);
+  let exitCode = 1;
+  try {
+    exitCode = (await radiusExtension.shutdown(signal)).exitCode;
+  } catch (error) {
+    console.error(`[radius] shutdown failed: ${errorMessage(error)}`);
+  }
+  // Give async close callbacks a tick without claiming incomplete cleanup succeeded.
+  setTimeout(() => process.exit(exitCode), 50);
 }
 
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   try {
     process.on(sig, () => {
-      gracefulShutdown(sig);
+      void gracefulShutdown(sig);
     });
   } catch {
     /* signal may be unsupported on platform */

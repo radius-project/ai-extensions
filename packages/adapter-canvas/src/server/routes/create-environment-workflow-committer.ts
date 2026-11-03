@@ -49,6 +49,7 @@ export interface WorkflowFileCommitterPorts {
     sha: string
   ): Promise<{ ok: boolean; stderr: string; timedOut?: boolean }>;
   mutationRecovery?: {
+    isStopped(): boolean;
     operation: object & {
       operationId: string;
       providerRecovery?: { state?: string };
@@ -87,7 +88,8 @@ export function bindWorkflowFileCommitterPorts(
         {
           ...createSetupWorkflowRecoveryPort(
             ports.mutationRecovery.operation,
-            ports.mutationRecovery.persist
+            ports.mutationRecovery.persist,
+            ports.mutationRecovery.isStopped
           ),
           beforeMutation: ports.mutationRecovery.beforeMutation
         }
@@ -95,14 +97,19 @@ export function bindWorkflowFileCommitterPorts(
     contentDigest: workflowContentDigest,
     blobSha: workflowBlobSha,
     parseBranchTarget: parseBranchDeleteTarget,
-    proveBranchAbsent: (repo, branch) =>
+    proveBranchAbsent: (repo, branch, assertActive) =>
       proveBranchAbsent({
         repo,
         branch,
         ports: {
-          listBranchRefs: (page) =>
-            ports.runGh(branchRefListingArgs(repo, branch, page)),
-          readBranchRef: () => ports.runGh(branchRefReadArgs(repo, branch))
+          listBranchRefs: (page) => {
+            assertActive();
+            return ports.runGh(branchRefListingArgs(repo, branch, page));
+          },
+          readBranchRef: () => {
+            assertActive();
+            return ports.runGh(branchRefReadArgs(repo, branch));
+          }
         }
       }),
     report: ({ branch, base }) =>

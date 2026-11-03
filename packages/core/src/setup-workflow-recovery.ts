@@ -11,6 +11,7 @@ export interface SetupWorkflowMutation extends AzureMutationRecord {
 }
 
 export interface SetupWorkflowRecoveryPort {
+  assertActive(): void;
   readonly operationId: string;
   find(kind: string, target: string): SetupWorkflowMutation | null;
   byKind(kind: string): readonly SetupWorkflowMutation[];

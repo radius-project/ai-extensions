@@ -16,6 +16,7 @@ import type {
 } from "./setup-azure-continuation.js";
 import { resolveAzureAutoSetupApplication } from "./setup-azure-application.js";
 import { configureAzureAutoSetupCredentials } from "./setup-azure-credentials.js";
+import { isSetupExecutionInterrupted } from "./setup-recovery-error.js";
 
 export type AzureIdentityProgress =
   | { kind: "select-subscription"; subscriptionId: string }
@@ -125,7 +126,16 @@ export async function runAzureSetup(
       return { kind: "failed" };
     }
     ports.identityProgress({ kind: "check-login" });
-    const accountResult = await runAz(["account", "show", "--output", "json"]);
+    const accountResult = await runAz([
+      "account",
+      "show",
+      "--output",
+      "json"
+    ]).catch((error: unknown) => {
+      if (!isSetupExecutionInterrupted(error)) ports.application.assertActive();
+      throw error;
+    });
+    ports.application.assertActive();
     if (accountResult.code !== 0) {
       await ports.finalizeIdentityFailure({ kind: "not-logged-in" });
       return { kind: "failed" };
@@ -176,6 +186,7 @@ export async function runAzureSetup(
         runGitHubJson
       );
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       const code =
         typeof error === "object" && error !== null && "code" in error ?
           error.code

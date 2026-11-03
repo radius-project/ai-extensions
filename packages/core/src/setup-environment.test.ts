@@ -4,6 +4,74 @@ import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
 import { setupEnvironmentHarness } from "../test/support/setup-environment.js";
 
 describe("configureSetupEnvironment", () => {
+  it.each(["plan", "dispatch", "automatic"] as const)(
+    "does not map late %s success into setup publication after shutdown",
+    async (boundary) => {
+      const h = setupEnvironmentHarness();
+      let stopped = false;
+      h.ports.isExecutionStopped = () => stopped;
+      const plan = h.ports.planCredentialVerification;
+      h.ports.planCredentialVerification = async (input) => {
+        const result = await plan(input);
+        if (boundary === "plan") stopped = true;
+        return {
+          ...result,
+          trigger: boundary === "automatic" ? "push" : result.trigger
+        };
+      };
+      const dispatch = h.ports.runVerificationDispatch;
+      h.ports.runVerificationDispatch = async (input) => {
+        expect(input.ports.isStopped).toBe(h.ports.isExecutionStopped);
+        const result = await dispatch(input);
+        stopped = true;
+        return result;
+      };
+      h.ports.discoverAutomaticVerificationRun = async (input) => {
+        expect(input.isStopped).toBe(h.ports.isExecutionStopped);
+        stopped = true;
+        return {
+          state: "discovered",
+          runId: "10",
+          runUrl: "https://github.test/run/10"
+        };
+      };
+      await expect(
+        configureSetupEnvironment(h.input, h.ports)
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(h.failures).toEqual([]);
+      expect(h.events.some((event) => event.kind === "verification-run")).toBe(
+        false
+      );
+      expect(h.transcript).not.toContain("enter-verify");
+    }
+  );
+  it.each(["RADIUS_STATE_BACKEND", "AZURE_TENANT_ID"] as const)(
+    "stops between individual writes after shutdown during %s",
+    async (heldVariable) => {
+      const h = setupEnvironmentHarness();
+      let stopped = false;
+      h.ports.isExecutionStopped = () => stopped;
+      const bind = h.ports.bindEnvironment;
+      const written: string[] = [];
+      h.ports.bindEnvironment = (target) => ({
+        ...bind(target),
+        setEnvironmentVariable: async (name) => {
+          written.push(name);
+          if (name === heldVariable) {
+            stopped = true;
+            h.stop();
+          }
+          return true;
+        }
+      });
+      await expect(
+        configureSetupEnvironment(h.input, h.ports)
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(written.at(-1)).toBe(heldVariable);
+      expect(h.failures).toEqual([]);
+    }
+  );
+
   it.each(["azure", "aws"])(
     "configures %s without a panel, ignores optional false writes, and persists before projection",
     async (provider) => {

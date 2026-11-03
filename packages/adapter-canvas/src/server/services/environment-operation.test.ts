@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildGitHubTrustPolicy } from "@radius-project/core";
+import {
+  assertSetupExecutionActive,
+  buildGitHubTrustPolicy
+} from "@radius-project/core";
 import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import {
   addLegacyStep,
@@ -123,6 +126,7 @@ function dependencies(
       releaseAwsDeployIdentity: async () => {
         events.push("release-aws");
       },
+      isStopped: () => false,
       guardStopBoundary: async (_target, boundary) => {
         events.push(`stop:${boundary}`);
         return true;
@@ -467,6 +471,53 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.events).not.toContain("preflight-ghcr");
   });
 
+  it.each(["environment", "azure", "interruption"])(
+    "preserves unresolved evidence when %s rejects after shutdown",
+    async (boundary) => {
+      const op = operation();
+      let stopped = false;
+      if (boundary === "azure") {
+        setCanonicalEnvironment(op, "Production");
+        recordGitHubEnvironment(op, {
+          state: "reused",
+          origin: "pre_existing",
+          repo: op.repo,
+          name: "Production",
+          providerId: "environment-1"
+        });
+      }
+      prepareProviderMutation(op, {
+        kind:
+          boundary === "azure" ?
+            "azure_application.create"
+          : "github_environment.put",
+        target: "octo/app:production"
+      });
+      const original = structuredClone(unresolvedProviderMutations(op));
+      const fail = async (): Promise<never> => {
+        stopped = true;
+        if (boundary === "interruption")
+          assertSetupExecutionActive(() => stopped);
+        throw new Error("Late provider read failed");
+      };
+      const test = dependencies(op, {
+        isStopped: () => stopped,
+        ...(boundary === "azure" ?
+          { setupServices: stages(fail) }
+        : { readGitHubJson: fail })
+      });
+      await expect(
+        runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor(),
+          test.dependencies
+        )
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(unresolvedProviderMutations(op)).toEqual(original);
+      expect(test.failures).toEqual([]);
+      expect(test.events).not.toContain("persist-provider-mutation");
+    }
+  );
   it("bounds failures before an outstanding environment write can reconcile", async () => {
     const op = operation();
     const mutation = prepareProviderMutation(op, {

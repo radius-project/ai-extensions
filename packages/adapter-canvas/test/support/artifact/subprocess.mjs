@@ -104,6 +104,7 @@ await import(pathToFileURL(artifact).href);
 process.on("message", async (message) => {
   if (message?.type === "shutdown") {
     process.emit("SIGTERM");
+    process.emit("SIGINT");
     return;
   }
   if (message?.type !== "render-page") return;

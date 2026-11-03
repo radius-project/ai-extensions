@@ -7,7 +7,10 @@ import { describe, expect, it } from "vitest";
 import { createWorkflowFileCommitter } from "./setup-workflow-committer.js";
 import { setupEnvironmentHarness } from "../test/support/setup-environment.js";
 import type { SetupWorkflowCommandResult } from "./setup-workflow-contracts.js";
-import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import {
+  assertSetupExecutionActive,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 import type { RecoverableMutationResult } from "./setup-azure-recovery.js";
 
 const target = { targetRepo: "octo/app", envName: "dev" };
@@ -52,6 +55,65 @@ function recoveringBranchHarness() {
 }
 
 describe("workflow publication recovery decisions", () => {
+  it.each([
+    "before",
+    "preflight",
+    "default",
+    "base",
+    "empty-default",
+    "empty-base"
+  ] as const)(
+    "fences workflow reads and temporary files across shutdown at %s",
+    async (boundary) => {
+      const h = harness([{ code: 1, stderr: "HTTP 404" }]);
+      let stopped = boundary === "before";
+      const recovery = h.ports.mutationRecovery;
+      if (!recovery) throw new Error("Missing recovery fixture");
+      recovery.assertActive = () => assertSetupExecutionActive(() => stopped);
+      const read = h.ports.runGh;
+      h.ports.runGh = async (args) => {
+        const result = await read(args);
+        if (boundary === "preflight") stopped = true;
+        return result;
+      };
+      h.ports.runGhWorkflow = async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "protected branch"
+      });
+      h.ports.getDefaultBranch = async () => {
+        if (boundary === "default" || boundary === "empty-default")
+          stopped = true;
+        return boundary === "empty-default" ? null : "main";
+      };
+      h.ports.getBranchHeadSha = async () => {
+        stopped = true;
+        return boundary === "empty-base" ? null : "base";
+      };
+      // The simple fixture does not model engine admission; retain its normal
+      // mutation behavior but enforce the same required pre-request contract.
+      const execute = recovery.execute;
+      recovery.execute = async (input) => {
+        recovery.assertActive();
+        return execute(input);
+      };
+      await expect(
+        createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+          path,
+          "content",
+          "message"
+        )
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(h.calls).toHaveLength(boundary === "before" ? 0 : 1);
+      if (boundary === "before" || boundary === "preflight")
+        expect(
+          h.transcript.some(
+            (entry) => Array.isArray(entry) && entry[0] === "file"
+          )
+        ).toBe(false);
+    }
+  );
+
   it.each([
     ["not found", { code: 1, stderr: "HTTP 404" }, "absent"],
     ["denied", { code: 1, stderr: "HTTP 403" }, "HTTP 403"],
