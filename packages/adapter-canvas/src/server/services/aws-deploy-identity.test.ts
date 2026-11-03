@@ -1719,6 +1719,125 @@ describe("repairAwsEnvironmentTrust", () => {
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
 
+  it("refuses a role whose ARN has another path than AWS_ROLE_ARN", async () => {
+    const moved = `arn:aws:iam::${ACCOUNT}:role/new/${ROLE}`;
+    const role = managedRole([PROD]);
+    const aws = fakeAws({
+      ...ready,
+      "iam get-role": ok({ Role: { ...role.Role, Arn: moved } })
+    });
+
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
+      ok: false,
+      code: "aws-role-arn-mismatch",
+      message: `This environment's AWS_ROLE_ARN is ${ROLE_ARN}, but the IAM role named ${ROLE} is ${moved}, so deploys cannot sign in to it whatever it trusts. Nothing was changed. Set AWS_ROLE_ARN to the role's ARN.`
+    });
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  it("refuses a subject that does not name the repository, even on its own role", async () => {
+    const shared = "repository_owner:octo:environment:dev";
+    const aws = fakeAws({ ...ready, "iam get-role": ok(managedRole([PROD])) });
+
+    const result = await repairAwsEnvironmentTrust(
+      { ...repair, subjects: [shared] },
+      aws.ports
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-subject-not-repository-specific"
+    });
+    expect("message" in result && result.message).toContain(shared);
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  it("refuses to widen a subject the role names under conditions it cannot check", async () => {
+    const role = managedRole([PROD]);
+    role.Role.AssumeRolePolicyDocument.Statement.push({
+      Effect: "Allow",
+      Principal: {
+        Federated: `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`
+      },
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: {
+        StringEquals: {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": [DEV, DEV_ID]
+        },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      }
+    });
+    const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
+
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
+      ok: false,
+      code: "aws-role-trust-restricted",
+      message: `IAM role ${ROLE} still names ${DEV}, ${DEV_ID} in its trust policy, under conditions Radius cannot check, so Repair would widen access rather than restore it. Nothing was changed. Check those conditions in the role's trust policy.`
+    });
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  const ID_AFTER = "repository_owner_id:11:environment:dev:repository_id:22";
+  it.each([
+    [
+      "another repository, its ID after the environment",
+      ID_AFTER,
+      "repository_owner_id:11:environment:prod:repository_id:99",
+      false
+    ],
+    [
+      "this repository, its ID after the environment",
+      ID_AFTER,
+      "repository_owner_id:11:environment:prod:repository_id:22",
+      true
+    ],
+    [
+      "another repository, its ID before the environment",
+      DEV_ID,
+      "repository_owner_id:11:repository_id:99:environment:prod",
+      false
+    ],
+    [
+      "this repository with other claims",
+      DEV_ID,
+      "repository_owner_id:11:environment:prod:repository_id:22",
+      false
+    ]
+  ])(
+    "compares every claim of an untagged role's subjects: %s",
+    async (_label, subject, trusted, allowed) => {
+      const aws = fakeAws({
+        ...ready,
+        "iam get-role": ok(unmanagedRole([trusted]))
+      });
+      const result = await repairAwsEnvironmentTrust(
+        { ...repair, subjects: [subject] },
+        aws.ports
+      );
+      expect(result.ok).toBe(allowed);
+      expect(aws.find("iam update-assume-role-policy") !== undefined).toBe(
+        allowed
+      );
+    }
+  );
+
+  it("does not count a subject the role names but excludes with another condition", async () => {
+    const role = unmanagedRole([PROD]);
+    const statement = role.Role.AssumeRolePolicyDocument.Statement[0] as {
+      Condition: Record<string, unknown>;
+    };
+    statement.Condition.StringLike = {
+      "token.actions.githubusercontent.com:sub": "repo:octo/web:*"
+    };
+    const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
+
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
+      ok: false,
+      code: "aws-role-not-this-repository"
+    });
+  });
+
   it("does not count a subject without an environment as this repository's", async () => {
     const aws = fakeAws({
       ...ready,
@@ -1840,10 +1959,11 @@ describe("repairAwsEnvironmentTrust", () => {
     [fail("NoSuchEntity: no role"), "aws-role-missing"],
     [fail("Throttling"), "aws-role-unreadable"],
     [
-      ok({ Role: { AssumeRolePolicyDocument: "%7Bnot json" } }),
+      ok({ Role: { Arn: ROLE_ARN, AssumeRolePolicyDocument: "%7Bnot json" } }),
       "aws-role-trust-unreadable"
     ],
-    [ok({}), "aws-role-trust-unreadable"]
+    [ok({ Role: { Arn: ROLE_ARN } }), "aws-role-trust-unreadable"],
+    [ok({}), "aws-role-arn-mismatch"]
   ])("changes nothing when the role reads as %j", async (answer, code) => {
     const aws = fakeAws({ ...ready, "iam get-role": answer });
     expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({

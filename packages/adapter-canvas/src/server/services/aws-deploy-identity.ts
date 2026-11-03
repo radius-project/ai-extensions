@@ -17,12 +17,15 @@ import {
   createGitHubOidcProviderCommand,
   githubOidcProviderArn,
   isAwsCommercialRegion,
+  acceptedGitHubSubjects,
   isRadiusManagedRole,
   mergeGitHubTrustSubject,
   parseAwsRoleArn,
   parsePolicyDocument,
   radiusRoleRepository,
   removeGitHubTrustSubject,
+  sameRepositorySubjects,
+  subjectNamesRepository,
   trustedGitHubSubjects,
   type PolicyDocument
 } from "@radius-project/core";
@@ -916,17 +919,10 @@ export interface AwsTrustRepairRequest {
   subjects: readonly string[];
 }
 
-// The repository part of a subject, such as `repo:octo/shop` or
-// `repo:octo@7/shop@42`, or "" for a subject without an environment.
-function subjectRepository(subject: string): string {
-  const at = subject.indexOf(":environment:");
-  return at > 0 ? subject.slice(0, at) : "";
-}
-
 // Whether Repair may add this repository's subjects to the role. The role
 // named by a GitHub variable could be any role in the account, so Repair only
 // changes one that Radius tagged for this repository, or one that already
-// trusts another environment of it.
+// lets another environment of it sign in, with the same subject claims.
 function repairMayChangeRole(
   role: Record<string, unknown>,
   trust: PolicyDocument,
@@ -934,11 +930,8 @@ function repairMayChangeRole(
   request: AwsTrustRepairRequest
 ): boolean {
   if (isRadiusManagedRole(role, request.repo)) return true;
-  const repositories = request.subjects
-    .map(subjectRepository)
-    .filter((prefix) => prefix !== "");
-  return trustedGitHubSubjects(trust, accountId).some((subject) =>
-    repositories.includes(subjectRepository(subject))
+  return acceptedGitHubSubjects(trust, accountId).some((trusted) =>
+    request.subjects.some((subject) => sameRepositorySubjects(subject, trusted))
   );
 }
 
@@ -1048,6 +1041,17 @@ export async function repairAwsEnvironmentTrust(
   const roleRecord = parseJson(getRole.stdout);
   const role =
     isRecord(roleRecord) && isRecord(roleRecord.Role) ? roleRecord.Role : {};
+  // IAM finds a role by name alone, but a deploy signs in with the full ARN,
+  // path included. A different path means deploys name a role that does not
+  // exist, and trust added here would not help them.
+  const actualArn = typeof role.Arn === "string" ? role.Arn : "";
+  if (actualArn !== request.roleArn.trim()) {
+    return {
+      ok: false,
+      code: "aws-role-arn-mismatch",
+      message: `This environment's AWS_ROLE_ARN is ${request.roleArn.trim()}, but the IAM role named ${roleName} is ${actualArn || "(no ARN reported)"}, so deploys cannot sign in to it whatever it trusts. Nothing was changed. Set AWS_ROLE_ARN to the role's ARN.`
+    };
+  }
   let existing: PolicyDocument;
   try {
     existing = parsePolicyDocument(role.AssumeRolePolicyDocument);
@@ -1062,6 +1066,28 @@ export async function repairAwsEnvironmentTrust(
     (subject) => mergeGitHubTrustSubject(existing, accountId, subject).changed
   );
   if (added.length === 0) return { ok: true, roleName, added };
+  // A subject without the repository in it is one every repository with the
+  // same claims can present, so trusting it would let them sign in too.
+  const shared = added.filter((subject) => !subjectNamesRepository(subject));
+  if (shared.length > 0) {
+    return {
+      ok: false,
+      code: "aws-subject-not-repository-specific",
+      message: `GitHub's OIDC subject for this environment, ${shared.join(", ")}, does not name the repository, so trusting it would let other repositories' workflows sign in to IAM role ${roleName}. Nothing was changed. Customize the repository's OIDC subject to include the repository, or add the subject to the role's trust policy yourself if that is intended.`
+    };
+  }
+  // A subject the role still names, but only under conditions Radius cannot
+  // read, such as a source IP, was not removed. A new statement without those
+  // conditions would widen access.
+  const named = trustedGitHubSubjects(existing, accountId);
+  const restricted = added.filter((subject) => named.includes(subject));
+  if (restricted.length > 0) {
+    return {
+      ok: false,
+      code: "aws-role-trust-restricted",
+      message: `IAM role ${roleName} still names ${restricted.join(", ")} in its trust policy, under conditions Radius cannot check, so Repair would widen access rather than restore it. Nothing was changed. Check those conditions in the role's trust policy.`
+    };
+  }
   if (!repairMayChangeRole(role, existing, accountId, request)) {
     return {
       ok: false,
