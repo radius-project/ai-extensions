@@ -3303,6 +3303,34 @@ describe("operation commands", () => {
     expect(browser.clock.intervals).toBe(1);
   });
 
+  it("settles on the pause when it lands before the rejoined poller's first read", async () => {
+    const browser = setup();
+    serveOperation(browser, { state: "cancelled", terminalState: "cancelled" });
+
+    await pressCommand(browser, () => jsonResponse(op()));
+
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Environment setup cancelled."
+    );
+    expect(browser.clock.timeouts).toBe(0);
+  });
+
+  it("still ignores a different operation's terminal record after a command", async () => {
+    const browser = setup();
+    serveOperation(browser, {
+      operationId: "op-0",
+      state: "cancelled",
+      terminalState: "cancelled"
+    });
+
+    await pressCommand(browser, () => jsonResponse(op()));
+
+    expect(browser.els[PROGRESS_IDS.activity].textContent).not.toBe(
+      "Environment setup cancelled."
+    );
+    expect(browser.clock.timeouts).toBe(1);
+  });
+
   it("reports a terminal result instead of rejoining the poller", async () => {
     const browser = setup();
     const deps = createDeps();
@@ -6000,6 +6028,33 @@ describe("resumeProgress", () => {
 
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
     expect(browser.clock.intervals).toBe(1);
+  });
+
+  it("settles a rejoined operation that ends before its first poll", async () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    let reads = 0;
+    browser.net.handle(operationsUrl(), () => {
+      reads += 1;
+      return jsonResponse(
+        reads === 1 ?
+          op({ environment: "prod" })
+        : op({
+            environment: "prod",
+            state: "cancelled",
+            terminalState: "cancelled"
+          })
+      );
+    });
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(reads).toBe(2);
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Environment setup cancelled."
+    );
+    expect(browser.clock.timeouts).toBe(0);
   });
 
   it.each([

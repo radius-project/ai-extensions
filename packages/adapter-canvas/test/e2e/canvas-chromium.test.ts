@@ -4895,6 +4895,217 @@ test.describe("Radius Canvas in Chromium", () => {
     });
   }
 
+  // After Pause or a reload the panel starts a new poller. A pause can land
+  // before that poller's first read, so the first record it sees may already
+  // be the same operation, paused. The clock is paused so each poll runs only
+  // when the test allows it, which fixes that order.
+  test.describe("a pause that lands before the rejoined panel's first poll", () => {
+    const OPERATION_ID = "op_chromium_rejoined_pause";
+
+    async function setupRecords(): Promise<{
+      live: unknown;
+      stopping: unknown;
+      paused: unknown;
+      previousPaused: unknown;
+    }> {
+      const ops = await import("../../src/operations.js");
+      const create = (operationId: string) => {
+        const operation = ops.createOperation({
+          operationId,
+          provider: "azure",
+          repo: REPOSITORY,
+          environment: "fixture-environment",
+          stages: ops.buildStages({ includeIdentity: true }),
+          journey: { origin: "environments" }
+        });
+        operation.context = { githubLogin: "repo-user" };
+        ops.enterStage(operation, ops.STAGE_AUTHORIZE_IDENTITY);
+        return operation;
+      };
+      const pause = (operation: ReturnType<typeof create>) => {
+        ops.requestStop(operation);
+        ops.stopAtBoundary(operation, "after-app-registration", {
+          announce: false
+        });
+        return operation;
+      };
+      const live = create(OPERATION_ID);
+      const stopping = create(OPERATION_ID);
+      ops.requestStop(stopping);
+      return {
+        live: { operation: ops.toClientView(live) },
+        stopping: { operation: ops.toClientView(stopping) },
+        paused: { operation: ops.toClientView(pause(create(OPERATION_ID))) },
+        previousPaused: {
+          operation: ops.toClientView(pause(create("op_chromium_previous")))
+        }
+      };
+    }
+
+    // Serves the repository read in order: each entry answers one poll, and
+    // the last entry repeats. Pause answers with the stopping record, and every
+    // read after it answers with `afterPause`.
+    async function serveOperations(
+      page: Page,
+      reads: unknown[],
+      stopping: unknown,
+      afterPause: unknown = null
+    ): Promise<{ polls: () => number; queue: (record: unknown) => void }> {
+      const queued = [...reads];
+      let polls = 0;
+      await page.route("**/api/operations**", async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        if (
+          request.method() === "POST" &&
+          url.pathname === `/api/operations/${OPERATION_ID}/stop`
+        ) {
+          if (afterPause) queued.splice(0, queued.length, afterPause);
+          await route.fulfill({
+            status: 202,
+            contentType: "application/json",
+            body: JSON.stringify({
+              operationId: OPERATION_ID,
+              ...(stopping as object)
+            })
+          });
+          return;
+        }
+        // The status chip reads without a repository; the real server has
+        // no operation to report.
+        if (
+          request.method() === "GET" &&
+          url.pathname === "/api/operations" &&
+          !url.searchParams.has("repo")
+        ) {
+          await route.continue();
+          return;
+        }
+        if (
+          request.method() !== "GET" ||
+          url.pathname !== "/api/operations" ||
+          url.searchParams.get("repo") !== REPOSITORY
+        ) {
+          throw new Error(
+            `unexpected ${request.method()} ${url.pathname}${url.search}`
+          );
+        }
+        polls += 1;
+        const record = queued.length > 1 ? queued.shift() : queued[0];
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(record)
+        });
+      });
+      return {
+        polls: () => polls,
+        queue: (record) => {
+          queued.splice(0, queued.length, record);
+        }
+      };
+    }
+
+    async function expectSettledPause(page: Page, polls: () => number) {
+      const panel = page.locator("#env-progress-panel");
+      await expect(page.locator("#env-progress-title")).toHaveText(
+        "Environment setup paused"
+      );
+      await expect(panel).not.toHaveClass(/env-progress--active/);
+      const elapsed = await page.locator("#env-progress-elapsed").textContent();
+      const settledPolls = polls();
+      await page.clock.fastForward(10_000);
+      await expect(page.locator("#env-progress-elapsed")).toHaveText(
+        elapsed ?? ""
+      );
+      expect(polls()).toBe(settledPolls);
+    }
+
+    test("shows the pause when it lands before the first poll after Pause, by keyboard", async ({
+      page,
+      canvas
+    }) => {
+      const records = await setupRecords();
+      await page.clock.install();
+      const operations = await serveOperations(
+        page,
+        [records.live],
+        records.stopping,
+        records.paused
+      );
+      await gotoCanvas(page, canvas, "environment");
+      const pause = page.getByRole("button", { name: "Pause setup" });
+      await expect(pause).toBeVisible();
+      await page.clock.pauseAt(
+        (await page.evaluate<number>("Date.now()")) + 1_000
+      );
+      const pollsBeforePause = operations.polls();
+
+      await pause.focus();
+      await page.keyboard.press("Enter");
+
+      await expect.poll(operations.polls).toBe(pollsBeforePause + 1);
+      await expectSettledPause(page, operations.polls);
+      // Axe schedules its own timers, so it runs on a moving clock.
+      await page.clock.resume();
+      await expectNoWcagViolations(page);
+    });
+
+    test("shows the pause when it lands before the first poll after a reload", async ({
+      page,
+      canvas
+    }) => {
+      const records = await setupRecords();
+      await page.clock.install();
+      await page.clock.pauseAt(Date.now() + 1_000);
+      const operations = await serveOperations(
+        page,
+        [records.live, records.paused],
+        records.stopping
+      );
+
+      await gotoCanvas(page, canvas, "environment");
+
+      await expect.poll(operations.polls).toBe(2);
+      await expectSettledPause(page, operations.polls);
+    });
+
+    test("keeps polling past another operation's paused record after Pause", async ({
+      page,
+      canvas
+    }) => {
+      const records = await setupRecords();
+      await page.clock.install();
+      const operations = await serveOperations(
+        page,
+        [records.live],
+        records.stopping,
+        records.previousPaused
+      );
+      await gotoCanvas(page, canvas, "environment");
+      const pause = page.getByRole("button", { name: "Pause setup" });
+      await expect(pause).toBeVisible();
+      await page.clock.pauseAt(
+        (await page.evaluate<number>("Date.now()")) + 1_000
+      );
+      const pollsBeforePause = operations.polls();
+
+      await pause.focus();
+      await page.keyboard.press("Enter");
+
+      // A previous setup's record is not this run's end.
+      await expect.poll(operations.polls).toBe(pollsBeforePause + 1);
+      await expect(page.locator("#env-progress-title")).toHaveText(
+        "Pausing fixture-environment setup after the current step…"
+      );
+
+      operations.queue(records.paused);
+      await page.clock.fastForward(1_500);
+      await expect.poll(operations.polls).toBe(pollsBeforePause + 2);
+      await expectSettledPause(page, operations.polls);
+    });
+  });
+
   test("pauses an interrupted setup before offering exact-run cancellation and deletion by keyboard @safety", async ({
     page,
     canvas

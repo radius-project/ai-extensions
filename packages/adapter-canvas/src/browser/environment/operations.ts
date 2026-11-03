@@ -517,7 +517,9 @@ export interface EnvironmentOperationsController {
   trackProgress(
     environment: string,
     provider: string,
-    onTerminal?: (op: OperationRecord) => void
+    onTerminal?: (op: OperationRecord) => void,
+    // The operation the panel already shows, when it rejoins one.
+    knownOperationId?: string
   ): void;
   resumeProgress(): void;
   applyTerminal(op: OperationRecord): void;
@@ -2132,7 +2134,12 @@ export function initializeEnvironmentOperations(
           return;
         }
         if (repo !== "") {
-          trackProgress(op.environment, op.provider, applyOperationTerminal);
+          trackProgress(
+            op.environment,
+            op.provider,
+            applyOperationTerminal,
+            op.operationId
+          );
           return;
         }
         pollOperation(op.operationId);
@@ -2573,7 +2580,8 @@ export function initializeEnvironmentOperations(
   function trackProgress(
     environment: string,
     provider: string,
-    onTerminal: (op: OperationRecord) => void = applyTerminal
+    onTerminal: (op: OperationRecord) => void = applyTerminal,
+    knownOperationId = ""
   ): void {
     stopProgress();
     session += 1;
@@ -2866,10 +2874,13 @@ export function initializeEnvironmentOperations(
           // The registry retains the latest terminal operation for this
           // repository. During the short gap before a new POST registers,
           // that record belongs to the previous environment and must not
-          // replace the optimistic panel for the setup just requested.
+          // replace the optimistic panel for the setup just requested. A
+          // rejoined operation has no such gap: it may end before this first
+          // poll, as a pause right after Continue does, and that end is its own.
           if (
             !observedOperation &&
             op &&
+            op.operationId !== knownOperationId &&
             (op.environment !== environment || op.terminalState !== null)
           ) {
             scheduleTick(POLL_RETRY_MS);
@@ -2973,7 +2984,12 @@ export function initializeEnvironmentOperations(
         // still offers the same actions.
         renderProgress(op);
         if (op.terminalState !== null) return;
-        trackProgress(op.environment, op.provider, applyOperationTerminal);
+        trackProgress(
+          op.environment,
+          op.provider,
+          applyOperationTerminal,
+          op.operationId
+        );
       })
       .catch(() => {
         /* nothing to resume */
