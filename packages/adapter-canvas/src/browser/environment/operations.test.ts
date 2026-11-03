@@ -3029,6 +3029,31 @@ describe("operation commands", () => {
     expect(bottomButtons(browser)).toHaveLength(0);
   });
 
+  it("shows Remove lock on a deletion that waits for an AWS lock", () => {
+    const browser = setup();
+    renderActions(
+      browser,
+      [
+        STOP_ACTION,
+        {
+          id: "remove-aws-lock",
+          kind: "remove_aws_lock",
+          label: "Remove lock",
+          description: "Remove it only after you confirm that run has stopped.",
+          path: "/api/operations/op-1/aws-lock/remove",
+          pending: false,
+          tone: "danger",
+          requiresConfirmation: true
+        }
+      ],
+      { kind: "delete" }
+    );
+
+    expect(buttons(browser).map((button) => button.textContent)).toEqual([
+      "Remove lock"
+    ]);
+  });
+
   it("renders deletion-specific failure details", () => {
     const browser = setup();
     renderActions(
@@ -3464,6 +3489,16 @@ describe("operation commands", () => {
       "Retrying deletion…"
     ],
     [
+      "a lock removal",
+      {
+        id: "remove-aws-lock",
+        kind: "remove_aws_lock",
+        label: "Remove lock",
+        path: "/api/operations/op-1/aws-lock/remove"
+      },
+      "Removing the lock…"
+    ],
+    [
       "an unknown command with the general acceptance sentence",
       {
         id: "unknown",
@@ -3485,6 +3520,103 @@ describe("operation commands", () => {
     );
     pending.resolve(jsonResponse({ operation: null }));
     await flushPromises();
+  });
+
+  const REMOVE_LOCK_ACTION = {
+    id: "remove-aws-lock",
+    kind: "remove_aws_lock",
+    label: "Remove lock",
+    path: "/api/operations/op-1/aws-lock/remove"
+  };
+
+  it.each([
+    ["aws-lock-removed", "Lock removed. This run continues."],
+    [
+      "aws-lock-already-removed",
+      "The lock was already gone. This run continues."
+    ]
+  ])(
+    "replaces the removing status once the server answers %s",
+    async (code, status) => {
+      const browser = setup();
+
+      await pressCommand(
+        browser,
+        () =>
+          jsonResponse({
+            code,
+            ...op({ state: "running", terminalState: null })
+          }),
+        { action: REMOVE_LOCK_ACTION }
+      );
+
+      expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(status);
+      expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+    }
+  );
+
+  it("reports a lock that stopped blocking the run as a status, not an error", async () => {
+    const browser = setup();
+
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse(
+          {
+            error:
+              "This run is not waiting for a lock that has been held long enough to remove.",
+            code: "aws-lock-not-removable",
+            ...op({ state: "running", terminalState: null })
+          },
+          false,
+          409
+        ),
+      { action: REMOVE_LOCK_ACTION }
+    );
+
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
+      "The lock is no longer blocking this run, so nothing was removed."
+    );
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+  });
+
+  it("reports a lock that stopped blocking the run even without an operation in the answer", async () => {
+    const browser = setup();
+
+    await pressCommand(
+      browser,
+      () => jsonResponse({ code: "aws-lock-not-removable" }, false, 409),
+      { action: REMOVE_LOCK_ACTION }
+    );
+
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
+      "The lock is no longer blocking this run, so nothing was removed."
+    );
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+  });
+
+  it("still reports any other Remove lock refusal as an error", async () => {
+    const browser = setup();
+
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse(
+          {
+            error:
+              "The lock changed since it was shown: another run now holds a new one. Nothing was removed.",
+            code: "aws-lock-changed"
+          },
+          false,
+          409
+        ),
+      { action: REMOVE_LOCK_ACTION }
+    );
+
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe("");
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "The lock changed since it was shown: another run now holds a new one. Nothing was removed."
+    );
   });
 
   it("clears the stale failure and refreshes environments when deletion retry starts", async () => {

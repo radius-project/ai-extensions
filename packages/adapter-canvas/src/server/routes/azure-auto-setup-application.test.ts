@@ -117,6 +117,7 @@ function harness(
       throw new Error(`unscripted az call: ${args.join(" ")}`);
     });
   const workflow: AzureAutoSetupWorkflow = {
+    isStopped: () => false,
     operation,
     steps: [],
     respond: (status, payload) => responses.push({ status, payload }),
@@ -165,6 +166,33 @@ function harness(
 }
 
 describe("Azure auto-setup App Registration service (SU-08)", () => {
+  it.each([undefined, SERVICE_PRINCIPAL])(
+    "stops caller backoff at the shared Azure invocation boundary (%j)",
+    async (identity) => {
+      let stopped = false;
+      const runAz = vi.fn(async (args: string[]) =>
+        args.slice(0, 3).join(" ") === "ad app list" ?
+          command({ stdout: "[]" })
+        : command({ code: 1, stderr: "HTTP 503 Service Unavailable" })
+      );
+      const test = harness({
+        identity,
+        runAz,
+        sleep: async () => {
+          stopped = true;
+        }
+      });
+      test.input.workflow.isStopped = () => stopped;
+      await expect(
+        resolveAzureAutoSetupApplication(test.input)
+      ).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(runAz).toHaveBeenCalledTimes(2);
+      expect(test.recorded).toEqual([]);
+      expect(test.failures).toEqual([]);
+    }
+  );
   it("reads current halt disposition and environment through the bound operation", () => {
     const test = harness();
     const { workflow, dependencies } = test.input;

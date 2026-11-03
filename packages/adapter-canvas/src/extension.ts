@@ -34,7 +34,14 @@ import {
 } from "@radius-project/adapter-shared";
 import { createRadiusCliVersionReader } from "./radius-cli-version.js";
 import { readAwsSwitch } from "./aws-switch.js";
-import { github, fetchFileFromRepo, getBranchHeadSha } from "./gh.js";
+import {
+  github,
+  fetchFileFromRepo,
+  getBranchHeadSha,
+  getGitHubIdentity,
+  resetGhIdentityCache,
+  redactGhCredentials
+} from "./gh.js";
 import {
   defaultBranchForState,
   detectWorkspaceContext,
@@ -107,6 +114,10 @@ import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
+import { githubAccountChoice } from "./runtime/github-account-choice.js";
+import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
+import { createGitHubAccountReadinessService } from "./server/services/github-account-readiness.js";
+import { createEnvironmentTools } from "./runtime/environment-tools.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -118,18 +129,58 @@ const execFileAsync = promisify(execFile);
 const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
-const { servers, getOrCreateServer, stopServer, getLastWebviewActivityAt } =
-  createProductionCanvasServerRuntime({
-    executionOwner,
-    accountContext,
-    awsEnabled: readAwsSwitch(process.env)
-  });
-
 const ghCommandPresentation = resolveGhCommandPresentation();
+const deploymentAccount = createDeploymentAccountResolver({
+  readinessOwner: executionOwner,
+  logDiagnostic: (message) => console.error("[radius readiness]", message),
+  readIdentity: async () => {
+    resetGhIdentityCache();
+    return getGitHubIdentity();
+  },
+  readiness: createGitHubAccountReadinessService(accountContext.coordinator, {
+    ownerKey: accountContext.ownerKey,
+    ghCommandPresentation
+  }),
+  createExecutor: (login) =>
+    accountContext.coordinator.createReadOnlyExecutor(login),
+  get choose() {
+    return githubAccountChoice(sessionHolder.tryGet());
+  },
+  redactDiagnostic: redactGhCredentials
+});
+const {
+  servers,
+  getOrCreateServer,
+  stopServer,
+  getLastWebviewActivityAt,
+  environmentServices
+} = createProductionCanvasServerRuntime({
+  executionOwner,
+  accountContext,
+  awsEnabled: readAwsSwitch(process.env)
+});
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
   session: sessionHolder,
   executionOwner,
+  environment: createEnvironmentTools({
+    ...environmentServices,
+    owner: executionOwner,
+    session: sessionHolder,
+    account: deploymentAccount,
+    workspace: () => detectWorkspaceContext(sessionHolder.get()),
+    validateBranch: async (branch) => {
+      await execFileAsync("git", ["check-ref-format", "--branch", branch], {
+        timeout: 10000
+      });
+    },
+    redact: redactGhCredentials,
+    reportError: (error) =>
+      console.error(
+        "[radius environment]",
+        redactGhCredentials(errorMessage(error))
+      )
+  }),
   clock: {
     now: () => Date.now(),
     wait: (ms) =>
@@ -352,15 +403,20 @@ let gracefulShutdownStarted = false;
 async function gracefulShutdown(signal: string): Promise<void> {
   if (gracefulShutdownStarted) return;
   gracefulShutdownStarted = true;
-  await radiusExtension.shutdown(signal);
-  // Give async close callbacks a tick, then exit cleanly.
-  setTimeout(() => process.exit(0), 50);
+  let exitCode = 1;
+  try {
+    exitCode = (await radiusExtension.shutdown(signal)).exitCode;
+  } catch (error) {
+    console.error(`[radius] shutdown failed: ${errorMessage(error)}`);
+  }
+  // Give async close callbacks a tick without claiming incomplete cleanup succeeded.
+  setTimeout(() => process.exit(exitCode), 50);
 }
 
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   try {
     process.on(sig, () => {
-      gracefulShutdown(sig);
+      void gracefulShutdown(sig);
     });
   } catch {
     /* signal may be unsupported on platform */

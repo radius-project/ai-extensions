@@ -9,6 +9,7 @@ import type {
 } from "../../src/setup-azure-continuation.js";
 import { AZURE_SERVICE_MANAGEMENT_REFERENCE_PROMPT } from "../../src/setup-azure-continuation.js";
 import type { ProviderMutationCommandResult } from "../../src/setup-azure-recovery.js";
+import { assertSetupExecutionActive } from "../../src/setup-recovery-error.js";
 
 export const subscriptionId = "11111111-1111-1111-1111-111111111111";
 export const tenantId = "22222222-2222-2222-2222-222222222222";
@@ -106,6 +107,7 @@ export function azurePorts(runAz: AzureApplicationPorts["runAz"]) {
       events.push(event);
     },
     recovery: {
+      assertActive: () => {},
       find: () => null,
       willWrite: () => true,
       unresolved: () => [],
@@ -116,6 +118,7 @@ export function azurePorts(runAz: AzureApplicationPorts["runAz"]) {
   };
   const application: AzureApplicationPorts = {
     ...base,
+    assertActive: () => assertSetupExecutionActive(() => false),
     runGitHubJson: async (path) => {
       events.push(["github", path]);
       if (path === "/repos/owner/repo")

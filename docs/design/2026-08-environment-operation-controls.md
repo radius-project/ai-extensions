@@ -492,20 +492,21 @@ Rollback and Exit invalidate the repository-scoped environment-list cache before
 
 These routes are loopback Canvas APIs. Mutation routes require `X-Radius-Mutation-Nonce`. The retry handler is registered as one template route, `/api/operations/{operationId}/retry/{retryKind}`, where `retryKind` is `setup`, `verification`, or `cleanup`. The workflow-cancellation route is proposed by PR #599, and the diagnostic route is proposed by PR #580.
 
-| Method | Path                                              | Purpose                                                             |
-|--------|---------------------------------------------------|---------------------------------------------------------------------|
-| `POST` | `/api/operations`                                 | Start and persist a server-owned environment operation.             |
-| `GET`  | `/api/operations?repo={repo}`                     | Read the current operation for a repository.                        |
-| `GET`  | `/api/operations/{operationId}`                   | Read one operation.                                                 |
-| `POST` | `/api/operations/{operationId}/stop`              | Persist a cooperative Stop request.                                 |
-| `POST` | `/api/operations/{operationId}/continue`          | Continue an intentionally stopped setup.                            |
-| `POST` | `/api/operations/{operationId}/resume/{code}`     | Supply input for a persisted prompt.                                |
-| `POST` | `/api/operations/{operationId}/abandon`           | Legacy input-required cancellation; current browser flows use Stop. |
-| `POST` | `/api/operations/{operationId}/retry/{retryKind}` | Retry setup, verification, or cleanup.                              |
-| `POST` | `/api/operations/{operationId}/cancel-workflow`   | Cancel or recheck the exact saved verification run after Stop.      |
-| `POST` | `/api/operations/{operationId}/rollback`          | Start proven-owned cleanup.                                         |
-| `POST` | `/api/operations/{operationId}/exit`              | Close incomplete setup and clean disposable owned artifacts.        |
-| `GET`  | `/api/operations/{operationId}/diagnostics`       | Download the local allowlisted diagnostic attachment.               |
+| Method | Path                                              | Purpose                                                                                            |
+|--------|---------------------------------------------------|----------------------------------------------------------------------------------------------------|
+| `POST` | `/api/operations`                                 | Start and persist a server-owned environment operation.                                            |
+| `GET`  | `/api/operations?repo={repo}`                     | Read the current operation for a repository.                                                       |
+| `GET`  | `/api/operations/{operationId}`                   | Read one operation.                                                                                |
+| `POST` | `/api/operations/{operationId}/stop`              | Persist a cooperative Stop request.                                                                |
+| `POST` | `/api/operations/{operationId}/continue`          | Continue an intentionally stopped setup.                                                           |
+| `POST` | `/api/operations/{operationId}/resume/{code}`     | Supply input for a persisted prompt.                                                               |
+| `POST` | `/api/operations/{operationId}/abandon`           | Legacy input-required cancellation; current browser flows use Stop.                                |
+| `POST` | `/api/operations/{operationId}/retry/{retryKind}` | Retry setup, verification, or cleanup.                                                             |
+| `POST` | `/api/operations/{operationId}/cancel-workflow`   | Cancel or recheck the exact saved verification run after Stop.                                     |
+| `POST` | `/api/operations/{operationId}/rollback`          | Start proven-owned cleanup.                                                                        |
+| `POST` | `/api/operations/{operationId}/exit`              | Close incomplete setup and clean disposable owned artifacts.                                       |
+| `POST` | `/api/operations/{operationId}/aws-lock/remove`   | Remove the AWS deploy identity lock a live run waits for, once the lock is 10 or more minutes old. |
+| `GET`  | `/api/operations/{operationId}/diagnostics`       | Download the local allowlisted diagnostic attachment.                                              |
 
 Example accepted command response:
 
@@ -535,7 +536,7 @@ N/A. The controls govern Canvas orchestration and external adapter mutations. No
 - [`src/operations.ts`](../../packages/adapter-canvas/src/operations.ts) owns the operation schema, commands, attempts, lifecycle rules, provider-recovery state, artifact provenance, rollback selection, action projection, persistence normalization, restart reconciliation, and session-scoped repository admission. PR #544 advances the schema from version 5 to version 6.
 - [`src/operation-store.ts`](../../packages/adapter-canvas/src/operation-store.ts) persists operation envelopes.
 - [`src/server/routes/operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts) owns Stop, Continue, Rollback, Exit, Retry, and PR #599's exact-run cancellation route.
-- [`src/server/routes/create-environment.ts`](../../packages/adapter-canvas/src/server/routes/create-environment.ts) orchestrates GitHub setup, provider journals, provenance checkpoints, reconciliation routing, and safe boundaries.
+- [`src/server/services/configure-environment.ts`](../../packages/adapter-canvas/src/server/services/configure-environment.ts) orchestrates GitHub setup, provider journals, provenance checkpoints, reconciliation routing, and safe boundaries.
 - [`src/server/routes/azure-auto-setup-application.ts`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-application.ts) and [`azure-auto-setup-credentials.ts`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-credentials.ts) record identity origin and stop between Azure mutations.
 - [`src/server/routes/create-environment-workflow-committer.ts`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-committer.ts) records commit and previous-path provenance.
 - [`src/server/routes/operations-status.ts`](../../packages/adapter-canvas/src/server/routes/operations-status.ts) owns operation reads, creation, prompt resume, legacy prompt abandonment, and PR #580's stable-state diagnostic preview and download route.

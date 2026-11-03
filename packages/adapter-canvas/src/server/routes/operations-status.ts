@@ -1,13 +1,15 @@
 import type { CanvasRequestContext } from "../request-context.js";
+import type { EnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import {
-  KUBERNETES_NAMESPACE_ERROR,
-  isAwsAccountId,
-  isAwsRegion,
-  isAwsRoleName,
-  parseAwsRoleArn
+  type SetupResumeInput,
+  type SetupResumeRequest
 } from "@radius-project/core";
+import {
+  createOperationResumeService,
+  type OperationResumeService
+} from "../services/operation-resume.js";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
-import { setupStartConflictResponse } from "./operation-start-conflict.js";
+import { createSetupStartService } from "../services/setup-start.js";
 import {
   createOperationDiagnosticContext,
   createOperationDiagnosticExport,
@@ -38,22 +40,7 @@ export interface OperationsStatusDependencies {
   now(): number;
 }
 
-interface OperationRequest {
-  azure: {
-    serviceManagementReference?: unknown;
-    appId?: unknown;
-    createNew?: unknown;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-}
-
-function isOperationRequest(value: unknown): value is OperationRequest {
-  if (typeof value !== "object" || value === null || !("azure" in value)) {
-    return false;
-  }
-  return typeof value.azure === "object" && value.azure !== null;
-}
+type OperationRequest = SetupResumeRequest;
 
 // The record `createOperation` returns and every seam that touches it. Typed as
 // broadly as `operations.ts` types it (that module is all `any`), so the route
@@ -128,7 +115,7 @@ export interface CreateOperationDependencies {
   // instance, or a map out of sync). The handler repairs that case rather than
   // leaving an accepted operation durably `running` with no work behind it.
   scheduleEnvironmentOperation(
-    instanceId: string,
+    instanceId: string | undefined,
     op: OperationRecord
   ): boolean;
   errorMessage(error: unknown): string;
@@ -147,6 +134,7 @@ export interface OperationActionRecord extends OperationRecord {
 }
 
 export interface OperationActionDependencies {
+  claimAdmission: EnvironmentExecutionOwner["claimAdmission"];
   getOperation(operationId: string): OperationActionRecord | null | undefined;
   canResumeInput(
     operation: OperationActionRecord,
@@ -171,7 +159,7 @@ export interface OperationActionDependencies {
   persistOperations(): Promise<void>;
   toClientView(operation: OperationActionRecord): unknown;
   scheduleEnvironmentOperation(
-    instanceId: string,
+    instanceId: string | undefined,
     operation: OperationActionRecord
   ): boolean;
   errorMessage(error: unknown): string;
@@ -213,38 +201,6 @@ export const RESUME_OPERATION_ROUTE =
   "/api/operations/:operationId/resume/:code";
 export const ABANDON_OPERATION_ROUTE = "/api/operations/:operationId/abandon";
 export const DISMISS_OPERATION_ROUTE = "/api/operations/:operationId/dismiss";
-
-interface ResumeOperationBody extends Record<string, unknown> {
-  checkpoint?: string;
-  repo?: string;
-  environment?: string;
-  provider?: string;
-}
-
-async function finishSchedulingFailure(
-  operation: OperationRecord,
-  instanceId: string,
-  finishOperation: (failure: Record<string, unknown>) => void,
-  persistOperations: () => Promise<void>,
-  errorMessage: (error: unknown) => string
-): Promise<void> {
-  finishOperation({
-    code: "operation-scheduling-failed",
-    stage: operation.currentStage,
-    stepSeq: null,
-    message:
-      "Radius accepted the environment operation but could not start any setup work for it.",
-    classification: "unknown",
-    evidence: `No server-owned task runner was available for instance ${instanceId}.`
-  });
-  try {
-    await persistOperations();
-  } catch (error) {
-    // The in-memory record is already terminal, so polling still reflects the
-    // failure when this best-effort durable repair cannot be written.
-    errorMessage(error);
-  }
-}
 
 // Operation status. The panel polls this instead of waiting on the POST,
 // which is what lets it stop blocking: the record outlives the request
@@ -423,14 +379,6 @@ function jsonError(
   context.response.end(JSON.stringify(payload));
 }
 
-function sendStartConflict(
-  context: CanvasRequestContext,
-  repo: string,
-  started: OperationStartConflict
-): void {
-  jsonError(context, 409, setupStartConflictResponse(repo, started));
-}
-
 // Register a new environment-setup operation and hand back a status URL the
 // panel polls. The request returns 202 the moment the record is durably
 // registered; the actual setup runs as a server-owned background task so the
@@ -461,276 +409,25 @@ export async function handleCreateOperation(
     });
     return;
   }
-  const repo = String(data.repo || "");
-  const environment = String(data.environment || data.name || "dev").trim();
-  const provider = data.provider === "aws" ? "aws" : "azure";
-  if (!dependencies.isValidRepoSlug(repo)) {
-    jsonError(context, 400, {
-      error: `Invalid repository "${repo}". Expected "owner/repo".`,
-      code: "invalid-repo"
-    });
-    return;
-  }
-  if (!environment.trim()) {
-    jsonError(context, 400, {
-      error: "Environment name is required.",
-      code: "environment-required"
-    });
-    return;
-  }
-  if (provider === "aws" && !dependencies.awsEnabled) {
-    jsonError(context, 400, {
-      error: `Creating AWS environments isn't supported yet. "${environment}" was not created.`,
-      code: "provider-unsupported"
-    });
-    return;
-  }
-  const namespace =
-    (
-      data.namespace === undefined ||
-      data.namespace === null ||
-      data.namespace === ""
-    ) ?
-      "default"
-    : data.namespace;
-  if (
-    typeof namespace !== "string" ||
-    !dependencies.isKubernetesNamespace(namespace)
-  ) {
-    jsonError(context, 400, {
-      error: KUBERNETES_NAMESPACE_ERROR,
-      code: "invalid-kubernetes-namespace"
-    });
-    return;
-  }
-  if (provider === "azure") {
-    if (
-      !dependencies.isResourceGroupName(String(data.resourceGroup || "")) ||
-      !dependencies.isAksClusterName(String(data.cluster || "")) ||
-      !dependencies.isUuid(String(data.tenantId || "")) ||
-      !dependencies.isUuid(String(data.subscriptionId || ""))
-    ) {
-      jsonError(context, 400, {
-        error:
-          "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
-        code: "invalid-azure-operation-input"
-      });
-      return;
-    }
-    // The cluster's resource group is optional, because the wizard cannot
-    // always resolve which resource group a cluster lives in, and an
-    // unrecorded one is already handled by the namespace check failing closed.
-    // A value that is present must still be a resource group name, since it is
-    // written to a GitHub environment variable. Reported on its own rather than
-    // folded into the message above, which names four other fields and would
-    // misdiagnose this one. Same rule and code as azure-auto-setup.
-    const clusterResourceGroup = String(data.clusterResourceGroup || "");
-    if (
-      clusterResourceGroup !== "" &&
-      !dependencies.isResourceGroupName(clusterResourceGroup)
-    ) {
-      jsonError(context, 400, {
-        error: `Invalid cluster resource group name "${clusterResourceGroup}".`,
-        code: "invalid-cluster-resource-group"
-      });
-      return;
-    }
-  } else if (
-    !isAwsAccountId(String(data.accountId || "")) ||
-    !isAwsRegion(String(data.region || "")) ||
-    !String(data.cluster || "").trim() ||
-    !String(data.vpcId || "").trim() ||
-    !String(data.subnetIds || "").trim() ||
-    (!isAwsRoleName(String(data.roleName || "")) &&
-      parseAwsRoleArn(String(data.existingRoleArn || "")) === null)
-  ) {
-    jsonError(context, 400, {
-      error:
-        "AWS setup requires a valid accountId, region, cluster, vpcId, subnetIds, and either an IAM role name or an existing role ARN.",
-      code: "invalid-aws-operation-input"
-    });
-    return;
-  }
-  const startConflict = dependencies.startConflict(repo);
-  if (startConflict) {
-    sendStartConflict(context, repo, startConflict);
-    return;
-  }
-  const selection = dependencies.claimSelectionHandle({
+  await createSetupStartService(dependencies)({
+    data,
     instanceId: context.instanceId,
-    repo,
-    environment,
-    handle: String(data.selectionHandle || "")
-  });
-  if (!selection.ok) {
-    jsonError(context, 409, {
-      error:
-        "The selected GitHub account is no longer ready. Re-check the account and try again.",
-      code: `github-selection-${selection.error}`
-    });
-    return;
-  }
-  let selectionCommitted = false;
-  try {
-    const needsAzureCredentials =
-      provider === "azure" && !String(data.clientId || "").trim();
-    const op = dependencies.createOperation({
-      provider,
-      repo,
-      environment,
-      stages: dependencies.buildStages({
-        includeIdentity: needsAzureCredentials || provider === "aws"
+    claimAccount: ({ repo, environment }) =>
+      dependencies.claimSelectionHandle({
+        instanceId: context.instanceId,
+        repo,
+        environment,
+        handle: String(data.selectionHandle || "")
       }),
-      journey: {
-        origin: data.origin || null,
-        resumeTarget: data.resumeTarget || null,
-        resumeBranch: data.resumeBranch || data.branch || null,
-        resumeReason: data.resumeReason || null
-      }
-    });
-    op.context = {
-      githubLogin: selection.login,
-      githubCredentialSource: selection.credentialSource
-    };
-    const environmentRequest = {
-      repo,
-      environment,
-      provider,
-      cluster: data.cluster || "",
-      namespace,
-      profileName: data.profileName || "",
-      branch: data.branch || "",
-      clientId: data.clientId || "",
-      tenantId: data.tenantId || "",
-      subscriptionId: data.subscriptionId || "",
-      resourceGroup: data.resourceGroup || "",
-      clusterResourceGroup: data.clusterResourceGroup || "",
-      appName: data.appName,
-      appId: data.appId || "",
-      createNew: data.createNew === true,
-      serviceManagementReference: data.serviceManagementReference || "",
-      roleName: data.roleName || "",
-      existingRoleArn: data.existingRoleArn || "",
-      accountId: data.accountId || "",
-      region: data.region || "",
-      vpcId: data.vpcId || "",
-      subnetIds: data.subnetIds || "",
-      origin: data.origin || null,
-      resumeTarget: data.resumeTarget || null,
-      resumeBranch: data.resumeBranch || null,
-      resumeReason: data.resumeReason || null,
-      githubLogin: selection.login
-    };
-    op.request = {
-      needsAzureCredentials,
-      github: {
-        login: selection.login,
-        credentialSource: selection.credentialSource
-      },
-      azure: {
-        resourceGroup: data.resourceGroup || "",
-        cluster: data.cluster || "",
-        clusterResourceGroup: data.clusterResourceGroup || "",
-        subscriptionId: data.subscriptionId || "",
-        tenantId: data.tenantId || "",
-        appName: data.appName,
-        appId: data.appId || "",
-        createNew: data.createNew === true,
-        serviceManagementReference: data.serviceManagementReference || ""
-      },
-      environment: environmentRequest
-    };
-    if (provider === "azure") {
-      op.resumeRequest = {
-        needsAzureCredentials,
-        github: {
-          login: selection.login,
-          credentialSource: selection.credentialSource
-        },
-        azure: structuredClone((op.request as { azure: unknown }).azure),
-        environment: {
-          repo,
-          environment,
-          provider,
-          cluster: data.cluster || "",
-          namespace,
-          profileName: data.profileName || "",
-          branch: data.branch || "",
-          tenantId: data.tenantId || "",
-          subscriptionId: data.subscriptionId || "",
-          resourceGroup: data.resourceGroup || "",
-          // Carried like every other identifying value, so a resumed setup
-          // writes the same cluster resource group the original request did
-          // rather than leaving the environment unable to say which cluster
-          // it holds.
-          clusterResourceGroup: data.clusterResourceGroup || "",
-          githubLogin: selection.login,
-          origin: data.origin || null,
-          resumeTarget: data.resumeTarget || null,
-          resumeBranch: data.resumeBranch || null,
-          resumeReason: data.resumeReason || null
-        }
-      };
+    publish: (result) => {
+      context.response.setHeader("Content-Type", "application/json");
+      context.response.setHeader("Location", String(result.body.statusUrl));
+      context.response.writeHead(result.status);
+      context.response.end(JSON.stringify(result.body));
     }
-    const started = dependencies.startOperation(op);
-    if (!started.ok) {
-      sendStartConflict(context, repo, started);
-      return;
-    }
-    try {
-      await dependencies.persistOperations();
-    } catch (error) {
-      dependencies.finish(op, "failed", {
-        failure: {
-          code: "operation-registration-persist-failed",
-          stage: op.currentStage,
-          stepSeq: null,
-          message:
-            "Radius could not durably register the environment operation.",
-          classification: "unknown",
-          evidence: dependencies.errorMessage(error)
-        }
-      });
-      jsonError(context, 500, {
-        error:
-          "Radius could not durably register the environment operation. No setup work was started.",
-        code: "operation-registration-persist-failed"
-      });
-      return;
-    }
-    selection.commit();
-    selectionCommitted = true;
-    const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
-    context.response.setHeader("Content-Type", "application/json");
-    context.response.setHeader("Location", statusUrl);
-    context.response.writeHead(202);
-    context.response.end(
-      JSON.stringify({ operationId: op.operationId, statusUrl })
-    );
-    // Scheduling comes strictly after the 202 is written, mirroring the legacy
-    // ordering the boundary test pins (`res.end` before `scheduleServerOwnedTask`).
-    const scheduled = dependencies.scheduleEnvironmentOperation(
-      context.instanceId,
-      op
-    );
-    if (!scheduled) {
-      // No runner accepted the operation, so nothing will ever advance or finish
-      // it. Leaving it `running` would keep polling clients spinning and block a
-      // fresh start for the same repo with a 409 until the record went stale.
-      // The 202 is already on the wire and cannot be recalled, but the record can
-      // be moved to a terminal state and persisted so the failure is observable
-      // through the same status endpoint the client is already polling.
-      await finishSchedulingFailure(
-        op,
-        context.instanceId,
-        (failure) => dependencies.finish(op, "failed", { failure }),
-        dependencies.persistOperations,
-        dependencies.errorMessage
-      );
-    }
-  } finally {
-    if (!selectionCommitted) selection.release();
-  }
+  }).then((result) => {
+    if (result.status !== 202) jsonError(context, result.status, result.body);
+  });
 }
 
 function requiredTemplateParameters(
@@ -748,7 +445,8 @@ function requiredTemplateParameters(
 
 export async function handleResumeOperation(
   context: CanvasRequestContext,
-  dependencies: OperationActionDependencies
+  dependencies: OperationActionDependencies,
+  service: OperationResumeService = createOperationResumeService(dependencies)
 ): Promise<void> {
   const parameters = requiredTemplateParameters(
     RESUME_OPERATION_ROUTE,
@@ -756,131 +454,21 @@ export async function handleResumeOperation(
   );
   const operationId = decodeURIComponent(parameters.operationId);
   const code = decodeURIComponent(parameters.code);
-  const operation = dependencies.getOperation(operationId);
-  if (!operation) {
-    jsonError(context, 404, {
-      error: "Unknown operation.",
-      code: "unknown-operation"
-    });
-    return;
-  }
-  if (
-    operation.state === "failed_partial" &&
-    operation.failure?.code === "operation-input-expired"
-  ) {
-    jsonError(context, 410, {
-      error: operation.failure.message,
-      code: "operation-input-expired",
-      operation: dependencies.toClientView(operation)
-    });
-    return;
-  }
-  const body = await context.readTextBody();
-  let data: ResumeOperationBody;
-  try {
-    data = JSON.parse(body) as ResumeOperationBody;
-  } catch {
-    data = {};
-  }
-  if (
-    !dependencies.canResumeInput(operation, {
-      code,
-      checkpoint: data.checkpoint,
-      repo: data.repo,
-      environment: data.environment,
-      provider: data.provider
-    })
-  ) {
-    jsonError(context, 409, {
-      error: "The operation is not waiting for this input.",
-      code: "operation-resume-mismatch",
-      operationId
-    });
-    return;
-  }
-  if (!operation.request && operation.resumeRequest) {
-    operation.request = structuredClone(operation.resumeRequest);
-  }
-  const resumeSnapshot = {
-    inputRequired: structuredClone(operation.inputRequired),
-    request:
-      operation.request !== undefined ?
-        structuredClone(operation.request)
-      : undefined,
-    resumeRequest:
-      operation.resumeRequest ?
-        structuredClone(operation.resumeRequest)
-      : undefined
-  };
-  if (!isOperationRequest(operation.request)) {
-    jsonError(context, 409, {
-      error:
-        "The operation cannot be resumed because its saved request is unavailable.",
-      code: "operation-resume-request-unavailable",
-      operationId
-    });
-    return;
-  } else {
-    const request = operation.request;
-    if (code === "service-management-reference-required") {
-      request.azure.serviceManagementReference =
-        data.serviceManagementReference || "";
-      if (operation.resumeRequest?.azure) {
-        operation.resumeRequest.azure.serviceManagementReference =
-          data.serviceManagementReference || "";
+  await service(
+    { operationId, code, instanceId: context.instanceId },
+    async () => {
+      const body = await context.readTextBody();
+      try {
+        return JSON.parse(body) as SetupResumeInput;
+      } catch {
+        return {};
       }
-    } else if (code === "app-selection-required") {
-      request.azure.appId = data.appId || "";
-      request.azure.createNew = data.createNew === true;
-      if (operation.resumeRequest?.azure) {
-        operation.resumeRequest.azure.appId = data.appId || "";
-        operation.resumeRequest.azure.createNew = data.createNew === true;
-      }
-    } else {
-      jsonError(context, 400, {
-        error: "Unsupported resume prompt.",
-        code: "unsupported-resume"
-      });
-      return;
+    },
+    ({ status, body }) => {
+      if (status === 202) context.json(status, body);
+      else jsonError(context, status, body);
     }
-  }
-  dependencies.resumeAfterInput(operation);
-  try {
-    await dependencies.persistOperations();
-  } catch (error) {
-    operation.request = resumeSnapshot.request;
-    if (resumeSnapshot.resumeRequest === undefined) {
-      delete operation.resumeRequest;
-    } else {
-      operation.resumeRequest = resumeSnapshot.resumeRequest;
-    }
-    dependencies.requireInput(operation, resumeSnapshot.inputRequired);
-    jsonError(context, 500, {
-      error:
-        "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
-      code: "operation-resume-persist-failed",
-      operationId,
-      detail: dependencies.errorMessage(error)
-    });
-    return;
-  }
-  context.json(202, {
-    operationId,
-    statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
-  });
-  const scheduled = dependencies.scheduleEnvironmentOperation(
-    context.instanceId,
-    operation
   );
-  if (!scheduled) {
-    await finishSchedulingFailure(
-      operation,
-      context.instanceId,
-      (failure) => dependencies.finish(operation, "failed", { failure }),
-      dependencies.persistOperations,
-      dependencies.errorMessage
-    );
-  }
 }
 
 export async function handleAbandonOperation(
@@ -963,9 +551,12 @@ export async function handleDismissOperation(
 export function createOperationsStatusRoutes(
   dependencies: OperationsStatusDependencies,
   createDependencies: CreateOperationDependencies,
-  actionDependencies: OperationActionDependencies
+  actionDependencies: OperationActionDependencies,
+  resumeService?: OperationResumeService
 ): RouteHandlerRegistry {
   assertOperationActionDependencies(actionDependencies);
+  const resume =
+    resumeService ?? createOperationResumeService(actionDependencies);
   return {
     "GET /api/operations": (context) =>
       handleLatestOperation(context, dependencies),
@@ -976,7 +567,7 @@ export function createOperationsStatusRoutes(
     "POST /api/operations": (context) =>
       handleCreateOperation(context, createDependencies),
     "POST /api/operations/:operationId/resume/:code": (context) =>
-      handleResumeOperation(context, actionDependencies),
+      handleResumeOperation(context, actionDependencies, resume),
     "POST /api/operations/:operationId/abandon": (context) =>
       handleAbandonOperation(context, actionDependencies),
     "POST /api/operations/:operationId/dismiss": (context) =>
