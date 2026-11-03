@@ -30,6 +30,7 @@ import {
 } from "../../../src/browser/build.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
 import { RADIUS_SESSION_START_CONTEXT } from "../../../src/runtime/declarations.js";
+import { createPluginUpdatePreferences } from "../../../src/runtime/plugin-update-preferences.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
@@ -382,7 +383,7 @@ describe("P0-C built Radius extension artifact", () => {
       {
         stage: "approval",
         detail:
-          "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code."
+          "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code. If you decline or cancel, Radius will not ask again for this installed version and marketplace."
       },
       { stage: "update", detail: "radius@radius-plugins" }
     ]);
@@ -426,10 +427,56 @@ describe("P0-C built Radius extension artifact", () => {
         /unhandledRejection|uncaughtException|shutdown incomplete/
       );
       if (approval === "unavailable") {
-        expect(result.stderr).toContain("No update was installed.");
+        expect(result.stderr).toContain(
+          "Radius skipped its plugin update request"
+        );
+        expect(result.stderr).not.toContain(
+          "could not complete its plugin update"
+        );
       }
     }
   );
+
+  it("retains a declined update across separate extension processes and workspaces", async () => {
+    const profile = mkdtempSync(join(tmpdir(), "radius-artifact-profile-"));
+    try {
+      const first = await runArtifactSmoke(
+        ARTIFACT,
+        20_000,
+        DIST,
+        "clean",
+        "decline",
+        profile
+      );
+      expect(first.pluginUpdateEvents.map((event) => event.stage)).toEqual([
+        "approval"
+      ]);
+      expect(first.exitCode).toBe(0);
+      const preferences = createPluginUpdatePreferences(
+        join(profile, ".copilot", "radius", "plugin-update-declines")
+      );
+      expect(
+        await preferences.hasDeclined({
+          marketplace: "radius-plugins",
+          version: "0.4.0"
+        })
+      ).toBe(true);
+      const next = await runArtifactSmoke(
+        ARTIFACT,
+        20_000,
+        DIST,
+        "clean",
+        "approve",
+        profile
+      );
+      expect(next.pluginUpdateEvents).toEqual([]);
+      expect(next.registration).toEqual(EXPECTED_REGISTRATION);
+      expect(next.exitCode).toBe(0);
+      expect(next.closeCount).toBe(1);
+    } finally {
+      rmSync(profile, { recursive: true, force: true });
+    }
+  });
   it("registers flat object tool parameters without provider-rejected root unions", () => {
     for (const tool of smoke.registration.tools) {
       expect(tool.parameters).toMatchObject({

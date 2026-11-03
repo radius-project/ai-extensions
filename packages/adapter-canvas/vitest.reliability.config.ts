@@ -50,6 +50,7 @@ export default defineConfig({
       "src/runtime/environment-execution-owner.test.ts",
       "src/runtime/create-radius-extension.test.ts",
       "src/runtime/plugin-update.test.ts",
+      "src/runtime/plugin-update-preferences.test.ts",
       "src/runtime/setup-execution.test.ts",
       "src/runtime/environment-tools.test.ts",
       "src/runtime/deployment-account.test.ts",

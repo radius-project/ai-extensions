@@ -12,9 +12,13 @@ Restart your Copilot session after installing so the skills and the canvas exten
 
 ### Update approval
 
-When Radius Canvas starts in a new session, it asks you to approve an update to the latest version available from the installed plugin's current marketplace. The request names that marketplace and runs once per extension process. Radius calls Copilot's session plugin update API only after you approve. If you decline or cancel, it does not install an update or ask again in that process. You can keep using the canvas while the request is open. Active sessions keep their loaded code and skills. Start a new session to load installed changes.
+When Radius Canvas starts in a new session, it considers one request to update the installed plugin from its current marketplace. Radius calls Copilot's session plugin update API only after you approve. If you decline or cancel, Radius remembers that choice across sessions for the installed version and marketplace. It will ask again only if the installed version or marketplace changes. You can still update manually at any time. You can keep using the canvas while the request is open. Active sessions keep their loaded code and skills. Start a new session to load installed changes.
 
-Update requests skip CI, disabled plugins, local marketplace paths, direct installs, built-in copies, enterprise-managed plugins, and multiple enabled Radius installs. Set `COPILOT_AUTO_UPDATE=false` in the environment that starts Copilot to turn off the request. If the host cannot ask for approval, Radius does not install an update. If approval fails, the runtime does not support session plugin updates, or an update fails, Radius reports a warning and leaves the current session running. Use **Customize > Installed** to update manually.
+The request names the marketplace and asks to update to its latest available version. Copilot's SDK does not expose available plugin versions, so Radius cannot check whether a newer version exists before asking. After an approved update, Radius reports the old and new versions when Copilot provides them, or says the plugin is already up to date if they match.
+
+Update requests skip CI, disabled plugins, local marketplace paths, direct installs, built-in copies, enterprise-managed plugins, multiple enabled Radius installs, and installs with no reported version. Set `COPILOT_AUTO_UPDATE=false` or `COPILOT_AUTO_UPDATE=0` in the environment that starts Copilot to turn off the request. `CI=false` and `CI=0` do not disable requests. If the host lacks the plugin API or approval UI, Radius skips the request and writes a diagnostic without showing a session warning. If approval, saved-choice access, or an update fails, Radius reports a warning and leaves the current session running. A failed completion notice does not report an installed update as a failed update. Use **Customize > Installed** to update manually.
+
+Radius stores declined choices under `~/.copilot/radius/plugin-update-declines` (`USERPROFILE` on Windows). To allow another request for the same installed version and marketplace, remove Radius's saved decline records from that directory.
 
 ## What's Included
 

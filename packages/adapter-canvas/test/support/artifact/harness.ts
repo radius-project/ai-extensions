@@ -94,12 +94,13 @@ export async function runArtifactSmoke(
     | "readiness"
     | "readiness-restoration-failed"
     | "readiness-external-change" = "clean",
-  updateApproval: "approve" | "decline" | "unavailable" = "approve"
+  updateApproval: "approve" | "decline" | "unavailable" = "approve",
+  profileDirectory?: string
 ): Promise<ArtifactSmokeResult> {
   const root = mkdtempSync(join(tmpdir(), "radius-artifact-smoke-"));
   const fakeRad = join(root, process.platform === "win32" ? "rad.exe" : "rad");
   const fakeBicep = join(
-    root,
+    profileDirectory ?? root,
     ".radius",
     "ai-extensions",
     "bin",
@@ -126,8 +127,8 @@ export async function runArtifactSmoke(
         CI: "",
         COPILOT_AUTO_UPDATE: "true",
         RADIUS_ARTIFACT_UPDATE_APPROVAL: updateApproval,
-        HOME: root,
-        USERPROFILE: root,
+        HOME: profileDirectory ?? root,
+        USERPROFILE: profileDirectory ?? root,
         RADIUS_ARTIFACT_PATH: resolve(artifactPath),
         RADIUS_ARTIFACT_ROOT: resolve(artifactRoot),
         RADIUS_ARTIFACT_WORKSPACE: root,

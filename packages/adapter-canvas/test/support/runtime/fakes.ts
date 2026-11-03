@@ -125,6 +125,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   const servers = new Map<string, CanvasServerEntry>();
   const sessionHolder = createSessionHolder();
   const executionOwner = createEnvironmentExecutionOwner();
+  const declinedPluginUpdates = new Set<string>();
 
   const workspaceContext: WorkspaceContext = options.workspaceContext ?? {
     workspacePath: "/workspace",
@@ -193,6 +194,13 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   const deps: RadiusExtensionDependencies = {
     logError: vi.fn(),
     automaticPluginUpdates: false,
+    pluginUpdatePreferences: {
+      hasDeclined: async (identity) =>
+        declinedPluginUpdates.has(JSON.stringify(identity)),
+      rememberDecline: async (identity) => {
+        declinedPluginUpdates.add(JSON.stringify(identity));
+      }
+    },
     session: sessionHolder,
     // Instant, so no suite spends real seconds inside a runtime wait. The
     // durations themselves are asserted by the unit tests that own them.

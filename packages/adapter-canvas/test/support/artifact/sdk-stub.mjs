@@ -159,7 +159,12 @@ export async function joinSession(declaration) {
       plugins: {
         list: async () => ({
           plugins: [
-            { name: "radius", marketplace: "radius-plugins", enabled: true }
+            {
+              name: "radius",
+              marketplace: "radius-plugins",
+              version: "0.4.0",
+              enabled: true
+            }
           ]
         }),
         update: async ({ name }) => {

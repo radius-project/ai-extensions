@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SessionPort } from "../../../src/runtime/session.js";
+import type { PluginUpdatePreferences } from "../../../src/runtime/plugin-update-preferences.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 
 function configureApproval(
@@ -25,7 +26,12 @@ describe("session-start Radius plugin update", () => {
       session.rpc.plugins = {
         list: async () => ({
           plugins: [
-            { name: "radius", marketplace: "custom-catalog", enabled: true }
+            {
+              name: "radius",
+              marketplace: "custom-catalog",
+              version: "0.4.0",
+              enabled: true
+            }
           ]
         }),
         update
@@ -34,7 +40,7 @@ describe("session-start Radius plugin update", () => {
     try {
       await vi.waitFor(() => {
         expect(harness.session.log).toHaveBeenCalledWith(
-          expect.stringContaining("update check completed"),
+          expect.stringContaining("plugin update completed"),
           { level: "info", ephemeral: true }
         );
       });
@@ -74,7 +80,12 @@ describe("session-start Radius plugin update", () => {
       session.rpc.plugins = {
         list: async () => ({
           plugins: [
-            { name: "radius", marketplace: "radius-plugins", enabled: true }
+            {
+              name: "radius",
+              marketplace: "radius-plugins",
+              version: "0.4.0",
+              enabled: true
+            }
           ]
         }),
         update
@@ -105,7 +116,12 @@ describe("session-start Radius plugin update", () => {
       session.rpc.plugins = {
         list: async () => ({
           plugins: [
-            { name: "radius", marketplace: "radius-plugins", enabled: true }
+            {
+              name: "radius",
+              marketplace: "radius-plugins",
+              version: "0.4.0",
+              enabled: true
+            }
           ]
         }),
         update: async () => {
@@ -137,6 +153,7 @@ describe("session-start Radius plugin update", () => {
     const update = vi.fn(async () => ({ skillsInstalled: 5 }));
     const harness = await createRuntimeSdkHarness({}, (deps, session) => {
       deps.automaticPluginUpdates = true;
+      configureApproval(session, async () => true);
       session.rpc.plugins = {
         list: () =>
           new Promise((resolve) => {
@@ -146,6 +163,7 @@ describe("session-start Radius plugin update", () => {
                   {
                     name: "radius",
                     marketplace: "radius-plugins",
+                    version: "0.4.0",
                     enabled: true
                   }
                 ]
@@ -167,6 +185,7 @@ describe("session-start Radius plugin update", () => {
     });
     const harness = await createRuntimeSdkHarness({}, (deps, session) => {
       deps.automaticPluginUpdates = true;
+      configureApproval(session, async () => true);
       deps.logError = report;
       session.rpc.plugins = {
         list: async () => {
@@ -186,6 +205,64 @@ describe("session-start Radius plugin update", () => {
       expect(harness.extension.isShutDown()).toBe(false);
     } finally {
       await harness.extension.shutdown("test");
+    }
+  });
+
+  it("honors a saved decline in a later runtime without showing another request", async () => {
+    let declined = false;
+    const preferences: PluginUpdatePreferences = {
+      hasDeclined: vi.fn(async () => declined),
+      rememberDecline: vi.fn(async () => {
+        declined = true;
+      })
+    };
+    const confirm = vi.fn(async () => false);
+    const update = vi.fn(async () => ({ skillsInstalled: 5 }));
+    const configure = (
+      deps: {
+        automaticPluginUpdates: boolean;
+        pluginUpdatePreferences: PluginUpdatePreferences;
+      },
+      session: SessionPort
+    ) => {
+      deps.automaticPluginUpdates = true;
+      deps.pluginUpdatePreferences = preferences;
+      configureApproval(session, confirm);
+      session.rpc.plugins = {
+        list: async () => ({
+          plugins: [
+            {
+              name: "radius",
+              marketplace: "radius-plugins",
+              version: "0.4.0",
+              enabled: true
+            }
+          ]
+        }),
+        update
+      };
+    };
+    const first = await createRuntimeSdkHarness({}, configure);
+    try {
+      await vi.waitFor(() =>
+        expect(preferences.rememberDecline).toHaveBeenCalledOnce()
+      );
+    } finally {
+      await first.extension.shutdown("test");
+    }
+    const next = await createRuntimeSdkHarness({}, configure);
+    try {
+      await vi.waitFor(() =>
+        expect(preferences.hasDeclined).toHaveBeenCalledTimes(2)
+      );
+      await expect(
+        next.host.open("panel", { page: "environment" })
+      ).resolves.toBeDefined();
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(update).not.toHaveBeenCalled();
+      expect(next.session.log).not.toHaveBeenCalled();
+    } finally {
+      await next.extension.shutdown("test");
     }
   });
 });

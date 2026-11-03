@@ -305,6 +305,7 @@ export function createRadiusExtension(
   let shutdownPromise: Promise<RadiusShutdownOutcome> | undefined;
   const updatePlugin = createRadiusPluginUpdater({
     enabled: deps.automaticPluginUpdates,
+    preferences: deps.pluginUpdatePreferences,
     isShutDown: () => shuttingDown,
     logError: deps.logError
   });
