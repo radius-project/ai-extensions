@@ -10,11 +10,11 @@ Open the GitHub Copilot app, select **Customize** in the side menu, and then sel
 
 Restart your Copilot session after installing so the skills and the canvas extension become available. Use the plugin's three-dot menu to update or uninstall it.
 
-### Automatic updates
+### Update approval
 
-When Radius Canvas starts in a new session, it asks Copilot to update the installed Radius plugin from its current marketplace. The update keeps the existing source and release channel, including an explicit version pin. The check runs once per extension process and does not block your work. Active sessions keep their loaded code and skills. Start a new session to load any installed changes.
+When Radius Canvas starts in a new session, it asks you to approve an update to the latest version available from the installed plugin's current marketplace. The request names that marketplace and runs once per extension process. Radius calls Copilot's session plugin update API only after you approve. If you decline or cancel, it does not install an update or ask again in that process. You can keep using the canvas while the request is open. Active sessions keep their loaded code and skills. Start a new session to load installed changes.
 
-Automatic updates skip CI, disabled plugins, local marketplace paths, direct installs, built-in copies, enterprise-managed plugins, and multiple enabled Radius installs. Set `COPILOT_AUTO_UPDATE=false` in the environment that starts Copilot to turn off the Radius update check. If the runtime does not support session plugin updates, or an update fails, Radius reports a warning and leaves the current session running. Use **Customize > Installed** to update manually.
+Update requests skip CI, disabled plugins, local marketplace paths, direct installs, built-in copies, enterprise-managed plugins, and multiple enabled Radius installs. Set `COPILOT_AUTO_UPDATE=false` in the environment that starts Copilot to turn off the request. If the host cannot ask for approval, Radius does not install an update. If approval fails, the runtime does not support session plugin updates, or an update fails, Radius reports a warning and leaves the current session running. Use **Customize > Installed** to update manually.
 
 ## What's Included
 

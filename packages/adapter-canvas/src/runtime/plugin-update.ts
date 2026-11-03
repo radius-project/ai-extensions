@@ -62,6 +62,16 @@ export function createRadiusPluginUpdater(options: {
       ) {
         return;
       }
+      const ui = session.ui;
+      if (session.capabilities?.ui?.elicitation !== true || !ui?.confirm) {
+        throw new Error(
+          "This Copilot host does not support interactive plugin update approval. No update was installed."
+        );
+      }
+      const approved = await ui.confirm(
+        `Update radius@${plugin.marketplace} to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code.`
+      );
+      if (options.isShutDown() || approved !== true) return;
       await plugins.update({
         name: `${plugin.name}@${plugin.marketplace}`
       });
@@ -73,7 +83,7 @@ export function createRadiusPluginUpdater(options: {
     } catch (error) {
       if (options.isShutDown()) return;
       const message = redactCredentials(
-        `Radius could not complete its automatic plugin update: ${errorMessage(error)} Use Customize > Installed to update Radius manually. This session keeps its current code.`
+        `Radius could not complete its plugin update: ${errorMessage(error)} Use Customize > Installed to update Radius manually. This session keeps its current code.`
       );
       options.logError(message);
       if (session.log) {

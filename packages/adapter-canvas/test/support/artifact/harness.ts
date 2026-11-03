@@ -54,6 +54,7 @@ interface ChildMessage {
     | "blocked"
     | "page"
     | "render-error"
+    | "plugin-approval"
     | "plugin-update"
     | "readiness";
   code?: string;
@@ -71,7 +72,7 @@ export interface ArtifactSmokeResult {
   stderr: string;
   renderedPage: string;
   exitCode: number;
-  pluginUpdates: string[];
+  pluginUpdateEvents: Array<{ stage: "approval" | "update"; detail: string }>;
   readiness?: { code: string; calls: string[] };
 }
 
@@ -92,7 +93,8 @@ export async function runArtifactSmoke(
     | "failed-session"
     | "readiness"
     | "readiness-restoration-failed"
-    | "readiness-external-change" = "clean"
+    | "readiness-external-change" = "clean",
+  updateApproval: "approve" | "decline" | "unavailable" = "approve"
 ): Promise<ArtifactSmokeResult> {
   const root = mkdtempSync(join(tmpdir(), "radius-artifact-smoke-"));
   const fakeRad = join(root, process.platform === "win32" ? "rad.exe" : "rad");
@@ -123,6 +125,7 @@ export async function runArtifactSmoke(
         ...process.env,
         CI: "",
         COPILOT_AUTO_UPDATE: "true",
+        RADIUS_ARTIFACT_UPDATE_APPROVAL: updateApproval,
         HOME: root,
         USERPROFILE: root,
         RADIUS_ARTIFACT_PATH: resolve(artifactPath),
@@ -147,7 +150,7 @@ export async function runArtifactSmoke(
   let registration: ArtifactRegistrationSnapshot | undefined;
   let ready = false;
   let closeCount = 0;
-  const pluginUpdates: string[] = [];
+  const pluginUpdateEvents: ArtifactSmokeResult["pluginUpdateEvents"] = [];
   let renderedPage: string | undefined;
   let failure: Error | undefined;
   let readiness: ArtifactSmokeResult["readiness"];
@@ -158,13 +161,16 @@ export async function runArtifactSmoke(
     if (raw.type === "registered") registration = raw.snapshot;
     else if (raw.type === "ready") ready = true;
     else if (raw.type === "shutdown") closeCount += raw.closeCount ?? 0;
-    else if (raw.type === "plugin-update") {
+    else if (raw.type === "plugin-update" || raw.type === "plugin-approval") {
       if (typeof raw.detail !== "string") {
         failure = new Error(
-          "Artifact plugin update did not identify its source."
+          "Artifact plugin update event did not identify its source."
         );
       } else {
-        pluginUpdates.push(raw.detail);
+        pluginUpdateEvents.push({
+          stage: raw.type === "plugin-approval" ? "approval" : "update",
+          detail: raw.detail
+        });
       }
     } else if (raw.type === "readiness" && raw.code && raw.calls)
       readiness = { code: raw.code, calls: raw.calls };
@@ -259,7 +265,7 @@ export async function runArtifactSmoke(
       stderr,
       renderedPage,
       exitCode,
-      pluginUpdates,
+      pluginUpdateEvents,
       readiness
     };
   } finally {

@@ -1,11 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
+import type { SessionPort } from "../../../src/runtime/session.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
+
+function configureApproval(
+  session: SessionPort,
+  confirm: (message: string) => Promise<boolean>
+) {
+  session.capabilities = { ui: { elicitation: true } };
+  session.ui = {
+    select: async () => {
+      throw new Error("unexpected selection");
+    },
+    confirm
+  };
+}
 
 describe("session-start Radius plugin update", () => {
   it("uses the joined session API once without changing canvas registration or reloading it", async () => {
     const update = vi.fn(async () => ({ skillsInstalled: 5 }));
+    const confirm = vi.fn(async () => true);
     const harness = await createRuntimeSdkHarness({}, (deps, session) => {
       deps.automaticPluginUpdates = true;
+      configureApproval(session, confirm);
       session.rpc.plugins = {
         list: async () => ({
           plugins: [
@@ -26,6 +42,12 @@ describe("session-start Radius plugin update", () => {
       expect(update).toHaveBeenCalledExactlyOnceWith({
         name: "radius@custom-catalog"
       });
+      expect(confirm).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining("radius@custom-catalog to the latest version")
+      );
+      expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(
+        update.mock.invocationCallOrder[0]
+      );
       expect(harness.joinSession).toHaveBeenCalledOnce();
       expect(harness.registration.canvas.id).toBe("radius");
       expect(harness.session.send).not.toHaveBeenCalled();
@@ -35,9 +57,51 @@ describe("session-start Radius plugin update", () => {
     }
   });
 
+  it("keeps the canvas usable while waiting for approval and does not repeat a declined request", async () => {
+    let decline: (approved: boolean) => void = () => {
+      throw new Error("approval was not requested");
+    };
+    const confirm = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          decline = resolve;
+        })
+    );
+    const update = vi.fn(async () => ({ skillsInstalled: 5 }));
+    const harness = await createRuntimeSdkHarness({}, (deps, session) => {
+      deps.automaticPluginUpdates = true;
+      configureApproval(session, confirm);
+      session.rpc.plugins = {
+        list: async () => ({
+          plugins: [
+            { name: "radius", marketplace: "radius-plugins", enabled: true }
+          ]
+        }),
+        update
+      };
+    });
+    try {
+      await vi.waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+      await expect(
+        harness.host.open("panel", { page: "environment" })
+      ).resolves.toBeDefined();
+      expect(update).not.toHaveBeenCalled();
+      decline(false);
+      await Promise.resolve();
+      harness.extension.attachSession(harness.session);
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(update).not.toHaveBeenCalled();
+      expect(harness.extension.isShutDown()).toBe(false);
+    } finally {
+      decline(false);
+      await harness.extension.shutdown("test");
+    }
+  });
+
   it("retains a usable runtime and surfaces an update rejection", async () => {
     const harness = await createRuntimeSdkHarness({}, (deps, session) => {
       deps.automaticPluginUpdates = true;
+      configureApproval(session, async () => true);
       session.rpc.plugins = {
         list: async () => ({
           plugins: [

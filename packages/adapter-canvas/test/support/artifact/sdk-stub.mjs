@@ -139,6 +139,21 @@ export async function joinSession(declaration) {
     workspacePath: process.env.RADIUS_ARTIFACT_WORKSPACE,
     send: async () => undefined,
     log: () => undefined,
+    capabilities: {
+      ui: {
+        elicitation:
+          process.env.RADIUS_ARTIFACT_UPDATE_APPROVAL !== "unavailable"
+      }
+    },
+    ui: {
+      select: async () => {
+        throw new Error("Unexpected artifact selection request.");
+      },
+      confirm: async (message) => {
+        await send({ type: "plugin-approval", detail: message });
+        return process.env.RADIUS_ARTIFACT_UPDATE_APPROVAL === "approve";
+      }
+    },
     rpc: {
       canvas: { open: async () => ({}) },
       plugins: {

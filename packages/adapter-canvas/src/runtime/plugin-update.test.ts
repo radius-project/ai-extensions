@@ -23,6 +23,14 @@ function fixture(enabled = true) {
     skillsInstalled: 5
   }));
   const session = createFakeSession();
+  const confirm = vi.fn(async () => true);
+  session.capabilities = { ui: { elicitation: true } };
+  session.ui = {
+    select: async () => {
+      throw new Error("unexpected selection");
+    },
+    confirm
+  };
   session.rpc.plugins = { list, update };
   const logError = vi.fn();
   const run = createRadiusPluginUpdater({
@@ -34,6 +42,7 @@ function fixture(enabled = true) {
     session,
     list,
     update,
+    confirm,
     logError,
     run: () => run(session),
     stop: () => {
@@ -42,7 +51,7 @@ function fixture(enabled = true) {
   };
 }
 
-describe("automatic Radius plugin updates", () => {
+describe("approval-based Radius plugin updates", () => {
   it.each([
     [{}, true],
     [{ COPILOT_AUTO_UPDATE: "true" }, true],
@@ -63,6 +72,9 @@ describe("automatic Radius plugin updates", () => {
     await first;
     await f.run();
     expect(f.list).toHaveBeenCalledOnce();
+    expect(f.confirm).toHaveBeenCalledExactlyOnceWith(
+      "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code."
+    );
     expect(f.update).toHaveBeenCalledExactlyOnceWith({
       name: "radius@radius-plugins"
     });
@@ -90,6 +102,7 @@ describe("automatic Radius plugin updates", () => {
       f.list.mockResolvedValue({ plugins });
       await f.run();
       expect(f.update).not.toHaveBeenCalled();
+      expect(f.confirm).not.toHaveBeenCalled();
       expect(f.session.log).not.toHaveBeenCalled();
     }
   );
@@ -99,6 +112,7 @@ describe("automatic Radius plugin updates", () => {
     if (state === "stopped") f.stop();
     await f.run();
     expect(f.list).not.toHaveBeenCalled();
+    expect(f.confirm).not.toHaveBeenCalled();
   });
 
   it("does not issue an update after shutdown during discovery", async () => {
@@ -109,6 +123,82 @@ describe("automatic Radius plugin updates", () => {
     });
     await f.run();
     expect(f.update).not.toHaveBeenCalled();
+    expect(f.confirm).not.toHaveBeenCalled();
+  });
+
+  it("does not update when approval is declined or cancelled", async () => {
+    const f = fixture();
+    f.confirm.mockResolvedValue(false);
+    await f.run();
+    await f.run();
+    expect(f.confirm).toHaveBeenCalledOnce();
+    expect(f.update).not.toHaveBeenCalled();
+    expect(f.session.log).not.toHaveBeenCalled();
+    expect(f.logError).not.toHaveBeenCalled();
+  });
+
+  it("waits for explicit approval and shares a pending request across starts", async () => {
+    const f = fixture();
+    let approve: (approved: boolean) => void = () => {
+      throw new Error("approval was not requested");
+    };
+    f.confirm.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          approve = resolve;
+        })
+    );
+    const first = f.run();
+    await vi.waitFor(() => expect(f.confirm).toHaveBeenCalledOnce());
+    expect(f.run()).toBe(first);
+    expect(f.update).not.toHaveBeenCalled();
+    approve(true);
+    await first;
+    expect(f.update).toHaveBeenCalledOnce();
+  });
+
+  it.each(["success", "failure"])(
+    "does not update or publish late approval %s after shutdown",
+    async (outcome) => {
+      const f = fixture();
+      f.confirm.mockImplementation(async () => {
+        f.stop();
+        if (outcome === "failure") {
+          throw new Error("approval interrupted");
+        }
+        return true;
+      });
+      await f.run();
+      expect(f.update).not.toHaveBeenCalled();
+      expect(f.session.log).not.toHaveBeenCalled();
+      expect(f.logError).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    "no-capabilities",
+    "no-ui-capability",
+    "unsupported",
+    "no-ui",
+    "no-confirm"
+  ])("does not update when approval is unavailable: %s", async (state) => {
+    const f = fixture();
+    if (state === "no-capabilities") delete f.session.capabilities;
+    if (state === "no-ui-capability") f.session.capabilities = {};
+    if (state === "unsupported") {
+      f.session.capabilities = { ui: { elicitation: false } };
+    }
+    if (state === "no-ui") delete f.session.ui;
+    if (state === "no-confirm" && f.session.ui) {
+      delete f.session.ui.confirm;
+    }
+    await f.run();
+    expect(f.confirm).not.toHaveBeenCalled();
+    expect(f.update).not.toHaveBeenCalled();
+    expect(f.session.log).toHaveBeenCalledWith(
+      expect.stringContaining("No update was installed."),
+      { level: "warning", ephemeral: true }
+    );
   });
 
   it.each(["success", "failure"])(
@@ -140,12 +230,13 @@ describe("automatic Radius plugin updates", () => {
     );
   });
 
-  it.each(["discovery", "update"])(
+  it.each(["discovery", "approval", "update"])(
     "reports %s failures without stopping the session",
     async (stage) => {
       const f = fixture();
       const error = new Error("fixture unavailable");
       if (stage === "discovery") f.list.mockRejectedValue(error);
+      else if (stage === "approval") f.confirm.mockRejectedValue(error);
       else f.update.mockRejectedValue(error);
       await expect(f.run()).resolves.toBeUndefined();
       expect(f.logError).toHaveBeenCalledWith(
@@ -157,6 +248,9 @@ describe("automatic Radius plugin updates", () => {
       );
       await f.run();
       expect(f.list).toHaveBeenCalledOnce();
+      if (stage !== "update") {
+        expect(f.update).not.toHaveBeenCalled();
+      }
     }
   );
 
@@ -195,10 +289,25 @@ describe("automatic Radius plugin updates", () => {
     f.session.log = vi.fn(async () => {
       throw new Error("logging unavailable");
     });
+
     await expect(f.run()).resolves.toBeUndefined();
     expect(f.update).toHaveBeenCalledOnce();
     expect(f.logError).toHaveBeenCalledWith(
       expect.stringContaining("logging unavailable")
+    );
+  });
+
+  it("does not report a rejected warning after shutdown", async () => {
+    const f = fixture();
+    f.list.mockRejectedValue(new Error("discovery unavailable"));
+    f.session.log = vi.fn(async () => {
+      f.stop();
+      throw new Error("logging interrupted");
+    });
+    await expect(f.run()).resolves.toBeUndefined();
+    expect(f.logError).toHaveBeenCalledOnce();
+    expect(f.logError).not.toHaveBeenCalledWith(
+      expect.stringContaining("could not display")
     );
   });
 });

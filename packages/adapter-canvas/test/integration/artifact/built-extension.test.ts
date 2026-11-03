@@ -378,7 +378,14 @@ describe("P0-C built Radius extension artifact", () => {
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
     expect(smoke.registration).toEqual(EXPECTED_REGISTRATION);
     expect(smoke.closeCount).toBe(1);
-    expect(smoke.pluginUpdates).toEqual(["radius@radius-plugins"]);
+    expect(smoke.pluginUpdateEvents).toEqual([
+      {
+        stage: "approval",
+        detail:
+          "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code."
+      },
+      { stage: "update", detail: "radius@radius-plugins" }
+    ]);
     expect(smoke.exitCode).toBe(0);
     // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
     // and reports them only on stderr. The harness already requires exit code 0;
@@ -398,6 +405,31 @@ describe("P0-C built Radius extension artifact", () => {
       ])
     );
   });
+
+  it.each(["decline", "unavailable"] as const)(
+    "leaves the shipped plugin unchanged when approval is %s",
+    async (approval) => {
+      const result = await runArtifactSmoke(
+        ARTIFACT,
+        20_000,
+        DIST,
+        "clean",
+        approval
+      );
+      expect(result.pluginUpdateEvents.map((event) => event.stage)).toEqual(
+        approval === "decline" ? ["approval"] : []
+      );
+      expect(result.registration).toEqual(EXPECTED_REGISTRATION);
+      expect(result.closeCount).toBe(1);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).not.toMatch(
+        /unhandledRejection|uncaughtException|shutdown incomplete/
+      );
+      if (approval === "unavailable") {
+        expect(result.stderr).toContain("No update was installed.");
+      }
+    }
+  );
   it("registers flat object tool parameters without provider-rejected root unions", () => {
     for (const tool of smoke.registration.tools) {
       expect(tool.parameters).toMatchObject({
