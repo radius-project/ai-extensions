@@ -708,6 +708,41 @@ export async function setupAwsDeployIdentity(
   return { ok: true, roleArn, roleCreated };
 }
 
+// IAM addresses a role by name in whichever account the CLI is signed in to, so
+// a run that changes a role by its ARN first confirms it is in the role's
+// account. Null when it is.
+async function signedInAccountProblem(
+  ports: Pick<AwsDeployIdentityPorts, "runAws">,
+  accountId: string,
+  roleName: string,
+  purpose: string
+): Promise<{ code: string; message: string } | null> {
+  const identity = await ports.runAws([
+    "sts",
+    "get-caller-identity",
+    "--output",
+    "json"
+  ]);
+  const caller = parseJson(identity.stdout);
+  const sessionAccount =
+    isRecord(caller) && typeof caller.Account === "string" ?
+      caller.Account
+    : "";
+  if (!succeeded(identity)) {
+    return {
+      code: "aws-cli-login-required",
+      message: `No active AWS CLI session, so Radius could not ${purpose} IAM role ${roleName}. Run "aws sso login" (or "aws configure"), then retry. ${detail(identity)}`
+    };
+  }
+  if (sessionAccount !== accountId) {
+    return {
+      code: "aws-account-mismatch",
+      message: `Your AWS CLI session is signed in to account ${sessionAccount || "(unknown)"}, but IAM role ${roleName} is in account ${accountId}. Nothing was changed. Sign in to account ${accountId}, then retry.`
+    };
+  }
+  return null;
+}
+
 export interface AwsDeployIdentityRemovalRequest {
   roleArn: string;
   environment: string;
@@ -746,28 +781,13 @@ export async function removeAwsEnvironmentFromRole(
       message: `IAM role ${request.roleArn} is outside the commercial AWS partition, so Radius did not change it.`
     };
   }
-  // IAM addresses the role by name in whichever account the CLI is signed in
-  // to, so confirm that is the role's account before reading or writing.
-  const identity = await ports.runAws([
-    "sts",
-    "get-caller-identity",
-    "--output",
-    "json"
-  ]);
-  const caller = parseJson(identity.stdout);
-  const sessionAccount =
-    isRecord(caller) && typeof caller.Account === "string" ?
-      caller.Account
-    : "";
-  if (!succeeded(identity) || sessionAccount !== accountId) {
-    return {
-      ok: false,
-      message:
-        succeeded(identity) ?
-          `Your AWS CLI session is signed in to account ${sessionAccount || "(unknown)"}, but IAM role ${roleName} is in account ${accountId}. Nothing was changed. Sign in to account ${accountId}, then retry.`
-        : `No active AWS CLI session, so Radius could not clean up IAM role ${roleName}. Run "aws sso login" (or "aws configure"), then retry. ${detail(identity)}`
-    };
-  }
+  const session = await signedInAccountProblem(
+    ports,
+    accountId,
+    roleName,
+    "clean up"
+  );
+  if (session) return { ok: false, message: session.message };
   const removed: string[] = [];
   const kept = [
     `IAM role ${roleName}`,
@@ -873,4 +893,206 @@ export async function removeAwsEnvironmentFromRole(
     };
   }
   return { ok: true, removed, kept };
+}
+
+export interface AwsTrustRepairRequest {
+  // The repository whose deploy failed.
+  repo: string;
+  // AWS_ROLE_ARN as the GitHub environment states it. Untrusted: anyone who
+  // can edit the environment's variables can point it at any role.
+  roleArn: string;
+  // Every subject the environment's workflows may present, worked out from
+  // GitHub for this repository and environment, never read from a variable.
+  subjects: readonly string[];
+}
+
+// The repository part of a subject, such as `repo:octo/shop` or
+// `repo:octo@7/shop@42`, or "" for a subject without an environment.
+function subjectRepository(subject: string): string {
+  const at = subject.indexOf(":environment:");
+  return at > 0 ? subject.slice(0, at) : "";
+}
+
+// Whether Repair may add this repository's subjects to the role. The role
+// named by a GitHub variable could be any role in the account, so Repair only
+// changes one that Radius tagged for this repository, or one that already
+// trusts another environment of it.
+function repairMayChangeRole(
+  role: Record<string, unknown>,
+  trust: PolicyDocument,
+  accountId: string,
+  request: AwsTrustRepairRequest
+): boolean {
+  if (isRadiusManagedRole(role, request.repo)) return true;
+  const repositories = request.subjects
+    .map(subjectRepository)
+    .filter((prefix) => prefix !== "");
+  return trustedGitHubSubjects(trust, accountId).some((subject) =>
+    repositories.includes(subjectRepository(subject))
+  );
+}
+
+export type AwsTrustRepairResult =
+  | {
+      readonly ok: true;
+      readonly roleName: string;
+      // The subjects that were missing and are now trusted again. Empty when
+      // the role already trusted every subject.
+      readonly added: readonly string[];
+    }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/**
+ * Add back the subjects an environment's deploys present but the role no
+ * longer trusts, for example after someone edited the trust policy by hand.
+ * Nothing else on the role changes. Only adds; a subject is never removed.
+ */
+export async function repairAwsEnvironmentTrust(
+  request: AwsTrustRepairRequest,
+  ports: Pick<AwsDeployIdentityPorts, "runAws" | "acquireLock" | "sleep">
+): Promise<AwsTrustRepairResult> {
+  const parsed = parseAwsRoleArn(request.roleArn);
+  if (!parsed) {
+    return {
+      ok: false,
+      code: "aws-role-invalid",
+      message: `This environment's AWS_ROLE_ARN, "${request.roleArn}", is not an IAM role ARN, so Radius cannot tell which role to repair.`
+    };
+  }
+  const { accountId, roleName } = parsed;
+  if (parsed.partition !== "aws") {
+    return {
+      ok: false,
+      code: "aws-partition-unsupported",
+      message: `IAM role ${request.roleArn} is outside the commercial AWS partition, so Radius did not change it.`
+    };
+  }
+  const session = await signedInAccountProblem(
+    ports,
+    accountId,
+    roleName,
+    "repair"
+  );
+  if (session) return { ok: false, ...session };
+
+  // Restoring trust does nothing if the account no longer has the GitHub
+  // identity provider the trust names, so check that first.
+  const providerArn = githubOidcProviderArn(accountId);
+  const provider = await ports.runAws([
+    "iam",
+    "get-open-id-connect-provider",
+    "--open-id-connect-provider-arn",
+    providerArn,
+    "--output",
+    "json"
+  ]);
+  if (!succeeded(provider)) {
+    return NO_SUCH_ENTITY.test(provider.stderr) ?
+        {
+          ok: false,
+          code: "aws-oidc-provider-missing",
+          message: `Account ${accountId} no longer has the GitHub identity provider, so GitHub workflows cannot sign in to any role. Nothing was changed. Ask an IAM administrator to run: ${createGitHubOidcProviderCommand()}`
+        }
+      : {
+          ok: false,
+          code: "aws-oidc-provider-unreadable",
+          message: `Could not read the account's GitHub identity provider: ${detail(provider)}`
+        };
+  }
+  const providerRecord = parseJson(provider.stdout);
+  if (
+    !isRecord(providerRecord) ||
+    !Array.isArray(providerRecord.ClientIDList) ||
+    !providerRecord.ClientIDList.includes(GITHUB_OIDC_AUDIENCE)
+  ) {
+    return {
+      ok: false,
+      code: "aws-oidc-provider-audience",
+      message: `The GitHub identity provider in account ${accountId} does not accept the ${GITHUB_OIDC_AUDIENCE} audience, so GitHub workflows cannot sign in. Nothing was changed. Ask an IAM administrator to run: aws iam add-client-id-to-open-id-connect-provider --open-id-connect-provider-arn ${providerArn} --client-id ${GITHUB_OIDC_AUDIENCE}`
+    };
+  }
+
+  const locked = await ports.acquireLock({ accountId, roleName });
+  if (!locked.ok) return locked;
+  const getRole = await ports.runAws([
+    "iam",
+    "get-role",
+    "--role-name",
+    roleName,
+    "--output",
+    "json"
+  ]);
+  if (!succeeded(getRole)) {
+    return NO_SUCH_ENTITY.test(getRole.stderr) ?
+        {
+          ok: false,
+          code: "aws-role-missing",
+          message: `IAM role ${roleName} no longer exists, so there is no trust to repair. Delete this environment and create it again to get a new deploy role.`
+        }
+      : {
+          ok: false,
+          code: "aws-role-unreadable",
+          message: `Could not read IAM role ${roleName}: ${detail(getRole)}`
+        };
+  }
+  const roleRecord = parseJson(getRole.stdout);
+  const role =
+    isRecord(roleRecord) && isRecord(roleRecord.Role) ? roleRecord.Role : {};
+  let existing: PolicyDocument;
+  try {
+    existing = parsePolicyDocument(role.AssumeRolePolicyDocument);
+  } catch (error) {
+    return {
+      ok: false,
+      code: "aws-role-trust-unreadable",
+      message: `Could not read the trust policy of IAM role ${roleName}, so Radius did not change it: ${String(error)}`
+    };
+  }
+  const added = request.subjects.filter(
+    (subject) => mergeGitHubTrustSubject(existing, accountId, subject).changed
+  );
+  if (added.length === 0) return { ok: true, roleName, added };
+  if (!repairMayChangeRole(role, existing, accountId, request)) {
+    return {
+      ok: false,
+      code: "aws-role-not-this-repository",
+      message: `IAM role ${roleName} was not created by Radius for ${request.repo} and trusts no other environment of it, so Radius will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role; if it does, add ${added.join(", ")} to its trust policy yourself.`
+    };
+  }
+  const trust = mergeGitHubTrustSubjects(existing, accountId, added);
+  const update = await ports.runAws([
+    "iam",
+    "update-assume-role-policy",
+    "--role-name",
+    roleName,
+    "--policy-document",
+    JSON.stringify(trust.policy)
+  ]);
+  if (!succeeded(update)) {
+    return LIMIT_EXCEEDED.test(update.stderr) ?
+        {
+          ok: false,
+          code: "aws-role-limit-exceeded",
+          message: `IAM role ${roleName} cannot trust this environment again: its trust policy is at IAM's size limit (${detail(update)}). Nothing was changed. Delete an environment that no longer uses this role, or ask an AWS administrator to raise the "Role trust policy length" quota (up to 8,192 characters).`
+        }
+      : {
+          ok: false,
+          code: "aws-role-trust-denied",
+          message: `Failed to update the trust policy of IAM role ${roleName}: ${detail(update)}`
+        };
+  }
+  const unconfirmed = await awaitTrustVisible(
+    ports,
+    roleName,
+    accountId,
+    trust.policy
+  );
+  if (unconfirmed) {
+    return {
+      ok: false,
+      code: "aws-role-trust-unconfirmed",
+      message: `${unconfirmed} Run Repair again.`
+    };
+  }
+  return { ok: true, roleName, added };
 }

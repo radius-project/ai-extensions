@@ -6,6 +6,7 @@ import {
 } from "@radius-project/core";
 import {
   removeAwsEnvironmentFromRole,
+  repairAwsEnvironmentTrust,
   setupAwsDeployIdentity,
   type AwsCommandResult,
   type AwsDeployIdentityRequest,
@@ -1571,5 +1572,282 @@ describe("waiting for IAM to show a trust policy write", () => {
       message: `IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped before another run could read the old one. Retry the deletion.`
     });
     expect(never.find("iam delete-role-policy")).toBeUndefined();
+  });
+});
+
+describe("repairAwsEnvironmentTrust", () => {
+  const repair = {
+    repo: "octo/shop",
+    roleArn: ROLE_ARN,
+    subjects: [DEV, DEV_ID]
+  };
+  const ready: Script = {
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-open-id-connect-provider": ok({
+      ClientIDList: ["sts.amazonaws.com"]
+    }),
+    "iam get-role": ok(managedRole([PROD, DEV])),
+    "iam update-assume-role-policy": ok()
+  };
+  const written = (aws: ReturnType<typeof fakeAws>) => {
+    const update = aws.find("iam update-assume-role-policy") ?? [];
+    return parsePolicyDocument(
+      JSON.parse(update[update.indexOf("--policy-document") + 1] ?? "{}")
+    );
+  };
+
+  it("adds back only the missing subjects and keeps everything else", async () => {
+    const aws = fakeAws(ready);
+
+    const result = await repairAwsEnvironmentTrust(repair, aws.ports);
+
+    expect(result).toEqual({ ok: true, roleName: ROLE, added: [DEV_ID] });
+    expect(trustedGitHubSubjects(written(aws), ACCOUNT)).toEqual([
+      PROD,
+      DEV,
+      DEV_ID
+    ]);
+    // Read-only checks first, then the lock, then the role.
+    expect(aws.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+      "sts get-caller-identity",
+      "iam get-open-id-connect-provider",
+      "iam get-role",
+      "iam update-assume-role-policy",
+      "iam get-role"
+    ]);
+    expect(aws.locks).toEqual([{ roleName: ROLE, after: 2 }]);
+  });
+
+  it("keeps trust statements Radius did not add", async () => {
+    const other = {
+      Effect: "Allow",
+      Principal: { Service: "ec2.amazonaws.com" },
+      Action: "sts:AssumeRole"
+    };
+    const role = managedRole([PROD]);
+    role.Role.AssumeRolePolicyDocument.Statement.push(other);
+    const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
+
+    await repairAwsEnvironmentTrust(repair, aws.ports);
+
+    expect(written(aws).Statement).toContainEqual(other);
+  });
+
+  const unmanagedRole = (subjects: string[]) => ({
+    Role: {
+      Arn: ROLE_ARN,
+      AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects)
+    }
+  });
+
+  it("adds to a role Radius did not tag when it trusts another environment of this repository", async () => {
+    const aws = fakeAws({
+      ...ready,
+      "iam get-role": ok(unmanagedRole([PROD]))
+    });
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
+      ok: true,
+      added: [DEV, DEV_ID]
+    });
+  });
+
+  it("adds to a role Radius created for this repository even when it trusts nothing", async () => {
+    const role = managedRole([]);
+    const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
+      ok: true,
+      added: [DEV, DEV_ID]
+    });
+  });
+
+  it.each([
+    [
+      "trusts only another repository",
+      unmanagedRole(["repo:mallory/evil:environment:dev"])
+    ],
+    ["trusts no GitHub subject", unmanagedRole([])],
+    [
+      "Radius created for another repository",
+      {
+        Role: {
+          ...managedRole(["repo:octo/web:environment:dev"]).Role,
+          Tags: [
+            { Key: "radius-managed", Value: "true" },
+            { Key: "radius-repository", Value: "octo/web" }
+          ]
+        }
+      }
+    ]
+  ])("refuses a role that %s, changing nothing", async (_label, role) => {
+    const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
+
+    const result = await repairAwsEnvironmentTrust(repair, aws.ports);
+
+    expect(result).toEqual({
+      ok: false,
+      code: "aws-role-not-this-repository",
+      message: `IAM role ${ROLE} was not created by Radius for octo/shop and trusts no other environment of it, so Radius will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role; if it does, add ${DEV}, ${DEV_ID} to its trust policy yourself.`
+    });
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  it("does not count a subject without an environment as this repository's", async () => {
+    const aws = fakeAws({
+      ...ready,
+      "iam get-role": ok(unmanagedRole(["repo:octo/shop:ref:refs/heads/main"]))
+    });
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
+      ok: false,
+      code: "aws-role-not-this-repository"
+    });
+  });
+
+  it("changes nothing when the role already trusts every subject", async () => {
+    const aws = fakeAws({
+      ...ready,
+      "iam get-role": ok(managedRole([DEV, DEV_ID]))
+    });
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
+      ok: true,
+      roleName: ROLE,
+      added: []
+    });
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "an ARN that is not a role",
+      { ...repair, roleArn: "not-an-arn" },
+      ready,
+      "aws-role-invalid"
+    ],
+    [
+      "a role outside the commercial partition",
+      { ...repair, roleArn: `arn:aws-cn:iam::${ACCOUNT}:role/${ROLE}` },
+      ready,
+      "aws-partition-unsupported"
+    ],
+    [
+      "no AWS CLI session",
+      repair,
+      {
+        ...ready,
+        "sts get-caller-identity": fail("Unable to locate credentials")
+      },
+      "aws-cli-login-required"
+    ],
+    [
+      "a session in another account",
+      repair,
+      { ...ready, "sts get-caller-identity": ok({ Account: "999999999999" }) },
+      "aws-account-mismatch"
+    ],
+    [
+      "no GitHub identity provider",
+      repair,
+      {
+        ...ready,
+        "iam get-open-id-connect-provider": fail("NoSuchEntity: gone")
+      },
+      "aws-oidc-provider-missing"
+    ],
+    [
+      "an unreadable GitHub identity provider",
+      repair,
+      { ...ready, "iam get-open-id-connect-provider": fail("AccessDenied") },
+      "aws-oidc-provider-unreadable"
+    ],
+    [
+      "a provider without the AWS audience",
+      repair,
+      {
+        ...ready,
+        "iam get-open-id-connect-provider": ok({ ClientIDList: ["other"] })
+      },
+      "aws-oidc-provider-audience"
+    ],
+    [
+      "a provider that answers without a client list",
+      repair,
+      { ...ready, "iam get-open-id-connect-provider": ok("{") },
+      "aws-oidc-provider-audience"
+    ]
+  ])("stops before the lock for %s", async (_label, request, script, code) => {
+    const aws = fakeAws(script);
+    expect(await repairAwsEnvironmentTrust(request, aws.ports)).toMatchObject({
+      ok: false,
+      code
+    });
+    expect(aws.locks).toEqual([]);
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  it("names the command that adds the missing provider", async () => {
+    const aws = fakeAws({
+      ...ready,
+      "iam get-open-id-connect-provider": fail("NoSuchEntity: gone")
+    });
+    const result = await repairAwsEnvironmentTrust(repair, aws.ports);
+    expect("message" in result && result.message).toContain(
+      "aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com"
+    );
+  });
+
+  it("stops when the lock cannot be taken", async () => {
+    const aws = fakeAws(ready, {
+      ok: false,
+      code: "aws-lock-busy",
+      message: "busy"
+    });
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
+      ok: false,
+      code: "aws-lock-busy",
+      message: "busy"
+    });
+    expect(aws.find("iam get-role")).toBeUndefined();
+  });
+
+  it.each([
+    [fail("NoSuchEntity: no role"), "aws-role-missing"],
+    [fail("Throttling"), "aws-role-unreadable"],
+    [
+      ok({ Role: { AssumeRolePolicyDocument: "%7Bnot json" } }),
+      "aws-role-trust-unreadable"
+    ],
+    [ok({}), "aws-role-trust-unreadable"]
+  ])("changes nothing when the role reads as %j", async (answer, code) => {
+    const aws = fakeAws({ ...ready, "iam get-role": answer });
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
+      ok: false,
+      code
+    });
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  it.each([
+    [fail("LimitExceeded: too long"), "aws-role-limit-exceeded"],
+    [fail("AccessDenied"), "aws-role-trust-denied"]
+  ])("reports a refused trust update as %s", async (answer, code) => {
+    const aws = fakeAws({ ...ready, "iam update-assume-role-policy": answer });
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
+      ok: false,
+      code
+    });
+  });
+
+  it("waits for IAM to show the update, and stops when it never does", async () => {
+    const settled = fakeAws(ready, { ok: true }, { staleReads: 1 });
+    expect(
+      await repairAwsEnvironmentTrust(repair, settled.ports)
+    ).toMatchObject({ ok: true, added: [DEV_ID] });
+    expect(settled.sleeps).toEqual([1000]);
+
+    const never = fakeAws(ready, { ok: true }, { staleReads: 99 });
+    expect(await repairAwsEnvironmentTrust(repair, never.ports)).toEqual({
+      ok: false,
+      code: "aws-role-trust-unconfirmed",
+      message: `IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped before another run could read the old one. Run Repair again.`
+    });
   });
 });

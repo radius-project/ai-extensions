@@ -24,6 +24,7 @@ import {
 import {
   activeDeploymentMutation,
   beginDeployAttempt,
+  DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND,
   deploymentStatusBlocksMutation,
   localDeploymentBlocksMutation,
@@ -50,6 +51,9 @@ import type {
 } from "../../../src/deploy-artifacts.js";
 import type { DeployMonitorRequest } from "../../../src/server/services/deploy-monitor.js";
 import type { CanvasState } from "../../../src/shared.js";
+import { createAwsTrustRepairService } from "../../../src/server/services/aws-trust-repair.js";
+import type { EnvironmentTarget } from "../../../src/server/services/environment-target.js";
+import type { AwsEnvironmentRepairResult } from "../../../src/server/services/aws-environment-access.js";
 import { observeWorkflowRun } from "@radius-project/core";
 import {
   readWorkflowRun,
@@ -105,6 +109,11 @@ interface Harness {
   artifacts: WorkflowArtifact[];
   artifactFiles: ArtifactFiles | null;
   setArtifactFiles(files: ArtifactFiles | null): void;
+  // AWS trust repair: the GitHub environment's variables, the role repairs
+  // asked for, and the answer each gets.
+  setEnvironmentTarget(target: EnvironmentTarget): void;
+  trustRepairs: unknown[];
+  setTrustRepairResult(result: AwsEnvironmentRepairResult): void;
 }
 
 function row(environment: string, status = "deployed"): DeploymentRow {
@@ -160,6 +169,30 @@ function start(
       args.includes("--method") ? "" : environments.join("\n")
     );
   };
+  let environmentTarget: EnvironmentTarget = {
+    provider: "aws",
+    clientId: "",
+    tenantId: "",
+    repoId: 0,
+    roleArn: "",
+    trustSubjects: []
+  };
+  const trustRepairs: unknown[] = [];
+  let trustRepairResult: AwsEnvironmentRepairResult = {
+    ok: true,
+    roleName: "radius-deploy-octo-todolist",
+    added: []
+  };
+  const awsTrustRepair = createAwsTrustRepairService({
+    readInstanceState: () => readInstanceState(),
+    cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
+    readEnvironmentTarget: async () => environmentTarget,
+    repair: async (input) => {
+      trustRepairs.push(input);
+      return trustRepairResult;
+    },
+    errorMessage: (error) => String(error)
+  });
   const abandonment = createDeploymentAbandonmentService({
     isValidRepoSlug,
     readInstanceState: () => readInstanceState(),
@@ -243,7 +276,8 @@ function start(
           throw new Error("unexpected deploy dispatch from the read harness");
         }
       },
-      abandonment
+      abandonment,
+      awsTrustRepair
     })
   );
 
@@ -295,6 +329,13 @@ function start(
     artifacts,
     get artifactFiles() {
       return artifactFiles;
+    },
+    setEnvironmentTarget(target) {
+      environmentTarget = target;
+    },
+    trustRepairs,
+    setTrustRepairResult(result) {
+      trustRepairResult = result;
     },
     setArtifactFiles(files) {
       artifactFiles = files;
@@ -2030,6 +2071,11 @@ function startDeploy(
         abandon: () => {
           throw new Error("the deploy harness must not abandon deployments");
         }
+      },
+      awsTrustRepair: {
+        repair: () => {
+          throw new Error("the deploy harness must not repair AWS trust");
+        }
       }
     })
   );
@@ -2115,6 +2161,105 @@ function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
   };
   Object.assign(state, extra);
 }
+
+describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
+  const ROLE_ARN = "arn:aws:iam::123456789012:role/radius-deploy-octo-todo";
+  const failedSignIn = (state: CanvasState): void => {
+    Object.assign(state, {
+      deployStatus: "failed",
+      deployErrorKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
+      deployingRepo: "octo/stale",
+      deployEnvName: "stale",
+      deployAttempt: {
+        id: "attempt-1",
+        targetRepo: "octo/todo",
+        environment: "dev"
+      }
+    });
+  };
+
+  it("repairs the role of the deploy that failed to sign in, ignoring the body", async () => {
+    const harness = start();
+    failedSignIn(harness.state);
+    harness.setEnvironmentTarget({
+      provider: "aws",
+      clientId: "",
+      tenantId: "",
+      repoId: 0,
+      roleArn: ROLE_ARN,
+      trustSubjects: ["repo:octo/todo:environment:dev"]
+    });
+    harness.setTrustRepairResult({
+      ok: true,
+      roleName: "radius-deploy-octo-todo",
+      added: ["repo:octo/todo:environment:dev"]
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy/repair-aws-trust",
+      JSON.stringify({ repo: "evil/repo", environment: "prod" })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      code: "aws-trust-repaired",
+      added: ["repo:octo/todo:environment:dev"],
+      message:
+        "IAM role radius-deploy-octo-todo trusts environment dev again. Radius added back repo:octo/todo:environment:dev. Deploy again."
+    });
+    expect(harness.trustRepairs).toEqual([
+      {
+        repo: "octo/todo",
+        environment: "dev",
+        roleArn: ROLE_ARN
+      }
+    ]);
+  });
+
+  it("refuses when this canvas has no deploy that failed to sign in", async () => {
+    const harness = start();
+    harness.state.deployStatus = "failed";
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy/repair-aws-trust",
+      "{}"
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: "repair-not-applicable"
+    });
+    expect(harness.trustRepairs).toEqual([]);
+  });
+
+  it("refuses an environment that is not set up for AWS", async () => {
+    const harness = start();
+    failedSignIn(harness.state);
+    harness.setEnvironmentTarget({
+      provider: "azure",
+      clientId: "app",
+      tenantId: "tenant",
+      repoId: 1,
+      roleArn: "",
+      trustSubjects: []
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy/repair-aws-trust",
+      "{}"
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "repair-not-aws" });
+    expect(harness.trustRepairs).toEqual([]);
+  });
+});
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   it.each([

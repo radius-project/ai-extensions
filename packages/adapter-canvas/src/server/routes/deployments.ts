@@ -176,6 +176,14 @@ export interface DeploymentsDependencies {
     request: DeleteConflictRequest,
     instanceId: string
   ): Promise<DeleteConflictProbe>;
+  // Repair for an AWS deploy that could not sign in. The service decides from
+  // this canvas's failed deploy which environment it repairs.
+  awsTrustRepair: {
+    repair(input: { instanceId: string }): Promise<{
+      status: number;
+      body: Record<string, unknown>;
+    }>;
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -931,6 +939,19 @@ export async function handleDeploy(
   context.json(result.status, result.body);
 }
 
+// Adds back the trust subjects the failed AWS deploy's role is missing. The
+// body is drained but not read: the failed deploy names the environment.
+export async function handleRepairAwsTrust(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): Promise<void> {
+  await context.readTextBody();
+  const result = await dependencies.awsTrustRepair.repair({
+    instanceId: context.instanceId
+  });
+  context.json(result.status, result.body);
+}
+
 // The ambient deploy chip's read-only source. Deliberately NOT served from
 // `/api/deploy-status`: that route drives the repair handoff and the failure
 // notice as a side effect of being polled, and the chip polls from every page
@@ -980,6 +1001,8 @@ export function createDeploymentsRoutes(
   return {
     "GET /api/deploy-status": (context) =>
       handleDeployStatus(context, dependencies),
+    "POST /api/deploy/repair-aws-trust": (context) =>
+      handleRepairAwsTrust(context, dependencies),
     "GET /api/deploy-notification": (context) =>
       handleDeployNotification(context, dependencies),
     "GET /api/list-applications": (context) =>

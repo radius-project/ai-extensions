@@ -1137,3 +1137,132 @@ describe("two setups on one deploy identity at the same time", () => {
     }
   );
 });
+
+describe("repairing an environment's trust under the lock", () => {
+  const repairInput = {
+    repo: "octo/shop",
+    environment: "dev",
+    roleArn: ROLE_ARN
+  };
+  const missingId: Record<string, Answer> = {
+    ...lockFree,
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-open-id-connect-provider": ok({
+      ClientIDList: ["sts.amazonaws.com"]
+    }),
+    "iam get-role": ok({
+      Role: {
+        Arn: ROLE_ARN,
+        AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [DEV, PROD])
+      }
+    }),
+    "iam update-assume-role-policy": ok()
+  };
+  const holder = (created: string) =>
+    lockPolicy("LOCK0", {
+      Description:
+        '{"repo":"octo/shop","environment":"prod","action":"setup","operationId":"op-2"}',
+      CreateDate: created
+    });
+
+  it("adds the missing subject under a repair lock and releases it", async () => {
+    const h = harness(missingId);
+
+    expect(await h.access.repair(repairInput)).toEqual({
+      ok: true,
+      roleName: ROLE,
+      added: [DEV_ID]
+    });
+
+    expect(h.commands()).toEqual([
+      "sts get-caller-identity",
+      "iam get-open-id-connect-provider",
+      "iam create-policy",
+      "iam get-policy",
+      "iam get-role",
+      "iam get-policy",
+      "iam update-assume-role-policy",
+      "iam get-role",
+      "iam get-policy",
+      "iam delete-policy"
+    ]);
+    const create = h.find("iam create-policy") ?? [];
+    expect(
+      JSON.parse(create[create.indexOf("--description") + 1] ?? "")
+    ).toMatchObject({ action: "repair", environment: "dev" });
+    // The subjects come from GitHub, with the ambient account.
+    expect(h.githubCalls).toEqual([
+      { path: "/repos/octo/shop", executor: undefined },
+      {
+        path: "/repos/octo/shop/actions/oidc/customization/sub",
+        executor: undefined
+      }
+    ]);
+  });
+
+  it.each([
+    [false, "2026-10-30T11:58:00Z", ""],
+    [
+      true,
+      "2026-10-30T11:00:00Z",
+      ` If that run has stopped, remove its lock with: aws iam delete-policy --policy-arn ${LOCK_ARN}`
+    ]
+  ])(
+    "refuses at once, naming the holder, when another run holds the lock (removable %s)",
+    async (_removable, created, ending) => {
+      const h = harness({
+        ...missingId,
+        "iam create-policy": fail("EntityAlreadyExists"),
+        "iam get-policy": holder(created)
+      });
+
+      const result = await h.access.repair(repairInput);
+
+      expect(result).toEqual({
+        ok: false,
+        code: "aws-lock-busy",
+        message: `The setup of environment prod in octo/shop is changing IAM role ${ROLE} (it has held the role's lock since ${created.slice(0, 16).replace("T", " ")} UTC), so Radius changed nothing. Try again once it finishes.${ending}`
+      });
+      expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
+      expect(h.commands()).not.toContain("iam get-role");
+      expect(h.commands()).not.toContain("iam delete-policy");
+    }
+  );
+
+  it("stops without writing when its lock is lost", async () => {
+    const h = harness({
+      ...missingId,
+      "iam get-policy": [lockPolicy("LOCK1"), lockPolicy("LOCK2")]
+    });
+
+    const result = await h.access.repair(repairInput);
+
+    expect(result).toMatchObject({ ok: false, code: "aws-lock-lost" });
+    expect(h.commands()).not.toContain("iam update-assume-role-policy");
+  });
+
+  it("finishes the repair but warns when the lock cannot be released", async () => {
+    const h = harness({
+      ...missingId,
+      "iam delete-policy": fail("AccessDenied")
+    });
+    expect(await h.access.repair(repairInput)).toMatchObject({
+      ok: true,
+      added: [DEV_ID],
+      lockWarning: expect.stringContaining("not allowed iam:DeletePolicy")
+    });
+  });
+
+  it("names both problems when the repair and the release fail", async () => {
+    const h = harness({
+      ...missingId,
+      "iam update-assume-role-policy": fail("AccessDenied"),
+      "iam delete-policy": fail("ServiceFailure")
+    });
+    const result = await h.access.repair(repairInput);
+    expect(result).toMatchObject({ ok: false, code: "aws-role-trust-denied" });
+    expect("message" in result && result.message).toMatch(
+      /AccessDenied Radius could not release the lock/
+    );
+  });
+});

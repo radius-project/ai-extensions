@@ -10,15 +10,19 @@ import {
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
   removeAwsEnvironmentFromRole,
+  repairAwsEnvironmentTrust,
   setupAwsDeployIdentity,
   type AwsCommandResult,
+  type AwsDeployIdentityPorts,
   type AwsDeployIdentityRemovalResult,
-  type AwsLockResult
+  type AwsLockResult,
+  type AwsTrustRepairResult
 } from "./aws-deploy-identity.js";
 import {
   acquireAwsDeployIdentityLock,
   isAwsWrite,
   type AwsDeployIdentityLock,
+  type AwsLockReleaseResult,
   type AwsLockWait
 } from "./aws-deploy-identity-lock.js";
 
@@ -92,6 +96,42 @@ export interface AwsEnvironmentAccess<Operation> {
     // line when there is something new to say.
     waiting?(wait: AwsLockWait, line: string | null): void | Promise<void>;
   }): Promise<AwsEnvironmentRemovalResult>;
+  // Add back the subjects GitHub presents for this environment's deploys but
+  // the role no longer trusts, under the deploy identity lock. Does not wait
+  // for a lock another run holds.
+  repair(input: {
+    repo: string;
+    environment: string;
+    roleArn: string;
+  }): Promise<AwsEnvironmentRepairResult>;
+}
+
+export type AwsEnvironmentRepairResult =
+  | (Extract<AwsTrustRepairResult, { ok: true }> & {
+      // Set when the repair finished but the lock could not be released.
+      readonly lockWarning?: string;
+    })
+  | Extract<AwsTrustRepairResult, { ok: false }>;
+
+type AwsRoleChangePorts = Pick<
+  AwsDeployIdentityPorts,
+  "runAws" | "acquireLock" | "sleep"
+>;
+
+// Another run holds the role's lock, and this run does not wait for it.
+function lockBusy(
+  roleName: string,
+  wait: AwsLockWait
+): { ok: false; code: string; message: string } {
+  return {
+    ok: false,
+    code: "aws-lock-busy",
+    message:
+      `${wait.holder} is changing IAM role ${roleName} (it has held the role's lock since ${lockTime(wait.since)}), so Radius changed nothing. Try again once it finishes.` +
+      (wait.removable ?
+        ` If that run has stopped, remove its lock with: aws iam delete-policy --policy-arn ${wait.policyArn}`
+      : "")
+  };
 }
 
 export type AwsEnvironmentRemovalResult =
@@ -139,7 +179,8 @@ export function createAwsEnvironmentAccess<Operation>(
       operationId: string;
     },
     shouldStop: () => boolean,
-    waiting: (wait: AwsLockWait, line: string | null) => Promise<void>
+    waiting: (wait: AwsLockWait, line: string | null) => Promise<void>,
+    sleep: (milliseconds: number) => Promise<void> = dependencies.sleep
   ): Promise<
     | { ok: true; lock: AwsDeployIdentityLock }
     | { ok: false; code: string; message: string }
@@ -158,7 +199,7 @@ export function createAwsEnvironmentAccess<Operation>(
       },
       {
         runAws: dependencies.runAws,
-        sleep: dependencies.sleep,
+        sleep,
         now: dependencies.now,
         shouldStop,
         waiting: async (wait) => {
@@ -184,6 +225,67 @@ export function createAwsEnvironmentAccess<Operation>(
       };
     }
     return result;
+  }
+
+  // Run `work` on one role under its lock: every IAM or EKS write is checked
+  // against the lock first, and the lock is released afterwards, including
+  // when `work` throws. With no `waiting`, a lock another run holds is not
+  // waited for: `work` gets a refusal naming the holder instead.
+  async function runUnderLock<T>(
+    holder: {
+      repo: string;
+      environment: string;
+      action: AwsLockAction;
+      operationId: string;
+    },
+    waiting: ((wait: AwsLockWait, line: string | null) => unknown) | null,
+    work: (ports: AwsRoleChangePorts) => Promise<T>
+  ): Promise<{ result: T; lost: string; released: AwsLockReleaseResult }> {
+    // Boxed so the closures below and this function see one value.
+    const state: { lock: AwsDeployIdentityLock | null; lost: string } = {
+      lock: null,
+      lost: ""
+    };
+    try {
+      const result = await work({
+        runAws: async (args) => {
+          if (state.lock && isAwsWrite(args)) {
+            const lost = await state.lock.verify();
+            if (lost) {
+              state.lost ||= lost;
+              return lockLostResult(lost);
+            }
+          }
+          return dependencies.runAws(args);
+        },
+        sleep: dependencies.sleep,
+        acquireLock: async ({ accountId, roleName }) => {
+          let busy: AwsLockWait | null = null;
+          const taken = await lock(
+            { accountId, roleName, ...holder },
+            () => busy !== null,
+            async (wait, line) => {
+              if (waiting) await waiting(wait, line);
+              else busy = wait;
+            },
+            async (milliseconds) => {
+              if (busy === null) await dependencies.sleep(milliseconds);
+            }
+          );
+          if (busy !== null) return lockBusy(roleName, busy);
+          if (!taken.ok) return taken;
+          state.lock = taken.lock;
+          return { ok: true };
+        }
+      });
+      const taken = state.lock;
+      state.lock = null;
+      const released = taken ? await taken.release() : { ok: true as const };
+      return { result, lost: state.lost, released };
+    } finally {
+      // Only set when `work` threw before the release above.
+      if (state.lock) await state.lock.release();
+    }
   }
 
   // The same subjects Azure's federated credentials trust: one for a
@@ -390,59 +492,36 @@ export function createAwsEnvironmentAccess<Operation>(
         trustSubjects.length > 0 ?
           trustSubjects
         : await resolveSubjects(repo, environment);
-      // Boxed so the closures below and this function see one value.
-      const state: { lock: AwsDeployIdentityLock | null; lost: string } = {
-        lock: null,
-        lost: ""
-      };
-      try {
-        const result = await removeAwsEnvironmentFromRole(
-          { roleArn, environment, subjects },
-          {
-            runAws: async (args) => {
-              if (state.lock && isAwsWrite(args)) {
-                const lost = await state.lock.verify();
-                if (lost) {
-                  state.lost ||= lost;
-                  return lockLostResult(lost);
-                }
-              }
-              return dependencies.runAws(args);
-            },
-            sleep: dependencies.sleep,
-            acquireLock: async ({ accountId, roleName }) => {
-              const taken = await lock(
-                {
-                  accountId,
-                  roleName,
-                  repo,
-                  environment,
-                  action: "delete",
-                  operationId
-                },
-                () => false,
-                async (wait, line) => {
-                  await waiting?.(wait, line);
-                }
-              );
-              if (!taken.ok) return taken;
-              state.lock = taken.lock;
-              return { ok: true };
-            }
-          }
-        );
-        const taken = state.lock;
-        state.lock = null;
-        const released = taken ? await taken.release() : { ok: true as const };
-        if (state.lost) return { ok: false, message: state.lost };
-        if (released.ok) return result;
-        return result.ok ?
-            { ...result, lockWarning: released.message }
-          : { ok: false, message: `${result.message} ${released.message}` };
-      } finally {
-        // Only set when the removal threw before the release above.
-        if (state.lock) await state.lock.release();
-      }
+      const { result, lost, released } = await runUnderLock(
+        { repo, environment, action: "delete", operationId },
+        waiting ?? (() => undefined),
+        (ports) =>
+          removeAwsEnvironmentFromRole(
+            { roleArn, environment, subjects },
+            ports
+          )
+      );
+      if (lost) return { ok: false, message: lost };
+      if (released.ok) return result;
+      return result.ok ?
+          { ...result, lockWarning: released.message }
+        : { ok: false, message: `${result.message} ${released.message}` };
+    },
+
+    async repair({ repo, environment, roleArn }) {
+      // Always from GitHub: AWS_TRUST_SUBJECTS is editable by anyone with
+      // admin on the repository, so it cannot decide what Repair trusts.
+      const subjects = await resolveSubjects(repo, environment);
+      const { result, lost, released } = await runUnderLock(
+        { repo, environment, action: "repair", operationId: "" },
+        null,
+        (ports) => repairAwsEnvironmentTrust({ repo, roleArn, subjects }, ports)
+      );
+      if (lost) return { ok: false, code: "aws-lock-lost", message: lost };
+      if (released.ok) return result;
+      return result.ok ?
+          { ...result, lockWarning: released.message }
+        : { ...result, message: `${result.message} ${released.message}` };
     }
   };
 }

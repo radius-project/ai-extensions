@@ -18,7 +18,8 @@ import {
   fakeInputById,
   fakeTree,
   flushPromises,
-  jsonResponse
+  jsonResponse,
+  textResponse
 } from "../../../test/support/browser/fakes.js";
 import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
@@ -37,6 +38,10 @@ import {
   DELETE_POLL_MS,
   DEPLOY_AUTO_HIDE_MS,
   DEPLOY_FAILED_HANDOFF_POLL_LIMIT,
+  AWS_REPAIR_BUTTON_ID,
+  AWS_REPAIR_HELP_ID,
+  AWS_REPAIR_PATH,
+  AWS_REPAIR_STATUS_ID,
   DEPLOY_STATUS_PATH,
   DEPLOY_WORKFLOW_POLL_LIMIT,
   DEPLOY_WORKFLOW_POLL_MS,
@@ -2420,6 +2425,209 @@ describe("deploy flow", () => {
     page.reverifyCredentialsBtn.dispatch("click");
     await flushPromises();
     expect(page.browser.nav.assigned).toContain("/?page=environment");
+  });
+
+  describe("Repair on an AWS deploy that could not sign in", () => {
+    const awsEnvironments = {
+      environments: [{ name: "dev", provider: "aws", status: "success" }]
+    };
+    async function failSignIn(
+      envPayload: unknown = awsEnvironments,
+      error = "AWS sign-in failed."
+    ) {
+      const page = fixture({ envPayload });
+      // The panel's markup is a string in the fake DOM, so the controls it
+      // renders are registered by id the way a real browser exposes them.
+      const repairButton = createFakeInput(AWS_REPAIR_BUTTON_ID);
+      const repairStatus = createFakeElement(AWS_REPAIR_STATUS_ID);
+      page.browser.document.add(repairButton);
+      page.browser.document.add(repairStatus);
+      init(page);
+      await flushPromises();
+      page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "cloud-auth-drift",
+          error,
+          handoff: { pending: false, state: "idle" }
+        })
+      );
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+      const repairCalls = () =>
+        page.browser.net.calls.filter((call) => call.url === AWS_REPAIR_PATH);
+      return { page, repairButton, repairStatus, repairCalls };
+    }
+
+    it("offers Repair before Re-verify and explains what it changes", async () => {
+      const { page } = await failSignIn();
+      const markup = page.progressSubtitle.innerHTML;
+      expect(markup).toContain(
+        `<button type="button" id="${AWS_REPAIR_BUTTON_ID}" class="rad-btn rad-btn--primary" style="margin:0;" aria-describedby="${AWS_REPAIR_HELP_ID}">Repair</button>`
+      );
+      expect(markup.indexOf(AWS_REPAIR_BUTTON_ID)).toBeLessThan(
+        markup.indexOf("deploy-reverify-credentials")
+      );
+      expect(markup).toContain('class="rad-btn rad-btn--secondary"');
+      expect(markup).toContain(
+        "Repair adds this environment back to its AWS deploy role's trust policy if it was removed. It changes nothing else."
+      );
+      expect(markup).toContain(`id="${AWS_REPAIR_STATUS_ID}" role="status"`);
+    });
+
+    it("does not offer Repair for an Azure environment", async () => {
+      const { page } = await failSignIn({
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
+      });
+      const markup = page.progressSubtitle.innerHTML;
+      expect(markup).not.toContain(AWS_REPAIR_BUTTON_ID);
+      expect(markup).toContain(
+        'id="deploy-reverify-credentials" class="rad-btn rad-btn--primary"'
+      );
+    });
+
+    it("asks the server once, with the nonce, and shows its answer", async () => {
+      const { page, repairButton, repairStatus, repairCalls } =
+        await failSignIn();
+      const response = createDeferred<HttpResponse>();
+      page.browser.net.handle(AWS_REPAIR_PATH, () => response.promise);
+
+      repairButton.dispatch("click");
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe("Repairing the AWS deploy role…");
+      expect(repairButton.disabled).toBe(true);
+      expect(repairCalls()).toHaveLength(1);
+      // The same failure shown again while Repair runs keeps it disabled.
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+      expect(page.progressSubtitle.innerHTML).toContain(
+        `aria-describedby="${AWS_REPAIR_HELP_ID}" disabled>Repair</button>`
+      );
+      expect(repairCalls()[0]?.init).toMatchObject({
+        method: "POST",
+        headers: { "X-Radius-Mutation-Nonce": "test-nonce" },
+        body: "{}"
+      });
+
+      response.resolve(
+        jsonResponse({
+          code: "aws-trust-repaired",
+          message: "IAM role r trusts environment dev again. Deploy again."
+        })
+      );
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe(
+        "IAM role r trusts environment dev again. Deploy again."
+      );
+      expect(repairButton.disabled).toBe(false);
+    });
+
+    it.each([
+      [
+        "the server's refusal",
+        () =>
+          jsonResponse(
+            { code: "aws-lock-busy", error: "Another run is changing it." },
+            false,
+            409
+          ),
+        "Another run is changing it."
+      ],
+      [
+        "a refusal with no text",
+        () => textResponse("bad gateway", false, 502),
+        "Radius could not repair the AWS deploy role."
+      ],
+      [
+        "a success with no text",
+        () => jsonResponse({}),
+        "Radius repaired the AWS deploy role. Deploy again."
+      ],
+      [
+        "an unreachable server",
+        () => Promise.reject(new Error("offline")),
+        "Radius could not reach the canvas server, so nothing was repaired. Try again."
+      ]
+    ])("shows %s", async (_label, answer, text) => {
+      const { page, repairButton, repairStatus } = await failSignIn();
+      page.browser.net.handle(AWS_REPAIR_PATH, answer);
+
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe(text);
+      expect(repairButton.disabled).toBe(false);
+    });
+
+    it("keeps the result when the same failure is shown again", async () => {
+      const { page, repairButton } = await failSignIn();
+      page.browser.net.handle(AWS_REPAIR_PATH, () =>
+        jsonResponse({ message: "Repaired." })
+      );
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+
+      expect(page.progressSubtitle.innerHTML).toContain(
+        `role="status" style="margin-top:10px; color:var(--rad-text);">Repaired.</div>`
+      );
+    });
+
+    it("finishes quietly when the panel's controls are gone", async () => {
+      const { page, repairButton } = await failSignIn();
+      const response = createDeferred<HttpResponse>();
+      page.browser.net.handle(AWS_REPAIR_PATH, () => response.promise);
+      repairButton.dispatch("click");
+      await flushPromises();
+      // A failure of another kind replaced the markup.
+      page.browser.document.remove(AWS_REPAIR_STATUS_ID);
+      page.browser.document.remove(AWS_REPAIR_BUTTON_ID);
+
+      response.resolve(jsonResponse({ message: "Repaired." }));
+      await flushPromises();
+
+      expect(repairButton.disabled).toBe(true);
+    });
+
+    it("drops an answer that arrives after a different failure replaced the panel", async () => {
+      const { page, repairButton, repairStatus } = await failSignIn();
+      const response = createDeferred<HttpResponse>();
+      page.browser.net.handle(AWS_REPAIR_PATH, () => response.promise);
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "cloud-auth-drift",
+          error: "A later sign-in failure.",
+          handoff: { pending: false, state: "idle" }
+        })
+      );
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+      repairStatus.textContent = "";
+
+      response.resolve(jsonResponse({ message: "Old answer." }));
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe("");
+      expect(page.progressSubtitle.innerHTML).not.toContain("Old answer.");
+    });
   });
 
   it("omits the preflight detail from the cloud-auth-drift panel when the failure carries no text", async () => {
