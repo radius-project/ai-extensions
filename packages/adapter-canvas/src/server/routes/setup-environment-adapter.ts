@@ -1,5 +1,8 @@
 import { parse as parseYaml } from "yaml";
-import type { SetupEnvironmentPorts } from "@radius-project/core";
+import {
+  assertSetupExecutionActive,
+  type SetupEnvironmentPorts
+} from "@radius-project/core";
 import { encodeWorkflowContent } from "@radius-project/adapter-shared";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { ConfigureEnvironmentDependencies } from "../services/configure-environment.js";
@@ -71,7 +74,9 @@ export function createSetupEnvironmentPorts(input: {
     stopBoundary: input.stopBoundary,
     checkpoint: input.checkpoint,
     preflightRepository: async (repo) => {
-      repositoryAccess = await d.preflightRepoAdmin(repo, executor);
+      repositoryAccess = await d.preflightRepoAdmin(repo, executor, () =>
+        assertSetupExecutionActive(d.isShuttingDown)
+      );
       return repositoryAccess === "";
     },
     preflightPackages: async () => {

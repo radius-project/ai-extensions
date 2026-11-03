@@ -320,7 +320,7 @@ describe("verification dispatch", () => {
       let stopped = false;
       test.ports.isStopped = () => stopped;
       const originalRead = test.ports.runGh;
-      test.ports.runGh = async (args) => {
+      const read = vi.fn<VerificationDispatchPorts["runGh"]>(async (args) => {
         if (args.includes("databaseId")) return originalRead(args);
         if (boundary === "wait") return command({ stdout: "[]" });
         entered.resolve();
@@ -333,19 +333,25 @@ describe("verification dispatch", () => {
             : boundary === "empty" ? "[]"
             : "invalid"
         });
-      };
-      test.ports.sleep = async () => {
+      });
+      test.ports.runGh = read;
+      const sleep = vi.fn(async () => {
         entered.resolve();
         await gate.promise;
-      };
+      });
+      test.ports.sleep = sleep;
       const identity = vi.spyOn(test.ports, "applyIdentity");
       const pending = expect(test.run()).rejects.toMatchObject({
         code: "setup-execution-interrupted"
       });
       await entered.promise;
+      const issuedReads = read.mock.calls.length;
+      const issuedSleeps = sleep.mock.calls.length;
       stopped = true;
       gate.resolve();
       await pending;
+      expect(read).toHaveBeenCalledTimes(issuedReads);
+      expect(sleep).toHaveBeenCalledTimes(issuedSleeps);
       expect(test.sendDispatch).toHaveBeenCalledOnce();
       expect(identity).toHaveBeenCalledOnce();
       expect(test.persisted.at(-1)?.status).toBe(
