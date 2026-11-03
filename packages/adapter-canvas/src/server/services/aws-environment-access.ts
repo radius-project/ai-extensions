@@ -106,6 +106,9 @@ export interface AwsEnvironmentAccess<Operation> {
     repo: string;
     environment: string;
     roleArn: string;
+    // Run once the lock is held, before any write: null when the environment
+    // still names `roleArn`, otherwise why Repair must stop.
+    confirmTarget(): Promise<{ code: string; message: string } | null>;
   }): Promise<AwsEnvironmentRepairResult>;
 }
 
@@ -579,7 +582,7 @@ export function createAwsEnvironmentAccess<Operation>(
         : { ok: false, message: `${result.message} ${released.message}` };
     },
 
-    async repair({ repo, environment: requested, roleArn }) {
+    async repair({ repo, environment: requested, roleArn, confirmTarget }) {
       // GitHub finds an environment by name in any casing, but its tokens
       // carry the stored spelling, so the subjects are built from that.
       const lookup = await dependencies.runGitHubJson(
@@ -600,7 +603,22 @@ export function createAwsEnvironmentAccess<Operation>(
       const { result, lost, released } = await runUnderLock(
         { repo, environment, action: "repair", operationId: "" },
         null,
-        (ports) => repairAwsEnvironmentTrust({ repo, roleArn, subjects }, ports)
+        (ports) =>
+          repairAwsEnvironmentTrust(
+            { repo, roleArn, subjects },
+            {
+              ...ports,
+              // A delete can run between the first read of the environment and
+              // this lock. Read it again under the lock, so Repair never adds
+              // trust back for an environment that is gone or moved roles.
+              acquireLock: async (request) => {
+                const taken = await ports.acquireLock(request);
+                if (!taken.ok) return taken;
+                const changed = await confirmTarget();
+                return changed ? { ok: false, ...changed } : taken;
+              }
+            }
+          )
       );
       if (lost) return { ok: false, code: "aws-lock-lost", message: lost };
       if (released.ok) return result;

@@ -28,6 +28,7 @@ export interface AwsTrustRepairDependencies {
     repo: string;
     environment: string;
     roleArn: string;
+    confirmTarget(): Promise<{ code: string; message: string } | null>;
   }): Promise<AwsEnvironmentRepairResult>;
   errorMessage(error: unknown): string;
 }
@@ -101,10 +102,38 @@ export function createAwsTrustRepairService(
       }
       let result: AwsEnvironmentRepairResult;
       try {
+        const roleArn = target.roleArn;
         result = await dependencies.repair({
           repo,
           environment,
-          roleArn: target.roleArn
+          roleArn,
+          confirmTarget: async () => {
+            let current: EnvironmentTarget;
+            try {
+              current = await dependencies.readEnvironmentTarget(
+                repo,
+                environment
+              );
+            } catch (error) {
+              return {
+                code: "repair-target-changed",
+                message: `Radius could not read GitHub environment "${environment}" again after it locked the role, so it changed nothing. The environment may have been deleted. ${dependencies.errorMessage(error)}`
+              };
+            }
+            if (current.provider !== "aws" || !current.roleArn) {
+              return {
+                code: "repair-target-changed",
+                message: `GitHub environment "${environment}" no longer names an AWS deploy role, so Radius changed nothing. Deploy again to see the current result.`
+              };
+            }
+            if (current.roleArn.trim() !== roleArn.trim()) {
+              return {
+                code: "repair-target-changed",
+                message: `GitHub environment "${environment}" changed while Repair took the lock: it now names ${current.roleArn} instead of ${roleArn}. Radius changed nothing. Deploy again to see the current result.`
+              };
+            }
+            return null;
+          }
         });
       } catch (error) {
         return {

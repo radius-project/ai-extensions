@@ -145,7 +145,8 @@ describe("AWS trust repair service", () => {
       {
         repo: "octo/shop",
         environment: "dev",
-        roleArn: ROLE_ARN
+        roleArn: ROLE_ARN,
+        confirmTarget: expect.any(Function)
       }
     ]);
   });
@@ -160,6 +161,92 @@ describe("AWS trust repair service", () => {
     await test.run(0);
     expect(test.reads).toEqual([["octo/shop", "dev"]]);
   });
+
+  // A fake access layer that, like the real one, runs the re-check after it
+  // takes the lock and stops with its answer.
+  const lockedRepair =
+    (writes: string[]): AwsTrustRepairDependencies["repair"] =>
+    async (input) => {
+      const changed = await input.confirmTarget();
+      if (changed) return { ok: false, ...changed };
+      writes.push(input.roleArn);
+      return {
+        ok: true,
+        roleName: "radius-deploy-octo-shop",
+        added: [SUBJECT]
+      };
+    };
+
+  it("repairs when the environment still names the same role under the lock", async () => {
+    const writes: string[] = [];
+    const test = service(failedSignIn, { repair: lockedRepair(writes) });
+    expect((await test.run()).status).toBe(200);
+    expect(test.reads).toEqual([
+      ["octo/shop", "dev"],
+      ["octo/shop", "dev"]
+    ]);
+    expect(writes).toEqual([ROLE_ARN]);
+  });
+
+  it("changes nothing when the environment was deleted before the lock", async () => {
+    const writes: string[] = [];
+    let reads = 0;
+    const test = service(failedSignIn, {
+      readEnvironmentTarget: async () => {
+        reads += 1;
+        if (reads > 1) throw new Error("gh: Not Found (HTTP 404)");
+        return awsTarget;
+      },
+      repair: lockedRepair(writes)
+    });
+
+    expect(await test.run()).toEqual({
+      status: 409,
+      body: {
+        code: "repair-target-changed",
+        error:
+          'Radius could not read GitHub environment "dev" again after it locked the role, so it changed nothing. The environment may have been deleted. gh: Not Found (HTTP 404)'
+      }
+    });
+    expect(writes).toEqual([]);
+  });
+
+  it.each([
+    [
+      "another role",
+      { ...awsTarget, roleArn: `${ROLE_ARN}-new` },
+      `GitHub environment "dev" changed while Repair took the lock: it now names ${ROLE_ARN}-new instead of ${ROLE_ARN}. Radius changed nothing. Deploy again to see the current result.`
+    ],
+    [
+      "no AWS role",
+      { ...awsTarget, roleArn: "" },
+      'GitHub environment "dev" no longer names an AWS deploy role, so Radius changed nothing. Deploy again to see the current result.'
+    ],
+    [
+      "another provider",
+      { ...awsTarget, provider: "azure" },
+      'GitHub environment "dev" no longer names an AWS deploy role, so Radius changed nothing. Deploy again to see the current result.'
+    ]
+  ])(
+    "changes nothing when the environment names %s by the time of the lock",
+    async (_label, changedTarget, error) => {
+      const writes: string[] = [];
+      let reads = 0;
+      const test = service(failedSignIn, {
+        readEnvironmentTarget: async () => {
+          reads += 1;
+          return reads > 1 ? changedTarget : awsTarget;
+        },
+        repair: lockedRepair(writes)
+      });
+
+      expect(await test.run()).toEqual({
+        status: 409,
+        body: { code: "repair-target-changed", error }
+      });
+      expect(writes).toEqual([]);
+    }
+  );
 
   it("says the trust is intact when nothing was missing", async () => {
     expect(await service(failedSignIn).run()).toEqual({

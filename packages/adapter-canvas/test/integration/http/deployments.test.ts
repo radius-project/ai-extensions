@@ -187,9 +187,11 @@ function start(
     readInstanceState: () => readInstanceState(),
     cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
     readEnvironmentTarget: async () => environmentTarget,
+    // Like the real access layer, runs the re-check once the lock is held.
     repair: async (input) => {
       trustRepairs.push(input);
-      return trustRepairResult;
+      const changed = await input.confirmTarget();
+      return changed ? { ok: false, ...changed } : trustRepairResult;
     },
     errorMessage: (error) => String(error)
   });
@@ -2214,7 +2216,8 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
       {
         repo: "octo/todo",
         environment: "dev",
-        roleArn: ROLE_ARN
+        roleArn: ROLE_ARN,
+        confirmTarget: expect.any(Function)
       }
     ]);
   });

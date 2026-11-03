@@ -1395,7 +1395,8 @@ describe("repairing an environment's trust under the lock", () => {
   const repairInput = {
     repo: "octo/shop",
     environment: "dev",
-    roleArn: ROLE_ARN
+    roleArn: ROLE_ARN,
+    confirmTarget: async () => null
   };
   const missingId: Record<string, Answer> = {
     ...lockFree,
@@ -1521,6 +1522,52 @@ describe("repairing an environment's trust under the lock", () => {
       )
     );
   });
+
+  it.each([
+    [
+      "was deleted",
+      {
+        code: "repair-target-changed",
+        message: 'GitHub environment "dev" is gone.'
+      }
+    ],
+    [
+      "names another role",
+      {
+        code: "repair-target-changed",
+        message: 'GitHub environment "dev" names another role.'
+      }
+    ]
+  ])(
+    "stops under the lock, changing nothing, when the environment %s",
+    async (_label, changed) => {
+      const h = harness(missingId);
+      const checkedAfter: string[][] = [];
+
+      const result = await h.access.repair({
+        ...repairInput,
+        confirmTarget: async () => {
+          checkedAfter.push(h.commands());
+          return changed;
+        }
+      });
+
+      expect(result).toEqual({ ok: false, ...changed });
+      // Checked once the lock is held and confirmed, before the role is read.
+      expect(checkedAfter).toEqual([
+        [
+          "sts get-caller-identity",
+          "iam get-open-id-connect-provider",
+          "iam create-policy",
+          "iam get-policy"
+        ]
+      ]);
+      expect(h.commands()).not.toContain("iam get-role");
+      expect(h.commands()).not.toContain("iam update-assume-role-policy");
+      // The lock is released.
+      expect(h.commands().at(-1)).toBe("iam delete-policy");
+    }
+  );
 
   it("builds the subjects from GitHub's spelling of the environment", async () => {
     const h = harness(missingId, {
