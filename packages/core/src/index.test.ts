@@ -142,7 +142,6 @@ const EXPECTED_FUNCTIONS = [
   "acceptedGitHubSubjects",
   "restrictedGitHubSubjects",
   "subjectNamesRepository",
-  "sameRepositorySubjects",
   "namesGitHubProvider",
   "buildGitHubTrustPolicy",
   "mergeGitHubTrustSubject",

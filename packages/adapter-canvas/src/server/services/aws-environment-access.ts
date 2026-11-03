@@ -590,7 +590,7 @@ export function createAwsEnvironmentAccess<Operation>(
         null,
         (ports) =>
           repairAwsEnvironmentTrust(
-            { repo, roleArn, subjects },
+            { repo, environment, roleArn, subjects },
             {
               ...ports,
               // A delete can run between the first read of the environment and

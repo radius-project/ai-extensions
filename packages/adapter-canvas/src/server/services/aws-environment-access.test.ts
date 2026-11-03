@@ -1410,6 +1410,8 @@ describe("repairing an environment's trust under the lock", () => {
         AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [DEV, PROD])
       }
     }),
+    // The permission policy setup wrote for this environment.
+    "iam get-role-policy": ok({ PolicyName: "radius-deploy-dev" }),
     "iam update-assume-role-policy": ok()
   };
   const holder = (created: string) =>
@@ -1434,6 +1436,7 @@ describe("repairing an environment's trust under the lock", () => {
       "iam create-policy",
       "iam get-policy",
       "iam get-role",
+      "iam get-role-policy",
       "iam get-policy",
       "iam update-assume-role-policy",
       "iam get-role",

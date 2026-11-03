@@ -34,7 +34,6 @@ import {
   radiusRoleRepository,
   removeGitHubTrustSubject,
   restrictedGitHubSubjects,
-  sameRepositorySubjects,
   subjectNamesRepository,
   trustedGitHubSubjects
 } from "./aws-identity.js";
@@ -820,42 +819,6 @@ describe("subjectNamesRepository", () => {
     ["", false]
   ])("%s names a repository: %s", (subject, names) => {
     expect(subjectNamesRepository(subject)).toBe(names);
-  });
-});
-
-describe("sameRepositorySubjects", () => {
-  it.each([
-    ["repo:octo/shop:environment:dev", "repo:octo/shop:environment:prod", true],
-    [
-      "repository_owner_id:7:environment:dev:repository_id:42",
-      "repository_owner_id:7:environment:prod:repository_id:42",
-      true
-    ],
-    [
-      "repository_owner_id:7:environment:dev:repository_id:42",
-      "repository_owner_id:7:environment:prod:repository_id:99",
-      false
-    ],
-    ["repo:octo/shop:environment:dev", "repo:octo/web:environment:dev", false],
-    [
-      "repo:octo/shop:environment:dev",
-      "repo:octo@7/shop@42:environment:dev",
-      false
-    ],
-    [
-      "repo:octo/shop:environment:dev",
-      "repo:octo/shop:ref:refs/heads/main",
-      false
-    ],
-    [
-      "repository_owner:octo:environment:dev",
-      "repository_owner:octo:environment:prod",
-      false
-    ],
-    ["repo:octo/shop:environment:dev", "repo:octo/shop", false],
-    ["not a subject", "not a subject", false]
-  ])("%s and %s: %s", (a, b, same) => {
-    expect(sameRepositorySubjects(a, b)).toBe(same);
   });
 });
 

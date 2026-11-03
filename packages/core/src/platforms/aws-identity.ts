@@ -396,22 +396,6 @@ export function subjectNamesRepository(subject: string): boolean {
 }
 
 /**
- * Whether two subjects name the same repository with the same claims, in the
- * same order, and differ at most in their environment. A shared prefix is not
- * enough: a claim such as `repository_id` can follow the environment.
- */
-export function sameRepositorySubjects(a: string, b: string): boolean {
-  const left = subjectClaims(a);
-  const right = subjectClaims(b);
-  if (!left || !right || left.length !== right.length) return false;
-  if (!subjectNamesRepository(a)) return false;
-  return left.every(([key, value], index) => {
-    const [otherKey, otherValue] = right[index];
-    return key === otherKey && (key === "environment" || value === otherValue);
-  });
-}
-
-/**
  * Whether any statement in this trust policy names the account's GitHub
  * provider. Unlike `trustedGitHubSubjects`, this also finds a Radius role
  * whose last environment was removed, which keeps only a Deny statement.

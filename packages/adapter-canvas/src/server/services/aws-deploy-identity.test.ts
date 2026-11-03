@@ -1606,6 +1606,7 @@ describe("waiting for IAM to show a trust policy write", () => {
 describe("repairAwsEnvironmentTrust", () => {
   const repair = {
     repo: "octo/shop",
+    environment: "dev",
     roleArn: ROLE_ARN,
     subjects: [DEV, DEV_ID]
   };
@@ -1615,6 +1616,8 @@ describe("repairAwsEnvironmentTrust", () => {
       ClientIDList: ["sts.amazonaws.com"]
     }),
     "iam get-role": ok(managedRole([PROD, DEV])),
+    // The permission policy setup wrote for this environment.
+    "iam get-role-policy": ok({ PolicyName: "radius-deploy-dev" }),
     "iam update-assume-role-policy": ok()
   };
   const written = (aws: ReturnType<typeof fakeAws>) => {
@@ -1640,8 +1643,19 @@ describe("repairAwsEnvironmentTrust", () => {
       "sts get-caller-identity",
       "iam get-open-id-connect-provider",
       "iam get-role",
+      "iam get-role-policy",
       "iam update-assume-role-policy",
       "iam get-role"
+    ]);
+    expect(aws.find("iam get-role-policy")).toEqual([
+      "iam",
+      "get-role-policy",
+      "--role-name",
+      ROLE,
+      "--policy-name",
+      "radius-deploy-dev",
+      "--output",
+      "json"
     ]);
     expect(aws.locks).toEqual([{ roleName: ROLE, after: 2 }]);
   });
@@ -1668,14 +1682,11 @@ describe("repairAwsEnvironmentTrust", () => {
     }
   });
 
-  it("adds to a role Radius did not tag when it trusts another environment of this repository", async () => {
-    const aws = fakeAws({
-      ...ready,
-      "iam get-role": ok(unmanagedRole([PROD]))
-    });
+  it("adds to a role Radius did not tag that still trusts this environment in one form", async () => {
+    const aws = fakeAws({ ...ready, "iam get-role": ok(unmanagedRole([DEV])) });
     expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
       ok: true,
-      added: [DEV, DEV_ID]
+      added: [DEV_ID]
     });
   });
 
@@ -1688,33 +1699,86 @@ describe("repairAwsEnvironmentTrust", () => {
     });
   });
 
+  // An environment pointed at a role it was never set up on, such as rv-c at
+  // the role that rv-b of the same repository uses.
   it.each([
     [
-      "trusts only another repository",
+      "another environment of this repository",
+      unmanagedRole(["repo:mallory/evil:environment:dev", PROD])
+    ],
+    [
+      "only another repository",
       unmanagedRole(["repo:mallory/evil:environment:dev"])
     ],
-    ["trusts no GitHub subject", unmanagedRole([])],
-    [
-      "Radius created for another repository",
-      {
-        Role: {
-          ...managedRole(["repo:octo/web:environment:dev"]).Role,
-          Tags: [
-            { Key: "radius-managed", Value: "true" },
-            { Key: "radius-repository", Value: "octo/web" }
-          ]
-        }
+    ["no GitHub subject", unmanagedRole([])]
+  ])(
+    "refuses a role Radius did not tag that trusts %s but not this environment",
+    async (_label, role) => {
+      const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
+
+      expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
+        ok: false,
+        code: "aws-role-not-this-repository",
+        message: `IAM role ${ROLE} was not created by Radius for octo/shop, and it no longer trusts environment dev in any form, so Radius cannot tell that this repository set the environment up on it. Nothing was changed. If environment dev should deploy with this role, set it up on the Environments page, which adds its trust and permissions.`
+      });
+      expect(aws.find("iam get-role-policy")).toBeUndefined();
+      expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+    }
+  );
+
+  it("refuses a role Radius created for another repository, even one that trusts this environment", async () => {
+    const role = {
+      Role: {
+        ...managedRole([DEV]).Role,
+        Tags: [
+          { Key: "radius-managed", Value: "true" },
+          { Key: "radius-repository", Value: "octo/web" }
+        ]
       }
-    ]
-  ])("refuses a role that %s, changing nothing", async (_label, role) => {
+    };
     const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
 
-    const result = await repairAwsEnvironmentTrust(repair, aws.ports);
-
-    expect(result).toEqual({
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
       ok: false,
       code: "aws-role-not-this-repository",
-      message: `IAM role ${ROLE} was not created by Radius for octo/shop and trusts no other environment of it, so Radius will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role; if it does, add ${DEV}, ${DEV_ID} to its trust policy yourself.`
+      message: `Radius created IAM role ${ROLE} for octo/web, not octo/shop, so Repair will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role.`
+    });
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
+  it.each([
+    ["its own role", managedRole([PROD])],
+    ["a role Radius did not tag", unmanagedRole([DEV])]
+  ])(
+    "refuses an environment setup never ran for on %s",
+    async (_label, role) => {
+      const aws = fakeAws({
+        ...ready,
+        "iam get-role": ok(role),
+        "iam get-role-policy": fail(
+          "NoSuchEntity: The role policy was not found"
+        )
+      });
+
+      expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
+        ok: false,
+        code: "aws-environment-not-set-up",
+        message: `IAM role ${ROLE} has no permission policy radius-deploy-dev for environment dev, so setup never ran for it on this role, and Repair only restores trust that setup added. Nothing was changed. If environment dev should deploy with this role, set it up on the Environments page, which adds its trust and permissions.`
+      });
+      expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+    }
+  );
+
+  it("changes nothing when the environment's permission policy cannot be read", async () => {
+    const aws = fakeAws({
+      ...ready,
+      "iam get-role-policy": fail("AccessDenied: iam:GetRolePolicy")
+    });
+
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
+      ok: false,
+      code: "aws-role-policy-unreadable",
+      message: `Could not read permission policy radius-deploy-dev on IAM role ${ROLE}, so Radius cannot tell that setup ran for environment dev on it: AccessDenied: iam:GetRolePolicy. Nothing was changed.`
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
@@ -1804,50 +1868,6 @@ describe("repairAwsEnvironmentTrust", () => {
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
-
-  const ID_AFTER = "repository_owner_id:11:environment:dev:repository_id:22";
-  it.each([
-    [
-      "another repository, its ID after the environment",
-      ID_AFTER,
-      "repository_owner_id:11:environment:prod:repository_id:99",
-      false
-    ],
-    [
-      "this repository, its ID after the environment",
-      ID_AFTER,
-      "repository_owner_id:11:environment:prod:repository_id:22",
-      true
-    ],
-    [
-      "another repository, its ID before the environment",
-      DEV_ID,
-      "repository_owner_id:11:repository_id:99:environment:prod",
-      false
-    ],
-    [
-      "this repository with other claims",
-      DEV_ID,
-      "repository_owner_id:11:environment:prod:repository_id:22",
-      false
-    ]
-  ])(
-    "compares every claim of an untagged role's subjects: %s",
-    async (_label, subject, trusted, allowed) => {
-      const aws = fakeAws({
-        ...ready,
-        "iam get-role": ok(unmanagedRole([trusted]))
-      });
-      const result = await repairAwsEnvironmentTrust(
-        { ...repair, subjects: [subject] },
-        aws.ports
-      );
-      expect(result.ok).toBe(allowed);
-      expect(aws.find("iam update-assume-role-policy") !== undefined).toBe(
-        allowed
-      );
-    }
-  );
 
   it("does not count a subject the role names but excludes with another condition", async () => {
     const role = unmanagedRole([PROD]);

@@ -25,7 +25,6 @@ import {
   radiusRoleRepository,
   removeGitHubTrustSubject,
   restrictedGitHubSubjects,
-  sameRepositorySubjects,
   subjectNamesRepository,
   trustedGitHubSubjects,
   type PolicyDocument
@@ -912,6 +911,8 @@ export async function removeAwsEnvironmentFromRole(
 export interface AwsTrustRepairRequest {
   // The repository whose deploy failed.
   repo: string;
+  // The environment whose deploy failed, as GitHub stores its name.
+  environment: string;
   // AWS_ROLE_ARN as the GitHub environment states it. Untrusted: anyone who
   // can edit the environment's variables can point it at any role.
   roleArn: string;
@@ -920,20 +921,62 @@ export interface AwsTrustRepairRequest {
   subjects: readonly string[];
 }
 
-// Whether Repair may add this repository's subjects to the role. The role
-// named by a GitHub variable could be any role in the account, so Repair only
-// changes one that Radius tagged for this repository, or one that already
-// lets another environment of it sign in, with the same subject claims.
-function repairMayChangeRole(
+// Why Repair may not add this environment's trust back, or null when the role
+// shows that setup ran for this environment of this repository. Repair only
+// restores trust: a GitHub variable names the role, and anyone who can edit
+// it could otherwise give a new environment, without the reviewers or branch
+// rules of the one it copies, a way into that role.
+async function repairEvidenceProblem(
+  ports: Pick<AwsDeployIdentityPorts, "runAws">,
   role: Record<string, unknown>,
   trust: PolicyDocument,
   accountId: string,
+  roleName: string,
   request: AwsTrustRepairRequest
-): boolean {
-  if (isRadiusManagedRole(role, request.repo)) return true;
-  return acceptedGitHubSubjects(trust, accountId).some((trusted) =>
-    request.subjects.some((subject) => sameRepositorySubjects(subject, trusted))
-  );
+): Promise<{ code: string; message: string } | null> {
+  const owner = radiusRoleRepository(role);
+  const setUpHint = `If environment ${request.environment} should deploy with this role, set it up on the Environments page, which adds its trust and permissions.`;
+  if (owner !== null && owner.toLowerCase() !== request.repo.toLowerCase()) {
+    return {
+      code: "aws-role-not-this-repository",
+      message: `Radius created IAM role ${roleName} for ${owner}, not ${request.repo}, so Repair will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role.`
+    };
+  }
+  // Setup refuses a role Radius created for another repository, so on one
+  // created for this repository, only this repository's setup wrote the
+  // environment's policy. On any other role the policy's name does not say
+  // which repository wrote it, so this environment must still be trusted in
+  // some form.
+  if (owner === null) {
+    const accepted = acceptedGitHubSubjects(trust, accountId);
+    if (!request.subjects.some((subject) => accepted.includes(subject))) {
+      return {
+        code: "aws-role-not-this-repository",
+        message: `IAM role ${roleName} was not created by Radius for ${request.repo}, and it no longer trusts environment ${request.environment} in any form, so Radius cannot tell that this repository set the environment up on it. Nothing was changed. ${setUpHint}`
+      };
+    }
+  }
+  const policyName = buildAwsEnvironmentPolicyName(request.environment);
+  const policy = await ports.runAws([
+    "iam",
+    "get-role-policy",
+    "--role-name",
+    roleName,
+    "--policy-name",
+    policyName,
+    "--output",
+    "json"
+  ]);
+  if (succeeded(policy)) return null;
+  return NO_SUCH_ENTITY.test(policy.stderr) ?
+      {
+        code: "aws-environment-not-set-up",
+        message: `IAM role ${roleName} has no permission policy ${policyName} for environment ${request.environment}, so setup never ran for it on this role, and Repair only restores trust that setup added. Nothing was changed. ${setUpHint}`
+      }
+    : {
+        code: "aws-role-policy-unreadable",
+        message: `Could not read permission policy ${policyName} on IAM role ${roleName}, so Radius cannot tell that setup ran for environment ${request.environment} on it: ${detail(policy)}. Nothing was changed.`
+      };
 }
 
 export type AwsTrustRepairResult =
@@ -1088,13 +1131,15 @@ export async function repairAwsEnvironmentTrust(
       message: `IAM role ${roleName} still covers ${restricted.join(", ")} in its trust policy, under conditions Radius cannot check, so Repair would widen access rather than restore it. Nothing was changed. Check those conditions in the role's trust policy.`
     };
   }
-  if (!repairMayChangeRole(role, existing, accountId, request)) {
-    return {
-      ok: false,
-      code: "aws-role-not-this-repository",
-      message: `IAM role ${roleName} was not created by Radius for ${request.repo} and trusts no other environment of it, so Radius will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role; if it does, add ${added.join(", ")} to its trust policy yourself.`
-    };
-  }
+  const unproven = await repairEvidenceProblem(
+    ports,
+    role,
+    existing,
+    accountId,
+    roleName,
+    request
+  );
+  if (unproven) return { ok: false, ...unproven };
   const trust = mergeGitHubTrustSubjects(existing, accountId, added);
   const update = await ports.runAws([
     "iam",
