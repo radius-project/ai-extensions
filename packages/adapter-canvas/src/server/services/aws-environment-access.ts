@@ -127,8 +127,15 @@ type AwsRoleChangePorts = Pick<
 // Another run holds the role's lock, and this run does not wait for it.
 function lockBusy(
   roleName: string,
-  wait: AwsLockWait
+  wait: AwsLockWait | null
 ): { ok: false; code: string; message: string } {
+  if (!wait) {
+    return {
+      ok: false,
+      code: "aws-lock-busy",
+      message: `IAM reports a lock on IAM role ${roleName} but could not say who holds it, so Radius changed nothing. Try again in a moment.`
+    };
+  }
   return {
     ok: false,
     code: "aws-lock-busy",
@@ -173,10 +180,6 @@ function lockLostMessage(
     : `${loss.reason}, so Radius stopped. Before it stopped, this run made these AWS changes: ${changes.join(", ")}. Another run may have changed them since, so check the role before you retry.`;
 }
 
-// How many times a lock attempt that does not wait for another run may pause
-// and try again before it gives up.
-const LOCK_NOT_WAITING_SLEEPS = 2;
-
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -201,8 +204,8 @@ export function createAwsEnvironmentAccess<Operation>(
       operationId: string;
     },
     shouldStop: () => boolean,
-    waiting: (wait: AwsLockWait, line: string | null) => Promise<void>,
-    sleep: (milliseconds: number) => Promise<void> = dependencies.sleep
+    // Null: do not wait for another run's lock; refuse, naming the holder.
+    waiting: ((wait: AwsLockWait, line: string | null) => Promise<void>) | null
   ): Promise<
     | { ok: true; lock: AwsDeployIdentityLock }
     | { ok: false; code: string; message: string }
@@ -217,11 +220,12 @@ export function createAwsEnvironmentAccess<Operation>(
           environment: request.environment,
           action: request.action,
           operationId: request.operationId
-        }
+        },
+        wait: waiting !== null
       },
       {
         runAws: dependencies.runAws,
-        sleep,
+        sleep: dependencies.sleep,
         now: dependencies.now,
         shouldStop,
         waiting: async (wait) => {
@@ -236,11 +240,12 @@ export function createAwsEnvironmentAccess<Operation>(
                 `⏳ The lock on IAM role ${request.roleName} is 10 or more minutes old. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}. If that run has stopped, use Remove lock.`
               : `⏳ Waiting for the lock on IAM role ${request.roleName}. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}.`;
           }
-          await waiting(wait, line);
+          await waiting?.(wait, line);
         }
       }
     );
     if (result.ok) return result;
+    if ("busy" in result) return lockBusy(request.roleName, result.holder);
     if ("stopped" in result) {
       return {
         ok: false,
@@ -291,34 +296,14 @@ export function createAwsEnvironmentAccess<Operation>(
         },
         sleep: dependencies.sleep,
         acquireLock: async ({ accountId, roleName }) => {
-          let busy: AwsLockWait | null = null;
-          // Without a listener the caller answers inside one request, so it
-          // tries only a little longer: enough for a lock released between
-          // IAM's create and read, or one slow IAM answer.
-          let sleeps = 0;
-          const gaveUp = () =>
-            waiting === null && sleeps >= LOCK_NOT_WAITING_SLEEPS;
           const taken = await lock(
             { accountId, roleName, ...holder },
-            () => busy !== null || gaveUp(),
-            async (wait, line) => {
-              if (waiting) await waiting(wait, line);
-              else busy = wait;
-            },
-            async (milliseconds) => {
-              if (busy !== null) return;
-              sleeps += 1;
-              await dependencies.sleep(milliseconds);
-            }
+            () => false,
+            waiting &&
+              (async (wait, line) => {
+                await waiting(wait, line);
+              })
           );
-          if (busy !== null) return lockBusy(roleName, busy);
-          if (!taken.ok && gaveUp()) {
-            return {
-              ok: false,
-              code: "aws-lock-busy",
-              message: `Radius could not take the lock on IAM role ${roleName} right away, so it changed nothing. Another run may hold it, or IAM is slow to answer. Try again in a moment.`
-            };
-          }
           if (!taken.ok) return taken;
           state.lock = taken.lock;
           return { ok: true };

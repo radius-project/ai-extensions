@@ -1618,7 +1618,7 @@ describe("repairing an environment's trust under the lock", () => {
     }
   );
 
-  it("gives up quickly, without waiting, when IAM will not say who holds the lock", async () => {
+  it("refuses at once, without sleeping, when IAM will not say who holds the lock", async () => {
     const h = harness({
       ...missingId,
       "iam create-policy": fail("EntityAlreadyExists"),
@@ -1628,10 +1628,54 @@ describe("repairing an environment's trust under the lock", () => {
     expect(await h.access.repair(repairInput)).toEqual({
       ok: false,
       code: "aws-lock-busy",
-      message: `Radius could not take the lock on IAM role ${ROLE} right away, so it changed nothing. Another run may hold it, or IAM is slow to answer. Try again in a moment.`
+      message: `IAM reports a lock on IAM role ${ROLE} but could not say who holds it, so Radius changed nothing. Try again in a moment.`
     });
-    expect(h.events.filter(([kind]) => kind === "sleep")).toHaveLength(2);
+    expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
+    expect(h.commands().filter((c) => c === "iam create-policy")).toHaveLength(
+      2
+    );
     expect(h.commands()).not.toContain("iam get-role");
+  });
+
+  it("passes through a lock it created but IAM never showed, naming its policy ID", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": lockPolicy("LOCK1"),
+      "iam get-policy": fail("NoSuchEntity: not yet")
+    });
+
+    const result = await h.access.repair(repairInput);
+
+    expect(result).toMatchObject({ ok: false, code: "aws-lock-unconfirmed" });
+    expect("message" in result && result.message).toContain(
+      `Check that "aws iam get-policy --policy-arn ${LOCK_ARN} --query Policy.PolicyId --output text" prints LOCK1`
+    );
+    expect(h.commands()).not.toContain("iam get-role");
+  });
+
+  it("passes through a lock another run replaced before it was confirmed", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": lockPolicy("LOCK1"),
+      "iam get-policy": lockPolicy("LOCK2")
+    });
+    expect(await h.access.repair(repairInput)).toMatchObject({
+      ok: false,
+      code: "aws-lock-lost"
+    });
+  });
+
+  it("passes through IAM being unreachable, without backing off", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": fail("Throttling: Rate exceeded")
+    });
+    expect(await h.access.repair(repairInput)).toEqual({
+      ok: false,
+      code: "aws-lock-unreachable",
+      message: `Radius could not reach IAM to lock IAM role ${ROLE} (Throttling: Rate exceeded). Nothing was changed. Retry.`
+    });
+    expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
   });
 
   it("still takes a lock released between IAM's create and read", async () => {
