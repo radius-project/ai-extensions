@@ -80,6 +80,7 @@ export function createRadiusPluginUpdater(options: {
         try {
           await session.log(message, { level: "warning", ephemeral: true });
         } catch (logError) {
+          if (options.isShutDown()) return;
           options.logError(
             redactCredentials(
               `Radius could not display its plugin update notice: ${errorMessage(logError)}`
