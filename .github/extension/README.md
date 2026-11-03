@@ -14,6 +14,8 @@ The released extension fetches remote templates at its baked source commit and f
 
 Merging a shared-action fix does not update workflows that are already generated and pinned. After installing a release that contains the fix, regenerate and recommit `run-rad-commands-azure.yml`, `run-rad-commands-aws.yml`, `delete-azure.yml`, `delete-aws.yml`, `delete-environment-azure.yml`, and `delete-environment-aws.yml`, then verify their first-party action references point to the new source commit. Rerunning an unchanged workflow still uses its old action revision.
 
+Control-plane setup waits for a Ready node, but a new Kubernetes API can still fail to serve its OpenAPI schema. When namespace or target-kubeconfig secret validation reports that exact temporary failure, setup retries preparation up to five times, with delays of 1, 2, 4, and 8 seconds. Each Kubernetes request has a 10-second limit, and the preparation step has a five-minute limit. Other errors and exhausted retries stop setup. Schema validation remains enabled.
+
 ## Credential-verification workflows
 
 Radius uses these workflows to confirm that a GitHub Environment is wired up correctly before any application is deployed. The environment-setup flow generates the provider-specific file, commits it to the target repo under `.github/workflows/`, and triggers it.
