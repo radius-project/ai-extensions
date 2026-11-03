@@ -36,10 +36,7 @@ import {
   type SetupOutcome
 } from "./setup-outcome.js";
 
-export type AzureSetupDependencies = Omit<
-  AzureAutoSetupDependencies,
-  "isServerOwnedRequest"
->;
+export type AzureSetupDependencies = AzureAutoSetupDependencies;
 
 export interface AzureSetupRequest {
   repo?: string;

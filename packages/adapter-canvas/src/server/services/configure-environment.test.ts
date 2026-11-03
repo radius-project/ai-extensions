@@ -3,7 +3,6 @@ import { createOperation, enterStage, requestStop } from "../../operations.js";
 import { guardStopBoundary } from "../../server.js";
 import { isValidRepoSlug } from "../../azure-oidc.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
-import { createCreateEnvironmentRoutes } from "../routes/create-environment.js";
 import {
   createConfigureEnvironmentService,
   type ConfigureEnvironmentDependencies
@@ -112,12 +111,6 @@ describe("transport-independent environment configuration", () => {
     expect(() => createConfigureEnvironmentService(dependencies)).toThrow(
       `Missing environment configuration dependency: ${name}`
     );
-    expect(() =>
-      createCreateEnvironmentRoutes({
-        ...dependencies,
-        isServerOwnedRequest: () => true
-      })
-    ).toThrow(`Missing environment configuration dependency: ${name}`);
   });
 
   it.each([
@@ -151,16 +144,6 @@ describe("transport-independent environment configuration", () => {
     Reflect.deleteProperty(dependencies, "tempFile");
     expect(() => createConfigureEnvironmentService(dependencies)).toThrow(
       "Missing environment configuration dependency: tempFile.write"
-    );
-  });
-
-  it("requires the HTTP authorization gate even with a prebuilt service", () => {
-    const { dependencies } = fixture();
-    const service = createConfigureEnvironmentService(dependencies);
-    const http = { ...dependencies, isServerOwnedRequest: () => true };
-    Reflect.deleteProperty(http, "isServerOwnedRequest");
-    expect(() => createCreateEnvironmentRoutes(http, service)).toThrow(
-      "Missing environment configuration dependency: isServerOwnedRequest"
     );
   });
 

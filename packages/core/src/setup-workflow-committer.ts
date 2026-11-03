@@ -325,7 +325,7 @@ export function createWorkflowFileCommitter(
         throw new Error(`could not create branch "${branch}"`);
       }
       if (creation.recovered && ports.mutationRecovery.rollbackPending()) {
-        await ports.mutationRecovery.execute({
+        const removal = await ports.mutationRecovery.execute({
           kind: "github_branch.delete",
           target: `${target.targetRepo}\0${branch}\0${baseSha}`,
           providerIdempotencyKey: branch,
@@ -384,6 +384,29 @@ export function createWorkflowFileCommitter(
             };
           }
         });
+        if (removal.state !== "applied") {
+          const diagnostic =
+            removal.state === "not_applied" ?
+              removal.diagnostic ||
+              removal.result?.stderr ||
+              removal.result?.stdout ||
+              ""
+            : "The removal was cancelled.";
+          const guidance =
+            `Radius could not confirm removal of recovered setup branch "${branch}" in ${target.targetRepo}. ` +
+            (diagnostic ? `${diagnostic} ` : "") +
+            "It will not repeat the delete or remove the remaining setup resources. Review that exact branch before starting setup again.";
+          ports.mutationRecovery.settleManual(
+            "github_branch.create",
+            `${target.targetRepo}\0${branch}\0${baseSha}`,
+            guidance
+          );
+          await ports.mutationRecovery.persist();
+          throw new ProviderMutationRecoveryError(
+            guidance,
+            "provider-mutation-manual-required"
+          );
+        }
         ports.mutationRecovery.markRollbackPending();
         await ports.mutationRecovery.persist();
         throw new ProviderMutationRecoveryError(

@@ -115,7 +115,7 @@ describe("setup coordinator boundary compatibility", () => {
       status: 500,
       body: {
         error:
-          "Setup could not finish reporting its outcome. Inspect the operation before retrying.",
+          "Setup could not finish reporting its outcome. In the Environments panel, open Show details and select Download diagnostic snapshot to review the recorded status before deciding whether to retry.",
         code: "setup-handler-failed"
       }
     });
