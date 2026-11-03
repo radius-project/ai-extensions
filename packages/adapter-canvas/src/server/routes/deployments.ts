@@ -951,19 +951,23 @@ export async function handleRepairAwsTrust(
   dependencies: DeploymentsDependencies
 ): Promise<void> {
   const body = await context.readTextBody();
-  let generation = -1;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(body || "{}");
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "generation" in parsed &&
-      Number.isSafeInteger(parsed.generation)
-    ) {
-      generation = Number(parsed.generation);
-    }
+    parsed = JSON.parse(body);
   } catch {
-    generation = -1;
+    parsed = null;
+  }
+  const generation =
+    typeof parsed === "object" && parsed !== null && "generation" in parsed ?
+      parsed.generation
+    : undefined;
+  if (typeof generation !== "number" || !Number.isSafeInteger(generation)) {
+    context.json(400, {
+      code: "repair-request-invalid",
+      error:
+        "Repair needs the deploy the panel shows, as an integer generation. Reload the page and try again."
+    });
+    return;
   }
   const result = await dependencies.awsTrustRepair.repair({
     instanceId: context.instanceId,

@@ -2989,33 +2989,43 @@ describe("deployments routes (SU-06)", () => {
 describe("POST /api/deploy/repair-aws-trust", () => {
   it.each([
     ["no body", ""],
-    ["unparseable JSON", "{"],
+    ["text that is not JSON", "not json"],
     ["no generation", "{}"],
     ["a fractional generation", '{"generation":1.5}'],
     ["a string generation", '{"generation":"4"}'],
-    ["a JSON array", "[4]"]
-  ])("names no deploy for a body with %s", async (_label, body) => {
-    const calls: unknown[] = [];
-    const routes = createDeploymentsRoutes(
-      dependencies({
-        awsTrustRepair: {
-          repair: async (input) => {
-            calls.push(input);
-            return { status: 409, body: { code: "repair-stale" } };
+    ["a JSON array", "[4]"],
+    ["JSON null", "null"]
+  ])(
+    "answers 400 for a body with %s, without asking the repair service",
+    async (_label, body) => {
+      const calls: unknown[] = [];
+      const routes = createDeploymentsRoutes(
+        dependencies({
+          awsTrustRepair: {
+            repair: async (input) => {
+              calls.push(input);
+              return { status: 200, body: {} };
+            }
           }
-        }
-      })
-    );
-    const { context: ctx } = context(
-      "POST",
-      "/api/deploy/repair-aws-trust",
-      body
-    );
+        })
+      );
+      const { context: ctx, recording } = context(
+        "POST",
+        "/api/deploy/repair-aws-trust",
+        body
+      );
 
-    await routes["POST /api/deploy/repair-aws-trust"](ctx);
+      await routes["POST /api/deploy/repair-aws-trust"](ctx);
 
-    expect(calls).toEqual([{ instanceId: "panel-a", generation: -1 }]);
-  });
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        code: "repair-request-invalid",
+        error:
+          "Repair needs the deploy the panel shows, as an integer generation. Reload the page and try again."
+      });
+      expect(calls).toEqual([]);
+    }
+  );
 
   it("drains the body and answers with the repair service's result", async () => {
     const calls: unknown[] = [];

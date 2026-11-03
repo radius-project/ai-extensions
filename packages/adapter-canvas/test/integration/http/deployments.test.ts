@@ -2232,7 +2232,7 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
     const response = await post(
       entry.baseUrl,
       "/api/deploy/repair-aws-trust",
-      "{}"
+      JSON.stringify({ generation: 0 })
     );
 
     expect(response.status).toBe(409);
@@ -2266,6 +2266,24 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
       code: "provider-unsupported",
       error:
         "AWS environments aren't supported yet, so Radius repaired nothing."
+    });
+    expect(harness.trustRepairs).toEqual([]);
+  });
+
+  it("answers 400 for a body that is not JSON, rather than calling the deploy stale", async () => {
+    const harness = start();
+    failedSignIn(harness.state);
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy/repair-aws-trust",
+      "not json"
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      code: "repair-request-invalid"
     });
     expect(harness.trustRepairs).toEqual([]);
   });
