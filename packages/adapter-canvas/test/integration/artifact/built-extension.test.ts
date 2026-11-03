@@ -318,6 +318,48 @@ describe("P0-C built Radius extension artifact", () => {
     smoke = await runArtifactSmoke(ARTIFACT, 20_000, DIST);
   }, 30_000);
 
+  it("wires readiness admission and settlement through the shipped registered setup tool", async () => {
+    const result = await runArtifactSmoke(ARTIFACT, 20_000, DIST, "readiness");
+    expect(result.readiness).toEqual({
+      code: "github-account-stopped",
+      calls: ["GET"]
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.closeCount).toBe(1);
+    expect(result.stderr).not.toMatch(
+      /unhandledRejection|uncaughtException|shutdown incomplete/
+    );
+  });
+
+  it.each([
+    "readiness-restoration-failed",
+    "readiness-external-change"
+  ] as const)(
+    "runs the composition-root restoration diagnostic exactly once for %s",
+    async (behavior) => {
+      const result = await runArtifactSmoke(ARTIFACT, 20_000, DIST, behavior);
+      expect(result.readiness).toEqual({
+        code: "github-account-stopped",
+        calls: ["GET"]
+      });
+      expect(result.closeCount).toBe(1);
+      expect(result.exitCode).toBe(
+        behavior === "readiness-restoration-failed" ? 1 : 0
+      );
+      const diagnostics = result.stderr
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("[radius readiness]"));
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toContain("original-account");
+      expect(result.stderr).not.toContain("fixture-value");
+      expect(
+        result.stderr.includes(
+          "Radius setup drain failed: GitHub account restoration failed"
+        )
+      ).toBe(behavior === "readiness-restoration-failed");
+      expect(result.stderr).not.toMatch(/unhandledRejection|uncaughtException/);
+    }
+  );
   it.each(["hung-session", "failed-session"] as const)(
     "exits nonzero on incomplete %s teardown despite repeated signals",
     async (behavior) => {
@@ -354,6 +396,17 @@ describe("P0-C built Radius extension artifact", () => {
         )
       ])
     );
+  });
+  it("registers flat object tool parameters without provider-rejected root unions", () => {
+    for (const tool of smoke.registration.tools) {
+      expect(tool.parameters).toMatchObject({
+        type: "object",
+        properties: expect.any(Object)
+      });
+      expect(tool.parameters.properties).not.toEqual({});
+      for (const keyword of ["oneOf", "anyOf", "allOf", "enum", "not"])
+        expect(tool.parameters).not.toHaveProperty(keyword);
+    }
   });
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {

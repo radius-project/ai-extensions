@@ -26,6 +26,58 @@ import {
 // all (a module that never imports it cannot call it), so that is what these
 // checks assert rather than banning the word "joinSession" from comments.
 describe("RU-20: createRadiusExtension never joins a session", () => {
+  it("bounds pending readiness at 2000ms without releasing it and gives SDK teardown its separate budget", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { deps } = createFakeDependencies();
+    const extension = createRadiusExtension(deps);
+    let release = () => {};
+    let releaseSdk = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sdkGate = new Promise<void>((resolve) => {
+      releaseSdk = resolve;
+    });
+    const close = vi.fn(async () => sdkGate);
+    extension.attachSession(Object.assign(createFakeSession(), { close }));
+    const work = deps.executionOwner.runReadiness(async () => gate);
+    try {
+      const shutdown = extension.shutdown();
+      const done = vi.fn();
+      void shutdown.then(done);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(close).not.toHaveBeenCalled();
+      expect(deps.executionOwner.pendingReadinessCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(close).toHaveBeenCalledOnce();
+      expect(deps.logError).toHaveBeenCalledWith(
+        expect.stringContaining("pending readiness checks: 1")
+      );
+      expect(deps.executionOwner.pendingReadinessCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(done).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(shutdown).resolves.toEqual({ complete: false, exitCode: 1 });
+      expect(deps.executionOwner.pendingReadinessCount()).toBe(1);
+      release();
+      await work;
+      expect(deps.executionOwner.pendingReadinessCount()).toBe(0);
+      const callback = vi.fn(async () => {});
+      await expect(
+        deps.executionOwner.runReadiness(callback)
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(callback).not.toHaveBeenCalled();
+    } finally {
+      release();
+      releaseSdk();
+      await work;
+      await extension.shutdown();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
+
   it("this module never imports the SDK's joinSession", () => {
     const source = readFileSync(
       new URL("./create-radius-extension.ts", import.meta.url),

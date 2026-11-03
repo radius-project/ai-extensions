@@ -1,5 +1,7 @@
 import {
   assertSetupExecutionActive,
+  isAwsRoleName,
+  parseAwsRoleArn,
   runSetupCoordinator,
   type SetupCoordinatorPorts
 } from "@radius-project/core";
@@ -342,6 +344,20 @@ export function createSetupCoordinatorPorts(
         )
       ),
     authorizeAws: async ({ reused, ...request }) => {
+      if (
+        !isAwsRoleName(String(request.roleName || "")) &&
+        parseAwsRoleArn(String(request.existingRoleArn || "")) === null
+      ) {
+        return {
+          kind: "failed",
+          error: {
+            status: 400,
+            code: "invalid-aws-operation-input",
+            message:
+              "AWS setup requires a valid IAM role name or an existing role ARN. Start a new setup with roleName or existingRoleArn."
+          }
+        };
+      }
       const conflict =
         reused ?
           await awsEnvironmentConflict(
