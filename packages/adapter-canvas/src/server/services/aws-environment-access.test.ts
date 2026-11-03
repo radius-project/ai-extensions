@@ -716,7 +716,7 @@ describe("AWS environment access removal", () => {
         ok: true,
         removed: [`trust subject ${DEV}`, "policy radius-deploy-dev"],
         warnings: [
-          `Radius didn't remove trust subject ${shared}, because this repository's OIDC subject template doesn't name both the repository and the environment, so other environments or repositories may use it. If nothing else needs it, remove it from the role's trust policy by hand.`
+          `Radius didn't remove trust subject ${shared}, because it doesn't name both this repository and an environment, so other environments or repositories may use it. If nothing else needs it, remove it from the role's trust policy by hand.`
         ]
       });
       expect(remainingTrust(h)).toEqual([shared, PROD]);
@@ -873,6 +873,45 @@ describe("AWS environment access removal of the cluster's access entry", () => {
       `${ENTRY}, because environment prod still uses that cluster`
     );
     expect(h.find("eks delete-access-entry")).toBeUndefined();
+  });
+
+  // `repository_owner:octo:environment:prod` is presented by every
+  // repository of octo, not only this one.
+  it.each([
+    ["an owner-wide subject", "repository_owner:octo:environment:prod"],
+    ["another repository's subject", "repo:octo/other:environment:prod"],
+    ["a wildcard", "repo:octo/shop:environment:prod*"]
+  ])(
+    "keeps the entry when another environment recorded %s",
+    async (_label, recorded) => {
+      const h = harness(
+        radiusRole([DEV, recorded]),
+        githubSubjects(true),
+        undefined,
+        undefined,
+        { prod: awsEnvironment("storefront", [recorded]) }
+      );
+      const result = await remove(h);
+      expect(result.ok && result.kept).toContain(
+        `${ENTRY}, because the role's trust policy lets in more than this repository's other environments. ${BY_HAND}`
+      );
+      expect(h.find("eks delete-access-entry")).toBeUndefined();
+    }
+  );
+
+  it("removes the entry when another environment recorded this repository's ID-based subject", async () => {
+    const prodId = "repo:octo@7/shop@42:environment:prod";
+    const h = harness(
+      radiusRole([DEV, prodId]),
+      githubSubjects(true),
+      undefined,
+      undefined,
+      { prod: awsEnvironment("storefront", [prodId]) }
+    );
+    expect(await remove(h)).toMatchObject({
+      ok: true,
+      removed: expect.arrayContaining([`access entry for ${ROLE} on shop`])
+    });
   });
 
   it("keeps the entry when another environment's subjects were never recorded", async () => {

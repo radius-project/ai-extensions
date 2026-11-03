@@ -31,6 +31,7 @@ import {
   parseAwsRoleArn,
   parsePolicyDocument,
   radiusRoleRepository,
+  namesRepositoryEnvironment,
   removeGitHubTrustSubject,
   trustAllowsOnlySubjects,
   trustedGitHubSubjects
@@ -550,6 +551,62 @@ describe("trust policy", () => {
       ]
     ])("rejects a policy with %s", (_label, policy) => {
       expect(trustAllowsOnlySubjects(policy, ACCOUNT, [PROD])).toBe(false);
+    });
+
+    it.each([`${PROD}*`, "repo:octo/shop:environment:pro?"])(
+      "rejects the wildcard %s even when the pattern itself is listed",
+      (pattern) => {
+        const policy = {
+          Version: "2012-10-17",
+          Statement: [github({ StringLike: { [`${GITHUB}:sub`]: pattern } })]
+        };
+        expect(trustAllowsOnlySubjects(policy, ACCOUNT, [pattern])).toBe(false);
+      }
+    );
+
+    it("accepts a StringLike value with no wildcard", () => {
+      const policy = {
+        Version: "2012-10-17",
+        Statement: [github({ StringLike: { [`${GITHUB}:sub`]: PROD } })]
+      };
+      expect(trustAllowsOnlySubjects(policy, ACCOUNT, [PROD])).toBe(true);
+    });
+  });
+
+  describe("namesRepositoryEnvironment", () => {
+    const shop = { fullName: "octo/Shop", ownerId: 7, repoId: 42 };
+
+    it.each([
+      ["the name form", "repo:octo/shop:environment:prod"],
+      ["the ID form", "repo:octo@7/shop@42:environment:prod"],
+      ["a repository claim", "repository:octo/shop:environment:prod"],
+      [
+        "a repository ID",
+        "repository_owner:octo:repository_id:42:environment:prod"
+      ],
+      ["another case", "repo:Octo/SHOP:environment:prod"]
+    ])("accepts %s", (_label, subject) => {
+      expect(namesRepositoryEnvironment(subject, shop)).toBe(true);
+    });
+
+    it.each([
+      ["an owner-wide subject", "repository_owner:octo:environment:prod"],
+      ["an owner ID subject", "repository_owner_id:7:environment:prod"],
+      ["no environment", "repo:octo/shop"],
+      [
+        "a branch instead of an environment",
+        "repo:octo/shop:ref:refs/heads/main"
+      ],
+      ["another repository", "repo:octo/other:environment:prod"],
+      ["another repository ID", "repository_id:43:environment:prod"],
+      ["a mismatched ID form", "repo:octo@7/shop@43:environment:prod"],
+      ["a wildcard environment", "repo:octo/shop:environment:*"],
+      ["a wildcard repository", "repo:octo/*:environment:prod"],
+      ["an empty value", "repo::environment:prod"],
+      ["an odd number of parts", "repo:octo/shop:environment"],
+      ["an empty subject", ""]
+    ])("rejects %s", (_label, subject) => {
+      expect(namesRepositoryEnvironment(subject, shop)).toBe(false);
     });
   });
 

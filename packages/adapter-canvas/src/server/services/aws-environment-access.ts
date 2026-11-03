@@ -1,5 +1,7 @@
 import {
   AWS_TRUST_SUBJECTS_VARIABLE,
+  namesRepositoryEnvironment,
+  type GitHubRepositoryIdentity,
   buildEnvironmentSuffix,
   formatAwsLockTime,
   type AwsLockAction
@@ -152,23 +154,6 @@ function lockLostMessage(
     : `${loss.reason}, so Radius stopped. Before it stopped, this run made these AWS changes: ${changes.join(", ")}. Another run may have changed them since, so check the role before you retry.`;
 }
 
-// Whether a subject built from this OIDC template names both the repository
-// and the environment. GitHub's default does. A custom template without both
-// gives a subject that other environments, or other repositories of the same
-// owner, present too.
-function namesRepositoryAndEnvironment(
-  config: ResolveOidcSubjectResult["subjectConfig"]
-): boolean {
-  if (config.useDefault) return true;
-  const keys = config.includeClaimKeys ?? [];
-  return (
-    keys.some((key) => key === "environment" || key === "context") &&
-    keys.some(
-      (key) => key === "repo" || key === "repository" || key === "repository_id"
-    )
-  );
-}
-
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -274,7 +259,8 @@ export function createAwsEnvironmentAccess<Operation>(
   // the answer unknown, because that environment may use the same cluster.
   async function listOtherAwsEnvironments(
     repo: string,
-    environment: string
+    environment: string,
+    repository: GitHubRepositoryIdentity
   ): Promise<AwsEnvironmentListing> {
     const names = await dependencies.environments.listEnvironmentNames(repo);
     if (!names.ok) return names;
@@ -299,9 +285,12 @@ export function createAwsEnvironmentAccess<Operation>(
           accountId: reading.claimant.accountId,
           region: reading.claimant.region,
           cluster: reading.claimant.cluster,
+          // Only subjects proven to be this repository's. Another may be
+          // presented by other repositories too, so the access entry has to
+          // stay while the role trusts it.
           trustSubjects: parseTrustSubjects(
             read.variables[AWS_TRUST_SUBJECTS_VARIABLE]
-          )
+          ).filter((subject) => namesRepositoryEnvironment(subject, repository))
         });
       }
     }
@@ -527,17 +516,16 @@ export function createAwsEnvironmentAccess<Operation>(
       const current = oidc.federatedCredentials
         .map((credential) => credential.subject)
         .filter((subject) => !trustSubjects.includes(subject));
-      const specific = namesRepositoryAndEnvironment(oidc.subjectConfig);
-      const subjects = [
-        ...new Set([...trustSubjects, ...(specific ? current : [])])
-      ];
-      const shared =
-        specific ?
-          []
-        : current.map(
-            (subject) =>
-              `Radius didn't remove trust subject ${subject}, because this repository's OIDC subject template doesn't name both the repository and the environment, so other environments or repositories may use it. If nothing else needs it, remove it from the role's trust policy by hand.`
-          );
+      const own = current.filter((subject) =>
+        namesRepositoryEnvironment(subject, oidc)
+      );
+      const subjects = [...new Set([...trustSubjects, ...own])];
+      const shared = current
+        .filter((subject) => !own.includes(subject))
+        .map(
+          (subject) =>
+            `Radius didn't remove trust subject ${subject}, because it doesn't name both this repository and an environment, so other environments or repositories may use it. If nothing else needs it, remove it from the role's trust policy by hand.`
+        );
       // Boxed so the closures below and this function see one value.
       const state: {
         lock: AwsDeployIdentityLock | null;
@@ -584,7 +572,7 @@ export function createAwsEnvironmentAccess<Operation>(
               return { ok: true };
             },
             listOtherEnvironments: () =>
-              listOtherAwsEnvironments(repo, environment)
+              listOtherAwsEnvironments(repo, environment, oidc)
           }
         );
         const result =

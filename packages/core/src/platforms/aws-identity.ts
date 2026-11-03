@@ -330,8 +330,9 @@ export function namesGitHubProvider(
 /**
  * Whether the only principals this trust policy lets in are GitHub workflows
  * presenting one of `subjects`. Deny statements grant nothing and are skipped.
- * Another principal, a GitHub statement with no `sub` constraint, or any
- * subject or pattern not in `subjects` makes it false.
+ * Another principal, a GitHub statement with no `sub` constraint, a wildcard
+ * pattern, or any subject not in `subjects` makes it false. A pattern admits
+ * subjects it doesn't spell out, so it never counts as listed.
  */
 export function trustAllowsOnlySubjects(
   policy: PolicyDocument,
@@ -349,9 +350,58 @@ export function trustAllowsOnlySubjects(
       stringList(principal.Federated).every((arn) => arn === providerArn) &&
       isGitHubStatement(statement, providerArn) &&
       subjectConstraints(statement).length > 0 &&
+      subjectConstraints(statement).every(
+        ({ operator, values }) =>
+          operator === "StringEquals" ||
+          values.every((value) => !/[*?]/.test(value))
+      ) &&
       subjectsOf(statement).every((subject) => subjects.includes(subject))
     );
   });
+}
+
+export interface GitHubRepositoryIdentity {
+  /** The repository's current `owner/name`. */
+  readonly fullName: string;
+  readonly ownerId: number;
+  readonly repoId: number;
+}
+
+/**
+ * Whether a GitHub OIDC subject names this repository and an environment, so
+ * no other repository or a workflow outside an environment presents it. The
+ * repository counts when the subject has its `owner/name`, its immutable
+ * `owner@id/name@id`, or its `repository_id`. Anything else, including an
+ * owner-wide subject, an older name from before a rename, or a wildcard, is
+ * not proven to be this repository's.
+ */
+export function namesRepositoryEnvironment(
+  subject: string,
+  repository: GitHubRepositoryIdentity
+): boolean {
+  const parts = subject.split(":");
+  if (parts.length < 4 || parts.length % 2 !== 0) return false;
+  const [owner = "", name = ""] = repository.fullName.toLowerCase().split("/");
+  const slugs = [
+    `${owner}/${name}`,
+    `${owner}@${repository.ownerId}/${name}@${repository.repoId}`
+  ];
+  let environment = false;
+  let named = false;
+  for (let index = 0; index < parts.length; index += 2) {
+    const key = parts[index];
+    const value = parts[index + 1] ?? "";
+    if (value === "" || /[*?]/.test(value)) return false;
+    if (key === "environment") environment = true;
+    if (
+      ((key === "repo" || key === "repository") &&
+        slugs.includes(value.toLowerCase())) ||
+      (key === "repository_id" && value === String(repository.repoId))
+    ) {
+      named = true;
+    }
+  }
+  return environment && named;
 }
 
 function githubTrustStatement(

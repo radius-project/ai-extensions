@@ -141,6 +141,7 @@ const EXPECTED_FUNCTIONS = [
   "trustedGitHubSubjects",
   "namesGitHubProvider",
   "trustAllowsOnlySubjects",
+  "namesRepositoryEnvironment",
   "buildGitHubTrustPolicy",
   "mergeGitHubTrustSubject",
   "removeGitHubTrustSubject",
