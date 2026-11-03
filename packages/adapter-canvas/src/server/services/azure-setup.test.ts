@@ -53,14 +53,186 @@ function fixture() {
   return { operation, dependencies, finalize };
 }
 
-describe("accepted Azure continuation shutdown", () => {
-  function deferred() {
-    let resolve = () => {};
-    const promise = new Promise<void>((complete) => {
-      resolve = complete;
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
+describe("initial Azure identity shutdown", () => {
+  function initialFixture() {
+    const test = fixture();
+    let stopped = false;
+    const calls: string[] = [];
+    test.dependencies.isStopped = () => stopped;
+    test.dependencies.external.preflightRepoAdmin = async () => "";
+    test.dependencies.external.preflightGhcrPackageWriteAccess = async () => ({
+      ok: true
     });
-    return { promise, resolve };
+    test.dependencies.external.runAz = async (args) => {
+      calls.push(args.join(" "));
+      if (args[0] === "account" && args[1] === "set")
+        return { code: 0, stdout: "", stderr: "" };
+      if (args[0] === "account" && args[1] === "show")
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            id: request.subscriptionId,
+            tenantId: "11111111-1111-1111-1111-111111111111",
+            user: { type: "user" }
+          }),
+          stderr: ""
+        };
+      throw new Error(`Unexpected Azure command ${args.join(" ")}`);
+    };
+    test.dependencies.external.runGitHubJson = async (path) => {
+      calls.push(path);
+      if (path === "/repos/octo/app")
+        return {
+          ok: true,
+          status: 200,
+          json: { full_name: "octo/app", id: 5, owner: { id: 7 } }
+        };
+      if (path.endsWith("/actions/oidc/customization/sub"))
+        return { ok: true, status: 200, json: { use_default: true } };
+      if (path.endsWith("/variables/AZURE_CLIENT_ID"))
+        return {
+          ok: true,
+          status: 200,
+          json: { value: "33333333-3333-3333-3333-333333333333" }
+        };
+      throw new Error(`Unexpected GitHub request ${path}`);
+    };
+    return {
+      ...test,
+      calls,
+      stop: () => {
+        stopped = true;
+      },
+      run: () =>
+        createAzureSetupService(test.dependencies)({
+          data: { ...request, operationId: test.operation.operationId }
+        })
+    };
   }
+
+  describe.each(["account", "repository", "customization", "client-id"])(
+    "held %s read",
+    (boundary) => {
+      it.each(["success", "malformed", "refused", "rejected"] as const)(
+        "rejects late %s without another request or terminal persistence",
+        async (result) => {
+          const test = initialFixture();
+          const entered = deferred();
+          const released = deferred();
+          async function hold() {
+            entered.resolve();
+            await released.promise;
+            if (result === "rejected") throw new Error("read unavailable");
+          }
+          const az = test.dependencies.external.runAz;
+          const github = test.dependencies.external.runGitHubJson;
+          test.dependencies.external.runAz = async (args) => {
+            const response = await az(args);
+            if (boundary === "account" && args[1] === "show") {
+              await hold();
+              if (result === "malformed") return { ...response, stdout: "{" };
+              if (result === "refused") return { ...response, code: 1 };
+            }
+            return response;
+          };
+          test.dependencies.external.runGitHubJson = async (...args) => {
+            const response = await github(...args);
+            const path = args[0];
+            if (
+              (boundary === "repository" && path === "/repos/octo/app") ||
+              (boundary === "customization" && path.endsWith("/sub")) ||
+              (boundary === "client-id" && path.endsWith("/AZURE_CLIENT_ID"))
+            ) {
+              await hold();
+              if (result === "malformed")
+                return { ok: true, status: 200, json: null };
+              if (result === "refused")
+                return { ok: false, status: 403, json: null };
+            }
+            return response;
+          };
+          const rejected = expect(test.run()).rejects.toMatchObject({
+            code: "setup-execution-interrupted"
+          });
+          try {
+            await entered.promise;
+            const issued = [...test.calls];
+            const checkpoint = structuredClone(test.operation);
+            const persist = vi.mocked(test.dependencies.operations.persist);
+            const saves = persist.mock.calls.length;
+            test.stop();
+            released.resolve();
+            await rejected;
+            expect(test.calls).toEqual(issued);
+            expect(test.operation).toEqual(checkpoint);
+            expect(persist).toHaveBeenCalledTimes(saves);
+            expect(test.finalize).not.toHaveBeenCalled();
+          } finally {
+            released.resolve();
+          }
+        }
+      );
+    }
+  );
+
+  it("checks admission after selected identity verification", async () => {
+    const test = initialFixture();
+    const github = vi.fn();
+    test.dependencies.external.runGitHubJson = async (
+      _path,
+      _executor,
+      beforeExecute
+    ) => {
+      test.stop();
+      beforeExecute?.();
+      github();
+      return { ok: false, status: 403, json: null };
+    };
+    await expect(test.run()).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    expect(github).not.toHaveBeenCalled();
+    expect(test.finalize).not.toHaveBeenCalled();
+  });
+
+  it("prevents the next OIDC attempt after shutdown during existing backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const test = initialFixture();
+      const received = deferred();
+      const read = vi.fn(async () => {
+        received.resolve();
+        return { ok: false, status: 503, json: null };
+      });
+      test.dependencies.external.runGitHubJson = read;
+      const rejected = expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      await received.promise;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      test.stop();
+      await vi.advanceTimersByTimeAsync(300);
+      await vi.runAllTimersAsync();
+      await rejected;
+      expect(read).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(test.finalize).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("accepted Azure continuation shutdown", () => {
   async function continuationFixture(caller: "user" | "servicePrincipal") {
     const test = fixture();
     const executor = successfulSelectedGhExecutor();

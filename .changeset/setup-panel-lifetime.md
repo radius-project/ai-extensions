@@ -24,4 +24,4 @@ Session shutdown waits up to two seconds for detached setup tasks, acknowledgeme
 
 Late absent or mismatched Azure recovery reads preserve unresolved evidence after shutdown. Caller-identity retries stop before another Azure invocation, and retrying an accepted verification dispatch after a save failure reuses its confirmed run rather than dispatching again.
 
-Resumed Azure setup stops continuation validation, nested repository checks and preflight work after shutdown without turning late reads into failure cleanup or overwriting its saved checkpoint.
+Initial and resumed Azure setup stop identity reads, nested repository checks and preflight work after shutdown without turning late reads into failure cleanup or overwriting saved checkpoints. An OIDC retry wait already in progress may finish, but it cannot start another request.
