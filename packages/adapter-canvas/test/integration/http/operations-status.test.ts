@@ -46,6 +46,7 @@ afterEach(async () => {
 });
 
 interface Harness {
+  claims: string[];
   attachment: { generation: number };
   records: Map<string, OperationActionRecord>;
   setLatest(record: unknown): void;
@@ -134,7 +135,8 @@ const DIAGNOSTIC_OPERATION: OperationActionRecord = {
   request: { azure: { clientSecret: "SECRET_CLIENT_SECRET" } }
 };
 
-function start(strictBrowserMutations = false): Harness {
+function start(strictBrowserMutations = false, awsEnabled = false): Harness {
+  const claims: string[] = [];
   const attachment = { generation: 1 };
   const records = new Map<string, OperationActionRecord>([
     ["op-running", RUNNING],
@@ -249,14 +251,17 @@ function start(strictBrowserMutations = false): Harness {
         now: () => Date.parse("2026-08-27T11:00:00.000Z")
       },
       {
-        awsEnabled: false,
-        claimSelectionHandle: () => ({
-          ok: true,
-          login: "octocat",
-          credentialSource: "keyring",
-          commit() {},
-          release() {}
-        }),
+        awsEnabled,
+        claimSelectionHandle: ({ handle }) => {
+          claims.push(handle);
+          return {
+            ok: true,
+            login: "octocat",
+            credentialSource: "keyring",
+            commit() {},
+            release() {}
+          };
+        },
         isValidRepoSlug,
         isResourceGroupName,
         isAksClusterName,
@@ -318,6 +323,7 @@ function start(strictBrowserMutations = false): Harness {
   });
 
   return {
+    claims,
     attachment,
     records,
     latestCalls,
@@ -415,6 +421,78 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     }
   });
 
+  it("keeps the disabled AWS gate ahead of namespace validation and account claims", async () => {
+    const h = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(`${entry.baseUrl}/api/operations`, {
+      method: "POST",
+      body: JSON.stringify({
+        repo: "octo/app",
+        environment: "dev",
+        provider: "aws",
+        namespace: "INVALID"
+      })
+    });
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBeNull();
+    expect(await response.json()).toEqual({
+      code: "provider-unsupported",
+      error: `Creating AWS environments isn't supported yet. "dev" was not created.`
+    });
+    expect(h.claims).toEqual([]);
+    expect(h.running.size).toBe(0);
+    expect(h.persistCalls).toEqual([]);
+    expect(h.scheduled).toEqual([]);
+  });
+  it.each([
+    { roleName: "fixture" },
+    { existingRoleArn: "arn:aws:iam::123456789012:role/existing" },
+    {
+      roleName: "fixture",
+      existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+    }
+  ])(
+    "preserves enabled AWS selectors through the HTTP contract: %j",
+    async (selectors) => {
+      const h = start(false, true);
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await fetch(`${entry.baseUrl}/api/operations`, {
+        method: "POST",
+        body: JSON.stringify({
+          repo: "octo/app",
+          environment: "dev",
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks",
+          vpcId: "vpc",
+          subnetIds: "subnet",
+          selectionHandle: "selected-account",
+          ...selectors
+        })
+      });
+      expect(response.status).toBe(202);
+      expect(response.headers.get("content-type")).toBe("application/json");
+      const body = (await response.json()) as {
+        operationId: string;
+        statusUrl: string;
+      };
+      expect(response.headers.get("location")).toBe(body.statusUrl);
+      expect(h.records.get(body.operationId)).toMatchObject({
+        request: { environment: selectors },
+        context: { githubLogin: "octocat" },
+        stages: expect.arrayContaining([
+          expect.objectContaining({ id: "authorize_identity" })
+        ])
+      });
+      expect(h.claims).toEqual(["selected-account"]);
+      expect(h.persistCalls).toEqual(["persist"]);
+      expect(h.scheduled).toEqual([
+        { instanceId: "panel-a", operationId: body.operationId }
+      ]);
+    }
+  );
   it.each(["Todo-app-3", true])(
     "rejects malformed namespace value %j before registering setup work",
     async (namespace) => {

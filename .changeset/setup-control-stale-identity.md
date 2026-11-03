@@ -11,3 +11,5 @@ Refuse setup controls when their operation or original coordinator changes durin
 Keep controls retryable when a previous task is still settling: return a temporary busy response instead of permanently blocking recovery, while preserving duplicate-command acceptance.
 
 Honor Stop while a setup answer is being saved without starting more setup work or leaving the operation running without a task. Report completion only after saving the stopped state; if that save fails, block further admission and show inspection guidance rather than claiming Stop was durable.
+
+Keep agent-callable controls bound to their authorized setup target, account, configuration and resource ownership while allowing the shared service to save its own command progress. Preserve diagnostic guidance to inspect the saved operation when admission cannot be durably undone.

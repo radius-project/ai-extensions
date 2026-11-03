@@ -1,5 +1,5 @@
 import type { SelectedGhExecutor } from "../../gh.js";
-import type { VerificationWorkflowState } from "../../operations.js";
+import type { WorkflowCancellationAuthority } from "./workflow-cancellation-target.js";
 
 const ACTIVE_WORKFLOW_STATUSES = new Set([
   "queued",
@@ -16,9 +16,11 @@ export interface VerificationWorkflowIdentity {
 }
 
 export interface VerificationWorkflowCancellationDependencies {
+  authority: WorkflowCancellationAuthority;
   run(
     executor: SelectedGhExecutor,
-    args: string[]
+    args: string[],
+    beforeExecute?: () => void
   ): Promise<{ code: string | number; stdout: string; stderr: string }>;
 }
 
@@ -68,7 +70,7 @@ export async function readVerificationWorkflowState(
   executor: SelectedGhExecutor,
   identity: VerificationWorkflowIdentity,
   dependencies: Pick<VerificationWorkflowCancellationDependencies, "run">
-): Promise<VerificationWorkflowState> {
+): Promise<"active" | "inactive"> {
   const result = await dependencies.run(executor, [
     "run",
     "view",
@@ -106,18 +108,28 @@ export async function cancelVerificationWorkflow(
   identity: VerificationWorkflowIdentity,
   dependencies: VerificationWorkflowCancellationDependencies
 ): Promise<"inactive" | "cancelling"> {
-  if (
-    (await readVerificationWorkflowState(executor, identity, dependencies)) ===
-    "inactive"
-  ) {
+  dependencies.authority.assertCurrent();
+  const state = await readVerificationWorkflowState(
+    executor,
+    identity,
+    dependencies
+  );
+  dependencies.authority.assertCurrent();
+  if (state === "inactive") {
     return "inactive";
   }
-  const cancelled = await dependencies.run(executor, [
-    "api",
-    "--method",
-    "POST",
-    `repos/${identity.repo}/actions/runs/${identity.runId}/cancel`
-  ]);
+  // The selected executor also verifies identity asynchronously. Mark issue only
+  // after that final read, with no await before starting the POST command.
+  const cancelled = await dependencies.run(
+    executor,
+    [
+      "api",
+      "--method",
+      "POST",
+      `repos/${identity.repo}/actions/runs/${identity.runId}/cancel`
+    ],
+    dependencies.authority.issued
+  );
   if (cancelled.code !== 0 && cancelled.code !== "0") {
     const state = await readVerificationWorkflowState(
       executor,

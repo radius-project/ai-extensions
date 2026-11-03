@@ -54,7 +54,10 @@ interface ChildMessage {
     | "blocked"
     | "page"
     | "render-error"
-    | "plugin-update";
+    | "plugin-update"
+    | "readiness";
+  code?: string;
+  calls?: string[];
   snapshot?: ArtifactRegistrationSnapshot;
   closeCount?: number;
   kind?: string;
@@ -69,6 +72,7 @@ export interface ArtifactSmokeResult {
   renderedPage: string;
   exitCode: number;
   pluginUpdates: string[];
+  readiness?: { code: string; calls: string[] };
 }
 
 function waitForExit(child: ChildProcess): Promise<number | null> {
@@ -82,7 +86,13 @@ export async function runArtifactSmoke(
   artifactPath: string,
   timeoutMs = 20_000,
   artifactRoot = dirname(artifactPath),
-  shutdownBehavior: "clean" | "hung-session" | "failed-session" = "clean"
+  shutdownBehavior:
+    | "clean"
+    | "hung-session"
+    | "failed-session"
+    | "readiness"
+    | "readiness-restoration-failed"
+    | "readiness-external-change" = "clean"
 ): Promise<ArtifactSmokeResult> {
   const root = mkdtempSync(join(tmpdir(), "radius-artifact-smoke-"));
   const fakeRad = join(root, process.platform === "win32" ? "rad.exe" : "rad");
@@ -140,6 +150,7 @@ export async function runArtifactSmoke(
   const pluginUpdates: string[] = [];
   let renderedPage: string | undefined;
   let failure: Error | undefined;
+  let readiness: ArtifactSmokeResult["readiness"];
   child.stderr?.on("data", (chunk: Buffer) => {
     if (stderr.length < 16_384) stderr += chunk.toString();
   });
@@ -155,8 +166,10 @@ export async function runArtifactSmoke(
       } else {
         pluginUpdates.push(raw.detail);
       }
-    } else if (raw.type === "blocked") {
-      failure = new Error(
+    } else if (raw.type === "readiness" && raw.code && raw.calls)
+      readiness = { code: raw.code, calls: raw.calls };
+    else if (raw.type === "blocked") {
+      failure ??= new Error(
         `Artifact attempted ${raw.kind}: ${raw.detail ?? "unknown target"}`
       );
     } else if (raw.type === "page") {
@@ -202,11 +215,13 @@ export async function runArtifactSmoke(
     const exitDeadline = Date.now() + 5_000;
     while (
       child.exitCode === null &&
+      !failure &&
       closeCount === 0 &&
       Date.now() < exitDeadline
     ) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 20));
     }
+    if (failure) throw failure;
     let exitTimer: ReturnType<typeof setTimeout> | undefined;
     const exitCode = await Promise.race([
       exitPromise,
@@ -214,13 +229,26 @@ export async function runArtifactSmoke(
         (_, reject) =>
           (exitTimer = setTimeout(
             () =>
-              reject(new Error("Artifact did not shut down within 5 seconds")),
+              reject(
+                new Error(
+                  `Artifact did not shut down within 5 seconds. stderr: ${stderr.slice(-2000)}`
+                )
+              ),
             Math.max(0, exitDeadline - Date.now())
           ))
       )
     ]).finally(() => clearTimeout(exitTimer));
     if (failure) throw failure;
-    if (exitCode !== (shutdownBehavior === "clean" ? 0 : 1)) {
+    if (
+      exitCode !==
+      ((
+        shutdownBehavior === "clean" ||
+        shutdownBehavior === "readiness" ||
+        shutdownBehavior === "readiness-external-change"
+      ) ?
+        0
+      : 1)
+    ) {
       throw new Error(
         `Artifact subprocess exited with ${exitCode}. stderr: ${stderr.slice(-2000)}`
       );
@@ -231,7 +259,8 @@ export async function runArtifactSmoke(
       stderr,
       renderedPage,
       exitCode,
-      pluginUpdates
+      pluginUpdates,
+      readiness
     };
   } finally {
     if (child.exitCode === null) {

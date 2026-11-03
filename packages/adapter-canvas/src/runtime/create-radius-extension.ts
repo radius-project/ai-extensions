@@ -379,7 +379,7 @@ export function createRadiusExtension(
             .slice(0, 10)
             .map((id) => id.replace(/[^a-zA-Z0-9_.-]/g, "?").slice(0, 80));
           deps.logError(
-            `Radius shutdown incomplete after ${CLEANUP_TIMEOUT_MS}ms; pending operations: ${pending.join(", ") || "none"}; server/task cleanup may remain pending. External work, journal saves or account restoration may be interrupted; inspect operation recovery before retrying.`
+            `Radius shutdown incomplete after ${CLEANUP_TIMEOUT_MS}ms; pending operations: ${pending.join(", ") || "none"}; pending readiness checks: ${deps.executionOwner.pendingReadinessCount()}; server/task cleanup may remain pending. External work, journal saves or account restoration may be interrupted; inspect operation recovery before retrying.`
           );
         }
 

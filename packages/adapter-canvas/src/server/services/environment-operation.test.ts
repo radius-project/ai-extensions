@@ -324,7 +324,9 @@ describe("runEnvironmentOperationWorkflow", () => {
     const op = operation();
     op.provider = "aws";
     const nested = { value: "saved", omitted: undefined };
-    op.request = { environment: { nested, optional: undefined } };
+    op.request = {
+      environment: { nested, optional: undefined, roleName: "fixture" }
+    };
     const test = dependencies(op, {
       ...awsIdentityReady(),
       instanceId: "own-panel",
@@ -804,7 +806,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     let canonicalName: string | null = null;
     let putCalls = 0;
@@ -852,7 +854,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     const executor = successfulSelectedGhExecutor({
       run: async (args) =>
@@ -1205,7 +1207,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     ).toEqual({ shouldMonitor: false });
   });
 
-  it("treats a malformed persisted request as empty instead of forwarding it", async () => {
+  it("refuses a malformed persisted AWS request instead of authorizing a default role", async () => {
     const op = operation();
     op.provider = "aws";
     op.request = null;
@@ -1218,94 +1220,88 @@ describe("runEnvironmentOperationWorkflow", () => {
 
     expect(
       await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
-    ).toEqual({ shouldMonitor: true });
-    expect(test.posts).toEqual([
-      {
-        pathname: "/api/create-environment",
-        data: {
-          repo: "octo/app",
-          environment: "Production",
-          operationEnvironment: "production",
-          provider: "aws",
-          operationId: op.operationId,
-          roleArn: AWS_ROLE_ARN,
-          trustSubjects: AWS_SUBJECTS,
-          clientId: ""
+    ).toEqual({ shouldMonitor: false });
+    expect(test.posts).toEqual([]);
+    expect(test.failures).toEqual([
+      expect.objectContaining({ code: "invalid-aws-operation-input" })
+    ]);
+  });
+
+  it.each([
+    { roleName: "radius-deploy-octo-app", existingRoleArn: "" },
+    { roleName: "", existingRoleArn: AWS_ROLE_ARN },
+    { roleName: "radius-deploy-octo-app", existingRoleArn: AWS_ROLE_ARN }
+  ])(
+    "authorizes saved AWS selectors and forwards the resolved role and trust: %j",
+    async (selectors) => {
+      const op = operation();
+      op.provider = "aws";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: {
+          environment: "production",
+          ...selectors,
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks-1"
         }
-      }
-    ]);
-  });
+      };
+      const identityCalls: Array<Record<string, unknown>> = [];
+      const executor = successfulSelectedGhExecutor({
+        run: async () =>
+          command({ stdout: JSON.stringify({ name: "Production" }) })
+      });
+      const test = dependencies(op, {
+        setupAwsDeployIdentity: async (target, request, received) => {
+          expect(target).toBe(op);
+          expect(received).toBe(executor);
+          test.events.push("aws-identity");
+          identityCalls.push(request);
+          return { ok: true, roleArn: AWS_ROLE_ARN, subjects: AWS_SUBJECTS };
+        }
+      });
 
-  it("prepares the AWS deploy identity after the GitHub environment and passes its role to create-environment", async () => {
-    const op = operation();
-    op.provider = "aws";
-    op.request = {
-      needsAzureCredentials: false,
-      environment: {
-        environment: "production",
-        roleName: "radius-deploy-octo-app",
-        existingRoleArn: "",
-        accountId: "123456789012",
-        region: "us-west-2",
-        cluster: "eks-1"
-      }
-    };
-    const identityCalls: Array<Record<string, unknown>> = [];
-    const executor = successfulSelectedGhExecutor({
-      run: async () =>
-        command({ stdout: JSON.stringify({ name: "Production" }) })
-    });
-    const test = dependencies(op, {
-      setupAwsDeployIdentity: async (target, request, received) => {
-        expect(target).toBe(op);
-        expect(received).toBe(executor);
-        test.events.push("aws-identity");
-        identityCalls.push(request);
-        return { ok: true, roleArn: AWS_ROLE_ARN, subjects: AWS_SUBJECTS };
-      }
-    });
+      expect(
+        await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+      ).toEqual({ shouldMonitor: true });
 
-    expect(
-      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
-    ).toEqual({ shouldMonitor: true });
-
-    expect(identityCalls).toEqual([
-      {
-        environment: "Production",
-        roleName: "radius-deploy-octo-app",
-        existingRoleArn: "",
-        accountId: "123456789012",
-        region: "us-west-2",
-        cluster: "eks-1",
-        repo: "octo/app"
-      }
-    ]);
-    expect(test.events.indexOf("canonical:Production")).toBeLessThan(
-      test.events.indexOf("aws-identity")
-    );
-    expect(test.events.indexOf("aws-identity")).toBeLessThan(
-      test.events.indexOf("post:/api/create-environment")
-    );
-    expect(test.posts).toEqual([
-      {
-        pathname: "/api/create-environment",
-        data: expect.objectContaining({
-          provider: "aws",
+      expect(identityCalls).toEqual([
+        {
           environment: "Production",
-          roleArn: AWS_ROLE_ARN,
-          trustSubjects: AWS_SUBJECTS
-        })
-      }
-    ]);
-    expect(test.failures).toEqual([]);
-  });
+          ...selectors,
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks-1",
+          repo: "octo/app"
+        }
+      ]);
+      expect(test.events.indexOf("canonical:Production")).toBeLessThan(
+        test.events.indexOf("aws-identity")
+      );
+      expect(test.events.indexOf("aws-identity")).toBeLessThan(
+        test.events.indexOf("post:/api/create-environment")
+      );
+      expect(test.posts).toEqual([
+        {
+          pathname: "/api/create-environment",
+          data: expect.objectContaining({
+            provider: "aws",
+            environment: "Production",
+            roleArn: AWS_ROLE_ARN,
+            trustSubjects: AWS_SUBJECTS
+          })
+        }
+      ]);
+      expect(test.failures).toEqual([]);
+    }
+  );
 
   it("stops at the AWS boundary when deploy identity setup is paused", async () => {
     const op = operation();
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     const executor = successfulSelectedGhExecutor({
       run: async () =>
@@ -1328,7 +1324,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     const executor = successfulSelectedGhExecutor({
       run: async () =>
@@ -1488,7 +1484,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       op.provider = "aws";
       op.request = {
         needsAzureCredentials: false,
-        environment: { environment: "production" }
+        environment: { environment: "production", roleName: "fixture" }
       };
       const executor = successfulSelectedGhExecutor({
         run: async (args) =>
@@ -1519,7 +1515,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     const executor = successfulSelectedGhExecutor({
       run: async (args) =>
@@ -1558,7 +1554,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       op.provider = "aws";
       op.request = {
         needsAzureCredentials: false,
-        environment: { environment: "production" }
+        environment: { environment: "production", roleName: "fixture" }
       };
       const executor = successfulSelectedGhExecutor({
         run: async () => command({ stdout: JSON.stringify(body) })

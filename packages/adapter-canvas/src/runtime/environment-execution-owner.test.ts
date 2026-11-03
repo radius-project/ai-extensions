@@ -38,6 +38,87 @@ afterEach(() => {
 });
 
 describe("runtime environment execution ownership", () => {
+  it("registers readiness before invoking work and drains independent registrations without operation IDs", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const first = deferred();
+    const second = deferred();
+    const work = owner.runReadiness(async () => {
+      expect(owner.pendingReadinessCount()).toBe(2);
+      await first.promise;
+    });
+    expect(owner.pendingReadinessCount()).toBe(1);
+    const other = owner.runReadiness(async () => second.promise);
+    expect(owner.pendingReadinessCount()).toBe(2);
+    expect(owner.pendingOperationIds()).toEqual([]);
+    const drain = owner.shutdown();
+    expect(owner.shutdown()).toBe(drain);
+    const done = vi.fn();
+    void drain.then(done);
+    first.resolve();
+    await work;
+    expect(owner.pendingReadinessCount()).toBe(1);
+    expect(done).not.toHaveBeenCalled();
+    second.resolve();
+    await other;
+    await expect(drain).resolves.toEqual({ complete: true, failures: [] });
+    expect(owner.pendingReadinessCount()).toBe(0);
+    const refused = vi.fn(async () => {});
+    await expect(owner.runReadiness(refused)).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    expect(refused).not.toHaveBeenCalled();
+  });
+
+  it.each(["sync", "async"] as const)(
+    "retires %s readiness errors without leaking or failing a clean drain",
+    async (mode) => {
+      const owner = createEnvironmentExecutionOwner();
+      const error = new Error("probe failed");
+      await expect(
+        owner.runReadiness(() => {
+          if (mode === "sync") throw error;
+          return Promise.reject(error);
+        })
+      ).rejects.toBe(error);
+      expect(owner.pendingReadinessCount()).toBe(0);
+      await expect(owner.shutdown()).resolves.toEqual({
+        complete: true,
+        failures: []
+      });
+    }
+  );
+
+  it.each(["before", "during", "retired"] as const)(
+    "retains restoration failures reported %s shutdown only for pending work",
+    async (when) => {
+      const owner = createEnvironmentExecutionOwner();
+      const gate = deferred();
+      let fail = () => {};
+      const work = owner.runReadiness(async (report) => {
+        fail = report;
+        if (when !== "during") report();
+        await gate.promise;
+      });
+      await Promise.resolve();
+      if (when === "retired") {
+        gate.resolve();
+        await work;
+      }
+      const drain = owner.shutdown();
+      if (when === "during") {
+        fail();
+        fail();
+      }
+      gate.resolve();
+      await work;
+      await expect(drain).resolves.toEqual({
+        complete: when === "retired",
+        failures:
+          when === "retired" ? [] : ["GitHub account restoration failed"]
+      });
+    }
+  );
+
   it("releases synchronous task ownership before the settled callback's consumer resumes", async () => {
     const owner = createEnvironmentExecutionOwner();
     const completed = deferred();
