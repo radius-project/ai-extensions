@@ -820,7 +820,9 @@ describe("environments — delete-environment refusal ladder", () => {
             tenantId: "",
             repoId: 7,
             roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r",
-            trustSubjects: ["repo:o/r:environment:dev"]
+            trustSubjects: ["repo:o/r:environment:dev"],
+            region: "us-west-2",
+            cluster: "shop"
           }),
         createOperation,
         buildDeleteStages,
@@ -852,7 +854,9 @@ describe("environments — delete-environment refusal ladder", () => {
       tenantId: "",
       repoId: 7,
       roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r",
-      trustSubjects: ["repo:o/r:environment:dev"]
+      trustSubjects: ["repo:o/r:environment:dev"],
+      region: "us-west-2",
+      cluster: "shop"
     });
     expect(recording.status).toBe(202);
     expect(JSON.parse(recording.body).operationId).toBe("op-del-aws");
@@ -895,7 +899,12 @@ describe("environments — delete-environment refusal ladder", () => {
       })
     );
     expect(recording.status).toBe(202);
-    expect(op.request).toMatchObject({ provider: "aws", roleArn: "" });
+    expect(op.request).toMatchObject({
+      provider: "aws",
+      roleArn: "",
+      region: "",
+      cluster: ""
+    });
   });
 
   it("400s with provider-unsupported guidance for an AWS environment while the AWS switch is off", async () => {

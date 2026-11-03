@@ -137,27 +137,30 @@ export interface EnvironmentDeletionPorts {
     repoId: number,
     environment: string
   ): Promise<void>;
-  // AWS only: remove the environment's trust subject and permission policy
-  // from the shared deploy role, under the deploy identity lock. The role
-  // itself is never deleted.
+  // AWS only: under the deploy identity lock, remove the environment's trust
+  // subjects and permission policy from the shared deploy role, and its
+  // cluster's access entry when nothing else uses it. The role itself is
+  // never deleted.
   removeAwsEnvironmentAccess(input: {
     repo: string;
     environment: string;
     roleArn: string;
     // The subjects setup recorded; empty when it recorded none.
     trustSubjects: readonly string[];
+    // Empty when the environment did not record its cluster.
+    region: string;
+    cluster: string;
     operationId: string;
     // Called on every poll while another run holds the lock, with a progress
     // line when there is something new to say.
     waiting(wait: AwsLockWait, line: string | null): Promise<void>;
+    // Runs after a successful removal, before the lock is released.
+    whileLocked(removal: AwsRoleAccessRemoval): Promise<void>;
   }): Promise<
-    | {
-        ok: true;
-        removed: readonly string[];
-        kept: readonly string[];
+    | (AwsRoleAccessRemoval & {
         // Set when the removal finished but the lock was left behind.
         lockWarning?: string;
-      }
+      })
     | { ok: false; message: string }
   >;
   // Durably record the operation after each state transition.
@@ -197,6 +200,13 @@ export function statePackageDeletionFailureMessage(input: {
   };
 }
 
+export interface AwsRoleAccessRemoval {
+  ok: true;
+  removed: readonly string[];
+  kept: readonly string[];
+  warnings: readonly string[];
+}
+
 interface DeletionOperation {
   operationId: string;
   provider?: string;
@@ -209,6 +219,8 @@ interface DeletionOperation {
     tenantId?: string;
     roleArn?: string;
     trustSubjects?: unknown;
+    region?: string;
+    cluster?: string;
     repoId?: number;
     [key: string]: unknown;
   };
@@ -372,8 +384,9 @@ export async function runEnvironmentDeletion(
   // `deleteGitHubEnvironmentStage` consumes; keeping both inside one lock keeps
   // that producer/consumer pair together. On the resume path the credential
   // stage is already done, so only the GitHub delete runs — still under the same
-  // lock. Non-Azure environments have no federated credential to retire, so
-  // their GitHub delete needs no lock.
+  // lock. An AWS environment's GitHub delete runs under the deploy identity
+  // lock instead, below. Other environments have nothing to retire, so their
+  // GitHub delete needs no lock.
   const roleArn = String(op.request?.roleArn || "");
   // All or nothing: a damaged list falls back to resolving the subjects from
   // GitHub rather than removing a partial set.
@@ -387,22 +400,38 @@ export async function runEnvironmentDeletion(
     ) ?
       (recordedSubjects as string[])
     : [];
-  if (stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS)) {
+  // The trust removal and the GitHub environment delete run under one hold of
+  // the deploy identity lock. Repair reads the GitHub environment under that
+  // lock, so if the lock were released between the two steps, Repair could
+  // still see the environment and add its subjects back. For the same reason,
+  // a retry whose GitHub environment delete is still pending removes the
+  // subjects again first. The removal is idempotent.
+  const awsStagePending = stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS);
+  if (
+    stageState(op, STAGE_DELETE_AWS_ROLE_ACCESS) !== null &&
+    (awsStagePending || stagePending(op, STAGE_DELETE_GITHUB_ENV))
+  ) {
     enterStage(op, STAGE_DELETE_AWS_ROLE_ACCESS);
     addStep(op, {
       stage: STAGE_DELETE_AWS_ROLE_ACCESS,
       kind: "mutation",
-      label: "Removing this environment's trust and policy from the IAM role",
+      label:
+        awsStagePending ?
+          "Removing this environment's trust, policy, and unused cluster access from the deploy identity"
+        : "Checking the deploy identity again before deleting the GitHub environment",
       state: "running"
     });
     await ports.persist();
     let removal;
+    let stopped = false;
     try {
       removal = await ports.removeAwsEnvironmentAccess({
         repo,
         environment,
         roleArn,
         trustSubjects,
+        region: String(op.request?.region || ""),
+        cluster: String(op.request?.cluster || ""),
         operationId: op.operationId,
         // Shown on the deletion's progress, where Remove lock is offered.
         waiting: async (wait, line) => {
@@ -418,6 +447,19 @@ export async function runEnvironmentDeletion(
             state: "running"
           });
           await ports.persist();
+        },
+        whileLocked: async (removed) => {
+          setContext(op, { awsLockWait: null });
+          recordAwsRoleAccessRemoval(op, removed);
+          await ports.persist();
+          stopped = await deleteGitHubEnvironmentStage(
+            op,
+            ports,
+            repo,
+            environment,
+            Number(op.request?.repoId)
+          );
+          await ports.persist();
         }
       });
     } catch (error) {
@@ -428,7 +470,7 @@ export async function runEnvironmentDeletion(
       addStep(op, {
         stage: STAGE_DELETE_AWS_ROLE_ACCESS,
         kind: "observation",
-        label: "Could not update the IAM role. Cleanup stopped.",
+        label: "Could not update the deploy identity. Cleanup stopped.",
         state: "failed"
       });
       setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "failed");
@@ -445,15 +487,6 @@ export async function runEnvironmentDeletion(
       await ports.persist();
       return;
     }
-    addStep(op, {
-      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
-      kind: removal.removed.length > 0 ? "mutation" : "observation",
-      label:
-        removal.removed.length > 0 ?
-          `Removed ${removal.removed.join(" and ")} from the IAM role`
-        : "The IAM role held nothing for this environment",
-      state: "succeeded"
-    });
     if (removal.lockWarning) {
       addStep(op, {
         stage: STAGE_DELETE_AWS_ROLE_ACCESS,
@@ -466,13 +499,10 @@ export async function runEnvironmentDeletion(
             "Other Radius runs that change this IAM role wait until the lock is removed."
         }
       });
+      setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "warning");
     }
-    setStageState(
-      op,
-      STAGE_DELETE_AWS_ROLE_ACCESS,
-      removal.lockWarning ? "warning" : "succeeded"
-    );
     await ports.persist();
+    if (stopped) return;
   }
 
   const clientId = String(op.request?.clientId || "");
@@ -650,7 +680,7 @@ export async function runEnvironmentDeletion(
     addStep(op, {
       stage: STAGE_REVIEW_IAM_ROLE,
       kind: "observation",
-      label: `Left IAM role ${roleName} and the account's GitHub identity provider in place. The role serves every environment in this repository. Remove it in the AWS console if nothing needs it.`,
+      label: `Radius doesn't delete IAM role ${roleName} or the account's GitHub identity provider, because other environments, repositories, or services may use them.`,
       state: "succeeded"
     });
     setStageState(op, STAGE_REVIEW_IAM_ROLE, "succeeded");
@@ -662,6 +692,47 @@ export async function runEnvironmentDeletion(
     hasWarnings(op) ? "succeeded_with_warnings" : "succeeded"
   );
   await ports.persist();
+}
+
+// Record what the role cleanup removed, kept, and could not confirm, and close
+// its stage.
+function recordAwsRoleAccessRemoval(
+  op: DeletionOperation,
+  removal: AwsRoleAccessRemoval
+): void {
+  if (removal.removed.length === 0) {
+    addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "observation",
+      label: "The deploy identity held nothing for this environment",
+      state: "succeeded"
+    });
+  }
+  for (const item of removal.removed) {
+    addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "mutation",
+      label: `Removed ${item}`,
+      state: "succeeded"
+    });
+  }
+  for (const item of removal.kept) {
+    addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "observation",
+      label: `Kept ${item}`,
+      state: "succeeded"
+    });
+  }
+  for (const warning of removal.warnings) {
+    addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "warning",
+      label: warning,
+      warning: { code: "aws-role-cleanup-warning", message: warning }
+    });
+  }
+  setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "succeeded");
 }
 
 async function deleteGitHubEnvironmentStage(

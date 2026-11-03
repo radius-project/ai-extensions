@@ -17,9 +17,13 @@ export interface EnvironmentTarget {
   // environment created before setup recorded them, or when the variable is
   // unreadable; deletion then resolves them from the repository.
   trustSubjects: string[];
+  // AWS only: the cluster whose access entry deletion may remove. Empty for an
+  // environment that did not record it.
+  region: string;
+  cluster: string;
 }
 
-function parseTrustSubjects(value: string | undefined): string[] {
+export function parseTrustSubjects(value: string | undefined): string[] {
   if (!value) return [];
   try {
     const parsed: unknown = JSON.parse(value);
@@ -85,7 +89,9 @@ export function createEnvironmentTargetReader(
       tenantId: vars.AZURE_TENANT_ID || "",
       repoId,
       roleArn: vars.AWS_ROLE_ARN || "",
-      trustSubjects: parseTrustSubjects(vars[AWS_TRUST_SUBJECTS_VARIABLE])
+      trustSubjects: parseTrustSubjects(vars[AWS_TRUST_SUBJECTS_VARIABLE]),
+      region: vars.AWS_REGION || "",
+      cluster: vars.AWS_EKS_CLUSTER_NAME || ""
     };
   };
 }

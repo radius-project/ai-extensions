@@ -363,7 +363,10 @@ import {
   graphRepairHandoffMessage,
   type GraphRepairRequest
 } from "./graph-model-repair.js";
-import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
+import {
+  createGhNamespaceClaimsPorts,
+  createSelectedNamespaceClaimsPorts
+} from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import type { EnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import {
@@ -5627,6 +5630,7 @@ export function createProductionCanvasServerRuntime(
     createAwsEnvironmentAccess<EnvironmentOperationRecord>({
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
+      environments: createGhNamespaceClaimsPorts(cliExec),
       sleep: sleepMs,
       now: () => Date.now(),
       isStopRequested: shouldStop,

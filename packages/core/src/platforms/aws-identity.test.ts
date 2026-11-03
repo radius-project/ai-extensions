@@ -32,10 +32,12 @@ import {
   parsePolicyDocument,
   radiusRoleRepository,
   removeGitHubTrustSubject,
+  trustAllowsOnlySubjects,
   trustedGitHubSubjects
 } from "./aws-identity.js";
 
 const ACCOUNT = "123456789012";
+const GITHUB = "token.actions.githubusercontent.com";
 const DEV = "repo:octo/shop:environment:dev";
 const PROD = "repo:octo/shop:environment:prod";
 
@@ -442,6 +444,113 @@ describe("trust policy", () => {
     );
     expect(removal.removed).toBe(false);
     expect(removal.remaining).toBe(1);
+  });
+
+  describe("trustAllowsOnlySubjects", () => {
+    const PROVIDER = githubOidcProviderArn(ACCOUNT);
+    const github = (condition: unknown, extra: object = {}) => ({
+      Effect: "Allow",
+      Principal: { Federated: PROVIDER },
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: condition,
+      ...extra
+    });
+
+    it.each([
+      ["the listed subjects", [DEV, PROD], [DEV, PROD]],
+      ["a subset of the listed subjects", [PROD], [DEV, PROD]]
+    ])("accepts a policy that trusts %s", (_label, trusted, listed) => {
+      expect(
+        trustAllowsOnlySubjects(
+          buildGitHubTrustPolicy(ACCOUNT, trusted),
+          ACCOUNT,
+          listed
+        )
+      ).toBe(true);
+    });
+
+    it("accepts the deny-only policy left after the last subject", () => {
+      const { policy } = removeGitHubTrustSubject(
+        buildGitHubTrustPolicy(ACCOUNT, [DEV]),
+        ACCOUNT,
+        DEV
+      );
+      expect(trustAllowsOnlySubjects(policy, ACCOUNT, [])).toBe(true);
+    });
+
+    it.each([
+      ["a subject outside the list", buildGitHubTrustPolicy(ACCOUNT, [DEV])],
+      [
+        "a wildcard pattern",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            github({ StringLike: { [`${GITHUB}:sub`]: "repo:octo/*" } })
+          ]
+        }
+      ],
+      [
+        "a GitHub statement with no subject constraint",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            github({ StringEquals: { [`${GITHUB}:aud`]: "sts.amazonaws.com" } })
+          ]
+        }
+      ],
+      [
+        "another principal",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { Service: "ec2.amazonaws.com" },
+              Action: "sts:AssumeRole"
+            }
+          ]
+        }
+      ],
+      [
+        "another principal beside the GitHub provider",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            github(
+              { StringEquals: { [`${GITHUB}:sub`]: PROD } },
+              {
+                Principal: {
+                  Federated: PROVIDER,
+                  AWS: `arn:aws:iam::${ACCOUNT}:root`
+                }
+              }
+            )
+          ]
+        }
+      ],
+      [
+        "another identity provider",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            github(
+              { StringEquals: { [`${GITHUB}:sub`]: PROD } },
+              {
+                Principal: {
+                  Federated: [PROVIDER, "arn:aws:iam::1:oidc-provider/other"]
+                }
+              }
+            )
+          ]
+        }
+      ],
+      [
+        "a statement with no principal",
+        { Version: "2012-10-17", Statement: [{ Effect: "Allow" }] }
+      ]
+    ])("rejects a policy with %s", (_label, policy) => {
+      expect(trustAllowsOnlySubjects(policy, ACCOUNT, [PROD])).toBe(false);
+    });
   });
 
   it("parses encoded, string, and object documents", () => {

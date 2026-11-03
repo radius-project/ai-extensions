@@ -1,13 +1,17 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildGitHubTrustPolicy } from "@radius-project/core";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
 import { createEnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
 import { deleteGitHubEnvironmentIdempotent } from "../../../src/server/services/github-environment.js";
 import { runEnvironmentDeletion } from "../../../src/server/services/environment-deletion.js";
+import { createAwsEnvironmentAccess } from "../../../src/server/services/aws-environment-access.js";
+import { createEnvironmentTargetReader } from "../../../src/server/services/environment-target.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
 import { redactGhCredentials } from "../../../src/gh.js";
+import type { GitHubJsonPayload } from "../../../src/azure-oidc.js";
 import {
   buildDeleteStages,
   createOperation,
@@ -17,6 +21,7 @@ import {
   STAGE_DELETE_CREDENTIAL,
   STAGE_DELETE_GITHUB_ENV,
   STAGE_DELETE_STATE_PACKAGE,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
   STAGE_REVIEW_APP_REGISTRATION
 } from "../../../src/operations.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
@@ -1044,6 +1049,226 @@ describe("the async delete route through its background runner", () => {
     // data now reports no environments, the picker still serves the cached "dev".
     harness.setScript(listingScript(""));
     expect(names((await harness.list()).body)).toEqual(["dev"]);
+  });
+
+  // An AWS environment's cluster comes from its GitHub variables, rides the
+  // delete request into the background runner, and decides which access entry
+  // the deploy identity cleanup removes. Only the `gh` and `aws` leaves are
+  // faked; the target reader, route, runner, and cleanup are production code.
+  it("removes an AWS environment's trust, policy, and unused access entry on the cluster its variables record", async () => {
+    const runnerFinished = deferred();
+    const account = "123456789012";
+    const role = "radius-deploy-octo-app";
+    const roleArn = `arn:aws:iam::${account}:role/${role}`;
+    const dev = "repo:octo/app:environment:dev";
+    const prod = "repo:octo/app:environment:prod";
+    const awsVariables = (cluster: string, subject: string) =>
+      [
+        "RADIUS_MANAGED\ttrue",
+        `AWS_ROLE_ARN\t${roleArn}`,
+        `AWS_ACCOUNT_ID\t${account}`,
+        "AWS_REGION\tus-west-2",
+        `AWS_EKS_CLUSTER_NAME\t${cluster}`,
+        `AWS_TRUST_SUBJECTS\t${JSON.stringify([subject])}`
+      ].join("\n");
+    // Every AWS command, and the GitHub environment delete, in order.
+    const awsCommands: string[][] = [];
+    const lock = {
+      Policy: {
+        PolicyId: "LOCK1",
+        Arn: `arn:aws:iam::${account}:policy/radius-lock-${role}`
+      }
+    };
+    const awsAnswers: Record<string, unknown> = {
+      "iam create-policy": lock,
+      "iam get-policy": lock,
+      "iam delete-policy": "",
+      "sts get-caller-identity": { Account: account },
+      "iam get-role": {
+        Role: {
+          Arn: roleArn,
+          AssumeRolePolicyDocument: buildGitHubTrustPolicy(account, [
+            dev,
+            prod
+          ]),
+          Tags: [
+            { Key: "radius-managed", Value: "true" },
+            { Key: "radius-repository", Value: "octo/app" }
+          ]
+        }
+      },
+      "iam update-assume-role-policy": "",
+      "iam delete-role-policy": "",
+      "eks describe-access-entry": {
+        accessEntry: { tags: { "radius-managed": "true" } }
+      },
+      "eks delete-access-entry": ""
+    };
+    const access = createAwsEnvironmentAccess<never>({
+      async runAws(args) {
+        awsCommands.push(args);
+        const command = args.slice(0, 2).join(" ");
+        // IAM shows a trust update to the reads that follow it.
+        if (command === "iam update-assume-role-policy") {
+          const role = awsAnswers["iam get-role"] as { Role: object };
+          awsAnswers["iam get-role"] = {
+            Role: {
+              ...role.Role,
+              AssumeRolePolicyDocument: JSON.parse(
+                args[args.indexOf("--policy-document") + 1] ?? "null"
+              )
+            }
+          };
+        }
+        const answer = awsAnswers[command];
+        if (answer === undefined) {
+          throw new Error(`unexpected aws ${args.join(" ")}`);
+        }
+        return {
+          code: 0,
+          stdout: typeof answer === "string" ? answer : JSON.stringify(answer),
+          stderr: ""
+        };
+      },
+      runGitHubJson: async (path) => {
+        const answers: Record<string, GitHubJsonPayload> = {
+          "/repos/octo/app": {
+            full_name: "octo/app",
+            id: 42,
+            owner: { id: 7 }
+          },
+          "/repos/octo/app/actions/oidc/customization/sub": {
+            use_default: true,
+            use_immutable_subject: false
+          }
+        };
+        if (!(path in answers)) {
+          throw new Error(`unexpected GitHub read ${path}`);
+        }
+        return { ok: true, status: 200, json: answers[path] };
+      },
+      environments: {
+        listEnvironmentNames: async () => ({
+          ok: true,
+          names: ["dev", "prod"]
+        }),
+        readEnvironmentVariables: async (_repo, name) => {
+          if (name !== "prod") throw new Error(`unexpected read of ${name}`);
+          return {
+            ok: true,
+            variables: Object.fromEntries(
+              awsVariables("storefront", prod)
+                .split("\n")
+                .map((line) => line.split("\t"))
+            )
+          };
+        }
+      },
+      sleep: async () => {},
+      now: () => Date.parse("2026-11-03T12:00:00Z"),
+      isStopRequested: () => false,
+      operationId: () => "",
+      operations: {
+        enterStage: () => {},
+        addLegacyStep: () => {},
+        setContext: () => {},
+        touch: () => {}
+      },
+      store: { persist: async () => {} },
+      stageAuthorizeIdentity: "authorize",
+      errorMessage: (error) =>
+        error instanceof Error ? error.message : String(error)
+    });
+    let capturedOp:
+      | { state: string; steps: Array<{ stage: string; label: string }> }
+      | undefined;
+    const deleteDeps: Partial<EnvironmentsDependencies> = {
+      awsEnabled: true,
+      discoverEnvironmentTarget: createEnvironmentTargetReader(async () =>
+        awsVariables("shop", dev)
+      ),
+      createOperation: (input) =>
+        createOperation(input) as ReturnType<
+          NonNullable<EnvironmentsDependencies["createOperation"]>
+        >,
+      buildDeleteStages: (options) => buildDeleteStages(options),
+      startOperation: (op) => ({ ok: true as const, operation: op }),
+      toClientView: (op) => toClientView(op),
+      persistOperations: async () => {},
+      logError: () => {},
+      scheduleEnvironmentOperation: (_instanceId, op) => {
+        capturedOp = op as unknown as typeof capturedOp;
+        void runEnvironmentDeletion(op as never, {
+          deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          removeAwsEnvironmentAccess: access.remove,
+          deleteStatePackage: async () => "deleted",
+          reportStatePackageDeletionFailure: async () => {},
+          withCredentialProvenanceLock: async () => {
+            throw new Error("unexpected credential lock");
+          },
+          runAz: async () => {
+            throw new Error("unexpected az");
+          },
+          readAzureIdentity: async () => {
+            throw new Error("unexpected Azure identity read");
+          },
+          readCredentialProvenance: () => [],
+          removeCredentialProvenance: async () => {},
+          clearEnvironmentCredentialProvenance: async () => {},
+          deleteGitHubEnvironment: async () => {
+            awsCommands.push(["github", "delete-environment"]);
+            return { outcome: "deleted" };
+          },
+          persist: async () => {},
+          errorMessage: (error) =>
+            error instanceof Error ? error.message : String(error)
+        })
+          .catch(() => {})
+          .finally(() => runnerFinished.resolve());
+        return true;
+      }
+    };
+    const harness = await start(listingScript("7\tdev"), deleteDeps);
+
+    const response = await fetch(`${harness.baseUrl}/api/delete-environment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo: REPO, environment: "dev" })
+    });
+    expect(response.status).toBe(202);
+    await runnerFinished.promise;
+
+    expect(capturedOp?.state).toBe("succeeded");
+    expect(awsCommands).toContainEqual([
+      "eks",
+      "delete-access-entry",
+      "--cluster-name",
+      "shop",
+      "--principal-arn",
+      roleArn,
+      "--region",
+      "us-west-2"
+    ]);
+    expect(
+      capturedOp?.steps
+        .filter((step) => step.stage === STAGE_DELETE_AWS_ROLE_ACCESS)
+        .map((step) => step.label)
+    ).toEqual(
+      expect.arrayContaining([
+        `Removed trust subject ${dev}`,
+        "Removed policy radius-deploy-dev",
+        `Removed access entry for ${role} on shop`,
+        `Kept IAM role ${role}`
+      ])
+    );
+    // The GitHub environment is deleted while the deploy identity is locked.
+    const order = awsCommands.map((args) => args.slice(0, 2).join(" "));
+    expect(order.indexOf("github delete-environment")).toBeGreaterThan(
+      order.indexOf("eks delete-access-entry")
+    );
+    expect(order.indexOf("github delete-environment")).toBeLessThan(
+      order.indexOf("iam delete-policy")
+    );
   });
 });
 

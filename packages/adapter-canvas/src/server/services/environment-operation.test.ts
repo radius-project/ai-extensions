@@ -1429,6 +1429,14 @@ describe("runEnvironmentOperationWorkflow", () => {
         if (!answer) throw new Error(`unexpected GitHub read ${path}`);
         return answer;
       },
+      environments: {
+        listEnvironmentNames: async () => {
+          throw new Error("unexpected environment listing");
+        },
+        readEnvironmentVariables: async () => {
+          throw new Error("unexpected variable read");
+        }
+      },
       sleep: async () => {},
       now: () => NOW,
       isStopRequested: () => false,

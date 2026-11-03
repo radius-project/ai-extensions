@@ -444,41 +444,77 @@ describe("runEnvironmentDeletion — AWS", () => {
       repo: "octo/app",
       environment: "dev",
       provider: "aws",
-      roleArn: ROLE_ARN
+      roleArn: ROLE_ARN,
+      region: "us-west-2",
+      cluster: "shop"
     };
     return op;
   }
+  type Removal = Awaited<
+    ReturnType<EnvironmentDeletionPorts["removeAwsEnvironmentAccess"]>
+  >;
+  type RemovalInput = Parameters<
+    EnvironmentDeletionPorts["removeAwsEnvironmentAccess"]
+  >[0];
+  // Behaves like the real port: a successful removal runs `whileLocked`
+  // before it returns, with the lock still held.
+  const removing = (
+    result: Removal,
+    events: string[] = []
+  ): ReturnType<typeof vi.fn<(input: RemovalInput) => Promise<Removal>>> =>
+    vi.fn(async (input: RemovalInput) => {
+      events.push("lock");
+      if (result.ok) await input.whileLocked(result);
+      events.push("release");
+      return result;
+    });
+  const nothing: Removal = {
+    ok: true,
+    removed: [],
+    kept: [],
+    warnings: []
+  };
+  const stageOf = (op: { stages: Array<{ id: string; state: string }> }) =>
+    op.stages.find((stage) => stage.id === STAGE_DELETE_AWS_ROLE_ACCESS)?.state;
 
-  it("removes the environment from the role after the Radius environment, then keeps the role", async () => {
+  it("removes the environment from the role and deletes the GitHub environment while holding the lock", async () => {
     const op = makeAwsOp();
     const order: string[] = [];
+    const removeAwsEnvironmentAccess = removing(
+      {
+        ok: true,
+        removed: [
+          "trust subject repo:octo/app:environment:dev",
+          "access entry for radius-deploy-octo-app on shop"
+        ],
+        kept: ["IAM role radius-deploy-octo-app"],
+        warnings: []
+      },
+      order
+    );
     const ports = makePorts({
       deleteRadiusEnvironment: vi.fn(async () => {
         order.push("radius");
         return { outcome: "deleted" as const };
       }),
-      removeAwsEnvironmentAccess: vi.fn(async () => {
-        order.push("role");
-        return {
-          ok: true as const,
-          removed: ["trust subject repo:octo/app:environment:dev"],
-          kept: []
-        };
-      }),
+      removeAwsEnvironmentAccess,
       deleteGitHubEnvironment: vi.fn(async () => {
         order.push("github");
         return { outcome: "deleted" as const };
       })
     });
     await runEnvironmentDeletion(op, ports);
-    expect(order).toEqual(["radius", "role", "github"]);
-    expect(ports.removeAwsEnvironmentAccess).toHaveBeenCalledWith({
+    expect(order).toEqual(["radius", "lock", "github", "release"]);
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith({
       repo: "octo/app",
       environment: "dev",
       roleArn: ROLE_ARN,
       trustSubjects: [],
+      region: "us-west-2",
+      cluster: "shop",
       operationId: op.operationId,
-      waiting: expect.any(Function)
+      waiting: expect.any(Function),
+      whileLocked: expect.any(Function)
     });
     expect(ports.runAz).not.toHaveBeenCalled();
     expect(op.stages.map((s: { id: string }) => s.id)).toEqual([
@@ -489,12 +525,61 @@ describe("runEnvironmentDeletion — AWS", () => {
       STAGE_REVIEW_IAM_ROLE
     ]);
     expect(op.state).toBe("succeeded");
+    expect(ports.deleteGitHubEnvironment).toHaveBeenCalledOnce();
     const labels = op.steps.map((step: { label: string }) => step.label);
-    expect(labels).toContain(
-      "Removed trust subject repo:octo/app:environment:dev from the IAM role"
+    expect(labels).toEqual(
+      expect.arrayContaining([
+        "Removed trust subject repo:octo/app:environment:dev",
+        "Removed access entry for radius-deploy-octo-app on shop",
+        "Kept IAM role radius-deploy-octo-app",
+        "Radius doesn't delete IAM role radius-deploy-octo-app or the account's GitHub identity provider, because other environments, repositories, or services may use them."
+      ])
     );
-    expect(labels).toContain(
-      "Left IAM role radius-deploy-octo-app and the account's GitHub identity provider in place. The role serves every environment in this repository. Remove it in the AWS console if nothing needs it."
+    expect(labels).not.toContain(
+      "The deploy identity held nothing for this environment"
+    );
+    // The role cleanup's steps come before the GitHub environment's.
+    const stages = op.steps.map((step: { stage: string }) => step.stage);
+    expect(stages.lastIndexOf(STAGE_DELETE_AWS_ROLE_ACCESS)).toBeLessThan(
+      stages.indexOf(STAGE_DELETE_GITHUB_ENV)
+    );
+  });
+
+  it("finishes with a warning for what it could not confirm", async () => {
+    const op = makeAwsOp();
+    const warning =
+      "Kept the access entry for radius-deploy-octo-app on shop, because Radius couldn't read this repository's environments (HTTP 403).";
+    await runEnvironmentDeletion(
+      op,
+      makePorts({
+        removeAwsEnvironmentAccess: removing({
+          ok: true,
+          removed: ["policy radius-deploy-dev"],
+          kept: [],
+          warnings: [warning]
+        })
+      })
+    );
+    expect(op.state).toBe("succeeded_with_warnings");
+    expect(
+      op.steps.find((step: { label: string }) => step.label === warning)
+    ).toMatchObject({
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      state: "warning",
+      warning: { code: "aws-role-cleanup-warning", message: warning }
+    });
+  });
+
+  it.each([
+    ["no cluster recorded", { region: undefined, cluster: undefined }],
+    ["an empty cluster", { region: "", cluster: "" }]
+  ])("passes an empty cluster for %s", async (_label, recorded) => {
+    const op = makeAwsOp();
+    op.request = { ...op.request, ...recorded };
+    const removeAwsEnvironmentAccess = removing(nothing);
+    await runEnvironmentDeletion(op, makePorts({ removeAwsEnvironmentAccess }));
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
+      expect.objectContaining({ region: "", cluster: "" })
     );
   });
 
@@ -514,18 +599,14 @@ describe("runEnvironmentDeletion — AWS", () => {
   ])("passes %s to the role cleanup", async (_label, recorded, expected) => {
     const op = makeAwsOp();
     op.request = { ...op.request, trustSubjects: recorded };
-    const removeAwsEnvironmentAccess = vi.fn(async () => ({
-      ok: true as const,
-      removed: [],
-      kept: []
-    }));
+    const removeAwsEnvironmentAccess = removing(nothing);
     await runEnvironmentDeletion(op, makePorts({ removeAwsEnvironmentAccess }));
     expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
       expect.objectContaining({ trustSubjects: expected })
     );
   });
 
-  it("keeps the role and recorded subjects across a restart and a retry", async () => {
+  it("keeps the role, recorded subjects, and cluster across a restart and a retry", async () => {
     const subjects = [
       "repo:octo/app:environment:dev",
       "repo:octo@7/app@42:environment:dev"
@@ -545,14 +626,16 @@ describe("runEnvironmentDeletion — AWS", () => {
 
     const resumed = restart(op);
     expect(resumed.state).toBe("running");
+    const succeeded = removing({
+      ok: true,
+      removed: subjects.map((subject) => `trust subject ${subject}`),
+      kept: [],
+      warnings: []
+    });
     const removeAwsEnvironmentAccess = vi
-      .fn()
+      .fn<(input: RemovalInput) => Promise<Removal>>()
       .mockResolvedValueOnce({ ok: false as const, message: "AccessDenied" })
-      .mockResolvedValue({
-        ok: true as const,
-        removed: subjects.map((subject) => `trust subject ${subject}`),
-        kept: []
-      });
+      .mockImplementation(succeeded);
     const ports = makePorts({ removeAwsEnvironmentAccess });
     await runEnvironmentDeletion(resumed, ports);
     expect(resumed.state).toBe("failed_partial");
@@ -566,43 +649,109 @@ describe("runEnvironmentDeletion — AWS", () => {
     await runEnvironmentDeletion(retried, ports);
 
     expect(retried.state).toBe("succeeded");
+    const expected = expect.objectContaining({
+      repo: "octo/app",
+      environment: "dev",
+      roleArn: ROLE_ARN,
+      trustSubjects: subjects,
+      region: "us-west-2",
+      cluster: "shop",
+      operationId: retried.operationId
+    });
     expect(removeAwsEnvironmentAccess.mock.calls).toEqual([
-      [
-        expect.objectContaining({
-          repo: "octo/app",
-          environment: "dev",
-          roleArn: ROLE_ARN,
-          trustSubjects: subjects,
-          operationId: retried.operationId
-        })
-      ],
-      [
-        expect.objectContaining({
-          repo: "octo/app",
-          environment: "dev",
-          roleArn: ROLE_ARN,
-          trustSubjects: subjects,
-          operationId: retried.operationId
-        })
-      ]
+      [expected],
+      [expected]
     ]);
   });
 
+  // Repair adds a subject while it can read the GitHub environment. Between a
+  // failed GitHub delete and the retry, it can add the subjects back.
+  it("removes the subjects again, under the lock, before retrying a failed GitHub environment delete", async () => {
+    const op = makeAwsOp();
+    const events: string[] = [];
+    const removeAwsEnvironmentAccess = removing(
+      {
+        ok: true,
+        removed: ["trust subject repo:octo/app:environment:dev"],
+        kept: [],
+        warnings: []
+      },
+      events
+    );
+    const deleteGitHubEnvironment = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        events.push("github failed");
+        return { outcome: "failed" as const, detail: "HTTP 502" };
+      })
+      .mockImplementation(async () => {
+        events.push("github");
+        return { outcome: "deleted" as const };
+      });
+    const ports = makePorts({
+      removeAwsEnvironmentAccess,
+      deleteGitHubEnvironment
+    });
+
+    await runEnvironmentDeletion(op, ports);
+    expect(op.state).toBe("failed_partial");
+    expect(stageOf(op)).toBe("succeeded");
+
+    beginRetryAttempt(op, "deletion");
+    applyDeletionRetry(op);
+    await runEnvironmentDeletion(op, ports);
+
+    expect(op.state).toBe("succeeded");
+    expect(events).toEqual([
+      "lock",
+      "github failed",
+      "release",
+      "lock",
+      "github",
+      "release"
+    ]);
+    expect(op.steps.map((step: { label: string }) => step.label)).toContain(
+      "Checking the deploy identity again before deleting the GitHub environment"
+    );
+    expect(stageOf(op)).toBe("succeeded");
+  });
+
+  it("does not run the role cleanup again once the GitHub environment is gone", async () => {
+    const op = makeAwsOp();
+    const removeAwsEnvironmentAccess = removing(nothing);
+    const ports = makePorts({
+      removeAwsEnvironmentAccess,
+      deleteStatePackage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("forbidden"))
+        .mockResolvedValue("deleted")
+    });
+
+    await runEnvironmentDeletion(op, ports);
+    expect(op.state).toBe("failed_partial");
+    beginRetryAttempt(op, "deletion");
+    applyDeletionRetry(op);
+    await runEnvironmentDeletion(op, ports);
+
+    expect(op.state).toBe("succeeded");
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledOnce();
+  });
+
   it.each([
-    ["arn:aws:iam::123456789012:role/team/deploy", "Left IAM role deploy "],
-    ["arn:aws:iam::1:role/team/x", "Left IAM role arn:aws:iam::1:role/team/x "]
+    [
+      "arn:aws:iam::123456789012:role/team/deploy",
+      "Radius doesn't delete IAM role deploy "
+    ],
+    [
+      "arn:aws:iam::1:role/team/x",
+      "Radius doesn't delete IAM role arn:aws:iam::1:role/team/x "
+    ]
   ])("names the kept role from %s", async (roleArn, label) => {
     const op = makeAwsOp();
     op.request = { ...op.request, roleArn };
     await runEnvironmentDeletion(
       op,
-      makePorts({
-        removeAwsEnvironmentAccess: vi.fn(async () => ({
-          ok: true as const,
-          removed: [],
-          kept: []
-        }))
-      })
+      makePorts({ removeAwsEnvironmentAccess: removing(nothing) })
     );
     expect(
       op.steps.some((step: { label: string }) => step.label.startsWith(label))
@@ -620,13 +769,15 @@ describe("runEnvironmentDeletion — AWS", () => {
     };
     const seen: unknown[] = [];
     const ports = makePorts({
-      removeAwsEnvironmentAccess: vi.fn(async ({ waiting }) => {
+      removeAwsEnvironmentAccess: vi.fn(async ({ waiting, whileLocked }) => {
         op.lastActivityAt = "2000-01-01T00:00:00.000Z";
         await waiting(wait, "⏳ Waiting for the lock on IAM role deploy.");
         seen.push(op.lastActivityAt, op.context?.awsLockWait);
         await waiting({ ...wait, removable: true }, null);
         seen.push(op.context?.awsLockWait);
-        return { ok: true as const, removed: [], kept: [] };
+        await whileLocked(nothing as Extract<Removal, { ok: true }>);
+        seen.push(op.context?.awsLockWait);
+        return nothing;
       })
     });
 
@@ -635,6 +786,7 @@ describe("runEnvironmentDeletion — AWS", () => {
     expect(seen[0]).not.toBe("2000-01-01T00:00:00.000Z");
     expect(seen[1]).toEqual(wait);
     expect(seen[2]).toEqual({ ...wait, removable: true });
+    expect(seen[3]).toBeNull();
     expect(op.context.awsLockWait).toBeNull();
     const labels = op.steps.map((step: { label: string }) => step.label);
     expect(labels.filter((label: string) => label.startsWith("⏳"))).toEqual([
@@ -646,12 +798,16 @@ describe("runEnvironmentDeletion — AWS", () => {
   it("finishes with a warning when the lock could not be released", async () => {
     const op = makeAwsOp();
     const ports = makePorts({
-      removeAwsEnvironmentAccess: vi.fn(async () => ({
-        ok: true as const,
-        removed: ["policy radius-deploy-dev"],
-        kept: [],
-        lockWarning: "not allowed iam:DeletePolicy"
-      }))
+      removeAwsEnvironmentAccess: vi.fn(async ({ whileLocked }) => {
+        const removed = {
+          ok: true as const,
+          removed: ["policy radius-deploy-dev"],
+          kept: [],
+          warnings: []
+        };
+        await whileLocked(removed);
+        return { ...removed, lockWarning: "not allowed iam:DeletePolicy" };
+      })
     });
 
     await runEnvironmentDeletion(op, ports);
@@ -667,28 +823,46 @@ describe("runEnvironmentDeletion — AWS", () => {
         message: "not allowed iam:DeletePolicy"
       }
     });
-    expect(
-      op.stages.find(
-        (stage: { id: string }) => stage.id === STAGE_DELETE_AWS_ROLE_ACCESS
-      )?.state
-    ).toBe("warning");
+    expect(stageOf(op)).toBe("warning");
     expect(ports.deleteGitHubEnvironment).toHaveBeenCalled();
     expect(op.state).toBe("succeeded_with_warnings");
   });
 
-  it("reports a role that held nothing for the environment", async () => {
+  it("reports a lock it could not release after a failed GitHub environment delete", async () => {
     const op = makeAwsOp();
     const ports = makePorts({
-      removeAwsEnvironmentAccess: vi.fn(async () => ({
-        ok: true as const,
-        removed: [],
-        kept: []
+      removeAwsEnvironmentAccess: vi.fn(async ({ whileLocked }) => {
+        await whileLocked(nothing as Extract<Removal, { ok: true }>);
+        return { ...nothing, lockWarning: "not allowed iam:DeletePolicy" };
+      }),
+      deleteGitHubEnvironment: vi.fn(async () => ({
+        outcome: "failed" as const,
+        detail: "HTTP 502"
       }))
     });
+
     await runEnvironmentDeletion(op, ports);
-    expect(op.steps.map((step: { label: string }) => step.label)).toContain(
-      "The IAM role held nothing for this environment"
+
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure?.code).toBe("github-env-delete-failed");
+    expect(
+      op.steps.some(
+        (step: { label: string }) =>
+          step.label === "Could not release the lock on the IAM role"
+      )
+    ).toBe(true);
+  });
+
+  it("reports a role that held nothing for the environment", async () => {
+    const op = makeAwsOp();
+    await runEnvironmentDeletion(
+      op,
+      makePorts({ removeAwsEnvironmentAccess: removing(nothing) })
     );
+    expect(op.steps.map((step: { label: string }) => step.label)).toContain(
+      "The deploy identity held nothing for this environment"
+    );
+    expect(op.state).toBe("succeeded");
   });
 
   it.each([

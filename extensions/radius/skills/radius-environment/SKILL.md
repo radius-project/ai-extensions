@@ -112,7 +112,9 @@ The managed Contour Gateway supports HTTP and TLS routes. TCP and UDP routes req
 
 **AWS**, recorded for environment deletion (not read by any workflow):
 
-- `AWS_TRUST_SUBJECTS`: JSON array of the GitHub OIDC subjects setup added to the IAM role's trust policy. Deleting the environment removes exactly these, even if the repository was renamed. Without it, deletion resolves the subjects from the repository's current name and IDs.
+- `AWS_TRUST_SUBJECTS`: JSON array of the GitHub OIDC subjects setup added to the IAM role's trust policy. Deleting the environment removes these, so an older subject goes even if the repository was renamed. It also removes the subjects GitHub resolves for the environment now, which covers any that Repair added. It holds the deploy role's lock until the GitHub environment is deleted, so Repair can't add them back in between.
+
+Deleting an AWS environment also reads `AWS_REGION` and `AWS_EKS_CLUSTER_NAME` to find the cluster's access entry. It removes the entry only when Radius created the role for this repository, setup tagged the entry, no other environment in the repository uses that cluster, and the role's trust lets in nothing but the subjects the repository's other environments recorded. Otherwise the entry is kept, and the completion message says why.
 
 **Azure** — read by `verify-azure.yml`:
 

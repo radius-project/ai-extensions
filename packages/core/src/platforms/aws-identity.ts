@@ -327,6 +327,33 @@ export function namesGitHubProvider(
   );
 }
 
+/**
+ * Whether the only principals this trust policy lets in are GitHub workflows
+ * presenting one of `subjects`. Deny statements grant nothing and are skipped.
+ * Another principal, a GitHub statement with no `sub` constraint, or any
+ * subject or pattern not in `subjects` makes it false.
+ */
+export function trustAllowsOnlySubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): boolean {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.every((statement) => {
+    if (statement.Effect === "Deny") return true;
+    const principal = statement.Principal;
+    return (
+      statement.Effect === "Allow" &&
+      isRecord(principal) &&
+      Object.keys(principal).every((key) => key === "Federated") &&
+      stringList(principal.Federated).every((arn) => arn === providerArn) &&
+      isGitHubStatement(statement, providerArn) &&
+      subjectConstraints(statement).length > 0 &&
+      subjectsOf(statement).every((subject) => subjects.includes(subject))
+    );
+  });
+}
+
 function githubTrustStatement(
   providerArn: string,
   subjects: readonly string[]
