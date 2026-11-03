@@ -595,7 +595,12 @@ describe("real server and fake SDK runtime ownership", () => {
         "iam create-role": { Role: { Arn: roleArn } },
         "iam put-role-policy": {},
         "eks create-access-entry": {},
-        "eks associate-access-policy": {}
+        "eks associate-access-policy": {},
+        // The deploy identity lock: taken first, checked before each write,
+        // and released when the pause ends the setup.
+        "iam create-policy": { Policy: { PolicyId: "LOCK1" } },
+        "iam get-policy": { Policy: { PolicyId: "LOCK1" } },
+        "iam delete-policy": {}
       };
       const cli = vi
         .spyOn(gh, "cliExec")
@@ -659,7 +664,14 @@ describe("real server and fake SDK runtime ownership", () => {
         await completed;
         expect(acquire).toHaveBeenCalledOnce();
         expect(op.failure, JSON.stringify(reports.mock.calls)).toBeNull();
-        expect(cli.mock.calls.at(-1)?.[1].slice(0, 2).join(" ")).toBe(pauseAt);
+        const awsCommands = cli.mock.calls.map(([, args]) =>
+          args.slice(0, 2).join(" ")
+        );
+        expect(awsCommands.slice(-3)).toEqual([
+          pauseAt,
+          "iam get-policy",
+          "iam delete-policy"
+        ]);
         expect(op.control.stop.boundary).toBe("after-aws-deploy-identity");
         expect(op.state).toBe("cancelled");
         expect(op.failure).toBeNull();
