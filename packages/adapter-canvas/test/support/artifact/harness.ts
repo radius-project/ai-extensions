@@ -48,7 +48,13 @@ export interface ArtifactRegistrationSnapshot {
 
 interface ChildMessage {
   type:
-    "registered" | "ready" | "shutdown" | "blocked" | "page" | "render-error";
+    | "registered"
+    | "ready"
+    | "shutdown"
+    | "blocked"
+    | "page"
+    | "render-error"
+    | "plugin-update";
   snapshot?: ArtifactRegistrationSnapshot;
   closeCount?: number;
   kind?: string;
@@ -62,6 +68,7 @@ export interface ArtifactSmokeResult {
   stderr: string;
   renderedPage: string;
   exitCode: number;
+  pluginUpdates: string[];
 }
 
 function waitForExit(child: ChildProcess): Promise<number | null> {
@@ -104,6 +111,8 @@ export async function runArtifactSmoke(
       cwd: root,
       env: {
         ...process.env,
+        CI: "",
+        COPILOT_AUTO_UPDATE: "true",
         HOME: root,
         USERPROFILE: root,
         RADIUS_ARTIFACT_PATH: resolve(artifactPath),
@@ -128,6 +137,7 @@ export async function runArtifactSmoke(
   let registration: ArtifactRegistrationSnapshot | undefined;
   let ready = false;
   let closeCount = 0;
+  const pluginUpdates: string[] = [];
   let renderedPage: string | undefined;
   let failure: Error | undefined;
   child.stderr?.on("data", (chunk: Buffer) => {
@@ -137,7 +147,15 @@ export async function runArtifactSmoke(
     if (raw.type === "registered") registration = raw.snapshot;
     else if (raw.type === "ready") ready = true;
     else if (raw.type === "shutdown") closeCount += raw.closeCount ?? 0;
-    else if (raw.type === "blocked") {
+    else if (raw.type === "plugin-update") {
+      if (typeof raw.detail !== "string") {
+        failure = new Error(
+          "Artifact plugin update did not identify its source."
+        );
+      } else {
+        pluginUpdates.push(raw.detail);
+      }
+    } else if (raw.type === "blocked") {
       failure = new Error(
         `Artifact attempted ${raw.kind}: ${raw.detail ?? "unknown target"}`
       );
@@ -207,7 +225,14 @@ export async function runArtifactSmoke(
         `Artifact subprocess exited with ${exitCode}. stderr: ${stderr.slice(-2000)}`
       );
     }
-    return { registration, closeCount, stderr, renderedPage, exitCode };
+    return {
+      registration,
+      closeCount,
+      stderr,
+      renderedPage,
+      exitCode,
+      pluginUpdates
+    };
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGKILL");

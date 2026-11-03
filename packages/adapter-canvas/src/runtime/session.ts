@@ -9,6 +9,8 @@
 // once joinSession resolves. Tests can `set()` a fake session up front and never
 // touch joinSession at all.
 
+import type { PluginUpdatePort } from "./plugin-update.js";
+
 export interface CanvasRpcOpenOptions {
   extensionId?: string;
   canvasId: string;
@@ -30,6 +32,7 @@ export interface SessionPort {
   log?(message: string, options?: SessionLogOptions): void | Promise<void>;
   send(message: unknown): unknown;
   rpc: {
+    plugins?: PluginUpdatePort;
     canvas: {
       open(options: CanvasRpcOpenOptions): Promise<unknown>;
     };

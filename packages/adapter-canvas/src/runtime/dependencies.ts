@@ -350,6 +350,7 @@ export interface OperationsDependencies {
 // module (server.ts/gh.ts/workspace.ts/...) or performing real I/O.
 export interface RadiusExtensionDependencies {
   logError(message: string): void;
+  automaticPluginUpdates: boolean;
   session: SessionHolder;
   executionOwner: EnvironmentExecutionOwner;
   clock: ClockDependencies;

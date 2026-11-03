@@ -192,6 +192,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
 
   const deps: RadiusExtensionDependencies = {
     logError: vi.fn(),
+    automaticPluginUpdates: false,
     session: sessionHolder,
     // Instant, so no suite spends real seconds inside a runtime wait. The
     // durations themselves are asserted by the unit tests that own them.

@@ -107,6 +107,7 @@ import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
+import { automaticPluginUpdatesEnabled } from "./runtime/plugin-update.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -128,6 +129,7 @@ const { servers, getOrCreateServer, stopServer, getLastWebviewActivityAt } =
 const ghCommandPresentation = resolveGhCommandPresentation();
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
+  automaticPluginUpdates: automaticPluginUpdatesEnabled(process.env),
   session: sessionHolder,
   executionOwner,
   clock: {

@@ -336,6 +336,7 @@ describe("P0-C built Radius extension artifact", () => {
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
     expect(smoke.registration).toEqual(EXPECTED_REGISTRATION);
     expect(smoke.closeCount).toBe(1);
+    expect(smoke.pluginUpdates).toEqual(["radius@radius-plugins"]);
     expect(smoke.exitCode).toBe(0);
     // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
     // and reports them only on stderr. The harness already requires exit code 0;
