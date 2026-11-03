@@ -1980,6 +1980,8 @@ describe("real server and fake SDK runtime ownership", () => {
             owner,
             session: fake.deps.session,
             account: createDeploymentAccountResolver({
+              readinessOwner: owner,
+              logDiagnostic: fake.deps.logError,
               readIdentity: async () => ({
                 accounts: [
                   {

@@ -1,4 +1,6 @@
 import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
   redactCredentials,
   selectGitHubAccount,
   type GitHubAccountSelection,
@@ -7,6 +9,7 @@ import {
 } from "@radius-project/core";
 import type { GitHubIdentity, SelectedGhExecutor } from "../gh.js";
 import type { GitHubAccountReadinessService } from "../server/services/github-account-readiness.js";
+import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 
 export interface DeploymentAccountPorts {
   readIdentity(): Promise<Pick<GitHubIdentity, "accounts">>;
@@ -14,6 +17,11 @@ export interface DeploymentAccountPorts {
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   choose?: GitHubAccountSelectionPorts["choose"];
   redactDiagnostic(value: string): string;
+  readinessOwner: Pick<
+    EnvironmentExecutionOwner,
+    "runReadiness" | "isShuttingDown"
+  >;
+  logDiagnostic(message: string): void;
 }
 
 export type DeploymentAccountSelection =
@@ -33,7 +41,39 @@ export function createDeploymentAccountResolver(ports: DeploymentAccountPorts) {
         listLogins: async () =>
           (await ports.readIdentity()).accounts.map(({ login }) => login),
         check: async (login, target) => {
-          const readiness = await ports.readiness.check({ ...target, login });
+          const readiness = await ports.readinessOwner.runReadiness(
+            async (reportRestorationFailure) => {
+              let reported = false;
+              return ports.readiness.check({
+                ...target,
+                login,
+                assertActive: () =>
+                  assertSetupExecutionActive(
+                    () =>
+                      !input.isCurrent() ||
+                      ports.readinessOwner.isShuttingDown()
+                  ),
+                reportRestoration: (restoration) => {
+                  if (reported) return;
+                  reported = true;
+                  if (restoration.state === "failed")
+                    reportRestorationFailure();
+                  try {
+                    ports.logDiagnostic(
+                      redact(
+                        restoration.guidance ||
+                          (restoration.state === "failed" ?
+                            "GitHub account restoration failed"
+                          : "GitHub CLI account changed externally")
+                      )
+                    );
+                  } catch {
+                    // Diagnostics cannot replace restoration evidence or settlement.
+                  }
+                }
+              });
+            }
+          );
           if (readiness.ready) return { state: "eligible" };
           const failures = Object.values(readiness.checks).filter(
             (check) => check.state !== "ready"
@@ -64,6 +104,12 @@ export function createDeploymentAccountResolver(ports: DeploymentAccountPorts) {
 
       return { ...selected, executor };
     } catch (error) {
+      if (
+        isSetupExecutionInterrupted(error) ||
+        !input.isCurrent() ||
+        ports.readinessOwner.isShuttingDown()
+      )
+        return { state: "stopped" };
       return {
         state: "unavailable",
         message: redact(error instanceof Error ? error.message : String(error))

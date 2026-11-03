@@ -131,6 +131,8 @@ const executionOwner = createEnvironmentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
 const deploymentAccount = createDeploymentAccountResolver({
+  readinessOwner: executionOwner,
+  logDiagnostic: (message) => console.error("[radius readiness]", message),
   readIdentity: async () => {
     resetGhIdentityCache();
     return getGitHubIdentity();

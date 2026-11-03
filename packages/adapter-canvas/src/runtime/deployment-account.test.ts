@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createEnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 import type { GitHubAccountReadiness } from "../server/services/github-account-readiness.js";
 import {
@@ -44,6 +45,8 @@ function fixture(overrides: Partial<DeploymentAccountPorts> = {}) {
   const check = vi.fn(async () => ready());
   const createExecutor = vi.fn(async () => executor);
   const resolve = createDeploymentAccountResolver({
+    readinessOwner: createEnvironmentExecutionOwner(),
+    logDiagnostic: vi.fn(),
     readIdentity,
     readiness: { check },
     createExecutor,
@@ -55,6 +58,136 @@ function fixture(overrides: Partial<DeploymentAccountPorts> = {}) {
 }
 
 describe("deployment GitHub account binding", () => {
+  it("does not track host choice and refuses a late selection before rechecking", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    let selected = (_login: string) => {};
+    let choosing = () => {};
+    const choice = new Promise<string>((resolve) => {
+      selected = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      choosing = resolve;
+    });
+    const check = vi.fn(async () => ready());
+    const { resolve, createExecutor } = fixture({
+      readinessOwner: owner,
+      readIdentity: async () => ({
+        accounts: ["saved", "other"].map((login) => ({
+          login,
+          hasWorkflow: true,
+          hasPackages: true,
+          switchable: true,
+          acting: false
+        }))
+      }),
+      readiness: { check },
+      choose: async () => {
+        choosing();
+        return choice;
+      }
+    });
+    const pending = resolve({
+      target: TARGET,
+      isCurrent: () => !owner.isShuttingDown()
+    });
+    await entered;
+    expect(owner.pendingReadinessCount()).toBe(0);
+    await expect(owner.shutdown()).resolves.toMatchObject({ complete: true });
+    selected("saved");
+    await expect(pending).resolves.toEqual({ state: "stopped" });
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(createExecutor).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "records restoration once before stopped suppression (throwing logger=%s)",
+    async (throws) => {
+      const owner = createEnvironmentExecutionOwner();
+      const logDiagnostic = vi.fn((_message: string) => {
+        if (throws) throw new Error("logger failed");
+      });
+      const { resolve } = fixture({
+        readinessOwner: owner,
+        logDiagnostic,
+        readiness: {
+          check: async (input) => {
+            const restoration = {
+              state: "failed" as const,
+              originalLogin: "original",
+              currentLogin: "saved",
+              guidance: "restore private-host-value client_secret=fixture-value"
+            };
+            input.reportRestoration?.(restoration);
+            input.reportRestoration?.(restoration);
+            void owner.shutdown();
+            input.assertActive?.();
+            return ready();
+          }
+        }
+      });
+      await expect(
+        resolve({ target: TARGET, isCurrent: () => true })
+      ).resolves.toEqual({ state: "stopped" });
+      await expect(owner.shutdown()).resolves.toEqual({
+        complete: false,
+        failures: ["GitHub account restoration failed"]
+      });
+      expect(logDiagnostic).toHaveBeenCalledOnce();
+      expect(logDiagnostic.mock.calls.flat().join("\n")).not.toContain(
+        "fixture-value"
+      );
+    }
+  );
+
+  it.each(["failed", "changed_externally"] as const)(
+    "reports %s with no guidance without misclassifying an external change",
+    async (state) => {
+      const owner = createEnvironmentExecutionOwner();
+      const logDiagnostic = vi.fn();
+      const { resolve } = fixture({
+        readinessOwner: owner,
+        logDiagnostic,
+        readiness: {
+          check: async (input) => {
+            input.reportRestoration?.({
+              state,
+              originalLogin: "original",
+              currentLogin: "saved",
+              guidance: null
+            });
+            void owner.shutdown();
+            input.assertActive?.();
+            return ready();
+          }
+        }
+      });
+      await expect(
+        resolve({ target: TARGET, isCurrent: () => true })
+      ).resolves.toEqual({ state: "stopped" });
+      await expect(owner.shutdown()).resolves.toMatchObject({
+        complete: state !== "failed"
+      });
+      expect(logDiagnostic).toHaveBeenCalledExactlyOnceWith(
+        state === "failed" ?
+          "GitHub account restoration failed"
+        : "GitHub CLI account changed externally"
+      );
+    }
+  );
+
+  it("refuses readiness registration on an already stopped owner even if the caller is stale", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    await owner.shutdown();
+    const { resolve, check, createExecutor } = fixture({
+      readinessOwner: owner
+    });
+    await expect(
+      resolve({ target: TARGET, isCurrent: () => true })
+    ).resolves.toEqual({ state: "stopped" });
+    expect(check).not.toHaveBeenCalled();
+    expect(createExecutor).not.toHaveBeenCalled();
+  });
+
   it("returns the verified selected executor for an unambiguous target", async () => {
     const { resolve, executor, check, createExecutor } = fixture();
     expect(await resolve({ target: TARGET, isCurrent: () => true })).toEqual({
@@ -63,7 +196,9 @@ describe("deployment GitHub account binding", () => {
       executor
     });
     expect(check).toHaveBeenCalledTimes(2);
-    expect(check).toHaveBeenLastCalledWith({ ...TARGET, login: "saved" });
+    expect(check).toHaveBeenLastCalledWith(
+      expect.objectContaining({ ...TARGET, login: "saved" })
+    );
     expect(createExecutor).toHaveBeenCalledExactlyOnceWith("saved");
   });
 

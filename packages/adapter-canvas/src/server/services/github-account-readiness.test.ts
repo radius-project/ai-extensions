@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { assertSetupExecutionActive } from "@radius-project/core";
+import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import {
   createGitHubAccountReadinessService,
   createGitHubSelectionHandleStore,
@@ -88,6 +90,153 @@ function readinessService(
 
 describe("GitHub account readiness", () => {
   it.each(
+    ["repos/octo/app", ...gitHubAppAccessProbePaths("octo/app")].flatMap(
+      (path) =>
+        ["ok", "malformed", "denied", "rejected", "identity"].map(
+          (outcome) => ({ path, outcome })
+        )
+    )
+  )(
+    "fences subsequent App probes after $path settles $outcome",
+    async ({ path, outcome }) => {
+      let stopped = false;
+      const calls: string[] = [];
+      const selected = successfulSelectedGhExecutor({
+        login: "fixture[bot]",
+        requiresKeyringSwitch: false,
+        run: async (args, options) => {
+          if (args[1] === path && outcome === "identity") {
+            stopped = true;
+            options?.beforeExecute?.();
+          }
+          calls.push(args[1]);
+          if (args[1] === path) {
+            stopped = true;
+            if (outcome === "rejected") throw new Error("failed read");
+          }
+          return {
+            code: args[1] === path && outcome === "denied" ? 1 : 0,
+            stdout:
+              outcome === "malformed" && args[1] === path ?
+                "invalid"
+              : '{"permissions":{"admin":true}}',
+            stderr: ""
+          };
+        }
+      });
+      const account = createGitHubAccountCoordinator({
+        createExecutor: async () => selected,
+        getActiveKeyringLogin: async () => selected.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected switch");
+        },
+        resetIdentityCache() {}
+      });
+      const probe = vi.fn(async () => ({
+        state: "allowed" as const,
+        detail: "ready"
+      }));
+      const service = createGitHubAccountReadinessService(account, {
+        ownerKey: "runtime",
+        ports: { probePackageAccess: probe }
+      });
+      await expect(
+        service.check({
+          repo: "octo/app",
+          environment: "dev",
+          login: selected.login,
+          assertActive: () => assertSetupExecutionActive(() => stopped)
+        })
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(probe).not.toHaveBeenCalled();
+      expect(calls.at(-1)).toBe(
+        outcome === "identity" ?
+          ["repos/octo/app", ...gitHubAppAccessProbePaths("octo/app")][
+            [
+              "repos/octo/app",
+              ...gitHubAppAccessProbePaths("octo/app")
+            ].indexOf(path) - 1
+          ]
+        : path
+      );
+    }
+  );
+
+  it.each(["success", "interrupted", "error"] as const)(
+    "reports failed/external restoration before suppressing %s work, even with throwing diagnostics",
+    async (workOutcome) => {
+      for (const restoration of ["failed", "changed_externally"] as const) {
+        let stopped = false;
+        let active = "original";
+        const selected = successfulSelectedGhExecutor({
+          login: "selected",
+          run: async () => ({
+            code: 0,
+            stdout: '{"permissions":{"admin":true}}',
+            stderr: ""
+          })
+        });
+        const account = createGitHubAccountCoordinator({
+          createExecutor: async () => selected,
+          getActiveKeyringLogin: async () => active,
+          switchKeyringAccount: async (login) => {
+            if (login === "original")
+              return { ok: false, error: "restore unavailable" };
+            active = login;
+            return { ok: true };
+          },
+          resetIdentityCache() {}
+        });
+        const diagnostic = vi.fn(() => {
+          throw new Error("diagnostic unavailable");
+        });
+        const service = createGitHubAccountReadinessService(account, {
+          ownerKey: "runtime",
+          ports: {
+            probePackageAccess: async () => {
+              if (restoration === "changed_externally") active = "external";
+              if (workOutcome === "interrupted") {
+                stopped = true;
+                assertSetupExecutionActive(() => stopped);
+              }
+              if (workOutcome === "error") throw new Error("ordinary failure");
+              return { state: "allowed", detail: "ready" };
+            }
+          }
+        });
+        const pending = service.check({
+          repo: "octo/app",
+          environment: "dev",
+          login: "selected",
+          assertActive: () => assertSetupExecutionActive(() => stopped),
+          reportRestoration: diagnostic
+        });
+        if (workOutcome === "interrupted")
+          await expect(pending).rejects.toMatchObject({
+            code: "setup-execution-interrupted"
+          });
+        else
+          await expect(pending).resolves.toMatchObject({
+            ready: false,
+            restoration: { state: restoration }
+          });
+        expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ state: restoration })
+        );
+        // A new lease can run once manual restoration has resolved any block.
+        active = "original";
+        await expect(
+          account.withSelectedAccount(
+            "selected",
+            { ownerKey: "next" },
+            async () => "next"
+          )
+        ).resolves.toMatchObject({ value: "next" });
+      }
+    }
+  );
+
+  it.each(
     (["allowed", "denied", "unavailable"] as const).flatMap((outcome) =>
       (["discovery", "saved", "stale"] as const).map((mode) => ({
         outcome,
@@ -145,6 +294,8 @@ describe("GitHub account readiness", () => {
         }
       );
       const resolve = createDeploymentAccountResolver({
+        readinessOwner: createEnvironmentExecutionOwner(),
+        logDiagnostic: vi.fn(),
         readIdentity: async () => ({
           accounts: ["first", "second"].map((login) => ({
             login,
@@ -781,6 +932,104 @@ describe("GitHub account readiness", () => {
 });
 
 describe("GHCR package access probe", () => {
+  it.each([
+    "before",
+    "token-ok",
+    "token-denied",
+    "token-rejected",
+    "body-ok",
+    "body-malformed",
+    "body-rejected"
+  ] as const)(
+    "does not admit a POST after shutdown at %s",
+    async (boundary) => {
+      let stopped = boundary === "before";
+      const calls: string[] = [];
+      const pending = probeGhcrPackageWriteAccess(
+        selectedExecutor({}),
+        "octo/app",
+        "dev",
+        async (_url, init) => {
+          calls.push(init.method ?? "GET");
+          if (boundary.startsWith("token")) stopped = true;
+          if (boundary === "token-rejected")
+            throw new Error("read unavailable");
+          return {
+            ok: boundary !== "token-denied",
+            status: 403,
+            json: async () => {
+              stopped = true;
+              if (boundary === "body-rejected")
+                throw new Error("body unavailable");
+              return boundary === "body-malformed" ? null : { token: "opaque" };
+            }
+          };
+        },
+        15000,
+        () => assertSetupExecutionActive(() => stopped)
+      );
+      await expect(pending).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(calls).toEqual(boundary === "before" ? [] : ["GET"]);
+    }
+  );
+
+  it.each([
+    "accepted",
+    "denied",
+    "rejected",
+    "cleanup-rejected",
+    "unsafe-location"
+  ] as const)(
+    "preserves an issued POST's %s result and cleanup after shutdown",
+    async (outcome) => {
+      let stopped = false;
+      const calls: string[] = [];
+      const result = await probeGhcrPackageWriteAccess(
+        selectedExecutor({}),
+        "octo/app",
+        "dev",
+        async (_url, init) => {
+          const method = init.method ?? "GET";
+          calls.push(method);
+          if (method === "POST") {
+            stopped = true;
+            if (outcome === "rejected") throw new Error("upload unavailable");
+            return {
+              ok: outcome !== "denied",
+              status: outcome === "denied" ? 403 : 202,
+              headers: {
+                get: () =>
+                  outcome === "unsafe-location" ?
+                    "https://other.invalid/upload"
+                  : "/upload"
+              },
+              json: async () => ({})
+            };
+          }
+          if (method === "DELETE" && outcome === "cleanup-rejected")
+            throw new Error("cleanup unavailable");
+          return { ok: true, json: async () => ({ token: "opaque" }) };
+        },
+        15000,
+        () => assertSetupExecutionActive(() => stopped)
+      );
+      expect(result.state).toBe(
+        outcome === "denied" ? "denied"
+        : outcome === "rejected" ? "unavailable"
+        : "allowed"
+      );
+      expect(calls).toEqual([
+        "GET",
+        "POST",
+        ...(["accepted", "cleanup-rejected"].includes(outcome) ?
+          ["DELETE"]
+        : [])
+      ]);
+    }
+  );
+
   it.each(
     (["token", "upload"] as const).flatMap((endpoint) =>
       [undefined, 200, 400, 401, 403, 404, 408, 429, 500, 503].map(
@@ -1380,3 +1629,4 @@ describe("GitHub selection handles", () => {
     expect(retry.ok).toBe(true);
   });
 });
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";

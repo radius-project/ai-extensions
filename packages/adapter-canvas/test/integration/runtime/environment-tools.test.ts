@@ -57,6 +57,7 @@ afterEach(() => {
   operations.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 const target = { repo: "fixture/app", environment: "dev" };
@@ -80,6 +81,7 @@ async function composition(
     beforeLease?: () => Promise<void>;
     leaseLogin?: string;
     readiness?: GitHubAccountReadinessService;
+    close?: () => Promise<void>;
     controlCheck?: () => void;
     cancellationRun?: (
       args: string[]
@@ -201,6 +203,8 @@ async function composition(
     }))
   }));
   const account = createDeploymentAccountResolver({
+    readinessOwner: owner,
+    logDiagnostic: fake.deps.logError,
     readIdentity,
     readiness: options.readiness ?? {
       check: async (input) => {
@@ -276,6 +280,7 @@ async function composition(
       }
     : {}
   );
+  if (options.close) Object.assign(session, { close: options.close });
   const extension = await bootstrapRadiusExtension(deps, {
     createCanvas: (declaration) => declaration,
     joinSession: async () => session
@@ -319,6 +324,259 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it.each(["released", "timed-out"] as const)(
+    "keeps a %s queued readiness lease tracked beyond the cleanup deadline without starting a switch",
+    async (end) => {
+      vi.useFakeTimers();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      let active = "original";
+      const entered = deferred();
+      const release = deferred();
+      const acquired = deferred();
+      const switches: string[] = [];
+      const coordinator = createGitHubAccountCoordinator(
+        {
+          createExecutor: async (login) =>
+            successfulSelectedGhExecutor({ login }),
+          getActiveKeyringLogin: async () => active,
+          switchKeyringAccount: async (login) => {
+            switches.push(login);
+            active = login;
+            return { ok: true };
+          },
+          resetIdentityCache() {}
+        },
+        {
+          setTimer: (callback, ms) => {
+            const timer = setTimeout(callback, ms);
+            acquired.resolve();
+            return timer;
+          }
+        }
+      );
+      const holder = coordinator.withSelectedAccount(
+        "holder",
+        { ownerKey: "other" },
+        async () => {
+          entered.resolve();
+          await release.promise;
+        }
+      );
+      await entered.promise;
+      const probe = vi.fn(async () => {
+        throw new Error("Unexpected probe");
+      });
+      const readiness = createGitHubAccountReadinessService(coordinator, {
+        ownerKey: "runtime",
+        ports: { probePackageAccess: probe }
+      });
+      const close = vi.fn(async () => {});
+      const h = await composition({ readiness, close });
+      const pending = h.invoke("radius_setup_environment", {
+        ...target,
+        provider: "azure",
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        subscriptionId: "22222222-2222-4222-8222-222222222222",
+        resourceGroup: "group",
+        cluster: "cluster"
+      });
+      try {
+        await acquired.promise;
+        const shutdown = h.extension.shutdown();
+        await vi.advanceTimersByTimeAsync(1999);
+        expect(close).not.toHaveBeenCalled();
+        expect(h.owner.pendingReadinessCount()).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(shutdown).resolves.toEqual({
+          complete: false,
+          exitCode: 1
+        });
+        expect(close).toHaveBeenCalledOnce();
+        expect(h.owner.pendingReadinessCount()).toBe(1);
+        if (end === "timed-out") {
+          await vi.advanceTimersByTimeAsync(999);
+          expect(h.owner.pendingReadinessCount()).toBe(1);
+          await vi.advanceTimersByTimeAsync(1);
+        } else release.resolve();
+        await expect(pending).resolves.toMatchObject({
+          code: "github-account-stopped"
+        });
+        expect(h.owner.pendingReadinessCount()).toBe(0);
+        expect(switches).not.toContain("saved-account");
+        expect(probe).not.toHaveBeenCalled();
+        expect(h.persist).not.toHaveBeenCalled();
+        expect(h.runner).not.toHaveBeenCalled();
+      } finally {
+        release.resolve();
+        await holder;
+        await pending;
+        await h.extension.shutdown();
+      }
+    }
+  );
+
+  it.each(
+    (["GET", "POST"] as const).flatMap((heldMethod) =>
+      (["restored", "failed", "external"] as const).map((restoration) => ({
+        heldMethod,
+        restoration
+      }))
+    )
+  )(
+    "drains readiness held at $heldMethod with $restoration restoration before SDK teardown",
+    async ({ heldMethod, restoration }) => {
+      vi.useFakeTimers();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const entered = deferred();
+      const released = deferred();
+      const cleanupEntered = deferred();
+      const cleanupReleased = deferred();
+      const restoreEntered = deferred();
+      const restoreReleased = deferred();
+      const calls: string[] = [];
+      let active = "original";
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () =>
+          successfulSelectedGhExecutor({
+            login: "saved-account",
+            requiresKeyringSwitch: true,
+            run: async (args) => {
+              expect(args).toEqual(["api", "repos/fixture/app"]);
+              return {
+                code: 0,
+                stdout: JSON.stringify({ permissions: { admin: true } }),
+                stderr: ""
+              };
+            }
+          }),
+        getActiveKeyringLogin: async () => {
+          if (
+            restoration === "external" &&
+            calls.length &&
+            (heldMethod === "GET" || calls.includes("DELETE"))
+          ) {
+            restoreEntered.resolve();
+            await restoreReleased.promise;
+            active = "external";
+          }
+          return active;
+        },
+        switchKeyringAccount: async (login) => {
+          if (login === "original") {
+            restoreEntered.resolve();
+            await restoreReleased.promise;
+            if (restoration === "failed")
+              return {
+                ok: false,
+                error: "restore unavailable client_secret=fixture-value"
+              };
+          }
+          active = login;
+          return { ok: true };
+        },
+        resetIdentityCache() {}
+      });
+      const readiness = createGitHubAccountReadinessService(coordinator, {
+        ownerKey: "readiness",
+        ports: {
+          probePackageAccess: (executor, repo, environment, assertActive) =>
+            probeGhcrPackageWriteAccess(
+              executor,
+              repo,
+              environment,
+              async (_url, init) => {
+                const method = init.method ?? "GET";
+                calls.push(method);
+                if (method === heldMethod) {
+                  entered.resolve();
+                  await released.promise;
+                }
+                if (method === "DELETE") {
+                  cleanupEntered.resolve();
+                  await cleanupReleased.promise;
+                }
+                return {
+                  ok: true,
+                  status: method === "POST" ? 202 : 200,
+                  headers: { get: () => "/upload" },
+                  json: async () => ({ token: "opaque" })
+                };
+              },
+              15000,
+              assertActive
+            )
+        }
+      });
+      const close = vi.fn(async () => {});
+      const h = await composition({ readiness, close });
+      const pending = h.invoke("radius_setup_environment", {
+        ...target,
+        provider: "azure",
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        subscriptionId: "22222222-2222-4222-8222-222222222222",
+        resourceGroup: "group",
+        cluster: "cluster"
+      });
+      try {
+        await entered.promise;
+        const shutdown = h.extension.shutdown();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(close).not.toHaveBeenCalled();
+        released.resolve();
+        if (heldMethod === "POST") {
+          await cleanupEntered.promise;
+          expect(calls).toEqual(["GET", "POST", "DELETE"]);
+          expect(close).not.toHaveBeenCalled();
+          cleanupReleased.resolve();
+        }
+        await restoreEntered.promise;
+        expect(close).not.toHaveBeenCalled();
+        restoreReleased.resolve();
+        await expect(pending).resolves.toMatchObject({
+          kind: "refused",
+          code: "github-account-stopped"
+        });
+        await expect(shutdown).resolves.toEqual({
+          complete: restoration !== "failed",
+          exitCode: restoration === "failed" ? 1 : 0
+        });
+        expect(close).toHaveBeenCalledOnce();
+        expect(active).toBe(
+          restoration === "restored" ? "original"
+          : restoration === "failed" ? "saved-account"
+          : "external"
+        );
+        const diagnostics = vi
+          .mocked(h.deps.logError)
+          .mock.calls.map(([message]) => message);
+        if (restoration !== "restored") {
+          expect(
+            diagnostics.filter((message) =>
+              message.includes("Restore the original")
+            )
+          ).toHaveLength(1);
+          expect(diagnostics.join("\n")).not.toContain("fixture-value");
+        }
+        expect(
+          diagnostics.some((message) => message.includes("drain failed"))
+        ).toBe(restoration === "failed");
+        expect(calls).toEqual(
+          heldMethod === "GET" ? ["GET"] : ["GET", "POST", "DELETE"]
+        );
+        expect(h.persist).not.toHaveBeenCalled();
+        expect(h.runner).not.toHaveBeenCalled();
+        expect(h.readExecutor).not.toHaveBeenCalled();
+        expect(operations.latest(target.repo)).toBeNull();
+      } finally {
+        released.resolve();
+        cleanupReleased.resolve();
+        restoreReleased.resolve();
+        await pending;
+        await h.extension.shutdown();
+      }
+    }
+  );
+
   it("interrupts a registered accepted Azure continuation at its held validation read without advancing durable state", async () => {
     const h = await composition({ realSetup: true });
     const entered = deferred();

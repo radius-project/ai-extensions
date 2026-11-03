@@ -1,5 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { stateRegistryForEnvironment } from "@radius-project/core";
+import {
+  isSetupExecutionInterrupted,
+  stateRegistryForEnvironment
+} from "@radius-project/core";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
@@ -11,9 +14,10 @@ import {
   GITHUB_APP_ACCESS_PROBES,
   isGitHubAppBotLogin
 } from "../../github-app-installation.js";
-import type {
-  GitHubAccountCoordinator,
-  GitHubAccountRestoration
+import {
+  GitHubAccountRestorationError,
+  type GitHubAccountCoordinator,
+  type GitHubAccountRestoration
 } from "./github-account-coordinator.js";
 import type {
   SelectedGhCredentialSource,
@@ -59,6 +63,8 @@ export interface GitHubAccountReadinessService {
     repo: string;
     environment: string;
     login: string;
+    assertActive?(): void;
+    reportRestoration?(restoration: GitHubAccountRestoration): void;
   }): Promise<GitHubAccountReadiness>;
 }
 
@@ -71,7 +77,8 @@ export interface GitHubAccountReadinessPorts {
   probePackageAccess(
     executor: SelectedGhExecutor,
     repo: string,
-    environment: string
+    environment: string,
+    assertActive?: () => void
   ): Promise<GitHubPackageAccessProbeResult>;
 }
 
@@ -107,8 +114,10 @@ export async function probeGhcrPackageWriteAccess(
   repo: string,
   environment: string,
   fetchToken: PackageTokenFetch = fetch,
-  timeoutMs = 15000
+  timeoutMs = 15000,
+  assertActive?: () => void
 ): Promise<GitHubPackageAccessProbeResult> {
+  assertActive?.();
   const signal = AbortSignal.timeout(timeoutMs);
   let packagePath: string;
   try {
@@ -138,11 +147,13 @@ export async function probeGhcrPackageWriteAccess(
       }
     );
   } catch {
+    assertActive?.();
     return {
       state: "unavailable",
       detail: "GitHub Packages authorization could not be verified."
     };
   }
+  assertActive?.();
   if (!response.ok) {
     const denied = response.status === 401 || response.status === 403;
     return {
@@ -163,11 +174,13 @@ export async function probeGhcrPackageWriteAccess(
     }
     if (!token.trim()) throw new Error("missing registry token");
   } catch {
+    assertActive?.();
     return {
       state: "unavailable",
       detail: "GitHub Packages returned an invalid authorization response."
     };
   }
+  assertActive?.();
   let uploadResponse: PackageTokenResponse;
   try {
     uploadResponse = await fetchToken(
@@ -329,16 +342,20 @@ function repairGuidance(
 
 async function inspectRepository(
   executor: SelectedGhExecutor,
-  repo: string
+  repo: string,
+  assertActive?: () => void
 ): Promise<{
   repository: GitHubReadinessCheck;
   environment: GitHubReadinessCheck;
   ready: boolean;
   appVerified: boolean;
 }> {
+  assertActive?.();
   const response = await executor.run(["api", `repos/${repo}`], {
-    timeout: 15000
+    timeout: 15000,
+    beforeExecute: assertActive
   });
+  assertActive?.();
   if (response.code !== 0) {
     const detail =
       (response.stderr || response.stdout).trim() ||
@@ -373,8 +390,10 @@ async function inspectRepository(
     // environments and still fail to create one.
     for (const probe of GITHUB_APP_ACCESS_PROBES) {
       const result = await executor.run(["api", probe.path(repo)], {
-        timeout: 15000
+        timeout: 15000,
+        beforeExecute: assertActive
       });
+      assertActive?.();
       if (result.code !== 0) {
         const check = errorCheck(
           describeMissingGitHubAppAccess(executor.login, repo, probe.permission)
@@ -426,19 +445,45 @@ export function createGitHubAccountReadinessService(
   options: GitHubAccountReadinessServiceOptions & { ownerKey: string }
 ): GitHubAccountReadinessService {
   const ports = options.ports || {
-    probePackageAccess: (executor, repo, environment) =>
-      probeGhcrPackageWriteAccess(executor, repo, environment)
+    probePackageAccess: (executor, repo, environment, assertActive) =>
+      probeGhcrPackageWriteAccess(
+        executor,
+        repo,
+        environment,
+        fetch,
+        15000,
+        assertActive
+      )
   };
   const ghCommandPresentation =
     options.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
   return {
-    async check({ repo, environment, login }) {
+    async check({ repo, environment, login, assertActive, reportRestoration }) {
+      let reported = false;
+      const report = (restoration: GitHubAccountRestoration) => {
+        if (
+          reported ||
+          (restoration.state !== "failed" &&
+            restoration.state !== "changed_externally")
+        )
+          return;
+        reported = true;
+        try {
+          reportRestoration?.(restoration);
+        } catch {
+          // A diagnostic callback cannot replace the original outcome.
+        }
+      };
       try {
         const lease = await coordinator.withSelectedAccount(
           login,
-          { ownerKey: options.ownerKey },
+          { ownerKey: options.ownerKey, assertActive },
           async (executor) => {
-            const repository = await inspectRepository(executor, repo);
+            const repository = await inspectRepository(
+              executor,
+              repo,
+              assertActive
+            );
             // Installation tokens report no OAuth scopes, so workflow access
             // rides on the verified installation probe rather than on the login
             // shape: a probe failure must not still claim workflow access.
@@ -450,7 +495,12 @@ export function createGitHubAccountReadinessService(
               hasScope(executor, "write:packages");
             const packageAccess =
               repository.ready && workflowReady && hasPackagesScope ?
-                await ports.probePackageAccess(executor, repo, environment)
+                await ports.probePackageAccess(
+                  executor,
+                  repo,
+                  environment,
+                  assertActive
+                )
               : null;
             const packagesReady = packageAccess?.state === "allowed";
             const checks: GitHubAccountReadiness["checks"] = {
@@ -488,6 +538,8 @@ export function createGitHubAccountReadinessService(
           },
           3000
         );
+        report(lease.restoration);
+        assertActive?.();
         const restorationReady =
           lease.restoration.state === "not_required" ||
           lease.restoration.state === "restored";
@@ -536,6 +588,12 @@ export function createGitHubAccountReadinessService(
           restoration: lease.restoration
         };
       } catch (error) {
+        if (error instanceof GitHubAccountRestorationError) {
+          report(error.restoration);
+          if (isSetupExecutionInterrupted(error.cause)) throw error.cause;
+        }
+        if (isSetupExecutionInterrupted(error)) throw error;
+        assertActive?.();
         const detail = error instanceof Error ? error.message : String(error);
         const check = errorCheck(detail);
         return {
@@ -552,7 +610,10 @@ export function createGitHubAccountReadinessService(
           },
           repair: null,
           repairRemediation: null,
-          restoration: null
+          restoration:
+            error instanceof GitHubAccountRestorationError ?
+              error.restoration
+            : null
         };
       }
     }

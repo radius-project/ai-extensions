@@ -1,3 +1,4 @@
+import { assertSetupExecutionActive } from "@radius-project/core";
 import { errorMessage } from "./util.js";
 
 export interface EnvironmentExecutionClock {
@@ -59,6 +60,10 @@ export function createEnvironmentExecutionOwner(
   >();
   const activeTasks = new Map<string | undefined, Set<Promise<void>>>();
   const activeRecords = new Set<TaskRecord>();
+  const readinessRecords = new Set<{
+    promise: Promise<void>;
+    failed: boolean;
+  }>();
   const settledListeners = new Map<string | undefined, Set<() => void>>();
   const deletionSettledListeners = new Map<
     string | undefined,
@@ -107,18 +112,47 @@ export function createEnvironmentExecutionOwner(
     // Snapshot every admitted record, including superseded/queued records and
     // detached scopes, before callbacks can change the operation map.
     const records = [...activeRecords];
+    const readiness = [...readinessRecords];
     drainPromise = Promise.allSettled(
-      records.map((record) => record.promise)
-    ).then(() => ({
-      complete: finalizationFailures.size === 0,
-      failures: [...finalizationFailures]
-    }));
+      [...records, ...readiness].map((record) => record.promise)
+    ).then(() => {
+      if (readiness.some((record) => record.failed))
+        finalizationFailures.add("GitHub account restoration failed");
+      return {
+        complete: finalizationFailures.size === 0,
+        failures: [...finalizationFailures]
+      };
+    });
     for (const timer of reconciliationTimers.values())
       notifyShutdown(timer.cancel);
     reconciliationTimers.clear();
     for (const { listener } of shutdownListeners) notifyShutdown(listener);
     shutdownListeners.clear();
     return drainPromise;
+  }
+
+  async function runReadiness<T>(
+    work: (reportRestorationFailure: () => void) => Promise<T>
+  ): Promise<T> {
+    assertSetupExecutionActive(() => shuttingDown);
+    const result: Promise<T> = Promise.resolve().then(() =>
+      work(() => {
+        record.failed = true;
+      })
+    );
+    const record = {
+      promise: result.then(
+        () => undefined,
+        () => undefined
+      ),
+      failed: false
+    };
+    readinessRecords.add(record);
+    try {
+      return await result;
+    } finally {
+      readinessRecords.delete(record);
+    }
   }
 
   function onShutdown(listener: () => void): () => void {
@@ -388,6 +422,8 @@ export function createEnvironmentExecutionOwner(
     attachDeletion: (instanceId: string) => attachScope(instanceId, new Map()),
     attachRuntime: () => attachScope(),
     shutdown,
+    runReadiness,
+    pendingReadinessCount: () => readinessRecords.size,
     pendingOperationIds: () => [
       ...new Set([...activeRecords].map(({ operationId }) => operationId))
     ],

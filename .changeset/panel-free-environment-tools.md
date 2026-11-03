@@ -13,3 +13,5 @@ Input prompts refresh after setup finishes settling, and application-selection p
 Resume keeps the original request's authority through answer reads and saves without requiring a panel. Controls report temporary task-busy guidance separately from failed durable correction. Verification bypass rechecks the saved target and runtime immediately before writing its marker, including after GitHub identity verification; already-issued writes retain their actual result.
 
 An inconclusive GitHub Packages check reports unavailable access and asks you to retry the same account, rather than silently selecting another account or suggesting a scope grant. Confirmed push access remains valid if empty-upload cleanup fails. Workflow status observations that were saved successfully remain intact if authority is lost immediately afterward.
+
+Runtime shutdown prevents new account-access probes and includes pending upload cleanup and account restoration in the existing bounded drain.
