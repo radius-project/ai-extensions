@@ -5865,6 +5865,7 @@ export function createProductionCanvasServerRuntime(
     stopPendingResume: sharedOperationResume.stopPendingResume,
     isShuttingDown: () => executionOwner.isShuttingDown(),
     get: (operationId) => operations.get(operationId),
+    awsEnabled,
     removeAwsDeployIdentityLock: (lock) =>
       removeAwsDeployIdentityLock(lock, runAwsCli),
     acquireForRetry: (op) => operations.acquireForRetry(op),

@@ -231,6 +231,7 @@ function dependencies(
     invalidateEnvironmentListing: (repo) => {
       journal.invalidatedListings.push(repo);
     },
+    awsEnabled: true,
     removeAwsDeployIdentityLock: () => {
       throw new Error("removeAwsDeployIdentityLock not stubbed");
     }
@@ -2099,23 +2100,59 @@ describe("handleRemoveAwsLock", () => {
     expect(out.journal.persistCalls).toBe(1);
   });
 
+  it("refuses a confirmation that names another lock, without touching AWS", async () => {
+    const op = waiting();
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK1"
+    );
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "aws-lock-changed",
+      error:
+        "The lock changed since it was shown: another run now holds a new one. Nothing was removed."
+    });
+    expect(out.journal.persistCalls).toBe(0);
+  });
+
   it.each([
-    ["names another lock", "aws-lock/remove?policyId=LOCK1"],
-    ["names no lock", "aws-lock/remove"]
+    ["no policy ID", "aws-lock/remove"],
+    ["an empty policy ID", "aws-lock/remove?policyId="]
   ])(
-    "refuses a confirmation that %s, without touching AWS",
+    "rejects a request with %s as invalid, without touching AWS",
     async (_label, action) => {
       const op = waiting();
       const out = await drive(handleRemoveAwsLock, op, action);
-      expect(out.recording.status).toBe(409);
+      expect(out.recording.status).toBe(400);
       expect(out.payload()).toMatchObject({
-        code: "aws-lock-changed",
-        error:
-          "The lock changed since it was shown: another run now holds a new one. Nothing was removed."
+        code: "aws-lock-invalid",
+        error: "Name the lock to remove by its policy ID."
+      });
+      expect(op).toMatchObject({
+        context: { awsLockWait: { removable: true } }
       });
       expect(out.journal.persistCalls).toBe(0);
     }
   );
+
+  it("refuses to remove a lock while AWS is switched off", async () => {
+    const op = waiting();
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK0",
+      { awsEnabled: false }
+    );
+    expect(out.recording.status).toBe(400);
+    expect(out.payload()).toMatchObject({
+      code: "provider-unsupported",
+      error:
+        "AWS environments aren't supported yet, so Radius removed no AWS lock."
+    });
+    expect(op).toMatchObject({ context: { awsLockWait: { removable: true } } });
+    expect(out.journal.persistCalls).toBe(0);
+  });
 
   it("says when the lock was already gone", async () => {
     const out = await drive(
@@ -2209,7 +2246,7 @@ describe("handleRemoveAwsLock", () => {
   it("answers 404 for an unknown operation", async () => {
     const out = await call(
       handleRemoveAwsLock,
-      "/api/operations/missing/aws-lock/remove",
+      "/api/operations/missing/aws-lock/remove?policyId=LOCK0",
       dependencies({ get: () => null })
     );
     expect(out.recording.status).toBe(404);

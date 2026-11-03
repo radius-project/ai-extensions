@@ -152,6 +152,7 @@ function start(): Harness {
       invalidateEnvironmentListing: (repo) => {
         invalidatedListings.push(repo);
       },
+      awsEnabled: true,
       removeAwsDeployIdentityLock: (lock) => {
         removedLocks.push(lock);
         return Promise.resolve({ ok: true, removed: true });

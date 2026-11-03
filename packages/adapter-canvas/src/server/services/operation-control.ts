@@ -198,6 +198,10 @@ export interface OperationsControlDependencies {
   cancelVerificationWorkflow(
     operation: OperationRecord
   ): Promise<"inactive" | "cancelling">;
+  // The AWS developer switch. Remove lock deletes an IAM policy through the
+  // developer's AWS CLI, so it is refused when AWS is off, like every other
+  // AWS route.
+  awsEnabled: boolean;
   // Delete the AWS deploy identity lock with exactly this policy ID.
   removeAwsDeployIdentityLock(lock: {
     policyArn: string;
@@ -410,6 +414,23 @@ async function handleRemoveAwsLock(
   context: OperationControlContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
+  if (!dependencies.awsEnabled) {
+    sendJson(context, 400, {
+      error:
+        "AWS environments aren't supported yet, so Radius removed no AWS lock.",
+      code: "provider-unsupported",
+      operationId: context.operationId
+    });
+    return;
+  }
+  if (!context.policyId) {
+    sendJson(context, 400, {
+      error: "Name the lock to remove by its policy ID.",
+      code: "aws-lock-invalid",
+      operationId: context.operationId
+    });
+    return;
+  }
   const resolved = resolveOperation(context, dependencies, {
     allowDelete: true
   });
@@ -1504,6 +1525,9 @@ function handleRetryOperation(
 export function createOperationsControlService(
   dependencies: OperationsControlDependencies
 ): OperationControlService {
+  if (typeof dependencies.awsEnabled !== "boolean") {
+    throw new Error("Missing operation control dependency: awsEnabled");
+  }
   for (const name of [
     "claimAdmission",
     "stopPendingResume",

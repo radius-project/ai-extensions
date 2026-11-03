@@ -110,6 +110,7 @@ const productionHandlers = {
     cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: () => true,
     invalidateEnvironmentListing: () => {},
+    awsEnabled: true,
     removeAwsDeployIdentityLock: () =>
       Promise.resolve({ ok: true, removed: true })
   }),

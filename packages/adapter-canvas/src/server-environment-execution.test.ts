@@ -274,6 +274,7 @@ describe("production coordinator scheduling scopes", () => {
       invalidateEnvironmentListing: () => {
         throw new Error("Unexpected invalidation");
       },
+      awsEnabled: true,
       removeAwsDeployIdentityLock: unavailable
     });
     const pending = service({
@@ -2041,6 +2042,7 @@ describe("production coordinator scheduling scopes", () => {
         invalidateEnvironmentListing: () => {
           throw new Error("Unexpected invalidation");
         },
+        awsEnabled: true,
         removeAwsDeployIdentityLock: unavailable
       });
       const report = vi.spyOn(operations, "report");

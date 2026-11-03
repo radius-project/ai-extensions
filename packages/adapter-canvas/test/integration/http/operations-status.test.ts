@@ -232,6 +232,7 @@ function start(strictBrowserMutations = false): Harness {
         throw new Error("Stop cannot schedule work");
       },
       invalidateEnvironmentListing: () => {},
+      awsEnabled: true,
       removeAwsDeployIdentityLock: async () => {
         throw new Error("Unexpected AWS lock removal");
       }
