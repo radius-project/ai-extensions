@@ -33,6 +33,7 @@ import {
   parsePolicyDocument,
   radiusRoleRepository,
   removeGitHubTrustSubject,
+  restrictedGitHubSubjects,
   sameRepositorySubjects,
   subjectNamesRepository,
   trustedGitHubSubjects
@@ -855,5 +856,85 @@ describe("sameRepositorySubjects", () => {
     ["not a subject", "not a subject", false]
   ])("%s and %s: %s", (a, b, same) => {
     expect(sameRepositorySubjects(a, b)).toBe(same);
+  });
+});
+
+describe("restrictedGitHubSubjects", () => {
+  const DEV = "repo:octo/shop:environment:dev";
+  const SUB = "token.actions.githubusercontent.com:sub";
+  const AUD = "token.actions.githubusercontent.com:aud";
+  const statement = (condition: Record<string, unknown>, effect = "Allow") => ({
+    Effect: effect,
+    Principal: { Federated: githubOidcProviderArn(ACCOUNT) },
+    Action: "sts:AssumeRoleWithWebIdentity",
+    Condition: condition
+  });
+  const restricted = (...statements: Record<string, unknown>[]) =>
+    restrictedGitHubSubjects(
+      { Version: "2012-10-17", Statement: statements },
+      ACCOUNT,
+      [DEV]
+    );
+
+  it.each([
+    [
+      "a pattern under a source IP condition",
+      statement({
+        StringLike: { [SUB]: "repo:octo/shop:environment:*" },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      })
+    ],
+    [
+      "an exact name under a source IP condition",
+      statement({
+        StringEquals: { [SUB]: DEV },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      })
+    ],
+    [
+      "a pattern for another audience",
+      statement({
+        StringLike: { [SUB]: "repo:octo/*", [AUD]: "example" }
+      })
+    ],
+    [
+      "a name another sub constraint excludes",
+      statement({
+        StringEquals: { [SUB]: DEV },
+        StringLike: { [SUB]: "repo:octo/web:*" }
+      })
+    ]
+  ])("counts a subject covered by %s", (_label, entry) => {
+    expect(restricted(entry)).toEqual([DEV]);
+  });
+
+  it.each([
+    [
+      "a pattern that does not match it, under a condition",
+      statement({
+        StringLike: { [SUB]: "repo:octo/web:*" },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      })
+    ],
+    [
+      "a condition with no sub constraint",
+      statement({ IpAddress: { "aws:SourceIp": "203.0.113.0/24" } })
+    ],
+    [
+      "a Deny statement",
+      statement(
+        {
+          StringLike: { [SUB]: "repo:octo/shop:*" },
+          IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+        },
+        "Deny"
+      )
+    ],
+    [
+      "only other subjects",
+      statement({ StringEquals: { [SUB]: "repo:octo/shop:environment:prod" } })
+    ]
+  ])("does not count a subject when the policy has %s", (_label, entry) => {
+    expect(restricted(entry)).toEqual([]);
   });
 });

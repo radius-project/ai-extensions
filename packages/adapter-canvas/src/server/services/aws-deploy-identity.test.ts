@@ -1752,6 +1752,33 @@ describe("repairAwsEnvironmentTrust", () => {
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
 
+  it("refuses to widen a subject the role covers by a pattern under a source IP condition", async () => {
+    const role = managedRole([PROD]);
+    role.Role.AssumeRolePolicyDocument.Statement.push({
+      Effect: "Allow",
+      Principal: {
+        Federated: `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`
+      },
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: {
+        StringEquals: {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        StringLike: {
+          "token.actions.githubusercontent.com:sub":
+            "repo:octo/shop:environment:*"
+        },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      }
+    });
+    const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
+
+    expect(
+      await repairAwsEnvironmentTrust({ ...repair, subjects: [DEV] }, aws.ports)
+    ).toMatchObject({ ok: false, code: "aws-role-trust-restricted" });
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
   it("refuses to widen a subject the role names under conditions it cannot check", async () => {
     const role = managedRole([PROD]);
     role.Role.AssumeRolePolicyDocument.Statement.push({
@@ -1773,7 +1800,7 @@ describe("repairAwsEnvironmentTrust", () => {
     expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
       ok: false,
       code: "aws-role-trust-restricted",
-      message: `IAM role ${ROLE} still names ${DEV}, ${DEV_ID} in its trust policy, under conditions Radius cannot check, so Repair would widen access rather than restore it. Nothing was changed. Check those conditions in the role's trust policy.`
+      message: `IAM role ${ROLE} still covers ${DEV}, ${DEV_ID} in its trust policy, under conditions Radius cannot check, so Repair would widen access rather than restore it. Nothing was changed. Check those conditions in the role's trust policy.`
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });

@@ -140,6 +140,7 @@ const EXPECTED_FUNCTIONS = [
   "parsePolicyDocument",
   "trustedGitHubSubjects",
   "acceptedGitHubSubjects",
+  "restrictedGitHubSubjects",
   "subjectNamesRepository",
   "sameRepositorySubjects",
   "namesGitHubProvider",

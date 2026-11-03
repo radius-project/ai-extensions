@@ -24,6 +24,7 @@ import {
   parsePolicyDocument,
   radiusRoleRepository,
   removeGitHubTrustSubject,
+  restrictedGitHubSubjects,
   sameRepositorySubjects,
   subjectNamesRepository,
   trustedGitHubSubjects,
@@ -1076,16 +1077,15 @@ export async function repairAwsEnvironmentTrust(
       message: `GitHub's OIDC subject for this environment, ${shared.join(", ")}, does not name the repository, so trusting it would let other repositories' workflows sign in to IAM role ${roleName}. Nothing was changed. Customize the repository's OIDC subject to include the repository, or add the subject to the role's trust policy yourself if that is intended.`
     };
   }
-  // A subject the role still names, but only under conditions Radius cannot
-  // read, such as a source IP, was not removed. A new statement without those
-  // conditions would widen access.
-  const named = trustedGitHubSubjects(existing, accountId);
-  const restricted = added.filter((subject) => named.includes(subject));
+  // A subject the role still covers, by name or pattern, under conditions
+  // Radius cannot read, such as a source IP, was not removed. A new statement
+  // without those conditions would widen access.
+  const restricted = restrictedGitHubSubjects(existing, accountId, added);
   if (restricted.length > 0) {
     return {
       ok: false,
       code: "aws-role-trust-restricted",
-      message: `IAM role ${roleName} still names ${restricted.join(", ")} in its trust policy, under conditions Radius cannot check, so Repair would widen access rather than restore it. Nothing was changed. Check those conditions in the role's trust policy.`
+      message: `IAM role ${roleName} still covers ${restricted.join(", ")} in its trust policy, under conditions Radius cannot check, so Repair would widen access rather than restore it. Nothing was changed. Check those conditions in the role's trust policy.`
     };
   }
   if (!repairMayChangeRole(role, existing, accountId, request)) {

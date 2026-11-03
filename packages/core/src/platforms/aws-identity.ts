@@ -335,6 +335,33 @@ export function acceptedGitHubSubjects(
   );
 }
 
+/**
+ * The subjects in `subjects` that a GitHub Allow statement in this trust
+ * policy already covers in a way adding a plain statement would widen: one
+ * that names the subject but excludes it with another `sub` constraint, or
+ * one whose `sub` constraints accept it, patterns included, under conditions
+ * Radius cannot read or for another audience.
+ */
+export function restrictedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  const statements = policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" && isGitHubStatement(statement, providerArn)
+  );
+  return subjects.filter((subject) =>
+    statements.some(
+      (statement) =>
+        subjectsOf(statement).includes(subject) ||
+        (!acceptsGitHubAudience(statement) &&
+          acceptsSubject(statement, subject))
+    )
+  );
+}
+
 // A subject is `claim:value` pairs joined by colons. GitHub's values have no
 // colon in them (an environment name is %3A-encoded), so a subject that does
 // not split into pairs is not one Radius can read.
