@@ -674,6 +674,99 @@ describe("AWS environment access removal", () => {
     }
   );
 
+  const customTemplate = (
+    includeClaimKeys: string[]
+  ): Record<string, GitHubJsonResponse> => ({
+    "/repos/octo/shop": defaultSubject["/repos/octo/shop"],
+    "/repos/octo/shop/actions/oidc/customization/sub": {
+      ok: true,
+      status: 200,
+      json: {
+        use_default: false,
+        include_claim_keys: includeClaimKeys,
+        use_immutable_subject: false
+      }
+    }
+  });
+
+  it.each([
+    ["the environment", ["repo"], "repo:octo/shop"],
+    [
+      "the repository",
+      ["repository_owner", "environment"],
+      "repository_owner:octo:environment:dev"
+    ]
+  ])(
+    "keeps a current subject whose template leaves out %s, and warns",
+    async (_label, keys, shared) => {
+      const h = harness(
+        roleTrusting([DEV, shared, PROD]),
+        customTemplate(keys)
+      );
+
+      const result = await h.access.remove({
+        repo: "octo/shop",
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        trustSubjects: [DEV],
+        ...cluster
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        removed: [`trust subject ${DEV}`, "policy radius-deploy-dev"],
+        warnings: [
+          `Radius didn't remove trust subject ${shared}, because this repository's OIDC subject template doesn't name both the repository and the environment, so other environments or repositories may use it. If nothing else needs it, remove it from the role's trust policy by hand.`
+        ]
+      });
+      expect(remainingTrust(h)).toEqual([shared, PROD]);
+    }
+  );
+
+  it("removes a current subject whose custom template names the repository and the environment", async () => {
+    const custom = "repository_id:42:environment:dev";
+    const h = harness(
+      roleTrusting([DEV, custom, PROD]),
+      customTemplate(["repository_id", "context"])
+    );
+
+    const result = await h.access.remove({
+      repo: "octo/shop",
+      environment: "dev",
+      roleArn: ROLE_ARN,
+      trustSubjects: [DEV],
+      ...cluster
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      removed: [
+        `trust subject ${DEV}`,
+        `trust subject ${custom}`,
+        "policy radius-deploy-dev"
+      ],
+      warnings: []
+    });
+  });
+
+  it("passes the shared-subject warning to the work run under the lock", async () => {
+    const h = harness(roleTrusting([DEV, PROD]), customTemplate(["repo"]));
+    const seen: unknown[] = [];
+
+    await h.access.remove({
+      repo: "octo/shop",
+      environment: "dev",
+      roleArn: ROLE_ARN,
+      trustSubjects: [DEV],
+      ...cluster,
+      whileLocked: async (removed) => {
+        seen.push(removed.warnings.length);
+      }
+    });
+
+    expect(seen).toEqual([1]);
+  });
+
   it("changes nothing in AWS when GitHub can't resolve the current subjects", async () => {
     const h = harness(roleTrusting([DEV, PROD]), {
       "/repos/octo/shop": { ok: false, status: 404, json: null }

@@ -7,7 +7,8 @@ import {
 import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
 import {
   resolveOidcSubject,
-  type GitHubJsonResponse
+  type GitHubJsonResponse,
+  type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
@@ -151,6 +152,23 @@ function lockLostMessage(
     : `${loss.reason}, so Radius stopped. Before it stopped, this run made these AWS changes: ${changes.join(", ")}. Another run may have changed them since, so check the role before you retry.`;
 }
 
+// Whether a subject built from this OIDC template names both the repository
+// and the environment. GitHub's default does. A custom template without both
+// gives a subject that other environments, or other repositories of the same
+// owner, present too.
+function namesRepositoryAndEnvironment(
+  config: ResolveOidcSubjectResult["subjectConfig"]
+): boolean {
+  if (config.useDefault) return true;
+  const keys = config.includeClaimKeys ?? [];
+  return (
+    keys.some((key) => key === "environment" || key === "context") &&
+    keys.some(
+      (key) => key === "repo" || key === "repository" || key === "repository_id"
+    )
+  );
+}
+
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -227,12 +245,12 @@ export function createAwsEnvironmentAccess<Operation>(
   // The same subjects Azure's federated credentials trust: one for a
   // repository that uses immutable subjects, otherwise the name-based and the
   // ID-based form.
-  async function resolveSubjects(
+  async function resolveOidc(
     repo: string,
     environment: string,
     executor?: SelectedGhExecutor
-  ): Promise<string[]> {
-    const oidc = await resolveOidcSubject(
+  ): Promise<ResolveOidcSubjectResult> {
+    return resolveOidcSubject(
       {
         targetRepo: repo,
         envName: environment,
@@ -240,6 +258,14 @@ export function createAwsEnvironmentAccess<Operation>(
       },
       (apiPath) => dependencies.runGitHubJson(apiPath, executor)
     );
+  }
+
+  async function resolveSubjects(
+    repo: string,
+    environment: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string[]> {
+    const oidc = await resolveOidc(repo, environment, executor);
     return oidc.federatedCredentials.map((credential) => credential.subject);
   }
 
@@ -492,14 +518,26 @@ export function createAwsEnvironmentAccess<Operation>(
     }) {
       // The recorded list covers a repository renamed since setup. The
       // current subjects cover what Repair added after an OIDC subject
-      // change, which the recorded list doesn't name. A GitHub read failure
-      // throws, so the delete stops with the GitHub environment kept.
+      // change, which the recorded list doesn't name. They are removed only
+      // when the template names this repository and environment, because
+      // otherwise other environments or repositories present them too. A
+      // GitHub read failure throws, so the delete stops with the GitHub
+      // environment kept.
+      const oidc = await resolveOidc(repo, environment);
+      const current = oidc.federatedCredentials
+        .map((credential) => credential.subject)
+        .filter((subject) => !trustSubjects.includes(subject));
+      const specific = namesRepositoryAndEnvironment(oidc.subjectConfig);
       const subjects = [
-        ...new Set([
-          ...trustSubjects,
-          ...(await resolveSubjects(repo, environment))
-        ])
+        ...new Set([...trustSubjects, ...(specific ? current : [])])
       ];
+      const shared =
+        specific ?
+          []
+        : current.map(
+            (subject) =>
+              `Radius didn't remove trust subject ${subject}, because this repository's OIDC subject template doesn't name both the repository and the environment, so other environments or repositories may use it. If nothing else needs it, remove it from the role's trust policy by hand.`
+          );
       // Boxed so the closures below and this function see one value.
       const state: {
         lock: AwsDeployIdentityLock | null;
@@ -507,7 +545,7 @@ export function createAwsEnvironmentAccess<Operation>(
         writes: string[];
       } = { lock: null, lost: null, writes: [] };
       try {
-        const result = await removeAwsEnvironmentFromRole(
+        const removal = await removeAwsEnvironmentFromRole(
           { repo, roleArn, environment, subjects, region, cluster },
           {
             runAws: async (args) => {
@@ -549,6 +587,10 @@ export function createAwsEnvironmentAccess<Operation>(
               listOtherAwsEnvironments(repo, environment)
           }
         );
+        const result =
+          removal.ok && shared.length > 0 ?
+            { ...removal, warnings: [...removal.warnings, ...shared] }
+          : removal;
         if (result.ok && !state.lost && whileLocked) {
           state.lost = (await state.lock?.verify()) ?? null;
           if (!state.lost) await whileLocked(result);
