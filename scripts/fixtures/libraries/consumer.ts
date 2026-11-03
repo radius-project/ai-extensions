@@ -12,8 +12,42 @@ import {
   normalizeLiveGraph
 } from "@radius-project/core/graph";
 import type { GraphContext, RadiusGraphData } from "@radius-project/core/graph";
-import { parseResourceId } from "@radius-project/core/domain";
+import {
+  parseResourceId,
+  createRadiusQueryClient,
+  aggregateRecipes
+} from "@radius-project/core/domain";
 import type { ResourceId } from "@radius-project/core/domain";
+import type {
+  RadiusQueryPort,
+  RadiusQueryRequest,
+  Resource,
+  ResourceList,
+  ApplicationProperties,
+  EnvironmentProperties,
+  RecipePackProperties,
+  QueryResult
+} from "@radius-project/core/domain";
+
+function queries(port: RadiusQueryPort, request: RadiusQueryRequest) {
+  const client = createRadiusQueryClient(port, request);
+  const applications: Promise<QueryResult<ApplicationProperties>> =
+    client.listApplications();
+  const environments: Promise<ResourceList<EnvironmentProperties>> =
+    client.listEnvironments();
+  const resource: Promise<Resource<ApplicationProperties>> =
+    client.getResourceById<ApplicationProperties>({ id: request.path });
+  const packs: Record<string, Resource<RecipePackProperties>> = {};
+  const rows = aggregateRecipes({ recipes: {} }, packs);
+  return [
+    applications,
+    environments,
+    resource,
+    rows,
+    client.getApplicationGraph
+  ];
+}
+void queries;
 
 const context: GraphContext = {
   connectionId: "packed-consumer",

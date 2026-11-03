@@ -4,6 +4,33 @@
 
 The `@radius-project/core` npm package exports only the browser-safe `@radius-project/core/graph` and `@radius-project/core/domain` subpaths, with compiled ESM and TypeScript declarations. The root barrel and the modeling, platform, remediation, and workflow modules are workspace-only APIs. See the [React graph library](../graph-react/README.md) for a consumer example and the [npm release guide](../../docs/eng/RELEASING.md#releasing-npm-graph-libraries) for publication.
 
+## Public Radius queries
+
+`@radius-project/core/domain` exports `createRadiusQueryClient`, resource and recipe types, exact equivalent-type helpers, and the pure `aggregateRecipes` function. The client owns query paths, version discovery, equivalent-type merging, and resource hydration. It imports no HTTP client, credentials, Backstage code, or browser globals. The host supplies a `RadiusQueryPort` that returns decoded responses and rejects HTTP failures.
+
+```typescript
+import { createRadiusQueryClient } from "@radius-project/core/domain";
+import type { RadiusQueryPort } from "@radius-project/core/domain";
+
+function applicationQueries(port: RadiusQueryPort, signal: AbortSignal) {
+  const client = createRadiusQueryClient(port, {
+    connectionId: "selected-connection",
+    plane: { type: "radius", name: "local" }
+  });
+  return client.listApplications({ signal });
+}
+```
+
+The port receives `{ connectionId, plane, method, path, signal }`. Paths include `/apis/api.ucp.dev/v1alpha3` and the API version. The host maps the explicit connection to its transport; the client never chooses a cluster. Cancellation reaches discovery, inventory, resource, and graph requests. Hosts must stop their transport when the signal aborts and own timeout policy. The client limits in-flight requests across all operations, including nested discovery, to four by default; `concurrency` accepts integers from one to 32. It holds no cross-client cache.
+
+`getResourceById<T>({ id, signal? })` requires a full UCP resource ID on the selected plane and fills a missing environment from the referenced application. Typed lists return their records directly. `listResources<T>({ resourceType?, resourceGroup?, signal? })`, `listApplications<T>`, and `listEnvironments<T>` return `{ value, complete, errors }`. Equivalent application and environment lists merge legacy `Applications.Core` before `Radius.Core`, with the first exact ID retained. Untyped inventory lists groups, then resources, then retrieves each resource; it omits `Microsoft.Resources/deployments`. Partial group, type, or resource failures remain in `errors`; an operation with no successful requests rejects with its first error. Empty successful lists remain empty.
+
+`getResourceType({ namespace, typeName, signal? })` first uses the specific discovery endpoint, then the provider inventory if that endpoint fails. `listResourceTypes({ signal? })` includes all namespaces with at least one API version. Queries choose the first discovered API version, or `2023-10-01-preview` if discovery is unavailable or has no versions. This default is an explicit older-control-plane compatibility rule; cancellation never triggers it. Resource and graph transport failures propagate without fallback.
+
+`getApplicationGraph({ applicationId, signal? })` makes a body-free POST and returns the raw `ApplicationGraphResponse` unchanged. It validates the application context and resources array, but does not normalize direction, filter records, synthesize status, or repair connections. Hosts choose their explicit source adapter, then call `normalizeLiveGraph` from `/graph`. The graph guard accepts both single-segment `Applications.Core/applications` and `Radius.Core/applications` IDs on the selected plane and retains their original IDs. Modeled graph hash requirements do not change.
+
+`aggregateRecipes(environment, packsById)` uses only supplied data. It retains inline recipe order and duplicates, then linked-pack order. Pack lookup is case-insensitive, with the last matching key retained; missing packs are skipped. Hosts must load packs and report loading failures separately.
+
 ## Workspace architecture
 
 Radius Canvas is the application-modeling and deployment product for the GitHub Copilot app. This document describes how the code is laid out after the modularization refactor (see [`docs/design/radius-extension-modularization.md`](../../docs/design/radius-extension-modularization.md)) and gives step-by-step guides for the three changes contributors make most often: **adding a compute platform**, **adding a canvas action/tool**, and **adding a whole new UI adapter**.
