@@ -24,6 +24,31 @@ import {
 } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
 import type { AppModelFreshnessStatus } from "@radius-project/core";
+import { RADIUS_FAILURE_REPORT_CONTEXT } from "./declarations.js";
+
+describe("failure report handoff guidance", () => {
+  it.each([
+    {
+      name: "model authoring",
+      message: appBicepHandoffMessage("acme/widgets")
+    },
+    {
+      name: "deploy repair",
+      message: deployRepairHandoffMessage("acme/widgets", "main")
+    },
+    {
+      name: "unconfirmed deploy",
+      message: deployFailureNoticeMessage("acme/widgets", "main")
+    }
+  ])(
+    "carries the report flow only in the agent-facing $name prompt",
+    ({ message }) => {
+      expect(message.prompt).toContain(RADIUS_FAILURE_REPORT_CONTEXT);
+      expect(message.displayPrompt).not.toContain("radius-report-issue");
+      expect(message.displayPrompt).not.toContain("submitting");
+    }
+  );
+});
 
 describe("DEFAULT_CANVAS_PAGE", () => {
   it("lands a page-less open on the application graph", () => {

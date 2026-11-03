@@ -28,7 +28,10 @@ import {
   modelFailureSummaryList
 } from "../model-failure-policy.js";
 import { freshnessIdentity } from "@radius-project/core";
-import { RADIUS_CANVAS_INSTANCE_ID } from "./declarations.js";
+import {
+  RADIUS_CANVAS_INSTANCE_ID,
+  RADIUS_FAILURE_REPORT_CONTEXT
+} from "./declarations.js";
 import type { AppModelStatus } from "./graph-context.js";
 
 interface DeployRepairDetails {
@@ -197,6 +200,7 @@ export function appBicepHandoffPrompt(
     "",
     RECIPE_PACK_NOTE,
     ENVIRONMENT_INDEPENDENT_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT,
     ...(failureReport && failureReport.branches.length ?
       [failureReportInstruction(repo, failureReport)]
     : [])
@@ -378,7 +382,8 @@ export function deployRepairHandoffPrompt(
     : "",
     `Repeat that repair-and-redeploy cycle at most ${DEPLOY_REPAIR_ATTEMPT_CAP} times, stopping early once the deploy succeeds or there is no different fix left to try. The canvas enforces that limit and refuses a further redeploy on this attempt, and each radius_deploy call reports which attempt it is. After that, report the result to the user and only try again if they ask.`,
     "",
-    RECIPE_PACK_NOTE
+    RECIPE_PACK_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT
   );
   return lines
     .filter((line, i) => line !== "" || lines[i - 1] !== "")
@@ -445,7 +450,8 @@ export function deployFailureNoticePrompt(
     deployRunUrl ?
       `- Tell the user the deploy failed and point them at the run: ${deployRunUrl}. Ask them to check the Actions tab for its real outcome.`
     : "- Tell the user the deploy failed to start (for example a missing `workflow` token scope, disabled Actions, or an unpushed branch) and ask them to check the repository's Actions tab.",
-    "- Only deploy again if the user explicitly asks, and start a fresh deploy from the canvas or with radius_deploy (no attemptId) once the previous run is known to be over."
+    "- Only deploy again if the user explicitly asks, and start a fresh deploy from the canvas or with radius_deploy (no attemptId) once the previous run is known to be over.",
+    RADIUS_FAILURE_REPORT_CONTEXT
   );
   return lines
     .filter((line, i) => line !== "" || lines[i - 1] !== "")

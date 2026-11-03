@@ -132,6 +132,8 @@ The OIDC trust must already exist on the cloud side before the workflow can auth
 
 ## Common errors and fixes
 
+When setup or verification ends in failure and recovery stops, use the `radius-report-issue` skill to offer a report to the Radius team. State that the user can review the issue before submission. Do not collect extra diagnostics until they agree, and require separate explicit permission to submit the reviewed draft. Pending input, account selection, consent, and expected AWS admission refusal are not terminal bugs.
+
 - **`refusing to allow an OAuth App to create or update workflow .github/workflows/verify-<provider>.yml without 'workflow' scope`** — the PAT lacks `workflow` scope. Run `gh auth refresh -s workflow` (the extension auto-prefers a `gh auth token` over `$GITHUB_TOKEN`).
 - **"Workflow dispatch accepted, but no new run appeared after 30s"** — usually means GitHub hasn't indexed the just-pushed workflow yet. The extension already retries dispatch with backoff; if it still fails, check the Actions tab in the browser.
 - **Azure OIDC fails with `AADSTS70021: No matching federated identity record found`** — the federated credential subject on the AAD app doesn't match. Subject must be exactly `repo:<owner>/<repo>:environment:<env-name>`.
