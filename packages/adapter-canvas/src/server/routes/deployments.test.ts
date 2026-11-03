@@ -578,6 +578,7 @@ describe("deployments routes (SU-06)", () => {
         deployedGraph: null,
         deployRunUrl: null,
         attempt: null,
+        generation: 0,
         active: false,
         repairing: false,
         handoff: IDLE_HANDOFF
@@ -2986,6 +2987,36 @@ describe("deployments routes (SU-06)", () => {
 });
 
 describe("POST /api/deploy/repair-aws-trust", () => {
+  it.each([
+    ["no body", ""],
+    ["unparseable JSON", "{"],
+    ["no generation", "{}"],
+    ["a fractional generation", '{"generation":1.5}'],
+    ["a string generation", '{"generation":"4"}'],
+    ["a JSON array", "[4]"]
+  ])("names no deploy for a body with %s", async (_label, body) => {
+    const calls: unknown[] = [];
+    const routes = createDeploymentsRoutes(
+      dependencies({
+        awsTrustRepair: {
+          repair: async (input) => {
+            calls.push(input);
+            return { status: 409, body: { code: "repair-stale" } };
+          }
+        }
+      })
+    );
+    const { context: ctx } = context(
+      "POST",
+      "/api/deploy/repair-aws-trust",
+      body
+    );
+
+    await routes["POST /api/deploy/repair-aws-trust"](ctx);
+
+    expect(calls).toEqual([{ instanceId: "panel-a", generation: -1 }]);
+  });
+
   it("drains the body and answers with the repair service's result", async () => {
     const calls: unknown[] = [];
     const routes = createDeploymentsRoutes(
@@ -3001,12 +3032,13 @@ describe("POST /api/deploy/repair-aws-trust", () => {
     const { context: ctx, recording } = context(
       "POST",
       "/api/deploy/repair-aws-trust",
-      '{"repo":"ignored/repo"}'
+      '{"repo":"ignored/repo","generation":4}'
     );
 
     await routes["POST /api/deploy/repair-aws-trust"](ctx);
 
-    expect(calls).toEqual([{ instanceId: "panel-a" }]);
+    // Only the deploy the panel showed is read; the repository is ignored.
+    expect(calls).toEqual([{ instanceId: "panel-a", generation: 4 }]);
     expect(recording.status).toBe(409);
     expect(JSON.parse(recording.body)).toEqual({ code: "aws-lock-busy" });
   });

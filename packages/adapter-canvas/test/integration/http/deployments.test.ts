@@ -2170,6 +2170,7 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
       deployErrorKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
       deployingRepo: "octo/stale",
       deployEnvName: "stale",
+      deployGeneration: 3,
       deployAttempt: {
         id: "attempt-1",
         targetRepo: "octo/todo",
@@ -2178,7 +2179,7 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
     });
   };
 
-  it("repairs the role of the deploy that failed to sign in, ignoring the body", async () => {
+  it("repairs the role of the deploy that failed to sign in, ignoring all but the generation", async () => {
     const harness = start();
     failedSignIn(harness.state);
     harness.setEnvironmentTarget({
@@ -2199,7 +2200,7 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
     const response = await post(
       entry.baseUrl,
       "/api/deploy/repair-aws-trust",
-      JSON.stringify({ repo: "evil/repo", environment: "prod" })
+      JSON.stringify({ repo: "evil/repo", environment: "prod", generation: 3 })
     );
 
     expect(response.status).toBe(200);
@@ -2236,6 +2237,22 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
     expect(harness.trustRepairs).toEqual([]);
   });
 
+  it("refuses a panel that shows an earlier deploy", async () => {
+    const harness = start();
+    failedSignIn(harness.state);
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy/repair-aws-trust",
+      JSON.stringify({ generation: 2 })
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "repair-stale" });
+    expect(harness.trustRepairs).toEqual([]);
+  });
+
   it("refuses an environment that is not set up for AWS", async () => {
     const harness = start();
     failedSignIn(harness.state);
@@ -2252,7 +2269,7 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
     const response = await post(
       entry.baseUrl,
       "/api/deploy/repair-aws-trust",
-      "{}"
+      JSON.stringify({ generation: 3 })
     );
 
     expect(response.status).toBe(409);

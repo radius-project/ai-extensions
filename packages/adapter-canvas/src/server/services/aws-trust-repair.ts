@@ -11,6 +11,8 @@ export interface AwsTrustRepairState {
   deployingRepo?: string;
   deployEnvName?: string;
   deployAttempt?: { targetRepo?: string; environment?: string };
+  // Advanced on every deploy, including a redeploy in a repair loop.
+  deployGeneration?: number;
 }
 
 export interface AwsTrustRepairDependencies {
@@ -37,9 +39,14 @@ export interface AwsTrustRepairResponse {
 
 export function createAwsTrustRepairService(
   dependencies: AwsTrustRepairDependencies
-): { repair(input: { instanceId: string }): Promise<AwsTrustRepairResponse> } {
+): {
+  repair(input: {
+    instanceId: string;
+    generation: number;
+  }): Promise<AwsTrustRepairResponse>;
+} {
   return {
-    async repair({ instanceId }) {
+    async repair({ instanceId, generation }) {
       const state = dependencies.readInstanceState(instanceId);
       const repo = state?.deployAttempt?.targetRepo || state?.deployingRepo;
       const environment =
@@ -56,6 +63,18 @@ export function createAwsTrustRepairService(
             code: "repair-not-applicable",
             error:
               "Repair is for a deploy that could not sign in to AWS, and this canvas has no such deploy now. Deploy again to see the current result."
+          }
+        };
+      }
+      // The panel names the deploy it showed. Another deploy since then
+      // could have failed for another environment.
+      if (generation !== (state.deployGeneration || 0)) {
+        return {
+          status: 409,
+          body: {
+            code: "repair-stale",
+            error:
+              "This failure is no longer the canvas's latest deploy, so Radius changed nothing. Repair from the current result."
           }
         };
       }

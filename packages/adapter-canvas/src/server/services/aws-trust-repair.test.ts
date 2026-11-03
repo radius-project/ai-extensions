@@ -13,7 +13,8 @@ const SUBJECT = "repo:octo/shop:environment:dev";
 const failedSignIn: AwsTrustRepairState = {
   deployStatus: "failed",
   deployErrorKind: DRIFT,
-  deployAttempt: { targetRepo: "octo/shop", environment: "dev" }
+  deployAttempt: { targetRepo: "octo/shop", environment: "dev" },
+  deployGeneration: 4
 };
 
 const awsTarget: EnvironmentTarget = {
@@ -52,11 +53,38 @@ function service(
   return {
     reads,
     repairs,
-    run: () => repair.repair({ instanceId: "panel-a" })
+    run: (generation = 4) =>
+      repair.repair({ instanceId: "panel-a", generation })
   };
 }
 
 describe("AWS trust repair service", () => {
+  it.each([
+    ["an earlier deploy", 3],
+    ["no deploy", -1]
+  ])(
+    "refuses a panel that shows %s, without reading GitHub or AWS",
+    async (_label, generation) => {
+      const test = service(failedSignIn);
+      expect(await test.run(generation)).toEqual({
+        status: 409,
+        body: {
+          code: "repair-stale",
+          error:
+            "This failure is no longer the canvas's latest deploy, so Radius changed nothing. Repair from the current result."
+        }
+      });
+      expect(test.reads).toEqual([]);
+      expect(test.repairs).toEqual([]);
+    }
+  );
+
+  it("treats a canvas that has never counted a deploy as generation 0", async () => {
+    const { deployGeneration: _unused, ...uncounted } = failedSignIn;
+    const test = service(uncounted);
+    expect((await test.run(0)).status).toBe(200);
+  });
+
   it.each([
     ["no canvas state", undefined],
     [
@@ -129,7 +157,7 @@ describe("AWS trust repair service", () => {
       deployingRepo: "octo/shop",
       deployEnvName: "dev"
     });
-    await test.run();
+    await test.run(0);
     expect(test.reads).toEqual([["octo/shop", "dev"]]);
   });
 
