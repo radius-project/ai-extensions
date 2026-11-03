@@ -68,6 +68,10 @@ function fixture() {
     schedule: () => {
       throw new Error("Unexpected schedule");
     },
+    awsEnabled: false,
+    removeAwsDeployIdentityLock: async () => {
+      throw new Error("Unexpected AWS lock removal");
+    },
     invalidateEnvironmentListing: () => {
       throw new Error("Unexpected invalidation");
     }

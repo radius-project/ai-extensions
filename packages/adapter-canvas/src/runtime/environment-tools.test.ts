@@ -966,7 +966,11 @@ describe("environment tool handlers", () => {
           throw new Error("Unexpected cancellation");
         },
         schedule,
-        invalidateEnvironmentListing: vi.fn()
+        invalidateEnvironmentListing: vi.fn(),
+        awsEnabled: false,
+        removeAwsDeployIdentityLock: async () => {
+          throw new Error("Unexpected AWS lock removal");
+        }
       });
       const result = await h.tools.control({ ...h.identity, action: "verify" });
       expect(result).toMatchObject({
