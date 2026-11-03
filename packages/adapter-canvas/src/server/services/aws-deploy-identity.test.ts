@@ -349,6 +349,34 @@ describe("setupAwsDeployIdentity", () => {
       "No active AWS CLI session"
     ],
     [
+      "a sign-in check that timed out",
+      {
+        "--version": freeChecks["--version"],
+        "sts get-caller-identity": {
+          code: 1,
+          stdout: "",
+          stderr: "",
+          timedOut: true
+        }
+      },
+      "aws-cli-login-required",
+      "then retry. the AWS CLI call timed out"
+    ],
+    [
+      "a sign-in check that timed out after printing",
+      {
+        "--version": freeChecks["--version"],
+        "sts get-caller-identity": {
+          code: 1,
+          stdout: "",
+          stderr: "partial",
+          timedOut: true
+        }
+      },
+      "aws-cli-login-required",
+      "then retry. the AWS CLI call timed out (partial)"
+    ],
+    [
       "a session in another account",
       {
         "--version": freeChecks["--version"],
@@ -1522,7 +1550,7 @@ describe("waiting for IAM to show a trust policy write", () => {
     expect(result).toMatchObject({
       ok: false,
       code: "aws-role-trust-unconfirmed",
-      message: `IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped before another run could read the old one. Retry setup.`,
+      message: `IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped. Retry setup.`,
       created: [`trust for ${DEV} on ${ROLE}`]
     });
     expect(aws.sleeps).toEqual([1000, 2000, 4000, 8000]);
@@ -1568,7 +1596,7 @@ describe("waiting for IAM to show a trust policy write", () => {
     const never = fakeAws(script, { ok: true }, { staleReads: 99 });
     expect(await removeAwsEnvironmentFromRole(removal, never.ports)).toEqual({
       ok: false,
-      message: `IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped before another run could read the old one. Retry the deletion.`
+      message: `IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped. Retry the deletion.`
     });
     expect(never.find("iam delete-role-policy")).toBeUndefined();
   });

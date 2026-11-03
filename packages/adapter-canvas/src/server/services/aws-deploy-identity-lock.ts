@@ -10,31 +10,45 @@ import {
 } from "@radius-project/core";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
 
-// The lock every Radius run takes before it reads and rewrites a deploy
-// identity's trust policy: setup, delete, rollback, and Repair. It is an IAM
+// The lock a Radius run takes before it reads and rewrites a deploy identity's
+// trust policy. Setup and delete take it today, and Repair takes it in the
+// change that adds Repair. Rollback (#1096) is reserved for it. It is an IAM
 // policy that only one caller can create.
 //
 // Radius never takes a lock over on its own. A run that was suspended, say by
 // a sleeping laptop, could resume after a takeover and send a write it had
-// already prepared, and nothing in IAM would refuse it. So after 10 minutes the
-// waiting run offers **Remove lock**, and a person confirms the holder stopped.
+// already prepared, and nothing in IAM would refuse it. So once the lock is 10
+// minutes old the waiting run offers **Remove lock**, and a person confirms
+// the holder stopped.
 //
 // Each holder records its lock's policy ID, which IAM makes new on every
-// create, and checks it before every write and before releasing. A run that
-// resumes after its lock was removed then stops instead of writing, and never
-// deletes the next holder's lock. The check is read-then-act on an eventually
-// consistent service, so it narrows the window rather than closing it; the
-// person confirming the holder stopped is what closes it.
+// create, and checks it before every write and before releasing. That catches
+// a run that resumes long after its lock was removed. It does not close every
+// gap: the check and the write, or the check and the delete on release, are
+// separate calls to an eventually consistent service. A write already past its
+// check still lands, and a release can delete a newer lock taken in between.
+// Two people removing the same stuck lock can also delete a lock the next run
+// just took. #1152 tracks a strongly consistent lock that closes these.
 
 export const AWS_LOCK_POLL_MS = 5000;
 // Waits while a lock this run just created is not yet readable in IAM.
 export const LOCK_VISIBLE_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
+// Waits between tries of a lock check or release that failed in a way a retry
+// can fix: throttling, an IAM service error, a dropped connection, or a CLI
+// call that ran past its time limit.
+export const LOCK_TRANSIENT_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+// How many waits in a row may fail that way before waiting gives up. Each
+// failed wait backs off from the poll interval, up to a minute.
+export const LOCK_WAIT_TRANSIENT_LIMIT = 6;
+const LOCK_WAIT_BACKOFF_MAX_MS = 60000;
 
 export interface AwsLockWait {
   readonly policyArn: string;
   readonly policyId: string;
   // Who holds the lock, as a sentence subject.
   readonly holder: string;
+  // The Radius operation that holds the lock, or "" when it names none.
+  readonly holderOperationId: string;
   // When IAM created the lock, as IAM reported it.
   readonly since: string;
   // Whether the lock is old enough to offer Remove lock.
@@ -52,17 +66,33 @@ export interface AwsLockPorts {
   waiting(wait: AwsLockWait): void | Promise<void>;
 }
 
+// Why a run no longer knows it holds its lock. `reason` is a sentence about
+// the lock only; the caller says what that means for its own writes.
+export type AwsLockLoss =
+  | { readonly kind: "removed" | "replaced"; readonly reason: string }
+  | { readonly kind: "unconfirmed"; readonly reason: string };
+
 export interface AwsDeployIdentityLock {
   readonly policyArn: string;
   readonly policyId: string;
   /** Null while this run still holds the lock, otherwise why it does not. */
-  verify(): Promise<string | null>;
-  /** Delete the lock if this run still holds it. Safe to call twice. */
+  verify(): Promise<AwsLockLoss | null>;
+  /**
+   * Delete the lock if this run still holds it. Safe to call again after a
+   * failure: the lock stays this run's until it is released or known gone.
+   */
   release(): Promise<AwsLockReleaseResult>;
 }
 
 export type AwsLockReleaseResult =
-  { readonly ok: true } | { readonly ok: false; readonly message: string };
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      // True when the lock is no longer this run's to release, so a retry
+      // would do nothing.
+      readonly gone: boolean;
+      readonly message: string;
+    };
 
 export type AwsLockAcquireResult =
   | { readonly ok: true; readonly lock: AwsDeployIdentityLock }
@@ -74,6 +104,8 @@ export type AwsLockRemovalResult =
   | { readonly ok: false; readonly code: string; readonly message: string };
 
 const ACCESS_DENIED = /AccessDenied|UnauthorizedOperation|not authorized/i;
+const TRANSIENT =
+  /Throttl|RequestLimitExceeded|TooManyRequests|Rate exceeded|ServiceFailure|ServiceUnavailable|InternalFailure|InternalError|RequestTimeout|EndpointConnectionError|Could not connect|Connection (?:was )?(?:reset|refused|closed|aborted)|Read timeout|connect timeout|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up/i;
 const NO_SUCH_ENTITY = /NoSuchEntity/;
 const ALREADY_EXISTS = /EntityAlreadyExists/;
 // Every verb that changes IAM or EKS. A command added to setup or delete later
@@ -86,7 +118,43 @@ function succeeded(result: AwsCommandResult): boolean {
 }
 
 function detail(result: AwsCommandResult): string {
-  return (result.stderr || result.stdout || "").trim() || "no output";
+  const output = (result.stderr || result.stdout || "").trim();
+  if (result.timedOut) {
+    return output ?
+        `the AWS CLI call timed out (${output})`
+      : "the AWS CLI call timed out";
+  }
+  return output || "no output";
+}
+
+/** The command a person runs to remove one lock safely, by its policy ID. */
+export function awsLockRecoveryCommand(
+  policyArn: string,
+  policyId: string
+): string {
+  return recoveryCommand(policyArn, policyId);
+}
+
+/** Whether a failed `aws` call may succeed if it is tried again. */
+export function isTransientAwsFailure(result: AwsCommandResult): boolean {
+  return (
+    !succeeded(result) &&
+    (result.timedOut === true || TRANSIENT.test(result.stderr))
+  );
+}
+
+// Run one `aws` call, trying it again after a failure a retry can fix.
+async function runRetrying(
+  ports: Pick<AwsLockPorts, "runAws" | "sleep">,
+  args: string[]
+): Promise<AwsCommandResult> {
+  let result = await ports.runAws(args);
+  for (const delay of LOCK_TRANSIENT_RETRY_DELAYS_MS) {
+    if (!isTransientAwsFailure(result)) break;
+    await ports.sleep(delay);
+    result = await ports.runAws(args);
+  }
+  return result;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,8 +175,10 @@ function text(record: Record<string, unknown> | null, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-function deleteCommand(policyArn: string): string {
-  return `aws iam delete-policy --policy-arn ${policyArn}`;
+// Every lock on one role has the same ARN, so the delete must be checked
+// against the policy ID first, or it can remove another run's newer lock.
+function recoveryCommand(policyArn: string, policyId: string): string {
+  return `Check that "aws iam get-policy --policy-arn ${policyArn} --query Policy.PolicyId --output text" prints ${policyId}, which is this run's lock, and only then run: aws iam delete-policy --policy-arn ${policyArn}`;
 }
 
 /** Whether an `aws` command changes IAM or EKS. */
@@ -120,15 +190,25 @@ function permissionsMessage(accountId: string): string {
   return `Ask an IAM administrator to allow iam:CreatePolicy, iam:GetPolicy, and iam:DeletePolicy on arn:aws:iam::${accountId}:policy/radius-lock-*.`;
 }
 
+// What the run that held the lock was, for release messages.
+const ACTION_LABEL: Readonly<Record<AwsLockHolder["action"], string>> = {
+  setup: "This setup",
+  delete: "This deletion",
+  repair: "This repair",
+  rollback: "This rollback"
+};
+
 function heldLock(
   policyArn: string,
   policyId: string,
   roleName: string,
-  runAws: AwsLockPorts["runAws"]
+  action: AwsLockHolder["action"],
+  ports: Pick<AwsLockPorts, "runAws" | "sleep">
 ): AwsDeployIdentityLock {
   let released = false;
-  const verify = async (): Promise<string | null> => {
-    const get = await runAws([
+  const done = `${ACTION_LABEL[action]} is done with IAM role ${roleName}`;
+  const verify = async (): Promise<AwsLockLoss | null> => {
+    const get = await runRetrying(ports, [
       "iam",
       "get-policy",
       "--policy-arn",
@@ -138,12 +218,21 @@ function heldLock(
     ]);
     if (!succeeded(get)) {
       return NO_SUCH_ENTITY.test(get.stderr) ?
-          `The lock on IAM role ${roleName} was removed while this run held it, so Radius stopped before changing the role.`
-        : `Radius could not confirm it still holds the lock on IAM role ${roleName}, so it stopped before changing the role: ${detail(get)}`;
+          {
+            kind: "removed",
+            reason: `The lock on IAM role ${roleName} was removed while this run held it`
+          }
+        : {
+            kind: "unconfirmed",
+            reason: `Radius could not confirm it still holds the lock on IAM role ${roleName} (${detail(get)})`
+          };
     }
     const policy = readPolicy(get.stdout);
     if (text(policy, "PolicyId") === policyId) return null;
-    return `The lock on IAM role ${roleName} was removed while this run held it, and another run now holds it (${awsLockHolderLabel(parseAwsLockHolder(policy?.Description))}). Radius stopped before changing the role.`;
+    return {
+      kind: "replaced",
+      reason: `The lock on IAM role ${roleName} was removed while this run held it, and another run now holds a new one (${awsLockHolderLabel(parseAwsLockHolder(policy?.Description))})`
+    };
   };
   return {
     policyArn,
@@ -152,14 +241,30 @@ function heldLock(
     async release() {
       if (released) return { ok: true };
       const lost = await verify();
-      if (lost) {
+      if (lost?.kind === "removed") {
         released = true;
         return {
           ok: false,
-          message: `${lost} Radius left the current lock in place.`
+          gone: true,
+          message: `${done}, but its lock had already been removed, so there was nothing to release. Another run may have changed the role while this one held it.`
         };
       }
-      const remove = await runAws([
+      if (lost?.kind === "replaced") {
+        released = true;
+        return {
+          ok: false,
+          gone: true,
+          message: `${done}. ${lost.reason}, so Radius left that lock in place. Another run may have changed the role while this one held it.`
+        };
+      }
+      if (lost) {
+        return {
+          ok: false,
+          gone: false,
+          message: `${done}, but ${lost.reason}, so Radius did not delete the lock. Other runs wait for this lock until it is removed. ${recoveryCommand(policyArn, policyId)}`
+        };
+      }
+      const remove = await runRetrying(ports, [
         "iam",
         "delete-policy",
         "--policy-arn",
@@ -171,10 +276,11 @@ function heldLock(
       }
       return {
         ok: false,
+        gone: false,
         message:
           ACCESS_DENIED.test(remove.stderr) ?
-            `Radius could not release the lock on IAM role ${roleName} because the signed-in AWS identity is not allowed iam:DeletePolicy. Other runs wait for it until it is removed. Run: ${deleteCommand(policyArn)}`
-          : `Radius could not release the lock on IAM role ${roleName}: ${detail(remove)}. Other runs wait for it until it is removed. Run: ${deleteCommand(policyArn)}`
+            `${done}, but Radius could not release its lock because the signed-in AWS identity is not allowed iam:DeletePolicy. Other runs wait for this lock until it is removed. ${recoveryCommand(policyArn, policyId)}`
+          : `${done}, but Radius could not release its lock: ${detail(remove)}. Other runs wait for this lock until it is removed. ${recoveryCommand(policyArn, policyId)}`
       };
     }
   };
@@ -206,10 +312,12 @@ async function awaitLockVisible(
       };
     }
     const delay = LOCK_VISIBLE_RETRY_DELAYS_MS[attempt];
-    if (!NO_SUCH_ENTITY.test(get.stderr) || delay === undefined) {
+    const retryable =
+      NO_SUCH_ENTITY.test(get.stderr) || isTransientAwsFailure(get);
+    if (!retryable || delay === undefined) {
       return {
         code: "aws-lock-unconfirmed",
-        message: `Radius created the lock on IAM role ${roleName} but could not read it back (${detail(get)}), so it stopped before changing the role. If no other Radius run is changing this role, run ${deleteCommand(policyArn)}, then retry.`
+        message: `Radius created the lock on IAM role ${roleName} but could not read it back (${detail(get)}), so it stopped before changing the role. Other runs wait for this lock until it is removed. ${recoveryCommand(policyArn, policyId)} Then retry.`
       };
     }
     await ports.sleep(delay);
@@ -230,6 +338,23 @@ export async function acquireAwsDeployIdentityLock(
   // A lock whose creation time IAM did not report is timed from when this run
   // first saw it, so Remove lock is still offered eventually.
   const firstSeen = new Map<string, number>();
+  // Failures a retry can fix, in a row. A wait can last many minutes, so one
+  // throttled or timed-out call must not end the run.
+  let transient = 0;
+  const backOff = async (result: AwsCommandResult) => {
+    transient += 1;
+    if (transient >= LOCK_WAIT_TRANSIENT_LIMIT) {
+      return {
+        ok: false as const,
+        code: "aws-lock-unreachable",
+        message: `Radius could not reach IAM to lock IAM role ${roleName} after ${transient} tries (${detail(result)}). Nothing was changed. Retry.`
+      };
+    }
+    await ports.sleep(
+      Math.min(AWS_LOCK_POLL_MS * 2 ** transient, LOCK_WAIT_BACKOFF_MAX_MS)
+    );
+    return null;
+  };
   for (;;) {
     if (ports.shouldStop()) return { ok: false, stopped: true };
     const create = await ports.runAws([
@@ -250,7 +375,7 @@ export async function acquireAwsDeployIdentityLock(
         return {
           ok: false,
           code: "aws-lock-unreadable",
-          message: `Radius created the lock on IAM role ${roleName} but AWS did not return its ID, so it cannot tell its own lock from the next one. Nothing else was changed. Run ${deleteCommand(policyArn)}, then retry.`
+          message: `Radius created the lock on IAM role ${roleName} but AWS did not return its ID, so it cannot tell its own lock from the next one. Nothing else was changed. Run "aws iam get-policy --policy-arn ${policyArn}" and check that its description names operation ${request.holder.operationId || "(none)"}; only then run: aws iam delete-policy --policy-arn ${policyArn}. Then retry.`
         };
       }
       const visible = await awaitLockVisible(
@@ -262,7 +387,13 @@ export async function acquireAwsDeployIdentityLock(
       if (visible) return { ok: false, ...visible };
       return {
         ok: true,
-        lock: heldLock(policyArn, policyId, roleName, ports.runAws)
+        lock: heldLock(
+          policyArn,
+          policyId,
+          roleName,
+          request.holder.action,
+          ports
+        )
       };
     }
     if (ACCESS_DENIED.test(create.stderr)) {
@@ -271,6 +402,11 @@ export async function acquireAwsDeployIdentityLock(
         code: "aws-lock-denied",
         message: `The signed-in AWS identity is not allowed iam:CreatePolicy, which Radius needs to lock IAM role ${roleName} so two runs cannot overwrite each other's trust policy changes. Nothing was changed. ${permissionsMessage(accountId)}`
       };
+    }
+    if (isTransientAwsFailure(create)) {
+      const gaveUp = await backOff(create);
+      if (gaveUp) return gaveUp;
+      continue;
     }
     if (!ALREADY_EXISTS.test(create.stderr)) {
       return {
@@ -287,17 +423,26 @@ export async function acquireAwsDeployIdentityLock(
       "--output",
       "json"
     ]);
+    if (isTransientAwsFailure(get)) {
+      const gaveUp = await backOff(get);
+      if (gaveUp) return gaveUp;
+      continue;
+    }
     // Released between the create and this read; try again after the wait.
     if (!succeeded(get) && !NO_SUCH_ENTITY.test(get.stderr)) {
-      return {
-        ok: false,
-        code:
-          ACCESS_DENIED.test(get.stderr) ? "aws-lock-denied" : (
-            "aws-lock-unreadable"
-          ),
-        message: `Another run holds the lock on IAM role ${roleName}, and Radius could not read who: ${detail(get)}. Nothing was changed. ${permissionsMessage(accountId)}`
-      };
+      return ACCESS_DENIED.test(get.stderr) ?
+          {
+            ok: false,
+            code: "aws-lock-denied",
+            message: `Another run holds the lock on IAM role ${roleName}, and the signed-in AWS identity is not allowed to read who: ${detail(get)}. Nothing was changed. ${permissionsMessage(accountId)}`
+          }
+        : {
+            ok: false,
+            code: "aws-lock-unreadable",
+            message: `Another run holds the lock on IAM role ${roleName}, and Radius could not read who: ${detail(get)}. Nothing was changed.`
+          };
     }
+    transient = 0;
     if (succeeded(get)) {
       const policy = readPolicy(get.stdout);
       const policyId = text(policy, "PolicyId");
@@ -306,10 +451,12 @@ export async function acquireAwsDeployIdentityLock(
       const seen = firstSeen.get(policyId) ?? ports.now();
       firstSeen.set(policyId, seen);
       const heldFrom = isNaN(created) ? seen : created;
+      const holder = parseAwsLockHolder(policy?.Description);
       await ports.waiting({
         policyArn,
         policyId,
-        holder: awsLockHolderLabel(parseAwsLockHolder(policy?.Description)),
+        holder: awsLockHolderLabel(holder),
+        holderOperationId: holder?.operationId ?? "",
         since,
         removable: ports.now() - heldFrom >= AWS_LOCK_REMOVABLE_AFTER_MS
       });
@@ -351,11 +498,18 @@ export async function removeAwsDeployIdentityLock(
   } catch {
     sessionAccount = "";
   }
-  if (!succeeded(identity) || sessionAccount !== account[1]) {
+  if (!succeeded(identity)) {
+    return {
+      ok: false,
+      code: "aws-cli-login-required",
+      message: `Radius could not read the AWS CLI session (${detail(identity)}), so it removed nothing. Run "aws sso login" (or "aws configure"), then try again.`
+    };
+  }
+  if (sessionAccount !== account[1]) {
     return {
       ok: false,
       code: "aws-account-mismatch",
-      message: `Sign the AWS CLI in to account ${account[1]}, where the lock is, then try again. Nothing was removed.`
+      message: `Your AWS CLI session is signed in to account ${sessionAccount || "(unknown)"}, but the lock is in account ${account[1]}. Sign in to account ${account[1]}, then try again. Nothing was removed.`
     };
   }
   const get = await runAws([

@@ -1,5 +1,6 @@
 import {
   buildEnvironmentSuffix,
+  formatAwsLockTime,
   type AwsLockAction
 } from "@radius-project/core";
 import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
@@ -18,7 +19,10 @@ import {
 import {
   acquireAwsDeployIdentityLock,
   isAwsWrite,
+  awsLockRecoveryCommand,
   type AwsDeployIdentityLock,
+  type AwsLockLoss,
+  type AwsLockReleaseResult,
   type AwsLockWait
 } from "./aws-deploy-identity-lock.js";
 
@@ -101,18 +105,30 @@ export type AwsEnvironmentRemovalResult =
     })
   | Extract<AwsDeployIdentityRemovalResult, { ok: false }>;
 
-// When IAM created a lock, for a progress line.
-function lockTime(since: string): string {
-  const time = Date.parse(since);
-  return isNaN(time) ? "an unknown time" : (
-      `${new Date(time).toISOString().slice(0, 16).replace("T", " ")} UTC`
-    );
-}
-
 // A write the lock check refused. Setup and delete treat it as a failure and
 // stop before any later command.
 function lockLostResult(reason: string): AwsCommandResult {
   return { code: 1, stdout: "", stderr: reason };
+}
+
+// Names the holder by operation too, so a person can find that run, or see it
+// is their own earlier attempt.
+function lockHolder(wait: AwsLockWait): string {
+  return wait.holderOperationId ?
+      `${wait.holder} (operation ${wait.holderOperationId})`
+    : wait.holder;
+}
+
+// What a lost lock means for this run. Before any write nothing changed; after
+// one, the changes it made may since have been changed again by the run that
+// took the lock.
+function lockLostMessage(
+  loss: AwsLockLoss,
+  changes: readonly string[]
+): string {
+  return changes.length === 0 ?
+      `${loss.reason}, so Radius stopped before changing the role.`
+    : `${loss.reason}, so Radius stopped. Before it stopped, this run made these AWS changes: ${changes.join(", ")}. Another run may have changed them since, so check the role before you retry.`;
 }
 
 function text(value: unknown): string {
@@ -166,10 +182,12 @@ export function createAwsEnvironmentAccess<Operation>(
           let line: string | null = null;
           if (!announced.has(key)) {
             announced.add(key);
+            // Not a warning: the wait is normal, and a warning step would
+            // outlive it and mark a setup that then succeeds as warned.
             line =
               wait.removable ?
-                `⚠️ The lock on IAM role ${request.roleName} has been held for more than 10 minutes. If that run has stopped, use Remove lock.`
-              : `⏳ Waiting for the lock on IAM role ${request.roleName}. ${wait.holder} has held it since ${lockTime(wait.since)}.`;
+                `⏳ The lock on IAM role ${request.roleName} is 10 or more minutes old. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}. If that run has stopped, use Remove lock.`
+              : `⏳ Waiting for the lock on IAM role ${request.roleName}. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}.`;
           }
           await waiting(wait, line);
         }
@@ -242,7 +260,9 @@ export function createAwsEnvironmentAccess<Operation>(
       }
       const accountId = text(input.accountId);
       let current: AwsDeployIdentityLock | null = null;
-      let lockLost = "";
+      let lockLost: AwsLockLoss | null = null;
+      // Writes that ran while this run held the lock, for a lost-lock message.
+      const writes: string[] = [];
       const result = await setupAwsDeployIdentity(
         {
           repo,
@@ -263,11 +283,16 @@ export function createAwsEnvironmentAccess<Operation>(
             if (current && isAwsWrite(args)) {
               const lost = await current.verify();
               if (lost) {
-                lockLost ||= lost;
-                return lockLostResult(lost);
+                lockLost ??= lost;
+                return lockLostResult(lost.reason);
               }
               // A pause that arrived during the check still stops this write.
               if (dependencies.isStopRequested(operation)) return PAUSED;
+              const result = await dependencies.runAws(args);
+              if (result.code === 0 || result.code === "0") {
+                writes.push(`aws ${args[0]} ${args[1]}`);
+              }
+              return result;
             }
             return dependencies.runAws(args);
           },
@@ -310,19 +335,23 @@ export function createAwsEnvironmentAccess<Operation>(
               `🔒 Locked IAM role ${roleName}, so no other Radius run changes its trust policy until this setup finishes.`,
               stage
             );
+            // Saved before the first write, so a record left by a stopped
+            // extension still names the lock it held.
+            await dependencies.store.persist();
             return { ok: true };
           }
         }
       );
       if (lockLost) {
         await dependencies.store.persist();
+        const created = "created" in result ? result.created : [];
         return {
           ok: false,
           status: 409,
-          error:
-            "created" in result && result.created.length > 0 ?
-              `${lockLost} Created before setup stopped: ${result.created.join(", ")}. Retry setup to finish, or remove them in the AWS console if you will not retry.`
-            : `${lockLost} Nothing was created in AWS.`,
+          error: lockLostMessage(
+            lockLost,
+            created.length > 0 ? created : writes
+          ),
           code: "aws-lock-lost"
         };
       }
@@ -361,18 +390,31 @@ export function createAwsEnvironmentAccess<Operation>(
     async release(operation) {
       const taken = held.get(operation);
       if (!taken) return;
-      held.delete(operation);
+      let released: AwsLockReleaseResult;
       try {
-        const released = await taken.release();
+        released = await taken.release();
+      } catch (error) {
+        // Still this run's: kept so the saved record names it.
+        operations.addLegacyStep(
+          operation,
+          `⚠️ Radius could not release the lock on the deploy identity: ${dependencies.errorMessage(error)}. Other runs wait for this lock until it is removed. ${awsLockRecoveryCommand(taken.policyArn, taken.policyId)}`,
+          stage
+        );
+        return;
+      }
+      if (released.ok || released.gone) {
+        held.delete(operation);
         operations.setContext(operation, { awsDeployIdentityLock: null });
-        if (!released.ok) {
-          operations.addLegacyStep(operation, `⚠️ ${released.message}`, stage);
-        }
+      }
+      if (!released.ok) {
+        operations.addLegacyStep(operation, `⚠️ ${released.message}`, stage);
+      }
+      try {
         await dependencies.store.persist();
       } catch (error) {
         operations.addLegacyStep(
           operation,
-          `⚠️ Radius could not release the lock on the deploy identity: ${dependencies.errorMessage(error)}. Other runs wait for it until it is removed. Run: aws iam delete-policy --policy-arn ${taken.policyArn}`,
+          `⚠️ Radius could not save this setup after it ${released.ok ? "released" : "tried to release"} the lock on the deploy identity: ${dependencies.errorMessage(error)}`,
           stage
         );
       }
@@ -391,10 +433,11 @@ export function createAwsEnvironmentAccess<Operation>(
           trustSubjects
         : await resolveSubjects(repo, environment);
       // Boxed so the closures below and this function see one value.
-      const state: { lock: AwsDeployIdentityLock | null; lost: string } = {
-        lock: null,
-        lost: ""
-      };
+      const state: {
+        lock: AwsDeployIdentityLock | null;
+        lost: AwsLockLoss | null;
+        writes: string[];
+      } = { lock: null, lost: null, writes: [] };
       try {
         const result = await removeAwsEnvironmentFromRole(
           { roleArn, environment, subjects },
@@ -403,9 +446,14 @@ export function createAwsEnvironmentAccess<Operation>(
               if (state.lock && isAwsWrite(args)) {
                 const lost = await state.lock.verify();
                 if (lost) {
-                  state.lost ||= lost;
-                  return lockLostResult(lost);
+                  state.lost ??= lost;
+                  return lockLostResult(lost.reason);
                 }
+                const result = await dependencies.runAws(args);
+                if (result.code === 0 || result.code === "0") {
+                  state.writes.push(`aws ${args[0]} ${args[1]}`);
+                }
+                return result;
               }
               return dependencies.runAws(args);
             },
@@ -434,7 +482,12 @@ export function createAwsEnvironmentAccess<Operation>(
         const taken = state.lock;
         state.lock = null;
         const released = taken ? await taken.release() : { ok: true as const };
-        if (state.lost) return { ok: false, message: state.lost };
+        if (state.lost) {
+          return {
+            ok: false,
+            message: lockLostMessage(state.lost, state.writes)
+          };
+        }
         if (released.ok) return result;
         return result.ok ?
             { ...result, lockWarning: released.message }

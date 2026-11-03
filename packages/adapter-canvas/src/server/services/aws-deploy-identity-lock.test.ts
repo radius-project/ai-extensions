@@ -1,9 +1,13 @@
+import type { AwsLockHolder } from "@radius-project/core";
 import { describe, expect, it } from "vitest";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
 import {
   AWS_LOCK_POLL_MS,
+  LOCK_TRANSIENT_RETRY_DELAYS_MS,
   acquireAwsDeployIdentityLock,
+  awsLockRecoveryCommand,
   isAwsWrite,
+  isTransientAwsFailure,
   removeAwsDeployIdentityLock,
   type AwsLockWait
 } from "./aws-deploy-identity-lock.js";
@@ -40,6 +44,16 @@ const MISSING = fail(
   "An error occurred (NoSuchEntity) when calling the GetPolicy operation"
 );
 const DENIED = fail("An error occurred (AccessDenied): not authorized");
+const THROTTLED = fail(
+  "An error occurred (Throttling) when calling the GetPolicy operation: Rate exceeded"
+);
+const TIMED_OUT: AwsCommandResult = {
+  code: 1,
+  stdout: "",
+  stderr: "",
+  timedOut: true
+};
+const RECOVERY = `Check that "aws iam get-policy --policy-arn ${LOCK_ARN} --query Policy.PolicyId --output text" prints LOCK1, which is this run's lock, and only then run: aws iam delete-policy --policy-arn ${LOCK_ARN}`;
 
 // A list answers successive calls in order, repeating its last entry. Any
 // command the scenario did not script throws.
@@ -85,16 +99,20 @@ function fakeIam(
   };
 }
 
-const acquire = (iam: ReturnType<typeof fakeIam>) =>
+const acquire = (
+  iam: ReturnType<typeof fakeIam>,
+  holder: AwsLockHolder = HOLDER
+) =>
   acquireAwsDeployIdentityLock(
-    { accountId: ACCOUNT, roleName: ROLE, holder: HOLDER },
+    { accountId: ACCOUNT, roleName: ROLE, holder },
     iam.ports
   );
 
 // A run holding LOCK1. Acquiring reads the lock back once; `script` answers
 // every read after that.
 async function held(
-  script: Record<string, AwsCommandResult | AwsCommandResult[]>
+  script: Record<string, AwsCommandResult | AwsCommandResult[]>,
+  holder: Parameters<typeof acquire>[1] = HOLDER
 ) {
   const later = script["iam get-policy"];
   const iam = fakeIam({
@@ -107,8 +125,9 @@ async function held(
       : [later])
     ]
   });
-  const result = await acquire(iam);
+  const result = await acquire(iam, holder);
   if (!result.ok) throw new Error("expected the lock");
+  iam.sleeps.length = 0;
   return { iam, lock: result.lock };
 }
 
@@ -171,6 +190,24 @@ describe("acquireAwsDeployIdentityLock", () => {
     expect(iam.commands()).not.toContain("iam delete-policy");
   });
 
+  it("retries a new lock that a throttled call could not read", async () => {
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": [THROTTLED, policy("LOCK1")]
+    });
+    expect(await acquire(iam)).toMatchObject({ ok: true });
+    expect(iam.sleeps).toEqual([500]);
+  });
+
+  it("names the policy ID to check when it stops on a lock it cannot read back", async () => {
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": DENIED
+    });
+    const result = await acquire(iam);
+    expect("message" in result && result.message).toContain(RECOVERY);
+  });
+
   it("stops at once when the new lock cannot be read for another reason", async () => {
     const iam = fakeIam({
       "iam create-policy": policy("LOCK1"),
@@ -211,12 +248,105 @@ describe("acquireAwsDeployIdentityLock", () => {
   });
 
   it("fails on any other create error", async () => {
-    const iam = fakeIam({ "iam create-policy": fail("Throttling: slow down") });
+    const iam = fakeIam({
+      "iam create-policy": fail("MalformedPolicyDocument: bad statement")
+    });
     expect(await acquire(iam)).toEqual({
       ok: false,
       code: "aws-lock-failed",
-      message: `Radius could not lock IAM role ${ROLE}: Throttling: slow down. Nothing was changed.`
+      message: `Radius could not lock IAM role ${ROLE}: MalformedPolicyDocument: bad statement. Nothing was changed.`
     });
+  });
+
+  it.each([
+    ["throttled", THROTTLED],
+    ["timed out", TIMED_OUT],
+    ["cut off", fail("Could not connect to the endpoint URL")]
+  ])(
+    "backs off and tries again when creating the lock is %s",
+    async (_label, answer) => {
+      const iam = fakeIam({
+        "iam create-policy": [answer, answer, policy("LOCK1")],
+        "iam get-policy": policy("LOCK1")
+      });
+      expect(await acquire(iam)).toMatchObject({ ok: true });
+      expect(iam.sleeps).toEqual([2 * AWS_LOCK_POLL_MS, 4 * AWS_LOCK_POLL_MS]);
+    }
+  );
+
+  it("gives up after six failures in a row a retry could fix, saying the call timed out", async () => {
+    const iam = fakeIam({ "iam create-policy": TIMED_OUT });
+
+    expect(await acquire(iam)).toEqual({
+      ok: false,
+      code: "aws-lock-unreachable",
+      message: `Radius could not reach IAM to lock IAM role ${ROLE} after 6 tries (the AWS CLI call timed out). Nothing was changed. Retry.`
+    });
+    expect(iam.sleeps).toEqual([10000, 20000, 40000, 60000, 60000]);
+  });
+
+  it("gives up when reading the holder keeps failing in a way a retry could fix", async () => {
+    const iam = fakeIam({
+      "iam create-policy": EXISTS,
+      "iam get-policy": fail("An error occurred (ServiceUnavailable)")
+    });
+    expect(await acquire(iam)).toMatchObject({
+      ok: false,
+      code: "aws-lock-unreachable"
+    });
+    expect(iam.sleeps).toEqual([10000, 20000, 40000, 60000, 60000]);
+  });
+
+  it("names a missing operation plainly when a created lock has no ID", async () => {
+    const iam = fakeIam({ "iam create-policy": ok("") });
+    const result = await acquireAwsDeployIdentityLock(
+      {
+        accountId: ACCOUNT,
+        roleName: ROLE,
+        holder: { ...HOLDER, operationId: "" }
+      },
+      iam.ports
+    );
+    expect("message" in result && result.message).toContain(
+      "names operation (none);"
+    );
+  });
+
+  it("keeps what a timed-out call printed in the message", async () => {
+    const iam = fakeIam({
+      "iam create-policy": { ...TIMED_OUT, stderr: "partial reply" }
+    });
+    const result = await acquire(iam);
+    expect("message" in result && result.message).toContain(
+      "(the AWS CLI call timed out (partial reply))"
+    );
+  });
+
+  it("counts only failures in a row, so a long wait survives occasional throttling", async () => {
+    const holderRead = policy("LOCK0", { Description: OTHER });
+    const throttledFive = Array.from({ length: 5 }, () => THROTTLED);
+    const iam = fakeIam({
+      "iam create-policy": [
+        ...Array.from({ length: 12 }, () => EXISTS),
+        policy("LOCK1")
+      ],
+      "iam get-policy": [
+        ...throttledFive,
+        holderRead,
+        ...throttledFive,
+        holderRead,
+        policy("LOCK1")
+      ]
+    });
+
+    expect(await acquire(iam)).toMatchObject({ ok: true });
+    const backOff = [10000, 20000, 40000, 60000, 60000];
+    expect(iam.sleeps).toEqual([
+      ...backOff,
+      AWS_LOCK_POLL_MS,
+      ...backOff,
+      AWS_LOCK_POLL_MS
+    ]);
   });
 
   it.each([
@@ -273,6 +403,7 @@ describe("acquireAwsDeployIdentityLock", () => {
       policyArn: LOCK_ARN,
       policyId: "LOCK1",
       holder: "The setup of environment prod in octo/shop",
+      holderOperationId: "op-2",
       since: "2026-10-30T11:58:00Z",
       removable: false
     });
@@ -309,7 +440,11 @@ describe("acquireAwsDeployIdentityLock", () => {
 
     await acquire(iam);
 
-    expect(iam.waits[0]).toMatchObject({ holder: "Another run", since: "" });
+    expect(iam.waits[0]).toMatchObject({
+      holder: "Another run",
+      holderOperationId: "",
+      since: ""
+    });
     expect(iam.waits[polls - 1]?.removable).toBe(false);
     expect(iam.waits[polls]?.removable).toBe(true);
   });
@@ -341,19 +476,31 @@ describe("acquireAwsDeployIdentityLock", () => {
   });
 
   it.each([
-    [DENIED, "aws-lock-denied"],
-    [fail("ServiceFailure"), "aws-lock-unreadable"]
-  ])("fails when it cannot read who holds the lock", async (answer, code) => {
-    const iam = fakeIam({
-      "iam create-policy": EXISTS,
-      "iam get-policy": answer
-    });
-    const result = await acquire(iam);
-    expect(result).toMatchObject({ ok: false, code });
-    expect("message" in result && result.message).toContain(
-      `Another run holds the lock on IAM role ${ROLE}`
-    );
-  });
+    [DENIED, "aws-lock-denied", "not allowed to read who"],
+    [
+      fail("ValidationError: bad ARN"),
+      "aws-lock-unreadable",
+      "could not read who: ValidationError: bad ARN"
+    ]
+  ])(
+    "fails when it cannot read who holds the lock: %#",
+    async (answer, code, text) => {
+      const iam = fakeIam({
+        "iam create-policy": EXISTS,
+        "iam get-policy": answer
+      });
+      const result = await acquire(iam);
+      expect(result).toMatchObject({ ok: false, code });
+      expect("message" in result && result.message).toContain(
+        `Another run holds the lock on IAM role ${ROLE}`
+      );
+      expect("message" in result && result.message).toContain(text);
+      // Only an access denial asks for permissions.
+      expect(
+        "message" in result && result.message.includes("iam:CreatePolicy")
+      ).toBe(code === "aws-lock-denied");
+    }
+  );
 
   it("stops before creating anything when a stop is already requested", async () => {
     const iam = fakeIam({}, 0);
@@ -381,25 +528,45 @@ describe("a held deploy identity lock", () => {
 
   it("is lost when the lock was removed", async () => {
     const { lock } = await held({ "iam get-policy": MISSING });
-    expect(await lock.verify()).toBe(
-      `The lock on IAM role ${ROLE} was removed while this run held it, so Radius stopped before changing the role.`
-    );
+    expect(await lock.verify()).toEqual({
+      kind: "removed",
+      reason: `The lock on IAM role ${ROLE} was removed while this run held it`
+    });
   });
 
   it("is lost, naming the new holder, when another run took a new lock", async () => {
     const { lock } = await held({
       "iam get-policy": policy("LOCK2", { Description: OTHER })
     });
-    expect(await lock.verify()).toBe(
-      `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds it (The setup of environment prod in octo/shop). Radius stopped before changing the role.`
-    );
+    expect(await lock.verify()).toEqual({
+      kind: "replaced",
+      reason: `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (The setup of environment prod in octo/shop)`
+    });
   });
 
-  it("is treated as lost when its ID cannot be read", async () => {
-    const { lock } = await held({ "iam get-policy": fail("ServiceFailure") });
-    expect(await lock.verify()).toBe(
-      `Radius could not confirm it still holds the lock on IAM role ${ROLE}, so it stopped before changing the role: ServiceFailure`
-    );
+  it("is unconfirmed when its ID cannot be read, even after retries", async () => {
+    const { iam, lock } = await held({
+      "iam get-policy": fail("ServiceFailure")
+    });
+    expect(await lock.verify()).toEqual({
+      kind: "unconfirmed",
+      reason: `Radius could not confirm it still holds the lock on IAM role ${ROLE} (ServiceFailure)`
+    });
+    expect(iam.sleeps).toEqual(LOCK_TRANSIENT_RETRY_DELAYS_MS);
+  });
+
+  it("is still held when a throttled check succeeds on retry", async () => {
+    const { iam, lock } = await held({
+      "iam get-policy": [THROTTLED, TIMED_OUT, policy("LOCK1")]
+    });
+    expect(await lock.verify()).toBeNull();
+    expect(iam.sleeps).toEqual([1000, 2000]);
+  });
+
+  it("does not retry a check that a retry cannot fix", async () => {
+    const { iam, lock } = await held({ "iam get-policy": DENIED });
+    expect(await lock.verify()).toMatchObject({ kind: "unconfirmed" });
+    expect(iam.sleeps).toEqual([]);
   });
 
   it("releases by checking its ID, deleting once, and doing nothing the second time", async () => {
@@ -430,14 +597,55 @@ describe("a held deploy identity lock", () => {
       "iam get-policy": policy("LOCK2", { Description: OTHER })
     });
 
-    const released = await lock.release();
-
-    expect(released.ok).toBe(false);
-    expect("message" in released && released.message).toMatch(
-      /Radius left the current lock in place\.$/
-    );
+    expect(await lock.release()).toEqual({
+      ok: false,
+      gone: true,
+      message: `This setup is done with IAM role ${ROLE}. The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (The setup of environment prod in octo/shop), so Radius left that lock in place. Another run may have changed the role while this one held it.`
+    });
     expect(iam.commands()).not.toContain("iam delete-policy");
     expect(await lock.release()).toEqual({ ok: true });
+  });
+
+  it.each([
+    [HOLDER, "This setup"],
+    [{ ...HOLDER, action: "delete" as const }, "This deletion"]
+  ])(
+    "says a lock removed before release had nothing to release: %#",
+    async (holder, subject) => {
+      const { iam, lock } = await held({ "iam get-policy": MISSING }, holder);
+
+      expect(await lock.release()).toEqual({
+        ok: false,
+        gone: true,
+        message: `${subject} is done with IAM role ${ROLE}, but its lock had already been removed, so there was nothing to release. Another run may have changed the role while this one held it.`
+      });
+      expect(iam.commands()).not.toContain("iam delete-policy");
+    }
+  );
+
+  it("keeps a lock it could not check, so a later release can delete it", async () => {
+    const { iam, lock } = await held({
+      "iam get-policy": [DENIED, policy("LOCK1")],
+      "iam delete-policy": ok()
+    });
+
+    expect(await lock.release()).toEqual({
+      ok: false,
+      gone: false,
+      message: `This setup is done with IAM role ${ROLE}, but Radius could not confirm it still holds the lock on IAM role ${ROLE} (An error occurred (AccessDenied): not authorized), so Radius did not delete the lock. Other runs wait for this lock until it is removed. ${RECOVERY}`
+    });
+    expect(iam.commands()).not.toContain("iam delete-policy");
+    expect(await lock.release()).toEqual({ ok: true });
+    expect(iam.commands()).toContain("iam delete-policy");
+  });
+
+  it("retries a throttled delete", async () => {
+    const { iam, lock } = await held({
+      "iam get-policy": policy("LOCK1"),
+      "iam delete-policy": [THROTTLED, ok()]
+    });
+    expect(await lock.release()).toEqual({ ok: true });
+    expect(iam.sleeps).toEqual([1000]);
   });
 
   it("treats a lock already deleted between the check and the delete as released", async () => {
@@ -450,7 +658,10 @@ describe("a held deploy identity lock", () => {
 
   it.each([
     [DENIED, "not allowed iam:DeletePolicy"],
-    [fail("ServiceFailure"), "could not release the lock on IAM role"]
+    [
+      fail("DeleteConflict: still attached"),
+      "could not release its lock: DeleteConflict: still attached"
+    ]
   ])(
     "reports a lock it could not delete with the command to remove it",
     async (answer, text) => {
@@ -461,11 +672,9 @@ describe("a held deploy identity lock", () => {
 
       const released = await lock.release();
 
-      expect(released.ok).toBe(false);
+      expect(released).toMatchObject({ ok: false, gone: false });
       expect("message" in released && released.message).toContain(text);
-      expect("message" in released && released.message).toContain(
-        `aws iam delete-policy --policy-arn ${LOCK_ARN}`
-      );
+      expect("message" in released && released.message).toContain(RECOVERY);
       // A failed release can be retried.
       expect(await lock.release()).toEqual({ ok: true });
       expect(
@@ -473,6 +682,29 @@ describe("a held deploy identity lock", () => {
       ).toHaveLength(2);
     }
   );
+});
+
+describe("isTransientAwsFailure", () => {
+  it.each([
+    [THROTTLED, true],
+    [TIMED_OUT, true],
+    [fail("An error occurred (ServiceFailure)"), true],
+    [fail("Connection was reset"), true],
+    [fail("read ECONNRESET"), true],
+    [DENIED, false],
+    [MISSING, false],
+    [EXISTS, false],
+    [ok(), false],
+    [{ code: 0, stdout: "", stderr: "", timedOut: true }, false]
+  ])("classifies %j: %s", (result, transient) => {
+    expect(isTransientAwsFailure(result)).toBe(transient);
+  });
+});
+
+describe("awsLockRecoveryCommand", () => {
+  it("names the policy ID to check before the delete", () => {
+    expect(awsLockRecoveryCommand(LOCK_ARN, "LOCK1")).toBe(RECOVERY);
+  });
 });
 
 describe("isAwsWrite", () => {
@@ -558,9 +790,21 @@ describe("removeAwsDeployIdentityLock", () => {
     expect(iam.calls).toEqual([]);
   });
 
+  it("asks for a sign-in, with the CLI's error, when there is no session", async () => {
+    const { iam, result } = remove({
+      "sts get-caller-identity": fail("Unable to locate credentials")
+    });
+    expect(await result).toEqual({
+      ok: false,
+      code: "aws-cli-login-required",
+      message:
+        'Radius could not read the AWS CLI session (Unable to locate credentials), so it removed nothing. Run "aws sso login" (or "aws configure"), then try again.'
+    });
+    expect(iam.commands()).toEqual(["sts get-caller-identity"]);
+  });
+
   it.each([
     ["another account", ok({ Account: "999999999999" })],
-    ["no session", fail("Unable to locate credentials")],
     ["unreadable identity", ok("{")]
   ])(
     "refuses when the CLI is signed in to %s, where the lock would look missing",
