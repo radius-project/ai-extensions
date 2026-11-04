@@ -154,6 +154,56 @@ function settled(owner: EnvironmentExecutionOwner, instanceId: string) {
   });
 }
 
+// An AWS setup for saved-account, with answers to the gh reads setup makes
+// before AWS setup.
+function awsOperation(operationId: string) {
+  const op = createOperation({
+    operationId,
+    repo: "fixture/app",
+    environment: "dev",
+    provider: "aws"
+  });
+
+  operations.put(op);
+  op.context.githubLogin = "saved-account";
+  op.request = {
+    environment: {
+      accountId: "123456789012",
+      region: "us-west-2",
+      cluster: "shop",
+      roleName: "radius-deploy"
+    }
+  };
+  vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+  vi.spyOn(operations, "report").mockImplementation(() => {});
+
+  const run = vi.fn(async (args: string[]) => {
+    const command = args.join(" ");
+
+    if (command === "api user")
+      return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+
+    if (command === "api repos/fixture/app")
+      return {
+        code: 0,
+        stdout: '{"full_name":"fixture/app","permissions":{"admin":true}}',
+        stderr: ""
+      };
+
+    if (command === "api /repos/fixture/app/environments/dev")
+      return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+
+    if (
+      command ===
+      "api /repos/fixture/app/environments/dev/variables?per_page=100"
+    )
+      return { code: 0, stdout: '{"variables":[]}', stderr: "" };
+    throw new Error(`Unexpected command: ${command}`);
+  });
+
+  return { op, run };
+}
+
 afterEach(() => {
   operations.clear();
   onOperationTerminal(null);
@@ -1160,102 +1210,87 @@ describe("production coordinator scheduling scopes", () => {
 
   it("lets other accounts switch while AWS setup waits for a held lock", async () => {
     const owner = createEnvironmentExecutionOwner();
-    const op = createOperation({
-      operationId: "op_aws_lock_wait",
-      repo: "fixture/app",
-      environment: "dev",
-      provider: "aws"
-    });
-    operations.put(op);
-    op.context.githubLogin = "saved-account";
-    op.request = {
-      environment: {
-        accountId: "123456789012",
-        region: "us-west-2",
-        cluster: "shop",
-        roleName: "radius-deploy"
-      }
-    };
-    vi.spyOn(operations, "persist").mockResolvedValue(undefined);
-    vi.spyOn(operations, "report").mockImplementation(() => {});
-    const run = vi.fn(async (args: string[]) => {
-      const command = args.join(" ");
-      if (command === "api user")
-        return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
-      if (command === "api repos/fixture/app")
-        return {
-          code: 0,
-          stdout: '{"full_name":"fixture/app","permissions":{"admin":true}}',
-          stderr: ""
-        };
-      if (command === "api /repos/fixture/app/environments/dev")
-        return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
-      if (
-        command ===
-        "api /repos/fixture/app/environments/dev/variables?per_page=100"
-      )
-        return { code: 0, stdout: '{"variables":[]}', stderr: "" };
-      throw new Error(`Unexpected command: ${command}`);
-    });
+    const { op, run } = awsOperation("op_aws_lock_wait");
     let activeLogin = "original-account";
+
     const accounts = createGitHubAccountCoordinator({
       createExecutor: async (login) =>
         successfulSelectedGhExecutor({ login, run }),
       getActiveKeyringLogin: async () => activeLogin,
       switchKeyringAccount: async (login) => {
         activeLogin = login;
+
         return { ok: true };
       },
       resetIdentityCache: () => {}
     });
-    const ok = (stdout: unknown = ""): AwsCommandResult => ({
+
+    const ok = (stdout = ""): AwsCommandResult => ({
       code: 0,
-      stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout),
+      stdout,
       stderr: ""
     });
-    const lock = (id: string) => ok({ Policy: { PolicyId: id } });
+
+    const lock = (id: string) =>
+      ok(JSON.stringify({ Policy: { PolicyId: id } }));
+
     // Another run holds the lock until the first poll ends. A list answers
     // successive calls in order, repeating its last entry.
-    const answers: Record<string, AwsCommandResult[]> = {
-      "--version": [ok("aws-cli/2.17.0 Python/3.11 Darwin/23")],
-      "sts get-caller-identity": [ok({ Account: "123456789012" })],
-      "eks describe-cluster": [
-        ok({
-          cluster: {
-            status: "ACTIVE",
-            accessConfig: { authenticationMode: "API" }
-          }
-        })
-      ],
-      "iam create-policy": [
-        { code: 254, stdout: "", stderr: "EntityAlreadyExists" },
-        lock("LOCK1")
-      ],
-      "iam get-policy": [lock("LOCK0"), lock("LOCK1")],
-      "iam get-role": [{ code: 254, stdout: "", stderr: "NoSuchEntity" }],
-      "iam list-open-id-connect-providers": [
-        ok({ OpenIDConnectProviderList: [] })
-      ],
-      "iam create-open-id-connect-provider": [ok()],
-      "iam create-role": [
-        ok({ Role: { Arn: "arn:aws:iam::123456789012:role/radius-deploy" } })
-      ],
-      "iam put-role-policy": [ok()],
-      "eks create-access-entry": [ok()],
-      "eks associate-access-policy": [ok()],
-      "iam delete-policy": [ok()]
-    };
+    const answers = new Map(
+      Object.entries({
+        "--version": [ok("aws-cli/2.17.0 Python/3.11 Darwin/23")],
+        "sts get-caller-identity": [
+          ok(JSON.stringify({ Account: "123456789012" }))
+        ],
+        "eks describe-cluster": [
+          ok(
+            JSON.stringify({
+              cluster: {
+                status: "ACTIVE",
+                accessConfig: { authenticationMode: "API" }
+              }
+            })
+          )
+        ],
+        "iam create-policy": [
+          { code: 254, stdout: "", stderr: "EntityAlreadyExists" },
+          lock("LOCK1")
+        ],
+        "iam get-policy": [lock("LOCK0"), lock("LOCK1")],
+        "iam get-role": [{ code: 254, stdout: "", stderr: "NoSuchEntity" }],
+        "iam list-open-id-connect-providers": [
+          ok(JSON.stringify({ OpenIDConnectProviderList: [] }))
+        ],
+        "iam create-open-id-connect-provider": [ok()],
+        "iam create-role": [
+          ok(
+            JSON.stringify({
+              Role: { Arn: "arn:aws:iam::123456789012:role/radius-deploy" }
+            })
+          )
+        ],
+        "iam put-role-policy": [ok()],
+        "eks create-access-entry": [ok()],
+        "eks associate-access-policy": [ok()],
+        "iam delete-policy": [ok()]
+      })
+    );
+
     const awsCommands: string[] = [];
     const duringWait: string[] = [];
+
     const access = createAwsEnvironmentAccess<EnvironmentOperationRecord>({
       async runAws(args) {
         const command = args.slice(0, 2).join(" ");
         awsCommands.push(command);
-        const list = answers[command];
+        const list = answers.get(command);
         const answer = list?.[0];
+
         if (!list || !answer)
           throw new Error(`unexpected aws ${args.join(" ")}`);
+
         if (list.length > 1) list.shift();
+
         return answer;
       },
       async runGitHubJson(path) {
@@ -1274,12 +1309,14 @@ describe("production coordinator scheduling scopes", () => {
       // A readiness check for another account runs while setup waits.
       async sleep() {
         duringWait.push(activeLogin);
+
         const readiness = await accounts.withSelectedAccount(
           "other-account",
           { ownerKey: "readiness" },
           async () => activeLogin,
           100
         );
+
         duringWait.push(readiness.value, activeLogin);
       },
       now: () => Date.parse("2026-10-30T12:00:00Z"),
@@ -1297,7 +1334,9 @@ describe("production coordinator scheduling scopes", () => {
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage: String
     });
+
     const configuredAs: string[] = [];
+
     const handler = coordinator(
       owner,
       "panel",
@@ -1314,6 +1353,7 @@ describe("production coordinator scheduling scopes", () => {
       undefined,
       access
     );
+
     const done = settled(owner, "panel");
     handler.scheduleEnvironmentOperation(op);
     await done;
@@ -1326,6 +1366,47 @@ describe("production coordinator scheduling scopes", () => {
     expect(awsCommands).toContain("iam create-role");
     expect(configuredAs).toEqual(["saved-account"]);
     expect(awsCommands.at(-1)).toBe("iam delete-policy");
+    expect(activeLogin).toBe("original-account");
+  });
+
+  it("does not start AWS setup when shutdown starts while it gives up the lease", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const { op, run } = awsOperation("op_aws_release_shutdown");
+    let activeLogin = "original-account";
+
+    const accounts = createGitHubAccountCoordinator({
+      createExecutor: async (login) =>
+        successfulSelectedGhExecutor({ login, run }),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        // AWS setup's release switches back to the original account.
+        if (login === "original-account") owner.shutdown();
+        activeLogin = login;
+
+        return { ok: true };
+      },
+      resetIdentityCache: () => {}
+    });
+
+    const setup = vi.fn(unavailable);
+
+    const handler = coordinator(
+      owner,
+      "panel",
+      undefined,
+      createEnvironmentAccountContext("runtime", accounts),
+      undefined,
+      undefined,
+      undefined,
+      { setup, release: async () => {} }
+    );
+
+    const done = settled(owner, "panel");
+    handler.scheduleEnvironmentOperation(op);
+    await done;
+
+    expect(setup).not.toHaveBeenCalled();
+    expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
     expect(activeLogin).toBe("original-account");
   });
 

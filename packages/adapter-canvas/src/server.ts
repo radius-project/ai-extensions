@@ -4510,8 +4510,9 @@ export function createEnvironmentOperationExecution(
               input,
               selectedExecutor
             ) => {
-              assertSetupExecutionActive(attachment.isShuttingDown);
               await lease.release();
+              // Shutdown can start while the release restores the account.
+              assertSetupExecutionActive(attachment.isShuttingDown);
               return awsEnvironmentAccess.setup(
                 operation,
                 input,
