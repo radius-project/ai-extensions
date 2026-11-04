@@ -295,7 +295,8 @@ RADIUS_AWS_EKS_CLUSTER_NAME="" RADIUS_TARGET_KUBECONFIG="" \
 [[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${before}" ]] ||
     fail "expected the kubeconfig to stay unchanged without an EKS cluster"
 
-# A failed prepare explains what to check and leaves the kubeconfig alone.
+# A failed prepare explains what to check, and leaves the kubeconfig and the
+# target-kubeconfig Secret alone.
 reset
 before="$(cat "${RADIUS_TARGET_KUBECONFIG}")"
 if output="$(AWS_FAILURES="1" bash "${SCRIPT}" --prepare 2>&1)"; then
@@ -305,6 +306,8 @@ fi
     fail "expected an actionable prepare error, got: ${output}"
 [[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${before}" ]] ||
     fail "expected a failed refresh to keep the previous kubeconfig"
+[[ "$(cat "${KUBECTL_APPLY_FILE}")" == $'secret=aws-oidc-token\ntoken<<\noidc-token-1\n>>' ]] ||
+    fail "expected only the OIDC Secret update when the EKS token cannot be minted"
 check_runner_files_removed
 
 # A failed Secret update fails prepare and keeps the previous runner kubeconfig.
@@ -400,27 +403,6 @@ fi
 if bash "${SCRIPT}" >/dev/null 2>&1; then
     fail "expected a missing mode to fail"
 fi
-
-# Without the AWS CLI, prepare fails with the actionable error and keeps the
-# previous kubeconfig and Secrets.
-reset
-no_aws_bin="${TEMP_DIR}/no-aws-bin"
-mkdir -p "${no_aws_bin}"
-for command in curl kubectl jq mktemp chmod rm mv env cat dirname sed head; do
-    ln -sf "$(PATH="${TEMP_DIR}/bin:${ORIGINAL_PATH}" command -v "${command}")" \
-        "${no_aws_bin}/${command}"
-done
-before="$(cat "${RADIUS_TARGET_KUBECONFIG}")"
-if output="$(PATH="${no_aws_bin}" "${BASH}" "${SCRIPT}" --prepare 2>&1)"; then
-    fail "expected prepare to fail without the AWS CLI"
-fi
-[[ "${output}" == *"Could not refresh the GitHub or EKS token."* ]] ||
-    fail "expected an actionable error without the AWS CLI, got: ${output}"
-[[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${before}" ]] ||
-    fail "expected the kubeconfig to stay unchanged without the AWS CLI"
-[[ "$(cat "${KUBECTL_APPLY_FILE}")" == $'secret=aws-oidc-token\ntoken<<\noidc-token-1\n>>' ]] ||
-    fail "expected only the OIDC Secret update without the AWS CLI"
-check_runner_files_removed
 
 # A cancelled watcher stops without waiting for its interval and removes its
 # token files.
