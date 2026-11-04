@@ -66,7 +66,8 @@ fi
 printf '{"kind":"ExecCredential","status":{"expirationTimestamp":"2030-01-01T00:14:00Z","token":"eks-token-%s"}}\n' "${count}"
 EOF
 
-# `create secret` prints the Secret's name and data so `apply` can record it.
+# `create secret` accepts only radius-system, and prints the Secret's name and
+# data so `apply` can record it.
 cat >"${TEMP_DIR}/bin/kubectl" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -94,6 +95,10 @@ case "${1:-}" in
         sed -n "s/^ *${key}: //p" "${kubeconfig}" | head -1
         ;;
     create)
+        if [[ "$5 $6" != "--namespace radius-system" ]]; then
+            echo "unexpected namespace: $*" >&2
+            exit 1
+        fi
         printf 'secret=%s\n' "$4"
         for argument in "$@"; do
             case "${argument}" in
@@ -230,7 +235,7 @@ cancel_watcher() {
 
 # --prepare refreshes both tokens once.
 reset
-output="$(bash "${SCRIPT}" --prepare 2>&1)"
+output="$(bash "${SCRIPT}" --prepare 2>&1)" || fail "expected prepare to succeed, got: ${output}"
 [[ "${output}" == "AWS tokens refreshed." ]] || fail "unexpected prepare output: ${output}"
 [[ "$(cat "${KUBECTL_APPLY_FILE}")" == "$(expected_updates oidc-token-1 eks-token-1)" ]] ||
     fail "expected the OIDC and kubeconfig Secrets with both EKS token forms, got:
@@ -290,7 +295,8 @@ RADIUS_AWS_EKS_CLUSTER_NAME="" RADIUS_TARGET_KUBECONFIG="" \
 [[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${before}" ]] ||
     fail "expected the kubeconfig to stay unchanged without an EKS cluster"
 
-# A failed prepare explains what to check and leaves the kubeconfig alone.
+# A failed prepare explains what to check, and leaves the kubeconfig and the
+# target-kubeconfig Secret alone.
 reset
 before="$(cat "${RADIUS_TARGET_KUBECONFIG}")"
 if output="$(AWS_FAILURES="1" bash "${SCRIPT}" --prepare 2>&1)"; then
@@ -300,6 +306,8 @@ fi
     fail "expected an actionable prepare error, got: ${output}"
 [[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${before}" ]] ||
     fail "expected a failed refresh to keep the previous kubeconfig"
+[[ "$(cat "${KUBECTL_APPLY_FILE}")" == $'secret=aws-oidc-token\ntoken<<\noidc-token-1\n>>' ]] ||
+    fail "expected only the OIDC Secret update when the EKS token cannot be minted"
 check_runner_files_removed
 
 # A failed Secret update fails prepare and keeps the previous runner kubeconfig.
@@ -370,6 +378,25 @@ fi
 [[ "${output}" == *"No EKS kubeconfig at RADIUS_TARGET_KUBECONFIG"* ]] ||
     fail "unexpected error without the EKS kubeconfig: ${output}"
 [[ ! -f "${CURL_COUNT_FILE}" ]] || fail "expected no token request with missing configuration"
+for interval in 0 -1 abc; do
+    if output="$(AWS_TOKEN_REFRESH_INTERVAL_SECONDS="${interval}" bash "${SCRIPT}" --watch 1 2>&1)"; then
+        fail "expected refresh interval '${interval}' to fail"
+    fi
+    [[ "${output}" == "AWS_TOKEN_REFRESH_INTERVAL_SECONDS must be a positive integer." ]] ||
+        fail "unexpected error for refresh interval '${interval}': ${output}"
+done
+[[ ! -f "${CURL_COUNT_FILE}" ]] || fail "expected no token request with an invalid refresh interval"
+for missing in server certificate-authority-data; do
+    sed -i.bak "/${missing}:/d" "${RADIUS_TARGET_KUBECONFIG}"
+    rm -f "${RADIUS_TARGET_KUBECONFIG}.bak"
+    if output="$(bash "${SCRIPT}" --prepare 2>&1)"; then
+        fail "expected prepare to fail without the kubeconfig ${missing}"
+    fi
+    [[ "${output}" == "The EKS kubeconfig at RADIUS_TARGET_KUBECONFIG has no cluster server or certificate authority." ]] ||
+        fail "unexpected error without the kubeconfig ${missing}: ${output}"
+    [[ ! -f "${CURL_COUNT_FILE}" ]] || fail "expected no token request without the kubeconfig ${missing}"
+    reset
+done
 if bash "${SCRIPT}" --watch abc >/dev/null 2>&1; then
     fail "expected an invalid refresh count to fail"
 fi
@@ -461,33 +488,21 @@ for cancel_case in "${cancel_cases[@]}"; do
     check_runner_files_removed
 done
 
-# The actions start the AWS refresher only when given the deploy role, and the
-# AWS workflows pass it and point the kubeconfig at the refreshed token key.
+# The actions declare the AWS inputs and pass them to their step. How the step
+# runs the refresher is tested in refresh-aws-tokens-actions_test.sh.
 for action in "${COMMAND_ACTION}" "${DELETE_ACTION}"; do
     name="$(basename "$(dirname "${action}")")"
     for input in aws-role-arn aws-eks-cluster-name aws-region; do
         grep -Fq "  ${input}:" "${action}" || fail "expected ${name} to declare ${input}"
     done
-    grep -Fq '[ -n "$RADIUS_AWS_ROLE_ARN" ]' "${action}" ||
-        fail "expected ${name} to refresh AWS tokens only with a deploy role"
-    grep -Fq 'scripts/refresh-aws-tokens.sh"' "${action}" ||
-        fail "expected ${name} to use the AWS refresher"
-    grep -Fq 'bash "$AWS_TOKEN_REFRESH_SCRIPT" --prepare' "${action}" ||
-        fail "expected ${name} to refresh AWS tokens before running"
-    grep -Fq 'bash "$AWS_TOKEN_REFRESH_SCRIPT" --watch &' "${action}" ||
-        fail "expected ${name} to start the AWS token watcher"
+    if ! grep -Fq 'RADIUS_AWS_ROLE_ARN: ${{ inputs.aws-role-arn }}' "${action}" ||
+        ! grep -Fq 'RADIUS_AWS_EKS_CLUSTER_NAME: ${{ inputs.aws-eks-cluster-name }}' "${action}" ||
+        ! grep -Fq 'RADIUS_AWS_REGION: ${{ inputs.aws-region }}' "${action}"; then
+        fail "expected ${name} to pass its AWS inputs to the refresher"
+    fi
 done
 
-validation_line="$(grep -n 'if ! is_allowed "$cmd"' "${COMMAND_ACTION}" | cut -d: -f1)"
-aws_start_line="$(grep -n 'start_aws_token_refresh; then' "${COMMAND_ACTION}" |
-    head -1 | cut -d: -f1)"
-if [[ -z "${validation_line}" || -z "${aws_start_line}" ||
-    "${aws_start_line}" -le "${validation_line}" ]]; then
-    fail "expected command validation before the AWS token refresh"
-fi
-[[ "$(grep -c 'start_aws_token_refresh; then' "${COMMAND_ACTION}")" == "2" ]] ||
-    fail "expected custom commands and the default deploy to start the AWS refresher"
-
+# The AWS workflows pass the deploy role, cluster, and region to the actions.
 for workflow in "${AWS_COMMAND_WORKFLOW}" "${AWS_DELETE_WORKFLOW}"; do
     name="$(basename "${workflow}")"
     grep -Fq 'aws-role-arn: ${{ vars.AWS_ROLE_ARN }}' "${workflow}" ||
@@ -496,10 +511,6 @@ for workflow in "${AWS_COMMAND_WORKFLOW}" "${AWS_DELETE_WORKFLOW}"; do
         fail "expected ${name} to pass the EKS cluster"
     grep -Fq 'aws-region: ${{ vars.AWS_REGION }}' "${workflow}" ||
         fail "expected ${name} to pass the region"
-    grep -Fq "tokenFile: ${POD_TOKEN_FILE}" "${workflow}" ||
-        fail "expected ${name} to point the kubeconfig at the refreshed token key"
-    grep -Fq 'SECRET_FILES+=(--from-file=token="$TOKEN_FILE")' "${workflow}" ||
-        fail "expected ${name} to store the EKS token key in the target-kubeconfig Secret"
 done
 
 for workflow in "${AZURE_COMMAND_WORKFLOW}" "${AZURE_DELETE_WORKFLOW}"; do
