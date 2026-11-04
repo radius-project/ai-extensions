@@ -583,7 +583,9 @@ describe("P0-C built Radius extension artifact", () => {
       "skills/radius-app-bicep/references/source-code-references.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
       "skills/radius-app-bicep/scripts/validate-bicep.mjs",
-      "skills/radius-app-bicep/scripts/bicep-security-rules.mjs"
+      "skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
+      "skills/radius-report-issue/SKILL.md",
+      "skills/radius-report-issue/references/bug-report.md"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
