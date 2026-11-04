@@ -44,6 +44,8 @@ Then stop, and write nothing: no `.radius/app.bicep`, no `.radius/bicepconfig.js
 
 ## Response
 
+When modeling ends in failure and recovery stops, first complete the required staged-run abort and permanent-failure notification, when applicable. Then use the `radius-report-issue` skill to offer a report to the Radius team. State that the user can review the issue before submission. Do not collect extra diagnostics until they agree, and require separate explicit permission to submit the reviewed draft. A missing Dockerfile or a pending application-selection question is not a terminal bug.
+
 When asked to model a repository:
 
 1. Generate the application definition into a staging directory and publish it only once the whole run is complete (see [Staged runs](#staged-runs)). Never write `.radius/app.bicep`, `.radius/bicepconfig.json`, the origin record, or a custom-type artifact directly into `.radius/`, and never `git add` anything yourself: the promote script publishes and stages the run. Do NOT push, and do NOT open a pull request: modeling only writes and stages the files locally. The application graph renders from the on-disk working tree, so no push is needed to preview it, and pushing to a remote is a deployment concern handled later, not part of modeling.

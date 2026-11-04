@@ -283,6 +283,30 @@ describe("RU-03: tool declarations", () => {
   });
 
   describe("RU-19: session start guidance", () => {
+    it("requires review and separate submission permission for terminal failure reports", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "use the radius-report-issue skill"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Collect extra diagnostics only after they agree"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "remove personal data and secrets"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "known session type, model and reasoning level"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Show the complete draft and require separate explicit permission before submitting to radius-project/ai-extensions"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Do not offer reports for active retries, pending input, deliberate cancellation, or expected unsupported features"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "do not ask twice for the same failed operation"
+      );
+    });
+
     it("opens the graph first and leaves missing-model authoring to the Canvas handoff", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
         "without explicitly requesting model creation or updates"
