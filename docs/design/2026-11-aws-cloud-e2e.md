@@ -13,26 +13,30 @@ A fake CLI can't show that AWS accepts the IAM, EKS, and RDS calls the product m
 
 ## Proposal
 
-Add an AWS job to the daily Cloud E2E workflow. It runs the AWS journey in the canvas in the Radius project's AWS functional-test account, `radius-test`, on two shared EKS clusters created once ahead of time, in regions Radius's own tests don't use. It uses a new long-lived fixture repository, and the cleanup workflow gets an AWS sweep that can only touch this test's resources.
+Add an AWS job to the daily Cloud E2E workflow. It drives the canvas through AWS setup, deploy, and delete in the Radius project's AWS functional-test account, `radius-test`, on two shared EKS clusters created once ahead of time, in regions Radius's own tests don't use. It uses a new long-lived fixture repository, and the cleanup workflow gets an AWS sweep that can only touch this test's resources.
 
 ## Objectives
 
 ### Goals
 
-- The AWS journey runs in Cloud E2E once a day and on manual dispatch, and never on pull requests.
+- The AWS test runs in Cloud E2E once a day and on manual dispatch, and never on pull requests.
 - A pod can reach every managed service in the `aws-eks` recipe pack, and the check catches nodes that can't.
 - Deleting both environments leaves only the deploy identity and the GitHub identity provider.
 - Cleanup removes what a failed run leaves behind, without touching Radius's own test resources.
 
 ### Non-goals
 
-- Running the AWS journey in the GitHub Copilot app host: the harness host already proves the cloud calls.
+- Running the AWS test in the GitHub Copilot app host: the harness host already proves the cloud calls.
 - Creating or deleting EKS clusters in the test: the canvas only discovers clusters, the same as for AKS.
 - Testing first-time creation of the deploy identity in CI: CI can't create roles in the shared account, so server tests and local runs cover it.
 
 ## Design
 
+Each day, the AWS job signs in to `radius-test`, uses the canvas to set up two environments, deploy, and delete, and then checks that nothing is left. The sections below cover where it runs, the two AWS identities it uses, what the test does step by step, and how cleanup works.
+
 ### Where it runs
+
+These choices decide where the test runs, and why.
 
 | What               | Choice                                                                          | Why                                                                                                                                                      |
 |--------------------|---------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -61,7 +65,7 @@ A second pinned commit carries the app for the failed deploy: one resource that 
 
 An account administrator creates an IAM role, `ai-extensions-cloud-e2e`, that the AWS job signs in to with GitHub's OIDC token. It trusts only `repo:radius-project/ai-extensions:ref:refs/heads/main`, so no pull request or branch can use it. The job doesn't use a GitHub environment, because that would change the subject GitHub sends.
 
-The role acts as the developer in the journey, and also checks and cleans up. It can:
+The role acts as the developer in the test, and also checks and cleans up. It can:
 
 - Read EKS, EC2, and RDS, and run `kubectl` on the two clusters.
 - Change only the deploy identity's trust policy and inline policies, its lock policy, and access entries on the two clusters.
@@ -93,7 +97,7 @@ The second cluster, in `us-west-1`, has no nodes. The run only creates an enviro
 
 Both clusters use authentication mode `API` and a public endpoint, because GitHub-hosted runners reach them over the internet. Nodes use public subnets, so no NAT gateway is needed. RDS uses private subnets. Both clusters must stay on a Kubernetes version in EKS standard support, because extended support costs six times as much.
 
-### The journey
+### What the test does
 
 Each step runs in the canvas, in order, with the AWS switch on.
 
@@ -146,7 +150,7 @@ The AWS suite has its own stage limits, about 230 minutes in total, under a 270-
 1. This design is reviewed.
 2. An administrator of `radius-test` creates the CI role, the deploy identity, and the clusters. An organization administrator creates the AWS fixture repository and installs the Cloud E2E GitHub App on it. An `ai-extensions` administrator adds the role and account secrets and the region and cluster variables.
 3. The AWS sweep lands first, so the scheduled AWS run never runs without cleanup.
-4. The AWS journey lands. Before merge, it runs locally in the developer's own AWS account and their fork of the fixture repository, which the lifecycle design already allows.
+4. The AWS test lands. Before merge, it runs locally in the developer's own AWS account and their fork of the fixture repository, which the lifecycle design already allows.
 5. On `main`, a manual cleanup run, then a manual Cloud E2E run. The daily schedule starts once both pass.
 
 Until the fixture variable is set, the AWS job and sweep skip and say why, following the lifecycle design's rule for an unpublished fixture.
@@ -157,22 +161,22 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 
 ## Error handling
 
-| Situation                                         | What happens                                                                                        |
-|---------------------------------------------------|-----------------------------------------------------------------------------------------------------|
-| Signing in to AWS fails                           | The job fails before the journey. The runbook points to the trust policy, which accepts only `main` |
-| Preflight finds the account or clusters wrong     | The job fails before any write, reported as an infrastructure failure                               |
-| Preflight finds something from an earlier run     | The job fails and names it, and points to the cleanup workflow. It doesn't delete it                |
-| The deploy identity is missing                    | Setup stops with the product's "not permitted to create IAM roles" message                          |
-| No Kubernetes write after the first token expired | The deploy step fails, because token refresh wasn't tested                                          |
-| The isolated probe connects                       | The connection check fails, because the isolated node no longer tests a missing network rule        |
-| No final snapshot, or more than one               | The delete step fails and names the instance                                                        |
-| A step fails part way                             | The fixture's teardown removes what the run registered, and cleanup removes the rest                |
+| Scenario                                          | What happens                                                                                            |
+|---------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| Signing in to AWS fails                           | The job fails before the test starts. The runbook points to the trust policy, which accepts only `main` |
+| Preflight finds the account or clusters wrong     | The job fails before any write, reported as an infrastructure failure                                   |
+| Preflight finds something from an earlier run     | The job fails and names it, and points to the cleanup workflow. It doesn't delete it                    |
+| The deploy identity is missing                    | Setup stops with the product's "not permitted to create IAM roles" message                              |
+| No Kubernetes write after the first token expired | The deploy step fails, because token refresh wasn't tested                                              |
+| The isolated probe connects                       | The connection check fails, because the isolated node no longer tests a missing network rule            |
+| No final snapshot, or more than one               | The delete step fails and names the instance                                                            |
+| A step fails part way                             | The fixture's teardown removes what the run registered, and cleanup removes the rest                    |
 
 ## Test plan
 
 - **Unit tests:** the cleanup rules, including resources shaped like Radius's (in `us-west-2`, tagged `RadiusCreationTimestamp`, or without our tags), none of which is selected. Groups left without an instance. Cleanup keeping retry inputs when a step fails. The connection check, snapshot check, and 15-minute check. The stage limits fitting the job timeout.
 - **Workflow tests:** the AWS job never runs on pull requests, has the repository guard, uses no GitHub environment, shares the concurrency group, and skips when the fixture variable is unset.
-- **Local run:** the full journey in the developer's own AWS account. It also checks that the deploy identity's boundary refuses `s3:PutAccountPublicAccessBlock`, an IAM action, and an RDS call in `us-west-2`.
+- **Local run:** the full test in the developer's own AWS account. It also checks that the deploy identity's boundary refuses `s3:PutAccountPublicAccessBlock`, an IAM action, and an RDS call in `us-west-2`.
 
 ## Open questions
 
@@ -187,4 +191,4 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 - **A cluster per run.** About $25 a month instead of $165. Rejected: 30 to 40 more minutes a run, rights to create clusters, VPCs, and roles, and a leaked cluster costs $73 a month until someone finds it.
 - **Sharing the Azure fixture repository.** Rejected: AWS would wait behind Azure on the lease, and a broken fixture would stop both.
 - **Letting the product create the deploy identity in CI.** Rejected in a shared account: the CI role could then create a role with any permissions.
-- **Trusting a protected GitHub environment so branches can run the AWS job before merge.** Rejected: a permanent second way to get the CI credential. Local runs cover the journey before merge.
+- **Trusting a protected GitHub environment so branches can run the AWS job before merge.** Rejected: a permanent second way to get the CI credential. Local runs cover the test before merge.
