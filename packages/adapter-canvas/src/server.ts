@@ -126,6 +126,7 @@ import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
 import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
+import { requireCurrentAwsWorkflows } from "./server/services/aws-workflow-compatibility.js";
 import {
   appParams,
   resolveDeployParams,
@@ -1121,7 +1122,9 @@ function kickoffWorkflowSync(
 // copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
 // scoped to just the workflow about to run (`only`), authors a missing file
 // (`create`), and is awaited so any create/update lands before the dispatch —
-// but a sync failure never blocks the dispatch (we log and proceed). `provider`
+// but Azure keeps its best-effort behavior. AWS provider workflows must pass
+// read-back verification before dispatch because older copies administer EKS
+// access that the deployment role no longer grants. `provider`
 // may be "" when unknown; deploy and delete workflow content is
 // provider-agnostic, so it only matters for verify. `workingBranch` (when it
 // matches the repo) is synced alongside the default branch so a
@@ -1140,6 +1143,11 @@ async function ensureWorkflowsCurrent(
 }> {
   if (!repo || !environment || !only || only.length === 0)
     return { created: [], updated: [], failed: [] };
+  let result: Awaited<ReturnType<typeof ensureWorkflowsCurrent>> = {
+    created: [],
+    updated: [],
+    failed: []
+  };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -1165,7 +1173,7 @@ async function ensureWorkflowsCurrent(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
-    return {
+    result = {
       // Downstream dispatchers use this list only to decide whether GitHub may
       // still be registering a workflow, including one created concurrently.
       created: [
@@ -1176,8 +1184,28 @@ async function ensureWorkflowsCurrent(
     };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
-    return { created: [], updated: [], failed: [] };
   }
+  if (includeAws) {
+    await requireCurrentAwsWorkflows(
+      { provider, files: only, workingBranch },
+      {
+        environmentProvider: async () =>
+          (await createEnvironmentTargetReader(runCommand)(repo, environment))
+            .provider,
+        defaultBranch: () => getDefaultBranch(repo),
+        templates: async () => ({
+          ...(await workflowTemplates(true).deploy(
+            environment,
+            ".radius/app.bicep"
+          )),
+          ...(await workflowTemplates(true).delete(environment))
+        }),
+        readFile: (path, branch) => fetchFileFromRepo(repo, path, branch),
+        errorMessage
+      }
+    );
+  }
+  return result;
 }
 
 // no access to the SDK `session`, so when a graph/generate route finds no

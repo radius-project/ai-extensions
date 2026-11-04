@@ -76,6 +76,7 @@ export {
 
 export {
   AWS_TRUST_SUBJECTS_VARIABLE,
+  AWS_PERMISSION_POLICY_NAME_VARIABLE,
   applySetupProviderConfiguration,
   azureRoleScope,
   cloudCredentialsComplete,

@@ -9,6 +9,7 @@ import {
 import type { BicepParam } from "../../bicep.js";
 import type { CanvasState } from "../../shared.js";
 import type { GitHubJsonResponse, GitHubJsonRunner } from "../../azure-oidc.js";
+import { requireCurrentAwsWorkflows } from "./aws-workflow-compatibility.js";
 
 const OK: DeployCommandResult = { code: 0, stdout: "", stderr: "" };
 
@@ -221,6 +222,41 @@ const PUBLIC_PARAM: BicepParam = {
 };
 
 describe("deploy dispatch construction", () => {
+  it("does not dispatch when template publication failed and the AWS provider is still stale", async () => {
+    const { input } = request();
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        ensureDeployWorkflowsOnBranch: async () => {
+          throw new Error("Protected branch");
+        },
+        ensureWorkflowsCurrent: async () => {
+          await requireCurrentAwsWorkflows(
+            {
+              provider: "aws",
+              files: ["run-rad-commands-aws.yml"],
+              workingBranch: "feat"
+            },
+            {
+              environmentProvider: async () => "aws",
+              defaultBranch: async () => "main",
+              templates: async () => ({
+                "run-rad-commands-aws.yml": "current"
+              }),
+              readFile: async () => "old create-access-entry workflow",
+              errorMessage: String
+            }
+          );
+          return { created: [], updated: [] };
+        }
+      })
+    );
+    await expect(service.prepareAndDispatch(input)).rejects.toThrow(
+      "branch is protected"
+    );
+    expect(gh.calls).toEqual([]);
+  });
   it.each([
     "getBranchHeadSha",
     "getDefaultBranch",

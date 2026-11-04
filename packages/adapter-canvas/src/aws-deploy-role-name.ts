@@ -5,7 +5,10 @@
 // browser reads the name the server rendered instead of computing it.
 
 import { createHash } from "node:crypto";
-import { buildAwsDeployRoleName } from "@radius-project/core/platforms";
+import {
+  buildAwsDeployRoleName,
+  buildAwsEnvironmentPolicyName
+} from "@radius-project/core/platforms";
 
 function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -13,4 +16,11 @@ function sha256Hex(text: string): string {
 
 export function defaultAwsDeployRoleName(repoFullName: string): string {
   return buildAwsDeployRoleName(repoFullName, sha256Hex);
+}
+
+export function awsEnvironmentPolicyName(
+  repo: string,
+  environment: string
+): string {
+  return buildAwsEnvironmentPolicyName(repo, environment, sha256Hex);
 }

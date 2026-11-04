@@ -96,7 +96,8 @@ function awsIdentityReady(): Partial<EnvironmentOperationWorkflowDependencies> {
     setupAwsDeployIdentity: async () => ({
       ok: true,
       roleArn: AWS_ROLE_ARN,
-      subjects: AWS_SUBJECTS
+      subjects: AWS_SUBJECTS,
+      policyName: "radius-deploy-production-111111111111"
     })
   };
 }
@@ -1295,7 +1296,12 @@ describe("runEnvironmentOperationWorkflow", () => {
           expect(received).toBe(executor);
           test.events.push("aws-identity");
           identityCalls.push(request);
-          return { ok: true, roleArn: AWS_ROLE_ARN, subjects: AWS_SUBJECTS };
+          return {
+            ok: true,
+            roleArn: AWS_ROLE_ARN,
+            subjects: AWS_SUBJECTS,
+            policyName: "radius-deploy-production-111111111111"
+          };
         }
       });
 
@@ -1593,6 +1599,11 @@ describe("runEnvironmentOperationWorkflow", () => {
       }
     };
     const githubAnswers: Record<string, GitHubJsonResponse> = {
+      "/repos/octo/app/environments/Production/variables?per_page=100": {
+        ok: true,
+        status: 200,
+        json: { variables: [] }
+      },
       "/repos/octo/app": {
         ok: true,
         status: 200,
@@ -1752,7 +1763,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       setupAwsDeployIdentity: async () => ({
         ok: true,
         roleArn: AWS_ROLE_ARN,
-        subjects: AWS_SUBJECTS
+        subjects: AWS_SUBJECTS,
+        policyName: "radius-deploy-production-111111111111"
       })
     });
 

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAwsEnvironmentPermissionPolicy,
   buildGitHubTrustPolicy,
   parsePolicyDocument,
   trustedGitHubSubjects
 } from "@radius-project/core";
+import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
 import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
@@ -44,6 +46,10 @@ const lockPolicy = (policyId: string, extra: Record<string, unknown> = {}) =>
 type Answer = AwsCommandResult | AwsCommandResult[];
 
 const lockFree: Record<string, Answer> = {
+  "iam get-role-policy": fail("NoSuchEntity"),
+  "iam list-role-policies": ok({
+    PolicyNames: ["radius-deploy-dev-f5fb7acf8f59"]
+  }),
   "iam create-policy": lockPolicy("LOCK1"),
   "iam get-policy": lockPolicy("LOCK1"),
   "iam delete-policy": ok()
@@ -72,6 +78,16 @@ function githubSubjects(
   useImmutableSubject: boolean
 ): Record<string, GitHubJsonResponse> {
   return {
+    "/repos/octo/shop/environments/prod/variables?per_page=100": {
+      ok: true,
+      status: 200,
+      json: { variables: [] }
+    },
+    "/repos/octo/shop/environments/dev/variables?per_page=100": {
+      ok: true,
+      status: 200,
+      json: { variables: [] }
+    },
     "/repos/octo/shop": {
       ok: true,
       status: 200,
@@ -162,7 +178,11 @@ function harness(
       githubCalls.push({ path, executor });
       const response = github[path];
       if (!response) throw new Error(`unexpected GitHub read ${path}`);
-      if (pauseDuring === "github" && path.endsWith("/customization/sub")) {
+      if (
+        (pauseDuring === "github" && path.endsWith("/customization/sub")) ||
+        (pauseDuring === "saved-policy" &&
+          path.endsWith("/variables?per_page=100"))
+      ) {
         stopRequested = true;
       }
       return response;
@@ -264,6 +284,209 @@ const input = {
 };
 
 describe("AWS environment access setup", () => {
+  it("reuses a saved policy from before a rename instead of creating a second grant", async () => {
+    const policyName = awsEnvironmentPolicyName("octo/old", "dev");
+    const h = harness(
+      {
+        ...happyPath,
+        "iam get-role": ok({
+          Role: {
+            Arn: ROLE_ARN,
+            AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [
+              DEV,
+              DEV_ID
+            ])
+          }
+        })
+      },
+      {
+        ...defaultSubject,
+        "/repos/octo/shop/environments/dev/variables?per_page=100": {
+          ok: true,
+          status: 200,
+          json: {
+            variables: [
+              { name: "AWS_PERMISSION_POLICY_NAME", value: policyName },
+              { name: "AWS_ROLE_ARN", value: ROLE_ARN }
+            ]
+          }
+        }
+      }
+    );
+    expect(
+      await h.access.setup(
+        operation,
+        { ...input, existingRoleArn: ROLE_ARN },
+        EXECUTOR
+      )
+    ).toMatchObject({ ok: true, policyName });
+    expect(h.find("iam put-role-policy")).toContain(policyName);
+    expect(h.find("iam get-role-policy")).toBeUndefined();
+  });
+
+  it.each([
+    { ok: false, status: 403 },
+    { ok: true, status: 200, json: {} },
+    { ok: true, status: 200, json: { variables: [null] } },
+    {
+      ok: true,
+      status: 200,
+      json: { variables: [{ name: "AWS_PERMISSION_POLICY_NAME", value: 42 }] }
+    },
+    {
+      ok: true,
+      status: 200,
+      json: {
+        variables: [
+          { name: "AWS_PERMISSION_POLICY_NAME", value: "invalid" },
+          { name: "AWS_ROLE_ARN", value: ROLE_ARN }
+        ]
+      }
+    },
+    {
+      ok: true,
+      status: 200,
+      json: {
+        variables: [
+          {
+            name: "AWS_PERMISSION_POLICY_NAME",
+            value: "radius-deploy-dev-111111111111"
+          },
+          { name: "AWS_ROLE_ARN", value: `${ROLE_ARN}-other` }
+        ]
+      }
+    }
+  ])(
+    "stops before AWS for denied, damaged or conflicting saved policy metadata: %j",
+    async (response) => {
+      const h = harness(happyPath, {
+        ...defaultSubject,
+        "/repos/octo/shop/environments/dev/variables?per_page=100": response
+      });
+      expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+        ok: false,
+        code: "aws-policy-name-unresolved"
+      });
+      expect(h.awsCalls).toEqual([]);
+    }
+  );
+
+  it("allows a new environment without saved configuration", async () => {
+    const h = harness(happyPath, {
+      ...defaultSubject,
+      "/repos/octo/shop/environments/dev/variables?per_page=100": {
+        ok: false,
+        status: 404
+      }
+    });
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+  });
+
+  it("honors a pause during the saved-policy read before making any AWS call", async () => {
+    const h = harness(happyPath, defaultSubject, "saved-policy");
+    expect(await h.access.setup(operation, input, EXECUTOR)).toEqual({
+      ok: false,
+      stopped: true
+    });
+    expect(h.awsCalls).toEqual([]);
+    expect(h.events).toContainEqual([
+      "setStageState",
+      operation.id,
+      STAGE,
+      "paused"
+    ]);
+  });
+
+  it("hashes GitHub's canonical repository name rather than a stale alias", async () => {
+    const h = harness(happyPath, {
+      "/repos/octo/shop": {
+        ok: true,
+        status: 200,
+        json: { full_name: "octo/renamed", id: 42, owner: { id: 7 } }
+      },
+      "/repos/octo/renamed/actions/oidc/customization/sub": {
+        ok: true,
+        status: 200,
+        json: { use_default: true, use_immutable_subject: false }
+      },
+      "/repos/octo/renamed/environments/dev/variables?per_page=100": {
+        ok: true,
+        status: 200,
+        json: { variables: [] }
+      }
+    });
+    const result = await h.access.setup(operation, input, EXECUTOR);
+    const policyName = awsEnvironmentPolicyName("octo/renamed", "dev");
+    expect(result).toMatchObject({ ok: true, policyName });
+    expect(h.find("iam put-role-policy")).toContain(policyName);
+    expect(h.find("iam put-role-policy")).not.toContain(
+      awsEnvironmentPolicyName("octo/shop", "dev")
+    );
+    expect(h.events).toContainEqual([
+      "setContext",
+      "op-1",
+      expect.objectContaining({ awsPolicyName: policyName })
+    ]);
+  });
+
+  it("reports an interrupted quota migration without restoring through a pause", async () => {
+    const h = harness(
+      {
+        ...happyPath,
+        "iam get-role": ok({
+          Role: {
+            Arn: ROLE_ARN,
+            AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [
+              DEV,
+              DEV_ID
+            ])
+          }
+        }),
+        "iam get-role-policy": ok({
+          PolicyName: "radius-deploy-dev",
+          PolicyDocument: buildAwsEnvironmentPermissionPolicy("us-west-2")
+        }),
+        "iam list-open-id-connect-providers": ok({
+          OpenIDConnectProviderList: [
+            {
+              Arn: `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`
+            }
+          ]
+        }),
+        "iam get-open-id-connect-provider": ok({
+          ClientIDList: ["sts.amazonaws.com"]
+        }),
+        "iam put-role-policy": fail("LimitExceeded"),
+        "iam delete-role-policy": ok()
+      },
+      defaultSubject,
+      "iam delete-role-policy"
+    );
+    expect(
+      await h.access.setup(
+        operation,
+        { ...input, existingRoleArn: ROLE_ARN },
+        EXECUTOR
+      )
+    ).toEqual({ ok: false, stopped: true });
+    expect(
+      h.commands().filter((command) => command === "iam put-role-policy")
+    ).toHaveLength(1);
+    expect(h.steps().join("\n")).toContain(
+      "This environment's grant may be missing"
+    );
+    expect(h.steps().join("\n")).toContain("Paused after AWS policy changes");
+    expect(h.roleRecorded()).toBe(false);
+    expect(h.events).toContainEqual([
+      "setStageState",
+      operation.id,
+      STAGE,
+      "paused"
+    ]);
+  });
+
   it("preserves partial progress when paused during the EKS retry delay", async () => {
     const h = harness(
       {
@@ -289,7 +512,7 @@ describe("AWS environment access setup", () => {
     expect(h.events).toContainEqual([
       "step",
       operation.id,
-      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, policy radius-deploy-dev on ${ROLE}.`,
+      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, policy radius-deploy-dev-f5fb7acf8f59 on ${ROLE}.`,
       STAGE
     ]);
     expect(h.events.at(-1)).toEqual(["persist"]);
@@ -326,11 +549,20 @@ describe("AWS environment access setup", () => {
 
       const result = await h.access.setup(operation, input, EXECUTOR);
 
-      expect(result).toEqual({ ok: true, roleArn: ROLE_ARN, subjects });
+      expect(result).toEqual({
+        ok: true,
+        roleArn: ROLE_ARN,
+        subjects,
+        policyName: "radius-deploy-dev-f5fb7acf8f59"
+      });
       expect(h.githubCalls).toEqual([
         { path: "/repos/octo/shop", executor: EXECUTOR },
         {
           path: "/repos/octo/shop/actions/oidc/customization/sub",
+          executor: EXECUTOR
+        },
+        {
+          path: "/repos/octo/shop/environments/dev/variables?per_page=100",
           executor: EXECUTOR
         }
       ]);
@@ -353,14 +585,18 @@ describe("AWS environment access setup", () => {
         `ℹ️ Deploy identity will trust ${subjects.join(", ")}`,
         STAGE
       ]);
-      // Progress is saved before the role and its subjects are recorded.
+      // The exact cleanup identity is durable before configuration starts.
       expect(h.events.slice(-2)).toEqual([
-        ["persist"],
         [
           "setContext",
           "op-1",
-          { awsRoleArn: ROLE_ARN, awsTrustSubjects: subjects }
-        ]
+          {
+            awsRoleArn: ROLE_ARN,
+            awsTrustSubjects: subjects,
+            awsPolicyName: "radius-deploy-dev-f5fb7acf8f59"
+          }
+        ],
+        ["persist"]
       ]);
     }
   );
@@ -397,7 +633,8 @@ describe("AWS environment access setup", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: picked,
-      subjects: [DEV, DEV_ID]
+      subjects: [DEV, DEV_ID],
+      policyName: "radius-deploy-dev-f5fb7acf8f59"
     });
     expect(h.find("iam get-role")).toEqual(
       expect.arrayContaining(["--role-name", "team-deployer"])
@@ -530,7 +767,11 @@ describe("pausing AWS environment access setup", () => {
     expect(h.events).toContainEqual([
       "setContext",
       "op-1",
-      { awsRoleArn: ROLE_ARN, awsTrustSubjects: [DEV, DEV_ID] }
+      {
+        awsRoleArn: ROLE_ARN,
+        awsTrustSubjects: [DEV, DEV_ID],
+        awsPolicyName: "radius-deploy-dev-f5fb7acf8f59"
+      }
     ]);
     expect(steps(h).at(-1)).toBe(
       `⏸️ Paused after AWS setup finished. ${ROLE_ARN} is ready for this environment.`
@@ -573,6 +814,28 @@ describe("AWS environment access removal", () => {
   };
   const cluster = { region: "us-west-2", cluster: "shop" };
 
+  it("refuses an unconfirmed fallback hash when recorded subjects do not name a repository", async () => {
+    const h = harness({
+      ...roleTrusting(["custom:environment:dev", PROD]),
+      "iam list-role-policies": ok({
+        PolicyNames: [awsEnvironmentPolicyName("octo/old", "dev")]
+      })
+    });
+    expect(
+      await h.access.remove({
+        repo: "octo/shop",
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        trustSubjects: ["custom:environment:dev"],
+        ...cluster
+      })
+    ).toMatchObject({ ok: false });
+    expect(h.find("iam list-role-policies")).toBeDefined();
+    expect(h.find("iam delete-role-policy")).toBeUndefined();
+    expect(h.find("iam update-assume-role-policy")).toBeUndefined();
+    expect(h.githubCalls.length).toBeGreaterThan(0);
+  });
+
   it("removes the recorded subjects and the ones GitHub resolves now", async () => {
     const h = harness(roleTrusting([DEV, DEV_ID, PROD]));
 
@@ -589,7 +852,7 @@ describe("AWS environment access removal", () => {
       removed: [
         `trust subject ${DEV}`,
         `trust subject ${DEV_ID}`,
-        "policy radius-deploy-dev"
+        "policy radius-deploy-dev-f5fb7acf8f59"
       ],
       kept: [
         `IAM role ${ROLE}`,
@@ -627,7 +890,7 @@ describe("AWS environment access removal", () => {
       removed: [
         `trust subject ${DEV}`,
         `trust subject ${DEV_ID}`,
-        "policy radius-deploy-dev"
+        "policy radius-deploy-dev-f5fb7acf8f59"
       ]
     });
     expect(remainingTrust(h)).toEqual([PROD]);
@@ -661,10 +924,56 @@ describe("AWS environment access removal", () => {
       removed: [
         `trust subject ${DEV}`,
         `trust subject ${DEV_ID}`,
-        "policy radius-deploy-dev"
+        "policy radius-deploy-dev-f5fb7acf8f59"
       ]
     });
     expect(remainingTrust(h)).toEqual([PROD]);
+  });
+
+  it("uses the setup repository encoded in an immutable subject after a rename", async () => {
+    const h = harness(roleTrusting([DEV_ID, PROD]), {
+      "/repos/octo/store": {
+        ok: true,
+        status: 200,
+        json: { full_name: "octo/store", id: 42, owner: { id: 7 } }
+      },
+      "/repos/octo/store/actions/oidc/customization/sub":
+        githubSubjects(true)["/repos/octo/shop/actions/oidc/customization/sub"]
+    });
+    expect(
+      await h.access.remove({
+        repo: "octo/store",
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        trustSubjects: [DEV_ID],
+        ...cluster
+      })
+    ).toMatchObject({
+      ok: true,
+      removed: [
+        `trust subject ${DEV_ID}`,
+        "policy radius-deploy-dev-f5fb7acf8f59"
+      ]
+    });
+    expect(remainingTrust(h)).toEqual([PROD]);
+    expect(h.githubCalls.length).toBeGreaterThan(0);
+  });
+
+  it("refuses ambiguous saved repository identities before any AWS call", async () => {
+    const h = harness(roleTrusting([DEV, PROD]));
+    expect(
+      await h.access.remove({
+        repo: "octo/shop",
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        trustSubjects: [DEV, "repo:octo/other:environment:dev"],
+        ...cluster
+      })
+    ).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("multiple repositories")
+    });
+    expect(h.commands()).toEqual([]);
   });
 
   it.each([
@@ -688,7 +997,7 @@ describe("AWS environment access removal", () => {
         removed: [
           `trust subject ${DEV}`,
           `trust subject ${DEV_ID}`,
-          "policy radius-deploy-dev"
+          "policy radius-deploy-dev-f5fb7acf8f59"
         ]
       });
       expect(remainingTrust(h)).toEqual([PROD]);
@@ -737,7 +1046,10 @@ describe("AWS environment access removal", () => {
 
       expect(result).toMatchObject({
         ok: true,
-        removed: [`trust subject ${DEV}`, "policy radius-deploy-dev"],
+        removed: [
+          `trust subject ${DEV}`,
+          "policy radius-deploy-dev-f5fb7acf8f59"
+        ],
         warnings: [sharedWarning(shared)]
       });
       expect(remainingTrust(h)).toEqual([shared, PROD]);
@@ -764,7 +1076,7 @@ describe("AWS environment access removal", () => {
       removed: [
         `trust subject ${DEV}`,
         `trust subject ${custom}`,
-        "policy radius-deploy-dev"
+        "policy radius-deploy-dev-f5fb7acf8f59"
       ],
       warnings: []
     });
@@ -788,7 +1100,7 @@ describe("AWS environment access removal", () => {
 
     expect(result).toMatchObject({
       ok: true,
-      removed: ["policy radius-deploy-dev"],
+      removed: ["policy radius-deploy-dev-f5fb7acf8f59"],
       warnings: [sharedWarning("repository_id:42")]
     });
     expect(h.find("iam update-assume-role-policy")).toBeUndefined();
@@ -810,7 +1122,10 @@ describe("AWS environment access removal", () => {
 
     expect(result).toMatchObject({
       ok: true,
-      removed: [`trust subject ${DEV}`, "policy radius-deploy-dev"],
+      removed: [
+        `trust subject ${DEV}`,
+        "policy radius-deploy-dev-f5fb7acf8f59"
+      ],
       warnings: []
     });
   });
@@ -1478,12 +1793,14 @@ describe("the deploy identity lock during removal", () => {
       "iam create-policy",
       "iam get-policy",
       "iam get-role",
+      "iam get-role-policy",
+      "iam list-role-policies",
+      "iam get-policy",
+      "iam delete-role-policy",
       "iam get-policy",
       "iam update-assume-role-policy",
       // IAM shows the write before the lock can be handed on.
       "iam get-role",
-      "iam get-policy",
-      "iam delete-role-policy",
       "iam get-policy",
       "iam delete-policy"
     ]);
@@ -1587,9 +1904,9 @@ describe("the deploy identity lock during removal", () => {
 
     expect(result).toEqual({
       ok: false,
-      message: `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (Another run), so Radius stopped. Before it stopped, this run made these AWS changes: aws iam update-assume-role-policy. Another run may have changed them since, so check the role before you retry.`
+      message: `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (Another run), so Radius stopped. Before it stopped, this run made these AWS changes: aws iam delete-role-policy. Another run may have changed them since, so check the role before you retry.`
     });
-    expect(h.commands()).not.toContain("iam delete-role-policy");
+    expect(h.commands()).not.toContain("iam update-assume-role-policy");
   });
 
   it("warns, naming the lock, when it was already gone at release", async () => {
@@ -1619,7 +1936,10 @@ describe("the deploy identity lock during removal", () => {
 
     expect(result).toMatchObject({
       ok: true,
-      removed: [`trust subject ${DEV}`, "policy radius-deploy-dev"],
+      removed: [
+        `trust subject ${DEV}`,
+        "policy radius-deploy-dev-f5fb7acf8f59"
+      ],
       lockWarning: expect.stringContaining("not allowed iam:DeletePolicy")
     });
   });
@@ -1636,7 +1956,7 @@ describe("the deploy identity lock during removal", () => {
     expect(result.ok).toBe(false);
     expect("message" in result && result.message).toMatch(
       new RegExp(
-        `^Could not update the trust policy of IAM role ${ROLE} \\(Throttling\\)\\. .* This deletion is done with IAM role ${ROLE}, but Radius could not release its lock: ServiceFailure\\.`
+        `^Removed policy .* Could not update the trust policy of IAM role ${ROLE} \\(Throttling\\)\\. .* This deletion is done with IAM role ${ROLE}, but Radius could not release its lock: ServiceFailure\\.`
       )
     );
   });
@@ -1666,8 +1986,8 @@ describe("the deploy identity lock during removal", () => {
       expect(result).toMatchObject({ ok: true });
       expect(seen).toEqual([
         [
-          [`trust subject ${DEV}`, "policy radius-deploy-dev"],
-          ["iam delete-role-policy", "iam get-policy"]
+          [`trust subject ${DEV}`, "policy radius-deploy-dev-f5fb7acf8f59"],
+          ["iam get-role", "iam get-policy"]
         ]
       ]);
       expect(h.commands().slice(-2)).toEqual([
@@ -1708,7 +2028,7 @@ describe("the deploy identity lock during removal", () => {
 
       expect(result).toEqual({
         ok: false,
-        message: `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (Another run), so Radius stopped. Before it stopped, this run made these AWS changes: aws iam update-assume-role-policy, aws iam delete-role-policy. Another run may have changed them since, so check the role before you retry.`
+        message: `The lock on IAM role ${ROLE} was removed while this run held it, and another run now holds a new one (Another run), so Radius stopped. Before it stopped, this run made these AWS changes: aws iam delete-role-policy, aws iam update-assume-role-policy. Another run may have changed them since, so check the role before you retry.`
       });
     });
 
@@ -1802,6 +2122,8 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
         });
       case "iam get-open-id-connect-provider":
         return ok({ ClientIDList: ["sts.amazonaws.com"] });
+      case "iam get-role-policy":
+        return fail("NoSuchEntity");
       case "iam update-assume-role-policy":
         writes.push(command);
         previousTrust = role?.trust;

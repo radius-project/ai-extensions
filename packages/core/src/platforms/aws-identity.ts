@@ -28,6 +28,7 @@ export const AWS_REPOSITORY_TAG = "radius-repository";
 const ROLE_NAME_MAX = 64;
 const ROLE_NAME_HASH_LENGTH = 6;
 const INLINE_POLICY_NAME_MAX = 128;
+const INLINE_POLICY_HASH_LENGTH = 12;
 const SUB_CLAIM = `${GITHUB_OIDC_HOST}:sub`;
 const AUD_CLAIM = `${GITHUB_OIDC_HOST}:aud`;
 const NO_SUBJECTS_SID = "RadiusNoTrustedEnvironments";
@@ -132,16 +133,87 @@ export function isAwsRoleName(value: string): boolean {
   return /^[A-Za-z0-9+=,.@_-]{1,64}$/.test(value);
 }
 
-/**
- * The per-environment permission policy name. It is an inline role policy, so
- * the name is unique per role rather than per account. Two repositories that
- * share a picked role and an environment name share this name.
- */
-export function buildAwsEnvironmentPolicyName(environment: string): string {
+/** Only for recognizing policies written before repository-scoped names. */
+export function buildLegacyAwsEnvironmentPolicyName(
+  environment: string
+): string {
   return iamSafe(`radius-deploy-${environment}`).slice(
     0,
     INLINE_POLICY_NAME_MAX
   );
+}
+
+export function buildAwsEnvironmentPolicyName(
+  repo: string,
+  environment: string,
+  sha256Hex: (text: string) => string
+): string {
+  const identity = [repo.toLowerCase(), environment.toLowerCase()];
+  const suffix = sha256Hex(JSON.stringify(identity)).slice(
+    0,
+    INLINE_POLICY_HASH_LENGTH
+  );
+  return `${awsEnvironmentPolicyPrefix(environment)}${suffix}`;
+}
+
+function awsEnvironmentPolicyPrefix(environment: string): string {
+  const prefix = iamSafe(`radius-deploy-${environment.toLowerCase()}`).slice(
+    0,
+    INLINE_POLICY_NAME_MAX - INLINE_POLICY_HASH_LENGTH - 1
+  );
+  return `${prefix}-`;
+}
+
+export function isAwsEnvironmentPolicyName(
+  name: string,
+  environment: string
+): boolean {
+  const prefix = awsEnvironmentPolicyPrefix(environment);
+  return (
+    name.startsWith(prefix) && /^[a-f0-9]{12}$/.test(name.slice(prefix.length))
+  );
+}
+
+export function legacyAwsPolicyOwnershipError(input: {
+  repo: string;
+  environment: string;
+  accountId: string;
+  subjects: readonly string[];
+  role: unknown;
+}): string | null {
+  const policy = parsePolicyDocument(
+    isRecord(input.role) ? input.role.AssumeRolePolicyDocument : null
+  );
+  if (
+    policy.Statement.some(
+      (statement) =>
+        statement.Effect === "Allow" &&
+        isGitHubStatement(statement, githubOidcProviderArn(input.accountId)) &&
+        !acceptsGitHubAudience(statement)
+    )
+  ) {
+    return "The role has GitHub trust conditions Radius cannot interpret.";
+  }
+  const name = buildLegacyAwsEnvironmentPolicyName(input.environment);
+  const subjects = trustedGitHubSubjects(policy, input.accountId);
+  const ambiguous = subjects.find((subject) => {
+    if (/[*?]/.test(subject)) return true;
+    if (input.subjects.includes(subject)) return false;
+    const environment = /:environment:(.+)$/.exec(subject)?.[1];
+    return (
+      !environment ||
+      buildLegacyAwsEnvironmentPolicyName(environment.replace(/%3A/gi, ":")) ===
+        name
+    );
+  });
+  if (ambiguous) return `The legacy policy may also belong to ${ambiguous}.`;
+  if (
+    !subjects.some((subject) => input.subjects.includes(subject)) &&
+    !isRadiusManagedRole(input.role, input.repo)
+  ) {
+    return "Neither the role's trust subjects nor its ownership tags identify this environment as the legacy policy's owner.";
+  }
+  return null;
 }
 
 export function githubOidcProviderArn(accountId: string): string {
@@ -685,10 +757,7 @@ export function removeGitHubTrustSubject(
 // role out of its own job. These PowerUserAccess grants are not region-bounded.
 const GLOBAL_POWER_USER_ACTIONS = [
   "account:GetAccountInformation",
-  "account:GetPrimaryEmail",
   "account:ListRegions",
-  "iam:CreateServiceLinkedRole",
-  "iam:DeleteServiceLinkedRole",
   "iam:ListRoles",
   "organizations:DescribeOrganization"
 ];
@@ -698,8 +767,8 @@ const GLOBAL_POWER_USER_ACTIONS = [
  * `PowerUserAccess` managed policy, with the broad grant limited to the
  * environment's region. It is written per environment, so a role shared by
  * environments in two regions can act in exactly those two, and deleting one
- * environment narrows the role back. It never grants `iam:*`, so the role
- * cannot make itself or anyone else an administrator.
+ * environment removes only that environment's grant. Other policies on a
+ * picked role can grant additional access; this policy must not deny them.
  */
 export function buildAwsEnvironmentPermissionPolicy(
   region: string
@@ -708,17 +777,36 @@ export function buildAwsEnvironmentPermissionPolicy(
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "RadiusPowerUserInRegion",
         Effect: "Allow",
-        NotAction: ["iam:*", "organizations:*", "account:*"],
+        NotAction: [
+          "iam:*",
+          "organizations:*",
+          "account:*",
+          // Exclude the five access-administration actions, not the read APIs.
+          "eks:*teAccessEntry",
+          "eks:*AccessPolicy"
+        ],
         Resource: "*",
-        Condition: { StringEquals: { "aws:RequestedRegion": [region] } }
+        Condition: { StringEquals: { "aws:RequestedRegion": region } }
       },
       {
-        Sid: "RadiusPowerUserGlobal",
         Effect: "Allow",
-        Action: GLOBAL_POWER_USER_ACTIONS,
+        Action: [...GLOBAL_POWER_USER_ACTIONS],
         Resource: "*"
+      },
+      {
+        Effect: "Allow",
+        Action: "iam:CreateServiceLinkedRole",
+        Resource: "*",
+        Condition: {
+          StringEquals: {
+            "iam:AWSServiceName": [
+              "rds.amazonaws.com",
+              "elasticache.amazonaws.com",
+              "opensearchservice.amazonaws.com"
+            ]
+          }
+        }
       }
     ]
   };

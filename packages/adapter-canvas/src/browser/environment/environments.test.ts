@@ -1112,7 +1112,7 @@ describe("deleteEnvironmentMessage", () => {
         config: { cluster: "eks-1" }
       })
     ).toBe(
-      "This deletes the GitHub environment \"dev\" and removes the Radius environment from eks-1. It removes this environment's trust subjects and its radius-deploy-dev policy from the deploy IAM role, and the role's access entry on eks-1 when nothing else can use it. The role itself and the account's GitHub identity provider are kept, because other environments or repositories may use them. Applications already deployed to it must be deleted first."
+      "This deletes the GitHub environment \"dev\" and removes the Radius environment from eks-1. It removes this environment's trust subjects and its repository-scoped permission policy from the deploy IAM role, and the role's access entry on eks-1 when nothing else can use it. The role itself and the account's GitHub identity provider are kept, because other environments or repositories may use them. Applications already deployed to it must be deleted first."
     );
   });
 
@@ -1195,7 +1195,7 @@ describe("environment deletion", () => {
 
     const message = page.confirmDialog.show.mock.calls[0][0].message;
     expect(message).toContain("removes the Radius environment from eks-1");
-    expect(message).toContain("radius-deploy-dev policy");
+    expect(message).toContain("repository-scoped permission policy");
     expect(message).not.toContain("Azure app registration");
   });
 
