@@ -4029,8 +4029,19 @@ describe("AWS cluster discovery", () => {
       );
     });
 
-    it("shows the note when the response no longer lists the cluster as usable", async () => {
-      const { page, discovery } = await discoverTwoClusters();
+    it("clears the cluster and keeps Create blocked when the response marks it unusable", async () => {
+      const page = renderDiscoveryPage();
+      const discovery = scriptedDiscovery(page);
+      discovery.answer(awsPayload({ clusters: TWO_CLUSTERS }));
+      const createErrors: string[] = [];
+      let handle: DiscoveryPanelHandle | null = null;
+      handle = initializeDiscoveryPanel(page.browser.context, {
+        mutationNonce: "",
+        onInfrastructureChange: () => {
+          createErrors.push(handle?.awsInfrastructureError() ?? "");
+        }
+      });
+      await handle?.discoverResources("aws", ACCOUNT, REGION);
       discovery.answer(
         awsPayload({
           clusters: [
@@ -4047,7 +4058,40 @@ describe("AWS cluster discovery", () => {
       pickCluster(page, "eks-2");
       await flushPromises();
 
+      const clusterSelect = page.selects["aws-cluster-select"];
+      expect(clusterSelect.value).toBe("");
+      const option = clusterSelect.options.find(
+        (entry) => entry.value === "eks-2"
+      );
+      expect(option?.textContent).toBe("eks-2 (DELETING)");
+      expect(option?.disabled).toBe(true);
+      expect(fakeText(page.awsClusterNote)).toBe(
+        "eks-2 is DELETING. Radius can use a cluster that is ACTIVE or UPDATING."
+      );
+      expect(handle?.currentInfraSelection("aws")).toMatchObject({
+        cluster: "",
+        subnetIds: ""
+      });
+      expect(createErrors.at(-1)).toBe("Select an EKS cluster.");
+      expect(handle?.awsInfrastructureError()).toBe("Select an EKS cluster.");
+    });
+
+    it("keeps the cluster and Create open when only its namespaces can't be read", async () => {
+      const { page, discovery, handle } = await discoverTwoClusters();
+      discovery.answer(
+        awsPayload({
+          clusters: TWO_CLUSTERS,
+          errors: { namespaces: "Forbidden" },
+          errorKinds: { namespaces: "denied" }
+        })
+      );
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      expect(page.selects["aws-cluster-select"].value).toBe("eks-2");
       expect(page.awsNamespaceNote.hidden).toBe(false);
+      expect(handle?.awsInfrastructureError()).toBe("");
     });
 
     it("hides a custom namespace typed for the previous cluster", async () => {

@@ -1348,21 +1348,12 @@ export function initializeDiscoveryPanel(
     return usable.length === 1 ? usable[0].id : "";
   };
 
-  // Show an AWS discovery response: the cluster options and note, the
-  // namespaces, and either the defaults or the held selection.
-  const showAwsDiscovery = (
-    raw: unknown,
-    data: DiscoveryData,
-    region: string
-  ): void => {
-    const kinds = data.errorKinds ?? {};
-    const errors = data.errors ?? {};
-    const clusterListFailed =
-      data.error !== undefined ||
-      kinds.clusters !== undefined ||
-      errors.clusters !== undefined;
-    awsClusterInfo =
-      clusterListFailed ? [] : parseAwsClusterInfo(readArray(raw, "clusters"));
+  // Render the cluster options from awsClusterInfo, with a disabled option for
+  // each unusable cluster. Returns the note line of each one.
+  const renderAwsClusterSelect = (
+    region: string,
+    clusterListFailed: boolean
+  ): AwsClusterNoteLine[] => {
     const options = sortDiscoveryOptions(
       awsClusterInfo.map((info: AwsClusterInfo) => {
         const presentation = awsClusterPresentation(info, region);
@@ -1382,9 +1373,25 @@ export function initializeDiscoveryPanel(
       false,
       clusterListFailed ? "Clusters unavailable" : "No EKS clusters"
     );
-    const noteLines: AwsClusterNoteLine[] = options.flatMap((option) =>
-      option.note ? [option.note] : []
-    );
+    return options.flatMap((option) => (option.note ? [option.note] : []));
+  };
+
+  // Show an AWS discovery response: the cluster options and note, the
+  // namespaces, and either the defaults or the held selection.
+  const showAwsDiscovery = (
+    raw: unknown,
+    data: DiscoveryData,
+    region: string
+  ): void => {
+    const kinds = data.errorKinds ?? {};
+    const errors = data.errors ?? {};
+    const clusterListFailed =
+      data.error !== undefined ||
+      kinds.clusters !== undefined ||
+      errors.clusters !== undefined;
+    awsClusterInfo =
+      clusterListFailed ? [] : parseAwsClusterInfo(readArray(raw, "clusters"));
+    const noteLines = renderAwsClusterSelect(region, clusterListFailed);
     awsInfrastructure.setDiscovered({
       clusters: awsClusterInfo,
       subnets: parseAwsSubnetInfo(readArray(raw, "subnets")),
@@ -1472,7 +1479,8 @@ export function initializeDiscoveryPanel(
   };
 
   // A cluster the developer picks gets its own namespaces. Only the namespace
-  // list changes. The cluster, VPC, and subnets on screen stay as they are.
+  // list changes, unless the response marks that cluster unusable. Then the
+  // cluster is disabled and cleared, as a full discovery would do.
   const rediscoverAwsNamespaces = async (cluster: string): Promise<void> => {
     const token = ++awsNamespaceToken;
     const namespaceSelect = context.dom.selectById("aws-namespace-select");
@@ -1510,6 +1518,17 @@ export function initializeDiscoveryPanel(
         context.dom.selectById(AWS_CLUSTER_SELECT_ID)?.value !== cluster
       ) {
         return;
+      }
+      const reported = parseAwsClusterInfo(readArray(raw, "clusters")).find(
+        (item) => item.id === cluster
+      );
+      if (reported !== undefined && !reported.usable) {
+        awsClusterInfo = awsClusterInfo.map((item) =>
+          item.id === cluster ? reported : item
+        );
+        const noteLines = renderAwsClusterSelect(account.tenantId, false);
+        awsInfrastructure.showCluster("", "defaults");
+        renderAwsClusterNote(context, noteLines);
       }
     }
     if (namespaceSelect) namespaceSelect.disabled = false;
