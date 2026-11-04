@@ -22,6 +22,7 @@ import {
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import { createAwsEnvironmentAccess } from "./aws-environment-access.js";
 import {
+  createSetupCoordinatorPorts,
   runEnvironmentOperationWorkflow,
   type EnvironmentOperationRecord,
   type EnvironmentOperationWorkflowDependencies
@@ -365,6 +366,7 @@ describe("runEnvironmentOperationWorkflow", () => {
         return false;
       }
     });
+
     let ghCalls = 0;
     const executor = successfulSelectedGhExecutor({
       run: async () => {
@@ -378,6 +380,32 @@ describe("runEnvironmentOperationWorkflow", () => {
     ).toEqual({ shouldMonitor: false });
     expect(test.events).toEqual(["stop:before-github-environment"]);
     expect(ghCalls).toBe(0);
+  });
+
+  it("keeps repository-read authority independent of cooperative Stop", async () => {
+    const op = operation();
+    requestStop(op);
+    let stopped = false;
+    const test = dependencies(op, {
+      isStopped: () => stopped,
+      preflightRepoAdmin: async (_repo, _executor, assertActive) => {
+        expect(assertActive).toBeTypeOf("function");
+        assertActive?.();
+        stopped = true;
+        assertActive?.();
+        throw new Error("Missing runtime interruption");
+      }
+    });
+    const ports = createSetupCoordinatorPorts(
+      op,
+      successfulSelectedGhExecutor(),
+      test.dependencies
+    );
+    await expect(ports.preflightRepository()).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    expect(test.failures).toEqual([]);
+    expect(op.endedAt).toBeNull();
   });
 
   it("lets Stop win over cleanup after a failed preflight", async () => {

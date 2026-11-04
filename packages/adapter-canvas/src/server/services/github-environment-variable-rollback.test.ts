@@ -571,7 +571,14 @@ describe("GitHub environment variable rollback", () => {
       command({ code: 1, stderr: "HTTP 403: Forbidden" }),
       "HTTP 403: Forbidden"
     ],
-    [command({ code: 1, stdout: "HTTP 403: Forbidden" }), "HTTP 403: Forbidden"]
+    [
+      command({ code: 1, stdout: "HTTP 403: Forbidden" }),
+      "HTTP 403: Forbidden"
+    ],
+    [
+      command({ code: 1, stderr: " ", stdout: "HTTP 403: Forbidden" }),
+      `GitHub rejected deletion of ${artifact().target}.`
+    ]
   ])(
     "records a conclusive provider rejection without retrying rollback",
     async (rejection, expectedDetail) => {

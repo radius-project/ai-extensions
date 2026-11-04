@@ -4356,11 +4356,12 @@ export function createEnvironmentOperationExecution(
           );
           if (attachment.isShuttingDown()) return { shouldMonitor: false };
           return runEnvironmentOperationWorkflow(op, executor, {
-            preflightRepoAdmin: (repo, selectedExecutor) =>
+            preflightRepoAdmin: (repo, selectedExecutor, assertActive) =>
               preflightRepoAdmin(
                 repo,
                 selectedExecutor,
-                GH_COMMAND_PRESENTATION
+                GH_COMMAND_PRESENTATION,
+                assertActive
               ),
             guardStopBoundary: (operation, boundary) =>
               attachment.isShuttingDown() ?
@@ -6504,8 +6505,8 @@ export function createProductionCanvasServerRuntime(
       return guardStopBoundary(input);
     },
     runAzCommand: (args) => runCliCommand("az", args),
-    preflightRepoAdmin: (repo, executor) =>
-      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+    preflightRepoAdmin: (repo, executor, assertActive) =>
+      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION, assertActive),
     preflightGhcrPackageWriteAccess: (executor) =>
       preflightGhcrPackageWriteAccess(
         getGhPackageCredentials,
