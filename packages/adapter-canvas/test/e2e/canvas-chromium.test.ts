@@ -4570,6 +4570,427 @@ test.describe("Radius Canvas in Chromium", () => {
         await expect(page.locator("#aws-restore-note")).toBeHidden();
       });
     });
+
+    test("offers Repair on an AWS deploy that could not sign in and reports an intact trust @safety", async ({
+      page,
+      canvas
+    }) => {
+      const environment = "fixture-environment";
+      const roleName = "radius-deploy-fixture";
+      const roleArn = `arn:aws:iam::${AWS_ACCOUNT}:role/${roleName}`;
+      const lockArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-${roleName}`;
+      const subject = `repo:${REPOSITORY}:environment:${environment}`;
+      const [owner, name] = REPOSITORY.split("/");
+      const idSubject = `repo:${owner}@7/${name}@42:environment:${environment}`;
+      await canvas.seedState({
+        ...baseCanvasState(canvas.workspacePath),
+        deployStatus: "failed",
+        deployErrorKind: "cloud-auth-drift",
+        deployEnvName: environment,
+        deployAttempt: { id: "attempt-1", targetRepo: REPOSITORY, environment }
+      });
+      const scenario = defaultFakeCliScenario();
+      // Ahead of the default scenario's answer for the same read, which
+      // describes an Azure environment.
+      scenario.commands.unshift({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/environments/${environment}/variables?per_page=100`,
+          "--jq",
+          '.variables[] | .name + "\\t" + (.value // "")'
+        ],
+        stdout: [
+          `AWS_ROLE_ARN\t${roleArn}`,
+          "AWS_REGION\tus-west-2",
+          `AWS_TRUST_SUBJECTS\t${JSON.stringify([subject])}`
+        ].join("\n")
+      });
+      // Repair works the subjects out from GitHub, not from the variable,
+      // using GitHub's stored spelling of the environment.
+      scenario.commands.unshift(
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/environments/${environment}`,
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28"
+          ],
+          stdout: JSON.stringify({ name: environment })
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}`,
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28"
+          ],
+          stdout: JSON.stringify({
+            full_name: REPOSITORY,
+            id: 42,
+            owner: { id: 7 }
+          })
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/actions/oidc/customization/sub`,
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28"
+          ],
+          stdout: JSON.stringify({
+            use_default: true,
+            use_immutable_subject: false
+          })
+        }
+      );
+      scenario.commands.push(
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "get-open-id-connect-provider"],
+          stdout: JSON.stringify({ ClientIDList: ["sts.amazonaws.com"] })
+        },
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "create-policy"],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK1" } })
+        },
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "get-policy"],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK1" } })
+        },
+        {
+          tool: "aws",
+          args: [
+            "iam",
+            "get-role",
+            "--role-name",
+            roleName,
+            "--output",
+            "json"
+          ],
+          stdout: JSON.stringify({
+            Role: {
+              Arn: roleArn,
+              AssumeRolePolicyDocument: {
+                Version: "2012-10-17",
+                Statement: [
+                  {
+                    Effect: "Allow",
+                    Principal: {
+                      Federated: `arn:aws:iam::${AWS_ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`
+                    },
+                    Action: "sts:AssumeRoleWithWebIdentity",
+                    Condition: {
+                      StringEquals: {
+                        "token.actions.githubusercontent.com:aud":
+                          "sts.amazonaws.com",
+                        "token.actions.githubusercontent.com:sub": [
+                          subject,
+                          idSubject
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          })
+        },
+        {
+          tool: "aws",
+          args: ["iam", "delete-policy", "--policy-arn", lockArn],
+          stdout: ""
+        }
+      );
+      await canvas.setScenario(scenario);
+      await page.route("**/api/list-environments**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            environments: [
+              { name: environment, provider: "aws", status: "success" }
+            ]
+          })
+        });
+      });
+      await page.route("**/api/deploy-status**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: "failed",
+            active: false,
+            error:
+              "Cloud authentication or authorization failed before any resource was deployed.",
+            deployRunUrl: "",
+            errorKind: "cloud-auth-drift",
+            errorBranch: "",
+            errorPaths: "",
+            repairing: false,
+            handoff: { pending: false, state: "idle" },
+            attempt: { targetRepo: "", environment: "" }
+          })
+        });
+      });
+
+      await page.goto(
+        `${canvas.baseUrl}/?page=deploying&application=todolist&environment=${environment}`
+      );
+
+      const repair = page.getByRole("button", { name: "Repair" });
+      await expect(repair).toBeVisible();
+      await expect(repair).toHaveAccessibleDescription(
+        "Repair adds this environment back to its AWS deploy role's trust policy if it was removed. It changes nothing else."
+      );
+      await expect(
+        page.getByRole("button", { name: "Re-verify credentials" })
+      ).toBeVisible();
+      await expectNoWcagViolations(page);
+      await repair.focus();
+      await page.keyboard.press("Enter");
+
+      const status = page.getByRole("status").filter({
+        hasText: `IAM role ${roleName} already trusts environment ${environment}`
+      });
+      await expect(status).toBeVisible();
+      const awsCalls = (await canvas.cliCalls())
+        .filter((call) => call.tool === "aws")
+        .map((call) => call.args.slice(0, 2).join(" "));
+      expect(awsCalls).toEqual([
+        "sts get-caller-identity",
+        "iam get-open-id-connect-provider",
+        "iam create-policy",
+        "iam get-policy",
+        "iam get-role",
+        "iam get-policy",
+        "iam delete-policy"
+      ]);
+      await expectNoWcagViolations(page);
+    });
+
+    test("pauses an AWS setup during the deploy identity lock wait and continues from Authorize deploy identity by keyboard @safety", async ({
+      page,
+      canvas
+    }) => {
+      const ops = await import("../../src/operations.js");
+      const { createAwsEnvironmentAccess } =
+        await import("../../src/server/services/aws-environment-access.js");
+      const { runEnvironmentOperationWorkflow } =
+        await import("../../src/server/services/environment-operation.js");
+      const { honorStopBoundary } =
+        await import("../../src/server/services/operation-stop-boundary.js");
+      const { successfulSelectedGhExecutor } =
+        await import("../support/server/selected-gh.js");
+      const persist = () => ops.operations.persist();
+      const unexpected = (what: string) => () => {
+        throw new Error(`unexpected ${what}`);
+      };
+      const awsCommands: string[] = [];
+      // Another run holds the deploy identity lock for the whole test, so every
+      // run waits at the lock until the customer pauses it.
+      const access = createAwsEnvironmentAccess<
+        NonNullable<ReturnType<typeof ops.operations.get>>
+      >({
+        async runAws(args) {
+          const command = args.slice(0, 2).join(" ");
+          awsCommands.push(command);
+          const ok = (stdout: unknown) => ({
+            code: 0,
+            stdout:
+              typeof stdout === "string" ? stdout : JSON.stringify(stdout),
+            stderr: ""
+          });
+          switch (command) {
+            case "--version":
+              return ok("aws-cli/2.17.0 Python/3.11 Linux/6");
+            case "sts get-caller-identity":
+              return ok({ Account: AWS_ACCOUNT });
+            case "eks describe-cluster":
+              return ok({
+                cluster: {
+                  status: "ACTIVE",
+                  accessConfig: { authenticationMode: "API" }
+                }
+              });
+            case "iam create-policy":
+              return {
+                code: 254,
+                stdout: "",
+                stderr:
+                  "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation"
+              };
+            case "iam get-policy":
+              return ok({
+                Policy: {
+                  PolicyId: "LOCK0",
+                  CreateDate: new Date().toISOString()
+                }
+              });
+            default:
+              throw new Error(`unexpected aws ${args.join(" ")}`);
+          }
+        },
+        async runGitHubJson(apiPath) {
+          if (apiPath === `/repos/${REPOSITORY}`) {
+            return {
+              ok: true,
+              status: 200,
+              json: { full_name: REPOSITORY, id: 42, owner: { id: 7 } }
+            };
+          }
+          return { ok: false, status: 404, json: null };
+        },
+        sleep: (milliseconds) =>
+          new Promise((resolve) =>
+            setTimeout(resolve, Math.min(milliseconds, 50))
+          ),
+        now: () => Date.now(),
+        isStopRequested: ops.shouldStop,
+        operationId: (operation) => operation.operationId,
+        operations: {
+          enterStage: ops.enterStage,
+          setStageState: ops.setStageState,
+          addLegacyStep: ops.addLegacyStep,
+          setContext: ops.setContext,
+          touch: (operation) => {
+            ops.touchOperation(operation);
+          }
+        },
+        store: { persist },
+        stageAuthorizeIdentity: ops.STAGE_AUTHORIZE_IDENTITY,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "repo-user",
+        run: unexpected("gh command")
+      });
+      // The real setup coordinator and stop boundary; only GitHub and AWS
+      // are scripted.
+      canvas.setEnvironmentOperationRunner(async (operationId) => {
+        const operation = ops.operations.get(operationId);
+        if (!operation) throw new Error("Setup operation was not saved.");
+        await runEnvironmentOperationWorkflow(operation, executor, {
+          isStopped: () => false,
+          preflightRepoAdmin: async () => "",
+          preflightGhcrPackageWriteAccess: async () => ({ ok: true }),
+          guardStopBoundary: (target, boundary) =>
+            honorStopBoundary({ operation: target, boundary, persist }),
+          readGitHubJson: async (apiPath) => ({
+            ok: true,
+            status: 200,
+            json:
+              apiPath.includes("/variables") ?
+                { variables: [] }
+              : { name: "dev", id: 77 },
+            stderr: ""
+          }),
+          setCanonicalEnvironment: ops.setCanonicalEnvironment,
+          recordGitHubEnvironment: ops.recordGitHubEnvironment,
+          promoteCreatedGitHubEnvironment: ops.promoteCreatedGitHubEnvironment,
+          addLegacyStep: (target, text) => {
+            ops.addLegacyStep(target, text);
+          },
+          persistEnvironmentResolution: async () => {
+            await persist();
+            return true;
+          },
+          persistProviderMutation: persist,
+          finalizeEnvironmentResolutionFailure: unexpected("setup failure"),
+          getOperation: (id) => ops.operations.get(id),
+          setupServices: {
+            authorizeAzure: unexpected("Azure authorization"),
+            configureEnvironment: unexpected("Configure environment")
+          },
+          setupAwsDeployIdentity: (target, request, selected) =>
+            access.setup(target, request, selected),
+          releaseAwsDeployIdentity: (target) => access.release(target),
+          now: () => Date.now()
+        });
+      });
+      await routeAwsProfileAndDiscovery(page);
+      await gotoCanvas(page, canvas, "environment");
+      await openAwsEnvironmentWizard(page);
+      await page.getByLabel("Environment name").fill("dev");
+      const started = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/operations" &&
+          response.request().method() === "POST"
+      );
+      const create = page.locator("#deploy-btn:not([disabled])");
+      await create.focus();
+      await page.keyboard.press("Enter");
+      const response = await started;
+      expect(response.status()).toBe(202);
+      const { operationId } = await response.json();
+      const recordState = async () =>
+        (await canvas.operationRecord(operationId)).state;
+
+      const stages = page.locator("#env-progress-panel .env-progress__stage");
+      const pausedStages = [
+        /^‖Authorize deploy identity — paused$/,
+        /Configure environment — skipped$/,
+        /Verify credentials — skipped$/
+      ];
+      const waitingForLock = [
+        /Authorize deploy identity — running$/,
+        /Configure environment — pending$/,
+        /Verify credentials — pending$/
+      ];
+      await expect(stages).toHaveText(waitingForLock);
+      await expect(page.locator("#env-progress-panel")).toContainText(
+        "Waiting for the lock on IAM role"
+      );
+      const pause = page.getByRole("button", { name: "Pause setup" });
+      await pause.focus();
+      await page.keyboard.press("Enter");
+
+      // Nothing changed in AWS, so authorization has not started, and
+      // Continue starts there rather than past it.
+      await expect.poll(recordState).toBe("cancelled");
+      await expect(stages).toHaveText(pausedStages, { timeout: 15_000 });
+      await expect(page.locator("#env-progress-panel")).toContainText(
+        "Paused before any AWS change. Nothing was created in AWS."
+      );
+      const continueSetup = page.getByRole("button", {
+        name: "Continue setup"
+      });
+      await expect(continueSetup).toHaveAccessibleDescription(
+        "Radius continues from Authorize the deploy identity and reuses the resources it already recorded."
+      );
+      await expectNoWcagViolations(page);
+      const createdPolicies = awsCommands.filter(
+        (command) => command === "iam create-policy"
+      ).length;
+      await continueSetup.focus();
+      await page.keyboard.press("Enter");
+
+      // Continue waits for the lock again, and only authorization is running.
+      await expect
+        .poll(
+          () =>
+            awsCommands.filter((command) => command === "iam create-policy")
+              .length
+        )
+        .toBeGreaterThan(createdPolicies);
+      await expect(stages).toHaveText(waitingForLock, { timeout: 15_000 });
+      await expect(
+        page.locator("#env-progress-panel .env-progress__stage--running")
+      ).toHaveCount(1);
+
+      await page.getByRole("button", { name: "Pause setup" }).focus();
+      await page.keyboard.press("Enter");
+      await expect.poll(recordState).toBe("cancelled");
+      await expect(stages).toHaveText(pausedStages, { timeout: 15_000 });
+      expect(awsCommands).not.toContain("iam get-role");
+      await expectNoWcagViolations(page);
+    });
   });
 
   test("keeps unsupported credential profiles out of environment creation @safety", async ({

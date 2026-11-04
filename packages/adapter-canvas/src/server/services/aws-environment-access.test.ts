@@ -87,6 +87,12 @@ function githubSubjects(
           { sub_claim_prefix: "repo:octo@7/shop@42" }
         : {})
       }
+    },
+    // GitHub's stored spelling, which Repair builds the subjects from.
+    "/repos/octo/shop/environments/dev": {
+      ok: true,
+      status: 200,
+      json: { name: "dev" }
     }
   };
 }
@@ -166,6 +172,9 @@ function harness(
     operations: {
       enterStage: (operation, stage) => {
         events.push(["enterStage", operation.id, stage]);
+      },
+      setStageState: (operation, stage, state) => {
+        events.push(["setStageState", operation.id, stage, state]);
       },
       addLegacyStep: (operation, text, stage) => {
         events.push(["step", operation.id, text, stage]);
@@ -451,7 +460,16 @@ describe("pausing AWS environment access setup", () => {
     expect(steps(h).at(-1)).toBe(
       "⏸️ Paused before any AWS change. Nothing was created in AWS."
     );
-    expect(h.events.at(-1)).toEqual(["persist"]);
+    expect(h.events.slice(-3)).toEqual([
+      ["setStageState", "op-1", STAGE, "paused"],
+      [
+        "step",
+        "op-1",
+        "⏸️ Paused before any AWS change. Nothing was created in AWS.",
+        STAGE
+      ],
+      ["persist"]
+    ]);
     expect(h.roleRecorded()).toBe(false);
   });
 
@@ -469,6 +487,7 @@ describe("pausing AWS environment access setup", () => {
     expect(steps(h).at(-1)).toBe(
       `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}.`
     );
+    expect(h.events).toContainEqual(["setStageState", "op-1", STAGE, "paused"]);
     expect(h.events.at(-1)).toEqual(["persist"]);
     expect(h.roleRecorded()).toBe(false);
   });
@@ -488,6 +507,8 @@ describe("pausing AWS environment access setup", () => {
     expect(steps(h).at(-1)).toBe(
       `⏸️ Paused after AWS setup finished. ${ROLE_ARN} is ready for this environment.`
     );
+    // The deploy identity is ready, so its stage stays done.
+    expect(h.events.map(([kind]) => kind)).not.toContain("setStageState");
     expect(h.events.at(-1)).toEqual(["persist"]);
   });
 
@@ -981,6 +1002,17 @@ describe("the deploy identity lock during setup", () => {
     expect(h.steps().at(-1)).toBe(
       "⏸️ Paused before any AWS change. Nothing was created in AWS."
     );
+    // The lock was never taken, so Authorize deploy identity has not started.
+    expect(h.events.slice(-3)).toEqual([
+      ["setStageState", "op-1", STAGE, "paused"],
+      [
+        "step",
+        "op-1",
+        "⏸️ Paused before any AWS change. Nothing was created in AWS.",
+        STAGE
+      ],
+      ["persist"]
+    ]);
   });
 
   it("stops before the next write when its lock is removed, naming what it created", async () => {
@@ -1341,6 +1373,7 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
         },
         operations: {
           enterStage: () => {},
+          setStageState: () => {},
           addLegacyStep: () => {},
           setContext: () => {},
           touch: () => {}
@@ -1388,4 +1421,305 @@ describe("two setups on one deploy identity at the same time", () => {
       expect(iam.writes).toHaveLength(2);
     }
   );
+});
+
+describe("repairing an environment's trust under the lock", () => {
+  const repairInput = {
+    repo: "octo/shop",
+    environment: "dev",
+    roleArn: ROLE_ARN,
+    confirmTarget: async () => null
+  };
+  const missingId: Record<string, Answer> = {
+    ...lockFree,
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-open-id-connect-provider": ok({
+      ClientIDList: ["sts.amazonaws.com"]
+    }),
+    "iam get-role": ok({
+      Role: {
+        Arn: ROLE_ARN,
+        AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [DEV, PROD])
+      }
+    }),
+    // The permission policy setup wrote for this environment.
+    "iam get-role-policy": ok({ PolicyName: "radius-deploy-dev" }),
+    "iam update-assume-role-policy": ok()
+  };
+  const holder = (created: string) =>
+    lockPolicy("LOCK0", {
+      Description:
+        '{"repo":"octo/shop","environment":"prod","action":"setup","operationId":"op-2"}',
+      CreateDate: created
+    });
+
+  it("adds the missing subject under a repair lock and releases it", async () => {
+    const h = harness(missingId);
+
+    expect(await h.access.repair(repairInput)).toEqual({
+      ok: true,
+      roleName: ROLE,
+      added: [DEV_ID]
+    });
+
+    expect(h.commands()).toEqual([
+      "sts get-caller-identity",
+      "iam get-open-id-connect-provider",
+      "iam create-policy",
+      "iam get-policy",
+      "iam get-role",
+      "iam get-role-policy",
+      "iam get-policy",
+      "iam update-assume-role-policy",
+      "iam get-role",
+      "iam get-policy",
+      "iam delete-policy"
+    ]);
+    const create = h.find("iam create-policy") ?? [];
+    expect(
+      JSON.parse(create[create.indexOf("--description") + 1] ?? "")
+    ).toMatchObject({ action: "repair", environment: "dev" });
+    // The subjects come from GitHub, with the ambient account.
+    expect(h.githubCalls).toEqual([
+      { path: "/repos/octo/shop/environments/dev", executor: undefined },
+      { path: "/repos/octo/shop", executor: undefined },
+      {
+        path: "/repos/octo/shop/actions/oidc/customization/sub",
+        executor: undefined
+      }
+    ]);
+  });
+
+  it.each([
+    [false, "2026-10-30T11:58:00Z", ""],
+    [
+      true,
+      "2026-10-30T11:00:00Z",
+      ` If that run has stopped, check that "aws iam get-policy --policy-arn ${LOCK_ARN} --query Policy.PolicyId --output text" prints LOCK0, the lock shown here, and only then run: aws iam delete-policy --policy-arn ${LOCK_ARN}`
+    ]
+  ])(
+    "refuses at once, naming the holder, when another run holds the lock (removable %s)",
+    async (_removable, created, ending) => {
+      const h = harness({
+        ...missingId,
+        "iam create-policy": fail("EntityAlreadyExists"),
+        "iam get-policy": holder(created)
+      });
+
+      const result = await h.access.repair(repairInput);
+
+      expect(result).toEqual({
+        ok: false,
+        code: "aws-lock-busy",
+        message: `The setup of environment prod in octo/shop (operation op-2) is changing IAM role ${ROLE} (it has held the role's lock since ${created.slice(0, 16).replace("T", " ")} UTC), so Radius changed nothing. Try again once it finishes.${ending}`
+      });
+      expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
+      expect(h.commands()).not.toContain("iam get-role");
+      expect(h.commands()).not.toContain("iam delete-policy");
+    }
+  );
+
+  it("stops without writing when its lock is lost", async () => {
+    const h = harness({
+      ...missingId,
+      "iam get-policy": [lockPolicy("LOCK1"), lockPolicy("LOCK2")]
+    });
+
+    const result = await h.access.repair(repairInput);
+
+    expect(result).toMatchObject({ ok: false, code: "aws-lock-lost" });
+    expect(h.commands()).not.toContain("iam update-assume-role-policy");
+  });
+
+  it("finishes the repair but warns when the lock cannot be released", async () => {
+    const h = harness({
+      ...missingId,
+      "iam delete-policy": fail("AccessDenied")
+    });
+    expect(await h.access.repair(repairInput)).toMatchObject({
+      ok: true,
+      added: [DEV_ID],
+      lockWarning: expect.stringContaining("not allowed iam:DeletePolicy")
+    });
+  });
+
+  it("names both problems when the repair and the release fail", async () => {
+    const h = harness({
+      ...missingId,
+      "iam update-assume-role-policy": fail("AccessDenied"),
+      "iam delete-policy": fail("ServiceFailure")
+    });
+    const result = await h.access.repair(repairInput);
+    expect(result).toMatchObject({ ok: false, code: "aws-role-trust-denied" });
+    expect("message" in result && result.message).toMatch(
+      new RegExp(
+        `AccessDenied This repair is done with IAM role ${ROLE}, but Radius could not release its lock: ServiceFailure\\.`
+      )
+    );
+  });
+
+  it.each([
+    [
+      "was deleted",
+      {
+        code: "repair-target-changed",
+        message: 'GitHub environment "dev" is gone.'
+      }
+    ],
+    [
+      "names another role",
+      {
+        code: "repair-target-changed",
+        message: 'GitHub environment "dev" names another role.'
+      }
+    ]
+  ])(
+    "stops under the lock, changing nothing, when the environment %s",
+    async (_label, changed) => {
+      const h = harness(missingId);
+      const checkedAfter: string[][] = [];
+
+      const result = await h.access.repair({
+        ...repairInput,
+        confirmTarget: async () => {
+          checkedAfter.push(h.commands());
+          return changed;
+        }
+      });
+
+      expect(result).toEqual({ ok: false, ...changed });
+      // Checked once the lock is held and confirmed, before the role is read.
+      expect(checkedAfter).toEqual([
+        [
+          "sts get-caller-identity",
+          "iam get-open-id-connect-provider",
+          "iam create-policy",
+          "iam get-policy"
+        ]
+      ]);
+      expect(h.commands()).not.toContain("iam get-role");
+      expect(h.commands()).not.toContain("iam update-assume-role-policy");
+      // The lock is released.
+      expect(h.commands().at(-1)).toBe("iam delete-policy");
+    }
+  );
+
+  it("builds the subjects from GitHub's spelling of the environment", async () => {
+    const h = harness(missingId, {
+      ...defaultSubject,
+      "/repos/octo/shop/environments/DEV": {
+        ok: true,
+        status: 200,
+        json: { name: "dev" }
+      }
+    });
+
+    expect(
+      await h.access.repair({ ...repairInput, environment: "DEV" })
+    ).toMatchObject({ ok: true, added: [DEV_ID] });
+    const create = h.find("iam create-policy") ?? [];
+    expect(
+      JSON.parse(create[create.indexOf("--description") + 1] ?? "")
+    ).toMatchObject({ environment: "dev" });
+  });
+
+  it.each([
+    [
+      "cannot be read",
+      { ok: false, status: 404, stderr: "Not Found" },
+      "Not Found"
+    ],
+    [
+      "has no name",
+      { ok: true, status: 200, json: {} },
+      "GitHub reported no name"
+    ],
+    ["fails without a message", { ok: false, status: 502 }, "HTTP 502"],
+    ["fails with no status", { ok: false }, "HTTP unknown"]
+  ])(
+    "changes nothing when the environment %s",
+    async (_label, answer, reason) => {
+      const h = harness(missingId, {
+        ...defaultSubject,
+        "/repos/octo/shop/environments/dev": answer
+      });
+
+      expect(await h.access.repair(repairInput)).toEqual({
+        ok: false,
+        code: "github-environment-unreadable",
+        message: `Radius could not read GitHub environment "dev" (${reason}), so it changed nothing.`
+      });
+      expect(h.awsCalls).toEqual([]);
+    }
+  );
+
+  it("refuses at once, without sleeping, when IAM will not say who holds the lock", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": fail("EntityAlreadyExists"),
+      "iam get-policy": fail("NoSuchEntity: gone")
+    });
+
+    expect(await h.access.repair(repairInput)).toEqual({
+      ok: false,
+      code: "aws-lock-busy",
+      message: `IAM reports a lock on IAM role ${ROLE} but could not say who holds it, so Radius changed nothing. Try again in a moment.`
+    });
+    expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
+    expect(h.commands().filter((c) => c === "iam create-policy")).toHaveLength(
+      2
+    );
+    expect(h.commands()).not.toContain("iam get-role");
+  });
+
+  it("passes through a lock it created but IAM never showed, naming its policy ID", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": lockPolicy("LOCK1"),
+      "iam get-policy": fail("NoSuchEntity: not yet")
+    });
+
+    const result = await h.access.repair(repairInput);
+
+    expect(result).toMatchObject({ ok: false, code: "aws-lock-unconfirmed" });
+    expect("message" in result && result.message).toContain(
+      `Check that "aws iam get-policy --policy-arn ${LOCK_ARN} --query Policy.PolicyId --output text" prints LOCK1`
+    );
+    expect(h.commands()).not.toContain("iam get-role");
+  });
+
+  it("passes through a lock another run replaced before it was confirmed", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": lockPolicy("LOCK1"),
+      "iam get-policy": lockPolicy("LOCK2")
+    });
+    expect(await h.access.repair(repairInput)).toMatchObject({
+      ok: false,
+      code: "aws-lock-lost"
+    });
+  });
+
+  it("passes through IAM being unreachable, without backing off", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": fail("Throttling: Rate exceeded")
+    });
+    expect(await h.access.repair(repairInput)).toEqual({
+      ok: false,
+      code: "aws-lock-unreachable",
+      message: `Radius could not reach IAM to lock IAM role ${ROLE} (Throttling: Rate exceeded). Nothing was changed. Retry.`
+    });
+    expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
+  });
+
+  it("still takes a lock released between IAM's create and read", async () => {
+    const h = harness({
+      ...missingId,
+      "iam create-policy": [fail("EntityAlreadyExists"), lockPolicy("LOCK1")],
+      "iam get-policy": [fail("NoSuchEntity: gone"), lockPolicy("LOCK1")]
+    });
+
+    expect(await h.access.repair(repairInput)).toMatchObject({ ok: true });
+  });
 });
