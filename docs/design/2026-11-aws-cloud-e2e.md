@@ -7,13 +7,13 @@ This amends the [Cloud E2E environment lifecycle](./2026-08-cloud-e2e-environmen
 
 ## Current state
 
-The Cloud E2E tests run once a day against real Azure and real GitHub. They create an environment in the canvas, deploy the fixture app to a shared AKS cluster, delete everything, and check that nothing is left. AWS has no such test. The AWS path (setup, deploy, delete) is on `main` behind the `RADIUS_CANVAS_AWS=1` developer switch, and only unit and server tests with a fake `aws` CLI cover it. Setup creates one IAM role per repository that the repository's GitHub deploy workflows sign in to, called the deploy role, and each environment adds its own permissions to it.
+The Cloud E2E tests run the canvas against real Azure once a day: create an environment, deploy, delete, and check that nothing is left. AWS setup, deploy, and delete are on `main` behind the `RADIUS_CANVAS_AWS=1` developer switch, but only tests with a fake `aws` CLI cover them. Setup creates one IAM role per repository, called the deploy role, that the repository's GitHub deploy workflows sign in to, and each environment adds its own permissions to it.
 
-A fake CLI can't show that AWS accepts the IAM, EKS, and RDS calls the product makes, that a pod can reach the database a recipe created, or that delete leaves nothing behind. Without a live test, a change that breaks AWS setup or delete reaches users silently, and a leak keeps billing until someone notices.
+A fake CLI can't show that AWS accepts the product's calls, that a pod can reach the database a recipe created, or that delete leaves nothing behind. A change that breaks AWS would reach users silently, and a leak would keep billing until someone noticed.
 
 ## Proposal
 
-Add an AWS job to the daily Cloud E2E workflow. It drives the canvas through AWS setup, deploy, and delete in the Radius project's AWS functional-test account, `radius-test`, on two shared EKS clusters created once ahead of time, in regions Radius's own tests don't use. It uses a new long-lived fixture repository, and the cleanup workflow gets an AWS sweep that can only touch this test's resources.
+Add an AWS job to the daily Cloud E2E workflow, in the Radius project's AWS test account, on two shared EKS clusters created ahead of time, in regions Radius's own tests don't use. It uses a new fixture repository, and the cleanup workflow gets an AWS sweep that can only touch this test's resources.
 
 ## Objectives
 
@@ -32,32 +32,28 @@ Add an AWS job to the daily Cloud E2E workflow. It drives the canvas through AWS
 
 ## Design
 
-Each day, the AWS job signs in to `radius-test`, uses the canvas to set up two environments, deploy, and delete, and then checks that nothing is left. The sections below cover where it runs, the two AWS roles it uses, what the test does step by step, and how cleanup works.
+Each day, the AWS job signs in to `radius-test`, uses the canvas to set up two environments, deploy, and delete, and then checks that nothing is left.
 
 ### Where it runs
 
-These choices decide where the test runs, and why.
+| What        | Choice                                                           | Why                                                                                                                                                      |
+|-------------|------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| AWS account | `radius-test`, the Radius project's AWS functional-test account  | Azure Cloud E2E already reuses the Radius test subscription. The account already has billing and the GitHub identity provider                            |
+| Regions     | `us-east-2` for the main environment, `us-west-1` for the second | Radius's tests use only `us-west-2`. Neither is `us-east-1`, where IAM and other global services sign their requests                                     |
+| Workflow    | A second job, `cloud-e2e-aws`, in `cloud-e2e.yml`                | Same schedule and never-on-pull-request rule. The workflow's concurrency group, shared with `cloud-e2e-cleanup.yml`, keeps cleanup out while a test runs |
 
-| What               | Choice                                                                          | Why                                                                                                                                                      |
-|--------------------|---------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| AWS account        | `radius-test`, the Radius project's AWS functional-test account                 | Azure Cloud E2E already reuses the Radius test subscription. The account already has billing and the GitHub identity provider                            |
-| Regions            | `us-east-2` for the main environment, `us-west-1` for the second                | Radius's tests use only `us-west-2`. Neither is `us-east-1`, where IAM and other global services sign their requests                                     |
-| Clusters           | One shared EKS cluster in each region, created once by an account administrator | The canvas never creates clusters. A cluster per run adds time, rights, and leak risk                                                                    |
-| Fixture repository | New, private, long-lived `radius-project/ai-extensions-fixture-aws`             | The AWS app is different from the Azure app, and a separate repository lets the two clouds run in parallel                                               |
-| Workflow           | A second job, `cloud-e2e-aws`, in `cloud-e2e.yml`                               | Same schedule and never-on-pull-request rule. The workflow's concurrency group, shared with `cloud-e2e-cleanup.yml`, keeps cleanup out while a test runs |
-
-AWS can't be added to the Azure job, because that job's 340-minute timeout is already close to GitHub's 6-hour limit. The two jobs share no state: different clouds, fixture repositories, and deploy identities.
+AWS can't be added to the Azure job, because that job's 340-minute timeout is already close to GitHub's 6-hour limit. The two jobs share no state: different clouds, fixture repositories, and deploy roles.
 
 ### The fixture repository
 
 The fixture repository is the GitHub repository the test runs the canvas against. It holds a ready-made app, and setup commits its workflows there, the same as in a user's repository. Azure uses `radius-project/ai-extensions-fixture`. AWS gets a new private one, `radius-project/ai-extensions-fixture-aws`.
 
-The lifecycle design uses one long-lived fixture repository, with each run kept apart by its environment names. AWS keeps that model with a second repository. The lifecycle design rejected a repository per run because it needs organization-wide rights to create repositories; a second long-lived repository needs none, only the existing Cloud E2E GitHub App installed on it.
+A separate repository is needed because the AWS app is different, and sharing one would make AWS wait behind Azure on the repository's lease. The lifecycle design rejected a repository per run because it needs organization-wide rights; a second long-lived one only needs the Cloud E2E GitHub App installed.
 
 Its baseline commit carries a `.radius/` directory produced by the real modeling flow, with two resources:
 
 - A `Radius.Data/mySqlDatabases` resource, which the `aws-eks` pack deploys on Amazon RDS.
-- A `Radius.Compute/containers` resource that signs in to the database over TLS and runs `SELECT 1` in a loop, and is ready only after that query succeeds. A query is needed because `mysqladmin ping` succeeds even when MySQL refuses the sign-in.
+- A `Radius.Compute/containers` resource that signs in to the database over TLS and runs `SELECT 1` in a loop, and is ready only after that query succeeds.
 
 The database password is a fixed test value in the private fixture model. The instance is private to the cluster's VPC and lives for less than an hour.
 
@@ -90,9 +86,7 @@ Everything except IAM is limited to the two regions. The test role can't create 
 
 The boundary lists services instead of allowing everything in the two regions, because a region condition limits where a request is sent, not what it changes. For example, `s3:PutAccountPublicAccessBlock` sent to `us-east-2` turns off S3 Block Public Access for every bucket in the account, including Radius's.
 
-The deploy role can't create service-linked roles. RDS's already exists in the account; a recipe for a new service may need an administrator to create one first.
-
-Because the test role can't create roles, a run that finds the deploy role missing stops at setup and changes nothing. Creating it for the first time is covered by server tests and by local runs in a developer's own account.
+The deploy role can't create service-linked roles. RDS's already exists; a new service's recipe may need an administrator to create one. If the deploy role is missing, setup stops and changes nothing, because the test role can't create roles.
 
 ### The clusters
 
@@ -100,7 +94,7 @@ The main cluster, in `us-east-2`, has two node groups. The default one has two `
 
 The second cluster, in `us-west-1`, has no nodes. The run only creates an environment on it, deploys an app that fails before any pod is scheduled, and deletes it.
 
-Both clusters use authentication mode `API` and a public endpoint, because GitHub-hosted runners reach them over the internet. Nodes use public subnets, so no NAT gateway is needed. RDS uses private subnets.
+Both clusters use authentication mode `API` and a public endpoint, so GitHub-hosted runners can reach them. Nodes use public subnets, so no NAT gateway is needed, and RDS uses private subnets.
 
 The ai-extensions maintainers own both clusters and upgrade them. A cluster must stay on a Kubernetes version in EKS standard support, because extended support costs six times as much. The test's preflight is the reminder: it warns when a cluster's version is within 60 days of leaving standard support, and fails once it has left.
 
@@ -116,16 +110,16 @@ Each step runs in the canvas, in order, with the AWS switch on.
 6. **Connection check.** The app's container is ready. A probe pod on the default nodes signs in to each managed service. The same probe on the isolated node times out, and the check names the service.
 7. **Delete the apps.** The RDS instance and its groups are gone, and exactly one final RDS snapshot exists. The test deletes it.
 8. **Delete the second environment.** Its subject, policy, and access entry are removed, and the main environment still passes verify.
-9. **Delete the main environment.** Its subject, policy, and access entry are removed.
-10. **Leftovers.** Only the deploy role, with no inline policies and the deny trust statement, and the GitHub identity provider are left. No RDS, Kubernetes, or GitHub resources from the run remain.
+9. **Delete the main environment** the same way.
+10. **Leftovers.** Only the deploy role, with no policies or trusted subjects, and the GitHub identity provider are left.
 
 Why some steps work the way they do:
 
-- **15 minutes:** an EKS token lasts 15 minutes, so a later Kubernetes write only works if the deploy's token refresh works. The start is the refresher's first log line, not the workflow's start. RDS create time varies, so the fixture app has a gate that forces a late write.
-- **Failed deploy on the second environment:** after a failed redeploy, Radius loses track of the resources it created, a known Radius issue. Failing on an environment with no database avoids leaving one behind.
-- **Final snapshot:** AWS Cloud Control always takes one when it deletes an RDS instance, also a known Radius issue. The recipe copies the app's tags to it on `resource-types-contrib`'s `main`, but the commit the canvas pins is older. Until the pin moves, the test finds the snapshot by the instance name it recorded; after that, it also checks the tags.
+- **15 minutes:** an EKS token lasts 15 minutes, so a later Kubernetes write proves token refresh works. The clock starts at the refresher's first log line. RDS create time varies, so a gate in the fixture app forces the late write.
+- **Failed deploy on the second environment:** after a failed redeploy, Radius loses track of what it created, a known Radius issue, so the failure runs where there's no database to lose.
+- **Final snapshot:** AWS Cloud Control always takes one when it deletes an RDS instance, also a known Radius issue. The recipe commit the canvas pins doesn't copy the app's tags to it yet, so the test finds it by instance name, and checks the tags once the pin moves.
 - **Radius build:** the AWS workflows use Radius `edge` on purpose, because no Radius release has the fixes AWS needs yet. A planned change moves AWS to that release before AWS ships. Each run records the Radius versions it used.
-- **Probe pods:** they run as Kubernetes Jobs in the app's namespace, with the app's Radius labels, so the lifecycle design's cleanup rule covers them. A probe that can't start fails the test, instead of counting as the expected timeout.
+- **Probe pods:** Kubernetes Jobs in the app's namespace with the app's Radius labels, so the lifecycle design's cleanup rule covers them. A probe that can't start fails the test instead of passing as a timeout.
 
 Each managed service in the pack gets a row in the connection check and a resource in the fixture app, added by the recipe that adds the service.
 
@@ -140,13 +134,13 @@ Each managed service in the pack gets a row in the connection check and a resour
 
 If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs.
 
-A resource is deleted only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with an expired test environment, and in one of the two clusters' VPCs where the resource has one. Kubernetes workloads follow the lifecycle design's label rule. Cleanup never deletes the deploy role, the identity provider, a cluster, a node group, a VPC, or anything in another region. A read that fails stops that kind of sweep without deleting.
+It deletes a resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with an expired test environment, and in one of the clusters' VPCs. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the roles, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
 
-The sweep has no dry run, the same as the Azure sweep, which also deletes in a subscription shared with Radius. Its rules are unit-tested against resources shaped like Radius's, and the test role can't act in `us-west-2`.
+Like the Azure sweep, which also deletes in a subscription shared with Radius, it has no dry run. Its rules are unit-tested against resources shaped like Radius's.
 
 ### Radius's cleanup job
 
-Radius's own daily job in the same account deletes RDS, S3, and log resources in `us-west-2` tagged `RadiusCreationTimestamp` and older than 6 hours. It can't delete this test's database: it looks only in `us-west-2`, the MySQL recipe doesn't set that tag, and the AWS job finishes in under 6 hours. This test can't delete Radius's resources either, because neither the test role nor the deploy role can act in `us-west-2`.
+Radius's daily cleanup job in the same account deletes RDS, S3, and log resources in `us-west-2` tagged `RadiusCreationTimestamp` and older than 6 hours. It can't touch this test: wrong region, a tag the MySQL recipe doesn't set, and a job that finishes in under 6 hours. This test can't touch Radius's resources either, because neither role can act in `us-west-2`.
 
 ### Time budget
 
@@ -155,16 +149,16 @@ The AWS suite has its own stage limits, about 230 minutes in total, under a 270-
 ### Rollout
 
 1. This design is reviewed.
-2. An administrator of `radius-test` creates the test role, the deploy role, and the clusters. An organization administrator creates the AWS fixture repository and installs the Cloud E2E GitHub App on it. An `ai-extensions` administrator adds the role and account secrets and the region and cluster variables.
+2. Administrators create the two roles and clusters in `radius-test`, the AWS fixture repository with the Cloud E2E GitHub App, and the `ai-extensions` secrets and variables.
 3. The AWS sweep lands first, so the scheduled AWS run never runs without cleanup.
-4. The AWS test lands. Before merge, it runs locally in the developer's own AWS account and their fork of the fixture repository, which the lifecycle design already allows.
+4. The AWS test lands, after a local run in the developer's own AWS account and fork of the fixture repository, as the lifecycle design allows.
 5. On `main`, a manual cleanup run, then a manual Cloud E2E run. The daily schedule starts once both pass.
 
-Until the fixture variable is set, the AWS job and sweep skip and say why, following the lifecycle design's rule for an unpublished fixture.
+Until the fixture variable is set, the AWS job and sweep skip and say why, as the lifecycle design does for an unpublished fixture.
 
 ### Cost
 
-About $240 a month: $165 for the main cluster and its nodes, $73 for the second cluster's control plane, and about $1 for RDS. Most of the cost is the shared clusters, which run all the time.
+About $240 a month: $165 for the main cluster and its nodes, $73 for the second cluster, and about $1 for RDS.
 
 ## Error handling
 
@@ -175,17 +169,13 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 | A cluster's Kubernetes version leaves standard support within 60 days | The run continues, with a warning in its summary that names the cluster and the date                    |
 | A cluster's Kubernetes version is past standard support               | Preflight fails and names the cluster, so it's upgraded before it costs more                            |
 | Preflight finds something from an earlier run                         | The job fails and names it, and points to the cleanup workflow. It doesn't delete it                    |
-| The deploy role is missing                                            | Setup stops with the product's "not permitted to create IAM roles" message                              |
-| No Kubernetes write after the first token expired                     | The deploy step fails, because token refresh wasn't tested                                              |
 | The isolated probe connects                                           | The connection check fails, because the isolated node no longer tests a missing network rule            |
-| No final snapshot, or more than one                                   | The delete step fails and names the instance                                                            |
-| A step fails part way                                                 | The fixture's teardown removes what the run registered, and cleanup removes the rest                    |
 
 ## Test plan
 
-- **Unit tests:** the cleanup rules, including resources shaped like Radius's (in `us-west-2`, tagged `RadiusCreationTimestamp`, or without our tags), none of which is selected. Groups left without an instance. Cleanup keeping retry inputs when a step fails. The connection check, snapshot check, and 15-minute check. The stage limits fitting the job timeout.
-- **Workflow tests:** the AWS job never runs on pull requests, has the repository guard, uses no GitHub environment, shares the concurrency group, and skips when the fixture variable is unset.
-- **Local run:** the full test in the developer's own AWS account. It also checks that the deploy role's boundary refuses `s3:PutAccountPublicAccessBlock`, an IAM action, and an RDS call in `us-west-2`.
+- **Unit tests:** the cleanup rules, which never select resources shaped like Radius's. Cleanup keeping retry inputs when a step fails. The connection, snapshot, and 15-minute checks. The stage limits fitting the job timeout.
+- **Workflow tests:** the AWS job never runs on pull requests, uses no GitHub environment, shares the concurrency group, and skips when the fixture variable is unset.
+- **Local run:** the full test in the developer's own AWS account, plus a check that the deploy role's boundary refuses `s3:PutAccountPublicAccessBlock`, IAM, and RDS in `us-west-2`.
 
 ## Open questions
 
