@@ -7,6 +7,7 @@ import type {
   CreateEnvironmentInstanceEntry
 } from "../services/configure-environment.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import { createOperation, requestStop } from "../../operations.js";
 
 const unexpected = (): never => {
   throw new Error("Unexpected adapter dependency.");
@@ -17,7 +18,11 @@ function harness(
   bindings: Partial<
     Pick<
       Parameters<typeof createSetupEnvironmentPorts>[0],
-      "provider" | "finalize" | "instanceId" | "isCurrentPresentation"
+      | "provider"
+      | "finalize"
+      | "instanceId"
+      | "isCurrentPresentation"
+      | "operation"
     >
   > = {}
 ) {
@@ -109,6 +114,37 @@ function harness(
 }
 
 describe("Canvas setup configuration adapter", () => {
+  it("uses live runtime shutdown, not cooperative Stop, for repository reads", async () => {
+    let shuttingDown = false;
+    const operation = createOperation({
+      repo: "octo/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    requestStop(operation);
+    const h = harness(
+      {
+        isShuttingDown: () => shuttingDown,
+        preflightRepoAdmin: async (_repo, _executor, assertActive) => {
+          expect(assertActive).toBeTypeOf("function");
+          assertActive?.();
+          shuttingDown = true;
+          assertActive?.();
+          throw new Error("Missing runtime interruption");
+        }
+      },
+      { operation }
+    );
+    await expect(h.ports.preflightRepository("octo/app")).rejects.toMatchObject(
+      {
+        code: "setup-execution-interrupted"
+      }
+    );
+    expect(h.finalized).toEqual([]);
+    expect(operation.endedAt).toBeNull();
+    expect(operation.failure).toBeNull();
+  });
+
   it.each([
     [null, null, "the setup branch", "the default branch"],
     ["", "", "the setup branch", "the default branch"],
