@@ -16,15 +16,11 @@ export const RECIPE_PACK_REPO = "radius-project/resource-types-contrib";
 export const RECIPE_PACK_REF = "main";
 
 // The AWS deploy workflow and the planned graph read the `aws-eks` recipe pack
-// from this pinned resource-types-contrib commit, the merge of
-// radius-project/resource-types-contrib#460. Its MySQL recipe sets
+// from this pinned resource-types-contrib commit. Its MySQL recipe sets
 // CopyTagsToSnapshot, so the final snapshot RDS keeps on delete carries the
-// app's tags. No Radius release's catalog has the pack yet
-// (radius-project/radius#13542 added it on main at the earlier #442 merge).
-// The deploy also pins the pack's aws-eks recipes to this commit's image tag, so
-// it must be a main commit that published them. This is the one place to move
-// it; #1130 moves it to the catalog once a Radius release's catalog pins the
-// pack at this commit or later.
+// app's tags. The deploy also pins the pack's aws-eks recipes to this commit's
+// image tag, so it must be a main commit that published them. #1130 moves this
+// pin to the Radius release catalog.
 export const AWS_EKS_RECIPE_PACK = {
   ref: "f3717de79d49d649a973c6fa098b6d546753a76f",
   path: "recipe-packs/aws-eks/aws-eks.bicep"
