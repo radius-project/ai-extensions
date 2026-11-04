@@ -552,6 +552,7 @@ describe("pausing AWS environment access setup", () => {
 describe("AWS environment access removal", () => {
   const roleTrusting = (subjects: string[]): Record<string, Answer> => ({
     ...lockFree,
+    "--version": ok("aws-cli/2.39.0"),
     "sts get-caller-identity": ok({ Account: ACCOUNT }),
     "iam get-role": ok({
       Role: {
@@ -859,6 +860,7 @@ describe("AWS environment access removal of the cluster's access entry", () => {
   const BY_HAND = `If nothing else uses it, run: aws eks delete-access-entry --cluster-name shop --principal-arn ${ROLE_ARN} --region us-west-2`;
   const radiusRole = (subjects: string[]): Record<string, Answer> => ({
     ...lockFree,
+    "--version": ok("aws-cli/2.17.0 Python/3.11 Darwin/23"),
     "sts get-caller-identity": ok({ Account: ACCOUNT }),
     "iam get-role": ok({
       Role: {
@@ -1457,6 +1459,7 @@ describe("the deploy identity lock during removal", () => {
   };
   const signedIn: Record<string, Answer> = {
     ...lockFree,
+    "--version": ok("aws-cli/2.39.0"),
     "sts get-caller-identity": ok({ Account: ACCOUNT }),
     "iam get-role": ok({
       Role: {
@@ -1474,6 +1477,7 @@ describe("the deploy identity lock during removal", () => {
     expect(await h.access.remove(removal)).toMatchObject({ ok: true });
 
     expect(h.commands()).toEqual([
+      "--version",
       "sts get-caller-identity",
       "iam create-policy",
       "iam get-policy",
@@ -1552,6 +1556,7 @@ describe("the deploy identity lock during removal", () => {
       "not allowed iam:CreatePolicy"
     );
     expect(h.commands()).toEqual([
+      "--version",
       "sts get-caller-identity",
       "iam create-policy"
     ]);

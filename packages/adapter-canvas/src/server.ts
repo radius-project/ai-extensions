@@ -757,6 +757,7 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   runSessionPrompt: (prompt) =>
     invokeSessionPrompt(sessionPromptHandler, prompt),
   runCommand: (command, args, options) => runCommand(command, args, options),
+  runAws: (args) => runCliCommand("aws", args, 15000),
   errorMessage
 });
 
@@ -5660,6 +5661,7 @@ export function createProductionCanvasServerRuntime(
   );
   const githubSelectionHandles = createGitHubSelectionHandleStore();
   const identityProfilesRoutes = createIdentityProfilesRoutes({
+    runAws: (args) => runCliCommand("aws", args, 15000),
     listCredentialProfiles,
     saveCredentialProfile,
     deleteCredentialProfile,

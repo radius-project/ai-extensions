@@ -14,6 +14,7 @@ import {
   buildAwsLockPolicyName,
   buildGitHubTrustPolicy,
   checkAwsCliVersion,
+  classifyAwsCliFailure,
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
   describeAwsLockHolder,
@@ -47,6 +48,49 @@ const GITHUB = "token.actions.githubusercontent.com";
 const DEV = "repo:octo/shop:environment:dev";
 const PROD = "repo:octo/shop:environment:prod";
 
+describe("AWS CLI failure classification", () => {
+  it.each([
+    ["spawn aws ENOENT", "missing-cli"],
+    ["aws: command not found", "missing-cli"],
+    ["aws is not recognized as an internal command", "missing-cli"],
+    [
+      "Error when retrieving credentials from custom-process: credential-helper: command not found",
+      "provider-failed"
+    ],
+    ["credential_process: spawn helper ENOENT", "provider-failed"],
+    [
+      "Error when retrieving token from sso: Token has expired and refresh failed",
+      "login-required"
+    ],
+    ["Unable to locate credentials", "login-required"],
+    ["ExpiredToken", "credentials-expired"],
+    ["InvalidClientTokenId", "credentials-invalid"],
+    ["AccessDenied", "access-denied"],
+    [
+      "An error occurred (AccessDenied) when calling the AssumeRole operation: User: arn:aws:iam::123456789012:user/dev is not authorized to perform: sts:AssumeRole on resource: arn:aws:iam::123456789012:role/MFA-admin",
+      "access-denied"
+    ],
+    [
+      "Enter MFA code for arn:aws:iam::123456789012:mfa/dev:",
+      "provider-failed"
+    ],
+    ["credential process failed", "provider-failed"],
+    ["connection timed out", "timeout"],
+    ["unavailable endpoint", "command-failed"]
+  ])("classifies %s as %s", (output, failure) => {
+    expect(classifyAwsCliFailure({ output })).toBe(failure);
+  });
+
+  it("preserves a subprocess timeout over provider diagnostics", () => {
+    expect(
+      classifyAwsCliFailure({
+        output: "credential_process is waiting for input",
+        timedOut: true
+      })
+    ).toBe("timeout");
+  });
+});
+
 describe("AWS CLI version gate", () => {
   it.each([
     ["aws-cli/2.15.3 Python/3.11.6 Darwin/23.0.0", true],
@@ -69,19 +113,24 @@ describe("AWS CLI version gate", () => {
     });
   });
 
-  it("shows the CLI's own output when no version can be read", () => {
+  it("reports an unreadable version without echoing process output", () => {
     const result = checkAwsCliVersion("command not found: aws");
     expect(result.ok).toBe(false);
     expect(!result.ok && result.message).toContain(
-      "Could not run the AWS CLI: command not found: aws"
+      "Could not read the AWS CLI version."
+    );
+    expect(!result.ok && result.message).not.toContain("command not found");
+    expect(!result.ok && result.message).toContain("2.15.3");
+    expect(!result.ok && result.message).toContain(
+      "getting-started-install.html"
     );
     expect(parseAwsCliVersion("")).toBeNull();
   });
 
-  it("says there was no version output when the CLI printed nothing", () => {
+  it("reports an unreadable version when the CLI printed nothing", () => {
     const result = checkAwsCliVersion("  ");
     expect(!result.ok && result.message).toContain(
-      "Could not run the AWS CLI: no version output."
+      "Could not read the AWS CLI version."
     );
   });
 

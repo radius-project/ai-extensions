@@ -6,6 +6,10 @@ import type {
 } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
+import {
+  verifyAwsCliSession,
+  type AwsCliRunner
+} from "../services/aws-cli-session.js";
 
 // Every seam is a single narrow function lifted from `server.ts`, injected
 // rather than moved: `preflightRepoAdmin` and `errorMessage` stay defined there
@@ -13,6 +17,7 @@ import type { RouteHandlerRegistry } from "../route-table.js";
 // access to the instance map. The list is wider than earlier slices only
 // because five routes are in scope, not because the surface per route grew.
 export interface IdentityProfilesDependencies {
+  runAws: AwsCliRunner;
   listCredentialProfiles(repo: string): CredentialProfile[];
   saveCredentialProfile(
     repo: string,
@@ -169,7 +174,7 @@ export async function handleGitHubAccount(
   }
 }
 
-// Create / update a credential profile (already verified client-side).
+// Recheck AWS identity at the write boundary, not just in the browser.
 //
 // Unlike the two GET routes, `Content-Type` is set separately inside each
 // branch immediately before its `writeHead`. The set order is identical in the
@@ -193,9 +198,46 @@ export async function handleSaveCredentialProfile(
       response.end(JSON.stringify({ error: "repo and name are required." }));
       return;
     }
-    // The whole parsed body is handed to the store, not just repo/name: the
-    // profile fields travel in the same object.
-    const saved = dependencies.saveCredentialProfile(repo, data);
+    let profile = data;
+    if (data.provider === "aws") {
+      if (
+        typeof data.accountId !== "string" ||
+        typeof data.region !== "string"
+      ) {
+        response.setHeader("Content-Type", "application/json");
+        response.writeHead(400);
+        response.end(
+          JSON.stringify({
+            code: "aws-input-invalid",
+            error: "AWS account ID and region must be strings."
+          })
+        );
+        return;
+      }
+      const verified = await verifyAwsCliSession(
+        { accountId: data.accountId, region: data.region },
+        dependencies.runAws
+      );
+      if (!verified.ok) {
+        response.setHeader("Content-Type", "application/json");
+        response.writeHead(400);
+        response.end(
+          JSON.stringify({
+            code: verified.code,
+            error: verified.message,
+            remediation: verified.remediation
+          })
+        );
+        return;
+      }
+      profile = {
+        ...data,
+        accountId: verified.accountId,
+        region: data.region.trim(),
+        user: verified.user
+      };
+    }
+    const saved = dependencies.saveCredentialProfile(repo, profile);
     response.setHeader("Content-Type", "application/json");
     response.writeHead(200);
     response.end(JSON.stringify({ success: true, profile: saved }));

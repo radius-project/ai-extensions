@@ -132,6 +132,7 @@ const EXPECTED_FUNCTIONS = [
   "isAwsRoleName",
   "parseAwsCliVersion",
   "checkAwsCliVersion",
+  "classifyAwsCliFailure",
   "buildAwsDeployRoleName",
   "buildAwsEnvironmentPolicyName",
   "githubOidcProviderArn",

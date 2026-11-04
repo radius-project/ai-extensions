@@ -1009,10 +1009,11 @@ describe("production environment owner HTTP binding", () => {
 
       expect(await aws.calls()).toEqual([
         "--version",
-        "sts get-caller-identity --output json"
+        "sts get-caller-identity --output json --region us-west-2"
       ]);
       expect(op.state).toBe("failed");
-      expect(op.failure.message).toContain("fake aws: refused");
+      expect(op.failure.message).toContain("AWS CLI verification failed");
+      expect(op.failure.message).not.toContain("fake aws: refused");
       expect(op.failure.message).toContain("Nothing was created in AWS.");
     } finally {
       await runtime.stopServer("aws-panel", true);
@@ -1053,6 +1054,7 @@ describe("production environment owner HTTP binding", () => {
 
   it("removes exactly the AWS lock a waiting run was shown, through the AWS CLI on PATH", async () => {
     const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.39.0" },
       "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
       "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK0"}}' },
       "iam delete-policy": { stdout: "" }
@@ -1099,6 +1101,7 @@ describe("production environment owner HTTP binding", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ code: "aws-lock-removed" });
       expect(await aws.calls()).toEqual([
+        "--version",
         "sts get-caller-identity --output json",
         `iam get-policy --policy-arn ${lockArn} --output json`,
         `iam delete-policy --policy-arn ${lockArn}`

@@ -1101,6 +1101,7 @@ describe("the async delete route through its background runner", () => {
       }
     };
     const awsAnswers: Record<string, unknown> = {
+      "--version": "aws-cli/2.17.0 Python/3.11 Darwin/23",
       "iam create-policy": lock,
       "iam get-policy": lock,
       "iam delete-policy": "",
