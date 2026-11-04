@@ -9,11 +9,13 @@ const VARIABLES = [
 ];
 
 describe("reading the environment a deletion targets", () => {
-  it("returns the deploy role an AWS environment recorded", async () => {
+  it("returns the deploy role and cluster an AWS environment recorded", async () => {
     const run = vi.fn(async () =>
       [
         "AWS_ACCOUNT_ID\t123456789012",
-        "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer"
+        "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
+        "AWS_REGION\tus-west-2",
+        "AWS_EKS_CLUSTER_NAME\tshop"
       ].join("\n")
     );
 
@@ -25,7 +27,9 @@ describe("reading the environment a deletion targets", () => {
       tenantId: "",
       repoId: 0,
       roleArn: "arn:aws:iam::123456789012:role/deployer",
-      trustSubjects: []
+      trustSubjects: [],
+      region: "us-west-2",
+      cluster: "shop"
     });
     expect(run.mock.calls).toEqual([["gh", VARIABLES, { timeout: 15000 }]]);
   });
@@ -82,7 +86,9 @@ describe("reading the environment a deletion targets", () => {
       tenantId: "tenant",
       repoId: 42,
       roleArn: "",
-      trustSubjects: []
+      trustSubjects: [],
+      region: "",
+      cluster: ""
     });
     expect(run).toHaveBeenLastCalledWith(
       "gh",
@@ -114,7 +120,9 @@ describe("reading the environment a deletion targets", () => {
       tenantId: "",
       repoId: 0,
       roleArn: "",
-      trustSubjects: []
+      trustSubjects: [],
+      region: "",
+      cluster: ""
     });
     expect(run).toHaveBeenCalledOnce();
   });

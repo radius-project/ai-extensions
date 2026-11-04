@@ -1,17 +1,27 @@
 import {
+  classifyAwsCliError,
   eksAcceptsAccessEntries,
   eksAuthenticationMode,
   isAwsRegion,
+  isEksClusterName,
   namesGitHubProvider,
   parseAwsRoleArn,
   parseAwsSubnets,
   parseAwsVpcs,
+  parseAwsZoneTypes,
   parsePolicyDocument,
   radiusRoleRepository,
   trustedGitHubSubjects,
+  type AwsCliErrorKind,
+  type AwsClusterUnusableReason,
   type PolicyDocument
 } from "@radius-project/core";
-import type { AwsDiscoveryResult, DiscoveryDependencies } from "./discovery.js";
+import { remediationView } from "@radius-project/core/remediations";
+import type {
+  AwsDiscoveryList,
+  AwsDiscoveryResult,
+  DiscoveryDependencies
+} from "./discovery.js";
 import { mapWithLimit } from "./map-with-limit.js";
 
 // AWS half of environment-wizard discovery. Every query is scoped to the
@@ -20,12 +30,8 @@ import { mapWithLimit } from "./map-with-limit.js";
 
 const AWS_CLI_TIMEOUT_MS = 20000;
 const KUBECTL_TIMEOUT_MS = 10000;
-const EKS_CLUSTER_PATTERN = /^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$/;
-export const AWS_DEFAULT_NAMESPACES = [
-  "default",
-  "kube-system",
-  "radius-system"
-];
+const USABLE_CLUSTER_STATUSES = new Set(["ACTIVE", "UPDATING"]);
+export const AWS_DEFAULT_NAMESPACES = ["default"];
 
 export interface AwsDiscoveryRequest {
   accountId?: string;
@@ -38,8 +44,13 @@ export interface AwsClusterItem {
   name: string;
   vpcId: string;
   authenticationMode: string;
-  /** False for clusters whose auth mode cannot take an access entry. */
+  /** The describe-cluster status, or empty when the cluster was not described. */
+  status: string;
   usable: boolean;
+  /** Present only when `usable` is false. */
+  unusableReason?: AwsClusterUnusableReason;
+  /** Present only for a cluster whose describe-cluster call failed. */
+  describeErrorKind?: AwsCliErrorKind;
 }
 
 function errorMessage(error: unknown): string {
@@ -52,11 +63,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function recordError(
   result: AwsDiscoveryResult,
-  facet: string,
+  list: AwsDiscoveryList,
   error: unknown
 ): void {
+  const message = errorMessage(error);
   result.errors = result.errors || {};
-  result.errors[facet] = errorMessage(error).slice(0, 800);
+  result.errors[list] = message.slice(0, 800);
+  result.errorKinds = result.errorKinds || {};
+  result.errorKinds[list] = classifyAwsCliError(message);
 }
 
 async function awsJson(
@@ -72,19 +86,63 @@ async function awsJson(
   return JSON.parse(out || "null");
 }
 
+function notDescribed(
+  name: string,
+  describeErrorKind: AwsCliErrorKind
+): AwsClusterItem {
+  return {
+    id: name,
+    name,
+    vpcId: "",
+    authenticationMode: "",
+    status: "",
+    usable: false,
+    unusableReason: "not-described",
+    describeErrorKind
+  };
+}
+
 export function parseAwsCluster(name: string, output: unknown): AwsClusterItem {
   const cluster =
     isRecord(output) && isRecord(output.cluster) ? output.cluster : {};
+  const status = typeof cluster.status === "string" ? cluster.status : "";
+  // An answer without a status is not a description setup can rely on.
+  if (status === "") return notDescribed(name, "other");
   const vpcConfig =
     isRecord(cluster.resourcesVpcConfig) ? cluster.resourcesVpcConfig : {};
   const authenticationMode = eksAuthenticationMode(output);
+  const unusableReason: AwsClusterUnusableReason | undefined =
+    !USABLE_CLUSTER_STATUSES.has(status) ? "status"
+    : !eksAcceptsAccessEntries(authenticationMode) ? "config-map"
+    : undefined;
   return {
     id: name,
     name,
     vpcId: typeof vpcConfig.vpcId === "string" ? vpcConfig.vpcId : "",
     authenticationMode,
-    usable: eksAcceptsAccessEntries(authenticationMode)
+    status,
+    usable: unusableReason === undefined,
+    ...(unusableReason ? { unusableReason } : {})
   };
+}
+
+async function describeCluster(
+  name: string,
+  region: string,
+  dependencies: DiscoveryDependencies
+): Promise<AwsClusterItem> {
+  try {
+    return parseAwsCluster(
+      name,
+      await awsJson(
+        dependencies,
+        ["eks", "describe-cluster", "--name", name],
+        region
+      )
+    );
+  } catch (e) {
+    return notDescribed(name, classifyAwsCliError(errorMessage(e)));
+  }
 }
 
 async function discoverNamespaces(
@@ -126,6 +184,61 @@ async function discoverNamespaces(
   }
 }
 
+// The four EC2 reads run together, and each one's failure is recorded on its
+// own list: a denied route-table, VPC, or zone read leaves the subnets listed.
+async function discoverNetwork(
+  result: AwsDiscoveryResult,
+  vpcIds: readonly string[],
+  region: string,
+  dependencies: DiscoveryDependencies
+): Promise<void> {
+  const vpcFilter = `Name=vpc-id,Values=${vpcIds.join(",")}`;
+  const [vpcs, subnets, routeTables, zones] = await Promise.allSettled([
+    awsJson(
+      dependencies,
+      ["ec2", "describe-vpcs", "--vpc-ids", ...vpcIds],
+      region
+    ),
+    awsJson(
+      dependencies,
+      ["ec2", "describe-subnets", "--filters", vpcFilter],
+      region
+    ),
+    awsJson(
+      dependencies,
+      ["ec2", "describe-route-tables", "--filters", vpcFilter],
+      region
+    ),
+    awsJson(dependencies, ["ec2", "describe-availability-zones"], region)
+  ]);
+  if (vpcs.status === "fulfilled") result.vpcs = parseAwsVpcs(vpcs.value);
+  else recordError(result, "vpcs", vpcs.reason);
+  if (routeTables.status === "rejected") {
+    recordError(result, "routeTables", routeTables.reason);
+  }
+  if (zones.status === "rejected") recordError(result, "zones", zones.reason);
+  if (subnets.status === "rejected") {
+    recordError(result, "subnets", subnets.reason);
+    return;
+  }
+  result.subnets = parseAwsSubnets(subnets.value, {
+    routeTables:
+      routeTables.status === "fulfilled" ? routeTables.value : undefined,
+    zones:
+      zones.status === "fulfilled" ? parseAwsZoneTypes(zones.value) : undefined,
+    region
+  });
+}
+
+function needsSignIn(result: AwsDiscoveryResult): boolean {
+  return (
+    Object.values(result.errorKinds || {}).includes("credentials") ||
+    result.clusters.some(
+      (cluster) => cluster.describeErrorKind === "credentials"
+    )
+  );
+}
+
 export async function discoverAwsResources(
   data: AwsDiscoveryRequest,
   dependencies: DiscoveryDependencies
@@ -146,72 +259,64 @@ export async function discoverAwsResources(
   }
   const requestedCluster =
     typeof data.cluster === "string" ? data.cluster.trim() : "";
-  if (requestedCluster && !EKS_CLUSTER_PATTERN.test(requestedCluster)) {
+  if (requestedCluster && !isEksClusterName(requestedCluster)) {
     return { ...result, error: "Invalid EKS cluster name." };
   }
+  result.namespaces = [...AWS_DEFAULT_NAMESPACES];
+  await discoverClustersAndNetwork(
+    result,
+    region,
+    requestedCluster,
+    dependencies
+  );
+  if (needsSignIn(result)) {
+    result.remediation = remediationView("aws-cli-login", {
+      nextStep: "refresh-discovery"
+    });
+  }
+  return result;
+}
 
-  const clusters: AwsClusterItem[] = [];
+async function discoverClustersAndNetwork(
+  result: AwsDiscoveryResult,
+  region: string,
+  requestedCluster: string,
+  dependencies: DiscoveryDependencies
+): Promise<void> {
+  let names: string[];
   try {
     const listed = await awsJson(
       dependencies,
       ["eks", "list-clusters", "--query", "clusters"],
       region
     );
-    const names =
+    names =
       Array.isArray(listed) ?
         listed.filter((name): name is string => typeof name === "string")
       : [];
-    const described = await Promise.all(
-      names.map(async (name) => {
-        try {
-          return parseAwsCluster(
-            name,
-            await awsJson(
-              dependencies,
-              ["eks", "describe-cluster", "--name", name],
-              region
-            )
-          );
-        } catch {
-          // Listed but not describable: still offer it, and let setup's own
-          // cluster check report the reason.
-          return {
-            id: name,
-            name,
-            vpcId: "",
-            authenticationMode: "",
-            usable: true
-          };
-        }
-      })
-    );
-    clusters.push(...described);
   } catch (e) {
+    // Every later call would fail the same way, so none runs.
     recordError(result, "clusters", e);
+    return;
   }
-  result.clusters = clusters;
-
-  try {
-    result.vpcs = parseAwsVpcs(
-      await awsJson(dependencies, ["ec2", "describe-vpcs"], region)
-    );
-  } catch (e) {
-    recordError(result, "vpcs", e);
-  }
-
-  try {
-    const [subnets, routeTables] = await Promise.all([
-      awsJson(dependencies, ["ec2", "describe-subnets"], region),
-      awsJson(dependencies, ["ec2", "describe-route-tables"], region)
-    ]);
-    result.subnets = parseAwsSubnets(subnets, routeTables);
-  } catch (e) {
-    recordError(result, "subnets", e);
+  result.clusters = await Promise.all(
+    names.map((name) => describeCluster(name, region, dependencies))
+  );
+  const usable = result.clusters.filter((cluster) => cluster.usable);
+  const vpcIds = [
+    ...new Set(usable.map((cluster) => cluster.vpcId).filter(Boolean))
+  ];
+  if (vpcIds.length > 0) {
+    await discoverNetwork(result, vpcIds, region, dependencies);
   }
 
   const namespaceCluster =
-    requestedCluster || (clusters.length === 1 ? clusters[0].name : "");
-  result.namespaces = [...AWS_DEFAULT_NAMESPACES];
+    requestedCluster ?
+      usable.some((cluster) => cluster.name === requestedCluster) ?
+        requestedCluster
+      : ""
+    : usable.length === 1 ? usable[0].name
+    : "";
   if (namespaceCluster) {
     try {
       const names = await discoverNamespaces(
@@ -224,7 +329,6 @@ export async function discoverAwsResources(
       recordError(result, "namespaces", e);
     }
   }
-  return result;
 }
 
 export interface AwsRoleCandidate {

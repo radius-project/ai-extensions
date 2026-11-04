@@ -56,6 +56,12 @@ interface DiscoveryPage {
   azureStatus: ReturnType<typeof createFakeElement>;
   azureRemediation: ReturnType<typeof createFakeElement>;
   awsStatus: ReturnType<typeof createFakeElement>;
+  awsRemediation: ReturnType<typeof createFakeElement>;
+  awsClusterNote: ReturnType<typeof createFakeElement>;
+  awsNamespaceNote: ReturnType<typeof createFakeElement>;
+  awsVpcValue: ReturnType<typeof createFakeElement>;
+  awsVpcNote: ReturnType<typeof createFakeElement>;
+  awsRestoreNote: ReturnType<typeof createFakeElement>;
   awsSubnetsList: ReturnType<typeof createFakeElement>;
   awsSubnetsError: ReturnType<typeof createFakeElement>;
   selectedAppId: ReturnType<typeof createFakeInput>;
@@ -85,8 +91,7 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
   for (const selectId of [
     "azure-rg-select",
     "azure-cluster-select",
-    "aws-cluster-select",
-    "aws-vpc-select"
+    "aws-cluster-select"
   ]) {
     const select = createFakeSelect(selectId);
     selects[selectId] = select;
@@ -103,6 +108,12 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
   const azureStatus = createFakeElement("azure-discover-status");
   const azureRemediation = createFakeElement("azure-discover-remediation");
   const awsStatus = createFakeElement("aws-discover-status");
+  const awsRemediation = createFakeElement("aws-discover-remediation");
+  const awsClusterNote = createFakeElement("aws-cluster-note");
+  const awsNamespaceNote = createFakeElement("aws-namespace-note");
+  const awsVpcValue = createFakeElement("aws-vpc-value", "output");
+  const awsVpcNote = createFakeElement("aws-vpc-note");
+  const awsRestoreNote = createFakeElement("aws-restore-note");
   const awsSubnetsList = createFakeElement("aws-subnets-list");
   const awsSubnetsError = createFakeElement("aws-subnets-error");
   const selectedAppId = createFakeInput("az-selected-app-id");
@@ -127,6 +138,12 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
     azureStatus,
     azureRemediation,
     awsStatus,
+    awsRemediation,
+    awsClusterNote,
+    awsNamespaceNote,
+    awsVpcValue,
+    awsVpcNote,
+    awsRestoreNote,
     awsSubnetsList,
     awsSubnetsError,
     selectedAppId,
@@ -157,6 +174,12 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
     azureStatus,
     azureRemediation,
     awsStatus,
+    awsRemediation,
+    awsClusterNote,
+    awsNamespaceNote,
+    awsVpcValue,
+    awsVpcNote,
+    awsRestoreNote,
     awsSubnetsList,
     awsSubnetsError,
     selectedAppId,
@@ -184,44 +207,61 @@ function discoverResponse(data: Record<string, unknown>) {
   return jsonResponse(data);
 }
 
+function awsCluster(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    name: id,
+    vpcId: "vpc-1",
+    authenticationMode: "API_AND_CONFIG_MAP",
+    status: "ACTIVE",
+    usable: true,
+    ...overrides
+  };
+}
+
+function awsSubnet(
+  id: string,
+  zone: string,
+  routing: string,
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    id,
+    name: `${routing}-${zone.slice(-1)}`,
+    vpcId: "vpc-1",
+    availabilityZone: zone,
+    routing,
+    zoneKind: "standard",
+    ...overrides
+  };
+}
+
 function awsPayload(overrides: Record<string, unknown> = {}) {
   return {
-    clusters: [
-      {
-        id: "eks-1",
-        name: "eks-1",
-        vpcId: "vpc-1",
-        authenticationMode: "API_AND_CONFIG_MAP",
-        usable: true
-      }
-    ],
+    clusters: [awsCluster("eks-1")],
     namespaces: ["default"],
-    vpcs: [{ id: "vpc-1", name: "vpc-1" }],
+    vpcs: [{ id: "vpc-1", name: "main (vpc-1)" }],
     subnets: [
-      {
-        id: "subnet-a",
-        name: "private-a",
-        vpcId: "vpc-1",
-        availabilityZone: "us-west-2a",
-        public: false
-      },
-      {
-        id: "subnet-b",
-        name: "private-b",
-        vpcId: "vpc-1",
-        availabilityZone: "us-west-2b",
-        public: false
-      },
-      {
-        id: "subnet-c",
-        name: "public-c",
-        vpcId: "vpc-1",
-        availabilityZone: "us-west-2c",
-        public: true
-      }
+      awsSubnet("subnet-a", "us-west-2a", "private"),
+      awsSubnet("subnet-b", "us-west-2b", "private"),
+      awsSubnet("subnet-c", "us-west-2c", "public")
     ],
     ...overrides
   };
+}
+
+function optionValues(select: ReturnType<typeof createFakeSelect>) {
+  return Array.from(select.options).map((option) => option.value);
+}
+
+function checkedSubnets(page: DiscoveryPage): string[] {
+  return fakeTree(page.awsSubnetsList)
+    .filter(
+      (element) =>
+        element.tagName === "input" &&
+        element.getAttribute("checked") === "checked"
+    )
+    .map((element) => element.getAttribute("value") ?? "");
 }
 
 // ---------------------------------------------------------------------------
@@ -1694,10 +1734,7 @@ describe("discoverResources", () => {
     page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
       const body = JSON.parse(init?.body ?? "{}");
       if (body.provider === "azure") return azureFirst;
-      return discoverResponse({
-        clusters: [{ id: "eks-1", name: "EKS One" }],
-        namespaces: ["team-a"]
-      });
+      return discoverResponse(awsPayload({ namespaces: ["team-a"] }));
     });
     const handle = initializeDiscoveryPanel(page.browser.context);
     // An azure discovery is already outstanding when the user opens an aws
@@ -1788,15 +1825,20 @@ describe("discoverResources", () => {
 
     expect(page.selects["aws-cluster-select"].value).toBe("eks-1");
     expect(page.selects["aws-namespace-select"].value).toBe("team-a");
-    expect(page.selects["aws-vpc-select"].value).toBe("vpc-1");
-    expect(handle?.currentInfraSelection("aws").subnetIds).toBe("subnet-a");
+    expect(page.awsVpcValue.textContent).toBe("main (vpc-1)");
+    expect(handle?.currentInfraSelection("aws")).toEqual({
+      cluster: "eks-1",
+      namespace: "team-a",
+      vpcId: "vpc-1",
+      subnetIds: "subnet-a"
+    });
     // The saved selection spans one zone, so Create Environment stays blocked.
     expect(handle?.awsInfrastructureError()).toBe(
       "Select subnets in at least two availability zones."
     );
   });
 
-  it("restores saved subnets without a VPC and a typed namespace", async () => {
+  it("applies the defaults and keeps a typed namespace when the saved selection has no cluster", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
       discoverResponse(awsPayload())
@@ -1821,58 +1863,43 @@ describe("discoverResources", () => {
     expect(page.customs["aws-namespace-custom"].style.display).toBe("none");
   });
 
-  it("reports the subnet requirement when the cluster select is missing", () => {
+  it("requires a cluster when the cluster select is missing", () => {
     const page = renderDiscoveryPage(["aws-cluster-select"]);
     const handle = initializeDiscoveryPanel(page.browser.context);
-    expect(handle?.awsInfrastructureError()).toBe(
-      "Select subnets in at least two availability zones."
-    );
+    expect(handle?.awsInfrastructureError()).toBe("Select an EKS cluster.");
   });
 
-  it("blocks an AWS cluster that cannot take an access entry", async () => {
+  it("does not invent an undiscovered AWS cluster on restore, and names it in the cluster note", async () => {
     const page = renderDiscoveryPage();
-    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse(
-        awsPayload({
-          clusters: [
-            {
-              id: "legacy",
-              name: "legacy",
-              vpcId: "vpc-1",
-              authenticationMode: "CONFIG_MAP",
-              usable: false
-            }
-          ]
-        })
-      )
-    );
+    const bodies: unknown[] = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(init?.body ?? "{}"));
+      return discoverResponse(
+        awsPayload({ clusters: [awsCluster("eks-2"), awsCluster("eks-1")] })
+      );
+    });
     const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      { cluster: "eks-external", namespace: "team-a" },
+      "aws"
+    );
+
     await handle?.discoverResources("aws", "123456789012", "us-west-2");
-    expect(handle?.awsInfrastructureError()).toContain(
-      "Cluster legacy uses CONFIG_MAP authentication"
-    );
-  });
-
-  it("does not invent an undiscovered AWS cluster on restore", async () => {
-    const page = renderDiscoveryPage();
-    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse({
-        clusters: [
-          { id: "eks-1", name: "EKS One" },
-          { id: "eks-2", name: "EKS Two" }
-        ]
-      })
-    );
-    const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({ cluster: "eks-external" }, "aws");
-
-    await handle?.discoverResources("aws", "", "");
 
     const clusterSelect = page.selects["aws-cluster-select"];
     expect(clusterSelect.value).toBe("");
-    expect(
-      Array.from(clusterSelect.options).map((option) => option.value)
-    ).toEqual(["", "eks-1", "eks-2"]);
+    expect(optionValues(clusterSelect)).toEqual(["", "eks-1", "eks-2"]);
+    expect(page.awsClusterNote.hidden).toBe(false);
+    expect(fakeText(page.awsClusterNote)).toBe(
+      "The saved cluster eks-external wasn't found in us-west-2."
+    );
+    expect(checkedSubnets(page)).toEqual([]);
+    expect(page.customs["aws-namespace-custom"].value).toBe("team-a");
+    expect(bodies[0]).toHaveProperty("cluster", "eks-external");
+
+    // The held selection was used once, so the next discovery doesn't send it.
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
+    expect(bodies[1]).not.toHaveProperty("cluster");
   });
 
   it("renders an explicit empty namespaces array as no options, not the defaults", async () => {
@@ -1888,7 +1915,7 @@ describe("discoverResources", () => {
     ).toEqual(["", "__custom__"]);
   });
 
-  it("renders aws clusters, namespaces, VPCs, and a subnet checklist without custom or None options", async () => {
+  it("renders aws clusters, namespaces, the cluster VPC, and a subnet checklist without a custom option", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
       discoverResponse(awsPayload())
@@ -1896,18 +1923,13 @@ describe("discoverResources", () => {
     const handle = initializeDiscoveryPanel(page.browser.context);
     await handle?.discoverResources("aws", "123456789012", "us-west-2");
 
-    expect(page.awsStatus.textContent).toBe("Found 1 cluster(s), 1 VPC(s)");
-    const clusterSelect = page.selects["aws-cluster-select"];
-    expect(
-      Array.from(clusterSelect.options).map((option) => option.value)
-    ).toEqual(["", "eks-1"]);
-    const vpcSelect = page.selects["aws-vpc-select"];
-    expect(Array.from(vpcSelect.options).map((option) => option.value)).toEqual(
-      ["", "vpc-1"]
+    expect(page.awsStatus.textContent).toBe(
+      "Found 1 EKS cluster in us-west-2."
     );
-    expect(
-      Array.from(vpcSelect.options).map((option) => option.textContent)
-    ).not.toContain("None (optional)");
+    const clusterSelect = page.selects["aws-cluster-select"];
+    expect(optionValues(clusterSelect)).toEqual(["", "eks-1"]);
+    expect(page.awsVpcValue.textContent).toBe("main (vpc-1)");
+    expect(page.awsClusterNote.hidden).toBe(true);
     const boxes = fakeTree(page.awsSubnetsList).filter(
       (element) => element.tagName === "input"
     );
@@ -1936,19 +1958,17 @@ describe("discoverResources", () => {
     ]);
   });
 
-  it("labels an unusable CONFIG_MAP cluster and reports it as the infrastructure error", async () => {
+  it("disables an unusable CONFIG_MAP cluster and reports its note line for a selection made by code", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
       discoverResponse(
         awsPayload({
           clusters: [
-            {
-              id: "eks-1",
-              name: "eks-1",
-              vpcId: "vpc-1",
+            awsCluster("legacy", {
               authenticationMode: "CONFIG_MAP",
-              usable: false
-            }
+              usable: false,
+              unusableReason: "config-map"
+            })
           ]
         })
       )
@@ -1958,13 +1978,23 @@ describe("discoverResources", () => {
     await handle?.discoverResources("aws", "123456789012", "us-west-2");
 
     const clusterSelect = page.selects["aws-cluster-select"];
-    expect(
-      Array.from(clusterSelect.options).map((option) => option.textContent)
-    ).toContain("eks-1 (CONFIG_MAP authentication, cannot be used)");
-    expect(clusterSelect.value).toBe("eks-1");
-    expect(handle?.awsInfrastructureError()).toBe(
-      "Cluster eks-1 uses CONFIG_MAP authentication, which does not support access entries, so Radius cannot grant the deploy role access to it."
+    const option = clusterSelect.options.find(
+      (entry) => entry.value === "legacy"
     );
+    expect(option?.textContent).toBe("legacy (CONFIG_MAP authentication)");
+    expect(option?.disabled).toBe(true);
+    expect(clusterSelect.value).toBe("");
+    expect(handle?.awsInfrastructureError()).toBe("Select an EKS cluster.");
+
+    // The select can't pick a disabled option, so only code can select it.
+    clusterSelect.value = "legacy";
+    const command =
+      "aws eks update-cluster-config --name legacy --region us-west-2 --access-config authenticationMode=API_AND_CONFIG_MAP";
+    expect(handle?.awsInfrastructureError()).toBe(
+      `legacy uses CONFIG_MAP authentication, which doesn't support access entries. A cluster administrator can enable access entries with this command. After that, AWS doesn't allow a switch back to CONFIG_MAP. ${command}`
+    );
+    expect(page.awsClusterNote.hidden).toBe(false);
+    expect(fakeText(page.awsClusterNote)).toContain(command);
   });
 
   it.each([
@@ -1999,7 +2029,12 @@ describe("discoverResources", () => {
       );
 
       expect(page.selects["aws-cluster-select"].value).toBe("");
-      expect(page.selects["aws-vpc-select"].value).toBe("");
+      expect(page.selects["aws-cluster-select"].options[0].textContent).toBe(
+        "Discovering EKS clusters…"
+      );
+      expect(page.awsVpcValue.textContent).toBe(
+        "Select a cluster to see its VPC."
+      );
       expect(handle?.currentInfraSelection("aws")).toMatchObject({
         cluster: "",
         vpcId: "",
@@ -2012,6 +2047,9 @@ describe("discoverResources", () => {
         fail(new Error("denied"));
         await next;
         expect(page.selects["aws-cluster-select"].value).toBe("");
+        expect(page.selects["aws-cluster-select"].options[0].textContent).toBe(
+          "Clusters unavailable"
+        );
         expect(handle?.awsInfrastructureError()).not.toBe("");
       } else {
         fail(new Error("abandoned"));
@@ -2020,13 +2058,11 @@ describe("discoverResources", () => {
     }
   );
 
-  it("requires a subnet selection before AWS discovery has run", () => {
+  it("requires a cluster before AWS discovery has run", () => {
     const page = renderDiscoveryPage();
     const handle = initializeDiscoveryPanel(page.browser.context);
 
-    expect(handle?.awsInfrastructureError()).toBe(
-      "Select subnets in at least two availability zones."
-    );
+    expect(handle?.awsInfrastructureError()).toBe("Select an EKS cluster.");
   });
 
   it("notifies the page when the AWS infrastructure selection changes", async () => {
@@ -2979,5 +3015,1157 @@ describe("findAzureClusterResourceGroup", () => {
         (option) => option.value
       )
     ).toEqual(["", "__aks__:rg-1:shared-aks:0", "__aks__:rg-1:shared-aks:1"]);
+  });
+});
+
+describe("AWS cluster discovery", () => {
+  const ACCOUNT = "123456789012";
+  const REGION = "us-west-2";
+  const SAVED = {
+    cluster: "eks-1",
+    namespace: "team-a",
+    vpcId: "vpc-1",
+    subnetIds: "subnet-a,subnet-c"
+  };
+
+  // A discovery endpoint whose next answers the test sets one at a time.
+  function scriptedDiscovery(page: DiscoveryPage) {
+    const answers: Array<() => Promise<HttpResponse>> = [];
+    const requests: Array<Record<string, unknown>> = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      requests.push(JSON.parse(init?.body ?? "{}"));
+      const next = answers.shift();
+      if (!next) throw new Error("No discovery answer was scripted.");
+      return next();
+    });
+    return {
+      // The parsed body of each request, oldest first.
+      requests,
+      answer(data: Record<string, unknown>) {
+        answers.push(() => Promise.resolve(discoverResponse(data)));
+      },
+      fail(message: string) {
+        answers.push(() => Promise.reject(new Error(message)));
+      },
+      hold() {
+        let resolve: (response: HttpResponse) => void = () => {};
+        const pending = new Promise<HttpResponse>((done) => {
+          resolve = done;
+        });
+        answers.push(() => pending);
+        return (data: Record<string, unknown>) =>
+          resolve(discoverResponse(data));
+      }
+    };
+  }
+
+  function toggleSubnet(page: DiscoveryPage, id: string, checked: boolean) {
+    const box = fakeTree(page.awsSubnetsList).find(
+      (element) => element.id === `aws-subnet-${id}`
+    );
+    if (!box) throw new Error(`No checkbox for ${id}.`);
+    Object.assign(box, { checked });
+    box.dispatch("change");
+  }
+
+  it("renders a disabled option for each unusable cluster and never disables an Azure option", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) =>
+      JSON.parse(init?.body ?? "{}").provider === "aws" ?
+        discoverResponse(
+          awsPayload({
+            clusters: [
+              awsCluster("eks-1"),
+              awsCluster("old", {
+                status: "DELETING",
+                usable: false,
+                unusableReason: "status"
+              })
+            ]
+          })
+        )
+      : discoverResponse({
+          clusters: [{ id: "aks-1", name: "AKS One", resourceGroup: "rg-1" }],
+          resourceGroups: [{ id: "rg-1", name: "rg-1" }],
+          namespaces: ["default"]
+        })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    await handle?.discoverResources("azure", "", "");
+
+    const disabled = (id: string) =>
+      page.selects[id].options
+        .filter((option) => option.value !== "")
+        .map((option) => `${option.value}:${String(option.disabled)}`);
+    expect(disabled("aws-cluster-select")).toEqual(["eks-1:false", "old:true"]);
+    expect(
+      page.selects["aws-cluster-select"].options.map(
+        (option) => option.textContent
+      )
+    ).toEqual(["Select a cluster", "eks-1", "old (DELETING)"]);
+    for (const id of [
+      "azure-rg-select",
+      "azure-cluster-select",
+      "azure-namespace-select"
+    ]) {
+      expect(disabled(id).every((entry) => entry.endsWith(":false"))).toBe(
+        true
+      );
+    }
+  });
+
+  it("keeps the error kinds of a response for the status line", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [],
+        errors: { clusters: "AccessDenied" },
+        errorKinds: { clusters: "denied" }
+      })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.awsStatus.textContent).toBe(
+      "The signed-in identity can't list EKS clusters (eks:ListClusters)."
+    );
+    expect(page.selects["aws-cluster-select"].options[0].textContent).toBe(
+      "Clusters unavailable"
+    );
+  });
+
+  it.each([
+    ["one usable cluster beside an unusable one", ["eks-1"], ["old"], "eks-1"],
+    ["two usable clusters", ["eks-1", "eks-2"], [], ""],
+    ["no usable cluster", [], ["old"], ""]
+  ])(
+    "auto-selects a cluster only when exactly one is usable: %s",
+    async (_label, usable, unusable, expected) => {
+      const page = renderDiscoveryPage();
+      page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+        discoverResponse(
+          awsPayload({
+            clusters: [
+              ...usable.map((id) => awsCluster(id)),
+              ...unusable.map((id) =>
+                awsCluster(id, { usable: false, unusableReason: "status" })
+              )
+            ]
+          })
+        )
+      );
+      const handle = initializeDiscoveryPanel(page.browser.context);
+
+      await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+      expect(page.selects["aws-cluster-select"].value).toBe(expected);
+      expect(page.selects["aws-namespace-select"].value).toBe("default");
+      expect(checkedSubnets(page)).toEqual(
+        expected === "" ? [] : ["subnet-a", "subnet-b"]
+      );
+    }
+  );
+
+  it("treats a response that isn't an object as an empty cluster list", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () => jsonResponse([]));
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.awsStatus.textContent).toBe("No EKS clusters in us-west-2.");
+    expect(page.selects["aws-cluster-select"].options[0].textContent).toBe(
+      "No EKS clusters"
+    );
+    expect(handle?.awsInfrastructureError()).toBe("Select an EKS cluster.");
+  });
+
+  it("reports the status line of an unusable cluster selected by code", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        awsPayload({
+          clusters: [
+            awsCluster("old", {
+              status: "DELETING",
+              usable: false,
+              unusableReason: "status"
+            })
+          ]
+        })
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    page.selects["aws-cluster-select"].value = "old";
+
+    expect(handle?.awsInfrastructureError()).toBe(
+      "old is DELETING. Radius can use a cluster that is ACTIVE or UPDATING."
+    );
+  });
+
+  it("shows the empty-list label when the account has no clusters", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(awsPayload({ clusters: [] }))
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.selects["aws-cluster-select"].options[0].textContent).toBe(
+      "No EKS clusters"
+    );
+    expect(page.awsStatus.textContent).toBe("No EKS clusters in us-west-2.");
+  });
+
+  it("writes one cluster note line for each reason a cluster can't be used", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        awsPayload({
+          clusters: [
+            awsCluster("a-config", {
+              authenticationMode: "CONFIG_MAP",
+              usable: false,
+              unusableReason: "config-map"
+            }),
+            awsCluster("b-creating", {
+              status: "CREATING",
+              usable: false,
+              unusableReason: "status"
+            }),
+            awsCluster("c-denied", {
+              usable: false,
+              unusableReason: "not-described",
+              describeErrorKind: "denied"
+            }),
+            awsCluster("d-session", {
+              usable: false,
+              unusableReason: "not-described",
+              describeErrorKind: "credentials"
+            }),
+            awsCluster("e-other", {
+              usable: false,
+              unusableReason: "not-described",
+              describeErrorKind: "other"
+            }),
+            awsCluster("f-ok")
+          ]
+        })
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.awsClusterNote.hidden).toBe(false);
+    expect(page.awsClusterNote.children.map((row) => fakeText(row))).toEqual([
+      "a-config uses CONFIG_MAP authentication, which doesn't support access entries. A cluster administrator can enable access entries with this command. After that, AWS doesn't allow a switch back to CONFIG_MAP.aws eks update-cluster-config --name a-config --region us-west-2 --access-config authenticationMode=API_AND_CONFIG_MAP",
+      "b-creating is CREATING. Radius can use a cluster that is ACTIVE or UPDATING.",
+      "The signed-in identity can't read c-denied (eks:DescribeCluster).",
+      "The AWS CLI session ended before d-session could be read. Sign in, then select Refresh.",
+      "AWS didn't return the details of e-other. Select Refresh to try again."
+    ]);
+    const command = fakeTree(page.awsClusterNote).find(
+      (element) => element.tagName === "code"
+    );
+    expect(command?.textContent).toContain("--region us-west-2");
+    expect(page.selects["aws-cluster-select"].value).toBe("f-ok");
+
+    // The next discovery clears the note until its response arrives.
+    const pending = handle?.discoverResources("aws", ACCOUNT, "us-east-2");
+    expect(page.awsClusterNote.hidden).toBe(true);
+    await pending;
+  });
+
+  it("renders the AWS sign-in button in its own host and hides it after a discovery without a session error", async () => {
+    const page = renderDiscoveryPage();
+    let signedIn = false;
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      const provider = JSON.parse(init?.body ?? "{}").provider;
+      if (provider === "azure") {
+        return discoverResponse({
+          clusters: [],
+          resourceGroups: [],
+          errors: { clusters: "Azure CLI sign-in is required." },
+          remediation: {
+            id: "azure-cli-login",
+            params: {
+              tenantId: "11111111-2222-3333-4444-555555555555",
+              nextStep: "refresh-discovery"
+            }
+          }
+        });
+      }
+      return discoverResponse(
+        signedIn ? awsPayload() : (
+          {
+            clusters: [],
+            errors: { clusters: "Token has expired" },
+            errorKinds: { clusters: "credentials" },
+            remediation: {
+              id: "aws-cli-login",
+              params: { nextStep: "refresh-discovery" }
+            }
+          }
+        )
+      );
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context, {
+      mutationNonce: "nonce-1092"
+    });
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    await handle?.discoverResources(
+      "azure",
+      "",
+      "11111111-2222-3333-4444-555555555555"
+    );
+
+    expect(page.awsStatus.textContent).toBe(
+      "The AWS CLI has no valid session. Sign in, then select Refresh."
+    );
+    expect(page.awsRemediation.hidden).toBe(false);
+    expect(fakeText(page.awsRemediation)).toContain("Sign in to AWS CLI");
+    expect(fakeText(page.awsRemediation)).toContain("aws sso login");
+    expect(
+      fakeTree(page.awsRemediation).some((element) =>
+        element.id.startsWith("aws-discover-login")
+      )
+    ).toBe(true);
+    // The Azure button keeps its own host, prefix, and tenant.
+    expect(page.azureRemediation.hidden).toBe(false);
+    expect(fakeText(page.azureRemediation)).toContain(
+      "az login --use-device-code --tenant 11111111-2222-3333-4444-555555555555"
+    );
+    expect(
+      fakeTree(page.azureRemediation).some((element) =>
+        element.id.startsWith("azure-discover-login")
+      )
+    ).toBe(true);
+    expect(fakeText(page.awsRemediation)).not.toContain("az login");
+
+    page.browser.net.handle("/api/run-remediation", (init) => {
+      expect(JSON.parse(init?.body ?? "{}")).toEqual({
+        id: "aws-cli-login",
+        params: { nextStep: "refresh-discovery" },
+        confirmed: false
+      });
+      return jsonResponse({ success: true, message: "Handed off." });
+    });
+    fakeTree(page.awsRemediation)
+      .find((element) => element.textContent === COMMAND_RUN_LABEL)
+      ?.dispatch("click");
+    await flushPromises();
+    expect(page.browser.net.calls.at(-1)?.url).toBe("/api/run-remediation");
+    expect(fakeText(page.awsRemediation)).toContain(
+      "refresh resource discovery"
+    );
+
+    signedIn = true;
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(page.awsRemediation.hidden).toBe(true);
+    expect(page.awsRemediation.children).toEqual([]);
+    expect(page.azureRemediation.hidden).toBe(false);
+
+    signedIn = false;
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(page.awsRemediation.hidden).toBe(false);
+    handle?.teardown();
+    expect(page.awsRemediation.hidden).toBe(true);
+    expect(page.azureRemediation.hidden).toBe(true);
+  });
+
+  it("doesn't let the AWS sign-in button run without a mutation nonce", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [],
+        errors: { clusters: "Token has expired" },
+        errorKinds: { clusters: "credentials" },
+        remediation: {
+          id: "aws-cli-login",
+          params: { nextStep: "refresh-discovery" }
+        }
+      })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    const runButton = fakeTree(page.awsRemediation).find(
+      (element) => element.textContent === COMMAND_RUN_LABEL
+    );
+    if (!runButton) throw new Error("the sign-in remediation has no Run");
+    expect(Reflect.get(runButton, "disabled")).toBe(true);
+    expect(fakeText(page.awsRemediation)).toContain(
+      "Reload the Radius canvas before asking Copilot to run this command."
+    );
+  });
+
+  it("hides the AWS sign-in button when a discovery request fails", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer({
+      clusters: [],
+      errors: { clusters: "Token has expired" },
+      errorKinds: { clusters: "credentials" },
+      remediation: {
+        id: "aws-cli-login",
+        params: { nextStep: "refresh-discovery" }
+      }
+    });
+    discovery.fail("network down");
+    const handle = initializeDiscoveryPanel(page.browser.context, {
+      mutationNonce: "nonce-1092"
+    });
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(page.awsRemediation.hidden).toBe(false);
+    await handle?.discoverResources("aws", ACCOUNT, "us-east-2");
+
+    expect(page.awsStatus.textContent).toBe("Discovery error: network down");
+    expect(page.awsRemediation.hidden).toBe(true);
+  });
+
+  it("keeps the selected cluster, namespace, and subnets across Refresh without checking the defaults", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(awsPayload({ namespaces: ["default", "team-a"] }));
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(checkedSubnets(page)).toEqual(["subnet-a", "subnet-b"]);
+
+    page.selects["aws-namespace-select"].value = "team-a";
+    page.selects["aws-namespace-select"].dispatch("change");
+    toggleSubnet(page, "subnet-b", false);
+    toggleSubnet(page, "subnet-c", true);
+    const release = discovery.hold();
+    const refresh = handle?.discoverResources("aws", ACCOUNT, REGION, {
+      keepSelection: true
+    });
+    // While the request runs the form is cleared, but the selection is held,
+    // and the request names its cluster.
+    expect(page.selects["aws-cluster-select"].value).toBe("");
+    await flushPromises();
+    expect(discovery.requests[1]).toHaveProperty("cluster", "eks-1");
+    release(awsPayload({ namespaces: ["default", "team-a"] }));
+    await refresh;
+
+    expect(handle?.currentInfraSelection("aws")).toEqual({
+      cluster: "eks-1",
+      namespace: "team-a",
+      vpcId: "vpc-1",
+      subnetIds: "subnet-a,subnet-c"
+    });
+    expect(page.awsRestoreNote.hidden).toBe(true);
+  });
+
+  it("applies the defaults on Refresh when no cluster is selected", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(
+      awsPayload({ clusters: [awsCluster("eks-1"), awsCluster("eks-2")] })
+    );
+    discovery.answer(awsPayload());
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(page.selects["aws-cluster-select"].value).toBe("");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION, {
+      keepSelection: true
+    });
+
+    expect(page.selects["aws-cluster-select"].value).toBe("eks-1");
+    expect(checkedSubnets(page)).toEqual(["subnet-a", "subnet-b"]);
+  });
+
+  it("doesn't hold the selection when Refresh runs for another account or region", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(awsPayload());
+    discovery.answer(
+      awsPayload({ clusters: [awsCluster("eks-1"), awsCluster("eks-2")] })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    await handle?.discoverResources("aws", ACCOUNT, "us-east-2", {
+      keepSelection: true
+    });
+
+    expect(page.selects["aws-cluster-select"].value).toBe("");
+  });
+
+  it.each([
+    [
+      "the request fails",
+      (d: ReturnType<typeof scriptedDiscovery>) => d.fail("network down")
+    ],
+    [
+      "the cluster list fails",
+      (d: ReturnType<typeof scriptedDiscovery>) =>
+        d.answer({
+          clusters: [],
+          errors: { clusters: "Throttling" },
+          errorKinds: { clusters: "other" }
+        })
+    ],
+    [
+      "the response has a top-level error",
+      (d: ReturnType<typeof scriptedDiscovery>) =>
+        d.answer({ error: "server busy" })
+    ]
+  ])(
+    "keeps a saved selection when %s, then restores it on the next discovery",
+    async (_label, firstAnswer) => {
+      const page = renderDiscoveryPage();
+      const discovery = scriptedDiscovery(page);
+      firstAnswer(discovery);
+      discovery.answer(awsPayload({ namespaces: ["default", "team-a"] }));
+      const handle = initializeDiscoveryPanel(page.browser.context);
+      handle?.setPendingInfraSelection(SAVED, "aws");
+
+      await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+      expect(page.selects["aws-cluster-select"].value).toBe("");
+      expect(page.selects["aws-cluster-select"].options[0].textContent).toBe(
+        "Clusters unavailable"
+      );
+      expect(handle?.awsInfrastructureError()).toBe("Select an EKS cluster.");
+      expect(page.customs["aws-namespace-custom"].value).toBe("team-a");
+
+      await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+      expect(discovery.requests.map((body) => body.cluster)).toEqual([
+        "eks-1",
+        "eks-1"
+      ]);
+      expect(handle?.currentInfraSelection("aws")).toEqual(SAVED);
+      expect(page.selects["aws-namespace-select"].value).toBe("team-a");
+      expect(handle?.awsInfrastructureError()).toBe("");
+    }
+  );
+
+  it("selects the saved cluster but holds its subnets while the subnet list is denied", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(
+      awsPayload({
+        subnets: [],
+        errors: { subnets: "UnauthorizedOperation" },
+        errorKinds: { subnets: "denied" }
+      })
+    );
+    discovery.answer(awsPayload());
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(SAVED, "aws");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.selects["aws-cluster-select"].value).toBe("eks-1");
+    expect(page.awsRestoreNote.hidden).toBe(true);
+    expect(fakeText(page.awsSubnetsList)).toBe("Subnets unavailable.");
+    expect(handle?.awsInfrastructureError()).toBe(
+      "Subnets couldn't be listed."
+    );
+    expect(page.awsStatus.textContent).toBe(
+      "Found 1 EKS cluster in us-west-2. The signed-in identity can't list subnets (ec2:DescribeSubnets)."
+    );
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(checkedSubnets(page)).toEqual(["subnet-a", "subnet-c"]);
+    expect(handle?.currentInfraSelection("aws")).toEqual(SAVED);
+  });
+
+  it("treats a subnet error kind it does not know as a failed list", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(
+      awsPayload({
+        subnets: [],
+        errors: { subnets: "Throttling" },
+        errorKinds: { subnets: "throttled" }
+      })
+    );
+    discovery.answer(awsPayload());
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(SAVED, "aws");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(fakeText(page.awsSubnetsList)).toBe("Subnets unavailable.");
+    expect(handle?.awsInfrastructureError()).toBe(
+      "Subnets couldn't be listed."
+    );
+    expect(page.awsStatus.textContent).toBe(
+      "Found 1 EKS cluster in us-west-2. Can't list subnets: Throttling"
+    );
+
+    // The saved subnets were held, so the next discovery restores them.
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(checkedSubnets(page)).toEqual(["subnet-a", "subnet-c"]);
+  });
+
+  it("names saved subnets that are no longer usable", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        awsPayload({
+          subnets: [
+            awsSubnet("subnet-a", "us-west-2a", "private"),
+            awsSubnet("subnet-b", "us-west-2b", "private"),
+            awsSubnet("subnet-lz", "us-west-2-lax-1a", "private", {
+              zoneKind: "local-zone"
+            })
+          ]
+        })
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      { cluster: "eks-1", subnetIds: "subnet-a,subnet-lz,subnet-gone" },
+      "aws"
+    );
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(checkedSubnets(page)).toEqual(["subnet-a"]);
+    expect(page.awsRestoreNote.hidden).toBe(false);
+    expect(page.awsRestoreNote.textContent).toBe(
+      "These saved subnets were removed from the selection: subnet-lz (Local Zone), subnet-gone (not found in the cluster's VPC)."
+    );
+  });
+
+  it("clears a saved cluster that can't be used even when another cluster is the only usable one", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        awsPayload({
+          clusters: [
+            awsCluster("eks-1", {
+              authenticationMode: "CONFIG_MAP",
+              usable: false,
+              unusableReason: "config-map"
+            }),
+            awsCluster("eks-2")
+          ]
+        })
+      )
+    );
+    const onInfrastructureChange = vi.fn();
+    const handle = initializeDiscoveryPanel(page.browser.context, {
+      mutationNonce: "nonce",
+      onInfrastructureChange
+    });
+    handle?.setPendingInfraSelection(SAVED, "aws");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.selects["aws-cluster-select"].value).toBe("");
+    expect(checkedSubnets(page)).toEqual([]);
+    expect(handle?.awsInfrastructureError()).toBe("Select an EKS cluster.");
+    expect(onInfrastructureChange).toHaveBeenCalled();
+    expect(fakeText(page.awsClusterNote)).toContain(
+      "eks-1 uses CONFIG_MAP authentication"
+    );
+    expect(fakeText(page.awsClusterNote)).not.toContain("wasn't found");
+    expect(page.customs["aws-namespace-custom"].value).toBe("team-a");
+  });
+
+  it("holds a saved selection when AWS doesn't describe its cluster", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(
+      awsPayload({
+        clusters: [
+          awsCluster("eks-1", {
+            usable: false,
+            unusableReason: "not-described",
+            describeErrorKind: "other"
+          }),
+          awsCluster("eks-2")
+        ]
+      })
+    );
+    discovery.answer(
+      awsPayload({ clusters: [awsCluster("eks-1"), awsCluster("eks-2")] })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(SAVED, "aws");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.selects["aws-cluster-select"].value).toBe("");
+    expect(fakeText(page.awsClusterNote)).not.toContain("wasn't found");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION, {
+      keepSelection: true
+    });
+
+    expect(discovery.requests[1]).toHaveProperty("cluster", "eks-1");
+    expect(handle?.currentInfraSelection("aws")).toEqual(SAVED);
+  });
+
+  it("drops a saved selection when discovery moves to another account or region", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.fail("network down");
+    discovery.answer(awsPayload());
+    discovery.answer(awsPayload());
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(SAVED, "aws");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    await handle?.discoverResources("aws", "999988887777", REGION);
+
+    expect(discovery.requests[1]).not.toHaveProperty("cluster");
+    expect(checkedSubnets(page)).toEqual(["subnet-a", "subnet-b"]);
+    expect(page.selects["aws-namespace-select"].value).toBe("default");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(checkedSubnets(page)).toEqual(["subnet-a", "subnet-b"]);
+  });
+
+  it("keeps the account tie of a selection held across a subtab switch", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.fail("network down");
+    discovery.answer(awsPayload());
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(SAVED, "aws");
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    handle?.preserveInfraSelection("aws");
+    await handle?.discoverResources("aws", ACCOUNT, "us-east-2");
+
+    // The hold still belongs to us-west-2, so us-east-2 drops it.
+    expect(discovery.requests[1]).not.toHaveProperty("cluster");
+    expect(checkedSubnets(page)).toEqual(["subnet-a", "subnet-b"]);
+  });
+
+  it("holds the AWS selection on screen across a subtab switch", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    const namespaces = ["default", "team-a"];
+    discovery.answer(awsPayload({ namespaces }));
+    discovery.answer(
+      awsPayload({
+        clusters: [awsCluster("eks-1"), awsCluster("eks-2")],
+        namespaces
+      })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    page.selects["aws-namespace-select"].value = "team-a";
+    toggleSubnet(page, "subnet-b", false);
+    toggleSubnet(page, "subnet-c", true);
+
+    handle?.preserveInfraSelection("aws");
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(discovery.requests[1]).toHaveProperty("cluster", "eks-1");
+    expect(handle?.currentInfraSelection("aws")).toEqual(SAVED);
+  });
+
+  it("holds the Azure selection on screen across a subtab switch", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    const azure = {
+      clusters: [{ id: "aks-1", name: "AKS One", resourceGroup: "rg-1" }],
+      resourceGroups: [{ id: "rg-1", name: "rg-1" }],
+      namespaces: ["default"]
+    };
+    discovery.answer(azure);
+    discovery.answer(azure);
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("azure", "", "");
+    page.selects["azure-namespace-select"].value = "__custom__";
+    page.customs["azure-namespace-custom"].value = "team-typed";
+
+    handle?.preserveInfraSelection("azure");
+    await handle?.discoverResources("azure", "", "");
+
+    expect(handle?.currentInfraSelection("azure").namespace).toBe("team-typed");
+  });
+
+  it("drops a held selection when the developer picks a cluster", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.fail("network down");
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    discovery.answer(awsPayload());
+    handle?.setPendingInfraSelection(SAVED, "aws");
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    page.selects["aws-cluster-select"].dispatch("change");
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(discovery.requests[1]).not.toHaveProperty("cluster");
+    expect(checkedSubnets(page)).toEqual(["subnet-a", "subnet-b"]);
+  });
+
+  it("copies a namespace the developer picks into the held selection", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.fail("network down");
+    discovery.answer(awsPayload({ namespaces: ["default", "team-b"] }));
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(SAVED, "aws");
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    // The failed request left the held namespace in the custom field.
+    expect(page.selects["aws-namespace-select"].value).toBe("__custom__");
+    page.customs["aws-namespace-custom"].value = "team-b";
+    page.customs["aws-namespace-custom"].dispatch("change");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(page.selects["aws-namespace-select"].value).toBe("team-b");
+    expect(handle?.currentInfraSelection("aws").cluster).toBe("eks-1");
+  });
+
+  it("doesn't hold a selection when the developer picks a namespace", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(awsPayload({ namespaces: ["default", "team-b"] }));
+    discovery.answer(awsPayload({ namespaces: ["default", "team-b"] }));
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    page.selects["aws-namespace-select"].value = "team-b";
+    page.selects["aws-namespace-select"].dispatch("change");
+    expect(handle?.currentInfraSelection("aws").namespace).toBe("team-b");
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(discovery.requests[1]).not.toHaveProperty("cluster");
+    expect(page.selects["aws-namespace-select"].value).toBe("default");
+  });
+
+  it("doesn't let a stale response change the held selection", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    const releaseFirst = discovery.hold();
+    const releaseSecond = discovery.hold();
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    const other = { ...SAVED, namespace: "team-other" };
+    handle?.setPendingInfraSelection(other, "aws");
+    const first = handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    handle?.setPendingInfraSelection(SAVED, "aws");
+    const second = handle?.discoverResources("aws", ACCOUNT, REGION);
+    releaseFirst(awsPayload({ clusters: [] }));
+    await first;
+
+    expect(page.selects["aws-cluster-select"].options[0].textContent).toBe(
+      "Discovering EKS clusters…"
+    );
+
+    releaseSecond(awsPayload({ namespaces: ["default", "team-a"] }));
+    await second;
+    expect(handle?.currentInfraSelection("aws")).toEqual(SAVED);
+  });
+
+  it("drops a held AWS selection when an Azure selection is set", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.fail("network down");
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    discovery.answer(awsPayload());
+    handle?.setPendingInfraSelection(SAVED, "aws");
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    handle?.setPendingInfraSelection({ cluster: "aks-1" }, "azure");
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(discovery.requests[1]).not.toHaveProperty("cluster");
+  });
+
+  it("notes that the namespace list has only default when the cluster's namespaces can't be read", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(
+      awsPayload({
+        errors: { namespaces: "kubectl: connection refused" },
+        errorKinds: { namespaces: "other" }
+      })
+    );
+    discovery.answer(awsPayload());
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.awsNamespaceNote.hidden).toBe(false);
+    expect(fakeText(page.awsNamespaceNote)).toBe(
+      "Can't list the namespaces in eks-1. Use default, or enter a custom namespace. Deploy creates the namespace if the cluster doesn't have it."
+    );
+    expect(page.awsNamespaceNote.textContent).not.toContain("connection");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+    expect(page.awsNamespaceNote.hidden).toBe(true);
+  });
+
+  it("doesn't note the namespace list when no cluster is selected", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(
+      awsPayload({ clusters: [awsCluster("eks-1"), awsCluster("eks-2")] })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(page.selects["aws-cluster-select"].value).toBe("");
+    expect(page.awsNamespaceNote.hidden).toBe(true);
+  });
+
+  it("doesn't send a saved cluster name that EKS can't have", async () => {
+    const page = renderDiscoveryPage();
+    const discovery = scriptedDiscovery(page);
+    discovery.answer(awsPayload());
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({ ...SAVED, cluster: "eks 1;" }, "aws");
+
+    await handle?.discoverResources("aws", ACCOUNT, REGION);
+
+    expect(discovery.requests[0]).not.toHaveProperty("cluster");
+  });
+
+  describe("when the developer picks a cluster", () => {
+    const TWO_CLUSTERS = [awsCluster("eks-1"), awsCluster("eks-2")];
+
+    async function discoverTwoClusters() {
+      const page = renderDiscoveryPage();
+      const discovery = scriptedDiscovery(page);
+      discovery.answer(awsPayload({ clusters: TWO_CLUSTERS }));
+      const handle = initializeDiscoveryPanel(page.browser.context);
+      await handle?.discoverResources("aws", ACCOUNT, REGION);
+      return { page, discovery, handle };
+    }
+
+    function pickCluster(page: DiscoveryPage, cluster: string) {
+      page.selects["aws-cluster-select"].value = cluster;
+      page.selects["aws-cluster-select"].dispatch("change");
+    }
+
+    it("lists the namespaces of that cluster", async () => {
+      const { page, discovery } = await discoverTwoClusters();
+      const release = discovery.hold();
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      const namespaceSelect = page.selects["aws-namespace-select"];
+      expect(namespaceSelect.disabled).toBe(true);
+      expect(discovery.requests[1]).toEqual({
+        provider: "aws",
+        accountId: ACCOUNT,
+        region: REGION,
+        cluster: "eks-2"
+      });
+      release(
+        awsPayload({
+          clusters: TWO_CLUSTERS,
+          namespaces: ["default", "team-b"]
+        })
+      );
+      await flushPromises();
+
+      expect(optionValues(namespaceSelect)).toContain("team-b");
+      expect(namespaceSelect.value).toBe("default");
+      expect(namespaceSelect.disabled).toBe(false);
+      expect(page.awsNamespaceNote.hidden).toBe(true);
+      expect(page.selects["aws-cluster-select"].value).toBe("eks-2");
+    });
+
+    it("blocks Create until the namespaces of that cluster are read", async () => {
+      const page = renderDiscoveryPage();
+      const discovery = scriptedDiscovery(page);
+      discovery.answer(awsPayload({ clusters: TWO_CLUSTERS }));
+      // The page reads the error each time the panel reports a change.
+      const createErrors: string[] = [];
+      let handle: DiscoveryPanelHandle | null = null;
+      handle = initializeDiscoveryPanel(page.browser.context, {
+        mutationNonce: "",
+        onInfrastructureChange: () => {
+          createErrors.push(handle?.awsInfrastructureError() ?? "");
+        }
+      });
+      await handle?.discoverResources("aws", ACCOUNT, REGION);
+      const release = discovery.hold();
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      expect(createErrors.at(-1)).toBe("Wait for the namespace list to load.");
+      release(awsPayload({ clusters: TWO_CLUSTERS }));
+      await flushPromises();
+
+      expect(createErrors.at(-1)).toBe("");
+    });
+
+    it("shows only default and the note when the request fails", async () => {
+      const { page, discovery } = await discoverTwoClusters();
+      discovery.fail("network down");
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      const namespaceSelect = page.selects["aws-namespace-select"];
+      expect(namespaceSelect.disabled).toBe(false);
+      expect(namespaceSelect.value).toBe("default");
+      expect(
+        optionValues(namespaceSelect).filter(
+          (value) => value !== "" && value !== "__custom__"
+        )
+      ).toEqual(["default"]);
+      expect(fakeText(page.awsNamespaceNote)).toBe(
+        "Can't list the namespaces in eks-2. Use default, or enter a custom namespace. Deploy creates the namespace if the cluster doesn't have it."
+      );
+    });
+
+    it("clears the cluster and keeps Create blocked when the response marks it unusable", async () => {
+      const page = renderDiscoveryPage();
+      const discovery = scriptedDiscovery(page);
+      discovery.answer(awsPayload({ clusters: TWO_CLUSTERS }));
+      const createErrors: string[] = [];
+      let handle: DiscoveryPanelHandle | null = null;
+      handle = initializeDiscoveryPanel(page.browser.context, {
+        mutationNonce: "",
+        onInfrastructureChange: () => {
+          createErrors.push(handle?.awsInfrastructureError() ?? "");
+        }
+      });
+      await handle?.discoverResources("aws", ACCOUNT, REGION);
+      discovery.answer(
+        awsPayload({
+          clusters: [
+            awsCluster("eks-1"),
+            awsCluster("eks-2", {
+              status: "DELETING",
+              usable: false,
+              unusableReason: "status"
+            })
+          ]
+        })
+      );
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      const clusterSelect = page.selects["aws-cluster-select"];
+      expect(clusterSelect.value).toBe("");
+      const option = clusterSelect.options.find(
+        (entry) => entry.value === "eks-2"
+      );
+      expect(option?.textContent).toBe("eks-2 (DELETING)");
+      expect(option?.disabled).toBe(true);
+      expect(fakeText(page.awsClusterNote)).toBe(
+        "eks-2 is DELETING. Radius can use a cluster that is ACTIVE or UPDATING."
+      );
+      expect(handle?.currentInfraSelection("aws")).toMatchObject({
+        cluster: "",
+        subnetIds: ""
+      });
+      expect(createErrors.at(-1)).toBe("Select an EKS cluster.");
+      expect(handle?.awsInfrastructureError()).toBe("Select an EKS cluster.");
+    });
+
+    it("keeps the cluster and Create open when only its namespaces can't be read", async () => {
+      const { page, discovery, handle } = await discoverTwoClusters();
+      discovery.answer(
+        awsPayload({
+          clusters: TWO_CLUSTERS,
+          errors: { namespaces: "Forbidden" },
+          errorKinds: { namespaces: "denied" }
+        })
+      );
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      expect(page.selects["aws-cluster-select"].value).toBe("eks-2");
+      expect(page.awsNamespaceNote.hidden).toBe(false);
+      expect(handle?.awsInfrastructureError()).toBe("");
+    });
+
+    it("hides a custom namespace typed for the previous cluster", async () => {
+      const { page, discovery } = await discoverTwoClusters();
+      discovery.answer(awsPayload({ clusters: TWO_CLUSTERS }));
+      const namespaceSelect = page.selects["aws-namespace-select"];
+      const custom = page.customs["aws-namespace-custom"];
+      namespaceSelect.value = "__custom__";
+      namespaceSelect.dispatch("change");
+      custom.value = "team-x";
+      expect(custom.style.display).toBe("");
+
+      pickCluster(page, "eks-2");
+      await flushPromises();
+
+      expect(namespaceSelect.value).toBe("default");
+      expect(custom.style.display).toBe("none");
+    });
+
+    it("drops the namespaces of a cluster that is no longer selected", async () => {
+      const { page, discovery } = await discoverTwoClusters();
+      const releaseFirst = discovery.hold();
+      discovery.answer(
+        awsPayload({
+          clusters: TWO_CLUSTERS,
+          namespaces: ["default", "team-1"]
+        })
+      );
+
+      pickCluster(page, "eks-2");
+      pickCluster(page, "eks-1");
+      await flushPromises();
+      releaseFirst(
+        awsPayload({
+          clusters: TWO_CLUSTERS,
+          namespaces: ["default", "team-2"]
+        })
+      );
+      await flushPromises();
+
+      const values = optionValues(page.selects["aws-namespace-select"]);
+      expect(values).toContain("team-1");
+      expect(values).not.toContain("team-2");
+    });
+
+    it("drops the namespaces when a full discovery starts", async () => {
+      const { page, discovery, handle } = await discoverTwoClusters();
+      const releaseFirst = discovery.hold();
+      discovery.answer(
+        awsPayload({
+          clusters: TWO_CLUSTERS,
+          namespaces: ["default", "team-full"]
+        })
+      );
+
+      pickCluster(page, "eks-2");
+      await handle?.discoverResources("aws", ACCOUNT, REGION, {
+        keepSelection: true
+      });
+      releaseFirst(
+        awsPayload({
+          clusters: TWO_CLUSTERS,
+          namespaces: ["default", "team-stale"]
+        })
+      );
+      await flushPromises();
+
+      expect(discovery.requests[2]).toHaveProperty("cluster", "eks-2");
+      const namespaceSelect = page.selects["aws-namespace-select"];
+      const values = optionValues(namespaceSelect);
+      expect(values).toContain("team-full");
+      expect(values).not.toContain("team-stale");
+      expect(namespaceSelect.disabled).toBe(false);
+      expect(handle?.awsInfrastructureError()).toBe("");
+    });
   });
 });

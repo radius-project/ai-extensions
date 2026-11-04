@@ -125,6 +125,7 @@ import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
+import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
 import {
   appParams,
   resolveDeployParams,
@@ -363,7 +364,10 @@ import {
   graphRepairHandoffMessage,
   type GraphRepairRequest
 } from "./graph-model-repair.js";
-import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
+import {
+  createGhNamespaceClaimsPorts,
+  createSelectedNamespaceClaimsPorts
+} from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import type { EnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import {
@@ -4353,11 +4357,12 @@ export function createEnvironmentOperationExecution(
           );
           if (attachment.isShuttingDown()) return { shouldMonitor: false };
           return runEnvironmentOperationWorkflow(op, executor, {
-            preflightRepoAdmin: (repo, selectedExecutor) =>
+            preflightRepoAdmin: (repo, selectedExecutor, assertActive) =>
               preflightRepoAdmin(
                 repo,
                 selectedExecutor,
-                GH_COMMAND_PRESENTATION
+                GH_COMMAND_PRESENTATION,
+                assertActive
               ),
             guardStopBoundary: (operation, boundary) =>
               attachment.isShuttingDown() ?
@@ -5627,12 +5632,14 @@ export function createProductionCanvasServerRuntime(
     createAwsEnvironmentAccess<EnvironmentOperationRecord>({
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
+      environments: createGhNamespaceClaimsPorts(cliExec),
       sleep: sleepMs,
       now: () => Date.now(),
       isStopRequested: shouldStop,
       operationId: (operation) => operation.operationId,
       operations: {
         enterStage,
+        setStageState,
         addLegacyStep,
         setContext,
         touch: (operation) => {
@@ -6011,6 +6018,15 @@ export function createProductionCanvasServerRuntime(
         });
       }),
     readProcessEnv: () => process.env,
+    awsTrustRepair: createAwsTrustRepairService({
+      awsEnabled,
+      readInstanceState: (instanceId) =>
+        canvasServer.instances.get(instanceId)?.state,
+      cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
+      readEnvironmentTarget: createEnvironmentTargetReader(runCommand),
+      repair: (input) => awsEnvironmentAccess.repair(input),
+      errorMessage
+    }),
     setTimer: (callback, ms) => setTimeout(callback, ms),
     // Declared as a getter for the same temporal-dead-zone reason as the cache
     // above: the deploy services are composed further down, after the workflow
@@ -6500,8 +6516,8 @@ export function createProductionCanvasServerRuntime(
       return guardStopBoundary(input);
     },
     runAzCommand: (args) => runCliCommand("az", args),
-    preflightRepoAdmin: (repo, executor) =>
-      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+    preflightRepoAdmin: (repo, executor, assertActive) =>
+      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION, assertActive),
     preflightGhcrPackageWriteAccess: (executor) =>
       preflightGhcrPackageWriteAccess(
         getGhPackageCredentials,

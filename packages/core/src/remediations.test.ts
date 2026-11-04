@@ -26,7 +26,7 @@ const VALID_PARAMS: Readonly<Record<RemediationId, Record<string, string>>> = {
   "azure-cli-install": { tenantId: TENANT },
   "azure-cli-login": { tenantId: TENANT },
   "azure-subscription-set": { subscriptionId: SUBSCRIPTION },
-  "aws-cli-login": {},
+  "aws-cli-login": { nextStep: "refresh-discovery" },
   "github-cli-login": {},
   "github-packages-scope": { login: "octocat" },
   "github-workflow-scope": {},
@@ -452,6 +452,61 @@ describe("aws remediation", () => {
     expect(remediation.argv).toEqual([["aws", "sso", "login"]]);
     expect(remediation.confirmBody).toContain("aws configure");
     expect(remediation.impact).toBe("low");
+    expect(remediation.params).toEqual({});
+    expect(remediation.followUp).toBe(
+      "After the login finishes, return to the Radius canvas and click Verify again."
+    );
+  });
+
+  it("uses the discovery follow-up without changing the login command", () => {
+    const remediation = build("aws-cli-login", {
+      nextStep: "refresh-discovery"
+    });
+
+    expect(remediation.params).toEqual({ nextStep: "refresh-discovery" });
+    expect(remediation.argv).toEqual([["aws", "sso", "login"]]);
+    expect(remediation.followUp).toBe(
+      "After the login finishes, return to the Radius canvas and refresh resource discovery."
+    );
+  });
+
+  it.each(["verify-credentials", "run arbitrary text", 17])(
+    "drops an unsupported login follow-up value %j",
+    (nextStep) => {
+      const remediation = build("aws-cli-login", { nextStep });
+
+      expect(remediation.params).toEqual({});
+      expect(remediation.followUp).toBe(
+        "After the login finishes, return to the Radius canvas and click Verify again."
+      );
+    }
+  );
+
+  it("describes the discovery-specific login to the agent", () => {
+    const message = remediationSessionMessage(
+      build("aws-cli-login", { nextStep: "refresh-discovery" })
+    );
+
+    expect(message.prompt).toContain(
+      "The Radius canvas needs an active AWS CLI session before it can discover AWS resources."
+    );
+    expect(message.prompt).toContain(
+      "Then tell the user: After the login finishes, return to the Radius canvas and refresh resource discovery."
+    );
+    expect(message.displayPrompt).toBe(
+      "Signing in to AWS CLI so the Radius canvas can refresh AWS resource discovery."
+    );
+  });
+
+  it("keeps the credential verification login prompt", () => {
+    const message = remediationSessionMessage(build("aws-cli-login", {}));
+
+    expect(message.prompt).toContain(
+      "The Radius canvas needs an active AWS CLI session before it can verify these credentials."
+    );
+    expect(message.displayPrompt).toBe(
+      "Signing in to AWS CLI so the Radius canvas can verify these AWS credentials."
+    );
   });
 });
 

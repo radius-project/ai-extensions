@@ -3,6 +3,8 @@
 // permission policy, and the AWS CLI version gate. No I/O: callers run the
 // `aws` CLI and hand the parsed documents in.
 
+import { buildEnvironmentSuffix } from "./oidc-subject.js";
+
 export const AWS_CLI_MINIMUM_VERSION = "2.15.3";
 export const AWS_CLI_INSTALL_URL =
   "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html";
@@ -313,6 +315,89 @@ export function trustedGitHubSubjects(
 }
 
 /**
+ * The exact GitHub OIDC subjects this trust policy lets GitHub's AWS tokens
+ * sign in with. Unlike `trustedGitHubSubjects`, a subject counts only when its
+ * statement accepts GitHub's audience, has no condition Radius cannot read, and
+ * every `sub` constraint on it accepts the subject. Patterns are left out.
+ */
+export function acceptedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" &&
+      isGitHubStatement(statement, providerArn) &&
+      acceptsGitHubAudience(statement)
+  ).flatMap((statement) =>
+    subjectsOf(statement).filter(
+      (subject) => !/[*?]/.test(subject) && acceptsSubject(statement, subject)
+    )
+  );
+}
+
+/**
+ * The subjects in `subjects` that a GitHub Allow statement in this trust
+ * policy already covers in a way adding a plain statement would widen: one
+ * that names the subject but excludes it with another `sub` constraint, or
+ * one whose `sub` constraints accept it, patterns included, under conditions
+ * Radius cannot read or for another audience.
+ */
+export function restrictedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  const statements = policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" && isGitHubStatement(statement, providerArn)
+  );
+  return subjects.filter((subject) =>
+    statements.some(
+      (statement) =>
+        subjectsOf(statement).includes(subject) ||
+        (!acceptsGitHubAudience(statement) &&
+          acceptsSubject(statement, subject))
+    )
+  );
+}
+
+// A subject is `claim:value` pairs joined by colons. GitHub's values have no
+// colon in them (an environment name is %3A-encoded), so a subject that does
+// not split into pairs is not one Radius can read.
+function subjectClaims(subject: string): [string, string][] | null {
+  const parts = subject.split(":");
+  if (parts.length < 2 || parts.length % 2 !== 0) return null;
+  const claims: [string, string][] = [];
+  for (let index = 0; index < parts.length; index += 2) {
+    const key = parts[index];
+    const value = parts[index + 1];
+    if (!key || !value) return null;
+    claims.push([key, value]);
+  }
+  return claims;
+}
+
+const REPOSITORY_CLAIMS: ReadonlySet<string> = new Set([
+  "repo",
+  "repository",
+  "repository_id"
+]);
+
+/**
+ * Whether a GitHub OIDC subject names one repository, by name or ID. A subject
+ * customized to, say, `repository_owner` and `context` does not, so every
+ * repository of that owner can present it.
+ */
+export function subjectNamesRepository(subject: string): boolean {
+  return (
+    subjectClaims(subject)?.some(([key]) => REPOSITORY_CLAIMS.has(key)) ?? false
+  );
+}
+
+/**
  * Whether any statement in this trust policy names the account's GitHub
  * provider. Unlike `trustedGitHubSubjects`, this also finds a Radius role
  * whose last environment was removed, which keeps only a Deny statement.
@@ -324,6 +409,110 @@ export function namesGitHubProvider(
   const providerArn = githubOidcProviderArn(accountId);
   return policy.Statement.some((statement) =>
     isGitHubStatement(statement, providerArn)
+  );
+}
+
+/**
+ * Whether the only principals this trust policy lets in are GitHub workflows
+ * presenting one of `subjects`. Deny statements grant nothing and are skipped.
+ * Another principal, a GitHub statement with no `sub` constraint, a wildcard
+ * pattern, or any subject not in `subjects` makes it false. A pattern admits
+ * subjects it doesn't spell out, so it never counts as listed.
+ */
+export function trustAllowsOnlySubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): boolean {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.every((statement) => {
+    if (statement.Effect === "Deny") return true;
+    const principal = statement.Principal;
+    return (
+      statement.Effect === "Allow" &&
+      isRecord(principal) &&
+      Object.keys(principal).every((key) => key === "Federated") &&
+      stringList(principal.Federated).every((arn) => arn === providerArn) &&
+      isGitHubStatement(statement, providerArn) &&
+      subjectConstraints(statement).length > 0 &&
+      subjectConstraints(statement).every(
+        ({ operator, values }) =>
+          operator === "StringEquals" ||
+          values.every((value) => !/[*?]/.test(value))
+      ) &&
+      subjectsOf(statement).every((subject) => subjects.includes(subject))
+    );
+  });
+}
+
+export interface GitHubRepositoryIdentity {
+  /** The repository's current `owner/name`. */
+  readonly fullName: string;
+  readonly ownerId: number;
+  readonly repoId: number;
+}
+
+// A subject's claims when none is a wildcard. A wildcard admits workflows the
+// subject doesn't spell out, so it can't be tied to one environment.
+function exactClaims(subject: string): [string, string][] | null {
+  const claims = subjectClaims(subject);
+  return claims && claims.every(([, value]) => !/[*?]/.test(value)) ?
+      claims
+    : null;
+}
+
+/**
+ * Whether a GitHub OIDC subject names this repository and an environment, so
+ * no other repository or a workflow outside an environment presents it. The
+ * repository counts when the subject has its `owner/name`, its immutable
+ * `owner@id/name@id`, or its `repository_id`. Anything else, including an
+ * owner-wide subject, an older name from before a rename, or a wildcard, is
+ * not proven to be this repository's.
+ */
+export function namesRepositoryEnvironment(
+  subject: string,
+  repository: GitHubRepositoryIdentity
+): boolean {
+  const claims = exactClaims(subject);
+  if (!claims) return false;
+  const [owner = "", name = ""] = repository.fullName.toLowerCase().split("/");
+  const slugs = [
+    `${owner}/${name}`,
+    `${owner}@${repository.ownerId}/${name}@${repository.repoId}`
+  ];
+  return (
+    claims.some(([key]) => key === "environment") &&
+    claims.some(
+      ([key, value]) =>
+        ((key === "repo" || key === "repository") &&
+          slugs.includes(value.toLowerCase())) ||
+        (key === "repository_id" && value === String(repository.repoId))
+    )
+  );
+}
+
+/**
+ * Whether a GitHub OIDC subject names a repository and exactly the environment
+ * `environment`, so only that one environment presents it. GitHub environment
+ * names are unique in a repository regardless of case. The repository may be
+ * named by an older name from before a rename. A subject with no repository,
+ * such as an owner-wide one, or with no environment is presented by other
+ * repositories or environments too.
+ */
+export function namesOneEnvironment(
+  subject: string,
+  environment: string
+): boolean {
+  const claims = exactClaims(subject);
+  if (!claims) return false;
+  const encoded = buildEnvironmentSuffix(environment)
+    .slice("environment:".length)
+    .toLowerCase();
+  const environments = claims.filter(([key]) => key === "environment");
+  return (
+    environments.length === 1 &&
+    environments[0][1].toLowerCase() === encoded &&
+    claims.some(([key]) => REPOSITORY_CLAIMS.has(key))
   );
 }
 
@@ -613,6 +802,22 @@ export function eksAuthenticationMode(describeCluster: unknown): string {
       accessConfig.authenticationMode
     : undefined;
   return typeof mode === "string" && mode ? mode : "CONFIG_MAP";
+}
+
+/**
+ * Why setup cannot use a cluster. When more than one applies, the first in
+ * this order wins: the cluster could not be described, its status is not
+ * ACTIVE or UPDATING, or its CONFIG_MAP authentication cannot take an access
+ * entry.
+ */
+export type AwsClusterUnusableReason =
+  "not-described" | "status" | "config-map";
+
+const EKS_CLUSTER_NAME_PATTERN = /^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$/;
+
+/** Whether a value has the form of an EKS cluster name. */
+export function isEksClusterName(value: string): boolean {
+  return EKS_CLUSTER_NAME_PATTERN.test(value);
 }
 
 /** Whether a cluster in this authentication mode accepts access entries. */
