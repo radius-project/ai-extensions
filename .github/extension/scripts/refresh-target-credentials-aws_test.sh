@@ -182,8 +182,13 @@ $(cat "${KUBECONFIG_PATH}")"
 $(cat "${APPLIED}")"
     grep -Fq "aws eks get-token --cluster-name demo-cluster --region us-west-2 --output json" "${CALLS}" ||
         fail "${workflow}: expected an EKS token for the configured cluster and region"
-    [[ "$(grep -cE '^kubectl rollout restart deployment/(applications-rp|dynamic-rp|bicep-de) -n radius-system$' "${CALLS}")" == "3" ]] ||
-        fail "${workflow}: expected the three consumers in radius-system to restart"
+    for consumer in applications-rp dynamic-rp bicep-de; do
+        restarts="$(grep -cFx "kubectl rollout restart deployment/${consumer} -n radius-system" "${CALLS}" || true)"
+        [[ "${restarts}" == "1" ]] ||
+            fail "${workflow}: expected ${consumer} in radius-system to restart once, got ${restarts}"
+    done
+    [[ "$(grep -c '^kubectl rollout restart ' "${CALLS}" || true)" == "3" ]] ||
+        fail "${workflow}: expected no restarts beyond the three consumers"
     [[ -z "$(ls -A "${TEST_ROOT}/runner")" ]] ||
         fail "${workflow}: expected the EKS token file to be removed from RUNNER_TEMP"
     if grep -q 'eks-token-1' "${STEP_LOG}"; then
