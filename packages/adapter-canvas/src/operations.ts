@@ -5737,8 +5737,8 @@ const PERSISTED_OPERATION_KEYS = new Set([
 // restart. The live delete op carries its inputs in a broad `op.request` (which
 // is deliberately NOT persisted — it can be large and may hold secrets), so a
 // hydrated delete op would otherwise lose the `clientId` its Azure-cleanup and
-// app-registration stages depend on, or the AWS role and trust subjects its
-// role cleanup depends on. We persist only these typed fields.
+// app-registration stages depend on, or the AWS role, trust subjects, and
+// cluster its role cleanup depends on. We persist only these typed fields.
 interface PersistedDeleteRecovery {
   repo?: string;
   environment?: string;
@@ -5747,6 +5747,8 @@ interface PersistedDeleteRecovery {
   tenantId?: string;
   roleArn?: string;
   trustSubjects?: string[];
+  region?: string;
+  cluster?: string;
   repoId?: number;
   credentialConsumerRetirementReady?: boolean;
 }
@@ -5760,7 +5762,9 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "provider",
     "clientId",
     "tenantId",
-    "roleArn"
+    "roleArn",
+    "region",
+    "cluster"
   ] as const) {
     if (typeof request[key] === "string") out[key] = request[key];
   }

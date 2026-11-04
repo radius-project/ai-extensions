@@ -1428,6 +1428,14 @@ describe("runEnvironmentOperationWorkflow", () => {
         }
         return { ok: false, status: 404, json: null };
       },
+      environments: {
+        listEnvironmentNames: async () => {
+          throw new Error("unexpected environment listing");
+        },
+        readEnvironmentVariables: async () => {
+          throw new Error("unexpected variable read");
+        }
+      },
       // Each poll of the held lock is where the customer presses Pause.
       sleep: async () => {
         waits.push(stageStates());
@@ -1613,6 +1621,14 @@ describe("runEnvironmentOperationWorkflow", () => {
         const answer = githubAnswers[path];
         if (!answer) throw new Error(`unexpected GitHub read ${path}`);
         return answer;
+      },
+      environments: {
+        listEnvironmentNames: async () => {
+          throw new Error("unexpected environment listing");
+        },
+        readEnvironmentVariables: async () => {
+          throw new Error("unexpected variable read");
+        }
       },
       sleep: async () => {},
       now: () => NOW,

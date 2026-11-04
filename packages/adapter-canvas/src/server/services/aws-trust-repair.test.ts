@@ -23,7 +23,9 @@ const awsTarget: EnvironmentTarget = {
   tenantId: "",
   repoId: 0,
   roleArn: ROLE_ARN,
-  trustSubjects: [SUBJECT]
+  trustSubjects: [SUBJECT],
+  region: "us-west-2",
+  cluster: "shop"
 };
 
 function service(
