@@ -126,7 +126,6 @@ cat >"${STUB_BIN}/aws" <<'EOF'
 #!/bin/bash
 printf 'aws %s\n' "$*" >>"${CALLS}"
 case "$*" in
-    "eks create-access-entry "* | "eks associate-access-policy "*) ;;
     "eks describe-cluster "*"cluster.endpoint"*) echo "https://eks.example" ;;
     "eks describe-cluster "*"cluster.certificateAuthority.data"*) echo "Q0EtREFUQQ==" ;;
     "eks get-token "*)
@@ -189,8 +188,6 @@ readonly OLD_KUBECONFIG=$'apiVersion: v1\nkind: Config\nusers:\n- name: eks-user
 readonly DESCRIBE_CLUSTER="aws eks describe-cluster --name demo-cluster --region us-west-2 --query cluster.endpoint --output text
 aws eks describe-cluster --name demo-cluster --region us-west-2 --query cluster.certificateAuthority.data --output text"
 readonly GET_TOKEN_CALL="aws eks get-token --cluster-name demo-cluster --region us-west-2 --output json"
-readonly ACCESS_ENTRY="aws eks create-access-entry --cluster-name demo-cluster --principal-arn ${ROLE} --type STANDARD --region us-west-2
-aws eks associate-access-policy --cluster-name demo-cluster --principal-arn ${ROLE} --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster --region us-west-2"
 readonly STORE_AND_RESTART="kubectl create secret target-kubeconfig
 kubectl apply -f -
 kubectl rollout restart deployment/applications-rp -n radius-system
@@ -304,15 +301,13 @@ for workflow in run-rad-commands-aws.yml delete-aws.yml delete-environment-aws.y
     VARS_AWS_ROLE_ARN="" VARS_AWS_EKS_CLUSTER_NAME="demo-cluster" \
         VARS_AWS_REGION="us-west-2" extract_step "${workflow}" "${REFRESH_STEP}" "${no_role}"
 
-    # delete-environment-aws.yml creates no access entry and runs no refresher,
+    # delete-environment-aws.yml checks no cluster access and runs no refresher,
     # so its kubeconfig has no tokenFile and its Secret no token key.
     if [[ "${workflow}" == delete-environment-aws.yml ]]; then
-        access_entry=""
         cluster_info=""
         token_file=""
         expected_secret="$(printf 'kubeconfig<<\n%s\n>>' "$(expected_kubeconfig)")"
     else
-        access_entry="${ACCESS_ENTRY}"$'\n'
         cluster_info=$'\nkubectl cluster-info with the target kubeconfig'
         token_file="${POD_TOKEN_FILE}"
         expected_secret="$(printf 'kubeconfig<<\n%s\n>>\ntoken<<\neks-token-1\n>>' \
@@ -324,12 +319,11 @@ for workflow in run-rad-commands-aws.yml delete-aws.yml delete-environment-aws.y
     mkdir -p "$(dirname "${KUBECONFIG_PATH}")"
     status="$(run_step "${connect}")"
     [[ "${status}" == "0" ]] || fail "${workflow}: expected connecting to succeed, got ${status}"
-    expect_calls "${access_entry}${DESCRIBE_CLUSTER}
+    expect_calls "${DESCRIBE_CLUSTER}
 ${GET_TOKEN_CALL}${cluster_info}" "${workflow}: connecting"
     expect_kubeconfig "$(expected_kubeconfig)" "${workflow}: connecting"
     rm -f "${KUBECONFIG_PATH}"
-    expect_get_token_failure_stops "${connect}" "${access_entry}${DESCRIBE_CLUSTER}"$'\n' \
-        "${workflow}: connecting"
+    expect_get_token_failure_stops "${connect}" "${DESCRIBE_CLUSTER}"$'\n' "${workflow}: connecting"
 
     # Refreshing mints a new token and stores it, then restarts the three
     # consumers and waits for them.
