@@ -431,6 +431,7 @@ describe("legacy environment policy migration", () => {
   it("deletes the recorded hash after a rename without inspecting another repository's legacy policy", async () => {
     const other = "repo:octo/other:environment:dev";
     const aws = fakeAws({
+      "--version": freeChecks["--version"],
       "sts get-caller-identity": ok({ Account: ACCOUNT }),
       "iam get-role": ok({
         Role: { ...managedRole([DEV, other]).Role, Tags: [] }
@@ -703,7 +704,7 @@ describe("setupAwsDeployIdentity", () => {
       "a CLI that cannot run",
       { "--version": fail("spawn aws ENOENT") },
       "aws-cli-unsupported",
-      "Could not run the AWS CLI: spawn aws ENOENT"
+      "The AWS CLI executable is not available"
     ],
     [
       "no CLI session",
@@ -711,8 +712,8 @@ describe("setupAwsDeployIdentity", () => {
         "--version": freeChecks["--version"],
         "sts get-caller-identity": fail("Token has expired")
       },
-      "aws-cli-login-required",
-      "No active AWS CLI session"
+      "aws-verification-failed",
+      "The AWS credentials have expired"
     ],
     [
       "a sign-in check that timed out",
@@ -725,8 +726,8 @@ describe("setupAwsDeployIdentity", () => {
           timedOut: true
         }
       },
-      "aws-cli-login-required",
-      "then retry. the AWS CLI call timed out"
+      "aws-verification-failed",
+      "The AWS CLI call timed out"
     ],
     [
       "a sign-in check that timed out after printing",
@@ -739,8 +740,8 @@ describe("setupAwsDeployIdentity", () => {
           timedOut: true
         }
       },
-      "aws-cli-login-required",
-      "then retry. the AWS CLI call timed out (partial)"
+      "aws-verification-failed",
+      "The AWS CLI call timed out"
     ],
     [
       "a session in another account",
@@ -749,7 +750,7 @@ describe("setupAwsDeployIdentity", () => {
         "sts get-caller-identity": ok({ Account: "999988887777" })
       },
       "aws-account-mismatch",
-      "signed in to account 999988887777, but this environment's profile is for account 123456789012"
+      "signed in to account 999988887777, but the requested account is 123456789012"
     ],
     [
       "a CONFIG_MAP cluster",
@@ -1011,7 +1012,7 @@ describe("setupAwsDeployIdentity failure paths", () => {
       "the CLI exits non-zero after printing a supported version",
       { "--version": raw("aws-cli/2.17.0 Python/3.11", 1) },
       "aws-cli-unsupported",
-      "Could not run the AWS CLI: aws-cli/2.17.0 Python/3.11"
+      "AWS CLI verification failed."
     ],
     [
       "the CLI session answers no readable account",
@@ -1019,8 +1020,8 @@ describe("setupAwsDeployIdentity failure paths", () => {
         "--version": freeChecks["--version"],
         "sts get-caller-identity": raw("not json")
       },
-      "aws-account-mismatch",
-      "signed in to account (unknown)"
+      "aws-identity-invalid",
+      "did not return a valid account ID"
     ],
     [
       "the cluster reports no access configuration",
@@ -1417,6 +1418,7 @@ describe("setupAwsDeployIdentity safety gates", () => {
 
   it("changes nothing when IAM answers with no role", async () => {
     const removal = fakeAws({
+      "--version": freeChecks["--version"],
       "sts get-caller-identity": ok({ Account: ACCOUNT }),
       "iam get-role": ok({})
     });
@@ -1426,7 +1428,7 @@ describe("setupAwsDeployIdentity safety gates", () => {
         listOtherEnvironments: unexpectedListing
       })
     ).toMatchObject({ ok: false });
-    expect(removal.calls).toHaveLength(2);
+    expect(removal.calls).toHaveLength(3);
   });
 
   it("does not claim a provider another setup created first", async () => {
@@ -1591,6 +1593,7 @@ describe("removeAwsEnvironmentFromRole", () => {
   const BY_HAND = `If nothing else uses it, run: aws eks delete-access-entry --cluster-name shop --principal-arn ${ROLE_ARN} --region us-west-2`;
   const OTHER_REPO = "repo:octo/other:environment:dev";
   const signedIn: Script = {
+    "--version": freeChecks["--version"],
     "iam get-role-policy": freeChecks["iam get-role-policy"],
     "iam list-role-policies": freeChecks["iam list-role-policies"],
     "sts get-caller-identity": ok({ Account: ACCOUNT }),
@@ -1901,9 +1904,10 @@ describe("removeAwsEnvironmentFromRole", () => {
     expect(!result.ok && result.message).toContain(
       `by hand remove ${DEV}, ${DEV_ID} from its trust policy and delete its policy radius-deploy-dev.`
     );
-    expect(aws.calls.map((args) => args[1])).toEqual([
-      "get-caller-identity",
-      "get-role"
+    expect(aws.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+      "--version",
+      "sts get-caller-identity",
+      "iam get-role"
     ]);
   });
 
@@ -1913,11 +1917,15 @@ describe("removeAwsEnvironmentFromRole", () => {
     ["answering no account", ok("not json")]
   ])("changes nothing when the CLI session is %s", async (_label, identity) => {
     const aws = fakeAws({
+      "--version": freeChecks["--version"],
       "sts get-caller-identity": identity,
       "iam get-role": ok(managedRole([DEV]))
     });
     expect(await remove(aws)).toMatchObject({ ok: false });
-    expect(aws.calls.map((args) => args[1])).toEqual(["get-caller-identity"]);
+    expect(aws.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+      "--version",
+      "sts get-caller-identity"
+    ]);
   });
 
   it.each([
@@ -1931,9 +1939,10 @@ describe("removeAwsEnvironmentFromRole", () => {
       "iam get-role": ok({ Role: { ...managedRole([DEV]).Role, Arn: arn } })
     });
     expect(await remove(aws)).toMatchObject({ ok: false });
-    expect(aws.calls.map((args) => args[1])).toEqual([
-      "get-caller-identity",
-      "get-role"
+    expect(aws.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+      "--version",
+      "sts get-caller-identity",
+      "iam get-role"
     ]);
   });
 
@@ -2366,6 +2375,7 @@ describe("deploy identity lock order", () => {
 
   it("locks delete after the account check and before reading the role", async () => {
     const aws = fakeAws({
+      "--version": freeChecks["--version"],
       "iam get-role-policy": freeChecks["iam get-role-policy"],
       "iam list-role-policies": freeChecks["iam list-role-policies"],
       "sts get-caller-identity": ok({ Account: ACCOUNT }),
@@ -2378,12 +2388,15 @@ describe("deploy identity lock order", () => {
       ...aws.ports,
       listOtherEnvironments: unexpectedListing
     });
-    expect(aws.locks).toEqual([{ roleName: ROLE, after: 1 }]);
+    expect(aws.locks).toEqual([{ roleName: ROLE, after: 2 }]);
   });
 
   it("changes nothing on delete when the lock cannot be taken", async () => {
     const aws = fakeAws(
-      { "sts get-caller-identity": ok({ Account: ACCOUNT }) },
+      {
+        "--version": freeChecks["--version"],
+        "sts get-caller-identity": ok({ Account: ACCOUNT })
+      },
       LOCK_DENIED
     );
     expect(
@@ -2392,11 +2405,12 @@ describe("deploy identity lock order", () => {
         listOtherEnvironments: unexpectedListing
       })
     ).toEqual({ ok: false, message: "not allowed iam:CreatePolicy" });
-    expect(aws.calls).toHaveLength(1);
+    expect(aws.calls).toHaveLength(2);
   });
 
   it("takes no delete lock when the session is in another account", async () => {
     const aws = fakeAws({
+      "--version": freeChecks["--version"],
       "sts get-caller-identity": ok({ Account: "999999999999" })
     });
     await removeAwsEnvironmentFromRole(removalRequest, {
@@ -2546,6 +2560,7 @@ describe("waiting for IAM to show a trust policy write", () => {
 
   it("waits on delete too, and stops the deletion when IAM never shows the write", async () => {
     const script: Script = {
+      "--version": freeChecks["--version"],
       "iam get-role-policy": freeChecks["iam get-role-policy"],
       "iam list-role-policies": freeChecks["iam list-role-policies"],
       "sts get-caller-identity": ok({ Account: ACCOUNT }),

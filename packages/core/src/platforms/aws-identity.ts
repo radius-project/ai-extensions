@@ -44,6 +44,47 @@ export function isAwsRegion(value: string): boolean {
   return AWS_REGION_PATTERN.test(value);
 }
 
+export type AwsCliFailure =
+  | "missing-cli"
+  | "timeout"
+  | "login-required"
+  | "credentials-expired"
+  | "credentials-invalid"
+  | "access-denied"
+  | "provider-failed"
+  | "command-failed";
+
+/** Classify diagnostics without exposing credential-provider output. */
+export function classifyAwsCliFailure(input: {
+  output: string;
+  timedOut?: boolean;
+}): AwsCliFailure {
+  const { output } = input;
+  if (input.timedOut || /timed out|timeout|ETIMEDOUT/i.test(output))
+    return "timeout";
+  if (
+    /credential_process|credential process|retrieving credentials/i.test(output)
+  )
+    return "provider-failed";
+  if (/ENOENT|command not found|not recognized as .*command/i.test(output))
+    return "missing-cli";
+  if (
+    /Unable to locate credentials|NoCredentialsError|SSOTokenLoadError|Error loading SSO Token|SSO session .*expired|Error when retrieving token from sso:.*(?:expired|refresh failed)/i.test(
+      output
+    )
+  )
+    return "login-required";
+  if (/ExpiredToken|Token has expired|security token .*expired/i.test(output))
+    return "credentials-expired";
+  if (/InvalidClientTokenId|security token .*invalid/i.test(output))
+    return "credentials-invalid";
+  if (/AccessDenied|UnauthorizedOperation|not authorized/i.test(output))
+    return "access-denied";
+  // After the AWS error codes: ARNs such as role/MFA-admin can contain "MFA".
+  if (/MFA|multi-factor/i.test(output)) return "provider-failed";
+  return "command-failed";
+}
+
 /**
  * Whether a region is in the commercial `aws` partition, the only one the
  * deploy identity's ARNs are built for. GovCloud and China regions use other
@@ -82,7 +123,7 @@ export function checkAwsCliVersion(output: string): AwsCliVersionCheck {
   if (!parsed || !minimum) {
     return {
       ok: false,
-      message: `Could not run the AWS CLI: ${output.trim() || "no version output"}. Upgrade the AWS CLI, then retry: ${AWS_CLI_INSTALL_URL}`
+      message: `Could not read the AWS CLI version. Radius needs AWS CLI ${AWS_CLI_MINIMUM_VERSION} or newer. Install or upgrade the AWS CLI, then retry: ${AWS_CLI_INSTALL_URL}`
     };
   }
   const version = parsed.join(".");
