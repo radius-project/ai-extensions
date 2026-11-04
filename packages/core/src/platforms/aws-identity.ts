@@ -62,9 +62,7 @@ export function classifyAwsCliFailure(input: {
   if (input.timedOut || /timed out|timeout|ETIMEDOUT/i.test(output))
     return "timeout";
   if (
-    /credential_process|credential process|retrieving credentials|MFA|multi-factor/i.test(
-      output
-    )
+    /credential_process|credential process|retrieving credentials/i.test(output)
   )
     return "provider-failed";
   if (/ENOENT|command not found|not recognized as .*command/i.test(output))
@@ -81,6 +79,8 @@ export function classifyAwsCliFailure(input: {
     return "credentials-invalid";
   if (/AccessDenied|UnauthorizedOperation|not authorized/i.test(output))
     return "access-denied";
+  // After the AWS error codes: ARNs such as role/MFA-admin can contain "MFA".
+  if (/MFA|multi-factor/i.test(output)) return "provider-failed";
   return "command-failed";
 }
 

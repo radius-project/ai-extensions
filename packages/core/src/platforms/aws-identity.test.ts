@@ -66,6 +66,14 @@ describe("AWS CLI failure classification", () => {
     ["ExpiredToken", "credentials-expired"],
     ["InvalidClientTokenId", "credentials-invalid"],
     ["AccessDenied", "access-denied"],
+    [
+      "An error occurred (AccessDenied) when calling the AssumeRole operation: User: arn:aws:iam::123456789012:user/dev is not authorized to perform: sts:AssumeRole on resource: arn:aws:iam::123456789012:role/MFA-admin",
+      "access-denied"
+    ],
+    [
+      "Enter MFA code for arn:aws:iam::123456789012:mfa/dev:",
+      "provider-failed"
+    ],
     ["credential process failed", "provider-failed"],
     ["connection timed out", "timeout"],
     ["unavailable endpoint", "command-failed"]
