@@ -2763,6 +2763,23 @@ describe("repairing an environment's trust under the lock", () => {
     }
   );
 
+  it("refuses a subject without the repository with setup's message and fix", async () => {
+    const h = harness(
+      missingId,
+      customTemplate(["repository_owner", "context"])
+    );
+
+    const result = await h.access.repair(repairInput);
+
+    expect(result).toEqual({
+      ok: false,
+      code: "aws-subject-not-repository-specific",
+      message:
+        "GitHub's OIDC subject for this environment, repository_owner:octo:environment:dev, does not name the repository, because the OIDC subject customization for octo/shop, set on the repository or its organization, includes only the claims repository_owner, context. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry."
+    });
+    expect(h.commands()).not.toContain("iam update-assume-role-policy");
+  });
+
   it("stops without writing when its lock is lost", async () => {
     const h = harness({
       ...missingId,

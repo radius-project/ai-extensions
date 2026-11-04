@@ -42,6 +42,7 @@ import {
   immutableEnvironmentRepository,
   removeGitHubTrustSubject,
   restrictedGitHubSubjects,
+  repositoryLessSubjectMessage,
   subjectNamesRepository,
   trustAllowsOnlySubjects,
   trustedGitHubSubjects
@@ -1256,6 +1257,36 @@ describe("subjectNamesRepository", () => {
     ["", false]
   ])("%s names a repository: %s", (subject, names) => {
     expect(subjectNamesRepository(subject)).toBe(names);
+  });
+});
+
+describe("repositoryLessSubjectMessage", () => {
+  it("names the subjects, the claim keys, and the fix", () => {
+    expect(
+      repositoryLessSubjectMessage(
+        ["repository_owner:octo:environment:dev"],
+        "octo/shop",
+        { useDefault: false, includeClaimKeys: ["repository_owner", "context"] }
+      )
+    ).toBe(
+      "GitHub's OIDC subject for this environment, repository_owner:octo:environment:dev, does not name the repository, because the OIDC subject customization for octo/shop, set on the repository or its organization, includes only the claims repository_owner, context. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry."
+    );
+  });
+
+  it("lists several subjects and leaves out claim keys GitHub did not report", () => {
+    const message = repositoryLessSubjectMessage(
+      ["environment:dev", "environment:prod"],
+      "octo/shop",
+      { useDefault: false }
+    );
+
+    expect(message).toContain(
+      "this environment, environment:dev, environment:prod, does not name"
+    );
+    expect(message).toContain(
+      "customization for octo/shop, set on the repository or its organization. Other"
+    );
+    expect(message).not.toContain("includes only");
   });
 });
 

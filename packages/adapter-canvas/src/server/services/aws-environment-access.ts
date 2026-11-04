@@ -1,6 +1,7 @@
 import {
   AWS_TRUST_SUBJECTS_VARIABLE,
   namesRepositoryEnvironment,
+  repositoryLessSubjectMessage,
   subjectNamesRepository,
   type GitHubRepositoryIdentity,
   type OidcSubjectConfig,
@@ -408,15 +409,6 @@ export function createAwsEnvironmentAccess<Operation>(
     };
   }
 
-  async function resolveSubjects(
-    repo: string,
-    environment: string,
-    executor?: SelectedGhExecutor
-  ): Promise<string[]> {
-    const oidc = await resolveOidc(repo, environment, executor);
-    return oidc.federatedCredentials.map((credential) => credential.subject);
-  }
-
   // The repository's AWS environments other than `environment`. Any read that
   // fails, or an environment Radius manages whose cluster can't be read, makes
   // the answer unknown, because that environment may use the same cluster.
@@ -561,11 +553,10 @@ export function createAwsEnvironmentAccess<Operation>(
         (subject) => !subjectNamesRepository(subject)
       );
       if (shared.length > 0) {
-        const keys = subjectConfig.includeClaimKeys ?? [];
         return {
           ok: false,
           status: 400,
-          error: `GitHub's OIDC subject for this environment, ${shared.join(", ")}, does not name the repository, because the OIDC subject customization for ${repo}, set on the repository or its organization, includes only the claims ${keys.join(", ")}. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry.`,
+          error: repositoryLessSubjectMessage(shared, repo, subjectConfig),
           code: "aws-subject-not-repository-specific"
         };
       }
@@ -914,13 +905,16 @@ export function createAwsEnvironmentAccess<Operation>(
       const environment = stored;
       // Always from GitHub: AWS_TRUST_SUBJECTS is editable by anyone with
       // admin on the repository, so it cannot decide what Repair trusts.
-      const subjects = await resolveSubjects(repo, environment);
+      const { subjects, subjectConfig } = await resolveIdentity(
+        repo,
+        environment
+      );
       const { result, lost, released } = await runUnderLock(
         { repo, environment, action: "repair", operationId: "" },
         null,
         (ports) =>
           repairAwsEnvironmentTrust(
-            { repo, environment, roleArn, subjects, policyName },
+            { repo, environment, roleArn, subjects, subjectConfig, policyName },
             {
               ...ports,
               // A delete can run between the first read of the environment and
