@@ -2472,7 +2472,10 @@ describe("initializeEnvironmentPage", () => {
       const acknowledgement = fakeText(page.elements["env-confirm-message"]);
       expect(acknowledgement).toContain('The environment "dev" was deleted');
       expect(acknowledgement).toContain(
-        "Its trust subject and permission policy were removed from the deploy IAM role. The role itself was kept"
+        "The progress panel lists what was removed from the deploy IAM role and the cluster's access, and what was kept. Radius never deletes the role itself"
+      );
+      expect(acknowledgement).not.toContain(
+        "Its trust subject and permission policy were removed"
       );
       expect(acknowledgement).not.toContain("Microsoft Entra");
       const consoleLink = page.elements["env-confirm-message"].children[1];

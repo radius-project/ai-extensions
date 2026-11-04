@@ -3,6 +3,8 @@
 // permission policy, and the AWS CLI version gate. No I/O: callers run the
 // `aws` CLI and hand the parsed documents in.
 
+import { buildEnvironmentSuffix } from "./oidc-subject.js";
+
 export const AWS_CLI_MINIMUM_VERSION = "2.15.3";
 export const AWS_CLI_INSTALL_URL =
   "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html";
@@ -407,6 +409,110 @@ export function namesGitHubProvider(
   const providerArn = githubOidcProviderArn(accountId);
   return policy.Statement.some((statement) =>
     isGitHubStatement(statement, providerArn)
+  );
+}
+
+/**
+ * Whether the only principals this trust policy lets in are GitHub workflows
+ * presenting one of `subjects`. Deny statements grant nothing and are skipped.
+ * Another principal, a GitHub statement with no `sub` constraint, a wildcard
+ * pattern, or any subject not in `subjects` makes it false. A pattern admits
+ * subjects it doesn't spell out, so it never counts as listed.
+ */
+export function trustAllowsOnlySubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): boolean {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.every((statement) => {
+    if (statement.Effect === "Deny") return true;
+    const principal = statement.Principal;
+    return (
+      statement.Effect === "Allow" &&
+      isRecord(principal) &&
+      Object.keys(principal).every((key) => key === "Federated") &&
+      stringList(principal.Federated).every((arn) => arn === providerArn) &&
+      isGitHubStatement(statement, providerArn) &&
+      subjectConstraints(statement).length > 0 &&
+      subjectConstraints(statement).every(
+        ({ operator, values }) =>
+          operator === "StringEquals" ||
+          values.every((value) => !/[*?]/.test(value))
+      ) &&
+      subjectsOf(statement).every((subject) => subjects.includes(subject))
+    );
+  });
+}
+
+export interface GitHubRepositoryIdentity {
+  /** The repository's current `owner/name`. */
+  readonly fullName: string;
+  readonly ownerId: number;
+  readonly repoId: number;
+}
+
+// A subject's claims when none is a wildcard. A wildcard admits workflows the
+// subject doesn't spell out, so it can't be tied to one environment.
+function exactClaims(subject: string): [string, string][] | null {
+  const claims = subjectClaims(subject);
+  return claims && claims.every(([, value]) => !/[*?]/.test(value)) ?
+      claims
+    : null;
+}
+
+/**
+ * Whether a GitHub OIDC subject names this repository and an environment, so
+ * no other repository or a workflow outside an environment presents it. The
+ * repository counts when the subject has its `owner/name`, its immutable
+ * `owner@id/name@id`, or its `repository_id`. Anything else, including an
+ * owner-wide subject, an older name from before a rename, or a wildcard, is
+ * not proven to be this repository's.
+ */
+export function namesRepositoryEnvironment(
+  subject: string,
+  repository: GitHubRepositoryIdentity
+): boolean {
+  const claims = exactClaims(subject);
+  if (!claims) return false;
+  const [owner = "", name = ""] = repository.fullName.toLowerCase().split("/");
+  const slugs = [
+    `${owner}/${name}`,
+    `${owner}@${repository.ownerId}/${name}@${repository.repoId}`
+  ];
+  return (
+    claims.some(([key]) => key === "environment") &&
+    claims.some(
+      ([key, value]) =>
+        ((key === "repo" || key === "repository") &&
+          slugs.includes(value.toLowerCase())) ||
+        (key === "repository_id" && value === String(repository.repoId))
+    )
+  );
+}
+
+/**
+ * Whether a GitHub OIDC subject names a repository and exactly the environment
+ * `environment`, so only that one environment presents it. GitHub environment
+ * names are unique in a repository regardless of case. The repository may be
+ * named by an older name from before a rename. A subject with no repository,
+ * such as an owner-wide one, or with no environment is presented by other
+ * repositories or environments too.
+ */
+export function namesOneEnvironment(
+  subject: string,
+  environment: string
+): boolean {
+  const claims = exactClaims(subject);
+  if (!claims) return false;
+  const encoded = buildEnvironmentSuffix(environment)
+    .slice("environment:".length)
+    .toLowerCase();
+  const environments = claims.filter(([key]) => key === "environment");
+  return (
+    environments.length === 1 &&
+    environments[0][1].toLowerCase() === encoded &&
+    claims.some(([key]) => REPOSITORY_CLAIMS.has(key))
   );
 }
 

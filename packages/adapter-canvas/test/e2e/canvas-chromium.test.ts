@@ -374,7 +374,11 @@ async function waitForStableComputedTransform(
 // return empty, the environment's variable listing carries the Azure identity,
 // and the repository-id lookup the target discovery makes resolves.
 async function setScenarioWithoutActiveDeployment(
-  canvas: CanvasHarness
+  canvas: CanvasHarness,
+  identity: readonly string[] = [
+    "AZURE_CLIENT_ID\tfixture-client-id",
+    "AZURE_TENANT_ID\tfixture-tenant-id"
+  ]
 ): Promise<void> {
   const argsOf = (command: FakeCliCommand): string[] => command.args ?? [];
   await canvas.setScenarioOverrides(
@@ -401,11 +405,7 @@ async function setScenarioWithoutActiveDeployment(
         if (!listsEnvironmentVariablesWithValues) return command;
         return {
           ...command,
-          stdout: [
-            command.stdout ?? "",
-            "AZURE_CLIENT_ID\tfixture-client-id",
-            "AZURE_TENANT_ID\tfixture-tenant-id"
-          ]
+          stdout: [command.stdout ?? "", ...identity]
             .filter((line) => line.length > 0)
             .join("\n")
         };
@@ -4093,6 +4093,61 @@ test.describe("Radius Canvas in Chromium", () => {
       await expectNoWcagViolations(page);
     });
 
+    test("deletes an AWS environment, naming the access entry before and the report after @safety", async ({
+      page,
+      canvas
+    }) => {
+      await setScenarioWithoutActiveDeployment(canvas, [
+        `AWS_ROLE_ARN\tarn:aws:iam::${AWS_ACCOUNT}:role/radius-deploy-fixture`,
+        `AWS_ACCOUNT_ID\t${AWS_ACCOUNT}`,
+        "AWS_REGION\tus-west-2",
+        "AWS_EKS_CLUSTER_NAME\tfixture-eks"
+      ]);
+      const deletion = canvas.driveEnvironmentDeletion({ state: "succeeded" });
+
+      await gotoCanvas(page, canvas, "environment");
+      await page.locator(".js-delete-env").first().click();
+      const confirmTitle = page.locator("#env-confirm-title");
+      await expect(confirmTitle).toHaveText("Delete environment?");
+      await expect(page.locator("#env-confirm-message")).toContainText(
+        "and the role's access entry on fixture-eks when nothing else can use it"
+      );
+      const deleteAccepted = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/delete-environment" &&
+          response.request().method() === "POST"
+      );
+      await page.getByRole("button", { name: "Delete environment" }).click();
+      const accepted = await deleteAccepted;
+      expect(accepted.status()).toBe(202);
+      const { operationId } = (await accepted.json()) as {
+        operationId: string;
+      };
+      expect((await canvas.operationRecord(operationId)).stages).toContainEqual(
+        expect.objectContaining({ id: "delete_aws_role_access" })
+      );
+
+      await waitForOperationState(page, operationId, "running");
+      await deletion.release();
+
+      await expect(confirmTitle).toHaveText("Environment deleted");
+      const message = page.locator("#env-confirm-message");
+      await expect(message).toContainText(
+        "The progress panel lists what was removed from the deploy IAM role and the cluster's access, and what was kept."
+      );
+      await expect(
+        message.getByRole("link", { name: "AWS IAM console" })
+      ).toHaveAttribute(
+        "href",
+        "https://console.aws.amazon.com/iam/home#/roles"
+      );
+      await expectNoWcagViolations(page);
+      const done = page.getByRole("button", { name: "Done" });
+      await expect(done).toBeFocused();
+      await done.click();
+      await expect(page.locator("#env-progress-panel")).toBeVisible();
+    });
+
     test("offers Repair on an AWS deploy that could not sign in and reports an intact trust @safety", async ({
       page,
       canvas
@@ -4364,6 +4419,10 @@ test.describe("Radius Canvas in Chromium", () => {
             };
           }
           return { ok: false, status: 404, json: null };
+        },
+        environments: {
+          listEnvironmentNames: unexpected("environment listing"),
+          readEnvironmentVariables: unexpected("variable read")
         },
         sleep: (milliseconds) =>
           new Promise((resolve) =>

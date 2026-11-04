@@ -1,4 +1,7 @@
 import {
+  AWS_TRUST_SUBJECTS_VARIABLE,
+  namesRepositoryEnvironment,
+  type GitHubRepositoryIdentity,
   buildEnvironmentSuffix,
   formatAwsLockTime,
   type AwsLockAction
@@ -6,9 +9,14 @@ import {
 import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
 import {
   resolveOidcSubject,
-  type GitHubJsonResponse
+  type GitHubJsonResponse,
+  type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
+import {
+  loadEnvironmentClaims,
+  type NamespaceClaimsPorts
+} from "../routes/create-environment-namespace-claims.js";
 import {
   removeAwsEnvironmentFromRole,
   repairAwsEnvironmentTrust,
@@ -16,9 +24,11 @@ import {
   type AwsCommandResult,
   type AwsDeployIdentityPorts,
   type AwsDeployIdentityRemovalResult,
+  type AwsEnvironmentListing,
   type AwsLockResult,
   type AwsTrustRepairResult
 } from "./aws-deploy-identity.js";
+import { parseTrustSubjects } from "./environment-target.js";
 import {
   acquireAwsDeployIdentityLock,
   isAwsWrite,
@@ -41,6 +51,9 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
     apiPath: string,
     executor?: SelectedGhExecutor
   ): Promise<GitHubJsonResponse>;
+  // Reads the repository's GitHub environments, so delete can tell which
+  // clusters they still use.
+  environments: NamespaceClaimsPorts;
   sleep(milliseconds: number): Promise<void>;
   now(): number;
   // Whether the customer asked to pause this operation.
@@ -88,18 +101,27 @@ export interface AwsEnvironmentAccess<Operation> {
   // both are done. Never throws; a lock left behind is reported as a step.
   release(operation: Operation): Promise<void>;
   // Remove what one environment added to the shared deploy role, under the
-  // deploy identity lock. `trustSubjects` are the subjects setup recorded;
-  // without them the subjects are resolved from the repository's current name
-  // and IDs.
+  // deploy identity lock. It removes `trustSubjects`, the subjects setup
+  // recorded, and the subjects GitHub resolves for the environment now.
   remove(input: {
     repo: string;
     environment: string;
     roleArn: string;
     trustSubjects?: readonly string[];
+    // The environment's cluster. Empty when it did not record one.
+    region: string;
+    cluster: string;
     operationId?: string;
     // Called on every poll while another run holds the lock, with a progress
     // line when there is something new to say.
     waiting?(wait: AwsLockWait, line: string | null): void | Promise<void>;
+    // Runs after a successful removal and before the lock is released, once
+    // the lock is confirmed still held. Delete retires the GitHub environment
+    // here: Repair reads that environment under the same lock, so it can't
+    // add the subjects back between the two steps.
+    whileLocked?(
+      removal: Extract<AwsDeployIdentityRemovalResult, { ok: true }>
+    ): Promise<void>;
   }): Promise<AwsEnvironmentRemovalResult>;
   // Add back the subjects GitHub presents for this environment's deploys but
   // the role no longer trusts, under the deploy identity lock. Does not wait
@@ -121,10 +143,14 @@ export type AwsEnvironmentRepairResult =
     })
   | Extract<AwsTrustRepairResult, { ok: false }>;
 
-type AwsRoleChangePorts = Pick<
+interface AwsRoleChangePorts extends Pick<
   AwsDeployIdentityPorts,
   "runAws" | "acquireLock" | "sleep"
->;
+> {
+  // Whether this run still holds the lock it took. False records the loss, so
+  // the caller reports it as it would a lost lock before a write.
+  stillLocked(): Promise<boolean>;
+}
 
 // Another run holds the role's lock, and this run does not wait for it.
 function lockBusy(
@@ -297,6 +323,10 @@ export function createAwsEnvironmentAccess<Operation>(
           return dependencies.runAws(args);
         },
         sleep: dependencies.sleep,
+        stillLocked: async () => {
+          state.lost ??= (await state.lock?.verify()) ?? null;
+          return state.lost === null;
+        },
         acquireLock: async ({ accountId, roleName }) => {
           const taken = await lock(
             { accountId, roleName, ...holder },
@@ -328,12 +358,12 @@ export function createAwsEnvironmentAccess<Operation>(
   // The same subjects Azure's federated credentials trust: one for a
   // repository that uses immutable subjects, otherwise the name-based and the
   // ID-based form.
-  async function resolveSubjects(
+  async function resolveOidc(
     repo: string,
     environment: string,
     executor?: SelectedGhExecutor
-  ): Promise<string[]> {
-    const oidc = await resolveOidcSubject(
+  ): Promise<ResolveOidcSubjectResult> {
+    return resolveOidcSubject(
       {
         targetRepo: repo,
         envName: environment,
@@ -341,7 +371,48 @@ export function createAwsEnvironmentAccess<Operation>(
       },
       (apiPath) => dependencies.runGitHubJson(apiPath, executor)
     );
+  }
+
+  async function resolveSubjects(
+    repo: string,
+    environment: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string[]> {
+    const oidc = await resolveOidc(repo, environment, executor);
     return oidc.federatedCredentials.map((credential) => credential.subject);
+  }
+
+  // The repository's AWS environments other than `environment`. Any read that
+  // fails, or an environment Radius manages whose cluster can't be read, makes
+  // the answer unknown, because that environment may use the same cluster.
+  async function listOtherAwsEnvironments(
+    repo: string,
+    environment: string,
+    repository: GitHubRepositoryIdentity
+  ): Promise<AwsEnvironmentListing> {
+    const loaded = await loadEnvironmentClaims(repo, dependencies.environments);
+    if (!loaded.ok) return loaded;
+    return {
+      ok: true,
+      environments: loaded.claims
+        .filter(
+          ({ claimant }) =>
+            claimant.provider === "aws" &&
+            claimant.environment.toLowerCase() !== environment.toLowerCase()
+        )
+        .map(({ claimant, variables }) => ({
+          name: claimant.environment,
+          accountId: claimant.accountId,
+          region: claimant.region,
+          cluster: claimant.cluster,
+          // Only subjects proven to be this repository's. Another may be
+          // presented by other repositories too, so the access entry has to
+          // stay while the role trusts it.
+          trustSubjects: parseTrustSubjects(
+            variables[AWS_TRUST_SUBJECTS_VARIABLE]
+          ).filter((subject) => namesRepositoryEnvironment(subject, repository))
+        }))
+    };
   }
 
   // Record what exists in AWS, save it, and hand the pause to the caller.
@@ -556,21 +627,42 @@ export function createAwsEnvironmentAccess<Operation>(
       environment,
       roleArn,
       trustSubjects = [],
+      region,
+      cluster,
       operationId = "",
-      waiting
+      waiting,
+      whileLocked
     }) {
-      const subjects =
-        trustSubjects.length > 0 ?
-          trustSubjects
-        : await resolveSubjects(repo, environment);
+      // The recorded list covers a repository renamed since setup. The
+      // current subjects cover what Repair added after an OIDC subject
+      // change, which the recorded list doesn't name. The removal keeps any
+      // that other environments or repositories may present too. A GitHub
+      // read failure throws, so the delete stops with the GitHub environment
+      // kept.
+      const oidc = await resolveOidc(repo, environment);
+      const subjects = [
+        ...new Set([
+          ...trustSubjects,
+          ...oidc.federatedCredentials.map((credential) => credential.subject)
+        ])
+      ];
       const { result, lost, released } = await runUnderLock(
         { repo, environment, action: "delete", operationId },
         waiting ?? (() => undefined),
-        (ports) =>
-          removeAwsEnvironmentFromRole(
-            { roleArn, environment, subjects },
-            ports
-          )
+        async (ports) => {
+          const removal = await removeAwsEnvironmentFromRole(
+            { repo, roleArn, environment, subjects, region, cluster },
+            {
+              ...ports,
+              listOtherEnvironments: () =>
+                listOtherAwsEnvironments(repo, environment, oidc)
+            }
+          );
+          if (removal.ok && whileLocked && (await ports.stillLocked())) {
+            await whileLocked(removal);
+          }
+          return removal;
+        }
       );
       if (lost) return { ok: false, message: lost };
       if (released.ok) return result;
