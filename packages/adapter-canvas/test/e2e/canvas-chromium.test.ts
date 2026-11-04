@@ -17,6 +17,7 @@ import {
   PLACEHOLDER_SECRET,
   PROFILE_NAME,
   PROFILE_SUBSCRIPTION_ID,
+  prepareCredentialStoreIsolation,
   REPOSITORY,
   REPOSITORY_ROOT,
   test,
@@ -3836,6 +3837,114 @@ test.describe("Radius Canvas in Chromium", () => {
       };
     }
 
+    async function openAwsCredentialForm(
+      page: Page,
+      canvas: CanvasHarness
+    ): Promise<void> {
+      await gotoCanvas(page, canvas, "credentials");
+      await page.locator("#new-cred-btn").click();
+      await page.locator("#cred-provider-select").selectOption("aws");
+      await page.locator("#cred-name-input").fill("aws-verification");
+      await page.locator("#aws-account-id").fill(AWS_ACCOUNT);
+      await page.locator("#aws-region").fill("us-east-2");
+    }
+
+    test("invalidates AWS verification after account and region edits in Chromium @safety", async ({
+      page,
+      canvas
+    }) => {
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText(
+        "Credentials verified"
+      );
+      await page.locator("#aws-account-id").fill("999988887777");
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      await expect(page.locator("#cred-verify-status")).toBeHidden();
+      await page.locator("#aws-account-id").fill(AWS_ACCOUNT);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText(
+        "Credentials verified"
+      );
+      await page.locator("#aws-region").fill("us-west-2");
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      await expect(page.locator("#cred-verify-status")).toBeHidden();
+      expect(
+        (await canvas.cliCalls())
+          .filter((call) => call.tool === "aws")
+          .map((call) => call.args)
+      ).toContainEqual([
+        "sts",
+        "get-caller-identity",
+        "--output",
+        "json",
+        "--region",
+        "us-east-2"
+      ]);
+    });
+
+    test("offers the AWS installer remediation before STS in Chromium @safety", async ({
+      page,
+      canvas
+    }) => {
+      const scenario = defaultFakeCliScenario();
+      const version = scenario.commands.find(
+        (command) => command.tool === "aws" && command.args?.[0] === "--version"
+      );
+      if (!version) throw new Error("AWS version command is not modeled");
+      version.stdout = "aws-cli/2.15.2";
+      await canvas.setScenario(scenario);
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText("2.15.3");
+      await expect(page.locator("#cred-verify-action")).toContainText(
+        "Install or upgrade AWS CLI"
+      );
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      expect(
+        (await canvas.cliCalls()).some(
+          (call) => call.tool === "aws" && call.args[0] === "sts"
+        )
+      ).toBe(false);
+    });
+
+    test("keeps credential fields locked until an AWS save completes @safety", async ({
+      page,
+      canvas
+    }) => {
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#save-cred-btn")).toBeEnabled();
+      let releaseSave = () => {};
+      const saving = new Promise<void>((resolve) => {
+        releaseSave = resolve;
+      });
+      await page.route("**/api/save-credential-profile", async (route) => {
+        await saving;
+        await route.fulfill({ response: await route.fetch() });
+      });
+      try {
+        await page.locator("#save-cred-btn").click();
+        await expect(page.locator("#save-cred-btn")).toHaveText("Saving…");
+        await expect(page.locator("#aws-account-id")).not.toBeEditable();
+        await expect(page.locator("#aws-region")).not.toBeEditable();
+        await expect(page.locator("#cred-provider-select")).toBeDisabled();
+        await expect(page.locator("#cred-name-input")).not.toBeEditable();
+        releaseSave();
+        await expect(page.locator("#cred-success-banner")).toContainText(
+          "Successfully created credential profile aws-verification"
+        );
+        await page.locator("#new-cred-btn").click();
+        await page.locator("#cred-provider-select").selectOption("aws");
+        await expect(page.locator("#aws-account-id")).toBeEditable();
+        await expect(page.locator("#aws-region")).toBeEditable();
+      } finally {
+        releaseSave();
+        await page.unrouteAll({ behavior: "wait" });
+        await prepareCredentialStoreIsolation();
+      }
+    });
+
     // Answers each discovery with the next reply. The last reply repeats.
     async function routeAwsProfileAndDiscovery(
       page: Page,
@@ -4913,6 +5022,7 @@ test.describe("Radius Canvas in Chromium", () => {
         isStopRequested: ops.shouldStop,
         operationId: (operation) => operation.operationId,
         operations: {
+          getContext: (operation) => operation.context ?? {},
           enterStage: ops.enterStage,
           setStageState: ops.setStageState,
           addLegacyStep: ops.addLegacyStep,

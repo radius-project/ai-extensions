@@ -210,6 +210,35 @@ describe("AWS trust repair service", () => {
     expect(writes).toEqual([ROLE_ARN]);
   });
 
+  it("passes the exact saved policy name to Repair", async () => {
+    const policyName = "radius-deploy-dev-111111111111";
+    const test = service(failedSignIn, {
+      readEnvironmentTarget: async () => ({ ...awsTarget, policyName })
+    });
+    expect((await test.run()).status).toBe(200);
+    expect(test.repairs).toEqual([expect.objectContaining({ policyName })]);
+  });
+
+  it("refuses a policy identity changed while Repair takes the lock", async () => {
+    const writes: string[] = [];
+    let reads = 0;
+    const test = service(failedSignIn, {
+      readEnvironmentTarget: async () => ({
+        ...awsTarget,
+        policyName:
+          ++reads === 1 ?
+            "radius-deploy-dev-111111111111"
+          : "radius-deploy-dev-222222222222"
+      }),
+      repair: lockedRepair(writes)
+    });
+    expect(await test.run()).toMatchObject({
+      status: 409,
+      body: { code: "repair-target-changed" }
+    });
+    expect(writes).toEqual([]);
+  });
+
   it("changes nothing when the environment was deleted before the lock", async () => {
     const writes: string[] = [];
     let reads = 0;
