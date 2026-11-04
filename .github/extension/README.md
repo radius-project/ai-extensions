@@ -42,9 +42,10 @@ Each workflow runs on `ubuntu-24.04`. No long-lived cloud secrets are stored —
 
 1. **Authenticate via OIDC.** Runs `aws-actions/configure-aws-credentials` with the environment's AWS variables.
 2. **Verify access.** Runs `aws sts get-caller-identity` to confirm the login.
-3. **Verify EKS access.** Updates the kubeconfig with `aws eks update-kubeconfig` and runs `kubectl cluster-info`.
-4. **Verify GHCR package push permission.** Confirms the workflow token can push to the OCI state archive package (`RADIUS_STATE_REGISTRY`) that `rad startup` / `rad shutdown` write to. See [GHCR package push check](#ghcr-package-push-check).
-5. **Summary.** Writes the environment, provider, and GHCR check result to the job summary.
+3. **Check the deploy role's AWS account.** Fails unless the role's account, from `aws sts get-caller-identity`, equals `AWS_ACCOUNT_ID`. The deploy and delete workflows run the same check.
+4. **Verify EKS access.** Updates the kubeconfig with `aws eks update-kubeconfig` and runs `kubectl cluster-info`.
+5. **Verify GHCR package push permission.** Confirms the workflow token can push to the OCI state archive package (`RADIUS_STATE_REGISTRY`) that `rad startup` / `rad shutdown` write to. See [GHCR package push check](#ghcr-package-push-check).
+6. **Summary.** Writes the environment, provider, and GHCR check result to the job summary.
 
 ### GHCR package push check
 
@@ -65,7 +66,7 @@ The workflows read GitHub Actions **variables** (`vars`) — never long-lived se
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Common   | `RADIUS_STATE_REGISTRY` (optional; enables the GHCR package push check)                                                                                                                                                      |
 | Azure    | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_AKS_CLUSTER_NAME`, `AZURE_AKS_RESOURCE_GROUP` (optional; the cluster's own resource group, defaults to `AZURE_RESOURCE_GROUP`) |
-| AWS      | `AWS_ROLE_ARN`, `AWS_REGION`, `AWS_EKS_CLUSTER_NAME`                                                                                                                                                                         |
+| AWS      | `AWS_ROLE_ARN`, `AWS_REGION`, `AWS_ACCOUNT_ID`, `AWS_EKS_CLUSTER_NAME`                                                                                                                                                       |
 
 ### Prerequisites on the cloud side
 
@@ -117,7 +118,7 @@ Gateway cleanup also accepts `[]` or `null` from `rad app list -o json` as an em
 
 The dispatcher routes to the matching provider workflow, which runs on `ubuntu-24.04`. It stands up an ephemeral [k3d](https://k3d.io) cluster to host the Radius control plane on the runner, points that control plane at the user's existing EKS/AKS cluster, and deploys the application there. The control-plane setup, state restore, and run/teardown phases below run from the shared composite actions; the OIDC login, cluster connection, token projection, credential registration, environment creation, and recipe-pack deployment are the provider-specific steps. When a provider's identifying variable is empty, its steps are skipped and resources deploy to the ephemeral control-plane cluster instead of an external target.
 
-1. **Authenticate via OIDC.** Runs `azure/login` (Azure) or `aws-actions/configure-aws-credentials` (AWS) so the runner exchanges its GitHub OIDC token for short-lived cloud credentials. No long-lived cloud secrets are stored.
+1. **Authenticate via OIDC.** Runs `azure/login` (Azure) or `aws-actions/configure-aws-credentials` (AWS) so the runner exchanges its GitHub OIDC token for short-lived cloud credentials. No long-lived cloud secrets are stored. AWS then checks that the role's account, from `aws sts get-caller-identity`, equals `AWS_ACCOUNT_ID`, and fails before any Radius or AWS change when they differ. Radius makes every AWS call with the role and reads only the region from the environment, so a role in another account would create resources there while Radius records them under `AWS_ACCOUNT_ID`.
 2. **Build the target-cluster kubeconfig.** When an external workload cluster is configured, sets `RADIUS_TARGET_KUBECONFIG` to a workspace-local file and connects to the cluster. Azure runs `az aks get-credentials --file`. AWS writes a static, token-based kubeconfig and checks cluster access. Developer setup creates the EKS access entry and associates its access policy; workflows do not administer access. If access is missing, rerun environment setup with an authorized developer identity. Without an external cluster the variable is empty and lifecycle operations target the ephemeral control-plane cluster.
 3. **Create the ephemeral control plane.** Installs k3d and creates the `radius-cp` cluster, then installs `oras`, the `rad` CLI from the pinned stable Radius release (`RADIUS_INSTALL_REF`), and Terraform.
 4. **Create the target-kubeconfig secret.** Stores the target kubeconfig as the `target-kubeconfig` secret in `radius-system` (skipped when no target kubeconfig is present).

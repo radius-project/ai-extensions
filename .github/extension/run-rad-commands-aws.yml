@@ -80,6 +80,30 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      - name: Check the deploy role's AWS account
+        # Radius makes every AWS call with this role and reads only the region
+        # from the environment, so a role in another account would act there
+        # while Radius records the resources under AWS_ACCOUNT_ID.
+        if: ${{ vars.AWS_ROLE_ARN != '' }}
+        env:
+          ENVIRONMENT_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          if ! [[ "$ENVIRONMENT_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::AWS_ACCOUNT_ID is not a 12-digit AWS account ID. Set it in this GitHub environment's variables to the account of AWS_ROLE_ARN."
+            exit 1
+          fi
+          # No pipe, so under bash -e a failed call fails this assignment and the step.
+          ROLE_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          if ! [[ "$ROLE_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::aws sts get-caller-identity returned no account for AWS_ROLE_ARN."
+            exit 1
+          fi
+          if [ "$ROLE_ACCOUNT_ID" != "$ENVIRONMENT_ACCOUNT_ID" ]; then
+            echo "::error::AWS_ROLE_ARN is in AWS account $ROLE_ACCOUNT_ID, but AWS_ACCOUNT_ID is $ENVIRONMENT_ACCOUNT_ID. Fix AWS_ROLE_ARN or AWS_ACCOUNT_ID in this GitHub environment's variables so both name the same account."
+            exit 1
+          fi
+          echo "AWS_ROLE_ARN is in AWS account $ROLE_ACCOUNT_ID, matching AWS_ACCOUNT_ID."
+
       - name: Log in to GHCR for the state archive
         # The OCI-backed Radius state archive authenticates to GHCR using the
         # runner's Docker credential store (~/.docker/config.json). rad startup
