@@ -14,6 +14,7 @@ import {
   buildAwsLockPolicyName,
   buildGitHubTrustPolicy,
   checkAwsCliVersion,
+  classifyAwsCliFailure,
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
   describeAwsLockHolder,
@@ -46,6 +47,41 @@ const ACCOUNT = "123456789012";
 const GITHUB = "token.actions.githubusercontent.com";
 const DEV = "repo:octo/shop:environment:dev";
 const PROD = "repo:octo/shop:environment:prod";
+
+describe("AWS CLI failure classification", () => {
+  it.each([
+    ["spawn aws ENOENT", "missing-cli"],
+    ["aws: command not found", "missing-cli"],
+    ["aws is not recognized as an internal command", "missing-cli"],
+    [
+      "Error when retrieving credentials from custom-process: credential-helper: command not found",
+      "provider-failed"
+    ],
+    ["credential_process: spawn helper ENOENT", "provider-failed"],
+    [
+      "Error when retrieving token from sso: Token has expired and refresh failed",
+      "login-required"
+    ],
+    ["Unable to locate credentials", "login-required"],
+    ["ExpiredToken", "credentials-expired"],
+    ["InvalidClientTokenId", "credentials-invalid"],
+    ["AccessDenied", "access-denied"],
+    ["credential process failed", "provider-failed"],
+    ["connection timed out", "timeout"],
+    ["unavailable endpoint", "command-failed"]
+  ])("classifies %s as %s", (output, failure) => {
+    expect(classifyAwsCliFailure({ output })).toBe(failure);
+  });
+
+  it("preserves a subprocess timeout over provider diagnostics", () => {
+    expect(
+      classifyAwsCliFailure({
+        output: "credential_process is waiting for input",
+        timedOut: true
+      })
+    ).toBe("timeout");
+  });
+});
 
 describe("AWS CLI version gate", () => {
   it.each([

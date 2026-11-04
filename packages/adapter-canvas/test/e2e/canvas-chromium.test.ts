@@ -17,6 +17,7 @@ import {
   PLACEHOLDER_SECRET,
   PROFILE_NAME,
   PROFILE_SUBSCRIPTION_ID,
+  prepareCredentialStoreIsolation,
   REPOSITORY,
   REPOSITORY_ROOT,
   test,
@@ -3905,6 +3906,43 @@ test.describe("Radius Canvas in Chromium", () => {
           (call) => call.tool === "aws" && call.args[0] === "sts"
         )
       ).toBe(false);
+    });
+
+    test("keeps credential fields locked until an AWS save completes @safety", async ({
+      page,
+      canvas
+    }) => {
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#save-cred-btn")).toBeEnabled();
+      let releaseSave = () => {};
+      const saving = new Promise<void>((resolve) => {
+        releaseSave = resolve;
+      });
+      await page.route("**/api/save-credential-profile", async (route) => {
+        await saving;
+        await route.fulfill({ response: await route.fetch() });
+      });
+      try {
+        await page.locator("#save-cred-btn").click();
+        await expect(page.locator("#save-cred-btn")).toHaveText("Saving…");
+        await expect(page.locator("#aws-account-id")).not.toBeEditable();
+        await expect(page.locator("#aws-region")).not.toBeEditable();
+        await expect(page.locator("#cred-provider-select")).toBeDisabled();
+        await expect(page.locator("#cred-name-input")).not.toBeEditable();
+        releaseSave();
+        await expect(page.locator("#cred-success-banner")).toContainText(
+          "Successfully created credential profile aws-verification"
+        );
+        await page.locator("#new-cred-btn").click();
+        await page.locator("#cred-provider-select").selectOption("aws");
+        await expect(page.locator("#aws-account-id")).toBeEditable();
+        await expect(page.locator("#aws-region")).toBeEditable();
+      } finally {
+        releaseSave();
+        await page.unrouteAll({ behavior: "wait" });
+        await prepareCredentialStoreIsolation();
+      }
     });
 
     // Answers each discovery with the next reply. The last reply repeats.

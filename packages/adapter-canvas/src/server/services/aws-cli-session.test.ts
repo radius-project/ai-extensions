@@ -169,6 +169,7 @@ describe("verifyAwsCliSession", () => {
     "NoCredentialsError",
     "SSOTokenLoadError",
     "Error loading SSO Token",
+    "Error when retrieving token from sso: Token has expired and refresh failed",
     "The SSO session associated with this profile has expired"
   ])("offers sign-in for %s", async (stderr) => {
     expect(
@@ -189,6 +190,10 @@ describe("verifyAwsCliSession", () => {
     ["AccessDenied", "denied"],
     [
       "credential_process failed: private provider output",
+      "credential provider failed"
+    ],
+    [
+      "Error when retrieving credentials from custom-process: credential-helper: command not found",
       "credential provider failed"
     ],
     ["MFA prompt failed", "credential provider failed"],

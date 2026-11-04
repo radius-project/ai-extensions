@@ -61,10 +61,16 @@ export function classifyAwsCliFailure(input: {
   const { output } = input;
   if (input.timedOut || /timed out|timeout|ETIMEDOUT/i.test(output))
     return "timeout";
+  if (
+    /credential_process|credential process|retrieving credentials|MFA|multi-factor/i.test(
+      output
+    )
+  )
+    return "provider-failed";
   if (/ENOENT|command not found|not recognized as .*command/i.test(output))
     return "missing-cli";
   if (
-    /Unable to locate credentials|NoCredentialsError|SSOTokenLoadError|Error loading SSO Token|SSO session .*expired/i.test(
+    /Unable to locate credentials|NoCredentialsError|SSOTokenLoadError|Error loading SSO Token|SSO session .*expired|Error when retrieving token from sso:.*(?:expired|refresh failed)/i.test(
       output
     )
   )
@@ -75,12 +81,6 @@ export function classifyAwsCliFailure(input: {
     return "credentials-invalid";
   if (/AccessDenied|UnauthorizedOperation|not authorized/i.test(output))
     return "access-denied";
-  if (
-    /credential_process|credential process|retrieving credentials|MFA|multi-factor/i.test(
-      output
-    )
-  )
-    return "provider-failed";
   return "command-failed";
 }
 

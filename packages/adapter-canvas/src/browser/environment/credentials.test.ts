@@ -1681,6 +1681,66 @@ describe("AWS verification", () => {
     expect(page.elements.credSuccessBanner.style.display).toBe("flex");
   });
 
+  it.each(["success", "server-error", "network-error"])(
+    "locks AWS fields during a deferred save and reports %s",
+    async (outcome) => {
+      const page = renderPage();
+      await openAwsForm(page);
+      page.elements.credNameInput.value = "acme-aws";
+      fillValidAwsFields(page);
+      page.browser.net.handle(VERIFY_AWS_PATH, () =>
+        jsonResponse({ success: true, accountId: "111122223333" })
+      );
+      page.elements.btnVerifyAws.dispatch("click");
+      await flushPromises();
+      const pending = createDeferred<HttpResponse>();
+      page.browser.net.handle(CREDENTIAL_SAVE_PATH, () => pending.promise);
+      page.browser.net.handle(
+        `${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`,
+        () => jsonResponse({ profiles: [] })
+      );
+
+      page.elements.saveCredBtn.dispatch("click");
+      for (const field of [
+        "awsAccountId",
+        "awsRegion",
+        "credProviderSelect",
+        "credNameInput"
+      ] as const) {
+        expect(page.elements[field].disabled).toBe(true);
+      }
+      page.elements.credGhcrRetry.dispatch("click");
+      await flushPromises();
+      expect(page.elements.saveCredBtn.disabled).toBe(true);
+
+      if (outcome === "network-error")
+        pending.reject(new Error("connection lost"));
+      else
+        pending.resolve(
+          jsonResponse(
+            outcome === "server-error" ? { error: "account changed" } : {}
+          )
+        );
+      await flushPromises();
+
+      expect(page.elements.saveCredBtn.textContent).toBe(
+        "Save Credential Profile"
+      );
+      expect(page.elements.awsAccountId.disabled).toBe(false);
+      expect(page.elements.awsRegion.disabled).toBe(false);
+      if (outcome === "success") {
+        expect(page.elements.credSuccessBanner.style.display).toBe("flex");
+      } else {
+        expect(page.decisions.notify).toHaveBeenCalledWith(
+          outcome === "server-error" ?
+            "Could not save profile: account changed"
+          : "Could not save the credential profile. Please try again."
+        );
+        expect(page.elements.saveCredBtn.disabled).toBe(false);
+      }
+    }
+  );
+
   it.each(["awsAccountId", "awsRegion"] as const)(
     "invalidates verified credentials when %s changes",
     async (field) => {

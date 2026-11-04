@@ -486,9 +486,29 @@ export function initializeCredentialsPane(
   let credPackagesVerified = false;
   let formContext: "standalone" | "wizard" = "standalone";
   let active = true;
+  let saving = false;
 
   const updateSaveState = (): void => {
-    saveCredBtn.disabled = !(credVerified !== null && credPackagesVerified);
+    saveCredBtn.disabled =
+      saving || !(credVerified !== null && credPackagesVerified);
+  };
+
+  const setSaving = (pending: boolean): void => {
+    saving = pending;
+    for (const control of [
+      credNameInput,
+      credProviderSelect,
+      azTenantId,
+      azSubId,
+      awsAccountId,
+      awsRegion,
+      btnVerifyAzure,
+      btnVerifyAws
+    ]) {
+      control.disabled = pending;
+    }
+    saveCredBtn.textContent = pending ? "Saving…" : saveLabel();
+    updateSaveState();
   };
 
   const applyProvider = (provider: string): void => {
@@ -661,6 +681,7 @@ export function initializeCredentialsPane(
 
   const showLanding = (): void => {
     formToken += 1;
+    setSaving(false);
     credForm.style.display = "none";
     credLanding.style.display = "";
     loadCredentialTable();
@@ -685,6 +706,7 @@ export function initializeCredentialsPane(
     // showLanding does for the standalone form; otherwise a save that resolves
     // after Cancel still passes the token check and reports a created profile.
     formToken += 1;
+    setSaving(false);
     wizardFormHost.style.display = "none";
     wizardStepCard.style.display = "";
     moveFormTo(credForm);
@@ -695,6 +717,7 @@ export function initializeCredentialsPane(
 
   const showCredentialsForm = (mode: "standalone" | "wizard"): void => {
     formContext = mode;
+    setSaving(false);
     credSuccessBanner.style.display = "none";
     credFormTitle.textContent = "Create Credential Profile";
     saveCredBtn.textContent = saveLabel();
@@ -1015,8 +1038,7 @@ export function initializeCredentialsPane(
     }
     const token = formToken;
     const wizard = formContext === "wizard";
-    saveCredBtn.disabled = true;
-    saveCredBtn.textContent = "Saving…";
+    setSaving(true);
     void context.net
       .fetch(CREDENTIAL_SAVE_PATH, {
         method: "POST",
@@ -1027,8 +1049,7 @@ export function initializeCredentialsPane(
       .then(
         (payload) => {
           if (!active || token !== formToken) return;
-          saveCredBtn.disabled = false;
-          saveCredBtn.textContent = saveLabel();
+          setSaving(false);
           const error = readString(payload, "error");
           if (error !== "") {
             options.decisions.notify(`Could not save profile: ${error}`);
@@ -1044,8 +1065,7 @@ export function initializeCredentialsPane(
         },
         () => {
           if (!active || token !== formToken) return;
-          saveCredBtn.disabled = false;
-          saveCredBtn.textContent = saveLabel();
+          setSaving(false);
           options.decisions.notify(
             "Could not save the credential profile. Please try again."
           );

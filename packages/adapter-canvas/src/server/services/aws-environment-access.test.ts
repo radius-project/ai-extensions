@@ -860,6 +860,7 @@ describe("AWS environment access removal of the cluster's access entry", () => {
   const BY_HAND = `If nothing else uses it, run: aws eks delete-access-entry --cluster-name shop --principal-arn ${ROLE_ARN} --region us-west-2`;
   const radiusRole = (subjects: string[]): Record<string, Answer> => ({
     ...lockFree,
+    "--version": ok("aws-cli/2.17.0 Python/3.11 Darwin/23"),
     "sts get-caller-identity": ok({ Account: ACCOUNT }),
     "iam get-role": ok({
       Role: {
