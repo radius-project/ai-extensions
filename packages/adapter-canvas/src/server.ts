@@ -120,10 +120,12 @@ import {
   createAwsEnvironmentAccess,
   type AwsEnvironmentAccess
 } from "./server/services/aws-environment-access.js";
+import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identity-lock.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
+import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
 import {
   appParams,
   resolveDeployParams,
@@ -174,6 +176,7 @@ import {
   hasWarnings,
   addLegacyStep,
   setContext,
+  touchOperation,
   setCanonicalEnvironment,
   setCloudContext,
   getSetupArtifactLedger,
@@ -4062,7 +4065,7 @@ function productionEnvironmentDeletionPorts(
 export interface EnvironmentOperationExecutionDependencies {
   awsEnvironmentAccess: Pick<
     AwsEnvironmentAccess<EnvironmentOperationRecord>,
-    "setup"
+    "setup" | "release"
   >;
   executionOwner: EnvironmentExecutionOwner;
   scope: ReturnType<EnvironmentExecutionOwner["attachRuntime"]>;
@@ -4116,7 +4119,10 @@ export function createEnvironmentOperationExecution(
   const instanceId = dependencies.presentation?.instanceId;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
-  if (typeof awsEnvironmentAccess?.setup !== "function")
+  if (
+    typeof awsEnvironmentAccess?.setup !== "function" ||
+    typeof awsEnvironmentAccess.release !== "function"
+  )
     throw new Error(
       "Missing request coordinator dependency: awsEnvironmentAccess"
     );
@@ -4348,11 +4354,12 @@ export function createEnvironmentOperationExecution(
           );
           if (attachment.isShuttingDown()) return { shouldMonitor: false };
           return runEnvironmentOperationWorkflow(op, executor, {
-            preflightRepoAdmin: (repo, selectedExecutor) =>
+            preflightRepoAdmin: (repo, selectedExecutor, assertActive) =>
               preflightRepoAdmin(
                 repo,
                 selectedExecutor,
-                GH_COMMAND_PRESENTATION
+                GH_COMMAND_PRESENTATION,
+                assertActive
               ),
             guardStopBoundary: (operation, boundary) =>
               attachment.isShuttingDown() ?
@@ -4460,6 +4467,10 @@ export function createEnvironmentOperationExecution(
                 selectedExecutor
               );
             },
+            // Runs during shutdown too: a lock left behind blocks every other
+            // run on this deploy identity until someone removes it.
+            releaseAwsDeployIdentity: (operation) =>
+              awsEnvironmentAccess.release(operation),
             now: () => Date.now()
           });
         },
@@ -5619,8 +5630,18 @@ export function createProductionCanvasServerRuntime(
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
       sleep: sleepMs,
+      now: () => Date.now(),
       isStopRequested: shouldStop,
-      operations: { enterStage, addLegacyStep, setContext },
+      operationId: (operation) => operation.operationId,
+      operations: {
+        enterStage,
+        setStageState,
+        addLegacyStep,
+        setContext,
+        touch: (operation) => {
+          touchOperation(operation);
+        }
+      },
       store: operations,
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage
@@ -5823,6 +5844,9 @@ export function createProductionCanvasServerRuntime(
     stopPendingResume: sharedOperationResume.stopPendingResume,
     isShuttingDown: () => executionOwner.isShuttingDown(),
     get: (operationId) => operations.get(operationId),
+    awsEnabled,
+    removeAwsDeployIdentityLock: (lock) =>
+      removeAwsDeployIdentityLock(lock, runAwsCli),
     acquireForRetry: (op) => operations.acquireForRetry(op),
     persistOperations: () => operations.persist(),
     reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
@@ -5990,6 +6014,15 @@ export function createProductionCanvasServerRuntime(
         });
       }),
     readProcessEnv: () => process.env,
+    awsTrustRepair: createAwsTrustRepairService({
+      awsEnabled,
+      readInstanceState: (instanceId) =>
+        canvasServer.instances.get(instanceId)?.state,
+      cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
+      readEnvironmentTarget: createEnvironmentTargetReader(runCommand),
+      repair: (input) => awsEnvironmentAccess.repair(input),
+      errorMessage
+    }),
     setTimer: (callback, ms) => setTimeout(callback, ms),
     // Declared as a getter for the same temporal-dead-zone reason as the cache
     // above: the deploy services are composed further down, after the workflow
@@ -6479,8 +6512,8 @@ export function createProductionCanvasServerRuntime(
       return guardStopBoundary(input);
     },
     runAzCommand: (args) => runCliCommand("az", args),
-    preflightRepoAdmin: (repo, executor) =>
-      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+    preflightRepoAdmin: (repo, executor, assertActive) =>
+      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION, assertActive),
     preflightGhcrPackageWriteAccess: (executor) =>
       preflightGhcrPackageWriteAccess(
         getGhPackageCredentials,

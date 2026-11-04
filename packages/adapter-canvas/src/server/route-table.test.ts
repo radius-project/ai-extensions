@@ -109,7 +109,10 @@ const productionHandlers = {
     inspectVerificationWorkflow: () => Promise.resolve("inactive"),
     cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: () => true,
-    invalidateEnvironmentListing: () => {}
+    invalidateEnvironmentListing: () => {},
+    awsEnabled: true,
+    removeAwsDeployIdentityLock: () =>
+      Promise.resolve({ ok: true, removed: true })
   }),
   ...createRepositoriesRoutes({
     cliExec: () => {},
@@ -159,6 +162,13 @@ const productionHandlers = {
       abandon: () => {
         throw new Error(
           "unexpected deployment abandonment from the route-table suite"
+        );
+      }
+    },
+    awsTrustRepair: {
+      repair: () => {
+        throw new Error(
+          "unexpected AWS trust repair from the route-table suite"
         );
       }
     }
@@ -453,6 +463,7 @@ describe("server route ownership boundary", () => {
       "POST /api/bypass-verification",
       "POST /api/operations",
       "POST /api/abandon-deployment",
+      "POST /api/deploy/repair-aws-trust",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon",
       "POST /api/operations/:operationId/dismiss",
@@ -461,7 +472,8 @@ describe("server route ownership boundary", () => {
       "POST /api/operations/:operationId/cancel-workflow",
       "POST /api/operations/:operationId/rollback",
       "POST /api/operations/:operationId/exit",
-      "POST /api/operations/:operationId/retry/:retryKind"
+      "POST /api/operations/:operationId/retry/:retryKind",
+      "POST /api/operations/:operationId/aws-lock/remove"
     ]);
     expect(() => assertRouteTable(table)).not.toThrow();
   });

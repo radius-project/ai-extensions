@@ -88,7 +88,7 @@ function coordinator(
   operationControl: OperationControlService = unavailable,
   awsEnvironmentAccess: Parameters<
     typeof createInstanceRequestCoordinator
-  >[3]["awsEnvironmentAccess"] = { setup: unavailable }
+  >[3]["awsEnvironmentAccess"] = { setup: unavailable, release: unavailable }
 ) {
   return createInstanceRequestCoordinator(
     instanceId,
@@ -155,6 +155,201 @@ afterEach(() => {
 });
 
 describe("production coordinator scheduling scopes", () => {
+  it.each([
+    ["active", null],
+    ["account context", 0],
+    ["empty workflow pass", 1],
+    ["empty variable pass", 2]
+  ] as const)(
+    "admits cleanup only while active after %s settlement",
+    async (_boundary, microtasks) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("cleanup-admission");
+      op.context.githubLogin = "saved-account";
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: op.repo,
+        name: op.environment,
+        providerId: "17"
+      });
+      const { command } = acceptCommand(op, {
+        kind: "rollback",
+        attempt: 1,
+        target: "cleanup"
+      });
+      const entered = deferred();
+      const identity = deferred();
+      const run = vi.fn(async (args: string[]) => {
+        expect(args).toContain("/repos/fixture/app/environments/dev");
+        return {
+          code: 0,
+          stdout: args.includes("DELETE") ? "" : '{"id":17}',
+          stderr: ""
+        };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      let verifications = 0;
+      executor.verifyIdentity = () => {
+        if (++verifications === 2) {
+          entered.resolve();
+          return identity.promise;
+        }
+        return Promise.resolve();
+      };
+      const account = createEnvironmentAccountContext(
+        "cleanup-admission",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => executor.login,
+          switchKeyringAccount: unavailable,
+          resetIdentityCache() {}
+        })
+      );
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      coordinator(owner, "panel", undefined, account).scheduleCommandTask(
+        "rollback",
+        op,
+        command.commandId
+      );
+      const done = settled(owner, "panel");
+      try {
+        await entered.promise;
+        // A shutdown observer can run between the fulfilled, empty cleanup passes.
+        let shutdown = identity.promise;
+        if (microtasks !== null) {
+          for (let turn = 0; turn < microtasks; turn++)
+            shutdown = shutdown.then(() => {});
+          shutdown = shutdown.then(() => {
+            owner.shutdown();
+          });
+        }
+        identity.resolve();
+        await shutdown;
+        await done;
+        expect(account.getExecutor(op.operationId)).toBeUndefined();
+        if (microtasks === null) {
+          expect(op.state).toBe("cancelled");
+          expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+          expect(
+            run.mock.calls.filter(([args]) => args.includes("DELETE"))
+          ).toHaveLength(1);
+        } else {
+          expect(run).not.toHaveBeenCalled();
+          expect(op.endedAt).toBeNull();
+          expect(op.failure).toBeNull();
+          expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+        }
+      } finally {
+        identity.resolve();
+        await done;
+        owner.shutdown();
+      }
+    }
+  );
+
+  it.each(
+    ["user", "repos/fixture/app"].flatMap((path) =>
+      [false, true].map((reject) => ({ path, reject }))
+    )
+  )(
+    "stops composed preflight after held $path settles (reject=$reject)",
+    async ({ path, reject }) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("preflight-shutdown");
+      op.context.githubLogin = "saved-account";
+      op.request = { needsAzureCredentials: true, azure: {}, environment: {} };
+      const entered = deferred();
+      const gate = deferred();
+      let activeLogin = "original";
+      const run = vi.fn(async (args: string[]) => {
+        expect(args[0]).toBe("api");
+        if (args[1] === path) {
+          entered.resolve();
+          await gate.promise;
+          if (reject) throw new Error("Held preflight read rejected");
+        }
+        if (args[1] === "user")
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        if (args[1] === "repos/fixture/app")
+          return {
+            code: 0,
+            stdout: '{"permissions":{"admin":true}}',
+            stderr: ""
+          };
+        throw new Error(`Unexpected subsequent command: ${args.join(" ")}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const packages = vi.spyOn(executor, "packageCredentials");
+      const switchAccount = vi.fn(async (login: string) => {
+        activeLogin = login;
+        return { ok: true };
+      });
+      const accounts = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => activeLogin,
+        switchKeyringAccount: switchAccount,
+        resetIdentityCache() {}
+      });
+      const context = createEnvironmentAccountContext("preflight", accounts);
+      const authorizeAzure = vi.fn(unavailable);
+      const configureEnvironment = vi.fn(unavailable);
+      const cli = vi.spyOn(gh, "cliExec").mockImplementation(() => {
+        throw new Error("Unexpected ambient CLI or mutation");
+      });
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      const handler = coordinator(owner, "panel", undefined, context, {
+        authorizeAzure,
+        configureEnvironment
+      });
+      handler.scheduleEnvironmentOperation(op);
+      const done = settled(owner, "panel");
+      try {
+        await Promise.race([entered.promise, done]);
+        expect(context.getExecutor(op.operationId)).toBe(executor);
+        const issuedReads = run.mock.calls.length;
+        owner.shutdown();
+        expect(activeLogin).toBe("saved-account");
+        expect(switchAccount).toHaveBeenCalledTimes(1);
+        expect(context.getExecutor(op.operationId)).toBe(executor);
+        gate.resolve();
+        await done;
+        expect(run).toHaveBeenCalledTimes(issuedReads);
+        expect(packages).not.toHaveBeenCalled();
+        expect(authorizeAzure).not.toHaveBeenCalled();
+        expect(configureEnvironment).not.toHaveBeenCalled();
+        expect(cli).not.toHaveBeenCalled();
+        expect(op.endedAt).toBeNull();
+        expect(op.failure).toBeNull();
+        expect(context.getExecutor(op.operationId)).toBeUndefined();
+        expect(activeLogin).toBe("original");
+        expect(switchAccount.mock.calls).toEqual([
+          ["saved-account"],
+          ["original"]
+        ]);
+        await expect(
+          accounts.withSelectedAccount(
+            "saved-account",
+            { ownerKey: "next" },
+            async () => "released"
+          )
+        ).resolves.toMatchObject({
+          value: "released",
+          restoration: { state: "restored" }
+        });
+      } finally {
+        gate.resolve();
+        await done;
+        owner.shutdown();
+      }
+    }
+  );
+
   it.each(["removed", "shutdown", "superseded"] as const)(
     "does not recover deferred admission after its context is %s",
     (change) => {
@@ -273,7 +468,9 @@ describe("production coordinator scheduling scopes", () => {
       schedule,
       invalidateEnvironmentListing: () => {
         throw new Error("Unexpected invalidation");
-      }
+      },
+      awsEnabled: true,
+      removeAwsDeployIdentityLock: unavailable
     });
     const pending = service({
       operationId: original.operationId,
@@ -883,6 +1080,7 @@ describe("production coordinator scheduling scopes", () => {
           code: "aws-cli-missing"
         };
       });
+      const release = vi.fn(async () => {});
       const configureEnvironment = vi.fn(unavailable);
       const handler = coordinator(
         owner,
@@ -892,13 +1090,18 @@ describe("production coordinator scheduling scopes", () => {
         { authorizeAzure: unavailable, configureEnvironment },
         undefined,
         undefined,
-        { setup }
+        { setup, release }
       );
       const done = settled(owner, "panel");
       handler.scheduleEnvironmentOperation(op);
       await done;
 
       expect(configureEnvironment).not.toHaveBeenCalled();
+      // Released whether setup failed or paused, since a lock left behind
+      // blocks every other run on the deploy identity. A setup stopped by
+      // shutdown never ran, so it took no lock.
+      if (shuttingDown) expect(release).not.toHaveBeenCalled();
+      else expect(release).toHaveBeenCalledExactlyOnceWith(op);
       if (shuttingDown) {
         expect(setup).not.toHaveBeenCalled();
         expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
@@ -1084,7 +1287,7 @@ describe("production coordinator scheduling scopes", () => {
   ] as const)("requires the explicit %s dependency", (name) => {
     const dependencies = {
       awsEnabled: false,
-      awsEnvironmentAccess: { setup: unavailable },
+      awsEnvironmentAccess: { setup: unavailable, release: unavailable },
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: createEnvironmentAccountContext("runtime", {
         createReadOnlyExecutor: unavailable,
@@ -1475,6 +1678,7 @@ describe("production coordinator scheduling scopes", () => {
 
   it.each([
     ["environment", "account"],
+    ["environment", "context-settlement"],
     ["environment", "read"],
     ["environment", "persistence"],
     ["environment", "planning"],
@@ -1565,13 +1769,20 @@ describe("production coordinator scheduling scopes", () => {
       let identityChecks = 0;
       const executor = {
         ...successfulSelectedGhExecutor({ login: "saved-account", run }),
-        verifyIdentity: async () => {
+        verifyIdentity: () => {
           identityChecks++;
-          if (boundary.startsWith("identity") && identityChecks === 2) {
-            await hold(boundary);
-            if (boundary === "identity-rejected")
-              throw new Error("Identity no longer available");
+          if (boundary === "context-settlement" && identityChecks === 2) {
+            held = true;
+            entered.resolve();
+            return gate.promise;
           }
+          return (async () => {
+            if (boundary.startsWith("identity") && identityChecks === 2) {
+              await hold(boundary);
+              if (boundary === "identity-rejected")
+                throw new Error("Identity no longer available");
+            }
+          })();
         }
       };
       const account = createEnvironmentAccountContext(
@@ -1601,10 +1812,14 @@ describe("production coordinator scheduling scopes", () => {
         await Promise.race([entered.promise, completed]);
         if (boundary !== "complete" && boundary !== "cleanup") {
           expect(held, JSON.stringify(op.failure)).toBe(true);
-          owner.shutdown();
+          const shutdown =
+            boundary === "context-settlement" ?
+              gate.promise.then(() => owner.shutdown())
+            : Promise.resolve(owner.shutdown());
           const reads = run.mock.calls.length;
           const azureReads = cli.mock.calls.length;
           gate.resolve();
+          await shutdown;
           await completed;
           expect(run).toHaveBeenCalledTimes(reads);
           expect(cli).toHaveBeenCalledTimes(azureReads);
@@ -2033,7 +2248,9 @@ describe("production coordinator scheduling scopes", () => {
         schedule,
         invalidateEnvironmentListing: () => {
           throw new Error("Unexpected invalidation");
-        }
+        },
+        awsEnabled: true,
+        removeAwsDeployIdentityLock: unavailable
       });
       const report = vi.spyOn(operations, "report");
       const handler = coordinator(
@@ -2272,6 +2489,53 @@ describe("production coordinator scheduling scopes", () => {
       expect(account.getExecutor(op.operationId)).toBeUndefined();
     }
   );
+
+  it("releases a verification monitor when its operation disappears during backoff", async () => {
+    vi.useFakeTimers();
+    const owner = createEnvironmentExecutionOwner();
+    const op = operation("removed-monitor");
+    op.currentStage = STAGE_VERIFY;
+    op.recoveryState = "verification_pending";
+    op.context.githubLogin = "saved-account";
+    op.verification = { runId: "17", dispatchedAt: Date.now() };
+    const executor = successfulSelectedGhExecutor({ login: "saved-account" });
+    const account = createEnvironmentAccountContext("monitor", {
+      createReadOnlyExecutor: async () => executor,
+      withSelectedAccount: unavailable
+    });
+    const observe = vi.fn(async () => ({
+      status: 200,
+      body: { state: "pending" }
+    }));
+    const persist = vi
+      .spyOn(operations, "persist")
+      .mockResolvedValue(undefined);
+    coordinator(
+      owner,
+      "panel",
+      undefined,
+      account,
+      undefined,
+      observe
+    ).startRecoveredTasks();
+    const done = settled(owner, "panel");
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(observe).toHaveBeenCalledOnce();
+      expect(account.getExecutor(op.operationId)).toBe(executor);
+      operations.delete(op.operationId);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await done;
+      expect(observe).toHaveBeenCalledOnce();
+      expect(persist).not.toHaveBeenCalled();
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+      expect(op.endedAt).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      owner.shutdown();
+      await done;
+    }
+  });
 
   it("persists expired recovered account acquisition without another read or executor", async () => {
     const owner = createEnvironmentExecutionOwner();
@@ -2863,7 +3127,7 @@ describe("production coordinator scheduling scopes", () => {
       withSelectedAccount: unavailable
     });
     const execution = createEnvironmentOperationExecution({
-      awsEnvironmentAccess: { setup: unavailable },
+      awsEnvironmentAccess: { setup: unavailable, release: unavailable },
       executionOwner: owner,
       scope,
       accountContext: account,

@@ -8,6 +8,7 @@ import {
   handleCancelWorkflow,
   handleContinueOperation,
   handleExitOperation,
+  handleRemoveAwsLock,
   handleRetryOperation,
   handleRollbackOperation,
   handleStopOperation,
@@ -15,6 +16,7 @@ import {
   CONTINUE_OPERATION_ROUTE,
   CANCEL_WORKFLOW_ROUTE,
   EXIT_OPERATION_ROUTE,
+  REMOVE_AWS_LOCK_ROUTE,
   RETRY_OPERATION_ROUTE,
   ROLLBACK_OPERATION_ROUTE,
   STOP_OPERATION_ROUTE,
@@ -43,6 +45,7 @@ import {
   requestStop,
   requireInput,
   setCommandState,
+  setContext,
   setStageState,
   setVerificationWorkflowState,
   verificationWorkflowState,
@@ -216,6 +219,10 @@ function dependencies(
     },
     invalidateEnvironmentListing: (repo) => {
       journal.invalidatedListings.push(repo);
+    },
+    awsEnabled: true,
+    removeAwsDeployIdentityLock: () => {
+      throw new Error("removeAwsDeployIdentityLock not stubbed");
     }
   };
   return Object.assign(base, overrides, { journal });
@@ -238,7 +245,7 @@ function retryableDeletion(): OperationFixture {
 }
 
 describe("the route registry", () => {
-  it("claims exactly the six declared control routes", () => {
+  it("claims exactly the seven declared control routes", () => {
     const registry = createOperationsControlRoutes(dependencies());
     expect(Object.keys(registry).sort()).toEqual(
       [
@@ -247,7 +254,8 @@ describe("the route registry", () => {
         routeKey({ method: "POST", path: CANCEL_WORKFLOW_ROUTE }),
         routeKey({ method: "POST", path: ROLLBACK_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: EXIT_OPERATION_ROUTE }),
-        routeKey({ method: "POST", path: RETRY_OPERATION_ROUTE })
+        routeKey({ method: "POST", path: RETRY_OPERATION_ROUTE }),
+        routeKey({ method: "POST", path: REMOVE_AWS_LOCK_ROUTE })
       ].sort()
     );
   });
@@ -2043,4 +2051,206 @@ describe("contracts shared by every control route", () => {
       ).toEqual(["continue-setup", "rollback", "exit-setup"]);
     }
   );
+});
+
+describe("handleRemoveAwsLock", () => {
+  const LOCK = {
+    policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
+    policyId: "LOCK0",
+    holder: "The setup of environment prod in octo/shop",
+    since: "2026-10-30T11:00:00Z"
+  };
+  const waiting = (removable = true): OperationFixture => {
+    const op = newOperation();
+    setContext(op, { awsLockWait: { ...LOCK, removable } });
+    return op;
+  };
+
+  it("removes the lock the run waits for and records it on the run", async () => {
+    const op = waiting();
+    const removed: unknown[] = [];
+
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async (lock) => {
+          removed.push(lock);
+          return { ok: true, removed: true };
+        }
+      }
+    );
+
+    expect(out.recording.status).toBe(200);
+    expect(out.payload()).toMatchObject({
+      code: "aws-lock-removed",
+      operationId: op.operationId
+    });
+    expect(removed).toEqual([
+      { policyArn: LOCK.policyArn, policyId: LOCK.policyId }
+    ]);
+    expect(op).toMatchObject({
+      context: { awsLockWait: { ...LOCK, removable: false } },
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "mutation",
+          label: `Removed the lock on the deploy identity held by: ${LOCK.holder}.`
+        })
+      ])
+    });
+    expect(out.journal.persistCalls).toBe(1);
+  });
+
+  it("refuses a confirmation that names another lock, without touching AWS", async () => {
+    const op = waiting();
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK1"
+    );
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "aws-lock-changed",
+      error:
+        "The lock changed since it was shown: another run now holds a new one. Nothing was removed."
+    });
+    expect(out.journal.persistCalls).toBe(0);
+  });
+
+  it.each([
+    ["no policy ID", "aws-lock/remove"],
+    ["an empty policy ID", "aws-lock/remove?policyId="]
+  ])(
+    "rejects a request with %s as invalid, without touching AWS",
+    async (_label, action) => {
+      const op = waiting();
+      const out = await drive(handleRemoveAwsLock, op, action);
+      expect(out.recording.status).toBe(400);
+      expect(out.payload()).toMatchObject({
+        code: "aws-lock-invalid",
+        error: "Name the lock to remove by its policy ID."
+      });
+      expect(op).toMatchObject({
+        context: { awsLockWait: { removable: true } }
+      });
+      expect(out.journal.persistCalls).toBe(0);
+    }
+  );
+
+  it("refuses to remove a lock while AWS is switched off", async () => {
+    const op = waiting();
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK0",
+      { awsEnabled: false }
+    );
+    expect(out.recording.status).toBe(400);
+    expect(out.payload()).toMatchObject({
+      code: "provider-unsupported",
+      error:
+        "AWS environments aren't supported yet, so Radius removed no AWS lock."
+    });
+    expect(op).toMatchObject({ context: { awsLockWait: { removable: true } } });
+    expect(out.journal.persistCalls).toBe(0);
+  });
+
+  it("says when the lock was already gone", async () => {
+    const out = await drive(
+      handleRemoveAwsLock,
+      waiting(),
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async () => ({ ok: true, removed: false })
+      }
+    );
+    expect(out.payload().code).toBe("aws-lock-already-removed");
+  });
+
+  it("still answers success when the record cannot be saved", async () => {
+    const out = await drive(
+      handleRemoveAwsLock,
+      waiting(),
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async () => ({ ok: true, removed: true }),
+        persistOperations: () => Promise.reject(new Error("disk full"))
+      }
+    );
+    expect(out.recording.status).toBe(200);
+    expect(out.payload().detail).toBe(
+      "The lock was removed, but Radius could not save that on this run: disk full"
+    );
+  });
+
+  it.each([
+    [
+      "an AWS refusal",
+      async () => ({
+        ok: false as const,
+        code: "aws-lock-changed",
+        message: "The lock changed since it was shown."
+      }),
+      "aws-lock-changed",
+      "The lock changed since it was shown."
+    ],
+    [
+      "a thrown error",
+      async () => {
+        throw new Error("spawn aws ENOENT");
+      },
+      "aws-lock-remove-failed",
+      "Radius could not remove the lock: spawn aws ENOENT"
+    ]
+  ])(
+    "refuses with the reason on %s and keeps offering removal",
+    async (_l, remove, code, error) => {
+      const op = waiting();
+      const out = await drive(
+        handleRemoveAwsLock,
+        op,
+        "aws-lock/remove?policyId=LOCK0",
+        {
+          removeAwsDeployIdentityLock: remove
+        }
+      );
+      expect(out.recording.status).toBe(409);
+      expect(out.payload()).toMatchObject({ code, error });
+      expect(op).toMatchObject({
+        context: { awsLockWait: { removable: true } }
+      });
+      expect(out.journal.persistCalls).toBe(0);
+    }
+  );
+
+  it.each([
+    ["a lock not yet old enough", () => waiting(false)],
+    ["no lock wait", () => newOperation()],
+    [
+      "a finished run",
+      () => {
+        const op = waiting();
+        finish(op, "failed", {});
+        return op;
+      }
+    ]
+  ])("refuses %s without touching AWS", async (_label, build) => {
+    const out = await drive(
+      handleRemoveAwsLock,
+      build(),
+      "aws-lock/remove?policyId=LOCK0"
+    );
+    expect(out.recording.status).toBe(409);
+    expect(out.payload().code).toBe("aws-lock-not-removable");
+  });
+
+  it("answers 404 for an unknown operation", async () => {
+    const out = await call(
+      handleRemoveAwsLock,
+      "/api/operations/missing/aws-lock/remove?policyId=LOCK0",
+      dependencies({ get: () => null })
+    );
+    expect(out.recording.status).toBe(404);
+  });
 });

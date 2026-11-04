@@ -25,6 +25,8 @@ export const CANCEL_WORKFLOW_ROUTE =
   "/api/operations/:operationId/cancel-workflow";
 export const RETRY_OPERATION_ROUTE =
   "/api/operations/:operationId/retry/:retryKind";
+export const REMOVE_AWS_LOCK_ROUTE =
+  "/api/operations/:operationId/aws-lock/remove";
 
 function decodeSegment(value: string): string {
   try {
@@ -49,7 +51,8 @@ async function runControlRoute(
       operationId: decodeSegment(params?.operationId ?? ""),
       command,
       retryKind: decodeSegment(params?.retryKind ?? ""),
-      abandon: context.url.searchParams.get("mode") === "abandon"
+      abandon: context.url.searchParams.get("mode") === "abandon",
+      policyId: context.url.searchParams.get("policyId") ?? ""
     },
     ({ status, body }) => {
       context.response.setHeader("Content-Type", "application/json");
@@ -117,6 +120,22 @@ export function handleRetryOperation(
   return runControlRoute(context, dependencies, RETRY_OPERATION_ROUTE, "retry");
 }
 
+/**
+ * Remove the AWS deploy identity lock a live setup or deletion waits for, once
+ * a person confirmed its holder stopped. The query names the lock they saw.
+ */
+export function handleRemoveAwsLock(
+  context: CanvasRequestContext,
+  dependencies: OperationsControlDependencies
+): Promise<void> {
+  return runControlRoute(
+    context,
+    dependencies,
+    REMOVE_AWS_LOCK_ROUTE,
+    "remove-aws-lock"
+  );
+}
+
 export function createOperationsControlRoutes(
   dependencies: OperationsControlDependencies,
   service: OperationControlService = createOperationsControlService(
@@ -142,6 +161,10 @@ export function createOperationsControlRoutes(
       "rollback"
     ),
     [`POST ${EXIT_OPERATION_ROUTE}`]: bind(EXIT_OPERATION_ROUTE, "exit"),
-    [`POST ${RETRY_OPERATION_ROUTE}`]: bind(RETRY_OPERATION_ROUTE, "retry")
+    [`POST ${RETRY_OPERATION_ROUTE}`]: bind(RETRY_OPERATION_ROUTE, "retry"),
+    [`POST ${REMOVE_AWS_LOCK_ROUTE}`]: bind(
+      REMOVE_AWS_LOCK_ROUTE,
+      "remove-aws-lock"
+    )
   };
 }

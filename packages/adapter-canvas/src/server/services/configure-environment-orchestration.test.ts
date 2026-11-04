@@ -1136,6 +1136,7 @@ describe("matched headless and panel-bound setup service parity", () => {
         roleArn: String(request.existingRoleArn),
         subjects: []
       }),
+      releaseAwsDeployIdentity: async () => {},
       getOperation: (id) =>
         id === operation.operationId ? operation : undefined,
       now: d.now,

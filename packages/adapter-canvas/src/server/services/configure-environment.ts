@@ -85,7 +85,8 @@ export interface ConfigureEnvironmentDependencies
   // --- preflight ---
   preflightRepoAdmin(
     repo: string,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<string>;
   preflightGhcrPackageWriteAccess(
     executor?: SelectedGhExecutor
