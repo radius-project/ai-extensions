@@ -999,7 +999,12 @@ export function defaultFakeCliScenario(): FakeCliScenario {
       },
       {
         tool: "aws",
-        args: ["sts", "get-caller-identity", "--output", "json"],
+        args: ["--version"],
+        stdout: "aws-cli/2.39.0 Python/3.13"
+      },
+      {
+        tool: "aws",
+        argsPrefix: ["sts", "get-caller-identity", "--output", "json"],
         stdout: JSON.stringify({
           Account: "123456789012",
           Arn: "arn:aws:iam::123456789012:user/fixture-aws-user"

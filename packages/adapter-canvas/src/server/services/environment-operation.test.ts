@@ -96,7 +96,8 @@ function awsIdentityReady(): Partial<EnvironmentOperationWorkflowDependencies> {
     setupAwsDeployIdentity: async () => ({
       ok: true,
       roleArn: AWS_ROLE_ARN,
-      subjects: AWS_SUBJECTS
+      subjects: AWS_SUBJECTS,
+      policyName: "radius-deploy-production-111111111111"
     })
   };
 }
@@ -1295,7 +1296,12 @@ describe("runEnvironmentOperationWorkflow", () => {
           expect(received).toBe(executor);
           test.events.push("aws-identity");
           identityCalls.push(request);
-          return { ok: true, roleArn: AWS_ROLE_ARN, subjects: AWS_SUBJECTS };
+          return {
+            ok: true,
+            roleArn: AWS_ROLE_ARN,
+            subjects: AWS_SUBJECTS,
+            policyName: "radius-deploy-production-111111111111"
+          };
         }
       });
 
@@ -1357,160 +1363,174 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.posts).toEqual([]);
   });
 
-  it("shows Authorize deploy identity paused when a pause lands during the lock wait, and Continue reruns only that stage", async () => {
-    const account = "123456789012";
-    const op = createOperation({
-      provider: "aws",
-      repo: "octo/app",
-      environment: "production"
-    });
-    op.request = {
-      needsAzureCredentials: false,
-      environment: {
-        environment: "production",
-        roleName: "radius-deploy-octo-app",
-        accountId: account,
-        region: "us-west-2",
-        cluster: "eks-1"
-      }
-    };
-    op.resumeRequest = structuredClone(op.request);
-    const executor = successfulSelectedGhExecutor({
-      run: async () =>
-        command({ stdout: JSON.stringify({ name: "Production" }) })
-    });
-    const awsAnswers: Record<string, GitHubEnvironmentCommandResult> = {
-      "--version": command({ stdout: "aws-cli/2.17.0 Python/3.11 Darwin/23" }),
-      "sts get-caller-identity": command({
-        stdout: JSON.stringify({ Account: account })
-      }),
-      "eks describe-cluster": command({
-        stdout: JSON.stringify({
-          cluster: {
-            status: "ACTIVE",
-            accessConfig: { authenticationMode: "API" }
-          }
-        })
-      }),
-      // Another run holds the lock for the whole test.
-      "iam create-policy": command({
-        code: 254,
-        stderr:
-          "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
-      }),
-      "iam get-policy": command({
-        stdout: JSON.stringify({
-          Policy: { PolicyId: "LOCK0", CreateDate: "2026-08-25T01:05:00Z" }
-        })
-      })
-    };
-    const stageStates = () =>
-      Object.fromEntries(
-        op.stages.map((stage: { id: string; state: string }) => [
-          stage.id,
-          stage.state
-        ])
-      );
-    const waits: Array<Record<string, string>> = [];
-    const access = createAwsEnvironmentAccess<EnvironmentOperationRecord>({
-      async runAws(args) {
-        const answer = awsAnswers[args.slice(0, 2).join(" ")];
-        if (!answer) throw new Error(`unexpected aws ${args.join(" ")}`);
-        return answer;
-      },
-      async runGitHubJson(path) {
-        if (path === "/repos/octo/app") {
-          return {
-            ok: true,
-            status: 200,
-            json: { full_name: "octo/app", id: 42, owner: { id: 7 } }
-          };
+  it.each(["lock wait", "failed policy read"])(
+    "keeps authorization paused during %s, including after Continue",
+    async (pauseAt) => {
+      const account = "123456789012";
+      const op = createOperation({
+        provider: "aws",
+        repo: "octo/app",
+        environment: "production"
+      });
+      op.request = {
+        needsAzureCredentials: false,
+        environment: {
+          environment: "production",
+          roleName: "radius-deploy-octo-app",
+          accountId: account,
+          region: "us-west-2",
+          cluster: "eks-1"
         }
-        return { ok: false, status: 404, json: null };
-      },
-      environments: {
-        listEnvironmentNames: async () => {
-          throw new Error("unexpected environment listing");
+      };
+      op.resumeRequest = structuredClone(op.request);
+      const executor = successfulSelectedGhExecutor({
+        run: async () =>
+          command({ stdout: JSON.stringify({ name: "Production" }) })
+      });
+      const awsAnswers: Record<string, GitHubEnvironmentCommandResult> = {
+        "--version": command({
+          stdout: "aws-cli/2.17.0 Python/3.11 Darwin/23"
+        }),
+        "sts get-caller-identity": command({
+          stdout: JSON.stringify({ Account: account })
+        }),
+        "eks describe-cluster": command({
+          stdout: JSON.stringify({
+            cluster: {
+              status: "ACTIVE",
+              accessConfig: { authenticationMode: "API" }
+            }
+          })
+        }),
+        // Another run holds the lock for the whole test.
+        "iam create-policy": command({
+          code: 254,
+          stderr:
+            "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
+        }),
+        "iam get-policy": command({
+          stdout: JSON.stringify({
+            Policy: { PolicyId: "LOCK0", CreateDate: "2026-08-25T01:05:00Z" }
+          })
+        })
+      };
+      const stageStates = () =>
+        Object.fromEntries(
+          op.stages.map((stage: { id: string; state: string }) => [
+            stage.id,
+            stage.state
+          ])
+        );
+      const waits: Array<Record<string, string>> = [];
+      const access = createAwsEnvironmentAccess<EnvironmentOperationRecord>({
+        async runAws(args) {
+          const answer = awsAnswers[args.slice(0, 2).join(" ")];
+          if (!answer) throw new Error(`unexpected aws ${args.join(" ")}`);
+          return answer;
         },
-        readEnvironmentVariables: async () => {
-          throw new Error("unexpected variable read");
-        }
-      },
-      // Each poll of the held lock is where the customer presses Pause.
-      sleep: async () => {
-        waits.push(stageStates());
-        requestStop(op);
-      },
-      now: () => NOW,
-      isStopRequested: shouldStop,
-      operationId: (target) => target.operationId,
-      operations: {
-        enterStage,
-        setStageState,
-        addLegacyStep,
-        setContext,
-        touch: () => {}
-      },
-      store: { persist: async () => {} },
-      stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
-      errorMessage: (error) =>
-        error instanceof Error ? error.message : String(error)
-    });
-    const test = dependencies(op, {
-      setupAwsDeployIdentity: (target, request, received) =>
-        access.setup(target, request, received),
-      releaseAwsDeployIdentity: (target) => access.release(target),
-      guardStopBoundary: (target, boundary) =>
-        honorStopBoundary({
-          operation: target,
-          boundary,
-          persist: async () => {}
-        })
-    });
+        async runGitHubJson(path) {
+          if (
+            pauseAt === "failed policy read" &&
+            path.endsWith("/variables?per_page=100")
+          ) {
+            waits.push(stageStates());
+            requestStop(op);
+            return { ok: false, status: 403, json: null };
+          }
+          if (path === "/repos/octo/app") {
+            return {
+              ok: true,
+              status: 200,
+              json: { full_name: "octo/app", id: 42, owner: { id: 7 } }
+            };
+          }
+          return { ok: false, status: 404, json: null };
+        },
+        environments: {
+          listEnvironmentNames: async () => {
+            throw new Error("unexpected environment listing");
+          },
+          readEnvironmentVariables: async () => {
+            throw new Error("unexpected variable read");
+          }
+        },
+        // Each poll of the held lock is where the customer presses Pause.
+        sleep: async () => {
+          waits.push(stageStates());
+          requestStop(op);
+        },
+        now: () => NOW,
+        isStopRequested: shouldStop,
+        operationId: (target) => target.operationId,
+        operations: {
+          getContext: (target) => target.context ?? {},
+          enterStage,
+          setStageState,
+          addLegacyStep,
+          setContext,
+          touch: () => {}
+        },
+        store: { persist: async () => {} },
+        stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      });
+      const test = dependencies(op, {
+        setupAwsDeployIdentity: (target, request, received) =>
+          access.setup(target, request, received),
+        releaseAwsDeployIdentity: (target) => access.release(target),
+        guardStopBoundary: (target, boundary) =>
+          honorStopBoundary({
+            operation: target,
+            boundary,
+            persist: async () => {}
+          })
+      });
 
-    await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
 
-    expect(op.state).toBe("cancelled");
-    expect(stageStates()).toEqual({
-      authorize_identity: "paused",
-      configure_environment: "skipped",
-      verify: "skipped"
-    });
-    const eligibility = canContinueSetup(op);
-    expect(eligibility).toMatchObject({
-      ok: true,
-      resumeFrom: "aws_deploy_identity"
-    });
-    expect(
-      projectOperationActions(op).find(
-        (action: { kind: string }) => action.kind === "continue_setup"
-      )?.description
-    ).toContain("Authorize the deploy identity");
+      expect(op.state).toBe("cancelled");
+      expect(stageStates()).toEqual({
+        authorize_identity: "paused",
+        configure_environment: "skipped",
+        verify: "skipped"
+      });
+      const eligibility = canContinueSetup(op);
+      expect(eligibility).toMatchObject({
+        ok: true,
+        resumeFrom: "aws_deploy_identity"
+      });
+      expect(
+        projectOperationActions(op).find(
+          (action: { kind: string }) => action.kind === "continue_setup"
+        )?.description
+      ).toContain("Authorize the deploy identity");
 
-    // What the Continue route does before it schedules the run again.
-    beginRetryAttempt(op, "setup");
-    applySetupResumePoint(op, eligibility.resumeFrom);
-    expect(stageStates()).toEqual({
-      authorize_identity: "running",
-      configure_environment: "pending",
-      verify: "pending"
-    });
-    waits.length = 0;
-
-    await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
-
-    // While Continue waits for the lock again, only authorization runs.
-    expect(waits).toEqual([
-      {
+      // What the Continue route does before it schedules the run again.
+      beginRetryAttempt(op, "setup");
+      applySetupResumePoint(op, eligibility.resumeFrom);
+      expect(stageStates()).toEqual({
         authorize_identity: "running",
         configure_environment: "pending",
         verify: "pending"
-      }
-    ]);
-    expect(test.posts).toEqual([]);
-    expect(op.state).toBe("cancelled");
-    expect(stageStates().authorize_identity).toBe("paused");
-  });
+      });
+      waits.length = 0;
+
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
+
+      // Continue reruns authorization, not the later setup stages.
+      expect(waits).toEqual([
+        {
+          authorize_identity: "running",
+          configure_environment: "pending",
+          verify: "pending"
+        }
+      ]);
+      expect(test.posts).toEqual([]);
+      expect(op.state).toBe("cancelled");
+      expect(stageStates().authorize_identity).toBe("paused");
+    }
+  );
 
   it("finalizes an AWS deploy identity failure without creating the environment", async () => {
     const op = operation();
@@ -1593,6 +1613,11 @@ describe("runEnvironmentOperationWorkflow", () => {
       }
     };
     const githubAnswers: Record<string, GitHubJsonResponse> = {
+      "/repos/octo/app/environments/Production/variables?per_page=100": {
+        ok: true,
+        status: 200,
+        json: { variables: [] }
+      },
       "/repos/octo/app": {
         ok: true,
         status: 200,
@@ -1635,6 +1660,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       isStopRequested: () => false,
       operationId: (target) => target.operationId,
       operations: {
+        getContext: (target) => target.context ?? {},
         enterStage,
         setStageState,
         addLegacyStep,
@@ -1752,7 +1778,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       setupAwsDeployIdentity: async () => ({
         ok: true,
         roleArn: AWS_ROLE_ARN,
-        subjects: AWS_SUBJECTS
+        subjects: AWS_SUBJECTS,
+        policyName: "radius-deploy-production-111111111111"
       })
     });
 

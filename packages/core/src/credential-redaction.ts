@@ -3,11 +3,12 @@ const REDACTED = "[REDACTED]";
 
 const RECOGNIZABLE_CREDENTIAL_PATTERNS = [
   /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
   /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g
 ] as const;
 
 const NAMED_CREDENTIAL_PATTERN =
-  /(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|federated[_-]?token|password)(\\*["'])?\s*[:=]/gi;
+  /(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|federated[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|access[_-]?key[_-]?id|password)(\\*["'])?\s*[:=]/gi;
 
 interface QuoteContext {
   cursor: number;
