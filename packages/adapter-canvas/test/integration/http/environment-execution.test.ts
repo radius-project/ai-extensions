@@ -7,6 +7,7 @@ import { createProductionGitHubAccountContext } from "../../../src/runtime/produ
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
+import * as gh from "../../../src/gh.js";
 import { createProductionCanvasServerRuntime } from "../../../src/server.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import {
@@ -55,6 +56,162 @@ function deferred() {
 }
 
 describe("production environment owner HTTP binding", () => {
+  it.each(
+    ["coordinator", "configuration"].flatMap((caller) =>
+      ["user", "repos/fixture/app"].flatMap((path) =>
+        [false, true].map((reject) => ({ caller, path, reject }))
+      )
+    )
+  )(
+    "fences $caller preflight after HTTP resume holds $path (reject=$reject)",
+    async ({ caller, path, reject }) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = deferred();
+      const gate = deferred();
+      let activeLogin = "original";
+      let preflights = 0;
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api user") preflights++;
+        if (
+          args[0] === "api" &&
+          args[1] === path &&
+          preflights === (caller === "coordinator" ? 1 : 2)
+        ) {
+          entered.resolve();
+          await gate.promise;
+          if (reject) throw new Error("Held preflight read rejected");
+        }
+        if (command === "api user")
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        if (command === "api repos/fixture/app")
+          return {
+            code: 0,
+            stdout: '{"permissions":{"admin":true}}',
+            stderr: ""
+          };
+        if (command === "api /repos/fixture/app/environments/dev")
+          return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+        if (
+          command.startsWith("api --paginate /repos/fixture/app/environments")
+        )
+          return { code: 0, stdout: "", stderr: "" };
+        throw new Error(`Unexpected subsequent command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const packages = vi.spyOn(executor, "packageCredentials");
+      const switchAccount = vi.fn(async (login: string) => {
+        activeLogin = login;
+        return { ok: true };
+      });
+      const accounts = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => activeLogin,
+        switchKeyringAccount: switchAccount,
+        resetIdentityCache() {}
+      });
+      const accountContext = createEnvironmentAccountContext(
+        "http-preflight",
+        accounts
+      );
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext
+      });
+      const cli = vi.spyOn(gh, "cliExec").mockImplementation(() => {
+        throw new Error("Unexpected ambient CLI or mutation");
+      });
+      const entry = await runtime.getOrCreateServer("preflight", "environment");
+      const op = createOperation({
+        operationId: "http-preflight",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.currentStage = STAGE_AUTHORIZE_IDENTITY;
+      op.request = { needsAzureCredentials: false, azure: {}, environment: {} };
+      requireInput(op, {
+        code: "app-selection-required",
+        message: "Choose an app.",
+        checkpoint: "azure-app-selection"
+      });
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      let done = Promise.resolve();
+      try {
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              ),
+              "content-type": "application/json"
+            },
+            body: JSON.stringify({
+              repo: op.repo,
+              environment: op.environment,
+              provider: op.provider,
+              checkpoint: "azure-app-selection",
+              createNew: true
+            })
+          }
+        );
+        expect(response.status).toBe(202);
+        await entered.promise;
+        done = new Promise<void>((resolve) => {
+          const stop = owner.onEnvironmentTasksSettled("preflight", () => {
+            stop();
+            resolve();
+          });
+        });
+        expect(op.failure).toBeNull();
+        expect(preflights).toBe(caller === "coordinator" ? 1 : 2);
+        expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+        const issuedReads = run.mock.calls.length;
+        const packageChecks = packages.mock.calls.length;
+        owner.shutdown();
+        expect(activeLogin).toBe("saved-account");
+        expect(switchAccount).toHaveBeenCalledTimes(1);
+        gate.resolve();
+        await done;
+        expect(run).toHaveBeenCalledTimes(issuedReads);
+        expect(packages).toHaveBeenCalledTimes(packageChecks);
+        expect(cli).not.toHaveBeenCalled();
+        expect(op.failure).toBeNull();
+        expect(op.endedAt).toBeNull();
+        expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
+        expect(activeLogin).toBe("original");
+        expect(switchAccount.mock.calls).toEqual([
+          ["saved-account"],
+          ["original"]
+        ]);
+        await expect(
+          accounts.withSelectedAccount(
+            "saved-account",
+            { ownerKey: "next" },
+            async () => "released"
+          )
+        ).resolves.toMatchObject({
+          value: "released",
+          restoration: { state: "restored" }
+        });
+      } finally {
+        gate.resolve();
+        await done;
+        owner.shutdown();
+        await runtime.stopServer("preflight", true);
+      }
+    }
+  );
+
   it("returns unavailable GHCR readiness without a selection handle or scope repair over HTTP", async () => {
     const executor = successfulSelectedGhExecutor({
       requiresKeyringSwitch: false,
