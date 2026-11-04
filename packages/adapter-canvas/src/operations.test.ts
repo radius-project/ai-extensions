@@ -5345,14 +5345,26 @@ describe("retry eligibility", () => {
       });
       enterStage(op, STAGE_VERIFY);
       pauseForProviderRestart(op);
-      expect(nextIncompleteSetupStep(op)).toBe("verification");
+      // The resume point and the scheduled monitor come from one answer.
+      expect(canContinueSetup(op)).toMatchObject({
+        ok: true,
+        resumeFrom: "verification",
+        recoveredVerification: true
+      });
+      expect(nextIncompleteSetupStep(op, { recoveredVerification: true })).toBe(
+        "verification"
+      );
 
       // Any other stop at Verify credentials still reruns the identity.
       const stopped = addSafeResumeRequest(awsOp());
       enterStage(stopped, STAGE_VERIFY);
       requestStop(stopped);
       stopAtBoundary(stopped, "verification-observation");
-      expect(nextIncompleteSetupStep(stopped)).toBe("aws_deploy_identity");
+      expect(canContinueSetup(stopped)).toMatchObject({
+        ok: true,
+        resumeFrom: "aws_deploy_identity",
+        recoveredVerification: false
+      });
     });
 
     it("positions Continue on Authorize deploy identity with every later stage pending", () => {

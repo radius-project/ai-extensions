@@ -3211,16 +3211,23 @@ export const SETUP_RESUME_STEPS = Object.freeze([
   "verification"
 ]);
 
-/** The first step the ledger does not already prove finished. */
-export function nextIncompleteSetupStep(op: any): string {
-  // An AWS continuation always runs Authorize deploy identity again: it takes
-  // the deploy identity lock and holds it through Configure environment (see
-  // runSetupCoordinator). Only the restart decision that monitors the saved
-  // verification run skips it.
+/**
+ * The step a continuation resumes from.
+ *
+ * An AWS setup with an identity stage resumes from Authorize deploy identity:
+ * it takes the deploy identity lock again and holds it through Configure
+ * environment (see runSetupCoordinator), unless it only monitors the saved
+ * verification run. Every other setup resumes from the first step the ledger
+ * does not already prove finished.
+ */
+export function nextIncompleteSetupStep(
+  op: any,
+  { recoveredVerification = false }: { recoveredVerification?: boolean } = {}
+): string {
   if (
     op?.provider === "aws" &&
     op.stages?.some((stage: any) => stage?.id === STAGE_AUTHORIZE_IDENTITY) &&
-    !(isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY)
+    !recoveredVerification
   ) {
     return "aws_deploy_identity";
   }
@@ -3408,12 +3415,15 @@ function setupForwardEligibility(
   // resources the customer just asked Radius to remove.
   if (intent === "continue" && rollbackRemovedEverything(op))
     return { ok: false, code: "setup-continue-rolled-back" };
+  // Continue then only monitors the saved verification run, so the resume
+  // point and the scheduled work must both come from this one answer.
+  const recoveredVerification =
+    isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY;
   return {
     ok: true,
     code: `${prefix}-allowed`,
-    resumeFrom: nextIncompleteSetupStep(op),
-    recoveredVerification:
-      isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY
+    resumeFrom: nextIncompleteSetupStep(op, { recoveredVerification }),
+    recoveredVerification
   };
 }
 
