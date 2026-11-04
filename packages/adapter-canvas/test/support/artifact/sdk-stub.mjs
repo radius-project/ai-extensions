@@ -139,7 +139,40 @@ export async function joinSession(declaration) {
     workspacePath: process.env.RADIUS_ARTIFACT_WORKSPACE,
     send: async () => undefined,
     log: () => undefined,
-    rpc: { canvas: { open: async () => ({}) } },
+    capabilities: {
+      ui: {
+        elicitation:
+          process.env.RADIUS_ARTIFACT_UPDATE_APPROVAL !== "unavailable"
+      }
+    },
+    ui: {
+      select: async () => {
+        throw new Error("Unexpected artifact selection request.");
+      },
+      confirm: async (message) => {
+        await send({ type: "plugin-approval", detail: message });
+        return process.env.RADIUS_ARTIFACT_UPDATE_APPROVAL === "approve";
+      }
+    },
+    rpc: {
+      canvas: { open: async () => ({}) },
+      plugins: {
+        list: async () => ({
+          plugins: [
+            {
+              name: "radius",
+              marketplace: "radius-plugins",
+              version: "0.4.0",
+              enabled: true
+            }
+          ]
+        }),
+        update: async ({ name }) => {
+          await send({ type: "plugin-update", detail: name });
+          return { skillsInstalled: 5 };
+        }
+      }
+    },
     metadata: { snapshot: async () => ({}) },
     close: async () => {
       closeCount++;

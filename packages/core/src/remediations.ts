@@ -335,10 +335,14 @@ function buildAzureSubscriptionSet(
   };
 }
 
-function buildAwsCliLogin(): Remediation {
+function buildAwsCliLogin(
+  params: Readonly<Record<string, unknown>>
+): Remediation {
+  const nextStep =
+    params.nextStep === "refresh-discovery" ? "refresh-discovery" : "";
   return {
     id: "aws-cli-login",
-    params: {},
+    params: nextStep ? { nextStep } : {},
     title: "Sign in to AWS CLI",
     displayCommand: "aws sso login",
     argv: [["aws", "sso", "login"]],
@@ -349,7 +353,9 @@ function buildAwsCliLogin(): Remediation {
       "No active AWS session was found. Copilot will run `aws sso login`. If this machine uses static credentials rather than SSO, cancel and run `aws configure` yourself instead.",
     confirmLabel: "Start AWS login",
     followUp:
-      "After the login finishes, return to the Radius canvas and click Verify again."
+      nextStep === "refresh-discovery" ?
+        "After the login finishes, return to the Radius canvas and refresh resource discovery."
+      : "After the login finishes, return to the Radius canvas and click Verify again."
   };
 }
 
@@ -634,7 +640,7 @@ export function buildRemediation(
     case "azure-subscription-set":
       return buildAzureSubscriptionSet(values);
     case "aws-cli-login":
-      return { ok: true, remediation: buildAwsCliLogin() };
+      return { ok: true, remediation: buildAwsCliLogin(values) };
     case "github-cli-login":
       return { ok: true, remediation: buildGithubCliLogin(values) };
     case "github-packages-scope":
@@ -713,7 +719,9 @@ function displayPromptFor(remediation: Remediation): string {
     case "azure-subscription-set":
       return "Selecting the Azure subscription the Radius canvas needs.";
     case "aws-cli-login":
-      return "Signing in to AWS CLI so the Radius canvas can verify these AWS credentials.";
+      return remediation.params.nextStep === "refresh-discovery" ?
+          "Signing in to AWS CLI so the Radius canvas can refresh AWS resource discovery."
+        : "Signing in to AWS CLI so the Radius canvas can verify these AWS credentials.";
     case "github-cli-login":
       return "Signing in to GitHub CLI so the Radius canvas can continue.";
     case "github-packages-scope":
@@ -742,7 +750,9 @@ function reasonFor(remediation: Remediation): string {
     case "azure-subscription-set":
       return "The Radius canvas needs the Azure CLI pointed at a specific subscription before it can continue.";
     case "aws-cli-login":
-      return "The Radius canvas needs an active AWS CLI session before it can verify these credentials.";
+      return remediation.params.nextStep === "refresh-discovery" ?
+          "The Radius canvas needs an active AWS CLI session before it can discover AWS resources."
+        : "The Radius canvas needs an active AWS CLI session before it can verify these credentials.";
     case "github-cli-login":
       return "The Radius canvas could not detect a signed-in GitHub CLI account.";
     case "github-packages-scope":

@@ -689,7 +689,10 @@ describe("real server and fake SDK runtime ownership", () => {
         "--version": "aws-cli/2.17.0",
         "sts get-caller-identity": { Account: "123456789012" },
         "eks describe-cluster": {
-          cluster: { accessConfig: { authenticationMode: "API" } }
+          cluster: {
+            status: "ACTIVE",
+            accessConfig: { authenticationMode: "API" }
+          }
         },
         "iam list-open-id-connect-providers": { OpenIDConnectProviderList: [] },
         "iam create-open-id-connect-provider": {},

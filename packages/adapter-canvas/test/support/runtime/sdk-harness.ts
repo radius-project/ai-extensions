@@ -96,7 +96,11 @@ function actionByName(
 }
 
 export async function createRuntimeSdkHarness(
-  options: FakeDependenciesOptions = {}
+  options: FakeDependenciesOptions = {},
+  configure?: (
+    dependencies: ReturnType<typeof createFakeDependencies>["deps"],
+    session: ReturnType<typeof createFakeSession>
+  ) => void
 ) {
   const fake = createFakeDependencies(options);
   let canvasDeclaration: CanvasDeclaration | undefined;
@@ -179,6 +183,7 @@ export async function createRuntimeSdkHarness(
   });
   const joinSession = vi.fn(async () => session);
 
+  configure?.(fake.deps, session);
   extension = await bootstrapRadiusExtension(fake.deps, {
     createCanvas,
     joinSession

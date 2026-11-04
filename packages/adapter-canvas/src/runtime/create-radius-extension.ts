@@ -13,6 +13,7 @@
 // never touches the network or a real SDK session.
 
 import { createRadiusCanvas } from "./create-radius-canvas.js";
+import { redactCredentials } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
@@ -33,6 +34,7 @@ import {
 import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
 import { createRadiusCanvasInstanceRegistry } from "./canvas-instance-registry.js";
 import { errorMessage } from "./util.js";
+import { createRadiusPluginUpdater } from "./plugin-update.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { SessionPort } from "./session.js";
 
@@ -301,6 +303,13 @@ export function createRadiusExtension(
   // ─── Shutdown (idempotent) ─────────────────────────────────────────────────
   let shuttingDown = false;
   let shutdownPromise: Promise<RadiusShutdownOutcome> | undefined;
+  const updatePlugin = createRadiusPluginUpdater({
+    enabled: deps.automaticPluginUpdates,
+    preferences: deps.pluginUpdatePreferences,
+    now: () => deps.clock.now(),
+    isShutDown: () => shuttingDown,
+    logError: deps.logError
+  });
 
   // Cleanup must never hang the process: a server that refuses to close, or a
   // session whose teardown never settles, is abandoned after this budget so
@@ -513,6 +522,11 @@ export function createRadiusExtension(
       pendingStartupDiagnostic = "";
     }
     startKeepalive();
+    void updatePlugin(session).catch((error: unknown) => {
+      deps.logError(
+        redactCredentials(`Radius plugin update failed: ${errorMessage(error)}`)
+      );
+    });
   }
 
   return {

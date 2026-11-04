@@ -28,7 +28,10 @@ import {
   modelFailureSummaryList
 } from "../model-failure-policy.js";
 import { freshnessIdentity } from "@radius-project/core";
-import { RADIUS_CANVAS_INSTANCE_ID } from "./declarations.js";
+import {
+  RADIUS_CANVAS_INSTANCE_ID,
+  RADIUS_FAILURE_REPORT_CONTEXT
+} from "./declarations.js";
 import type { AppModelStatus } from "./graph-context.js";
 
 interface DeployRepairDetails {
@@ -197,6 +200,7 @@ export function appBicepHandoffPrompt(
     "",
     RECIPE_PACK_NOTE,
     ENVIRONMENT_INDEPENDENT_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT,
     ...(failureReport && failureReport.branches.length ?
       [failureReportInstruction(repo, failureReport)]
     : [])
@@ -257,7 +261,8 @@ export function appModelRefreshPrompt(status: AppModelStatus): string {
     "The model is on the current workspace branch, so writing the working tree is enough. Do not commit or push it as part of the refresh.",
     "",
     RECIPE_PACK_NOTE,
-    ENVIRONMENT_INDEPENDENT_NOTE
+    ENVIRONMENT_INDEPENDENT_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT
   ].join("\n");
 }
 
@@ -296,7 +301,8 @@ export function appModelUnverifiedPrompt(status: AppModelStatus): string {
     "If they would rather keep their edits, leave the file alone. Repairing one specific problem in place is the alternative that preserves them.",
     "",
     RECIPE_PACK_NOTE,
-    ENVIRONMENT_INDEPENDENT_NOTE
+    ENVIRONMENT_INDEPENDENT_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT
   ].join("\n");
 }
 
@@ -378,7 +384,8 @@ export function deployRepairHandoffPrompt(
     : "",
     `Repeat that repair-and-redeploy cycle at most ${DEPLOY_REPAIR_ATTEMPT_CAP} times, stopping early once the deploy succeeds or there is no different fix left to try. The canvas enforces that limit and refuses a further redeploy on this attempt, and each radius_deploy call reports which attempt it is. After that, report the result to the user and only try again if they ask.`,
     "",
-    RECIPE_PACK_NOTE
+    RECIPE_PACK_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT
   );
   return lines
     .filter((line, i) => line !== "" || lines[i - 1] !== "")
@@ -432,20 +439,21 @@ export function deployFailureNoticePrompt(
   const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
   const fenced = fenceDeployDiagnostic(error);
   const lines = [
-    `The Radius deploy${where}${onPhrase} failed, and its workflow run could not be confirmed. Report this to the user; do not automatically redeploy.`,
+    `The Radius deploy${where}${onPhrase} could not be confirmed, so its remote deployment outcome is unknown. Report this to the user; do not automatically redeploy. Do not claim that the remote deployment itself failed.`,
     "",
     fenced ?
       `${DEPLOY_DIAGNOSTIC_NOTE}\n\n${fenced}`
-    : "The deploy failed before a workflow run could be confirmed, and no error text was captured."
+    : "Deploy dispatch or monitoring ended before a workflow run could be confirmed, and no error text was captured."
   ];
   if (deployRunUrl) lines.push("", `Workflow run (full logs): ${deployRunUrl}`);
   lines.push(
     "",
     "A workflow run may or may not still be in progress, so do NOT call radius_deploy to retry this on the agent's own initiative: a second run could race the first against the same target. Instead:",
     deployRunUrl ?
-      `- Tell the user the deploy failed and point them at the run: ${deployRunUrl}. Ask them to check the Actions tab for its real outcome.`
-    : "- Tell the user the deploy failed to start (for example a missing `workflow` token scope, disabled Actions, or an unpushed branch) and ask them to check the repository's Actions tab.",
-    "- Only deploy again if the user explicitly asks, and start a fresh deploy from the canvas or with radius_deploy (no attemptId) once the previous run is known to be over."
+      `- Tell the user that deploy monitoring ended before the workflow outcome could be confirmed, leave the remote deployment outcome unknown, and point them at the run: ${deployRunUrl}. Ask them to check the Actions tab for its real outcome.`
+    : "- Tell the user that deploy dispatch or run lookup could not confirm a workflow run (for example a missing `workflow` token scope, disabled Actions, an unpushed branch, or an accepted dispatch whose run has not surfaced yet), leave the remote deployment outcome unknown, and ask them to check the repository's Actions tab.",
+    "- Only deploy again if the user explicitly asks, and start a fresh deploy from the canvas or with radius_deploy (no attemptId) once the previous run is known to be over.",
+    RADIUS_FAILURE_REPORT_CONTEXT
   );
   return lines
     .filter((line, i) => line !== "" || lines[i - 1] !== "")

@@ -29,6 +29,7 @@ const STAGES = new Set([
 const STAGE_STATES = new Set([
   "pending",
   "running",
+  "paused",
   "succeeded",
   "warning",
   "failed",

@@ -520,6 +520,96 @@ describe("acquireAwsDeployIdentityLock", () => {
   });
 });
 
+describe("acquireAwsDeployIdentityLock without waiting", () => {
+  const acquireNow = (iam: ReturnType<typeof fakeIam>) =>
+    acquireAwsDeployIdentityLock(
+      { accountId: ACCOUNT, roleName: ROLE, holder: HOLDER, wait: false },
+      iam.ports
+    );
+
+  it("returns the holder at once instead of waiting", async () => {
+    const iam = fakeIam({
+      "iam create-policy": EXISTS,
+      "iam get-policy": policy("LOCK0", {
+        Description: OTHER,
+        CreateDate: "2026-10-30T11:00:00Z"
+      })
+    });
+
+    expect(await acquireNow(iam)).toEqual({
+      ok: false,
+      busy: true,
+      holder: {
+        policyArn: LOCK_ARN,
+        policyId: "LOCK0",
+        holder: "The setup of environment prod in octo/shop",
+        holderOperationId: "op-2",
+        since: "2026-10-30T11:00:00Z",
+        removable: true
+      }
+    });
+    expect(iam.sleeps).toEqual([]);
+    expect(iam.waits).toEqual([]);
+  });
+
+  it("tries a lock released between create and read once more, at once", async () => {
+    const iam = fakeIam({
+      "iam create-policy": [EXISTS, policy("LOCK1")],
+      "iam get-policy": [MISSING, policy("LOCK1")]
+    });
+    expect(await acquireNow(iam)).toMatchObject({ ok: true });
+    expect(iam.sleeps).toEqual([]);
+  });
+
+  it("names no holder when IAM keeps saying the lock exists but cannot read it", async () => {
+    const iam = fakeIam({
+      "iam create-policy": EXISTS,
+      "iam get-policy": MISSING
+    });
+    expect(await acquireNow(iam)).toEqual({
+      ok: false,
+      busy: true,
+      holder: null
+    });
+    expect(iam.commands()).toEqual([
+      "iam create-policy",
+      "iam get-policy",
+      "iam create-policy",
+      "iam get-policy"
+    ]);
+    expect(iam.sleeps).toEqual([]);
+  });
+
+  it.each([
+    ["creating", { "iam create-policy": THROTTLED }],
+    [
+      "reading the holder",
+      { "iam create-policy": EXISTS, "iam get-policy": THROTTLED }
+    ]
+  ])(
+    "stops without backing off when IAM is unreachable while %s",
+    async (_label, script) => {
+      const iam = fakeIam(script);
+      expect(await acquireNow(iam)).toMatchObject({
+        ok: false,
+        code: "aws-lock-unreachable"
+      });
+      expect(iam.sleeps).toEqual([]);
+    }
+  );
+
+  it("passes through a lock it created that IAM never shows", async () => {
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": MISSING
+    });
+    expect(await acquireNow(iam)).toMatchObject({
+      ok: false,
+      code: "aws-lock-unconfirmed"
+    });
+  });
+});
+
 describe("a held deploy identity lock", () => {
   it("is still held while the lock has its ID", async () => {
     const { lock } = await held({ "iam get-policy": policy("LOCK1") });
