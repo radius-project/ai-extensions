@@ -444,27 +444,32 @@ export function environmentsPaneMarkup(
         <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
           <div id="aws-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="aws-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
+          <div id="aws-discover-remediation" hidden></div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div class="rad-field">
             <label for="aws-cluster-select">EKS Cluster</label>
-            <select id="aws-cluster-select"><option value="" disabled selected>Loading…</option></select>
+            <select id="aws-cluster-select" aria-describedby="aws-cluster-note"><option value="" disabled selected>Loading…</option></select>
+            <div id="aws-cluster-note" class="rad-field__help" hidden></div>
           </div>
           <div class="rad-field">
             <label for="aws-namespace-select">Namespace</label>
-            <select id="aws-namespace-select" aria-describedby="aws-namespace-help aws-namespace-error"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-namespace-custom" type="text" maxlength="63" pattern="${KUBERNETES_NAMESPACE_PATTERN}" aria-label="Namespace (custom)" aria-describedby="aws-namespace-help aws-namespace-error" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="aws-namespace-select" aria-describedby="aws-namespace-help aws-namespace-note aws-namespace-error"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-namespace-custom" type="text" maxlength="63" pattern="${KUBERNETES_NAMESPACE_PATTERN}" aria-label="Namespace (custom)" aria-describedby="aws-namespace-help aws-namespace-note aws-namespace-error" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
             <div class="rad-field__help" id="aws-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
+            <div id="aws-namespace-note" class="status info" role="status" hidden></div>
             <div id="aws-namespace-error" class="status error" role="alert" hidden></div>
           </div>
           <div class="rad-field">
-            <label for="aws-vpc-select">VPC</label>
-            <select id="aws-vpc-select"><option value="" disabled selected>Loading…</option></select>
+            <span id="aws-vpc-label" style="display:block; font-weight:600; font-size:12px; color:var(--rad-text-tertiary); margin:0 0 4px;">VPC</span>
+            <output id="aws-vpc-value" aria-labelledby="aws-vpc-label" aria-describedby="aws-vpc-note" style="display:block; font-size:13px; padding:4px 0;">Select a cluster to see its VPC.</output>
+            <div id="aws-vpc-note" class="status info" role="status" hidden></div>
           </div>
           <div class="rad-field">
             <span id="aws-subnets-label" style="display:block; font-weight:600; font-size:12px; color:var(--rad-text-tertiary); margin:0 0 4px;">Subnets</span>
-            <div id="aws-subnets-list" role="group" aria-labelledby="aws-subnets-label" aria-describedby="aws-subnets-note aws-subnets-error" style="border:1px solid var(--rad-stroke); border-radius:6px; padding:4px 0; max-height:220px; overflow:auto;"></div>
-            <div class="rad-field__help" id="aws-subnets-note">Two availability zones are required. Public subnets are reachable from the internet.</div>
+            <div id="aws-restore-note" class="status info" role="status" hidden style="margin:0 0 4px;"></div>
+            <div id="aws-subnets-list" role="group" aria-labelledby="aws-subnets-label" aria-describedby="aws-restore-note aws-subnets-note aws-subnets-error" style="border:1px solid var(--rad-stroke); border-radius:6px; padding:4px 0; max-height:220px; overflow:auto;"></div>
+            <div class="rad-field__help" id="aws-subnets-note">Two availability zones are required. Local Zone, Wavelength Zone, and Outpost subnets can't be selected.</div>
             <div id="aws-subnets-error" class="status error" role="alert" hidden></div>
           </div>
         </div>

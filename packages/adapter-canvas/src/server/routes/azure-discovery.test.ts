@@ -5,6 +5,7 @@ import { isUuid } from "../../azure-oidc.js";
 import {
   azureDiscoveryContract,
   commandLine,
+  TEST_KUBECONFIG_PATH,
   temporaryKubeconfigDouble
 } from "../../../test/support/azure-discovery-contract.js";
 import { createRequestContext } from "../request-context.js";
@@ -444,7 +445,7 @@ describe("azure-discovery routes (SU-08)", () => {
 
   describe("POST /api/discover", () => {
     const SUB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-    const NS_TRIPLE = ["default", "kube-system", "radius-system"];
+    const AWS_FALLBACK_NAMESPACES = ["default"];
     // The shape every failing arm answers with. Pinned once so each refusal
     // below asserts the whole body rather than only its `error` field.
     const REFUSAL = {
@@ -479,10 +480,16 @@ describe("azure-discovery routes (SU-08)", () => {
       eks: "aws eks list-clusters --query clusters --region us-west-2 --output json",
       describe: (name: string) =>
         `aws eks describe-cluster --name ${name} --region us-west-2 --output json`,
-      vpcs: "aws ec2 describe-vpcs --region us-west-2 --output json",
-      subnets: "aws ec2 describe-subnets --region us-west-2 --output json",
+      vpcs: "aws ec2 describe-vpcs --vpc-ids vpc-1 --region us-west-2 --output json",
+      subnets:
+        "aws ec2 describe-subnets --filters Name=vpc-id,Values=vpc-1 --region us-west-2 --output json",
       routeTables:
-        "aws ec2 describe-route-tables --region us-west-2 --output json"
+        "aws ec2 describe-route-tables --filters Name=vpc-id,Values=vpc-1 --region us-west-2 --output json",
+      zones:
+        "aws ec2 describe-availability-zones --region us-west-2 --output json",
+      kubeconfig: (name: string) =>
+        `aws eks update-kubeconfig --name ${name} --region us-west-2 --kubeconfig ${TEST_KUBECONFIG_PATH}`,
+      eksNamespaces: `kubectl --kubeconfig ${TEST_KUBECONFIG_PATH} get namespaces -o jsonpath={.items[*].metadata.name}`
     };
     const AWS_BODY = { provider: "aws", region: "us-west-2" };
 
@@ -875,12 +882,16 @@ describe("azure-discovery routes (SU-08)", () => {
           [CLI.eks]: '["eks-1", 7, null, "eks-2"]',
           [CLI.describe("eks-1")]: JSON.stringify({
             cluster: {
+              status: "ACTIVE",
               resourcesVpcConfig: { vpcId: "vpc-1" },
               accessConfig: { authenticationMode: "API" }
             }
           }),
           [CLI.describe("eks-2")]: JSON.stringify({
-            cluster: { resourcesVpcConfig: { vpcId: "vpc-1" } }
+            cluster: {
+              status: "ACTIVE",
+              resourcesVpcConfig: { vpcId: "vpc-2" }
+            }
           }),
           [CLI.vpcs]: JSON.stringify({ Vpcs: [{ VpcId: "vpc-1" }] }),
           [CLI.subnets]: JSON.stringify({
@@ -892,7 +903,14 @@ describe("azure-discovery routes (SU-08)", () => {
               }
             ]
           }),
-          [CLI.routeTables]: JSON.stringify({ RouteTables: [] })
+          [CLI.routeTables]: JSON.stringify({ RouteTables: [] }),
+          [CLI.zones]: JSON.stringify({
+            AvailabilityZones: [
+              { ZoneName: "us-west-2a", ZoneType: "availability-zone" }
+            ]
+          }),
+          [CLI.kubeconfig("eks-1")]: "",
+          [CLI.eksNamespaces]: "default eks-1-dev"
         });
         const recording = await discover(
           JSON.stringify({ provider, region: "us-west-2" }),
@@ -902,7 +920,8 @@ describe("azure-discovery routes (SU-08)", () => {
         expect(recording.status, String(provider)).toBe(200);
         // EKS returns bare cluster names, so non-strings are filtered out, and
         // a cluster with no access config defaults to CONFIG_MAP, which cannot
-        // take an access entry.
+        // take an access entry. EC2 reads cover only the usable cluster's VPC,
+        // and namespaces come from the only usable cluster.
         expect(JSON.parse(recording.body), String(provider)).toEqual({
           clusters: [
             {
@@ -910,18 +929,21 @@ describe("azure-discovery routes (SU-08)", () => {
               name: "eks-1",
               vpcId: "vpc-1",
               authenticationMode: "API",
+              status: "ACTIVE",
               usable: true
             },
             {
               id: "eks-2",
               name: "eks-2",
-              vpcId: "vpc-1",
+              vpcId: "vpc-2",
               authenticationMode: "CONFIG_MAP",
-              usable: false
+              status: "ACTIVE",
+              usable: false,
+              unusableReason: "config-map"
             }
           ],
           resourceGroups: [],
-          namespaces: NS_TRIPLE,
+          namespaces: ["default", "eks-1-dev"],
           vpcs: [{ id: "vpc-1", name: "vpc-1" }],
           subnets: [
             {
@@ -929,7 +951,8 @@ describe("azure-discovery routes (SU-08)", () => {
               name: "",
               vpcId: "vpc-1",
               availabilityZone: "us-west-2a",
-              public: false
+              routing: "unknown",
+              zoneKind: "standard"
             }
           ]
         });
@@ -939,7 +962,10 @@ describe("azure-discovery routes (SU-08)", () => {
           { line: CLI.describe("eks-2"), timeout: 20000 },
           { line: CLI.vpcs, timeout: 20000 },
           { line: CLI.subnets, timeout: 20000 },
-          { line: CLI.routeTables, timeout: 20000 }
+          { line: CLI.routeTables, timeout: 20000 },
+          { line: CLI.zones, timeout: 20000 },
+          { line: CLI.kubeconfig("eks-1"), timeout: 20000 },
+          { line: CLI.eksNamespaces, timeout: 10000 }
         ]);
       }
     });
@@ -976,12 +1002,13 @@ describe("azure-discovery routes (SU-08)", () => {
       });
     });
 
-    it("records a per-facet error for each failing aws query", async () => {
+    it("records a failed aws cluster list with its error kind and makes no other call", async () => {
       const cli = cliFake({
-        [CLI.eks]: { throws: new Error("eks denied") },
-        [CLI.vpcs]: { throws: new Error("vpcs denied") },
-        [CLI.subnets]: { throws: new Error("subnets denied") },
-        [CLI.routeTables]: JSON.stringify({ RouteTables: [] })
+        [CLI.eks]: {
+          throws: new Error(
+            "An error occurred (AccessDeniedException) when calling the ListClusters operation"
+          )
+        }
       });
       const recording = await discover(JSON.stringify(AWS_BODY), {
         runCli: cli.runCli
@@ -991,14 +1018,34 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [],
         resourceGroups: [],
-        namespaces: NS_TRIPLE,
+        namespaces: AWS_FALLBACK_NAMESPACES,
         vpcs: [],
         subnets: [],
         errors: {
-          clusters: "eks denied",
-          vpcs: "vpcs denied",
-          subnets: "subnets denied"
-        }
+          clusters:
+            "An error occurred (AccessDeniedException) when calling the ListClusters operation"
+        },
+        errorKinds: { clusters: "denied" }
+      });
+      expect(cli.calls.map((call) => call.line)).toEqual([CLI.eks]);
+    });
+
+    it("answers an aws cluster list that needs a session with the discovery sign-in", async () => {
+      const cli = cliFake({
+        [CLI.eks]: { throws: new Error("Unable to locate credentials.") }
+      });
+      const recording = await discover(JSON.stringify(AWS_BODY), {
+        runCli: cli.runCli
+      });
+
+      const parsed = JSON.parse(recording.body) as {
+        errorKinds: unknown;
+        remediation: { id: string; params: unknown };
+      };
+      expect(parsed.errorKinds).toEqual({ clusters: "credentials" });
+      expect(parsed.remediation).toMatchObject({
+        id: "aws-cli-login",
+        params: { nextStep: "refresh-discovery" }
       });
     });
 
@@ -1021,25 +1068,33 @@ describe("azure-discovery routes (SU-08)", () => {
       ).toEqual({ resourceGroups: "groups denied" });
 
       const aws = cliFake({
-        [CLI.eks]: "[]",
+        [CLI.eks]: '["eks-1"]',
+        [CLI.describe("eks-1")]: JSON.stringify({
+          cluster: {
+            status: "ACTIVE",
+            resourcesVpcConfig: { vpcId: "vpc-1" },
+            accessConfig: { authenticationMode: "API" }
+          }
+        }),
         [CLI.vpcs]: "{}",
         [CLI.subnets]: "{}",
-        [CLI.routeTables]: { throws: new Error("route tables denied") }
+        [CLI.routeTables]: { throws: new Error("route tables denied") },
+        [CLI.zones]: "{}",
+        [CLI.kubeconfig("eks-1")]: "",
+        [CLI.eksNamespaces]: ""
       });
       const awsRecording = await discover(JSON.stringify(AWS_BODY), {
         runCli: aws.runCli
       });
-      expect(
-        (JSON.parse(awsRecording.body) as { errors: unknown }).errors
-      ).toEqual({ subnets: "route tables denied" });
+      expect(JSON.parse(awsRecording.body)).toMatchObject({
+        errors: { routeTables: "route tables denied" },
+        errorKinds: { routeTables: "other" }
+      });
     });
 
     it("keeps a non-array eks payload as an empty cluster list with no error", async () => {
       const cli = cliFake({
-        [CLI.eks]: '{"clusters":[]}',
-        [CLI.vpcs]: "[]",
-        [CLI.subnets]: "[]",
-        [CLI.routeTables]: "[]"
+        [CLI.eks]: '{"clusters":[]}'
       });
       const recording = await discover(JSON.stringify(AWS_BODY), {
         runCli: cli.runCli
@@ -1048,7 +1103,7 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [],
         resourceGroups: [],
-        namespaces: NS_TRIPLE,
+        namespaces: AWS_FALLBACK_NAMESPACES,
         vpcs: [],
         subnets: []
       });

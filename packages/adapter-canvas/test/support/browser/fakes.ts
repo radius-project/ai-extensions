@@ -232,6 +232,11 @@ export class FakeOptionElement extends FakeElement implements DomOptionElement {
   constructor() {
     super("", "option");
   }
+
+  // Reflects the attribute, as HTMLOptionElement.disabled does.
+  get disabled(): boolean {
+    return this.attributes.has("disabled");
+  }
 }
 
 export class FakeSelectElement extends FakeElement implements DomSelectElement {

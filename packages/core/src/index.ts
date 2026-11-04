@@ -76,6 +76,7 @@ export {
 
 export {
   AWS_TRUST_SUBJECTS_VARIABLE,
+  AWS_PERMISSION_POLICY_NAME_VARIABLE,
   applySetupProviderConfiguration,
   azureRoleScope,
   cloudCredentialsComplete,
@@ -227,6 +228,7 @@ export {
   KUBERNETES_NAMESPACE_PATTERN,
   isKubernetesNamespace
 } from "./platforms/index.js";
+export * from "./platforms/aws-cli-error.js";
 export * from "./platforms/aws-identity.js";
 export * from "./platforms/aws-network.js";
 export type {

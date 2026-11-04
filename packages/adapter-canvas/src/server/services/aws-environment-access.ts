@@ -1,21 +1,38 @@
 import {
+  AWS_TRUST_SUBJECTS_VARIABLE,
+  namesRepositoryEnvironment,
+  type GitHubRepositoryIdentity,
   buildEnvironmentSuffix,
+  AWS_PERMISSION_POLICY_NAME_VARIABLE,
+  awsRoleArn,
+  isAwsEnvironmentPolicyName,
   formatAwsLockTime,
   type AwsLockAction
 } from "@radius-project/core";
 import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
 import {
   resolveOidcSubject,
-  type GitHubJsonResponse
+  parseServedReposFromSubjects,
+  type GitHubJsonResponse,
+  type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
+  loadEnvironmentClaims,
+  type NamespaceClaimsPorts
+} from "../routes/create-environment-namespace-claims.js";
+import {
   removeAwsEnvironmentFromRole,
+  repairAwsEnvironmentTrust,
   setupAwsDeployIdentity,
   type AwsCommandResult,
+  type AwsDeployIdentityPorts,
   type AwsDeployIdentityRemovalResult,
-  type AwsLockResult
+  type AwsEnvironmentListing,
+  type AwsLockResult,
+  type AwsTrustRepairResult
 } from "./aws-deploy-identity.js";
+import { parseTrustSubjects } from "./environment-target.js";
 import {
   acquireAwsDeployIdentityLock,
   isAwsWrite,
@@ -38,13 +55,19 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
     apiPath: string,
     executor?: SelectedGhExecutor
   ): Promise<GitHubJsonResponse>;
+  // Reads the repository's GitHub environments, so delete can tell which
+  // clusters they still use.
+  environments: NamespaceClaimsPorts;
   sleep(milliseconds: number): Promise<void>;
   now(): number;
   // Whether the customer asked to pause this operation.
   isStopRequested(operation: Operation): boolean;
   operationId(operation: Operation): string;
   operations: {
+    getContext(operation: Operation): Record<string, unknown>;
     enterStage(operation: Operation, stage: string): void;
+    // Record a stage's verdict, which settling the operation keeps.
+    setStageState(operation: Operation, stage: string, state: string): void;
     addLegacyStep(operation: Operation, text: string, stage: string): void;
     setContext(operation: Operation, patch: Record<string, unknown>): void;
     // Record activity without a step, so a long wait is not taken as stale.
@@ -57,7 +80,12 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
 }
 
 export type AwsEnvironmentSetupResult =
-  | { ok: true; roleArn: string; subjects: readonly string[] }
+  | {
+      ok: true;
+      roleArn: string;
+      subjects: readonly string[];
+      policyName: string;
+    }
   | { ok: false; status: number; error: string; code: string }
   // A pause was requested. Every AWS change made before it is recorded on the
   // operation; the caller honors the pause at its next boundary.
@@ -83,19 +111,80 @@ export interface AwsEnvironmentAccess<Operation> {
   // both are done. Never throws; a lock left behind is reported as a step.
   release(operation: Operation): Promise<void>;
   // Remove what one environment added to the shared deploy role, under the
-  // deploy identity lock. `trustSubjects` are the subjects setup recorded;
-  // without them the subjects are resolved from the repository's current name
-  // and IDs.
+  // deploy identity lock. It removes `trustSubjects`, the subjects setup
+  // recorded, and the subjects GitHub resolves for the environment now.
   remove(input: {
     repo: string;
     environment: string;
     roleArn: string;
     trustSubjects?: readonly string[];
+    // The environment's cluster. Empty when it did not record one.
+    region: string;
+    cluster: string;
+    policyName?: string;
     operationId?: string;
     // Called on every poll while another run holds the lock, with a progress
     // line when there is something new to say.
     waiting?(wait: AwsLockWait, line: string | null): void | Promise<void>;
+    // Runs after a successful removal and before the lock is released, once
+    // the lock is confirmed still held. Delete retires the GitHub environment
+    // here: Repair reads that environment under the same lock, so it can't
+    // add the subjects back between the two steps.
+    whileLocked?(
+      removal: Extract<AwsDeployIdentityRemovalResult, { ok: true }>
+    ): Promise<void>;
   }): Promise<AwsEnvironmentRemovalResult>;
+  // Add back the subjects GitHub presents for this environment's deploys but
+  // the role no longer trusts, under the deploy identity lock. Does not wait
+  // for a lock another run holds.
+  repair(input: {
+    repo: string;
+    environment: string;
+    roleArn: string;
+    policyName?: string;
+    // Run once the lock is held, before any write: null when the environment
+    // still names `roleArn`, otherwise why Repair must stop.
+    confirmTarget(): Promise<{ code: string; message: string } | null>;
+  }): Promise<AwsEnvironmentRepairResult>;
+}
+
+export type AwsEnvironmentRepairResult =
+  | (Extract<AwsTrustRepairResult, { ok: true }> & {
+      // Set when the repair finished but the lock could not be released.
+      readonly lockWarning?: string;
+    })
+  | Extract<AwsTrustRepairResult, { ok: false }>;
+
+interface AwsRoleChangePorts extends Pick<
+  AwsDeployIdentityPorts,
+  "runAws" | "acquireLock" | "sleep"
+> {
+  // Whether this run still holds the lock it took. False records the loss, so
+  // the caller reports it as it would a lost lock before a write.
+  stillLocked(): Promise<boolean>;
+}
+
+// Another run holds the role's lock, and this run does not wait for it.
+function lockBusy(
+  roleName: string,
+  wait: AwsLockWait | null
+): { ok: false; code: string; message: string } {
+  if (!wait) {
+    return {
+      ok: false,
+      code: "aws-lock-busy",
+      message: `IAM reports a lock on IAM role ${roleName} but could not say who holds it, so Radius changed nothing. Try again in a moment.`
+    };
+  }
+  return {
+    ok: false,
+    code: "aws-lock-busy",
+    message:
+      `${lockHolder(wait)} is changing IAM role ${roleName} (it has held the role's lock since ${formatAwsLockTime(wait.since)}), so Radius changed nothing. Try again once it finishes.` +
+      (wait.removable ?
+        ` If that run has stopped, check that "aws iam get-policy --policy-arn ${wait.policyArn} --query Policy.PolicyId --output text" prints ${wait.policyId}, the lock shown here, and only then run: aws iam delete-policy --policy-arn ${wait.policyArn}`
+      : "")
+  };
 }
 
 export type AwsEnvironmentRemovalResult =
@@ -155,7 +244,8 @@ export function createAwsEnvironmentAccess<Operation>(
       operationId: string;
     },
     shouldStop: () => boolean,
-    waiting: (wait: AwsLockWait, line: string | null) => Promise<void>
+    // Null: do not wait for another run's lock; refuse, naming the holder.
+    waiting: ((wait: AwsLockWait, line: string | null) => Promise<void>) | null
   ): Promise<
     | { ok: true; lock: AwsDeployIdentityLock }
     | { ok: false; code: string; message: string }
@@ -170,7 +260,8 @@ export function createAwsEnvironmentAccess<Operation>(
           environment: request.environment,
           action: request.action,
           operationId: request.operationId
-        }
+        },
+        wait: waiting !== null
       },
       {
         runAws: dependencies.runAws,
@@ -189,11 +280,12 @@ export function createAwsEnvironmentAccess<Operation>(
                 `⏳ The lock on IAM role ${request.roleName} is 10 or more minutes old. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}. If that run has stopped, use Remove lock.`
               : `⏳ Waiting for the lock on IAM role ${request.roleName}. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}.`;
           }
-          await waiting(wait, line);
+          await waiting?.(wait, line);
         }
       }
     );
     if (result.ok) return result;
+    if ("busy" in result) return lockBusy(request.roleName, result.holder);
     if ("stopped" in result) {
       return {
         ok: false,
@@ -204,15 +296,86 @@ export function createAwsEnvironmentAccess<Operation>(
     return result;
   }
 
+  // Run `work` on one role under its lock: every IAM or EKS write is checked
+  // against the lock first, and the lock is released afterwards, including
+  // when `work` throws. With no `waiting`, a lock another run holds is not
+  // waited for: `work` gets a refusal naming the holder instead.
+  async function runUnderLock<T>(
+    holder: {
+      repo: string;
+      environment: string;
+      action: AwsLockAction;
+      operationId: string;
+    },
+    waiting: ((wait: AwsLockWait, line: string | null) => unknown) | null,
+    work: (ports: AwsRoleChangePorts) => Promise<T>
+  ): Promise<{ result: T; lost: string; released: AwsLockReleaseResult }> {
+    // Boxed so the closures below and this function see one value.
+    const state: {
+      lock: AwsDeployIdentityLock | null;
+      lost: AwsLockLoss | null;
+      // Writes that ran while this run held the lock, for a lost-lock message.
+      writes: string[];
+    } = { lock: null, lost: null, writes: [] };
+    try {
+      const result = await work({
+        runAws: async (args) => {
+          if (state.lock && isAwsWrite(args)) {
+            const lost = await state.lock.verify();
+            if (lost) {
+              state.lost ??= lost;
+              return lockLostResult(lost.reason);
+            }
+            const result = await dependencies.runAws(args);
+            if (result.code === 0 || result.code === "0") {
+              state.writes.push(`aws ${args[0]} ${args[1]}`);
+            }
+            return result;
+          }
+          return dependencies.runAws(args);
+        },
+        sleep: dependencies.sleep,
+        stillLocked: async () => {
+          state.lost ??= (await state.lock?.verify()) ?? null;
+          return state.lost === null;
+        },
+        acquireLock: async ({ accountId, roleName }) => {
+          const taken = await lock(
+            { accountId, roleName, ...holder },
+            () => false,
+            waiting &&
+              (async (wait, line) => {
+                await waiting(wait, line);
+              })
+          );
+          if (!taken.ok) return taken;
+          state.lock = taken.lock;
+          return { ok: true };
+        }
+      });
+      const taken = state.lock;
+      state.lock = null;
+      const released = taken ? await taken.release() : { ok: true as const };
+      return {
+        result,
+        lost: state.lost ? lockLostMessage(state.lost, state.writes) : "",
+        released
+      };
+    } finally {
+      // Only set when `work` threw before the release above.
+      if (state.lock) await state.lock.release();
+    }
+  }
+
   // The same subjects Azure's federated credentials trust: one for a
   // repository that uses immutable subjects, otherwise the name-based and the
   // ID-based form.
-  async function resolveSubjects(
+  async function resolveOidc(
     repo: string,
     environment: string,
     executor?: SelectedGhExecutor
-  ): Promise<string[]> {
-    const oidc = await resolveOidcSubject(
+  ): Promise<ResolveOidcSubjectResult> {
+    return resolveOidcSubject(
       {
         targetRepo: repo,
         envName: environment,
@@ -220,7 +383,63 @@ export function createAwsEnvironmentAccess<Operation>(
       },
       (apiPath) => dependencies.runGitHubJson(apiPath, executor)
     );
+  }
+
+  async function resolveIdentity(
+    repo: string,
+    environment: string,
+    executor?: SelectedGhExecutor
+  ): Promise<{ repo: string; repoId: number; subjects: string[] }> {
+    const oidc = await resolveOidc(repo, environment, executor);
+    return {
+      repo: oidc.fullName,
+      repoId: oidc.repoId,
+      subjects: oidc.federatedCredentials.map(
+        (credential) => credential.subject
+      )
+    };
+  }
+
+  async function resolveSubjects(
+    repo: string,
+    environment: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string[]> {
+    const oidc = await resolveOidc(repo, environment, executor);
     return oidc.federatedCredentials.map((credential) => credential.subject);
+  }
+
+  // The repository's AWS environments other than `environment`. Any read that
+  // fails, or an environment Radius manages whose cluster can't be read, makes
+  // the answer unknown, because that environment may use the same cluster.
+  async function listOtherAwsEnvironments(
+    repo: string,
+    environment: string,
+    repository: GitHubRepositoryIdentity
+  ): Promise<AwsEnvironmentListing> {
+    const loaded = await loadEnvironmentClaims(repo, dependencies.environments);
+    if (!loaded.ok) return loaded;
+    return {
+      ok: true,
+      environments: loaded.claims
+        .filter(
+          ({ claimant }) =>
+            claimant.provider === "aws" &&
+            claimant.environment.toLowerCase() !== environment.toLowerCase()
+        )
+        .map(({ claimant, variables }) => ({
+          name: claimant.environment,
+          accountId: claimant.accountId,
+          region: claimant.region,
+          cluster: claimant.cluster,
+          // Only subjects proven to be this repository's. Another may be
+          // presented by other repositories too, so the access entry has to
+          // stay while the role trusts it.
+          trustSubjects: parseTrustSubjects(
+            variables[AWS_TRUST_SUBJECTS_VARIABLE]
+          ).filter((subject) => namesRepositoryEnvironment(subject, repository))
+        }))
+    };
   }
 
   // Record what exists in AWS, save it, and hand the pause to the caller.
@@ -233,22 +452,89 @@ export function createAwsEnvironmentAccess<Operation>(
     return { ok: false, stopped: true };
   }
 
+  async function savedPolicyName(
+    repo: string,
+    environment: string,
+    roleArn: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string | undefined> {
+    const response = await dependencies.runGitHubJson(
+      `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`,
+      executor
+    );
+    if (response.status === 404) return undefined;
+    const data: unknown = response.json;
+    if (
+      !response.ok ||
+      typeof data !== "object" ||
+      data === null ||
+      !("variables" in data) ||
+      !Array.isArray(data.variables)
+    ) {
+      throw new Error(
+        "Could not read the environment's saved AWS policy identity. Nothing was changed."
+      );
+    }
+    const values = new Map<string, string>();
+    const variables: unknown[] = data.variables;
+    for (const variable of variables) {
+      if (
+        typeof variable !== "object" ||
+        variable === null ||
+        !("name" in variable) ||
+        typeof variable.name !== "string" ||
+        !("value" in variable) ||
+        typeof variable.value !== "string"
+      ) {
+        throw new Error(
+          "GitHub returned unreadable environment variables. Nothing was changed."
+        );
+      }
+      values.set(variable.name, variable.value);
+    }
+    const name = values.get(AWS_PERMISSION_POLICY_NAME_VARIABLE);
+    if (name === undefined) return undefined;
+    if (
+      values.get("AWS_ROLE_ARN") !== roleArn ||
+      !isAwsEnvironmentPolicyName(name, environment)
+    ) {
+      throw new Error(
+        "The saved AWS permission policy does not match this environment and selected role. Repair its saved configuration before setup. Nothing was changed."
+      );
+    }
+    return name;
+  }
+
   function pausedLine(created: readonly string[]): string {
     return created.length > 0 ?
         `⏸️ Paused before the next AWS change. Created before the pause: ${created.join(", ")}.`
       : "⏸️ Paused before any AWS change. Nothing was created in AWS.";
   }
 
+  // The deploy identity is not ready, so the stage is paused rather than done,
+  // and Continue runs it again.
+  function pausedBeforeReady(
+    operation: Operation,
+    created: readonly string[]
+  ): Promise<AwsEnvironmentSetupResult> {
+    operations.setStageState(operation, stage, "paused");
+    return paused(operation, pausedLine(created));
+  }
+
   return {
     async setup(operation, input, executor) {
       operations.enterStage(operation, stage);
-      const repo = text(input.repo);
+      let repo = text(input.repo);
       const environment = text(input.environment);
       let subjects: string[];
+      let repoId: number;
       try {
-        subjects = await resolveSubjects(repo, environment, executor);
+        const identity = await resolveIdentity(repo, environment, executor);
+        repo = identity.repo;
+        repoId = identity.repoId;
+        subjects = identity.subjects;
         if (dependencies.isStopRequested(operation)) {
-          return paused(operation, pausedLine([]));
+          return pausedBeforeReady(operation, []);
         }
       } catch (error) {
         return {
@@ -259,6 +545,53 @@ export function createAwsEnvironmentAccess<Operation>(
         };
       }
       const accountId = text(input.accountId);
+      const roleName = text(input.roleName) || defaultAwsDeployRoleName(repo);
+      const existingRoleArn = text(input.existingRoleArn);
+      let policyName: string | undefined;
+      let reconcileLegacyPolicy = false;
+      try {
+        policyName = await savedPolicyName(
+          repo,
+          environment,
+          existingRoleArn || awsRoleArn(accountId, roleName),
+          executor
+        );
+        const recovery = operations.getContext(operation).awsPolicyIdentity;
+        if (recovery !== undefined) {
+          if (
+            typeof recovery !== "object" ||
+            recovery === null ||
+            !("repoId" in recovery) ||
+            recovery.repoId !== repoId ||
+            !("environment" in recovery) ||
+            recovery.environment !== environment ||
+            !("roleArn" in recovery) ||
+            recovery.roleArn !==
+              (existingRoleArn || awsRoleArn(accountId, roleName)) ||
+            !("policyName" in recovery) ||
+            typeof recovery.policyName !== "string" ||
+            !isAwsEnvironmentPolicyName(recovery.policyName, environment) ||
+            (policyName !== undefined && policyName !== recovery.policyName)
+          ) {
+            throw new Error(
+              "The recorded partial AWS policy identity does not match this setup. Reconcile its grant before retrying. Nothing was changed."
+            );
+          }
+          reconcileLegacyPolicy = policyName === undefined;
+          policyName = recovery.policyName;
+        }
+      } catch (error) {
+        if (dependencies.isStopRequested(operation))
+          return pausedBeforeReady(operation, []);
+        return {
+          ok: false,
+          status: 400,
+          code: "aws-policy-name-unresolved",
+          error: dependencies.errorMessage(error)
+        };
+      }
+      if (dependencies.isStopRequested(operation))
+        return pausedBeforeReady(operation, []);
       let current: AwsDeployIdentityLock | null = null;
       let lockLost: AwsLockLoss | null = null;
       // Writes that ran while this run held the lock, for a lost-lock message.
@@ -270,8 +603,10 @@ export function createAwsEnvironmentAccess<Operation>(
           accountId,
           region: text(input.region),
           cluster: text(input.cluster),
-          roleName: text(input.roleName) || defaultAwsDeployRoleName(repo),
-          existingRoleArn: text(input.existingRoleArn),
+          roleName,
+          existingRoleArn,
+          policyName,
+          reconcileLegacyPolicy,
           subjects
         },
         {
@@ -298,6 +633,30 @@ export function createAwsEnvironmentAccess<Operation>(
           },
           step: (line) => {
             operations.addLegacyStep(operation, line, stage);
+          },
+          recordPolicyIdentity: async (identity) => {
+            operations.setContext(operation, {
+              awsPolicyIdentity: { repoId, environment, ...identity }
+            });
+            await dependencies.store.persist();
+          },
+          isRecordedForeignPolicy: async (candidate) => {
+            if (candidate.repoId !== undefined)
+              return candidate.repoId !== repoId;
+            const identity = await resolveIdentity(
+              candidate.repo,
+              environment,
+              executor
+            );
+            return (
+              identity.repoId !== repoId &&
+              (await savedPolicyName(
+                identity.repo,
+                environment,
+                candidate.roleArn,
+                executor
+              )) === candidate.policyName
+            );
           },
           sleep: dependencies.sleep,
           acquireLock: async ({ roleName }): Promise<AwsLockResult> => {
@@ -359,14 +718,22 @@ export function createAwsEnvironmentAccess<Operation>(
         if (result.ok) {
           operations.setContext(operation, {
             awsRoleArn: result.roleArn,
-            awsTrustSubjects: subjects
+            awsTrustSubjects: subjects,
+            awsPolicyName: result.policyName
           });
           return paused(
             operation,
             `⏸️ Paused after AWS setup finished. ${result.roleArn} is ready for this environment.`
           );
         }
-        return paused(operation, pausedLine(result.created));
+        if (writes.includes("aws iam delete-role-policy")) {
+          operations.setStageState(operation, stage, "paused");
+          return paused(
+            operation,
+            `Paused after AWS policy changes. ${result.message}`
+          );
+        }
+        return pausedBeforeReady(operation, result.created);
       }
       await dependencies.store.persist();
       if (!result.ok) {
@@ -382,9 +749,16 @@ export function createAwsEnvironmentAccess<Operation>(
       }
       operations.setContext(operation, {
         awsRoleArn: result.roleArn,
-        awsTrustSubjects: subjects
+        awsTrustSubjects: subjects,
+        awsPolicyName: result.policyName
       });
-      return { ok: true, roleArn: result.roleArn, subjects };
+      await dependencies.store.persist();
+      return {
+        ok: true,
+        roleArn: result.roleArn,
+        subjects,
+        policyName: result.policyName
+      };
     },
 
     async release(operation) {
@@ -425,77 +799,122 @@ export function createAwsEnvironmentAccess<Operation>(
       environment,
       roleArn,
       trustSubjects = [],
+      region,
+      cluster,
+      policyName,
       operationId = "",
-      waiting
+      waiting,
+      whileLocked
     }) {
-      const subjects =
-        trustSubjects.length > 0 ?
-          trustSubjects
-        : await resolveSubjects(repo, environment);
-      // Boxed so the closures below and this function see one value.
-      const state: {
-        lock: AwsDeployIdentityLock | null;
-        lost: AwsLockLoss | null;
-        writes: string[];
-      } = { lock: null, lost: null, writes: [] };
-      try {
-        const result = await removeAwsEnvironmentFromRole(
-          { roleArn, environment, subjects },
-          {
-            runAws: async (args) => {
-              if (state.lock && isAwsWrite(args)) {
-                const lost = await state.lock.verify();
-                if (lost) {
-                  state.lost ??= lost;
-                  return lockLostResult(lost.reason);
-                }
-                const result = await dependencies.runAws(args);
-                if (result.code === 0 || result.code === "0") {
-                  state.writes.push(`aws ${args[0]} ${args[1]}`);
-                }
-                return result;
-              }
-              return dependencies.runAws(args);
-            },
-            sleep: dependencies.sleep,
-            acquireLock: async ({ accountId, roleName }) => {
-              const taken = await lock(
-                {
-                  accountId,
-                  roleName,
-                  repo,
-                  environment,
-                  action: "delete",
-                  operationId
-                },
-                () => false,
-                async (wait, line) => {
-                  await waiting?.(wait, line);
-                }
-              );
-              if (!taken.ok) return taken;
-              state.lock = taken.lock;
-              return { ok: true };
-            }
-          }
-        );
-        const taken = state.lock;
-        state.lock = null;
-        const released = taken ? await taken.release() : { ok: true as const };
-        if (state.lost) {
-          return {
-            ok: false,
-            message: lockLostMessage(state.lost, state.writes)
-          };
-        }
-        if (released.ok) return result;
-        return result.ok ?
-            { ...result, lockWarning: released.message }
-          : { ok: false, message: `${result.message} ${released.message}` };
-      } finally {
-        // Only set when the removal threw before the release above.
-        if (state.lock) await state.lock.release();
+      // The recorded list covers a repository renamed since setup. The
+      // current subjects cover what Repair added after an OIDC subject
+      // change, which the recorded list doesn't name. The removal keeps any
+      // that other environments or repositories may present too. A GitHub
+      // read failure throws, so the delete stops with the GitHub environment
+      // kept.
+      const oidc = await resolveOidc(repo, environment);
+      const subjects = [
+        ...new Set([
+          ...trustSubjects,
+          ...oidc.federatedCredentials.map((credential) => credential.subject)
+        ])
+      ];
+      // Recorded subjects retain the pre-rename repository for older grants.
+      const policyRepositories = new Set(
+        parseServedReposFromSubjects(
+          trustSubjects.length > 0 ? trustSubjects : subjects
+        ).map((name) => name.toLowerCase())
+      );
+      if (policyRepositories.size > 1) {
+        return {
+          ok: false,
+          message:
+            "Recorded AWS trust subjects name multiple repositories, so Radius did not change the deploy identity. Review the environment's saved AWS configuration before retrying."
+        };
       }
+      const policyRepository = [...policyRepositories][0] ?? oidc.fullName;
+      const { result, lost, released } = await runUnderLock(
+        { repo, environment, action: "delete", operationId },
+        waiting ?? (() => undefined),
+        async (ports) => {
+          const removal = await removeAwsEnvironmentFromRole(
+            {
+              repo: policyRepository,
+              roleArn,
+              environment,
+              subjects,
+              region,
+              cluster,
+              policyName
+            },
+            {
+              ...ports,
+              listOtherEnvironments: () =>
+                listOtherAwsEnvironments(repo, environment, oidc)
+            }
+          );
+          if (removal.ok && whileLocked && (await ports.stillLocked())) {
+            await whileLocked(removal);
+          }
+          return removal;
+        }
+      );
+      if (lost) return { ok: false, message: lost };
+      if (released.ok) return result;
+      return result.ok ?
+          { ...result, lockWarning: released.message }
+        : { ok: false, message: `${result.message} ${released.message}` };
+    },
+
+    async repair({
+      repo,
+      environment: requested,
+      roleArn,
+      policyName,
+      confirmTarget
+    }) {
+      // GitHub finds an environment by name in any casing, but its tokens
+      // carry the stored spelling, so the subjects are built from that.
+      const lookup = await dependencies.runGitHubJson(
+        `/repos/${repo}/environments/${encodeURIComponent(requested)}`
+      );
+      const stored = lookup.ok ? text(lookup.json?.name) : "";
+      if (!stored) {
+        return {
+          ok: false,
+          code: "github-environment-unreadable",
+          message: `Radius could not read GitHub environment "${requested}" (${lookup.ok ? "GitHub reported no name" : lookup.stderr || `HTTP ${lookup.status ?? "unknown"}`}), so it changed nothing.`
+        };
+      }
+      const environment = stored;
+      // Always from GitHub: AWS_TRUST_SUBJECTS is editable by anyone with
+      // admin on the repository, so it cannot decide what Repair trusts.
+      const subjects = await resolveSubjects(repo, environment);
+      const { result, lost, released } = await runUnderLock(
+        { repo, environment, action: "repair", operationId: "" },
+        null,
+        (ports) =>
+          repairAwsEnvironmentTrust(
+            { repo, environment, roleArn, subjects, policyName },
+            {
+              ...ports,
+              // A delete can run between the first read of the environment and
+              // this lock. Read it again under the lock, so Repair never adds
+              // trust back for an environment that is gone or moved roles.
+              acquireLock: async (request) => {
+                const taken = await ports.acquireLock(request);
+                if (!taken.ok) return taken;
+                const changed = await confirmTarget();
+                return changed ? { ok: false, ...changed } : taken;
+              }
+            }
+          )
+      );
+      if (lost) return { ok: false, code: "aws-lock-lost", message: lost };
+      if (released.ok) return result;
+      return result.ok ?
+          { ...result, lockWarning: released.message }
+        : { ...result, message: `${result.message} ${released.message}` };
     }
   };
 }

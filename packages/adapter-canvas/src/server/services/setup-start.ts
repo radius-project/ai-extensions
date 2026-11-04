@@ -3,6 +3,7 @@ import {
   isAwsAccountId,
   isAwsRegion,
   isAwsRoleName,
+  isAwsSetupNetworkInput,
   parseAwsRoleArn
 } from "@radius-project/core";
 import type {
@@ -123,6 +124,16 @@ export function createSetupStartService(dependencies: SetupStartDependencies) {
         error:
           "AWS setup requires a valid accountId, region, cluster, vpcId, subnetIds, and either an IAM role name or an existing role ARN.",
         code: "invalid-aws-operation-input"
+      });
+    }
+    if (
+      provider === "aws" &&
+      !isAwsSetupNetworkInput(data.vpcId, data.subnetIds)
+    ) {
+      return result(400, {
+        error:
+          "AWS setup requires a VPC ID such as vpc-0123abcd and at least two different subnet IDs such as subnet-0123abcd, separated by commas.",
+        code: "invalid-aws-network-input"
       });
     }
     const startConflict = dependencies.startConflict(repo);
