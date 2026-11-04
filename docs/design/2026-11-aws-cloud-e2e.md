@@ -100,13 +100,15 @@ The main cluster, in `us-east-2`, has two node groups. The default one has two `
 
 The second cluster, in `us-west-1`, has no nodes. The run only creates an environment on it, deploys an app that fails before any pod is scheduled, and deletes it.
 
-Both clusters use authentication mode `API` and a public endpoint, because GitHub-hosted runners reach them over the internet. Nodes use public subnets, so no NAT gateway is needed. RDS uses private subnets. Both clusters must stay on a Kubernetes version in EKS standard support, because extended support costs six times as much.
+Both clusters use authentication mode `API` and a public endpoint, because GitHub-hosted runners reach them over the internet. Nodes use public subnets, so no NAT gateway is needed. RDS uses private subnets.
+
+The ai-extensions maintainers own both clusters and upgrade them. A cluster must stay on a Kubernetes version in EKS standard support, because extended support costs six times as much. The test's preflight is the reminder: it warns when a cluster's version is within 60 days of leaving standard support, and fails once it has left.
 
 ### What the test does
 
 Each step runs in the canvas, in order, with the AWS switch on.
 
-1. **Preflight.** The account, both clusters, and the isolated node group are as expected, and nothing from an earlier run is left.
+1. **Preflight.** The account, both clusters, and the isolated node group are as expected, both clusters are on a Kubernetes version in standard support, and nothing from an earlier run is left.
 2. **Create the main environment.** Setup reuses the deploy role, and adds one trust subject, one inline policy, and one access entry. Verify succeeds.
 3. **Create the second environment.** It uses the same deploy role, which now has two of each.
 4. **Failed deploy.** The failing app, deployed to the second environment, shows its resource as failed in the deployed graph. Nothing is created in AWS.
@@ -166,16 +168,18 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 
 ## Error handling
 
-| Scenario                                          | What happens                                                                                            |
-|---------------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| Signing in to AWS fails                           | The job fails before the test starts. The runbook points to the trust policy, which accepts only `main` |
-| Preflight finds the account or clusters wrong     | The job fails before any write, reported as an infrastructure failure                                   |
-| Preflight finds something from an earlier run     | The job fails and names it, and points to the cleanup workflow. It doesn't delete it                    |
-| The deploy role is missing                        | Setup stops with the product's "not permitted to create IAM roles" message                              |
-| No Kubernetes write after the first token expired | The deploy step fails, because token refresh wasn't tested                                              |
-| The isolated probe connects                       | The connection check fails, because the isolated node no longer tests a missing network rule            |
-| No final snapshot, or more than one               | The delete step fails and names the instance                                                            |
-| A step fails part way                             | The fixture's teardown removes what the run registered, and cleanup removes the rest                    |
+| Scenario                                                              | What happens                                                                                            |
+|-----------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| Signing in to AWS fails                                               | The job fails before the test starts. The runbook points to the trust policy, which accepts only `main` |
+| Preflight finds the account or clusters wrong                         | The job fails before any write, reported as an infrastructure failure                                   |
+| A cluster's Kubernetes version leaves standard support within 60 days | The run continues, with a warning in its summary that names the cluster and the date                    |
+| A cluster's Kubernetes version is past standard support               | Preflight fails and names the cluster, so it's upgraded before it costs more                            |
+| Preflight finds something from an earlier run                         | The job fails and names it, and points to the cleanup workflow. It doesn't delete it                    |
+| The deploy role is missing                                            | Setup stops with the product's "not permitted to create IAM roles" message                              |
+| No Kubernetes write after the first token expired                     | The deploy step fails, because token refresh wasn't tested                                              |
+| The isolated probe connects                                           | The connection check fails, because the isolated node no longer tests a missing network rule            |
+| No final snapshot, or more than one                                   | The delete step fails and names the instance                                                            |
+| A step fails part way                                                 | The fixture's teardown removes what the run registered, and cleanup removes the rest                    |
 
 ## Test plan
 
@@ -185,7 +189,7 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 
 ## Open questions
 
-1. **Will the Radius maintainers who own `radius-test` accept about $240 a month, and who keeps the clusters on a supported Kubernetes version?** About a third of the cost is the second cluster, which exists only to test a second region.
+1. **Will the Radius maintainers who own `radius-test` accept about $240 a month?** About a third of the cost is the second cluster, which exists only to test a second region.
 2. **Which fixture gate forces a Kubernetes write at least 16 minutes into the deploy, every time?** For example, a resource that waits on the container, whose readiness is held back for 16 minutes. The local run picks it.
 3. **Which resource fails in Kubernetes, before any AWS call, every time?** The local run picks it.
 
