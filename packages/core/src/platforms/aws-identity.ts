@@ -313,6 +313,89 @@ export function trustedGitHubSubjects(
 }
 
 /**
+ * The exact GitHub OIDC subjects this trust policy lets GitHub's AWS tokens
+ * sign in with. Unlike `trustedGitHubSubjects`, a subject counts only when its
+ * statement accepts GitHub's audience, has no condition Radius cannot read, and
+ * every `sub` constraint on it accepts the subject. Patterns are left out.
+ */
+export function acceptedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" &&
+      isGitHubStatement(statement, providerArn) &&
+      acceptsGitHubAudience(statement)
+  ).flatMap((statement) =>
+    subjectsOf(statement).filter(
+      (subject) => !/[*?]/.test(subject) && acceptsSubject(statement, subject)
+    )
+  );
+}
+
+/**
+ * The subjects in `subjects` that a GitHub Allow statement in this trust
+ * policy already covers in a way adding a plain statement would widen: one
+ * that names the subject but excludes it with another `sub` constraint, or
+ * one whose `sub` constraints accept it, patterns included, under conditions
+ * Radius cannot read or for another audience.
+ */
+export function restrictedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  const statements = policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" && isGitHubStatement(statement, providerArn)
+  );
+  return subjects.filter((subject) =>
+    statements.some(
+      (statement) =>
+        subjectsOf(statement).includes(subject) ||
+        (!acceptsGitHubAudience(statement) &&
+          acceptsSubject(statement, subject))
+    )
+  );
+}
+
+// A subject is `claim:value` pairs joined by colons. GitHub's values have no
+// colon in them (an environment name is %3A-encoded), so a subject that does
+// not split into pairs is not one Radius can read.
+function subjectClaims(subject: string): [string, string][] | null {
+  const parts = subject.split(":");
+  if (parts.length < 2 || parts.length % 2 !== 0) return null;
+  const claims: [string, string][] = [];
+  for (let index = 0; index < parts.length; index += 2) {
+    const key = parts[index];
+    const value = parts[index + 1];
+    if (!key || !value) return null;
+    claims.push([key, value]);
+  }
+  return claims;
+}
+
+const REPOSITORY_CLAIMS: ReadonlySet<string> = new Set([
+  "repo",
+  "repository",
+  "repository_id"
+]);
+
+/**
+ * Whether a GitHub OIDC subject names one repository, by name or ID. A subject
+ * customized to, say, `repository_owner` and `context` does not, so every
+ * repository of that owner can present it.
+ */
+export function subjectNamesRepository(subject: string): boolean {
+  return (
+    subjectClaims(subject)?.some(([key]) => REPOSITORY_CLAIMS.has(key)) ?? false
+  );
+}
+
+/**
  * Whether any statement in this trust policy names the account's GitHub
  * provider. Unlike `trustedGitHubSubjects`, this also finds a Radius role
  * whose last environment was removed, which keeps only a Deny statement.

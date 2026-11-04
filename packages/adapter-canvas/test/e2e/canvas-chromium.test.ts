@@ -4093,6 +4093,209 @@ test.describe("Radius Canvas in Chromium", () => {
       await expectNoWcagViolations(page);
     });
 
+    test("offers Repair on an AWS deploy that could not sign in and reports an intact trust @safety", async ({
+      page,
+      canvas
+    }) => {
+      const environment = "fixture-environment";
+      const roleName = "radius-deploy-fixture";
+      const roleArn = `arn:aws:iam::${AWS_ACCOUNT}:role/${roleName}`;
+      const lockArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-${roleName}`;
+      const subject = `repo:${REPOSITORY}:environment:${environment}`;
+      const [owner, name] = REPOSITORY.split("/");
+      const idSubject = `repo:${owner}@7/${name}@42:environment:${environment}`;
+      await canvas.seedState({
+        ...baseCanvasState(canvas.workspacePath),
+        deployStatus: "failed",
+        deployErrorKind: "cloud-auth-drift",
+        deployEnvName: environment,
+        deployAttempt: { id: "attempt-1", targetRepo: REPOSITORY, environment }
+      });
+      const scenario = defaultFakeCliScenario();
+      // Ahead of the default scenario's answer for the same read, which
+      // describes an Azure environment.
+      scenario.commands.unshift({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/environments/${environment}/variables?per_page=100`,
+          "--jq",
+          '.variables[] | .name + "\\t" + (.value // "")'
+        ],
+        stdout: [
+          `AWS_ROLE_ARN\t${roleArn}`,
+          "AWS_REGION\tus-west-2",
+          `AWS_TRUST_SUBJECTS\t${JSON.stringify([subject])}`
+        ].join("\n")
+      });
+      // Repair works the subjects out from GitHub, not from the variable,
+      // using GitHub's stored spelling of the environment.
+      scenario.commands.unshift(
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/environments/${environment}`,
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28"
+          ],
+          stdout: JSON.stringify({ name: environment })
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}`,
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28"
+          ],
+          stdout: JSON.stringify({
+            full_name: REPOSITORY,
+            id: 42,
+            owner: { id: 7 }
+          })
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/actions/oidc/customization/sub`,
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28"
+          ],
+          stdout: JSON.stringify({
+            use_default: true,
+            use_immutable_subject: false
+          })
+        }
+      );
+      scenario.commands.push(
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "get-open-id-connect-provider"],
+          stdout: JSON.stringify({ ClientIDList: ["sts.amazonaws.com"] })
+        },
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "create-policy"],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK1" } })
+        },
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "get-policy"],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK1" } })
+        },
+        {
+          tool: "aws",
+          args: [
+            "iam",
+            "get-role",
+            "--role-name",
+            roleName,
+            "--output",
+            "json"
+          ],
+          stdout: JSON.stringify({
+            Role: {
+              Arn: roleArn,
+              AssumeRolePolicyDocument: {
+                Version: "2012-10-17",
+                Statement: [
+                  {
+                    Effect: "Allow",
+                    Principal: {
+                      Federated: `arn:aws:iam::${AWS_ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`
+                    },
+                    Action: "sts:AssumeRoleWithWebIdentity",
+                    Condition: {
+                      StringEquals: {
+                        "token.actions.githubusercontent.com:aud":
+                          "sts.amazonaws.com",
+                        "token.actions.githubusercontent.com:sub": [
+                          subject,
+                          idSubject
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          })
+        },
+        {
+          tool: "aws",
+          args: ["iam", "delete-policy", "--policy-arn", lockArn],
+          stdout: ""
+        }
+      );
+      await canvas.setScenario(scenario);
+      await page.route("**/api/list-environments**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            environments: [
+              { name: environment, provider: "aws", status: "success" }
+            ]
+          })
+        });
+      });
+      await page.route("**/api/deploy-status**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: "failed",
+            active: false,
+            error:
+              "Cloud authentication or authorization failed before any resource was deployed.",
+            deployRunUrl: "",
+            errorKind: "cloud-auth-drift",
+            errorBranch: "",
+            errorPaths: "",
+            repairing: false,
+            handoff: { pending: false, state: "idle" },
+            attempt: { targetRepo: "", environment: "" }
+          })
+        });
+      });
+
+      await page.goto(
+        `${canvas.baseUrl}/?page=deploying&application=todolist&environment=${environment}`
+      );
+
+      const repair = page.getByRole("button", { name: "Repair" });
+      await expect(repair).toBeVisible();
+      await expect(repair).toHaveAccessibleDescription(
+        "Repair adds this environment back to its AWS deploy role's trust policy if it was removed. It changes nothing else."
+      );
+      await expect(
+        page.getByRole("button", { name: "Re-verify credentials" })
+      ).toBeVisible();
+      await expectNoWcagViolations(page);
+      await repair.focus();
+      await page.keyboard.press("Enter");
+
+      const status = page.getByRole("status").filter({
+        hasText: `IAM role ${roleName} already trusts environment ${environment}`
+      });
+      await expect(status).toBeVisible();
+      const awsCalls = (await canvas.cliCalls())
+        .filter((call) => call.tool === "aws")
+        .map((call) => call.args.slice(0, 2).join(" "));
+      expect(awsCalls).toEqual([
+        "sts get-caller-identity",
+        "iam get-open-id-connect-provider",
+        "iam create-policy",
+        "iam get-policy",
+        "iam get-role",
+        "iam get-policy",
+        "iam delete-policy"
+      ]);
+      await expectNoWcagViolations(page);
+    });
+
     test("pauses an AWS setup during the deploy identity lock wait and continues from Authorize deploy identity by keyboard @safety", async ({
       page,
       canvas

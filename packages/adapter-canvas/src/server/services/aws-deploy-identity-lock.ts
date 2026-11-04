@@ -97,7 +97,14 @@ export type AwsLockReleaseResult =
 export type AwsLockAcquireResult =
   | { readonly ok: true; readonly lock: AwsDeployIdentityLock }
   | { readonly ok: false; readonly code: string; readonly message: string }
-  | { readonly ok: false; readonly stopped: true };
+  | { readonly ok: false; readonly stopped: true }
+  // Only without waiting: another run holds the lock. `holder` is null when
+  // IAM said the lock exists but could not say who holds it.
+  | {
+      readonly ok: false;
+      readonly busy: true;
+      readonly holder: AwsLockWait | null;
+    };
 
 export type AwsLockRemovalResult =
   | { readonly ok: true; readonly removed: boolean }
@@ -326,14 +333,25 @@ async function awaitLockVisible(
 
 /**
  * Take the lock on one deploy identity, waiting while another run holds it.
- * The caller must already have confirmed the CLI session is in `accountId`,
- * so the lock is created next to the role it protects.
+ * With `wait: false`, answers at once with the holder instead, for a caller
+ * that answers inside one request. The caller must already have confirmed the
+ * CLI session is in `accountId`, so the lock is created next to the role it
+ * protects.
  */
 export async function acquireAwsDeployIdentityLock(
-  request: { accountId: string; roleName: string; holder: AwsLockHolder },
+  request: {
+    accountId: string;
+    roleName: string;
+    holder: AwsLockHolder;
+    wait?: boolean;
+  },
   ports: AwsLockPorts
 ): Promise<AwsLockAcquireResult> {
   const { accountId, roleName } = request;
+  const wait = request.wait !== false;
+  // Without waiting, a lock released between IAM's create and read is tried
+  // once more at once; a second time, IAM is not settled, and the run stops.
+  let vanished = false;
   const policyArn = awsLockPolicyArn(accountId, roleName);
   // A lock whose creation time IAM did not report is timed from when this run
   // first saw it, so Remove lock is still offered eventually.
@@ -343,6 +361,13 @@ export async function acquireAwsDeployIdentityLock(
   let transient = 0;
   const backOff = async (result: AwsCommandResult) => {
     transient += 1;
+    if (!wait) {
+      return {
+        ok: false as const,
+        code: "aws-lock-unreachable",
+        message: `Radius could not reach IAM to lock IAM role ${roleName} (${detail(result)}). Nothing was changed. Retry.`
+      };
+    }
     if (transient >= LOCK_WAIT_TRANSIENT_LIMIT) {
       return {
         ok: false as const,
@@ -443,6 +468,11 @@ export async function acquireAwsDeployIdentityLock(
           };
     }
     transient = 0;
+    if (!succeeded(get) && !wait) {
+      if (vanished) return { ok: false, busy: true, holder: null };
+      vanished = true;
+      continue;
+    }
     if (succeeded(get)) {
       const policy = readPolicy(get.stdout);
       const policyId = text(policy, "PolicyId");
@@ -452,14 +482,16 @@ export async function acquireAwsDeployIdentityLock(
       firstSeen.set(policyId, seen);
       const heldFrom = isNaN(created) ? seen : created;
       const holder = parseAwsLockHolder(policy?.Description);
-      await ports.waiting({
+      const current: AwsLockWait = {
         policyArn,
         policyId,
         holder: awsLockHolderLabel(holder),
         holderOperationId: holder?.operationId ?? "",
         since,
         removable: ports.now() - heldFrom >= AWS_LOCK_REMOVABLE_AFTER_MS
-      });
+      };
+      if (!wait) return { ok: false, busy: true, holder: current };
+      await ports.waiting(current);
     }
     await ports.sleep(AWS_LOCK_POLL_MS);
   }
