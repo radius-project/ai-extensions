@@ -238,8 +238,13 @@ export function initializeEnvironmentPage(
       const hint = context.dom.byId("env-step1-hint");
       if (hint) hint.style.display = profile ? "none" : "";
     },
-    discoverResources(provider, subscriptionId, tenantId) {
-      void discovery.discoverResources(provider, subscriptionId, tenantId);
+    discoverResources(provider, subscriptionId, tenantId, options) {
+      void discovery.discoverResources(
+        provider,
+        subscriptionId,
+        tenantId,
+        options
+      );
     }
   });
   if (!profiles) {
@@ -378,8 +383,8 @@ export function initializeEnvironmentPage(
       setPendingInfraSelection(config, provider) {
         discovery.setPendingInfraSelection(config, provider);
       },
-      currentInfraSelection(provider) {
-        return discovery.currentInfraSelection(provider);
+      preserveInfraSelection(provider) {
+        discovery.preserveInfraSelection(provider);
       },
       canSubmit() {
         return (

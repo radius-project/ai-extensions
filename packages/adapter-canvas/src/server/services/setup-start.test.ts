@@ -37,7 +37,7 @@ const aws = {
   accountId: "123456789012",
   region: "us-west-2",
   cluster: "fixture-eks",
-  vpcId: "vpc-fixture",
+  vpcId: "vpc-0f1e",
   subnetIds: "subnet-a,subnet-b"
 };
 function harness(awsEnabled = true) {

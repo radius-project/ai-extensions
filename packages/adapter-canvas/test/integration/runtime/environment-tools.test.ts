@@ -991,8 +991,8 @@ describe("registered environment tools with production runtime services", () => 
         accountId: "123456789012",
         region: "us-west-2",
         cluster: "eks",
-        vpcId: "vpc",
-        subnetIds: "subnet",
+        vpcId: "vpc-1",
+        subnetIds: "subnet-a,subnet-b",
         roleName: "fixture"
       });
       expect(result.kind).toBe("unavailable");
@@ -1077,8 +1077,8 @@ describe("registered environment tools with production runtime services", () => 
           accountId: "123456789012",
           region: "us-west-2",
           cluster: "eks",
-          vpcId: "vpc",
-          subnetIds: "subnet",
+          vpcId: "vpc-1",
+          subnetIds: "subnet-a,subnet-b",
           roleName: "fixture",
           namespace: "INVALID"
         })
@@ -1113,8 +1113,8 @@ describe("registered environment tools with production runtime services", () => 
           accountId: "123456789012",
           region: "us-west-2",
           cluster: "eks",
-          vpcId: "vpc",
-          subnetIds: "subnet",
+          vpcId: "vpc-1",
+          subnetIds: "subnet-a,subnet-b",
           ...selectors
         });
         expect(result.kind).toBe("accepted");
@@ -1143,8 +1143,8 @@ describe("registered environment tools with production runtime services", () => 
           accountId: "123456789012",
           region: "us-west-2",
           cluster: "eks",
-          vpcId: "vpc",
-          subnetIds: "subnet",
+          vpcId: "vpc-1",
+          subnetIds: "subnet-a,subnet-b",
           roleArn: "arn:aws:iam::123456789012:role/legacy"
         }
       };
@@ -1228,8 +1228,8 @@ describe("registered environment tools with production runtime services", () => 
           accountId: "123456789012",
           region: "us-west-2",
           cluster: "eks",
-          vpcId: "vpc",
-          subnetIds: "subnet",
+          vpcId: "vpc-1",
+          subnetIds: "subnet-a,subnet-b",
           ...selectors
         }
       };
@@ -1273,7 +1273,7 @@ describe("registered environment tools with production runtime services", () => 
           else if (key === "eks describe-cluster")
             callback(
               null,
-              '{"cluster":{"accessConfig":{"authenticationMode":"API"}}}',
+              '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}',
               ""
             );
           else if (key === "iam create-policy" || key === "iam get-policy")
@@ -2804,7 +2804,7 @@ describe("registered environment tools with production runtime services", () => 
               accountId: "123456789012",
               region: "us-west-2",
               cluster: "fixture-eks",
-              vpcId: "vpc-fixture",
+              vpcId: "vpc-0f1e",
               subnetIds: "subnet-a,subnet-b"
             })
         });
@@ -2872,7 +2872,7 @@ describe("registered environment tools with production runtime services", () => 
         accountId: "123456789012",
         region: "us-west-2",
         cluster: "fixture",
-        vpcId: "vpc-fixture",
+        vpcId: "vpc-0f1e",
         subnetIds: "subnet-a,subnet-b"
       });
       expect(result.kind).toBe("accepted");

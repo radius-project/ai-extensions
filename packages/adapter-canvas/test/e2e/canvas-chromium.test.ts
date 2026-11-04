@@ -1,8 +1,10 @@
 import {
   DELETE_RADIUS_REF,
   RADIUS_REF,
+  enableAccessEntriesCommand,
   redactCredentials
 } from "@radius-project/core";
+import { remediationView } from "@radius-project/core/remediations";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
@@ -32,6 +34,7 @@ import {
 } from "@radius-project/core";
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+import { AWS_SUBNET_NOTE } from "../../src/browser/environment/aws-infrastructure.js";
 import { defaultAwsDeployRoleName } from "../../src/aws-deploy-role-name.js";
 import {
   generateDeleteWorkflow,
@@ -3782,7 +3785,62 @@ test.describe("Radius Canvas in Chromium", () => {
     const PICKED_ROLE_ARN = `arn:aws:iam::${AWS_ACCOUNT}:role/platform-deploy`;
     const AWS_PROFILE = "fixture-aws";
 
-    async function routeAwsProfileAndDiscovery(page: Page): Promise<void> {
+    type AwsDiscoveryReply = Record<string, unknown> | "network-failure";
+
+    function awsSubnet(
+      id: string,
+      name: string,
+      availabilityZone: string,
+      fields: Record<string, unknown> = {}
+    ): Record<string, unknown> {
+      return {
+        id,
+        name,
+        vpcId: "vpc-1",
+        availabilityZone,
+        routing: "private",
+        zoneKind: "standard",
+        ...fields
+      };
+    }
+
+    function awsCluster(
+      id: string,
+      fields: Record<string, unknown> = {}
+    ): Record<string, unknown> {
+      return {
+        id,
+        name: id,
+        vpcId: "vpc-1",
+        authenticationMode: "API",
+        status: "ACTIVE",
+        usable: true,
+        ...fields
+      };
+    }
+
+    function awsDiscoveryBody(
+      fields: Record<string, unknown> = {}
+    ): Record<string, unknown> {
+      return {
+        clusters: [awsCluster("eks-1")],
+        resourceGroups: [],
+        namespaces: ["default", "shop"],
+        vpcs: [{ id: "vpc-1", name: "main (vpc-1)" }],
+        subnets: [
+          awsSubnet("subnet-a", "private-a", "us-west-2a"),
+          awsSubnet("subnet-b", "private-b", "us-west-2b"),
+          awsSubnet("subnet-c", "public-a", "us-west-2a", { routing: "public" })
+        ],
+        ...fields
+      };
+    }
+
+    // Answers each discovery with the next reply. The last reply repeats.
+    async function routeAwsProfileAndDiscovery(
+      page: Page,
+      replies: readonly AwsDiscoveryReply[] = [awsDiscoveryBody()]
+    ): Promise<() => number> {
       await page.route("**/api/credential-profiles**", async (route) => {
         await route.fulfill({
           status: 200,
@@ -3800,49 +3858,21 @@ test.describe("Radius Canvas in Chromium", () => {
           })
         });
       });
+      let discoveries = 0;
       await page.route("**/api/discover", async (route) => {
+        const reply = replies[Math.min(discoveries, replies.length - 1)];
+        discoveries += 1;
+        if (reply === "network-failure") {
+          await route.abort("failed");
+          return;
+        }
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({
-            clusters: [
-              {
-                id: "eks-1",
-                name: "eks-1",
-                vpcId: "vpc-1",
-                authenticationMode: "API",
-                usable: true
-              }
-            ],
-            resourceGroups: [],
-            namespaces: ["default", "shop"],
-            vpcs: [{ id: "vpc-1", name: "main (vpc-1)" }],
-            subnets: [
-              {
-                id: "subnet-a",
-                name: "private-a",
-                vpcId: "vpc-1",
-                availabilityZone: "us-west-2a",
-                public: false
-              },
-              {
-                id: "subnet-b",
-                name: "private-b",
-                vpcId: "vpc-1",
-                availabilityZone: "us-west-2b",
-                public: false
-              },
-              {
-                id: "subnet-c",
-                name: "public-a",
-                vpcId: "vpc-1",
-                availabilityZone: "us-west-2a",
-                public: true
-              }
-            ]
-          })
+          body: JSON.stringify(reply)
         });
       });
+      return () => discoveries;
     }
 
     async function openAwsEnvironmentWizard(page: Page): Promise<void> {
@@ -3922,7 +3952,10 @@ test.describe("Radius Canvas in Chromium", () => {
       await expect(roleName).toBeVisible();
       await expect(roleName).toHaveValue(defaultAwsDeployRoleName(REPOSITORY));
       await expect(page.getByLabel("EKS Cluster")).toHaveValue("eks-1");
-      await expect(page.getByLabel("VPC")).toHaveValue("vpc-1");
+      await expect(page.locator("#aws-cluster-note")).toBeHidden();
+      await expect(page.getByLabel("VPC", { exact: true })).toHaveText(
+        "main (vpc-1)"
+      );
 
       const subnets = page.getByRole("group", { name: "Subnets" });
       const subnetA = subnets.getByRole("checkbox", { name: /subnet-a/ });
@@ -3932,6 +3965,10 @@ test.describe("Radius Canvas in Chromium", () => {
       await expect(
         subnets.getByRole("checkbox", { name: /subnet-c/ })
       ).not.toBeChecked();
+      await expect(page.locator("#aws-subnets-note")).toHaveText(
+        AWS_SUBNET_NOTE
+      );
+      await expect(page.locator("#aws-restore-note")).toBeHidden();
 
       // One zone is not enough for RDS: the form says so, marks the group,
       // and keeps Create Environment off until a second zone is back.
@@ -4091,6 +4128,447 @@ test.describe("Radius Canvas in Chromium", () => {
         })
         .toMatchObject({ policyId: "LOCK0", removable: false });
       await expectNoWcagViolations(page);
+    });
+
+    test.describe("AWS cluster and subnet usability", () => {
+      const clusterSelect = (page: Page): Locator =>
+        page.getByLabel("EKS Cluster");
+      const namespaceSelect = (page: Page): Locator =>
+        page.locator("#aws-namespace-select");
+      const subnetBox = (page: Page, id: string): Locator =>
+        page
+          .getByRole("group", { name: "Subnets" })
+          .getByRole("checkbox", { name: new RegExp(id) });
+
+      async function routeAwsEnvironment(
+        page: Page,
+        config: Record<string, string>
+      ): Promise<void> {
+        await page.route("**/api/list-environments**", async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              environments: [
+                {
+                  name: "dev",
+                  provider: "aws",
+                  status: "success",
+                  credentialProfile: AWS_PROFILE,
+                  config: {
+                    accountId: AWS_ACCOUNT,
+                    region: "us-west-2",
+                    cluster: "eks-1",
+                    namespace: "shop",
+                    vpcId: "vpc-1",
+                    ...config
+                  }
+                }
+              ]
+            })
+          });
+        });
+      }
+
+      async function openAwsEnvironmentEdit(page: Page): Promise<void> {
+        const edit = page
+          .getByRole("row")
+          .filter({ hasText: AWS_PROFILE })
+          .getByRole("button", { name: "edit" });
+        await edit.focus();
+        await page.keyboard.press("Enter");
+        await expect(page.locator("#env-step-details")).toBeVisible();
+      }
+
+      // Records each setup request and refuses it, so no setup runs.
+      async function captureSetupRequests(
+        page: Page
+      ): Promise<Array<Record<string, unknown>>> {
+        const bodies: Array<Record<string, unknown>> = [];
+        await page.route("**/api/operations", async (route) => {
+          if (route.request().method() !== "POST") {
+            await route.continue();
+            return;
+          }
+          bodies.push(route.request().postDataJSON());
+          await route.fulfill({
+            status: 400,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: "Setup is stubbed in this test.",
+              code: "stubbed"
+            })
+          });
+        });
+        return bodies;
+      }
+
+      test("disables a CONFIG_MAP cluster and shows the command that enables access entries", async ({
+        page,
+        canvas
+      }) => {
+        await routeAwsProfileAndDiscovery(page, [
+          awsDiscoveryBody({
+            clusters: [
+              awsCluster("eks-1"),
+              awsCluster("legacy", {
+                authenticationMode: "CONFIG_MAP",
+                usable: false,
+                unusableReason: "config-map"
+              })
+            ]
+          })
+        ]);
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentWizard(page);
+
+        await expect(page.locator("#aws-discover-status")).toHaveText(
+          "Found 2 EKS clusters in us-west-2. 1 can be used."
+        );
+        await expect(clusterSelect(page)).toHaveValue("eks-1");
+        const legacy = clusterSelect(page).locator('option[value="legacy"]');
+        await expect(legacy).toHaveText("legacy (CONFIG_MAP authentication)");
+        await expect(legacy).toBeDisabled();
+        const note = page.locator("#aws-cluster-note");
+        await expect(note).toBeVisible();
+        await expect(note).toContainText(
+          "legacy uses CONFIG_MAP authentication, which doesn't support access entries."
+        );
+        await expect(note.locator("code")).toHaveText(
+          enableAccessEntriesCommand("legacy", "us-west-2")
+        );
+        await expect(clusterSelect(page)).toHaveAttribute(
+          "aria-describedby",
+          "aws-cluster-note"
+        );
+        await expectNoWcagViolations(page);
+      });
+
+      test("shows the selected cluster's VPC as text and follows a cluster change", async ({
+        page,
+        canvas
+      }) => {
+        const discovery = awsDiscoveryBody({
+          clusters: [
+            awsCluster("eks-1"),
+            awsCluster("eks-2", { vpcId: "vpc-2" })
+          ],
+          vpcs: [
+            { id: "vpc-1", name: "main (vpc-1)" },
+            { id: "vpc-2", name: "vpc-2" }
+          ],
+          subnets: [
+            awsSubnet("subnet-a", "private-a", "us-west-2a"),
+            awsSubnet("subnet-b", "private-b", "us-west-2b"),
+            awsSubnet("subnet-d", "", "us-west-2c", { vpcId: "vpc-2" }),
+            awsSubnet("subnet-e", "", "us-west-2d", { vpcId: "vpc-2" })
+          ]
+        });
+        await routeAwsProfileAndDiscovery(page, [discovery]);
+        // A request that names a cluster gets that cluster's namespaces.
+        const namespaceRequests: unknown[] = [];
+        await page.route("**/api/discover", async (route) => {
+          const body: unknown = route.request().postDataJSON();
+          const cluster =
+            typeof body === "object" && body !== null ?
+              Reflect.get(body, "cluster")
+            : undefined;
+          if (typeof cluster !== "string") {
+            await route.fallback();
+            return;
+          }
+          namespaceRequests.push(cluster);
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ...discovery,
+              namespaces: ["default", `team-${cluster}`]
+            })
+          });
+        });
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentWizard(page);
+
+        const vpc = page.getByLabel("VPC", { exact: true });
+        const namespaceOption = (name: string): Locator =>
+          namespaceSelect(page).locator(`option[value="${name}"]`);
+        await expect(clusterSelect(page)).toHaveValue("");
+        await expect(vpc).toHaveText("Select a cluster to see its VPC.");
+        await expect(page.locator("select#aws-vpc-select")).toHaveCount(0);
+
+        await clusterSelect(page).selectOption("eks-2");
+        await expect(vpc).toHaveText("vpc-2");
+        await expect(subnetBox(page, "subnet-d")).toBeChecked();
+        await expect(subnetBox(page, "subnet-e")).toBeChecked();
+        await expect(subnetBox(page, "subnet-a")).toHaveCount(0);
+        await expect(namespaceOption("team-eks-2")).toHaveCount(1);
+        await expect(namespaceSelect(page)).toHaveValue("default");
+        await expect(namespaceSelect(page)).toBeEnabled();
+
+        await clusterSelect(page).selectOption("eks-1");
+        await expect(vpc).toHaveText("main (vpc-1)");
+        await expect(subnetBox(page, "subnet-a")).toBeChecked();
+        await expect(subnetBox(page, "subnet-d")).toHaveCount(0);
+        await expect(namespaceOption("team-eks-1")).toHaveCount(1);
+        await expect(namespaceOption("team-eks-2")).toHaveCount(0);
+        await expect(page.locator("#aws-namespace-note")).toBeHidden();
+        expect(namespaceRequests).toEqual(["eks-2", "eks-1"]);
+      });
+
+      test("disables a Local Zone subnet's checkbox", async ({
+        page,
+        canvas
+      }) => {
+        await routeAwsProfileAndDiscovery(page, [
+          awsDiscoveryBody({
+            subnets: [
+              awsSubnet("subnet-a", "private-a", "us-west-2a"),
+              awsSubnet("subnet-b", "private-b", "us-west-2b"),
+              awsSubnet("subnet-lz", "edge", "us-west-2-lax-1a", {
+                zoneKind: "local-zone"
+              })
+            ]
+          })
+        ]);
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentWizard(page);
+
+        const localZone = subnetBox(page, "subnet-lz");
+        await expect(localZone).toBeDisabled();
+        await expect(localZone).not.toBeChecked();
+        await expect(
+          page
+            .getByRole("group", { name: "Subnets" })
+            .locator("label")
+            .filter({ hasText: "subnet-lz" })
+        ).toContainText("us-west-2-lax-1a (Local Zone)");
+        await expect(subnetBox(page, "subnet-a")).toBeChecked();
+        await expect(subnetBox(page, "subnet-b")).toBeChecked();
+        await expectNoWcagViolations(page);
+      });
+
+      test("says which permission is missing when the cluster list is denied", async ({
+        page,
+        canvas
+      }) => {
+        await routeAwsProfileAndDiscovery(page, [
+          awsDiscoveryBody({
+            clusters: [],
+            errors: {
+              clusters:
+                "An error occurred (AccessDeniedException) when calling the ListClusters operation"
+            },
+            errorKinds: { clusters: "denied" }
+          })
+        ]);
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentWizard(page);
+
+        await expect(page.locator("#aws-discover-status")).toHaveText(
+          "The signed-in identity can't list EKS clusters (eks:ListClusters)."
+        );
+        await expect(clusterSelect(page).locator("option")).toHaveText([
+          "Clusters unavailable"
+        ]);
+        await expect(page.locator("#aws-discover-remediation")).toBeEmpty();
+        await expect(page.locator("#deploy-btn")).toBeDisabled();
+      });
+
+      test("offers AWS sign-in when the CLI has no session, then clears it after Refresh", async ({
+        page,
+        canvas
+      }) => {
+        const remediationRequests: unknown[] = [];
+        await page.route("**/api/run-remediation", async (route) => {
+          remediationRequests.push(route.request().postDataJSON());
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ success: true })
+          });
+        });
+        await routeAwsProfileAndDiscovery(page, [
+          awsDiscoveryBody({
+            clusters: [],
+            subnets: [],
+            errors: {
+              clusters: "Unable to locate credentials",
+              subnets: "Unable to locate credentials"
+            },
+            errorKinds: { clusters: "credentials", subnets: "credentials" },
+            remediation: remediationView("aws-cli-login", {
+              nextStep: "refresh-discovery"
+            })
+          }),
+          awsDiscoveryBody()
+        ]);
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentWizard(page);
+
+        await expect(page.locator("#aws-discover-status")).toHaveText(
+          "The AWS CLI has no valid session. Sign in, then select Refresh."
+        );
+        const remediation = page.locator("#aws-discover-remediation");
+        await expect(remediation).toContainText("Sign in to AWS CLI");
+        await expect(remediation).toContainText("aws sso login");
+        const run = remediation.getByRole("button", {
+          name: COMMAND_RUN_LABEL
+        });
+        await expect(run).toBeVisible();
+        await expectNoWcagViolations(page);
+
+        await run.focus();
+        await page.keyboard.press("Enter");
+        await expect
+          .poll(() => remediationRequests)
+          .toEqual([
+            {
+              id: "aws-cli-login",
+              params: { nextStep: "refresh-discovery" },
+              confirmed: false
+            }
+          ]);
+
+        await page.locator("#aws-refresh-btn").click();
+        await expect(page.locator("#aws-discover-status")).toHaveText(
+          "Found 1 EKS cluster in us-west-2."
+        );
+        await expect(remediation).toBeEmpty();
+        await expect(clusterSelect(page)).toHaveValue("eks-1");
+      });
+
+      test("keeps Create Environment disabled while no usable cluster is selected", async ({
+        page,
+        canvas
+      }) => {
+        await routeAwsProfileAndDiscovery(page, [
+          awsDiscoveryBody({
+            clusters: [
+              awsCluster("legacy", {
+                authenticationMode: "CONFIG_MAP",
+                usable: false,
+                unusableReason: "config-map"
+              }),
+              awsCluster("new", {
+                status: "CREATING",
+                usable: false,
+                unusableReason: "status"
+              })
+            ]
+          })
+        ]);
+        const setupRequests = await captureSetupRequests(page);
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentWizard(page);
+        await page.getByLabel("Environment name").fill("dev");
+
+        await expect(page.locator("#aws-discover-status")).toHaveText(
+          "Found 2 EKS clusters in us-west-2. None can be used."
+        );
+        await expect(clusterSelect(page)).toHaveValue("");
+        await expect(
+          clusterSelect(page).locator('option[value="new"]')
+        ).toHaveText("new (CREATING)");
+        await expect(page.locator("#aws-cluster-note")).toContainText(
+          "new is CREATING. Radius can use a cluster that is ACTIVE or UPDATING."
+        );
+        await expect(page.locator("#deploy-btn")).toBeDisabled();
+        expect(setupRequests).toEqual([]);
+      });
+
+      test("keeps a changed subnet selection and namespace after Refresh", async ({
+        page,
+        canvas
+      }) => {
+        const discoveries = await routeAwsProfileAndDiscovery(page);
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentWizard(page);
+
+        await expect(subnetBox(page, "subnet-a")).toBeChecked();
+        await subnetBox(page, "subnet-b").uncheck();
+        await subnetBox(page, "subnet-c").check();
+        await namespaceSelect(page).selectOption("shop");
+        await expect(page.locator("#aws-infra-warning")).toContainText(
+          "A public subnet is selected."
+        );
+
+        await page.locator("#aws-refresh-btn").click();
+        await expect.poll(discoveries).toBe(2);
+        await expect(page.locator("#aws-discover-status")).toHaveText(
+          "Found 1 EKS cluster in us-west-2."
+        );
+        await expect(clusterSelect(page)).toHaveValue("eks-1");
+        await expect(namespaceSelect(page)).toHaveValue("shop");
+        await expect(subnetBox(page, "subnet-a")).toBeChecked();
+        await expect(subnetBox(page, "subnet-b")).not.toBeChecked();
+        await expect(subnetBox(page, "subnet-c")).toBeChecked();
+        await expect(page.locator("#aws-restore-note")).toBeHidden();
+      });
+
+      test("names a removed saved subnet on edit and leaves it out of the request", async ({
+        page,
+        canvas
+      }) => {
+        await routeAwsProfileAndDiscovery(page);
+        const setupRequests = await captureSetupRequests(page);
+        await routeAwsEnvironment(page, {
+          subnetIds: "subnet-a,subnet-b,subnet-gone"
+        });
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentEdit(page);
+
+        const restoreNote = page.locator("#aws-restore-note");
+        await expect(restoreNote).toBeVisible();
+        await expect(restoreNote).toHaveText(
+          "These saved subnets were removed from the selection: subnet-gone (not found in the cluster's VPC)."
+        );
+        await expect(subnetBox(page, "subnet-a")).toBeChecked();
+        await expect(subnetBox(page, "subnet-b")).toBeChecked();
+        await expect(namespaceSelect(page)).toHaveValue("shop");
+        await expectNoWcagViolations(page);
+
+        const save = page.locator("#deploy-btn");
+        await expect(save).toBeEnabled();
+        await save.click();
+        await expect.poll(() => setupRequests.length).toBe(1);
+        expect(setupRequests[0]).toMatchObject({
+          provider: "aws",
+          cluster: "eks-1",
+          namespace: "shop",
+          vpcId: "vpc-1",
+          subnetIds: "subnet-a,subnet-b"
+        });
+      });
+
+      test("restores the saved selection on edit after a failed discovery and Refresh", async ({
+        page,
+        canvas
+      }) => {
+        await routeAwsProfileAndDiscovery(page, [
+          "network-failure",
+          awsDiscoveryBody()
+        ]);
+        await routeAwsEnvironment(page, { subnetIds: "subnet-a,subnet-c" });
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentEdit(page);
+
+        await expect(page.locator("#aws-discover-status")).toHaveText(
+          "Discovery error: Failed to fetch"
+        );
+        await expect(clusterSelect(page).locator("option")).toHaveText([
+          "Clusters unavailable"
+        ]);
+        await expect(page.locator("#deploy-btn")).toBeDisabled();
+
+        await page.locator("#aws-refresh-btn").click();
+        await expect(clusterSelect(page)).toHaveValue("eks-1");
+        await expect(namespaceSelect(page)).toHaveValue("shop");
+        await expect(subnetBox(page, "subnet-a")).toBeChecked();
+        await expect(subnetBox(page, "subnet-b")).not.toBeChecked();
+        await expect(subnetBox(page, "subnet-c")).toBeChecked();
+        await expect(page.locator("#aws-restore-note")).toBeHidden();
+      });
     });
 
     test("deletes an AWS environment, naming the access entry before and the report after @safety", async ({
@@ -4390,7 +4868,10 @@ test.describe("Radius Canvas in Chromium", () => {
               return ok({ Account: AWS_ACCOUNT });
             case "eks describe-cluster":
               return ok({
-                cluster: { accessConfig: { authenticationMode: "API" } }
+                cluster: {
+                  status: "ACTIVE",
+                  accessConfig: { authenticationMode: "API" }
+                }
               });
             case "iam create-policy":
               return {

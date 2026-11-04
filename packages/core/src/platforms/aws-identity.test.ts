@@ -24,6 +24,7 @@ import {
   isAwsAccountId,
   isAwsRegion,
   isAwsRoleName,
+  isEksClusterName,
   isRadiusManagedRole,
   mergeGitHubTrustSubject,
   namesGitHubProvider,
@@ -929,6 +930,24 @@ describe("formatAwsLockTime", () => {
     ["not a date", "an unknown time"]
   ])("formats %j as %s", (since, text) => {
     expect(formatAwsLockTime(since)).toBe(text);
+  });
+});
+
+describe("isEksClusterName", () => {
+  it("accepts names EKS allows, up to 100 characters", () => {
+    expect(isEksClusterName("shop")).toBe(true);
+    expect(isEksClusterName("0-shop_Prod")).toBe(true);
+    expect(isEksClusterName("a".repeat(100))).toBe(true);
+  });
+
+  it.each([
+    ["an empty name", ""],
+    ["a leading hyphen", "-shop"],
+    ["a space", "shop prod"],
+    ["a dot", "shop.prod"],
+    ["101 characters", "a".repeat(101)]
+  ])("rejects %s", (_label, value) => {
+    expect(isEksClusterName(value)).toBe(false);
   });
 });
 
