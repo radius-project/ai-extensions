@@ -233,11 +233,17 @@ status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" RAD_COMMANDS='["kubectl get pods"]' run_
 expect_calls "" "a disallowed command"
 expect_result "${COMMANDS_RESULT}" disallowed_command 2 "a disallowed command"
 
-# The default deploy refreshes before it reads the app's parameters.
-status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" PREPARE_STATUS=1 RAD_COMMANDS="" run_step run-rad-commands)"
+# The default deploy refreshes before it reads the app's parameters. The app
+# file is missing, so a step that went on past the failed refresh would fail on
+# that file instead, with the same exit code and result.
+status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" PREPARE_STATUS=1 RAD_COMMANDS="" \
+    APP_FILE="${TEST_ROOT}/missing/app.bicep" run_step run-rad-commands)"
 [[ "${status}" == "1" ]] || fail "a failed token refresh before the default deploy: expected exit 1, got ${status}"
 expect_calls "refresher --prepare ${REFRESHER_ARGS}" "a failed token refresh before the default deploy"
 expect_result "${COMMANDS_RESULT}" command_failed 1 "a failed token refresh before the default deploy"
+if grep -q 'missing/app.bicep not found' "${STEP_LOG}"; then
+    fail "a failed token refresh before the default deploy: expected the step to stop before reading the app file"
+fi
 
 # delete-resource.
 export RESOURCE_TYPE="application" RESOURCE_NAME="todo" FORCE_DELETE="false"

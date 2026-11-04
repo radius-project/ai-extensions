@@ -66,7 +66,8 @@ fi
 printf '{"kind":"ExecCredential","status":{"expirationTimestamp":"2030-01-01T00:14:00Z","token":"eks-token-%s"}}\n' "${count}"
 EOF
 
-# `create secret` prints the Secret's name and data so `apply` can record it.
+# `create secret` accepts only radius-system, and prints the Secret's name and
+# data so `apply` can record it.
 cat >"${TEMP_DIR}/bin/kubectl" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -94,6 +95,10 @@ case "${1:-}" in
         sed -n "s/^ *${key}: //p" "${kubeconfig}" | head -1
         ;;
     create)
+        if [[ "$5 $6" != "--namespace radius-system" ]]; then
+            echo "unexpected namespace: $*" >&2
+            exit 1
+        fi
         printf 'secret=%s\n' "$4"
         for argument in "$@"; do
             case "${argument}" in
@@ -230,7 +235,7 @@ cancel_watcher() {
 
 # --prepare refreshes both tokens once.
 reset
-output="$(bash "${SCRIPT}" --prepare 2>&1)"
+output="$(bash "${SCRIPT}" --prepare 2>&1)" || fail "expected prepare to succeed, got: ${output}"
 [[ "${output}" == "AWS tokens refreshed." ]] || fail "unexpected prepare output: ${output}"
 [[ "$(cat "${KUBECTL_APPLY_FILE}")" == "$(expected_updates oidc-token-1 eks-token-1)" ]] ||
     fail "expected the OIDC and kubeconfig Secrets with both EKS token forms, got:

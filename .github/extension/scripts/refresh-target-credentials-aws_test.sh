@@ -106,13 +106,23 @@ case "$*" in
 esac
 EOF
 
-# `create secret` prints each --from-file key and file content so `apply` can
-# record the Secret's data.
+# `create secret` accepts only the target-kubeconfig Secret in radius-system, and
+# prints each --from-file key and file content so `apply` can record the data.
 cat >"${STUB_BIN}/kubectl" <<'EOF'
 #!/bin/bash
 case "$1" in
     create)
         printf 'kubectl create secret %s\n' "$4" >>"${CALLS}"
+        namespace=""
+        previous=""
+        for argument in "$@"; do
+            [[ "${previous}" == "--namespace" ]] && namespace="${argument}"
+            previous="${argument}"
+        done
+        if [[ "$2 $3 $4" != "secret generic target-kubeconfig" || "${namespace}" != "radius-system" ]]; then
+            echo "unexpected Secret: $* " >&2
+            exit 1
+        fi
         for argument in "$@"; do
             case "${argument}" in
                 --from-file=*)
@@ -123,7 +133,7 @@ case "$1" in
         done
         ;;
     apply) cat >"${APPLIED}" ;;
-    rollout) printf 'kubectl rollout %s %s\n' "$2" "$3" >>"${CALLS}" ;;
+    rollout) printf 'kubectl %s\n' "$*" >>"${CALLS}" ;;
     *) exit 1 ;;
 esac
 EOF
@@ -172,8 +182,8 @@ $(cat "${KUBECONFIG_PATH}")"
 $(cat "${APPLIED}")"
     grep -Fq "aws eks get-token --cluster-name demo-cluster --region us-west-2 --output json" "${CALLS}" ||
         fail "${workflow}: expected an EKS token for the configured cluster and region"
-    [[ "$(grep -c '^kubectl rollout restart deployment/' "${CALLS}")" == "3" ]] ||
-        fail "${workflow}: expected the three consumers to restart"
+    [[ "$(grep -cE '^kubectl rollout restart deployment/(applications-rp|dynamic-rp|bicep-de) -n radius-system$' "${CALLS}")" == "3" ]] ||
+        fail "${workflow}: expected the three consumers in radius-system to restart"
     [[ -z "$(ls -A "${TEST_ROOT}/runner")" ]] ||
         fail "${workflow}: expected the EKS token file to be removed from RUNNER_TEMP"
     if grep -q 'eks-token-1' "${STEP_LOG}"; then
