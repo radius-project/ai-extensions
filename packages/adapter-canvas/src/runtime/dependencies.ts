@@ -24,6 +24,7 @@ import type {
 import type { SessionHolder } from "./session.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import type { EnvironmentTools } from "./environment-tools.js";
+import type { PluginUpdatePreferences } from "./plugin-update-preferences.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -351,6 +352,8 @@ export interface OperationsDependencies {
 // module (server.ts/gh.ts/workspace.ts/...) or performing real I/O.
 export interface RadiusExtensionDependencies {
   logError(message: string): void;
+  automaticPluginUpdates: boolean;
+  pluginUpdatePreferences: PluginUpdatePreferences;
   session: SessionHolder;
   executionOwner: EnvironmentExecutionOwner;
   environment: EnvironmentTools;

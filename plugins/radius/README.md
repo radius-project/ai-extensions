@@ -10,6 +10,16 @@ Open the GitHub Copilot app, select **Customize** in the side menu, and then sel
 
 Restart your Copilot session after installing so the skills and the canvas extension become available. Use the plugin's three-dot menu to update or uninstall it.
 
+### Update approval
+
+When Radius Canvas starts in a new session, it considers one request to update the installed plugin from its current marketplace. Radius calls Copilot's session plugin update API only after you approve. After any answer, including approval, decline, or cancellation, Radius waits 7 days before asking again for that marketplace. This wait also applies when an approved check finds that the plugin is already current or installs a new version. Once 7 days have passed, the next eligible session can ask again. A different marketplace has its own saved answer. You can still update manually at any time. You can keep using the canvas while the request is open. Active sessions keep their loaded code and skills. Start a new session to load installed changes.
+
+The request names the marketplace and asks to update to its latest available version. Copilot's SDK does not expose available plugin versions, so Radius cannot check whether a newer version exists before asking. After an approved update, Radius reports the old and new versions when Copilot provides them, or says the plugin is already up to date if they match.
+
+Update requests skip CI, disabled plugins, local marketplace paths, direct installs, built-in copies, enterprise-managed plugins, and multiple enabled Radius installs. Set `COPILOT_AUTO_UPDATE=false` or `COPILOT_AUTO_UPDATE=0` in the environment that starts Copilot to turn off the request. `CI=false` and `CI=0` do not disable requests. If the host lacks the plugin API or approval UI, Radius skips the request and writes a diagnostic without showing a session warning. If saved history cannot be read, Radius skips the request with a diagnostic. If an answer cannot be saved, Radius writes a diagnostic and still follows your answer; a later session may ask again sooner. Preference-storage errors never show an update-failure warning. If approval or an update fails, Radius reports a warning and leaves the current session running. A failed completion notice does not report an installed update as a failed update. Use **Customize > Installed** to update manually.
+
+Radius stores answer timestamps under `~/.copilot/radius/plugin-update-responses` (`USERPROFILE` on Windows). To allow another request before the 7-day wait ends, remove Radius's saved answer records from that directory. The old `plugin-update-declines` records are not used.
+
 ## What's Included
 
 ### Skills
