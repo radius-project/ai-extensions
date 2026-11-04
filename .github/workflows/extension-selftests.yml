@@ -52,6 +52,7 @@ jobs:
           set -euo pipefail
           mapfile -t scripts < <(
             git ls-files \
+              '.github/extension/*.sh' \
               '.github/extension/**/*.sh' \
               'build/scripts/verify-contrib-consumers*.sh' \
               'build/scripts/update-radius-installer*.sh' \
@@ -71,6 +72,7 @@ jobs:
           set -euo pipefail
           mapfile -t tests < <(
             git ls-files \
+              '.github/extension/*_test.sh' \
               '.github/extension/**/*_test.sh' \
               'build/scripts/update-radius-installer_test.sh' \
               'build/scripts/cloud-e2e-lease_test.sh' \
