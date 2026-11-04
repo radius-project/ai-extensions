@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted
+} from "@radius-project/core";
 import {
   createGitHubAccountCoordinator,
+  GitHubAccountRestorationError,
   type GitHubAccountCoordinatorPorts
 } from "./github-account-coordinator.js";
 import type {
@@ -71,6 +76,204 @@ function ports(input: {
 }
 
 describe("GitHub account coordinator", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("preserves an external-change error when the command presentation supplies no recovery guidance", async () => {
+    let active = "original";
+    const coordinator = createGitHubAccountCoordinator(
+      {
+        createExecutor: async () => executor("selected", "keyring", true, []),
+        getActiveKeyringLogin: async () => active,
+        switchKeyringAccount: async (login) => {
+          active = login;
+          return { ok: true };
+        },
+        resetIdentityCache() {}
+      },
+      {
+        ghCommandPresentation: {
+          kind: "unavailable",
+          shell: "posix",
+          installationNote: ""
+        }
+      }
+    );
+    const cause = new Error("work failed");
+    await expect(
+      coordinator.withSelectedAccount(
+        "selected",
+        { ownerKey: "runtime" },
+        async () => {
+          active = "external";
+          throw cause;
+        }
+      )
+    ).rejects.toMatchObject({
+      cause,
+      message: "work failed The GitHub CLI account changed externally.",
+      restoration: { state: "changed_externally", guidance: "" }
+    });
+    expect(active).toBe("external");
+  });
+
+  it.each([
+    ["create", true, "original"],
+    ["read", false, "original"],
+    ["identity", false, "original"],
+    ["read", true, "original"],
+    ["identity", true, "selected"],
+    ["switch", true, "original"],
+    ["selected-read", true, "original"],
+    ["identity", true, "original"]
+  ] as const)(
+    "fences forward work after %s (switch=%s, active=%s) but restores an issued switch",
+    async (boundary, requiresSwitch, initial) => {
+      let stopped = false;
+      let active = initial as string;
+      const events: string[] = [];
+      const work = vi.fn(async () => "value");
+      const selected = executor("selected", "keyring", requiresSwitch, events);
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () => {
+          events.push("create");
+          if (boundary === "create") stopped = true;
+          return {
+            ...selected,
+            verifyIdentity: async () => {
+              events.push("identity");
+              if (boundary === "identity") stopped = true;
+            }
+          };
+        },
+        getActiveKeyringLogin: async () => {
+          events.push(`read:${active}`);
+          if (
+            boundary === "read" ||
+            (boundary === "selected-read" && active === "selected")
+          )
+            stopped = true;
+          return active;
+        },
+        switchKeyringAccount: async (login) => {
+          events.push(`switch:${login}`);
+          active = login;
+          if (boundary === "switch") stopped = true;
+          return { ok: true };
+        },
+        resetIdentityCache() {}
+      });
+      await expect(
+        coordinator.withSelectedAccount(
+          "selected",
+          {
+            ownerKey: "runtime",
+            assertActive: () => assertSetupExecutionActive(() => stopped)
+          },
+          work
+        )
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(work).not.toHaveBeenCalled();
+      expect(active).toBe(initial);
+      if (events.includes("switch:selected"))
+        expect(events.at(-2)).toBe("switch:original");
+      else
+        expect(events.some((event) => event.startsWith("switch:"))).toBe(false);
+    }
+  );
+
+  it.each(["acquire", "timeout"] as const)(
+    "retains the queued 3000ms lease until %s and refuses new work when stopped",
+    async (end) => {
+      vi.useFakeTimers();
+      const events: string[] = [];
+      const coordinator = createGitHubAccountCoordinator(
+        ports({ activeLogin: "original", events })
+      );
+      let release = () => {};
+      let entered = () => {};
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const holder = coordinator.withSelectedAccount(
+        "holder",
+        { ownerKey: "other" },
+        async () => {
+          entered();
+          await gate;
+        }
+      );
+      await reached;
+      let stopped = false;
+      const work = vi.fn(async () => {});
+      const queued = coordinator.withSelectedAccount(
+        "queued",
+        {
+          ownerKey: "runtime",
+          assertActive: () => assertSetupExecutionActive(() => stopped)
+        },
+        work,
+        3000
+      );
+      const observed = queued.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      stopped = true;
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(work).not.toHaveBeenCalled();
+      if (end === "timeout") {
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await observed).toMatchObject({
+          message: expect.stringContaining("Another Environment Creation")
+        });
+      }
+      release();
+      await holder;
+      if (end === "acquire")
+        expect(isSetupExecutionInterrupted(await observed)).toBe(true);
+      expect(events).not.toContain("switch:queued");
+      expect(work).not.toHaveBeenCalled();
+      await expect(
+        coordinator.withSelectedAccount(
+          "original",
+          { ownerKey: "next" },
+          async () => "next"
+        )
+      ).resolves.toMatchObject({ value: "next" });
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
+  it.each(["failed", "changed_externally"] as const)(
+    "preserves interruption in an ordinary %s restoration carrier",
+    async (state) => {
+      const cause = new Error("interrupted");
+      let active = "original";
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () => executor("selected", "keyring", true, []),
+        getActiveKeyringLogin: async () => active,
+        switchKeyringAccount: async (login) => {
+          if (login === "original")
+            return { ok: false, error: "restore unavailable" };
+          active = login;
+          return { ok: true };
+        },
+        resetIdentityCache() {}
+      });
+      const error = await coordinator
+        .withSelectedAccount("selected", { ownerKey: "runtime" }, async () => {
+          if (state === "changed_externally") active = "external";
+          throw cause;
+        })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(GitHubAccountRestorationError);
+      expect(error).toMatchObject({ cause, restoration: { state } });
+      expect(isSetupExecutionInterrupted(error)).toBe(false);
+      expect(active).toBe(state === "failed" ? "selected" : "external");
+    }
+  );
+
   it("verifies a read-only selected executor", async () => {
     const events: string[] = [];
     const coordinator = createGitHubAccountCoordinator(

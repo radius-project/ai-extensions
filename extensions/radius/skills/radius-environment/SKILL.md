@@ -18,11 +18,13 @@ Create a GitHub Environment configured with the cloud credentials and private GH
 
 ## Flow
 
-The canvas drives a short wizard per provider: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the user's stored GitHub CLI credential, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification or automatic deployment.
+The environment tools and Canvas wizard share one operation owner: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the selected GitHub account, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification. Setup is verify-only: successful verification never deploys an application. Deployment requires a separate explicit action.
 
 ### AWS
 
-1. **Form inputs**: env name, IAM Role ARN, AWS region, account ID, EKS cluster name, optional VPC + subnet IDs (required if the app uses `Radius.Data/mySqlDatabases`). These are written as GitHub Environment variables.
+AWS setup remains disabled by default. Enable the developer switch at extension startup; it is not a tool argument.
+
+1. **Form inputs**: env name, IAM role name or existing role ARN, AWS region, account ID, EKS cluster name, VPC ID and comma-separated subnet IDs. Both role selectors may be supplied; the existing role ARN takes precedence. Setup authorizes the deploy identity and records its resolved role ARN and cloud settings as GitHub Environment variables.
 2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-aws.yml` and dispatches it. The workflow logs into AWS via OIDC and runs `aws sts get-caller-identity`, then runs `aws eks update-kubeconfig` for the EKS cluster and `kubectl cluster-info` to confirm cluster access. Status is polled and shown live in the canvas.
 
 ### Azure
@@ -32,7 +34,29 @@ The canvas drives a short wizard per provider: collect the environment's cloud s
 
 ## How to invoke
 
-When the user asks to create or set up a Radius environment, **open the canvas straight to the environment wizard**:
+Use `radius_setup_environment` to start setup without opening a panel. Supply `repo`, `environment`, `provider`, and the provider's required fields. Azure requires `tenantId`, `subscriptionId`, `resourceGroup` and `cluster`; an optional `clientId` uses an existing credential identity, otherwise the existing application selection/creation flow applies. AWS requires `accountId`, `region`, `cluster`, `vpcId`, `subnetIds` and a valid `roleName` or `existingRoleArn`; subnet IDs are a comma-separated string. Both selectors are retained for the operation's lifetime in this runtime, and `existingRoleArn` takes precedence. The unreleased `roleArn` input is not accepted or aliased. Within the same runtime, Continue/Retry refuses a request without a valid selector rather than authorizing a default role. AWS setup requests are not durably saved: after a runtime restart, Continue/Retry reports the request as missing, so start a new setup. Namespace defaults to `default`. An omitted branch means the current worktree branch only for the session repository; another repository requires an explicit branch.
+
+With AWS disabled, shared admission refuses AWS before account readiness, account choice or setup work. Tool schema, workspace and branch checks happen first, so a missing branch can still require an explicit target. Closing a panel does not stop runtime-owned setup. AWS user Stop remains cooperative and saves known partial progress, but nested AWS commands and subsequent local context/persistence updates are not fully fenced by runtime shutdown. That shutdown correction and wider AWS mutation recovery remain deferred.
+
+The advertised SDK schemas are flat objects for provider compatibility, but accepted inputs remain conditional: do not mix Azure-only and AWS-only fields. Only `resume` accepts and requires `interactionId`, `provider`, `checkpoint` and `answer`; other controls reject those fields. The handler enforces these stricter rules even if the host only validates common required fields.
+
+Setup trims leading and trailing whitespace from the environment name before admission. Poll `radius_environment_status` with the returned `operationId`, `repo` and canonical `environment`; for example, setup input `" dev "` returns `"dev"`. Status and control require that exact saved target rather than accepting a padded alias. `accepted` means the operation was admitted, not that verification succeeded. Status is read-only except for recording observed progress: it never deploys, redispatches, repairs or authorizes cleanup. Treat `unknown`, `expired`, `refused` and `unavailable` as explicit limitations, not permission to retry mutations.
+
+Use `radius_environment_control` only for an action returned as eligible. `continue`, `verify`, `retry-setup`, `retry-cleanup`, `cancel-workflow`, `rollback`, `exit`, `abandon` and `bypass-verification` use the saved operation and its account. `stop` is a local, operation-bound safety request: it does not require fresh GitHub readiness or available credentials, so it can be admitted while setup holds the account lease. It remains subject to target, eligibility, currentness and durable-persistence checks. Stop is cooperative: an already-started write may settle before execution stops at its safe boundary; cancelling the exact saved workflow is a separate command. Rollback only removes proven-owned setup artifacts, not an arbitrary existing environment. Tool bypass requires a positively classified permissions failure.
+
+For a supported Azure input prompt, pass `action: "resume"`, the current `interactionId`, `provider: "azure"`, `checkpoint`, and the typed `answer`. A service-management-reference answer contains its prompt `code` and `serviceManagementReference`. An application-selection answer contains its prompt `code` and either `createNew: true`, or `createNew: false` with `appId`. A replaced or consumed prompt cannot be reused.
+
+For `pull-request-merge` guidance, `interaction.pullRequestUrl` is optional and identifies the validated saved setup pull request. Present that link when supplied; do not invent a link or treat its informational interaction ID as permission to resume. Missing or invalid saved URLs do not authorize verification dispatch. Runtime shutdown stops further verification reconciliation but cannot cancel a request already sent; an uncertain dispatch remains recorded for recovery, not an instruction to dispatch again.
+
+An `app-selection-required` interaction includes `appSelection.candidates` with validated `appId` values, redacted display names of at most 200 characters, and valid UTC `createdDateTime` values when available. Names may be identical: present IDs and creation dates to distinguish applications. At most 20 candidates are returned; `appSelection.truncated` signals omitted candidates or shortened names. A valid saved `defaultAppId` remains in the returned list. This list is guidance, not an authorization allowlist: the existing explicit `appId` and create-new paths still apply and the service checks live ownership. Empty guidance does not authorize creating an identity automatically.
+
+An input prompt can be temporarily unsupported while its execution task settles. Poll status again and use the latest supported handle; eligibility changes replace the handle, and an earlier unsupported handle cannot resume the operation. For `verification-retry-pull-request-open`, follow the `pull-request-merge` guidance and merge the recorded setup PR through the normal review process before requesting verification again. This refusal dispatches no verification workflow.
+
+Only a supported `setup-input` interaction ID is a runtime-held answer handle. IDs on unsupported account-selection, reauthorization, confirmation or other manual requirements are informational: satisfy the requirement through the trusted host or external flow, then invoke the tool again. Those IDs are never consent tokens and cannot be used to resume a setup prompt.
+
+**Do not supply credentials, account proofs, panel selection handles or a `confirmed` boolean.** Multiple eligible GitHub accounts require a trusted host choice. Cleanup, abandonment, workflow cancellation and verification bypass require trusted host confirmation where applicable. Login/consent requirements still need the external authentication flow and subsequent service evidence; a dialog is not proof that authentication succeeded. If the result contains `interaction_required` or an unsupported interaction, follow its manual guidance. Do not automatically open a panel, switch accounts, assume consent or silently substitute another account.
+
+If the user prefers the visual wizard, open Canvas explicitly:
 
 ```javascript
 open_canvas({
@@ -52,7 +76,7 @@ open_canvas({
 })
 ```
 
-The popup lands directly on the create-environment form for the chosen provider. No navigation needed.
+The panel lands directly on the create-environment form. Closing it detaches the view without cancelling shared setup work.
 
 > **Canvas not opening?** If the Radius panel does not appear even though this skill and the Radius plugin are installed, reload extensions (or restart the app) and try again.
 
@@ -111,7 +135,9 @@ The OIDC trust must already exist on the cloud side before the workflow can auth
 - **`refusing to allow an OAuth App to create or update workflow .github/workflows/verify-<provider>.yml without 'workflow' scope`** — the PAT lacks `workflow` scope. Run `gh auth refresh -s workflow` (the extension auto-prefers a `gh auth token` over `$GITHUB_TOKEN`).
 - **"Workflow dispatch accepted, but no new run appeared after 30s"** — usually means GitHub hasn't indexed the just-pushed workflow yet. The extension already retries dispatch with backoff; if it still fails, check the Actions tab in the browser.
 - **Azure OIDC fails with `AADSTS70021: No matching federated identity record found`** — the federated credential subject on the AAD app doesn't match. Subject must be exactly `repo:<owner>/<repo>:environment:<env-name>`.
-- **AWS OIDC fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`** — IAM role trust policy missing or wrong audience. Audience should be `sts.amazonaws.com`, condition on `token.actions.githubusercontent.com:sub == repo:<owner>/<repo>:environment:<env-name>`.
+- **AWS OIDC fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`** — IAM role trust policy missing or wrong audience. Audience should be `sts.amazonaws.com`, condition on `token.actions.githubusercontent.com:sub == repo:<owner>/<repo>:environment:<env-name>`. When a deploy fails this way, the canvas offers **Repair**, which adds the subjects GitHub now presents for this environment back to the deploy role's trust policy and changes nothing else. It only changes a role Radius created for this repository, or one that already trusts another environment of it. If Repair reports the trust is intact, the cause is elsewhere, such as the role's permissions.
+- **AWS setup or deletion waits for "the lock on IAM role …"** — another Radius run is changing the same deploy role's trust policy, so this one waits. The lock is an IAM policy named `radius-lock-<role>`. After 10 minutes the canvas offers **Remove lock**. Use it only after confirming the other run has stopped, because two runs writing the trust policy at once can drop an environment's access.
+- **AWS setup stops with "not allowed iam:CreatePolicy"** — the signed-in AWS identity needs `iam:CreatePolicy`, `iam:GetPolicy`, and `iam:DeletePolicy` on `arn:aws:iam::<account>:policy/radius-lock-*` to take the deploy role's lock. Setup changed nothing.
 - **GHCR package bootstrap fails** — refresh the stored `gh` credential with `read:packages` and `write:packages`. The extension pushes a harmless retained `bootstrap` artifact with an `org.opencontainers.image.source` annotation, then requires the package to be private/internal and linked to the target repository. It never uses a public repository's `GITHUB_TOKEN` to create the package because that can make the package public.
 
 ## Verifying after creation
@@ -120,5 +146,5 @@ After the canvas reports success, the new env appears in the **Envs ▾** dropdo
 
 ## Related files
 
-- `extension.mjs` — environment creation (`/api/create-environment`), verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`.
+- `extension.mjs` — the registered environment tools and Canvas use operation-owned direct services, verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`. Use the tools or wizard rather than calling private setup endpoints.
 - The verification workflow templates are the canonical `verify-aws.yml` / `verify-azure.yml` (both named `Radius - Verify Credentials`) hosted in `radius-project/ai-extensions` at `.github/extension/`. The released extension fetches the matching provider template at the full source commit baked into its build, fills the `verify-ghcr-push` action reference with that same immutable SHA, commits it into the target user repo at `.github/workflows/verify-<provider>.yml`, then dispatches it. A fetch failure is a hard error; no generated verification workflow follows a mutable release ref.

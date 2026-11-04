@@ -48,7 +48,15 @@ export interface ArtifactRegistrationSnapshot {
 
 interface ChildMessage {
   type:
-    "registered" | "ready" | "shutdown" | "blocked" | "page" | "render-error";
+    | "registered"
+    | "ready"
+    | "shutdown"
+    | "blocked"
+    | "page"
+    | "render-error"
+    | "readiness";
+  code?: string;
+  calls?: string[];
   snapshot?: ArtifactRegistrationSnapshot;
   closeCount?: number;
   kind?: string;
@@ -61,6 +69,8 @@ export interface ArtifactSmokeResult {
   closeCount: number;
   stderr: string;
   renderedPage: string;
+  exitCode: number;
+  readiness?: { code: string; calls: string[] };
 }
 
 function waitForExit(child: ChildProcess): Promise<number | null> {
@@ -73,7 +83,14 @@ function waitForExit(child: ChildProcess): Promise<number | null> {
 export async function runArtifactSmoke(
   artifactPath: string,
   timeoutMs = 20_000,
-  artifactRoot = dirname(artifactPath)
+  artifactRoot = dirname(artifactPath),
+  shutdownBehavior:
+    | "clean"
+    | "hung-session"
+    | "failed-session"
+    | "readiness"
+    | "readiness-restoration-failed"
+    | "readiness-external-change" = "clean"
 ): Promise<ArtifactSmokeResult> {
   const root = mkdtempSync(join(tmpdir(), "radius-artifact-smoke-"));
   const fakeRad = join(root, process.platform === "win32" ? "rad.exe" : "rad");
@@ -109,7 +126,8 @@ export async function runArtifactSmoke(
         RADIUS_ARTIFACT_WORKSPACE: root,
         RADIUS_RAD_BINARY: fakeRad,
         RADIUS_RAD_SKIP_VERSION_CHECK: "1",
-        RADIUS_CANVAS_DEV: "0"
+        RADIUS_CANVAS_DEV: "0",
+        RADIUS_ARTIFACT_SHUTDOWN: shutdownBehavior
       },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
       windowsHide: true
@@ -127,6 +145,7 @@ export async function runArtifactSmoke(
   let closeCount = 0;
   let renderedPage: string | undefined;
   let failure: Error | undefined;
+  let readiness: ArtifactSmokeResult["readiness"];
   child.stderr?.on("data", (chunk: Buffer) => {
     if (stderr.length < 16_384) stderr += chunk.toString();
   });
@@ -134,8 +153,10 @@ export async function runArtifactSmoke(
     if (raw.type === "registered") registration = raw.snapshot;
     else if (raw.type === "ready") ready = true;
     else if (raw.type === "shutdown") closeCount += raw.closeCount ?? 0;
+    else if (raw.type === "readiness" && raw.code && raw.calls)
+      readiness = { code: raw.code, calls: raw.calls };
     else if (raw.type === "blocked") {
-      failure = new Error(
+      failure ??= new Error(
         `Artifact attempted ${raw.kind}: ${raw.detail ?? "unknown target"}`
       );
     } else if (raw.type === "page") {
@@ -181,28 +202,52 @@ export async function runArtifactSmoke(
     const exitDeadline = Date.now() + 5_000;
     while (
       child.exitCode === null &&
+      !failure &&
       closeCount === 0 &&
       Date.now() < exitDeadline
     ) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 20));
     }
+    if (failure) throw failure;
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
     const exitCode = await Promise.race([
       exitPromise,
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () =>
-            reject(new Error("Artifact did not shut down within 5 seconds")),
-          Math.max(0, exitDeadline - Date.now())
-        )
+      new Promise<never>(
+        (_, reject) =>
+          (exitTimer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Artifact did not shut down within 5 seconds. stderr: ${stderr.slice(-2000)}`
+                )
+              ),
+            Math.max(0, exitDeadline - Date.now())
+          ))
       )
-    ]);
+    ]).finally(() => clearTimeout(exitTimer));
     if (failure) throw failure;
-    if (exitCode !== 0) {
+    if (
+      exitCode !==
+      ((
+        shutdownBehavior === "clean" ||
+        shutdownBehavior === "readiness" ||
+        shutdownBehavior === "readiness-external-change"
+      ) ?
+        0
+      : 1)
+    ) {
       throw new Error(
         `Artifact subprocess exited with ${exitCode}. stderr: ${stderr.slice(-2000)}`
       );
     }
-    return { registration, closeCount, stderr, renderedPage };
+    return {
+      registration,
+      closeCount,
+      stderr,
+      renderedPage,
+      exitCode,
+      readiness
+    };
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGKILL");

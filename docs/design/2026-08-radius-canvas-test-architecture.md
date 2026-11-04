@@ -67,7 +67,7 @@ The approved architecture describes a target, not the current contents of `main`
 | 7     | Complete: add reviewed visual baselines and extended resilience coverage                            | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
 | 8     | Not started: qualify the controlled real-host suite and require it before release                   | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
 
-The current accepted runtime surface is two actions, `get_graph_resources` and `update_source_refs`, and seven tools: `radius_generate_app`, `radius_report_modeling_failure`, `radius_generate_pr_diff_markdown`, `radius_publish_custom_type_extension`, `radius_publish_recipe`, `radius_deploy`, and `radius_deploy_status`. The authoritative Phase 2 inventory contains 40 local API routes with no legacy fallback.
+The current accepted runtime surface is two actions, `get_graph_resources` and `update_source_refs`, and seven tools: `radius_generate_app`, `radius_report_modeling_failure`, `radius_generate_pr_diff_markdown`, `radius_publish_custom_type_extension`, `radius_publish_recipe`, `radius_deploy`, and `radius_deploy_status`. The historical Phase 2 inventory contains 40 local API routes with no legacy fallback. The live route table is authoritative: the unused `POST /api/azure-auto-setup` and `POST /api/create-environment` adapters are removed after their coordinator callers migrated to direct services.
 
 ## Objectives
 

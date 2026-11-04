@@ -1,15 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  acceptedGitHubSubjects,
   AWS_CLI_MINIMUM_VERSION,
+  AWS_LOCK_REMOVABLE_AFTER_MS,
+  awsLockHolderLabel,
+  awsLockPolicyArn,
   awsRoleArn,
   awsRoleTags,
   buildAwsDeployRoleName,
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
+  buildAwsLockPolicyDocument,
+  buildAwsLockPolicyName,
   buildGitHubTrustPolicy,
   checkAwsCliVersion,
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
+  describeAwsLockHolder,
+  formatAwsLockTime,
   eksAcceptsAccessEntries,
   eksAuthenticationMode,
   githubOidcProviderArn,
@@ -20,10 +28,13 @@ import {
   mergeGitHubTrustSubject,
   namesGitHubProvider,
   parseAwsCliVersion,
+  parseAwsLockHolder,
   parseAwsRoleArn,
   parsePolicyDocument,
   radiusRoleRepository,
   removeGitHubTrustSubject,
+  restrictedGitHubSubjects,
+  subjectNamesRepository,
   trustedGitHubSubjects
 } from "./aws-identity.js";
 
@@ -607,5 +618,286 @@ describe("EKS authentication mode", () => {
     expect(eksAcceptsAccessEntries("API")).toBe(true);
     expect(eksAcceptsAccessEntries("API_AND_CONFIG_MAP")).toBe(true);
     expect(eksAcceptsAccessEntries("CONFIG_MAP")).toBe(false);
+  });
+});
+
+describe("deploy identity lock", () => {
+  const holder = {
+    repo: "octo/shop",
+    environment: "dev",
+    action: "setup" as const,
+    operationId: "op-1"
+  };
+
+  it("names the lock after the role, inside IAM's 128-character policy name limit", () => {
+    const longest = "r".repeat(64);
+    expect(buildAwsLockPolicyName("radius-deploy-octo-shop")).toBe(
+      "radius-lock-radius-deploy-octo-shop"
+    );
+    expect(buildAwsLockPolicyName(longest)).toHaveLength(76);
+    expect(awsLockPolicyArn(ACCOUNT, "shop")).toBe(
+      `arn:aws:iam::${ACCOUNT}:policy/radius-lock-shop`
+    );
+  });
+
+  it("writes a document that only denies passing the lock itself", () => {
+    expect(buildAwsLockPolicyDocument(ACCOUNT, "shop")).toEqual({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Sid: "RadiusDeployIdentityLock",
+          Effect: "Deny",
+          Action: "iam:PassRole",
+          Resource: `arn:aws:iam::${ACCOUNT}:policy/radius-lock-shop`
+        }
+      ]
+    });
+  });
+
+  it("round-trips the holder through the policy description", () => {
+    const description = describeAwsLockHolder(holder);
+    expect(description).toBe(
+      '{"repo":"octo/shop","environment":"dev","action":"setup","operationId":"op-1"}'
+    );
+    expect(parseAwsLockHolder(description)).toEqual(holder);
+  });
+
+  it("escapes characters IAM descriptions refuse and restores them on read", () => {
+    const unicode = { ...holder, environment: "prod-é-✓-😀" };
+    const description = describeAwsLockHolder(unicode);
+    expect(description).toMatch(/^[\x20-\x7e]*$/);
+    expect(parseAwsLockHolder(description)).toEqual(unicode);
+  });
+
+  it("drops the repository and environment when they would pass the 1,000-character limit", () => {
+    const description = describeAwsLockHolder({
+      ...holder,
+      environment: "é".repeat(255)
+    });
+    expect(description.length).toBeLessThanOrEqual(1000);
+    expect(parseAwsLockHolder(description)).toEqual({
+      repo: "",
+      environment: "",
+      action: "setup",
+      operationId: "op-1"
+    });
+  });
+
+  it.each([
+    [undefined],
+    [""],
+    ["not json"],
+    ["[]"],
+    ['{"action":"takeover"}'],
+    ['{"repo":"octo/shop"}']
+  ])("reads %j as no holder", (description) => {
+    expect(parseAwsLockHolder(description)).toBeNull();
+  });
+
+  it("reads missing text fields as empty", () => {
+    expect(parseAwsLockHolder('{"action":"delete","repo":7}')).toEqual({
+      repo: "",
+      environment: "",
+      action: "delete",
+      operationId: ""
+    });
+  });
+
+  it.each([
+    [holder, "The setup of environment dev in octo/shop"],
+    [
+      { ...holder, action: "delete" as const },
+      "The delete of environment dev in octo/shop"
+    ],
+    [{ ...holder, environment: "" }, "The setup of octo/shop"],
+    [
+      { ...holder, repo: "", environment: "" },
+      "The setup of an unnamed environment"
+    ],
+    [null, "Another run"]
+  ])("labels %j as %s", (value, label) => {
+    expect(awsLockHolderLabel(value)).toBe(label);
+  });
+
+  it("offers removal after ten minutes", () => {
+    expect(AWS_LOCK_REMOVABLE_AFTER_MS).toBe(600000);
+  });
+});
+
+describe("formatAwsLockTime", () => {
+  it.each([
+    ["2026-10-30T11:58:30Z", "2026-10-30 11:58 UTC"],
+    ["2026-10-30T04:58:30-07:00", "2026-10-30 11:58 UTC"],
+    ["", "an unknown time"],
+    ["not a date", "an unknown time"]
+  ])("formats %j as %s", (since, text) => {
+    expect(formatAwsLockTime(since)).toBe(text);
+  });
+});
+
+describe("acceptedGitHubSubjects", () => {
+  const DEV = "repo:octo/shop:environment:dev";
+  const PROD = "repo:octo/shop:environment:prod";
+  const statement = (condition: Record<string, unknown>) => ({
+    Effect: "Allow",
+    Principal: { Federated: githubOidcProviderArn(ACCOUNT) },
+    Action: "sts:AssumeRoleWithWebIdentity",
+    Condition: condition
+  });
+  const policy = (...statements: Record<string, unknown>[]) => ({
+    Version: "2012-10-17",
+    Statement: statements
+  });
+
+  it("lists the exact subjects GitHub's AWS tokens can sign in with", () => {
+    expect(
+      acceptedGitHubSubjects(
+        buildGitHubTrustPolicy(ACCOUNT, [DEV, PROD]),
+        ACCOUNT
+      )
+    ).toEqual([DEV, PROD]);
+  });
+
+  it.each([
+    [
+      "another sub constraint excludes it",
+      statement({
+        StringEquals: { [`token.actions.githubusercontent.com:sub`]: DEV },
+        StringLike: {
+          [`token.actions.githubusercontent.com:sub`]: "repo:octo/web:*"
+        }
+      })
+    ],
+    [
+      "a condition Radius cannot read restricts it",
+      statement({
+        StringEquals: { [`token.actions.githubusercontent.com:sub`]: DEV },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      })
+    ],
+    [
+      "it needs another audience",
+      statement({
+        StringEquals: {
+          [`token.actions.githubusercontent.com:sub`]: DEV,
+          [`token.actions.githubusercontent.com:aud`]: "example"
+        }
+      })
+    ],
+    [
+      "it is a pattern",
+      statement({
+        StringLike: {
+          [`token.actions.githubusercontent.com:sub`]: "repo:octo/shop:*"
+        }
+      })
+    ],
+    [
+      "it is denied",
+      {
+        ...statement({
+          StringEquals: { [`token.actions.githubusercontent.com:sub`]: DEV }
+        }),
+        Effect: "Deny"
+      }
+    ]
+  ])("leaves out a subject when %s", (_label, entry) => {
+    expect(acceptedGitHubSubjects(policy(entry), ACCOUNT)).toEqual([]);
+  });
+});
+
+describe("subjectNamesRepository", () => {
+  it.each([
+    ["repo:octo/shop:environment:dev", true],
+    ["repo:octo@7/shop@42:environment:dev", true],
+    ["repository:octo/shop:environment:dev", true],
+    ["repository_owner_id:7:environment:dev:repository_id:42", true],
+    ["repository_owner:octo:environment:dev", false],
+    ["repository_owner_id:7:environment:dev", false],
+    ["repo:octo/shop:environment", false],
+    ["repo::environment:dev", false],
+    ["", false]
+  ])("%s names a repository: %s", (subject, names) => {
+    expect(subjectNamesRepository(subject)).toBe(names);
+  });
+});
+
+describe("restrictedGitHubSubjects", () => {
+  const DEV = "repo:octo/shop:environment:dev";
+  const SUB = "token.actions.githubusercontent.com:sub";
+  const AUD = "token.actions.githubusercontent.com:aud";
+  const statement = (condition: Record<string, unknown>, effect = "Allow") => ({
+    Effect: effect,
+    Principal: { Federated: githubOidcProviderArn(ACCOUNT) },
+    Action: "sts:AssumeRoleWithWebIdentity",
+    Condition: condition
+  });
+  const restricted = (...statements: Record<string, unknown>[]) =>
+    restrictedGitHubSubjects(
+      { Version: "2012-10-17", Statement: statements },
+      ACCOUNT,
+      [DEV]
+    );
+
+  it.each([
+    [
+      "a pattern under a source IP condition",
+      statement({
+        StringLike: { [SUB]: "repo:octo/shop:environment:*" },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      })
+    ],
+    [
+      "an exact name under a source IP condition",
+      statement({
+        StringEquals: { [SUB]: DEV },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      })
+    ],
+    [
+      "a pattern for another audience",
+      statement({
+        StringLike: { [SUB]: "repo:octo/*", [AUD]: "example" }
+      })
+    ],
+    [
+      "a name another sub constraint excludes",
+      statement({
+        StringEquals: { [SUB]: DEV },
+        StringLike: { [SUB]: "repo:octo/web:*" }
+      })
+    ]
+  ])("counts a subject covered by %s", (_label, entry) => {
+    expect(restricted(entry)).toEqual([DEV]);
+  });
+
+  it.each([
+    [
+      "a pattern that does not match it, under a condition",
+      statement({
+        StringLike: { [SUB]: "repo:octo/web:*" },
+        IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+      })
+    ],
+    [
+      "a condition with no sub constraint",
+      statement({ IpAddress: { "aws:SourceIp": "203.0.113.0/24" } })
+    ],
+    [
+      "a Deny statement",
+      statement(
+        {
+          StringLike: { [SUB]: "repo:octo/shop:*" },
+          IpAddress: { "aws:SourceIp": "203.0.113.0/24" }
+        },
+        "Deny"
+      )
+    ],
+    [
+      "only other subjects",
+      statement({ StringEquals: { [SUB]: "repo:octo/shop:environment:prod" } })
+    ]
+  ])("does not count a subject when the policy has %s", (_label, entry) => {
+    expect(restricted(entry)).toEqual([]);
   });
 });

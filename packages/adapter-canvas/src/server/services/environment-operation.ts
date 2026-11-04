@@ -1,4 +1,7 @@
 import {
+  assertSetupExecutionActive,
+  isAwsRoleName,
+  parseAwsRoleArn,
   runSetupCoordinator,
   type SetupCoordinatorPorts
 } from "@radius-project/core";
@@ -53,9 +56,11 @@ export interface EnvironmentOperationRequest {
 }
 
 export interface EnvironmentOperationWorkflowDependencies {
+  isStopped(): boolean;
   preflightRepoAdmin(
     repo: string,
-    executor: SelectedGhExecutor
+    executor: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<string>;
   guardStopBoundary(
     operation: EnvironmentOperationRecord,
@@ -121,7 +126,11 @@ export interface EnvironmentOperationWorkflowDependencies {
     | { ok: false; status: number; error: string; code: string }
     | { ok: false; stopped: true }
   >;
-  instanceId: string;
+  // AWS only: release the deploy identity lock setup took. Never throws.
+  releaseAwsDeployIdentity(
+    operation: EnvironmentOperationRecord
+  ): Promise<void>;
+  instanceId?: string;
   now(): number;
 }
 
@@ -140,6 +149,7 @@ async function failResolution(
   dependencies: EnvironmentOperationWorkflowDependencies,
   error: unknown
 ): Promise<{ shouldMonitor: false }> {
+  assertSetupExecutionActive(dependencies.isStopped);
   const unresolvedMutation = unresolvedProviderMutations(operation)[0];
   if (unresolvedMutation) {
     return recordProviderReconciliationFailure(
@@ -232,7 +242,8 @@ export function createSetupCoordinatorPorts(
     preflightRepository: async () => {
       const message = await dependencies.preflightRepoAdmin(
         operation.repo,
-        executor
+        executor,
+        () => assertSetupExecutionActive(dependencies.isStopped)
       );
       if (!message) return true;
       preflightFailure = {
@@ -266,6 +277,7 @@ export function createSetupCoordinatorPorts(
         runGh: (args) => executor.run(args),
         now: dependencies.now,
         mutationRecovery: {
+          isStopped: dependencies.isStopped,
           operation,
           persist: dependencies.persistProviderMutation
         },
@@ -315,6 +327,7 @@ export function createSetupCoordinatorPorts(
       );
     },
     reconcileFailure: (mutationId, error) => {
+      assertSetupExecutionActive(dependencies.isStopped);
       const live = unresolvedProviderMutations(operation).find(
         (mutation) => mutation.mutationId === mutationId
       );
@@ -333,6 +346,20 @@ export function createSetupCoordinatorPorts(
         )
       ),
     authorizeAws: async ({ reused, ...request }) => {
+      if (
+        !isAwsRoleName(String(request.roleName || "")) &&
+        parseAwsRoleArn(String(request.existingRoleArn || "")) === null
+      ) {
+        return {
+          kind: "failed",
+          error: {
+            status: 400,
+            code: "invalid-aws-operation-input",
+            message:
+              "AWS setup requires a valid IAM role name or an existing role ARN. Start a new setup with roleName or existingRoleArn."
+          }
+        };
+      }
       const conflict =
         reused ?
           await awsEnvironmentConflict(
@@ -364,6 +391,7 @@ export function createSetupCoordinatorPorts(
             }
           };
     },
+    releaseAws: () => dependencies.releaseAwsDeployIdentity(operation),
     configureEnvironment: async (request) =>
       setupStageResult(
         await dependencies.setupServices.configureEnvironment(

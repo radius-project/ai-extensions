@@ -23,6 +23,32 @@ afterEach(async () => {
 });
 
 describe("server scaffolding real-loopback HIT", () => {
+  it("tolerates an already closed real socket while releasing the instance once", async () => {
+    const stopped: string[] = [];
+    container = createCanvasServer({
+      createHttpServer: (handler) => createServer(handler),
+      createRequestHandler: () => (_request, response) => response.end("ready"),
+      createState: () => ({}),
+      defaultPage: "graph",
+      now: () => 1,
+      preferredPort: async () => 0,
+      prepareIdentity: () => {},
+      onStopped: (id) => {
+        stopped.push(id);
+      }
+    });
+    const entry = await container.getOrCreate("panel");
+    expect(await (await fetch(entry.baseUrl)).text()).toBe("ready");
+    entry.server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => {
+      entry.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await expect(container.stop("panel", true)).resolves.toBeUndefined();
+    expect(stopped).toEqual(["panel"]);
+    expect(container.instances.size).toBe(0);
+    await container.stop("panel", true);
+    expect(stopped).toEqual(["panel"]);
+  });
   it("stubs every declared route without relaxing table validation", () => {
     // The helper exists so a test that ignores a family stops needing a manual
     // stub edit each slice. It must stay test-support only: supplying handlers

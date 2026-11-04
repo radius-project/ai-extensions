@@ -9,8 +9,8 @@ import { setSetupEnvironmentVariable } from "@radius-project/core";
 import { setupValueDigest } from "@radius-project/adapter-shared";
 import { createSetupWorkflowRecoveryPort } from "../services/setup-workflow-recovery.js";
 
-// Seam 2 of the `POST /api/create-environment` slice: every `gh` invocation the
-// route makes. Create Environment supplies a selected-account executor, so every
+// GitHub command binding for environment setup.
+// Create Environment supplies a selected-account executor, so every
 // command uses one pinned credential and a failure is returned without retrying
 // under ambient or keyring state. The legacy CLI port remains for callers that do
 // not yet supply an executor.
@@ -21,10 +21,12 @@ export interface WorkflowScopeGhRunnerPorts {
 }
 
 export interface WorkflowScopeGhRunnerTarget {
+  isStopped?(): boolean;
   targetRepo: string;
   envName: string;
   environmentProviderId?: string | null;
   mutationRecovery?: {
+    isStopped(): boolean;
     operation: object & { operationId: string };
     persist(): Promise<void>;
     recordVariable(entry: {
@@ -113,11 +115,13 @@ export function createWorkflowScopeGhRunner(
       run: runGh,
       runOrThrow: runGhOrThrow,
       digest: setupValueDigest,
+      isStopped: target.isStopped,
       recovery:
         target.mutationRecovery ?
           createSetupWorkflowRecoveryPort(
             target.mutationRecovery.operation,
-            target.mutationRecovery.persist
+            target.mutationRecovery.persist,
+            target.mutationRecovery.isStopped
           )
         : undefined,
       recordVariable: (entry) => target.mutationRecovery?.recordVariable(entry)

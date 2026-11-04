@@ -4,6 +4,32 @@ import { join, relative, resolve } from "node:path";
 
 let joinCount = 0;
 let joinedDeclaration;
+let closeCount = 0;
+
+export function artifactCloseCount() {
+  return closeCount;
+}
+
+export async function runArtifactReadiness() {
+  const tool = joinedDeclaration?.tools.find(
+    (candidate) => candidate.name === "radius_setup_environment"
+  );
+  if (!tool) throw new Error("Setup tool was not registered.");
+  return JSON.parse(
+    String(
+      await tool.handler({
+        repo: "fixture/app",
+        environment: "dev",
+        branch: "feature/setup",
+        provider: "azure",
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        subscriptionId: "22222222-2222-4222-8222-222222222222",
+        resourceGroup: "fixture-group",
+        cluster: "fixture-cluster"
+      })
+    )
+  );
+}
 
 const REQUIRED_SKILL_FILES = [
   "SKILL.md",
@@ -115,7 +141,14 @@ export async function joinSession(declaration) {
     log: () => undefined,
     rpc: { canvas: { open: async () => ({}) } },
     metadata: { snapshot: async () => ({}) },
-    close: () => send({ type: "shutdown", closeCount: 1 })
+    close: async () => {
+      closeCount++;
+      await send({ type: "shutdown", closeCount: 1 });
+      if (process.env.RADIUS_ARTIFACT_SHUTDOWN === "hung-session")
+        await new Promise(() => {});
+      if (process.env.RADIUS_ARTIFACT_SHUTDOWN === "failed-session")
+        throw new Error("Controlled session teardown failure");
+    }
   };
 }
 
