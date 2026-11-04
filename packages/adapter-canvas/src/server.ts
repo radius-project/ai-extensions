@@ -125,6 +125,7 @@ import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
+import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
 import {
   appParams,
   resolveDeployParams,
@@ -6017,6 +6018,15 @@ export function createProductionCanvasServerRuntime(
         });
       }),
     readProcessEnv: () => process.env,
+    awsTrustRepair: createAwsTrustRepairService({
+      awsEnabled,
+      readInstanceState: (instanceId) =>
+        canvasServer.instances.get(instanceId)?.state,
+      cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
+      readEnvironmentTarget: createEnvironmentTargetReader(runCommand),
+      repair: (input) => awsEnvironmentAccess.repair(input),
+      errorMessage
+    }),
     setTimer: (callback, ms) => setTimeout(callback, ms),
     // Declared as a getter for the same temporal-dead-zone reason as the cache
     // above: the deploy services are composed further down, after the workflow
