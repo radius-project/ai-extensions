@@ -4381,7 +4381,7 @@ export function createEnvironmentOperationExecution(
       const setup = await githubAccountCoordinator.withSelectedAccount(
         selectedLogin,
         { ownerKey: accountContext.ownerKey, operationId },
-        async (executor) => {
+        async (executor, lease) => {
           releaseExecutor = accountContext.registerExecutor(
             operationId,
             executor
@@ -4484,7 +4484,16 @@ export function createEnvironmentOperationExecution(
                 assertSetupExecutionActive(attachment.isShuttingDown);
                 return setupServices.authorizeAzure(request);
               },
-              configureEnvironment: (request, projectionInstanceId) => {
+              configureEnvironment: async (request, projectionInstanceId) => {
+                // Configure environment runs gh as the selected account, so
+                // it takes back the lease AWS setup gave up. No lease holder
+                // waits for the deploy identity lock this setup holds.
+                await lease.retake(() => {
+                  addLegacyStep(
+                    op,
+                    "⏳ Waiting for another Radius run to finish with the GitHub CLI account."
+                  );
+                });
                 assertSetupExecutionActive(attachment.isShuttingDown);
                 return setupServices.configureEnvironment(
                   request,
@@ -4493,8 +4502,16 @@ export function createEnvironmentOperationExecution(
                 );
               }
             },
-            setupAwsDeployIdentity: (operation, input, selectedExecutor) => {
+            // The deploy identity lock wait has no deadline, so AWS setup
+            // gives up the GitHub account lease. A failed or paused AWS setup
+            // never needs it again.
+            setupAwsDeployIdentity: async (
+              operation,
+              input,
+              selectedExecutor
+            ) => {
               assertSetupExecutionActive(attachment.isShuttingDown);
+              await lease.release();
               return awsEnvironmentAccess.setup(
                 operation,
                 input,
