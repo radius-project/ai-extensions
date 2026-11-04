@@ -32,13 +32,17 @@ import {
   parseAwsRoleArn,
   parsePolicyDocument,
   radiusRoleRepository,
+  namesOneEnvironment,
+  namesRepositoryEnvironment,
   removeGitHubTrustSubject,
   restrictedGitHubSubjects,
   subjectNamesRepository,
+  trustAllowsOnlySubjects,
   trustedGitHubSubjects
 } from "./aws-identity.js";
 
 const ACCOUNT = "123456789012";
+const GITHUB = "token.actions.githubusercontent.com";
 const DEV = "repo:octo/shop:environment:dev";
 const PROD = "repo:octo/shop:environment:prod";
 
@@ -445,6 +449,199 @@ describe("trust policy", () => {
     );
     expect(removal.removed).toBe(false);
     expect(removal.remaining).toBe(1);
+  });
+
+  describe("trustAllowsOnlySubjects", () => {
+    const PROVIDER = githubOidcProviderArn(ACCOUNT);
+    const github = (condition: unknown, extra: object = {}) => ({
+      Effect: "Allow",
+      Principal: { Federated: PROVIDER },
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: condition,
+      ...extra
+    });
+
+    it.each([
+      ["the listed subjects", [DEV, PROD], [DEV, PROD]],
+      ["a subset of the listed subjects", [PROD], [DEV, PROD]]
+    ])("accepts a policy that trusts %s", (_label, trusted, listed) => {
+      expect(
+        trustAllowsOnlySubjects(
+          buildGitHubTrustPolicy(ACCOUNT, trusted),
+          ACCOUNT,
+          listed
+        )
+      ).toBe(true);
+    });
+
+    it("accepts the deny-only policy left after the last subject", () => {
+      const { policy } = removeGitHubTrustSubject(
+        buildGitHubTrustPolicy(ACCOUNT, [DEV]),
+        ACCOUNT,
+        DEV
+      );
+      expect(trustAllowsOnlySubjects(policy, ACCOUNT, [])).toBe(true);
+    });
+
+    it.each([
+      ["a subject outside the list", buildGitHubTrustPolicy(ACCOUNT, [DEV])],
+      [
+        "a wildcard pattern",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            github({ StringLike: { [`${GITHUB}:sub`]: "repo:octo/*" } })
+          ]
+        }
+      ],
+      [
+        "a GitHub statement with no subject constraint",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            github({ StringEquals: { [`${GITHUB}:aud`]: "sts.amazonaws.com" } })
+          ]
+        }
+      ],
+      [
+        "another principal",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { Service: "ec2.amazonaws.com" },
+              Action: "sts:AssumeRole"
+            }
+          ]
+        }
+      ],
+      [
+        "another principal beside the GitHub provider",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            github(
+              { StringEquals: { [`${GITHUB}:sub`]: PROD } },
+              {
+                Principal: {
+                  Federated: PROVIDER,
+                  AWS: `arn:aws:iam::${ACCOUNT}:root`
+                }
+              }
+            )
+          ]
+        }
+      ],
+      [
+        "another identity provider",
+        {
+          Version: "2012-10-17",
+          Statement: [
+            github(
+              { StringEquals: { [`${GITHUB}:sub`]: PROD } },
+              {
+                Principal: {
+                  Federated: [PROVIDER, "arn:aws:iam::1:oidc-provider/other"]
+                }
+              }
+            )
+          ]
+        }
+      ],
+      [
+        "a statement with no principal",
+        { Version: "2012-10-17", Statement: [{ Effect: "Allow" }] }
+      ]
+    ])("rejects a policy with %s", (_label, policy) => {
+      expect(trustAllowsOnlySubjects(policy, ACCOUNT, [PROD])).toBe(false);
+    });
+
+    it.each([`${PROD}*`, "repo:octo/shop:environment:pro?"])(
+      "rejects the wildcard %s even when the pattern itself is listed",
+      (pattern) => {
+        const policy = {
+          Version: "2012-10-17",
+          Statement: [github({ StringLike: { [`${GITHUB}:sub`]: pattern } })]
+        };
+        expect(trustAllowsOnlySubjects(policy, ACCOUNT, [pattern])).toBe(false);
+      }
+    );
+
+    it("accepts a StringLike value with no wildcard", () => {
+      const policy = {
+        Version: "2012-10-17",
+        Statement: [github({ StringLike: { [`${GITHUB}:sub`]: PROD } })]
+      };
+      expect(trustAllowsOnlySubjects(policy, ACCOUNT, [PROD])).toBe(true);
+    });
+  });
+
+  describe("namesOneEnvironment", () => {
+    it.each([
+      ["the name form", "repo:octo/shop:environment:dev"],
+      ["the ID form", "repo:octo@7/shop@42:environment:dev"],
+      ["an older name from before a rename", "repo:octo/old:environment:dev"],
+      ["a repository ID", "repository_id:42:environment:dev"],
+      ["the environment in another case", "repo:octo/shop:environment:DEV"]
+    ])("accepts %s", (_label, subject) => {
+      expect(namesOneEnvironment(subject, "dev")).toBe(true);
+    });
+
+    it("matches an environment name with a colon by its encoded form", () => {
+      expect(
+        namesOneEnvironment("repo:octo/shop:environment:a%3Ab", "a:b")
+      ).toBe(true);
+    });
+
+    it.each([
+      ["no environment", "repository_id:42"],
+      ["no repository", "repository_owner:octo:environment:dev"],
+      ["another environment", "repo:octo/shop:environment:prod"],
+      ["two environments", "repo:octo/shop:environment:dev:environment:dev"],
+      ["a wildcard", "repo:octo/shop:environment:*"],
+      ["an empty value", "repo::environment:dev"],
+      ["a malformed subject", "repo:octo/shop:environment"]
+    ])("rejects %s", (_label, subject) => {
+      expect(namesOneEnvironment(subject, "dev")).toBe(false);
+    });
+  });
+
+  describe("namesRepositoryEnvironment", () => {
+    const shop = { fullName: "octo/Shop", ownerId: 7, repoId: 42 };
+
+    it.each([
+      ["the name form", "repo:octo/shop:environment:prod"],
+      ["the ID form", "repo:octo@7/shop@42:environment:prod"],
+      ["a repository claim", "repository:octo/shop:environment:prod"],
+      [
+        "a repository ID",
+        "repository_owner:octo:repository_id:42:environment:prod"
+      ],
+      ["another case", "repo:Octo/SHOP:environment:prod"]
+    ])("accepts %s", (_label, subject) => {
+      expect(namesRepositoryEnvironment(subject, shop)).toBe(true);
+    });
+
+    it.each([
+      ["an owner-wide subject", "repository_owner:octo:environment:prod"],
+      ["an owner ID subject", "repository_owner_id:7:environment:prod"],
+      ["no environment", "repo:octo/shop"],
+      [
+        "a branch instead of an environment",
+        "repo:octo/shop:ref:refs/heads/main"
+      ],
+      ["another repository", "repo:octo/other:environment:prod"],
+      ["another repository ID", "repository_id:43:environment:prod"],
+      ["a mismatched ID form", "repo:octo@7/shop@43:environment:prod"],
+      ["a wildcard environment", "repo:octo/shop:environment:*"],
+      ["a wildcard repository", "repo:octo/*:environment:prod"],
+      ["an empty value", "repo::environment:prod"],
+      ["an odd number of parts", "repo:octo/shop:environment"],
+      ["an empty subject", ""]
+    ])("rejects %s", (_label, subject) => {
+      expect(namesRepositoryEnvironment(subject, shop)).toBe(false);
+    });
   });
 
   it("parses encoded, string, and object documents", () => {
