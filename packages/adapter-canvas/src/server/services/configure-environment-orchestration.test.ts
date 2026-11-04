@@ -366,7 +366,7 @@ function start(script: Script = {}): Harness {
             namespace: "application"
           }
         : {
-            roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+            existingRoleArn: "arn:aws:iam::123456789012:role/radius-deploy",
             region: "us-west-2",
             accountId: "123456789012",
             cluster: "cluster",
@@ -1133,9 +1133,10 @@ describe("matched headless and panel-bound setup service parity", () => {
       // setup would have prepared.
       setupAwsDeployIdentity: async (_op, request) => ({
         ok: true,
-        roleArn: String(request.roleArn),
+        roleArn: String(request.existingRoleArn),
         subjects: []
       }),
+      releaseAwsDeployIdentity: async () => {},
       getOperation: (id) =>
         id === operation.operationId ? operation : undefined,
       now: d.now,

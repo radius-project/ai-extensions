@@ -77,9 +77,9 @@ describe("operation-bound setup verification monitoring", () => {
   });
 
   it.each(["pending", "unknown"])(
-    "caps backoff and jitter for %s evidence at the saved deadline",
+    "increases and caps backoff for %s evidence, then terminates after recognizing expiry",
     async (state) => {
-      const ports = fixture({ observe: async () => ({ state }) });
+      const ports = fixture({ observe: vi.fn(async () => ({ state })) });
       await expect(monitorSetupVerification(60_000, ports)).rejects.toThrow(
         "Credential verification did not complete within 45 minutes."
       );
@@ -89,6 +89,11 @@ describe("operation-bound setup verification monitoring", () => {
       expect(ports.sleep).toHaveBeenNthCalledWith(4, 15250);
       expect(ports.sleep).toHaveBeenNthCalledWith(5, 15250);
       expect(ports.sleep).toHaveBeenNthCalledWith(6, 15250);
+      expect(ports.observe).toHaveBeenCalledTimes(6);
+      expect(ports.sleep).toHaveBeenCalledTimes(6);
+      expect(ports.now()).toBe(70_250);
+      expect(ports.expire).not.toHaveBeenCalled();
+      expect(ports.stop).not.toHaveBeenCalled();
     }
   );
 

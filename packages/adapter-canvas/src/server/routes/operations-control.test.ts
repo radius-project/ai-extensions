@@ -8,6 +8,7 @@ import {
   handleCancelWorkflow,
   handleContinueOperation,
   handleExitOperation,
+  handleRemoveAwsLock,
   handleRetryOperation,
   handleRollbackOperation,
   handleStopOperation,
@@ -15,6 +16,7 @@ import {
   CONTINUE_OPERATION_ROUTE,
   CANCEL_WORKFLOW_ROUTE,
   EXIT_OPERATION_ROUTE,
+  REMOVE_AWS_LOCK_ROUTE,
   RETRY_OPERATION_ROUTE,
   ROLLBACK_OPERATION_ROUTE,
   STOP_OPERATION_ROUTE,
@@ -43,6 +45,7 @@ import {
   requestStop,
   requireInput,
   setCommandState,
+  setContext,
   setStageState,
   setVerificationWorkflowState,
   verificationWorkflowState,
@@ -63,6 +66,10 @@ import {
   type OperationFixture
 } from "../../../test/support/server/operation-fixtures.js";
 import type { CanvasServerEntry } from "../types.js";
+import type {
+  WorkflowCancellationTarget,
+  WorkflowCancellationAuthority
+} from "../services/workflow-cancellation-target.js";
 
 // The terminal announcement is a single process-wide listener, so every test
 // that touches it registers its own and clears it afterwards.
@@ -133,21 +140,6 @@ type ControlHandler = (
 /** The control path for one action on a saved record. */
 function controlPath(op: { operationId: string }, action: string): string {
   return `/api/operations/${op.operationId}/${action}`;
-}
-
-function verificationRunId(operation: {
-  verification?: unknown;
-  [key: string]: unknown;
-}): string {
-  const verification = operation.verification;
-  if (
-    !verification ||
-    typeof verification !== "object" ||
-    !("runId" in verification)
-  ) {
-    throw new Error("test operation has no verification run");
-  }
-  return String(verification.runId);
 }
 
 async function call(
@@ -227,6 +219,10 @@ function dependencies(
     },
     invalidateEnvironmentListing: (repo) => {
       journal.invalidatedListings.push(repo);
+    },
+    awsEnabled: true,
+    removeAwsDeployIdentityLock: () => {
+      throw new Error("removeAwsDeployIdentityLock not stubbed");
     }
   };
   return Object.assign(base, overrides, { journal });
@@ -249,7 +245,7 @@ function retryableDeletion(): OperationFixture {
 }
 
 describe("the route registry", () => {
-  it("claims exactly the six declared control routes", () => {
+  it("claims exactly the seven declared control routes", () => {
     const registry = createOperationsControlRoutes(dependencies());
     expect(Object.keys(registry).sort()).toEqual(
       [
@@ -258,7 +254,8 @@ describe("the route registry", () => {
         routeKey({ method: "POST", path: CANCEL_WORKFLOW_ROUTE }),
         routeKey({ method: "POST", path: ROLLBACK_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: EXIT_OPERATION_ROUTE }),
-        routeKey({ method: "POST", path: RETRY_OPERATION_ROUTE })
+        routeKey({ method: "POST", path: RETRY_OPERATION_ROUTE }),
+        routeKey({ method: "POST", path: REMOVE_AWS_LOCK_ROUTE })
       ].sort()
     );
   });
@@ -445,16 +442,17 @@ describe("POST /api/operations/{id}/stop", () => {
       }
     });
 
-    expect(out.recording.status).toBe(200);
+    expect(out.recording.status).toBe(500);
     expect(out.payload()).toMatchObject({
-      code: "operation-stopped-workflow-status-unknown",
-      detail:
-        "GitHub unavailable Radius also could not save the unknown workflow status: disk gone"
+      code: "workflow-status-persist-failed",
+      stopRecorded: true,
+      detail: "disk gone",
+      observationError: "GitHub unavailable"
     });
     expect(verificationWorkflowState(op)).toBe("unknown");
-    expect(announced).toEqual([op.operationId]);
+    expect(announced).toEqual([]);
     expect(
-      out.payload().operation.actions.map((action: { id: string }) => action.id)
+      toClientView(op).actions.map((action: { id: string }) => action.id)
     ).not.toContain("rollback");
   });
 
@@ -608,7 +606,7 @@ describe("POST /api/operations/{id}/stop", () => {
       deps
     );
 
-    expect(seen).toEqual(["octo/app:setup"]);
+    expect(seen).toEqual(["octo/app:setup", "octo/app:setup"]);
     expect(out.recording.status).toBe(202);
     expect(out.payload().statusUrl).toBe("/api/operations/octo%2Fapp%3Asetup");
   });
@@ -1236,6 +1234,12 @@ describe("POST /api/operations/{id}/continue", () => {
   });
 
   describe("POST /api/operations/{id}/cancel-workflow", () => {
+    function stoppedSetup() {
+      const operation = newOperation();
+      operation.context = { githubLogin: "saved-account" };
+      finish(operation, "cancelled");
+      return operation;
+    }
     it("cancels only the exact run after setup is stopped", async () => {
       const op = stoppedSetup();
       op.verification = { runId: "42" };
@@ -1243,8 +1247,8 @@ describe("POST /api/operations/{id}/continue", () => {
       const seen: string[] = [];
 
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
-        cancelVerificationWorkflow: (operation) => {
-          seen.push(verificationRunId(operation));
+        cancelVerificationWorkflow: (target) => {
+          seen.push(target.runId);
           return Promise.resolve("inactive");
         }
       });
@@ -1262,7 +1266,11 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let cancellations = 0;
       const dependencies = {
-        cancelVerificationWorkflow: () => {
+        cancelVerificationWorkflow: (
+          _target: WorkflowCancellationTarget,
+          authority: WorkflowCancellationAuthority
+        ) => {
+          authority.issued();
           cancellations += 1;
           if (cancellations === 1) {
             return Promise.reject(new Error("GitHub temporarily unavailable"));
@@ -1365,6 +1373,7 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let cancellations = 0;
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        reportOperationDiagnostic: vi.fn(),
         persistOperations: () => Promise.reject(new Error("disk gone")),
         cancelVerificationWorkflow: () => {
           cancellations += 1;
@@ -1374,8 +1383,7 @@ describe("POST /api/operations/{id}/continue", () => {
 
       expect(out.recording.status).toBe(500);
       expect(out.payload()).toMatchObject({
-        code: "workflow-cancel-persist-failed",
-        detail: "disk gone"
+        code: "operation-control-recovery-persist-failed"
       });
       expect(cancellations).toBe(0);
       expect(verificationWorkflowState(op)).toBe("active");
@@ -1392,21 +1400,23 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let persists = 0;
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        reportOperationDiagnostic: vi.fn(),
         persistOperations: () => {
           persists += 1;
           return persists === 1 ?
               Promise.resolve()
             : Promise.reject(new Error("disk gone"));
         },
-        cancelVerificationWorkflow: () =>
-          Promise.reject(new Error("GitHub unavailable"))
+        cancelVerificationWorkflow: (_target, authority) => {
+          authority.issued();
+          return Promise.reject(new Error("GitHub unavailable"));
+        }
       });
 
-      expect(out.recording.status).toBe(502);
+      expect(out.recording.status).toBe(500);
       expect(out.payload()).toMatchObject({
-        code: "workflow-cancel-failed",
-        detail:
-          "GitHub unavailable Radius also could not save the workflow status: disk gone"
+        code: "workflow-cancel-result-persist-failed",
+        detail: "GitHub unavailable"
       });
       expect(verificationWorkflowState(op)).toBe("unknown");
     });
@@ -2041,4 +2051,206 @@ describe("contracts shared by every control route", () => {
       ).toEqual(["continue-setup", "rollback", "exit-setup"]);
     }
   );
+});
+
+describe("handleRemoveAwsLock", () => {
+  const LOCK = {
+    policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
+    policyId: "LOCK0",
+    holder: "The setup of environment prod in octo/shop",
+    since: "2026-10-30T11:00:00Z"
+  };
+  const waiting = (removable = true): OperationFixture => {
+    const op = newOperation();
+    setContext(op, { awsLockWait: { ...LOCK, removable } });
+    return op;
+  };
+
+  it("removes the lock the run waits for and records it on the run", async () => {
+    const op = waiting();
+    const removed: unknown[] = [];
+
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async (lock) => {
+          removed.push(lock);
+          return { ok: true, removed: true };
+        }
+      }
+    );
+
+    expect(out.recording.status).toBe(200);
+    expect(out.payload()).toMatchObject({
+      code: "aws-lock-removed",
+      operationId: op.operationId
+    });
+    expect(removed).toEqual([
+      { policyArn: LOCK.policyArn, policyId: LOCK.policyId }
+    ]);
+    expect(op).toMatchObject({
+      context: { awsLockWait: { ...LOCK, removable: false } },
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "mutation",
+          label: `Removed the lock on the deploy identity held by: ${LOCK.holder}.`
+        })
+      ])
+    });
+    expect(out.journal.persistCalls).toBe(1);
+  });
+
+  it("refuses a confirmation that names another lock, without touching AWS", async () => {
+    const op = waiting();
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK1"
+    );
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "aws-lock-changed",
+      error:
+        "The lock changed since it was shown: another run now holds a new one. Nothing was removed."
+    });
+    expect(out.journal.persistCalls).toBe(0);
+  });
+
+  it.each([
+    ["no policy ID", "aws-lock/remove"],
+    ["an empty policy ID", "aws-lock/remove?policyId="]
+  ])(
+    "rejects a request with %s as invalid, without touching AWS",
+    async (_label, action) => {
+      const op = waiting();
+      const out = await drive(handleRemoveAwsLock, op, action);
+      expect(out.recording.status).toBe(400);
+      expect(out.payload()).toMatchObject({
+        code: "aws-lock-invalid",
+        error: "Name the lock to remove by its policy ID."
+      });
+      expect(op).toMatchObject({
+        context: { awsLockWait: { removable: true } }
+      });
+      expect(out.journal.persistCalls).toBe(0);
+    }
+  );
+
+  it("refuses to remove a lock while AWS is switched off", async () => {
+    const op = waiting();
+    const out = await drive(
+      handleRemoveAwsLock,
+      op,
+      "aws-lock/remove?policyId=LOCK0",
+      { awsEnabled: false }
+    );
+    expect(out.recording.status).toBe(400);
+    expect(out.payload()).toMatchObject({
+      code: "provider-unsupported",
+      error:
+        "AWS environments aren't supported yet, so Radius removed no AWS lock."
+    });
+    expect(op).toMatchObject({ context: { awsLockWait: { removable: true } } });
+    expect(out.journal.persistCalls).toBe(0);
+  });
+
+  it("says when the lock was already gone", async () => {
+    const out = await drive(
+      handleRemoveAwsLock,
+      waiting(),
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async () => ({ ok: true, removed: false })
+      }
+    );
+    expect(out.payload().code).toBe("aws-lock-already-removed");
+  });
+
+  it("still answers success when the record cannot be saved", async () => {
+    const out = await drive(
+      handleRemoveAwsLock,
+      waiting(),
+      "aws-lock/remove?policyId=LOCK0",
+      {
+        removeAwsDeployIdentityLock: async () => ({ ok: true, removed: true }),
+        persistOperations: () => Promise.reject(new Error("disk full"))
+      }
+    );
+    expect(out.recording.status).toBe(200);
+    expect(out.payload().detail).toBe(
+      "The lock was removed, but Radius could not save that on this run: disk full"
+    );
+  });
+
+  it.each([
+    [
+      "an AWS refusal",
+      async () => ({
+        ok: false as const,
+        code: "aws-lock-changed",
+        message: "The lock changed since it was shown."
+      }),
+      "aws-lock-changed",
+      "The lock changed since it was shown."
+    ],
+    [
+      "a thrown error",
+      async () => {
+        throw new Error("spawn aws ENOENT");
+      },
+      "aws-lock-remove-failed",
+      "Radius could not remove the lock: spawn aws ENOENT"
+    ]
+  ])(
+    "refuses with the reason on %s and keeps offering removal",
+    async (_l, remove, code, error) => {
+      const op = waiting();
+      const out = await drive(
+        handleRemoveAwsLock,
+        op,
+        "aws-lock/remove?policyId=LOCK0",
+        {
+          removeAwsDeployIdentityLock: remove
+        }
+      );
+      expect(out.recording.status).toBe(409);
+      expect(out.payload()).toMatchObject({ code, error });
+      expect(op).toMatchObject({
+        context: { awsLockWait: { removable: true } }
+      });
+      expect(out.journal.persistCalls).toBe(0);
+    }
+  );
+
+  it.each([
+    ["a lock not yet old enough", () => waiting(false)],
+    ["no lock wait", () => newOperation()],
+    [
+      "a finished run",
+      () => {
+        const op = waiting();
+        finish(op, "failed", {});
+        return op;
+      }
+    ]
+  ])("refuses %s without touching AWS", async (_label, build) => {
+    const out = await drive(
+      handleRemoveAwsLock,
+      build(),
+      "aws-lock/remove?policyId=LOCK0"
+    );
+    expect(out.recording.status).toBe(409);
+    expect(out.payload().code).toBe("aws-lock-not-removable");
+  });
+
+  it("answers 404 for an unknown operation", async () => {
+    const out = await call(
+      handleRemoveAwsLock,
+      "/api/operations/missing/aws-lock/remove?policyId=LOCK0",
+      dependencies({ get: () => null })
+    );
+    expect(out.recording.status).toBe(404);
+  });
 });

@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { admitSetupCommand } from "@radius-project/core";
 import {
   acceptCommand,
+  addStep,
   announceOperationTerminal,
   applyDeletionRetry,
   applySetupResumePoint,
@@ -18,17 +19,18 @@ import {
   enterStage,
   markVerificationRetryPrecondition,
   findActiveCommand,
-  finish,
   getOperationControl,
+  finish,
   isProviderRestartDecision,
   markVerificationRetryAcquisition,
+  removableAwsLockWait,
   rollbackRetryAttempt,
   setCommandState,
+  setContext,
   setStageState,
+  setVerificationWorkflowState,
   snapshotRetryState,
   stopProviderRestartDecision,
-  setVerificationWorkflowState,
-  verificationWorkflowState,
   toClientView,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
@@ -37,12 +39,19 @@ import {
   STAGE_VERIFY,
   type OperationAttemptKind,
   type OperationCommandKind,
-  type StopRequestOutcome,
-  type VerificationWorkflowState
+  type StopRequestOutcome
 } from "../../operations.js";
 import { errorMessage } from "../../runtime/util.js";
 import type { OperationRecord } from "../routes/operations-status.js";
 import type { EnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
+import { cancelOperationWorkflow } from "./operation-workflow-cancellation.js";
+import {
+  captureWorkflowCancellationTarget,
+  WorkflowCancellationRefusal,
+  type WorkflowCancellationTarget,
+  type WorkflowCancellationResult,
+  type WorkflowCancellationAuthority
+} from "./workflow-cancellation-target.js";
 
 // Cooperative controls for an environment operation: stop, the two forward
 // commands (continue a deliberate stop, retry a failed continuation), rollback
@@ -68,16 +77,25 @@ import type { EnvironmentExecutionOwner } from "../../runtime/environment-execut
 
 export interface OperationControlResult {
   status: number;
-  body: Record<string, unknown>;
+  body: Record<string, unknown> & { cancellation?: WorkflowCancellationResult };
 }
 
 export interface OperationControlInput {
   operationId: string;
+  cancellationTarget?: WorkflowCancellationTarget;
   isCurrent?(): boolean;
   instanceId?: string;
   command:
-    "stop" | "continue" | "cancel-workflow" | "rollback" | "exit" | "retry";
+    | "stop"
+    | "continue"
+    | "cancel-workflow"
+    | "rollback"
+    | "exit"
+    | "retry"
+    | "remove-aws-lock";
   retryKind?: string;
+  // Remove lock only: the lock policy ID the developer was shown.
+  policyId?: string;
   abandon?: boolean;
 }
 
@@ -182,11 +200,25 @@ export interface OperationsControlDependencies {
   // behind under the status its last attempt wrote.
   invalidateEnvironmentListing(repo: string): void;
   inspectVerificationWorkflow(
-    operation: OperationRecord
+    target: WorkflowCancellationTarget,
+    assertCurrent: () => void
   ): Promise<"active" | "inactive">;
   cancelVerificationWorkflow(
-    operation: OperationRecord
+    target: WorkflowCancellationTarget,
+    authority: WorkflowCancellationAuthority
   ): Promise<"inactive" | "cancelling">;
+  // The AWS developer switch. Remove lock deletes an IAM policy through the
+  // developer's AWS CLI, so it is refused when AWS is off, like every other
+  // AWS route.
+  awsEnabled: boolean;
+  // Delete the AWS deploy identity lock with exactly this policy ID.
+  removeAwsDeployIdentityLock(lock: {
+    policyArn: string;
+    policyId: string;
+  }): Promise<
+    | { ok: true; removed: boolean }
+    | { ok: false; code: string; message: string }
+  >;
 }
 
 // Typed views of the model's `any`-shaped exports, pinned once here so the
@@ -383,6 +415,107 @@ function resolveOperation(
 }
 
 /**
+ * Remove the AWS deploy identity lock a live setup or deletion is waiting for,
+ * after a person confirmed its holder stopped. Only the lock the run last saw
+ * is removed, so a lock another run took since then stays.
+ */
+async function handleRemoveAwsLock(
+  context: OperationControlContext,
+  dependencies: OperationsControlDependencies
+): Promise<void> {
+  if (!dependencies.awsEnabled) {
+    sendJson(context, 400, {
+      error:
+        "AWS environments aren't supported yet, so Radius removed no AWS lock.",
+      code: "provider-unsupported",
+      operationId: context.operationId
+    });
+    return;
+  }
+  if (!context.policyId) {
+    sendJson(context, 400, {
+      error: "Name the lock to remove by its policy ID.",
+      code: "aws-lock-invalid",
+      operationId: context.operationId
+    });
+    return;
+  }
+  const resolved = resolveOperation(context, dependencies, {
+    allowDelete: true
+  });
+  if (!resolved) return;
+  const { operationId, operation } = resolved;
+  const wait = removableAwsLockWait(operation);
+  if (!wait) {
+    sendJson(context, 409, {
+      error:
+        "This run is not waiting for a lock that has been held long enough to remove.",
+      code: "aws-lock-not-removable",
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  // The developer confirmed that one holder stopped. If another run has taken
+  // a new lock since the dialog opened, that confirmation says nothing about it.
+  if (context.policyId !== wait.policyId) {
+    sendJson(context, 409, {
+      error:
+        "The lock changed since it was shown: another run now holds a new one. Nothing was removed.",
+      code: "aws-lock-changed",
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  let result: Awaited<
+    ReturnType<OperationsControlDependencies["removeAwsDeployIdentityLock"]>
+  >;
+  try {
+    result = await dependencies.removeAwsDeployIdentityLock({
+      policyArn: wait.policyArn,
+      policyId: wait.policyId
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      code: "aws-lock-remove-failed",
+      message: `Radius could not remove the lock: ${errorMessage(error)}`
+    };
+  }
+  if (!result.ok) {
+    sendJson(context, 409, {
+      error: result.message,
+      code: result.code,
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  // The waiting run takes a new lock at its next poll. Until then the panel
+  // must not offer to remove a lock that is already gone.
+  setContext(operation, { awsLockWait: { ...wait, removable: false } });
+  addStep(operation, {
+    kind: "mutation",
+    label: `Removed the lock on the deploy identity held by: ${wait.holder}.`,
+    state: "succeeded"
+  });
+  let detail: string | undefined;
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    detail = `The lock was removed, but Radius could not save that on this run: ${errorMessage(error)}`;
+  }
+  sendJson(context, 200, {
+    operationId,
+    code: result.removed ? "aws-lock-removed" : "aws-lock-already-removed",
+    ...(detail ? { detail } : {}),
+    statusUrl: statusUrlFor(operationId),
+    operation: clientView(operation)
+  });
+}
+
+/**
  * Record a customer stop request.
  *
  * An operation parked on a prompt has nothing in flight, so it cancels at once;
@@ -397,9 +530,31 @@ async function handleStopOperation(
   context: OperationControlContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
-  const resolved = await resolveOperation(context, dependencies);
+  const resolved = resolveOperation(context, dependencies);
   if (!resolved) return;
   const { operationId, operation } = resolved;
+  const repo = operation.repo;
+  const environment = operation.environment;
+  const callerCurrent = context.isCurrent?.() ?? true;
+  if (dependencies.isShuttingDown?.()) {
+    sendJson(context, 503, {
+      code: "operation-shutting-down",
+      error:
+        "The session is shutting down. No Stop was recorded; review the saved operation before continuing in a new session.",
+      operationId
+    });
+    return;
+  }
+  if (
+    !callerCurrent ||
+    dependencies.get(operationId) !== operation ||
+    operation.operationId !== operationId ||
+    operation.repo !== repo ||
+    operation.environment !== environment
+  ) {
+    publishStale(context);
+    return;
+  }
   const pendingResumeStop = dependencies.stopPendingResume(operation);
   if (pendingResumeStop) {
     const result = await pendingResumeStop;
@@ -408,6 +563,28 @@ async function handleStopOperation(
   }
   if (isProviderRestartDecision(operation)) {
     const snapshot = snapshotRetryState(operation);
+    const repo = operation.repo;
+    const environment = operation.environment;
+    const account = structuredClone(operation.context);
+    const verificationAttempt =
+      getOperationControl(operation)?.attempts.verification;
+    let ownedVerification = structuredClone(operation.verification);
+    const assertCurrent = () => {
+      if (dependencies.isShuttingDown?.())
+        throw new WorkflowCancellationRefusal("operation-shutting-down");
+      if (
+        dependencies.get(operationId) !== operation ||
+        operation.operationId !== operationId ||
+        operation.repo !== repo ||
+        operation.environment !== environment ||
+        getOperationControl(operation)?.attempts.verification !==
+          verificationAttempt ||
+        !isDeepStrictEqual(operation.context, account) ||
+        !isDeepStrictEqual(operation.verification, ownedVerification) ||
+        operation.state !== "cancelled"
+      )
+        throw new WorkflowCancellationRefusal("operation-context-changed");
+    };
     stopProviderRestartDecision(operation);
     try {
       await dependencies.persistOperations();
@@ -423,39 +600,61 @@ async function handleStopOperation(
       return;
     }
     try {
-      setVerificationWorkflowState(
-        operation,
-        await dependencies.inspectVerificationWorkflow(operation)
-      );
-      await dependencies.persistOperations();
-    } catch (error) {
-      setVerificationWorkflowState(operation, "unknown");
-      let persistError: unknown = null;
+      assertCurrent();
+      let state: "active" | "inactive" | "unknown";
+      let readError: unknown;
+      try {
+        const target = captureWorkflowCancellationTarget(operation);
+        state = await dependencies.inspectVerificationWorkflow(
+          target,
+          assertCurrent
+        );
+      } catch (error) {
+        if (error instanceof WorkflowCancellationRefusal) throw error;
+        assertCurrent();
+        state = "unknown";
+        readError = error;
+      }
+      assertCurrent();
+      setVerificationWorkflowState(operation, state);
+      ownedVerification = structuredClone(operation.verification);
       try {
         await dependencies.persistOperations();
       } catch (saveError) {
-        persistError = saveError;
+        assertCurrent();
+        sendJson(context, 500, {
+          operationId,
+          code: "workflow-status-persist-failed",
+          stopRecorded: true,
+          error:
+            "The Stop request was saved, but Radius could not save the workflow status. Inspect the saved operation before continuing.",
+          detail: errorMessage(saveError),
+          ...(readError ? { observationError: errorMessage(readError) } : {})
+        });
+        return;
       }
+      assertCurrent();
+      announceOperationTerminal(operation);
       sendJson(context, 200, {
         operationId,
-        code: "operation-stopped-workflow-status-unknown",
-        detail:
-          persistError === null ?
-            errorMessage(error)
-          : `${errorMessage(error)} Radius also could not save the unknown workflow status: ${errorMessage(persistError)}`,
+        code:
+          state === "unknown" ?
+            "operation-stopped-workflow-status-unknown"
+          : "operation-stopped",
+        ...(readError ? { detail: errorMessage(readError) } : {}),
         statusUrl: statusUrlFor(operationId),
         operation: clientView(operation)
       });
-      announceOperationTerminal(operation);
-      return;
+    } catch (error) {
+      if (!(error instanceof WorkflowCancellationRefusal)) throw error;
+      sendJson(context, error.code === "operation-shutting-down" ? 503 : 409, {
+        operationId,
+        code: error.code,
+        stopRecorded: true,
+        error:
+          "The Stop request was saved, but workflow observation was refused because its operation changed or the session is shutting down. No late workflow status was saved."
+      });
     }
-    announceOperationTerminal(operation);
-    sendJson(context, 200, {
-      operationId,
-      code: "operation-stopped",
-      statusUrl: statusUrlFor(operationId),
-      operation: clientView(operation)
-    });
     return;
   }
 
@@ -532,18 +731,10 @@ async function handleCancelWorkflow(
   context: OperationControlContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
-  const resolved = await resolveOperation(context, dependencies);
+  const resolved = resolveOperation(context, dependencies);
   if (!resolved) return;
   const { operationId, operation } = resolved;
-  const verification =
-    operation.verification && typeof operation.verification === "object" ?
-      operation.verification
-    : null;
-  const runId =
-    verification && "runId" in verification && verification.runId != null ?
-      String(verification.runId)
-    : "";
-  if (operation.state !== "cancelled" || !runId) {
+  if (operation.state !== "cancelled" || !context.cancellationTarget) {
     sendJson(context, 409, {
       error:
         "Pause setup before cancelling its exact verification workflow run.",
@@ -553,119 +744,14 @@ async function handleCancelWorkflow(
     });
     return;
   }
-  if (
-    verificationWorkflowState(operation) === "unknown" ||
-    verificationWorkflowState(operation) === "cancelling"
-  ) {
-    let state: VerificationWorkflowState;
-    try {
-      state = await dependencies.inspectVerificationWorkflow(operation);
-    } catch (error) {
-      sendJson(context, 502, {
-        error: "Radius could not read the verification workflow status.",
-        code: "workflow-status-read-failed",
-        operationId,
-        detail: errorMessage(error),
-        operation: clientView(operation)
-      });
-      return;
-    }
-    setVerificationWorkflowState(operation, state);
-    try {
-      await dependencies.persistOperations();
-    } catch (error) {
-      setVerificationWorkflowState(operation, "unknown");
-      sendJson(context, 500, {
-        error:
-          "Radius read the verification workflow status but could not save it. Try again.",
-        code: "workflow-status-persist-failed",
-        operationId,
-        detail: errorMessage(error),
-        operation: clientView(operation)
-      });
-      return;
-    }
-    sendJson(context, 200, {
-      operationId,
-      code: "workflow-status-checked",
-      statusUrl: statusUrlFor(operationId),
-      operation: clientView(operation)
-    });
-    return;
-  }
-  const snapshot = snapshotRetryState(operation);
-  const previousCancellationAttempts = (
-    getOperationControl(operation)?.commands ?? []
-  )
-    .filter(
-      (command) =>
-        command.kind === "cancel_workflow" && command.target === runId
-    )
-    .map((command) => command.attempt);
-  const cancellationAttempt =
-    previousCancellationAttempts.length === 0 ?
-      0
-    : Math.max(...previousCancellationAttempts) + 1;
-  const accepted = acceptOperationCommand(operation, {
-    kind: "cancel_workflow",
-    attempt: cancellationAttempt,
-    target: runId
-  });
-  setCommandState(operation, accepted.command.commandId, "running");
-  setVerificationWorkflowState(operation, "cancelling");
-  try {
-    await dependencies.persistOperations();
-  } catch (error) {
-    rollbackRetryAttempt(operation, snapshot);
-    sendJson(context, 500, {
-      error:
-        "Radius could not save the workflow cancellation request, so it did not contact GitHub. Try again.",
-      code: "workflow-cancel-persist-failed",
-      operationId,
-      detail: errorMessage(error)
-    });
-    return;
-  }
-  try {
-    const state = await dependencies.cancelVerificationWorkflow(operation);
-    setVerificationWorkflowState(operation, state);
-    setCommandState(operation, accepted.command.commandId, "finished", state);
-    await dependencies.persistOperations();
-    sendJson(context, state === "inactive" ? 200 : 202, {
-      operationId,
-      code:
-        state === "inactive" ? "workflow-cancelled" : (
-          "workflow-cancellation-pending"
-        ),
-      statusUrl: statusUrlFor(operationId),
-      operation: clientView(operation)
-    });
-  } catch (error) {
-    setVerificationWorkflowState(operation, "unknown");
-    setCommandState(
+  context.publish(
+    await cancelOperationWorkflow(
+      context,
       operation,
-      accepted.command.commandId,
-      "finished",
-      "failed"
-    );
-    let persistError: unknown = null;
-    try {
-      await dependencies.persistOperations();
-    } catch (saveError) {
-      persistError = saveError;
-    }
-    sendJson(context, 502, {
-      error:
-        "Radius could not confirm cancellation of the verification workflow.",
-      code: "workflow-cancel-failed",
-      operationId,
-      detail:
-        persistError === null ?
-          errorMessage(error)
-        : `${errorMessage(error)} Radius also could not save the workflow status: ${errorMessage(persistError)}`,
-      operation: clientView(operation)
-    });
-  }
+      context.cancellationTarget,
+      dependencies
+    )
+  );
 }
 
 /**
@@ -1401,6 +1487,9 @@ function handleRetryOperation(
 export function createOperationsControlService(
   dependencies: OperationsControlDependencies
 ): OperationControlService {
+  if (typeof dependencies.awsEnabled !== "boolean") {
+    throw new Error("Missing operation control dependency: awsEnabled");
+  }
   for (const name of [
     "claimAdmission",
     "stopPendingResume",
@@ -1412,7 +1501,8 @@ export function createOperationsControlService(
     "inspectVerificationWorkflow",
     "cancelVerificationWorkflow",
     "schedule",
-    "invalidateEnvironmentListing"
+    "invalidateEnvironmentListing",
+    "removeAwsDeployIdentityLock"
   ] as const) {
     if (typeof dependencies[name] !== "function") {
       throw new Error(`Missing operation control dependency: ${name}`);
@@ -1424,11 +1514,39 @@ export function createOperationsControlService(
     "cancel-workflow": handleCancelWorkflow,
     rollback: handleRollbackOperation,
     exit: handleExitOperation,
-    retry: handleRetryOperation
+    retry: handleRetryOperation,
+    "remove-aws-lock": handleRemoveAwsLock
   };
   const operationMutations = new Map<string, Promise<OperationControlResult>>();
   return (input, publish) => {
     const operationId = input.operationId;
+    if (input.command === "cancel-workflow" && !input.cancellationTarget) {
+      const operation = dependencies.get(operationId);
+      if (operation) {
+        try {
+          const target = captureWorkflowCancellationTarget(operation);
+          const callerCurrent = input.isCurrent;
+          input = {
+            ...input,
+            cancellationTarget: target,
+            isCurrent: () =>
+              dependencies.get(operationId) === operation &&
+              callerCurrent?.() !== false
+          };
+        } catch (error) {
+          const unavailable = {
+            status: 409,
+            body: {
+              operationId,
+              code: "workflow-cancel-not-available",
+              error: errorMessage(error)
+            }
+          };
+          publish?.(unavailable);
+          return Promise.resolve(unavailable);
+        }
+      }
+    }
     const previous = operationMutations.get(operationId) ?? Promise.resolve();
     const current = previous
       .catch(() => {})

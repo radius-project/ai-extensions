@@ -7,6 +7,7 @@ import { createProductionGitHubAccountContext } from "../../../src/runtime/produ
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
+import * as gh from "../../../src/gh.js";
 import { createProductionCanvasServerRuntime } from "../../../src/server.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import {
@@ -22,7 +23,10 @@ import {
   recordAzureApp,
   requireInput,
   finish,
+  pauseForProviderRestart,
+  onOperationTerminal,
   operations,
+  setContext,
   OPERATION_SCHEMA_VERSION,
   setVerificationWorkflowState,
   STAGE_DELETE_RADIUS_ENV,
@@ -37,6 +41,7 @@ import {
 } from "../../../src/operation-store.js";
 
 afterEach(async () => {
+  onOperationTerminal(null);
   vi.restoreAllMocks();
   operations.clear();
   await configureOperationStore(disabledOperationStore());
@@ -51,6 +56,365 @@ function deferred() {
 }
 
 describe("production environment owner HTTP binding", () => {
+  it.each(
+    ["coordinator", "configuration"].flatMap((caller) =>
+      ["user", "repos/fixture/app"].flatMap((path) =>
+        [false, true].map((reject) => ({ caller, path, reject }))
+      )
+    )
+  )(
+    "fences $caller preflight after HTTP resume holds $path (reject=$reject)",
+    async ({ caller, path, reject }) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = deferred();
+      const gate = deferred();
+      let activeLogin = "original";
+      let preflights = 0;
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api user") preflights++;
+        if (
+          args[0] === "api" &&
+          args[1] === path &&
+          preflights === (caller === "coordinator" ? 1 : 2)
+        ) {
+          entered.resolve();
+          await gate.promise;
+          if (reject) throw new Error("Held preflight read rejected");
+        }
+        if (command === "api user")
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        if (command === "api repos/fixture/app")
+          return {
+            code: 0,
+            stdout: '{"permissions":{"admin":true}}',
+            stderr: ""
+          };
+        if (command === "api /repos/fixture/app/environments/dev")
+          return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+        if (
+          command.startsWith("api --paginate /repos/fixture/app/environments")
+        )
+          return { code: 0, stdout: "", stderr: "" };
+        throw new Error(`Unexpected subsequent command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const packages = vi.spyOn(executor, "packageCredentials");
+      const switchAccount = vi.fn(async (login: string) => {
+        activeLogin = login;
+        return { ok: true };
+      });
+      const accounts = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => activeLogin,
+        switchKeyringAccount: switchAccount,
+        resetIdentityCache() {}
+      });
+      const accountContext = createEnvironmentAccountContext(
+        "http-preflight",
+        accounts
+      );
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext
+      });
+      const cli = vi.spyOn(gh, "cliExec").mockImplementation(() => {
+        throw new Error("Unexpected ambient CLI or mutation");
+      });
+      const entry = await runtime.getOrCreateServer("preflight", "environment");
+      const op = createOperation({
+        operationId: "http-preflight",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.currentStage = STAGE_AUTHORIZE_IDENTITY;
+      op.request = { needsAzureCredentials: false, azure: {}, environment: {} };
+      requireInput(op, {
+        code: "app-selection-required",
+        message: "Choose an app.",
+        checkpoint: "azure-app-selection"
+      });
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      let done = Promise.resolve();
+      try {
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              ),
+              "content-type": "application/json"
+            },
+            body: JSON.stringify({
+              repo: op.repo,
+              environment: op.environment,
+              provider: op.provider,
+              checkpoint: "azure-app-selection",
+              createNew: true
+            })
+          }
+        );
+        expect(response.status).toBe(202);
+        await entered.promise;
+        done = new Promise<void>((resolve) => {
+          const stop = owner.onEnvironmentTasksSettled("preflight", () => {
+            stop();
+            resolve();
+          });
+        });
+        expect(op.failure).toBeNull();
+        expect(preflights).toBe(caller === "coordinator" ? 1 : 2);
+        expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+        const issuedReads = run.mock.calls.length;
+        const packageChecks = packages.mock.calls.length;
+        owner.shutdown();
+        expect(activeLogin).toBe("saved-account");
+        expect(switchAccount).toHaveBeenCalledTimes(1);
+        gate.resolve();
+        await done;
+        expect(run).toHaveBeenCalledTimes(issuedReads);
+        expect(packages).toHaveBeenCalledTimes(packageChecks);
+        expect(cli).not.toHaveBeenCalled();
+        expect(op.failure).toBeNull();
+        expect(op.endedAt).toBeNull();
+        expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
+        expect(activeLogin).toBe("original");
+        expect(switchAccount.mock.calls).toEqual([
+          ["saved-account"],
+          ["original"]
+        ]);
+        await expect(
+          accounts.withSelectedAccount(
+            "saved-account",
+            { ownerKey: "next" },
+            async () => "released"
+          )
+        ).resolves.toMatchObject({
+          value: "released",
+          restoration: { state: "restored" }
+        });
+      } finally {
+        gate.resolve();
+        await done;
+        owner.shutdown();
+        await runtime.stopServer("preflight", true);
+      }
+    }
+  );
+
+  it("returns unavailable GHCR readiness without a selection handle or scope repair over HTTP", async () => {
+    const executor = successfulSelectedGhExecutor({
+      requiresKeyringSwitch: false,
+      run: async (args) => {
+        if (args.join(" ") !== "api repos/fixture/app")
+          throw new Error("Unexpected repository command");
+        return {
+          code: 0,
+          stdout: '{"permissions":{"admin":true}}',
+          stderr: ""
+        };
+      }
+    });
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async () => executor,
+      getActiveKeyringLogin: async () => executor.login,
+      switchKeyringAccount: async () => {
+        throw new Error("Unexpected switch");
+      },
+      resetIdentityCache() {}
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: createEnvironmentAccountContext(
+        "http-readiness",
+        coordinator
+      )
+    });
+    const loopbackFetch = globalThis.fetch;
+    const registry = vi.fn(
+      async () => new Response("client_secret=fixture-value", { status: 503 })
+    );
+    vi.stubGlobal(
+      "fetch",
+      (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        if (String(input).startsWith("https://ghcr.io/")) return registry();
+        if (String(input).startsWith("http://127.0.0.1:"))
+          return loopbackFetch(input, init);
+        throw new Error("Unexpected network destination");
+      }
+    );
+    try {
+      const entry = await runtime.getOrCreateServer("readiness", "environment");
+      const response = await fetch(`${entry.baseUrl}/api/github-account`, {
+        method: "POST",
+        headers: {
+          origin: entry.baseUrl,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+        },
+        body: JSON.stringify({
+          repo: "fixture/app",
+          environment: "dev",
+          login: executor.login
+        })
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
+      const body = await response.json();
+      expect(body).toMatchObject({
+        success: true,
+        readiness: {
+          ready: false,
+          summary: "GitHub access could not be verified",
+          checks: {
+            packages: {
+              state: "error",
+              detail: "GitHub Packages authorization could not be verified."
+            }
+          },
+          repair: expect.stringContaining("retry with the same account"),
+          repairRemediation: null
+        }
+      });
+      expect(body.selectionHandle).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain("fixture-value");
+      expect(JSON.stringify(body)).not.toContain("auth refresh");
+      expect(registry).toHaveBeenCalledOnce();
+    } finally {
+      await runtime.stopServer("readiness", true);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(
+    ["shutdown", "changed-run"].flatMap((change) =>
+      ["stop", "cancel-workflow"].flatMap((action) =>
+        (action === "stop" ? [false, true] : [false]).map((reject) => ({
+          change,
+          action,
+          reject
+        }))
+      )
+    )
+  )(
+    "refuses $action over HTTP after $change during status read (reject=$reject)",
+    async ({ change, action, reject }) => {
+      const entered = deferred();
+      const gate = deferred();
+      const owner = createEnvironmentExecutionOwner();
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] !== "run") throw new Error("Unexpected cancellation POST");
+        entered.resolve();
+        await gate.promise;
+        if (reject) throw new Error("late network failure");
+        return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache() {}
+      });
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext: createEnvironmentAccountContext(
+          "http-cancellation",
+          coordinator
+        )
+      });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.verification = { runId: "42", workflowState: "active" };
+      if (action === "stop") {
+        op.resumeRequest = {
+          environment: {
+            repo: op.repo,
+            environment: op.environment,
+            provider: "azure"
+          }
+        };
+        op.currentStage = STAGE_VERIFY;
+        pauseForProviderRestart(op);
+      } else finish(op, "cancelled");
+      operations.put(op);
+      let pending: Promise<Response> | undefined;
+      try {
+        const entry = await runtime.getOrCreateServer("cancel", "environment");
+        const persist = vi
+          .spyOn(operations, "persist")
+          .mockResolvedValue(undefined);
+        const announce = vi.fn();
+        onOperationTerminal(announce);
+        pending = fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/${action}`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        await entered.promise;
+        if (change === "shutdown") owner.shutdown();
+        else op.verification = { runId: "43", workflowState: "active" };
+        gate.resolve();
+        const response = await pending;
+        expect(response.status).toBe(change === "shutdown" ? 503 : 409);
+        expect(response.headers.get("content-type")).toContain(
+          "application/json"
+        );
+        expect(response.headers.get("cache-control")).toContain("no-store");
+        expect(await response.json()).toMatchObject({
+          code:
+            change === "shutdown" ?
+              "operation-shutting-down"
+            : "operation-context-changed"
+        });
+        expect(run).toHaveBeenCalledTimes(1);
+        if (action === "stop") {
+          expect(op.state).toBe("cancelled");
+          expect(persist).toHaveBeenCalledTimes(1);
+          expect(announce).not.toHaveBeenCalled();
+        }
+        expect(op.verification).toEqual({
+          runId: change === "shutdown" ? "42" : "43",
+          workflowState: "active"
+        });
+      } finally {
+        gate.resolve();
+        await pending;
+        await runtime.stopServer("cancel", true);
+      }
+    }
+  );
+
   it.each(["timeout", "confirmed"] as const)(
     "refuses a fresh HTTP retry after shutdown and restored %s dispatch",
     async (acknowledgement) => {
@@ -222,6 +586,69 @@ describe("production environment owner HTTP binding", () => {
       }
     }
   );
+
+  it("projects the latest saved operation without repository context through the production status route", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const unavailable = async (): Promise<never> => {
+      throw new Error("Unexpected account lookup");
+    };
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: createEnvironmentAccountContext("latest-status", {
+        createReadOnlyExecutor: unavailable,
+        withSelectedAccount: unavailable
+      })
+    });
+    const entry = await runtime.getOrCreateServer(
+      "latest-status",
+      "environment"
+    );
+    try {
+      const empty = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(empty.status).toBe(200);
+      expect(await empty.json()).toEqual({ operation: null });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      finish(op, "failed");
+      op.request = { private: "never-return-this" };
+      operations.put(op);
+      const response = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const result = await response.json();
+      expect(result).toMatchObject({
+        operation: {
+          operationId: op.operationId,
+          repo: op.repo,
+          environment: op.environment,
+          state: "failed"
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("never-return-this");
+      const beforeExport = Date.now();
+      const diagnostic = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/diagnostics`
+      );
+      expect(diagnostic.status).toBe(200);
+      expect(diagnostic.headers.get("content-disposition")).toContain(
+        "attachment;"
+      );
+      expect(diagnostic.headers.get("cache-control")).toBe("no-store");
+      const exported = await diagnostic.json();
+      expect(Date.parse(exported.generatedAt)).toBeGreaterThanOrEqual(
+        beforeExport
+      );
+      expect(Date.parse(exported.generatedAt)).toBeLessThanOrEqual(Date.now());
+      expect(JSON.stringify(exported)).not.toContain("never-return-this");
+      expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("latest-status", true);
+    }
+  });
 
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};
@@ -571,137 +998,91 @@ describe("production environment owner HTTP binding", () => {
   );
 
   it("runs the AWS CLI on PATH for AWS deploy identity setup", async () => {
-    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
-    const log = path.join(fakeBin, "calls.log");
-    const originalPath = process.env.PATH;
-    const originalPathExt = process.env.PATHEXT;
-    const originalLog = process.env.FAKE_AWS_LOG;
     // Answers the version check, then refuses the sign-in check so setup
     // stops before anything could be written.
-    await fs.writeFile(
-      path.join(fakeBin, "aws"),
-      [
-        "#!/bin/sh",
-        'printf "%s\\n" "$*" >> "$FAKE_AWS_LOG"',
-        'if [ "$1" = "--version" ]; then',
-        '  echo "aws-cli/2.17.0 Python/3.11 Linux/6"',
-        "  exit 0",
-        "fi",
-        'echo "fake aws: not signed in" >&2',
-        "exit 3",
-        ""
-      ].join("\n")
-    );
-    await fs.chmod(path.join(fakeBin, "aws"), 0o755);
-    // Let Node parse Windows command-line quotes before recording argv.
-    await fs.writeFile(
-      path.join(fakeBin, "aws.cjs"),
-      [
-        'const fs = require("node:fs");',
-        "const args = process.argv.slice(2);",
-        'fs.appendFileSync(process.env.FAKE_AWS_LOG, `${args.join(" ")}\\n`);',
-        'if (args.length === 1 && args[0] === "--version") {',
-        '  console.log("aws-cli/2.17.0 Python/3.11 Windows/10");',
-        "} else {",
-        '  console.error("fake aws: not signed in");',
-        "  process.exitCode = 3;",
-        "}",
-        ""
-      ].join("\n")
-    );
-    await fs.writeFile(
-      path.join(fakeBin, "aws.cmd"),
-      ["@echo off", `"${process.execPath}" "%~dp0aws.cjs" %*`, ""].join("\r\n")
-    );
-    const run = vi.fn(async (args: string[]) => {
-      const command = args.join(" ");
-      if (command === "api user") {
-        return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
-      }
-      if (
-        command === "api /repos/fixture/app" ||
-        command === "api repos/fixture/app"
-      ) {
-        return {
-          code: 0,
-          stdout: JSON.stringify({
-            full_name: "fixture/app",
-            id: 42,
-            owner: { id: 7 },
-            permissions: { admin: true }
-          }),
-          stderr: ""
-        };
-      }
-      if (command === "api /repos/fixture/app/environments/dev") {
-        return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
-      }
-      if (
-        command ===
-        "api /repos/fixture/app/environments/dev/variables?per_page=100"
-      ) {
-        return { code: 0, stdout: '{"variables":[]}', stderr: "" };
-      }
-      if (command === "api /repos/fixture/app/actions/oidc/customization/sub") {
-        return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
-      }
-      throw new Error(`Unexpected selected command: ${command}`);
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" }
     });
-    const executor = successfulSelectedGhExecutor({
-      login: "saved-account",
-      requiresKeyringSwitch: false,
-      run
+    const runtime = awsSetupRuntime();
+    try {
+      const op = await runAwsSetup(runtime, "op_aws_cli");
+
+      expect(await aws.calls()).toEqual([
+        "--version",
+        "sts get-caller-identity --output json"
+      ]);
+      expect(op.state).toBe("failed");
+      expect(op.failure.message).toContain("fake aws: refused");
+      expect(op.failure.message).toContain("Nothing was created in AWS.");
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it("stops AWS setup before any write when the deploy identity cannot be locked", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout: '{"cluster":{"accessConfig":{"authenticationMode":"API"}}}'
+      },
+      "iam create-policy": {
+        stderr: "An error occurred (AccessDenied) when calling CreatePolicy",
+        code: 254
+      }
     });
-    const accountContext = createEnvironmentAccountContext(
-      "runtime-aws-cli",
-      createGitHubAccountCoordinator({
-        createExecutor: async () => executor,
-        getActiveKeyringLogin: async () => "original",
-        switchKeyringAccount: async () => {
-          throw new Error("Unexpected switch");
-        },
-        resetIdentityCache: () => {}
-      })
-    );
-    const owner = createEnvironmentExecutionOwner();
+    const runtime = awsSetupRuntime();
+    try {
+      const op = await runAwsSetup(runtime, "op_aws_lock");
+
+      const calls = await aws.calls();
+      expect(calls.at(-1)).toMatch(
+        /^iam create-policy --policy-name radius-lock-radius-deploy-fixture-app --description \{"repo":"fixture\/app","environment":"dev","action":"setup","operationId":"op_aws_lock"\} /
+      );
+      expect(op.state).toBe("failed");
+      expect(op.failure.code).toBe("aws-lock-denied");
+      expect(op.failure.message).toContain("not allowed iam:CreatePolicy");
+      expect(op.failure.message).toContain("Nothing was created in AWS.");
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it("removes exactly the AWS lock a waiting run was shown, through the AWS CLI on PATH", async () => {
+    const aws = await fakeAwsOnPath({
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK0"}}' },
+      "iam delete-policy": { stdout: "" }
+    });
     const runtime = createTestCanvasServerRuntime({
-      executionOwner: owner,
-      accountContext,
+      executionOwner: createEnvironmentExecutionOwner(),
       awsEnabled: true
     });
     try {
-      process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
-      process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
-      process.env.FAKE_AWS_LOG = log;
       const entry = await runtime.getOrCreateServer("aws-panel", "environment");
       const op = createOperation({
-        operationId: "op_aws_cli",
+        operationId: "op_aws_wait",
         repo: "fixture/app",
         environment: "dev",
         provider: "aws"
       });
-      op.context.githubLogin = "saved-account";
-      op.currentStage = STAGE_AUTHORIZE_IDENTITY;
-      op.request = {
-        needsAzureCredentials: false,
-        azure: {},
-        environment: {
-          accountId: "123456789012",
-          region: "us-west-2",
-          cluster: "shop",
-          roleName: "radius-deploy-fixture-app"
+      const lockArn =
+        "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
+      setContext(op, {
+        awsLockWait: {
+          policyArn: lockArn,
+          policyId: "LOCK0",
+          holder: "The setup of environment prod in fixture/app",
+          since: "2026-10-30T11:00:00Z",
+          removable: true
         }
-      };
-      // The resume transport is the server-owned way to schedule a saved
-      // operation from a test; the AWS path ignores the Azure answer.
-      requireInput(op, {
-        code: "app-selection-required",
-        message: "Choose an app.",
-        checkpoint: "azure-app-selection"
       });
       operations.put(op);
+
       const response = await fetch(
-        `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+        `${entry.baseUrl}/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`,
         {
           method: "POST",
           headers: {
@@ -710,36 +1091,20 @@ describe("production environment owner HTTP binding", () => {
             "x-radius-mutation-nonce": String(entry.state.browserMutationNonce),
             "content-type": "application/json"
           },
-          body: JSON.stringify({
-            repo: op.repo,
-            environment: op.environment,
-            provider: op.provider,
-            checkpoint: "azure-app-selection",
-            createNew: true
-          })
+          body: "{}"
         }
       );
-      expect(response.status).toBe(202);
-      // The setup outlives the request, so wait for the operation to finish.
-      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
-        timeout: 15000
-      });
 
-      expect(
-        (await fs.readFile(log, "utf8")).split(/\r?\n/).filter(Boolean)
-      ).toEqual(["--version", "sts get-caller-identity --output json"]);
-      expect(op.state).toBe("failed");
-      expect(op.failure.message).toContain("fake aws: not signed in");
-      expect(op.failure.message).toContain("Nothing was created in AWS.");
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ code: "aws-lock-removed" });
+      expect(await aws.calls()).toEqual([
+        "sts get-caller-identity --output json",
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        `iam delete-policy --policy-arn ${lockArn}`
+      ]);
     } finally {
       await runtime.stopServer("aws-panel", true);
-      if (originalPath === undefined) delete process.env.PATH;
-      else process.env.PATH = originalPath;
-      if (originalPathExt === undefined) delete process.env.PATHEXT;
-      else process.env.PATHEXT = originalPathExt;
-      if (originalLog === undefined) delete process.env.FAKE_AWS_LOG;
-      else process.env.FAKE_AWS_LOG = originalLog;
-      await fs.rm(fakeBin, { recursive: true, force: true });
+      await aws.restore();
     }
   });
 
@@ -1099,3 +1464,205 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 });
+
+interface FakeAwsAnswer {
+  stdout?: string;
+  stderr?: string;
+  code?: number;
+}
+
+/**
+ * Put a fake `aws` first on PATH. It logs every call and answers by its first
+ * two words; anything else is refused, so setup stops rather than writes.
+ */
+async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
+  const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
+  const log = path.join(fakeBin, "calls.log");
+  const originalPath = process.env.PATH;
+  const originalPathExt = process.env.PATHEXT;
+  const originalLog = process.env.FAKE_AWS_LOG;
+  const shCases = Object.entries(answers).map(([command, answer]) =>
+    [
+      `  ${JSON.stringify(command)})`,
+      ...(answer.stdout ? [`    printf '%s\\n' '${answer.stdout}'`] : []),
+      ...(answer.stderr ? [`    printf '%s\\n' '${answer.stderr}' >&2`] : []),
+      `    exit ${answer.code ?? 0} ;;`
+    ].join("\n")
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "aws"),
+    [
+      "#!/bin/sh",
+      'printf "%s\\n" "$*" >> "$FAKE_AWS_LOG"',
+      'key="$1"',
+      '[ -n "$2" ] && key="$1 $2"',
+      'case "$key" in',
+      ...shCases,
+      "esac",
+      'echo "fake aws: refused" >&2',
+      "exit 3",
+      ""
+    ].join("\n")
+  );
+  await fs.chmod(path.join(fakeBin, "aws"), 0o755);
+  // On Windows, Node parses the command line's quotes before argv is
+  // recorded and matched, so quoted arguments arrive whole (#1151).
+  await fs.writeFile(
+    path.join(fakeBin, "aws.cjs"),
+    [
+      'const fs = require("node:fs");',
+      `const answers = ${JSON.stringify(answers)};`,
+      "const args = process.argv.slice(2);",
+      'fs.appendFileSync(process.env.FAKE_AWS_LOG, `${args.join(" ")}\\n`);',
+      'const answer = answers[args.slice(0, 2).join(" ")];',
+      "if (answer) {",
+      "  if (answer.stdout) console.log(answer.stdout);",
+      "  if (answer.stderr) console.error(answer.stderr);",
+      "  process.exitCode = answer.code ?? 0;",
+      "} else {",
+      '  console.error("fake aws: refused");',
+      "  process.exitCode = 3;",
+      "}",
+      ""
+    ].join("\n")
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "aws.cmd"),
+    ["@echo off", `"${process.execPath}" "%~dp0aws.cjs" %*`, ""].join("\r\n")
+  );
+  process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+  process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+  process.env.FAKE_AWS_LOG = log;
+  return {
+    calls: async () =>
+      (await fs.readFile(log, "utf8"))
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => line.trim()),
+    restore: async () => {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPathExt === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = originalPathExt;
+      if (originalLog === undefined) delete process.env.FAKE_AWS_LOG;
+      else process.env.FAKE_AWS_LOG = originalLog;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    }
+  };
+}
+
+// A canvas runtime with the AWS switch on whose GitHub account answers the
+// reads AWS setup makes for fixture/app.
+function awsSetupRuntime() {
+  const run = vi.fn(async (args: string[]) => {
+    const command = args.join(" ");
+    if (command === "api user") {
+      return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+    }
+    if (
+      command === "api /repos/fixture/app" ||
+      command === "api repos/fixture/app"
+    ) {
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          full_name: "fixture/app",
+          id: 42,
+          owner: { id: 7 },
+          permissions: { admin: true }
+        }),
+        stderr: ""
+      };
+    }
+    if (command === "api /repos/fixture/app/environments/dev") {
+      return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+    }
+    if (
+      command ===
+      "api /repos/fixture/app/environments/dev/variables?per_page=100"
+    ) {
+      return { code: 0, stdout: '{"variables":[]}', stderr: "" };
+    }
+    if (command === "api /repos/fixture/app/actions/oidc/customization/sub") {
+      return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+    }
+    throw new Error(`Unexpected selected command: ${command}`);
+  });
+  const executor = successfulSelectedGhExecutor({
+    login: "saved-account",
+    requiresKeyringSwitch: false,
+    run
+  });
+  return createTestCanvasServerRuntime({
+    executionOwner: createEnvironmentExecutionOwner(),
+    accountContext: createEnvironmentAccountContext(
+      "runtime-aws-cli",
+      createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => "original",
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected switch");
+        },
+        resetIdentityCache: () => {}
+      })
+    ),
+    awsEnabled: true
+  });
+}
+
+// Schedule a saved AWS setup through the server and wait for it to end.
+async function runAwsSetup(
+  runtime: ReturnType<typeof awsSetupRuntime>,
+  operationId: string
+) {
+  const entry = await runtime.getOrCreateServer("aws-panel", "environment");
+  const op = createOperation({
+    operationId,
+    repo: "fixture/app",
+    environment: "dev",
+    provider: "aws"
+  });
+  op.context.githubLogin = "saved-account";
+  op.currentStage = STAGE_AUTHORIZE_IDENTITY;
+  op.request = {
+    needsAzureCredentials: false,
+    azure: {},
+    environment: {
+      accountId: "123456789012",
+      region: "us-west-2",
+      cluster: "shop",
+      roleName: "radius-deploy-fixture-app"
+    }
+  };
+  // The resume transport is the server-owned way to schedule a saved
+  // operation from a test; the AWS path ignores the Azure answer.
+  requireInput(op, {
+    code: "app-selection-required",
+    message: "Choose an app.",
+    checkpoint: "azure-app-selection"
+  });
+  operations.put(op);
+  const response = await fetch(
+    `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+    {
+      method: "POST",
+      headers: {
+        origin: entry.baseUrl,
+        "sec-fetch-site": "same-origin",
+        "x-radius-mutation-nonce": String(entry.state.browserMutationNonce),
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        repo: op.repo,
+        environment: op.environment,
+        provider: op.provider,
+        checkpoint: "azure-app-selection",
+        createNew: true
+      })
+    }
+  );
+  expect(response.status).toBe(202);
+  // The setup outlives the request, so wait for the operation to finish.
+  await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), { timeout: 15000 });
+  return op;
+}

@@ -313,6 +313,89 @@ export function trustedGitHubSubjects(
 }
 
 /**
+ * The exact GitHub OIDC subjects this trust policy lets GitHub's AWS tokens
+ * sign in with. Unlike `trustedGitHubSubjects`, a subject counts only when its
+ * statement accepts GitHub's audience, has no condition Radius cannot read, and
+ * every `sub` constraint on it accepts the subject. Patterns are left out.
+ */
+export function acceptedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" &&
+      isGitHubStatement(statement, providerArn) &&
+      acceptsGitHubAudience(statement)
+  ).flatMap((statement) =>
+    subjectsOf(statement).filter(
+      (subject) => !/[*?]/.test(subject) && acceptsSubject(statement, subject)
+    )
+  );
+}
+
+/**
+ * The subjects in `subjects` that a GitHub Allow statement in this trust
+ * policy already covers in a way adding a plain statement would widen: one
+ * that names the subject but excludes it with another `sub` constraint, or
+ * one whose `sub` constraints accept it, patterns included, under conditions
+ * Radius cannot read or for another audience.
+ */
+export function restrictedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  const statements = policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" && isGitHubStatement(statement, providerArn)
+  );
+  return subjects.filter((subject) =>
+    statements.some(
+      (statement) =>
+        subjectsOf(statement).includes(subject) ||
+        (!acceptsGitHubAudience(statement) &&
+          acceptsSubject(statement, subject))
+    )
+  );
+}
+
+// A subject is `claim:value` pairs joined by colons. GitHub's values have no
+// colon in them (an environment name is %3A-encoded), so a subject that does
+// not split into pairs is not one Radius can read.
+function subjectClaims(subject: string): [string, string][] | null {
+  const parts = subject.split(":");
+  if (parts.length < 2 || parts.length % 2 !== 0) return null;
+  const claims: [string, string][] = [];
+  for (let index = 0; index < parts.length; index += 2) {
+    const key = parts[index];
+    const value = parts[index + 1];
+    if (!key || !value) return null;
+    claims.push([key, value]);
+  }
+  return claims;
+}
+
+const REPOSITORY_CLAIMS: ReadonlySet<string> = new Set([
+  "repo",
+  "repository",
+  "repository_id"
+]);
+
+/**
+ * Whether a GitHub OIDC subject names one repository, by name or ID. A subject
+ * customized to, say, `repository_owner` and `context` does not, so every
+ * repository of that owner can present it.
+ */
+export function subjectNamesRepository(subject: string): boolean {
+  return (
+    subjectClaims(subject)?.some(([key]) => REPOSITORY_CLAIMS.has(key)) ?? false
+  );
+}
+
+/**
  * Whether any statement in this trust policy names the account's GitHub
  * provider. Unlike `trustedGitHubSubjects`, this also finds a Radius role
  * whose last environment was removed, which keeps only a Deny statement.
@@ -633,4 +716,123 @@ export function configMapClusterMessage(
   region: string
 ): string {
   return `Cluster ${cluster} uses CONFIG_MAP authentication, which does not support access entries. Radius grants cluster access through an access entry, so it cannot authorize the deploy role on this cluster. Run this command to enable access entries, then retry: ${enableAccessEntriesCommand(cluster, region)}`;
+}
+
+// The deploy identity lock. IAM has no conditional write for a trust policy,
+// but `CreatePolicy` refuses a name that already exists in the account, so
+// creating this policy is a test-and-set: one caller wins and the rest wait.
+// IAM names ignore case, as role names do, so one role always maps to one lock.
+
+const LOCK_POLICY_PREFIX = "radius-lock-";
+const LOCK_DESCRIPTION_MAX = 1000;
+
+/** How long a lock is held before a waiting run offers to remove it. */
+export const AWS_LOCK_REMOVABLE_AFTER_MS = 10 * 60 * 1000;
+
+export type AwsLockAction = "setup" | "delete" | "repair" | "rollback";
+
+const LOCK_ACTIONS: readonly AwsLockAction[] = [
+  "setup",
+  "delete",
+  "repair",
+  "rollback"
+];
+
+/** The Radius run that holds a deploy identity lock. */
+export interface AwsLockHolder {
+  readonly repo: string;
+  readonly environment: string;
+  readonly action: AwsLockAction;
+  readonly operationId: string;
+}
+
+/** The lock policy's name: `radius-lock-<role>`, at most 76 characters. */
+export function buildAwsLockPolicyName(roleName: string): string {
+  return `${LOCK_POLICY_PREFIX}${roleName}`;
+}
+
+export function awsLockPolicyArn(accountId: string, roleName: string): string {
+  return `arn:aws:iam::${accountId}:policy/${buildAwsLockPolicyName(roleName)}`;
+}
+
+/**
+ * The lock policy's document. It is never attached, and even if it were, it
+ * only denies passing the lock policy itself as a role, which matches nothing.
+ */
+export function buildAwsLockPolicyDocument(
+  accountId: string,
+  roleName: string
+): PolicyDocument {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "RadiusDeployIdentityLock",
+        Effect: "Deny",
+        Action: "iam:PassRole",
+        Resource: awsLockPolicyArn(accountId, roleName)
+      }
+    ]
+  };
+}
+
+/**
+ * The lock policy's description, naming the holder. IAM descriptions accept
+ * only Latin-1 characters, so anything else is written as a JSON escape.
+ */
+export function describeAwsLockHolder(holder: AwsLockHolder): string {
+  const text = JSON.stringify({
+    repo: holder.repo,
+    environment: holder.environment,
+    action: holder.action,
+    operationId: holder.operationId
+  }).replace(
+    /[^\x20-\x7e]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
+  );
+  return text.length <= LOCK_DESCRIPTION_MAX ?
+      text
+    : JSON.stringify({
+        action: holder.action,
+        operationId: holder.operationId
+      });
+}
+
+/** The holder a lock description names, or null when it names none. */
+export function parseAwsLockHolder(description: unknown): AwsLockHolder | null {
+  if (typeof description !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(description);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const action = LOCK_ACTIONS.find((value) => value === parsed.action);
+  if (!action) return null;
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  return {
+    repo: text(parsed.repo),
+    environment: text(parsed.environment),
+    action,
+    operationId: text(parsed.operationId)
+  };
+}
+
+/** How a waiting run names the lock's holder. */
+export function awsLockHolderLabel(holder: AwsLockHolder | null): string {
+  if (!holder) return "Another run";
+  const target =
+    holder.environment && holder.repo ?
+      `environment ${holder.environment} in ${holder.repo}`
+    : holder.repo || "an unnamed environment";
+  return `The ${holder.action} of ${target}`;
+}
+
+/** When IAM created a lock, for a person: `2026-10-30 11:58 UTC`. */
+export function formatAwsLockTime(since: string): string {
+  const time = Date.parse(since);
+  return isNaN(time) ? "an unknown time" : (
+      `${new Date(time).toISOString().slice(0, 16).replace("T", " ")} UTC`
+    );
 }

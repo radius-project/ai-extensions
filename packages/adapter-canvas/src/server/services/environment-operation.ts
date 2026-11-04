@@ -1,5 +1,7 @@
 import {
   assertSetupExecutionActive,
+  isAwsRoleName,
+  parseAwsRoleArn,
   runSetupCoordinator,
   type SetupCoordinatorPorts
 } from "@radius-project/core";
@@ -57,7 +59,8 @@ export interface EnvironmentOperationWorkflowDependencies {
   isStopped(): boolean;
   preflightRepoAdmin(
     repo: string,
-    executor: SelectedGhExecutor
+    executor: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<string>;
   guardStopBoundary(
     operation: EnvironmentOperationRecord,
@@ -123,6 +126,10 @@ export interface EnvironmentOperationWorkflowDependencies {
     | { ok: false; status: number; error: string; code: string }
     | { ok: false; stopped: true }
   >;
+  // AWS only: release the deploy identity lock setup took. Never throws.
+  releaseAwsDeployIdentity(
+    operation: EnvironmentOperationRecord
+  ): Promise<void>;
   instanceId?: string;
   now(): number;
 }
@@ -235,7 +242,8 @@ export function createSetupCoordinatorPorts(
     preflightRepository: async () => {
       const message = await dependencies.preflightRepoAdmin(
         operation.repo,
-        executor
+        executor,
+        () => assertSetupExecutionActive(dependencies.isStopped)
       );
       if (!message) return true;
       preflightFailure = {
@@ -338,6 +346,20 @@ export function createSetupCoordinatorPorts(
         )
       ),
     authorizeAws: async ({ reused, ...request }) => {
+      if (
+        !isAwsRoleName(String(request.roleName || "")) &&
+        parseAwsRoleArn(String(request.existingRoleArn || "")) === null
+      ) {
+        return {
+          kind: "failed",
+          error: {
+            status: 400,
+            code: "invalid-aws-operation-input",
+            message:
+              "AWS setup requires a valid IAM role name or an existing role ARN. Start a new setup with roleName or existingRoleArn."
+          }
+        };
+      }
       const conflict =
         reused ?
           await awsEnvironmentConflict(
@@ -369,6 +391,7 @@ export function createSetupCoordinatorPorts(
             }
           };
     },
+    releaseAws: () => dependencies.releaseAwsDeployIdentity(operation),
     configureEnvironment: async (request) =>
       setupStageResult(
         await dependencies.setupServices.configureEnvironment(

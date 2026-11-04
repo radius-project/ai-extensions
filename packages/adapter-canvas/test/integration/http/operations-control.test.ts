@@ -39,6 +39,7 @@ import {
   prepareProviderMutation,
   settleProviderMutation,
   setCommandState,
+  setContext,
   setStageState,
   setVerificationWorkflowState,
   stopAtBoundary,
@@ -89,6 +90,8 @@ interface Harness {
   }>;
   registry: ReturnType<typeof createRegistry>;
   shuttingDown: { value: boolean };
+  // The AWS locks the panel asked to remove.
+  removedLocks: Array<{ policyArn: string; policyId: string }>;
   setPullRequestMergeCheck(
     check: () => Promise<
       | { state: "merged" }
@@ -109,6 +112,7 @@ function start(): Harness {
   const createScheduled: Harness["createScheduled"] = [];
   const invalidatedListings: string[] = [];
   const shuttingDown = { value: false };
+  const removedLocks: Harness["removedLocks"] = [];
   let pullRequestMergeCheck = (): Promise<
     | { state: "merged" }
     | { state: "open" }
@@ -147,6 +151,11 @@ function start(): Harness {
       },
       invalidateEnvironmentListing: (repo) => {
         invalidatedListings.push(repo);
+      },
+      awsEnabled: true,
+      removeAwsDeployIdentityLock: (lock) => {
+        removedLocks.push(lock);
+        return Promise.resolve({ ok: true, removed: true });
       }
     }),
     // The by-id read is composed too: a client that just issued a command polls
@@ -258,6 +267,7 @@ function start(): Harness {
     createScheduled,
     registry,
     shuttingDown,
+    removedLocks,
     invalidatedListings,
     setPullRequestMergeCheck: (check) => {
       pullRequestMergeCheck = check;
@@ -892,6 +902,7 @@ describe("stop, then continue or roll back, over the socket", () => {
       const harness = start();
       const entry = await container!.getOrCreate("panel-recovery");
       const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
+      op.context = { githubLogin: "saved-account" };
       op.verification = { runId: "42" };
       setVerificationWorkflowState(op, "active");
 
@@ -1210,5 +1221,131 @@ describe("exiting a setup over the socket", () => {
       commandId: accepted.commandId
     });
     expect(harness.scheduled).toHaveLength(1);
+  });
+});
+
+describe("removing an abandoned AWS lock over the socket", () => {
+  const LOCK = {
+    policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
+    policyId: "LOCK0",
+    holder: "The setup of environment prod in octo/shop",
+    since: "2026-10-30T11:00:00Z"
+  };
+
+  it.each([
+    [
+      "setup",
+      () => {
+        const op = newOperation();
+        op.provider = "aws";
+        return op;
+      }
+    ],
+    [
+      "deletion",
+      () =>
+        createOperation({
+          provider: "aws",
+          repo: "octo/shop",
+          environment: "dev",
+          kind: OPERATION_KIND_DELETE,
+          stages: buildDeleteStages({ includeAwsCleanup: true })
+        }) as OperationFixture
+    ]
+  ])(
+    "offers Remove lock on a waiting %s, removes exactly that lock, and stops offering it",
+    async (_label, build) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const op = seed(harness, build());
+      setContext(op, { awsLockWait: { ...LOCK, removable: true } });
+      const statusPath = `/api/operations/${op.operationId}`;
+
+      const offered = action(
+        await poll(entry.baseUrl, statusPath),
+        "remove-aws-lock"
+      );
+      expect(offered).toMatchObject({
+        label: "Remove lock",
+        path: `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`,
+        requiresConfirmation: true,
+        confirmLabel: "Remove lock",
+        cancelLabel: "Keep waiting"
+      });
+
+      const response = await post(entry.baseUrl, offered!.path);
+      expect(response.status).toBe(200);
+      expect((await body(response)).code).toBe("aws-lock-removed");
+      expect(harness.removedLocks).toEqual([
+        { policyArn: LOCK.policyArn, policyId: LOCK.policyId }
+      ]);
+      expect(harness.persistCalls).toEqual(["persist"]);
+      expect(
+        action(await poll(entry.baseUrl, statusPath), "remove-aws-lock")
+      ).toBeUndefined();
+
+      const again = await post(entry.baseUrl, offered!.path);
+      expect(again.status).toBe(409);
+      expect((await body(again)).code).toBe("aws-lock-not-removable");
+      expect(harness.removedLocks).toHaveLength(1);
+    }
+  );
+
+  it("refuses a confirmation for a lock another run has since replaced", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness, newOperation());
+    setContext(op, { awsLockWait: { ...LOCK, removable: true } });
+    const shown = action(
+      await poll(entry.baseUrl, `/api/operations/${op.operationId}`),
+      "remove-aws-lock"
+    );
+    // While the dialog is open, the old holder releases and another run's
+    // lock becomes the one this run waits for.
+    setContext(op, {
+      awsLockWait: { ...LOCK, policyId: "LOCK1", removable: true }
+    });
+
+    const response = await post(entry.baseUrl, shown!.path);
+
+    expect(response.status).toBe(409);
+    expect((await body(response)).code).toBe("aws-lock-changed");
+    expect(harness.removedLocks).toEqual([]);
+  });
+
+  it("refuses a lock that is not yet old enough, without touching AWS", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness, newOperation());
+    setContext(op, { awsLockWait: { ...LOCK, removable: false } });
+
+    expect(
+      action(
+        await poll(entry.baseUrl, `/api/operations/${op.operationId}`),
+        "remove-aws-lock"
+      )
+    ).toBeUndefined();
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`
+    );
+    expect(response.status).toBe(409);
+    expect(harness.removedLocks).toEqual([]);
+  });
+
+  it("refuses a request that cannot prove it came from the panel", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness, newOperation());
+    setContext(op, { awsLockWait: { ...LOCK, removable: true } });
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`,
+      { Origin: new URL(entry.baseUrl).origin }
+    );
+
+    expect(response.status).toBe(403);
+    expect(harness.removedLocks).toEqual([]);
   });
 });
