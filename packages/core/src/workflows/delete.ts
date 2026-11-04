@@ -1,5 +1,6 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 import { RADIUS_REF } from "./deploy.js";
+import { AWS_RADIUS_RELEASE_OVERRIDE } from "./aws-radius-release.js";
 
 // Release builds replace this environment read with their exact source commit.
 // Source and live-test runs may override it to validate another revision.
@@ -22,6 +23,8 @@ export const DELETE_ENV_DISPATCHER_FILE = "delete-environment.yml";
 // The environment-delete Azure provider workflow. Static, ai-extensions-owned,
 // and committed alongside the environment dispatcher.
 export const DELETE_ENV_AZURE_FILE = "delete-environment-azure.yml";
+// The environment-delete AWS provider workflow, carrying the same guard.
+export const DELETE_ENV_AWS_FILE = "delete-environment-aws.yml";
 
 // The exact name of the guard step inside `delete-environment-azure.yml` that
 // fails when applications are still deployed to the environment. The canvas
@@ -40,10 +43,11 @@ export type DeleteWorkflowFiles = Record<string, string>;
  * Returns the files committed to the target repo's `.github/workflows/`: the
  * `delete-application.yml` and `delete-environment.yml` dispatchers plus the
  * reusable provider workflows — `delete-azure.yml` / `delete-aws.yml` for the
- * application-delete path and `delete-environment-azure.yml` for the
+ * application-delete path and `delete-environment-azure.yml` /
+ * `delete-environment-aws.yml` for the
  * environment-delete path. The dispatchers only fill `{{ENV}}` (the dispatch
  * default); the provider workflows also pin their composite actions to
- * `{{RADIUS_REF}}`.
+ * `{{RADIUS_REF}}`, and the AWS ones fill `{{AWS_RADIUS_RELEASE_OVERRIDE}}`.
  *
  * `templates` maps the committed file name to the raw template body fetched
  * from `radius-project/ai-extensions`. The caller must supply every file;
@@ -79,9 +83,15 @@ export function generateDeleteWorkflow(
       ENV: env,
       RADIUS_REF: DELETE_RADIUS_REF
     }),
+    [DELETE_ENV_AWS_FILE]: fillTemplate(pick(DELETE_ENV_AWS_FILE), {
+      ENV: env,
+      RADIUS_REF: DELETE_RADIUS_REF,
+      AWS_RADIUS_RELEASE_OVERRIDE
+    }),
     [DELETE_AWS_FILE]: fillTemplate(pick(DELETE_AWS_FILE), {
       ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF
+      RADIUS_REF: DELETE_RADIUS_REF,
+      AWS_RADIUS_RELEASE_OVERRIDE
     })
   };
   for (const [file, body] of Object.entries(files)) {

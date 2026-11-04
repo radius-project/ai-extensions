@@ -127,6 +127,8 @@ jobs:
 
       - name: Set up control plane
         uses: radius-project/ai-extensions/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
+        with:
+          release-override: ${{ vars.RADIUS_RELEASE_OVERRIDE }}
 
       - name: Project cloud OIDC tokens into Radius pods
         env:
@@ -208,9 +210,9 @@ jobs:
       # ai-extensions-owned safety guard (issue #303), split into two steps so a
       # listing failure cannot be mistaken for "no applications". This "List
       # applications" step must FAIL CLOSED: if `rad application list` errors
-      # (auth, state restore, control-plane) or returns anything other than a
-      # JSON array, we exit non-zero here instead of treating it as an empty
-      # environment. This step is deliberately NOT the named guard step, so the
+      # (auth, state restore, control-plane) or returns anything other than one
+      # JSON array or null, we exit non-zero here. Radius 0.62 returns null for
+      # an empty list. This step is deliberately NOT the named guard step, so the
       # canvas extension classifies a listing failure as a generic (retryable)
       # delete failure rather than "applications still deployed".
       - name: List applications in the environment
@@ -228,8 +230,14 @@ jobs:
             echo "::error::Could not list applications in environment '${RESOURCE_NAME}'. Refusing to delete the environment so a live application is not orphaned; check Radius connectivity and retry."
             exit 1
           fi
-          if ! printf '%s' "$apps_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-            echo "::error::'rad application list' did not return a JSON array for environment '${RESOURCE_NAME}'. Refusing to delete the environment; check Radius connectivity and retry."
+          if ! apps_json="$(printf '%s' "$apps_json" | jq -sce '
+            if length != 1 then error("expected one JSON document")
+            elif .[0] == null then []
+            elif (.[0] | type) == "array" then .[0]
+            else error("expected an array or null")
+            end
+          ')"; then
+            echo "::error::'rad application list' did not return one JSON array or null for environment '${RESOURCE_NAME}'. Refusing to delete the environment; check Radius connectivity and retry."
             exit 1
           fi
           app_count="$(printf '%s' "$apps_json" | jq 'length')"

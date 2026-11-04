@@ -24,7 +24,24 @@ fixes, features) as long as they follow a few guidelines:
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) 24 (the active major is recorded in [`.node-version`](./.node-version))
-- [pnpm](https://pnpm.io/) `>= 9` (this repo uses `pnpm@9.15.9`)
+- [pnpm](https://pnpm.io/), using the exact version selected by `packageManager` in the root [`package.json`](./package.json)
+
+From the repository root, install the declared package manager with npm. This command works in Bash and PowerShell:
+
+```bash
+npm install --global "$(node -p "require('./package.json').packageManager")"
+pnpm --version
+```
+
+Keep the pnpm version only in the root `packageManager` field; do not duplicate it in installation commands, nested manifests, or documentation. The [npm installation method](https://pnpm.io/installation#using-npm) installs pnpm's native executable. If an existing Corepack shim shadows that executable, run `corepack disable pnpm` before reinstalling. GitHub Actions reads the root field through `pnpm/action-setup` without a `version` input, and the canonical visual Dockerfile reads the same field when installing pnpm.
+
+The deploy-progress artifact uploader has a separate workspace and lockfile, but uses pnpm installed from the root manifest rather than maintaining another pin. After the installation above, run its commands from the repository root with `--dir` to keep its dependencies isolated:
+
+```bash
+pnpm --dir .github/extension/actions/deploy-progress/artifact-uploader install --frozen-lockfile --ignore-workspace
+pnpm --dir .github/extension/actions/deploy-progress/artifact-uploader run test
+pnpm --dir .github/extension/actions/deploy-progress/artifact-uploader run build
+```
 
 ## Repository layout
 
@@ -87,6 +104,10 @@ pnpm typecheck       # typecheck core + shared + canvas
 > (`@github/copilot-sdk`) at runtime, so the build intentionally leaves it
 > unbundled.
 
+### AWS developer switch
+
+AWS environments are hidden from users while they are being built. To work on them, start the Copilot app with `RADIUS_CANVAS_AWS=1` in its environment. The extension reads the switch once at startup. With it on, the canvas offers AWS credential profiles, creates and deletes AWS environments, and commits the AWS workflows to the repository. Any other value, or no value, keeps AWS hidden.
+
 ## Testing
 
 Tests live across the workspace packages and run together through the root [Vitest](https://vitest.dev/) projects configuration.
@@ -116,6 +137,26 @@ When a check fails, inspect `packages/adapter-canvas/test-results/visual/` for a
 Pull requests run the same comparison as the **Visual comparisons** check whenever they change `packages/**`, the root package manifests, lockfile, or `tsconfig.json`, the extension manifest or `radius-app-bicep` skill the server reads, the canonical runner, or its workflow. When screenshots no longer match, the check comments on the pull request with a link to the diff images. If the change is intended, add the `pr:update-visual-baselines` label instead of running Docker locally: the **Canvas Visual Baselines** workflow regenerates the baselines, commits the changed PNGs to the pull request branch, removes the label, and **Visual comparisons** runs again on the new commit. Review every regenerated image in **Files changed** before approving. The label cannot push to a branch in a fork, so fork pull requests use the local update command.
 
 The container supplies canonical Linux rasterization on every developer host; it does not prove native Canvas functionality on that host. The separate reliability workflow continues to qualify behavioral checks natively on Ubuntu, Windows, and macOS.
+
+## Required merge checks
+
+The `main` ruleset must require these exact check names, with GitHub Actions as their source except for DCO:
+
+- `CI gate`
+- `Action shell helpers`
+- `Deploy-progress artifact uploader`
+- `dependency-review / dependency-review`
+- `check / Check registry URLs`
+- `Visual comparisons`
+- `DCO` (the DCO app)
+
+`CI gate` waits for every job in the Build workflow, including both Chromium shards, Windows checks, coverage, library checks, and every plugin build. It runs even if another job fails. It fails if any dependency fails, is cancelled, or is skipped. When adding a Build job, add it to the gate's `needs` list; the workflow contract test checks this list.
+
+Workflow files do not set required checks in GitHub. After merging a change to this list or to a check name, a repository administrator must update **Settings > Rules > Rulesets > main > Require status checks to pass**. Keep the existing rules, check sources, and the requirement for branches to be up to date. A failed required check blocks a normal merge; the ruleset's existing bypass permissions remain unchanged.
+
+`Visual comparisons` can skip when there are no visual changes. Changeset comments and coverage service reports remain advisory. Live upstream tests, reliability, cloud E2E, modeling, and real-host qualification are not required merge checks.
+
+To check the gate itself, run `pnpm exec vitest run packages/adapter-canvas/test/ci/ci-gate.test.mjs`. The test executes the workflow's Bash step with successful, failed, cancelled, skipped, missing, and unknown job results.
 
 ## Before you open a pull request
 

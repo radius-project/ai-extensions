@@ -45,6 +45,55 @@ function runScripts(value, scripts = []) {
 }
 
 describe(".github/extension release assets", () => {
+  it("keeps the packaged report template aligned with every bug-report form field", () => {
+    const template = parseYaml(
+      readFileSync(
+        join(REPO_ROOT, ".github", "ISSUE_TEMPLATE", "bug-report.yml"),
+        "utf8"
+      )
+    );
+    const fallback = readFileSync(
+      join(
+        REPO_ROOT,
+        "extensions",
+        "radius",
+        "skills",
+        "radius-report-issue",
+        "references",
+        "bug-report.md"
+      ),
+      "utf8"
+    );
+    expect(
+      [...fallback.matchAll(/^### (.+)$/gm)].map((match) => match[1])
+    ).toEqual(template.body.map((field) => field.attributes.label));
+    expect(template.labels).toEqual(["bug"]);
+    for (const option of template.body.find((field) => field.id === "area")
+      .attributes.options) {
+      expect(fallback).toContain(option);
+    }
+  });
+
+  it("routes all owning skills to the same reviewed failure-report flow", () => {
+    const skills = [
+      "radius-app-bicep",
+      "radius-app-graph",
+      "radius-deploy",
+      "radius-environment",
+      "radius-delete"
+    ];
+    for (const skill of skills) {
+      const guidance = readFileSync(
+        join(REPO_ROOT, "extensions", "radius", "skills", skill, "SKILL.md"),
+        "utf8"
+      );
+      expect(guidance, skill).toContain("`radius-report-issue` skill");
+      expect(guidance, skill).toContain(
+        "require separate explicit permission to submit the reviewed draft"
+      );
+    }
+  });
+
   it("pins every remote action to a commit or the source-build placeholder", () => {
     const workflows = filesUnder(EXTENSION_ROOT).filter((path) =>
       /\.ya?ml$/u.test(path)
@@ -104,9 +153,78 @@ describe(".github/extension release assets", () => {
 
     expect(installStep).toBeDefined();
     expect(installStep.run).toContain(
-      'install-rad.sh --version "$RADIUS_INSTALL_REF"'
+      'bash "${GITHUB_ACTION_PATH}/install-radius.sh"'
     );
-    expect(installStep.run).not.toMatch(/install-rad\.sh\s+edge\b/u);
+    expect(action.inputs["release-override"]).toMatchObject({
+      required: false,
+      default: ""
+    });
+    expect(installStep.env.RADIUS_RELEASE_OVERRIDE).toBe(
+      "${{ inputs.release-override }}"
+    );
+    // Edge is opt-in so an Azure environment's override cannot select it.
+    expect(action.inputs["allow-edge"]).toMatchObject({
+      required: false,
+      default: "false"
+    });
+    expect(installStep.env.RADIUS_ALLOW_EDGE).toBe("${{ inputs.allow-edge }}");
+    expect(installStep.env.RADIUS_INSTALL_REF).toMatch(/^v\d+\.\d+\.\d+$/u);
+    // The shared default stays the release the rest of the extension pins. Only
+    // the AWS workflows pass their own edge default.
+    const release = JSON.parse(
+      readFileSync(
+        join(
+          REPO_ROOT,
+          "packages",
+          "adapter-shared",
+          "src",
+          "radius-release.json"
+        ),
+        "utf8"
+      )
+    );
+    expect(installStep.env.RADIUS_INSTALL_REF).toBe(release.tag);
+    expect(installStep.env.RADIUS_INSTALL_COMMIT).toBe(release.commit);
+  });
+
+  it("passes the selected environment's release override to every control-plane action", () => {
+    const callers = readdirSync(EXTENSION_ROOT)
+      .filter((file) => /\.ya?ml$/u.test(file))
+      .flatMap((file) => {
+        const workflow = parseYaml(
+          readFileSync(join(EXTENSION_ROOT, file), "utf8")
+        );
+        return Object.values(workflow.jobs ?? {}).flatMap((job) =>
+          (job.steps ?? [])
+            .filter((step) =>
+              step.uses?.startsWith(`${INTERNAL_PREFIX}setup-control-plane@`)
+            )
+            .map((step) => ({ file, job, step }))
+        );
+      });
+
+    expect(callers.map(({ file }) => file).sort()).toEqual([
+      "delete-aws.yml",
+      "delete-azure.yml",
+      "delete-environment-aws.yml",
+      "delete-environment-azure.yml",
+      "run-rad-commands-aws.yml",
+      "run-rad-commands-azure.yml"
+    ]);
+    for (const { file, job, step } of callers) {
+      expect(job.environment, file).toBe("${{ inputs.environment }}");
+      // AWS workflows fall back to the AWS-only edge default the extension
+      // fills in; Azure workflows use the shared release default.
+      expect(step.with?.["release-override"], file).toBe(
+        file.includes("aws") ?
+          "${{ vars.RADIUS_RELEASE_OVERRIDE || '{{AWS_RADIUS_RELEASE_OVERRIDE}}' }}"
+        : "${{ vars.RADIUS_RELEASE_OVERRIDE }}"
+      );
+      // Only AWS workflows may install edge; Azure leaves the input unset.
+      expect(step.with?.["allow-edge"], file).toBe(
+        file.includes("aws") ? "true" : undefined
+      );
+    }
   });
 
   // A `workflow_dispatch` boolean input is a real boolean in the `inputs`

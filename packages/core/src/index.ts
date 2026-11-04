@@ -11,7 +11,38 @@
 // exported from their own module and out of this file.
 
 export { redactCredentials } from "./credential-redaction.js";
+export {
+  selectGitHubAccount,
+  type GitHubAccountSelection,
+  type GitHubAccountSelectionPorts,
+  type GitHubAccountSelectionTarget
+} from "./github-account-selection.js";
 export { runSetupCoordinator } from "./setup-coordinator.js";
+export { monitorSetupVerification } from "./setup-verification-monitor.js";
+export {
+  readSetupVerificationStatus,
+  isAzureRbacVerificationFailure,
+  type SetupVerificationStatusInput,
+  type SetupVerificationRunDetail,
+  type SetupVerificationReadRequest,
+  type SetupVerificationStatusOperation,
+  type SetupVerificationStatus,
+  type SetupVerificationStatusPorts
+} from "./setup-verification-status.js";
+export {
+  classifyVerifyFailure,
+  extractMissingPermissions,
+  type VerifyFailureCategory,
+  type VerifyUnreachableComponent,
+  type VerifyFailureStep,
+  type VerifyFailureInput,
+  type VerifyFailureClassification
+} from "./verify-failure-classification.js";
+export type {
+  SetupVerificationObservation,
+  SetupVerificationMonitorOperation,
+  SetupVerificationMonitorPorts
+} from "./setup-verification-monitor.js";
 export type {
   SetupCoordinatorTarget,
   SetupCoordinatorOperation,
@@ -44,6 +75,7 @@ export {
 } from "./setup-github-environment-provenance.js";
 
 export {
+  AWS_TRUST_SUBJECTS_VARIABLE,
   applySetupProviderConfiguration,
   azureRoleScope,
   cloudCredentialsComplete,
@@ -195,6 +227,9 @@ export {
   KUBERNETES_NAMESPACE_PATTERN,
   isKubernetesNamespace
 } from "./platforms/index.js";
+export * from "./platforms/aws-cli-error.js";
+export * from "./platforms/aws-identity.js";
+export * from "./platforms/aws-network.js";
 export type {
   ComputePlatform,
   PortalContext,
@@ -219,6 +254,7 @@ export {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_ENV_GUARD_STEP_NAME,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
@@ -313,3 +349,5 @@ export * from "./setup-environment-contracts.js";
 
 export * from "./setup-verification-policy.js";
 export * from "./setup-verification-plan.js";
+export * from "./setup-command-admission.js";
+export * from "./setup-input-resume.js";

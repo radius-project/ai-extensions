@@ -9,6 +9,7 @@ export type RouteOwner =
   | "operations-status"
   | "identity-credentials"
   | "azure-discovery"
+  | "aws-discovery"
   | "repositories"
   | "graphs-planning"
   | "environments"
@@ -173,7 +174,6 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   legacyPost("/api/delete-environment", "exact", "json", "environments"),
   declare("POST", "/api/bypass-verification", "exact", "json", "environments"),
   declare("POST", "/api/operations", "exact", "json", "operations-status"),
-  legacyPost("/api/azure-auto-setup", "exact", "json", "azure-discovery"),
   declare(
     "GET",
     "/api/list-azure-app-registrations",
@@ -188,8 +188,8 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "none",
     "azure-discovery"
   ),
+  declare("GET", "/api/list-aws-roles", "exact", "none", "aws-discovery"),
   legacyPost("/api/app-params", "exact", "json", "environments"),
-  legacyPost("/api/create-environment", "exact", "json", "environments"),
   declare("GET", "/api/load-graph-stream", "exact", "none", "graphs-planning"),
   declare("GET", "/api/progress", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deployed-graph", "exact", "none", "graphs-planning"),
@@ -202,6 +202,13 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("GET", "/api/delete-conflict", "exact", "none", "deployments"),
   legacyPost("/api/delete-deployment", "exact", "json", "deployments"),
   declare("POST", "/api/abandon-deployment", "exact", "json", "deployments"),
+  declare(
+    "POST",
+    "/api/deploy/repair-aws-trust",
+    "exact",
+    "json",
+    "deployments"
+  ),
   declare("GET", "/api/verify-status", "exact", "none", "environments"),
   declare("GET", "/api/user-repos", "exact", "none", "repositories"),
   legacyPost("/api/repo-branches", "exact", "json", "repositories"),
@@ -281,6 +288,15 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare(
     "POST",
     "/api/operations/:operationId/retry/:retryKind",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  // Removes the AWS deploy identity lock a live setup or deletion waits for,
+  // once a person confirmed its holder stopped.
+  declare(
+    "POST",
+    "/api/operations/:operationId/aws-lock/remove",
     "template",
     "json",
     "operations-status"

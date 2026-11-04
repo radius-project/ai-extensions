@@ -18,7 +18,6 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
@@ -34,7 +33,15 @@ import {
   runRadBicepPublish
 } from "@radius-project/adapter-shared";
 import { createRadiusCliVersionReader } from "./radius-cli-version.js";
-import { github, fetchFileFromRepo, getBranchHeadSha } from "./gh.js";
+import { readAwsSwitch } from "./aws-switch.js";
+import {
+  github,
+  fetchFileFromRepo,
+  getBranchHeadSha,
+  getGitHubIdentity,
+  resetGhIdentityCache,
+  redactGhCredentials
+} from "./gh.js";
 import {
   defaultBranchForState,
   detectWorkspaceContext,
@@ -107,11 +114,21 @@ import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
+import { automaticPluginUpdatesEnabled } from "./runtime/plugin-update.js";
+import { createPluginUpdatePreferences } from "./runtime/plugin-update-preferences.js";
+import { githubAccountChoice } from "./runtime/github-account-choice.js";
+import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
+import { createGitHubAccountReadinessService } from "./server/services/github-account-readiness.js";
+import { createEnvironmentTools } from "./runtime/environment-tools.js";
 import { setupDevSelfReload } from "./runtime/dev-reload.js";
 import {
   configureProcessLifecycle,
   warmRadBinary
 } from "./runtime/process-lifecycle.js";
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -119,17 +136,75 @@ const execFileAsync = promisify(execFile);
 const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
-const { servers, getOrCreateServer, stopServer, getLastWebviewActivityAt } =
-  createProductionCanvasServerRuntime({ executionOwner, accountContext });
-
 const ghCommandPresentation = resolveGhCommandPresentation();
+const deploymentAccount = createDeploymentAccountResolver({
+  readinessOwner: executionOwner,
+  logDiagnostic: (message) => console.error("[radius readiness]", message),
+  readIdentity: async () => {
+    resetGhIdentityCache();
+    return getGitHubIdentity();
+  },
+  readiness: createGitHubAccountReadinessService(accountContext.coordinator, {
+    ownerKey: accountContext.ownerKey,
+    ghCommandPresentation
+  }),
+  createExecutor: (login) =>
+    accountContext.coordinator.createReadOnlyExecutor(login),
+  get choose() {
+    return githubAccountChoice(sessionHolder.tryGet());
+  },
+  redactDiagnostic: redactGhCredentials
+});
+const {
+  servers,
+  getOrCreateServer,
+  stopServer,
+  getLastWebviewActivityAt,
+  environmentServices
+} = createProductionCanvasServerRuntime({
+  executionOwner,
+  accountContext,
+  awsEnabled: readAwsSwitch(process.env)
+});
 const dependencies: RadiusExtensionDependencies = {
-  logError: console.error.bind(console),
+  logError: (message) => console.error(message),
+  automaticPluginUpdates: automaticPluginUpdatesEnabled(process.env),
+  pluginUpdatePreferences: createPluginUpdatePreferences(
+    join(
+      process.env.USERPROFILE || os.homedir(),
+      ".copilot",
+      "radius",
+      "plugin-update-responses"
+    )
+  ),
   session: sessionHolder,
   executionOwner,
+  environment: createEnvironmentTools({
+    ...environmentServices,
+    owner: executionOwner,
+    session: sessionHolder,
+    account: deploymentAccount,
+    workspace: () => detectWorkspaceContext(sessionHolder.get()),
+    validateBranch: async (branch) => {
+      await execFileAsync("git", ["check-ref-format", "--branch", branch], {
+        timeout: 10000
+      });
+    },
+    redact: redactGhCredentials,
+    reportError: (error) =>
+      console.error(
+        "[radius environment]",
+        redactGhCredentials(errorMessage(error))
+      )
+  }),
   clock: {
-    now: Date.now,
-    wait: (ms) => delay(ms, undefined, { ref: false })
+    now: () => Date.now(),
+    wait: (ms) =>
+      new Promise<void>((resolve) => {
+        // Unref'd so a pending wait cannot hold the extension process open at
+        // shutdown; everything it guards is fire-and-forget.
+        setTimeout(resolve, ms).unref?.();
+      })
   },
   servers,
   getOrCreateServer,
@@ -154,8 +229,10 @@ const dependencies: RadiusExtensionDependencies = {
     filterGraphVisualizationResources
   },
   rad: {
-    buildGraphViaRad:
-      buildGraphViaRad as RadiusExtensionDependencies["rad"]["buildGraphViaRad"],
+    buildGraphViaRad: (content, bicepRepoPath, options) =>
+      buildGraphViaRad(content, bicepRepoPath, options) as ReturnType<
+        RadiusExtensionDependencies["rad"]["buildGraphViaRad"]
+      >,
     ensureRadBinary,
     runRadBicepPublishExtension,
     runRadBicepPublish,
@@ -190,10 +267,10 @@ const dependencies: RadiusExtensionDependencies = {
   },
   process: {
     existsSync,
-    execFile: execFileAsync
+    execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
   },
   deploy: {
-    fetch
+    fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
   },
   operations: {
     setupInFlight
@@ -205,7 +282,7 @@ const dependencies: RadiusExtensionDependencies = {
     workspaceSourceRevision,
     workspaceModelRecoverable,
     workspaceSourceChangedSince,
-    branchHeadCommit: getBranchHeadSha,
+    branchHeadCommit: (repo, branch) => getBranchHeadSha(repo, branch),
     modelingRunLastActivityAtMs,
     fetchWorkspaceFile,
     fetchRepoFile: (repo, branch, repoPath) =>
@@ -354,5 +431,7 @@ setupDevSelfReload({
   setTimer: setTimeout,
   clearTimer: clearTimeout,
   log: console.error.bind(console),
-  shutdown: gracefulShutdown
+  shutdown: (signal) => {
+    void gracefulShutdown(signal);
+  }
 });

@@ -73,13 +73,13 @@ function workspace() {
   writeJson(join(root, "packages", "core", "package.json"), {
     name: "@radius-project/core",
     version: "0.1.0",
-    private: true,
+    private: false,
     publishConfig: { access: "public" }
   });
   writeJson(join(root, "packages", "graph-react", "package.json"), {
     name: "@radius-project/graph-react",
     version: "0.1.0",
-    private: true,
+    private: false,
     dependencies: { "@radius-project/core": "workspace:*" },
     publishConfig: { access: "public" }
   });

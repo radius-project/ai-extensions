@@ -9,6 +9,7 @@ import {
   payloadRemediation,
   VERIFY_AWS_PATH,
   VERIFY_AZURE_PATH,
+  awsProfileFieldError,
   credentialRowsMarkup,
   initializeCredentialsPane,
   isCredentialsPaneController,
@@ -62,7 +63,6 @@ function buildElements() {
     azSubId: createFakeInput("az-sub-id"),
     awsAccountId: createFakeInput("aws-account-id"),
     awsRegion: createFakeInput("aws-region"),
-    awsRoleArn: createFakeInput("aws-role-arn"),
     credVerifyStatus: createFakeElement("cred-verify-status"),
     credVerifyHint: createFakeElement("cred-verify-hint"),
     saveCredBtn: createFakeInput("save-cred-btn"),
@@ -84,7 +84,7 @@ function buildElements() {
   return elements;
 }
 
-function renderPage(repo = "octo/app") {
+function renderPage(repo = "octo/app", awsEnabled = false) {
   const browser = createFakeBrowser();
   const elements = buildElements();
   for (const element of Object.values(elements)) browser.document.add(element);
@@ -105,7 +105,7 @@ function renderPage(repo = "octo/app") {
   };
   const initialized = initializeCredentialsPane(
     browser.context,
-    { repo, mutationNonce: "test-nonce", decisions, confirmDialog },
+    { repo, mutationNonce: "test-nonce", awsEnabled, decisions, confirmDialog },
     dependencies
   );
   if (!isCredentialsPaneController(initialized)) {
@@ -152,6 +152,42 @@ async function readyTable(profile: Partial<CredentialProfile> = {}) {
   await flushPromises();
   return { page, rows };
 }
+
+describe("awsProfileFieldError", () => {
+  it.each([
+    ["123456789012", "us-west-2"],
+    ["000000000000", "eu-central-1"],
+    ["123456789012", "us-gov-west-1"],
+    ["123456789012", "ap-southeast-2"]
+  ])("accepts account %s in region %s", (accountId, region) => {
+    expect(awsProfileFieldError(accountId, region)).toBe("");
+  });
+
+  it.each([
+    "",
+    "12345678901",
+    "1234567890123",
+    "12345678901a",
+    " 123456789012"
+  ])("rejects the account id %j", (accountId) => {
+    expect(awsProfileFieldError(accountId, "us-west-2")).toBe(
+      `Account ID "${accountId}" is not valid. Enter the 12-digit AWS account ID.`
+    );
+  });
+
+  it.each(["", "us-west", "US-WEST-2", "us-west-22", "useast1", "us-west-2a"])(
+    "rejects the region %j",
+    (region) => {
+      expect(awsProfileFieldError("123456789012", region)).toBe(
+        `Region "${region}" is not valid. Enter an AWS region such as us-west-2.`
+      );
+    }
+  );
+
+  it("reports the account before the region", () => {
+    expect(awsProfileFieldError("1", "x")).toContain("Account ID");
+  });
+});
 
 describe("credential profile parsing and markup", () => {
   it("parses valid profiles and drops malformed or unnamed entries", () => {
@@ -207,35 +243,60 @@ describe("credential profile parsing and markup", () => {
   });
 
   it("renders the empty state without a repository request", () => {
-    expect(credentialRowsMarkup([])).toContain(
+    expect(credentialRowsMarkup([], false)).toContain(
       "No credential profiles created yet"
     );
   });
 
-  it("renders escaped AWS rows without an environment creation action", () => {
+  it("disables environment creation for AWS profiles while the AWS switch is off", () => {
+    const markup = credentialRowsMarkup(
+      [
+        {
+          name: "acme-aws",
+          provider: "aws",
+          status: "verified",
+          tenantId: "",
+          subscriptionId: "",
+          accountId: "",
+          region: "",
+          roleArn: ""
+        }
+      ],
+      false
+    );
+    expect(markup).not.toContain("js-cred-createenv");
+    expect(markup).toContain(
+      'disabled title="AWS environments are not yet supported">Create Env'
+    );
+  });
+
+  it("renders escaped AWS rows with an environment creation action with the AWS switch on", () => {
     const hostile = '<img src=x onerror="alert(1)">';
-    const markup = credentialRowsMarkup([
-      {
-        name: hostile,
-        provider: "aws",
-        status: "verified",
-        tenantId: "",
-        subscriptionId: "",
-        accountId: "",
-        region: "",
-        roleArn: ""
-      }
-    ]);
+    const markup = credentialRowsMarkup(
+      [
+        {
+          name: hostile,
+          provider: "aws",
+          status: "verified",
+          tenantId: "",
+          subscriptionId: "",
+          accountId: "",
+          region: "",
+          roleArn: ""
+        }
+      ],
+      true
+    );
     expect(markup).not.toContain("<img");
     expect(markup).toContain("&lt;img");
     // Profiles are create-and-delete only: an environment snapshots a
     // profile's values at creation, so editing one could never update the
     // environments already created from it.
     expect(markup).not.toContain("js-cred-edit");
-    expect(markup).not.toContain("js-cred-createenv");
     expect(markup).toContain(
-      'disabled title="AWS environments are not yet supported"'
+      'class="rad-btn rad-btn--neutral js-cred-createenv" data-name="&lt;img'
     );
+    expect(markup).not.toContain("disabled title=");
     expect(markup).toContain("js-cred-delete");
     expect(markup).toContain("AWS");
     expect(markup).toContain("<td>Verified</td>");
@@ -243,35 +304,41 @@ describe("credential profile parsing and markup", () => {
   });
 
   it("keeps environment creation enabled for Azure profiles", () => {
-    const markup = credentialRowsMarkup([
-      {
-        name: "acme-azure",
-        provider: "azure",
-        status: "verified",
-        tenantId: "",
-        subscriptionId: "",
-        accountId: "",
-        region: "",
-        roleArn: ""
-      }
-    ]);
+    const markup = credentialRowsMarkup(
+      [
+        {
+          name: "acme-azure",
+          provider: "azure",
+          status: "verified",
+          tenantId: "",
+          subscriptionId: "",
+          accountId: "",
+          region: "",
+          roleArn: ""
+        }
+      ],
+      false
+    );
     expect(markup).toContain("js-cred-createenv");
-    expect(markup).not.toContain("AWS environments are not yet supported");
+    expect(markup).not.toContain("disabled title=");
   });
 
   it("disables environment creation for unknown credential providers", () => {
-    const markup = credentialRowsMarkup([
-      {
-        name: "future-profile",
-        provider: "future-cloud",
-        status: "verified",
-        tenantId: "",
-        subscriptionId: "",
-        accountId: "",
-        region: "",
-        roleArn: ""
-      }
-    ]);
+    const markup = credentialRowsMarkup(
+      [
+        {
+          name: "future-profile",
+          provider: "future-cloud",
+          status: "verified",
+          tenantId: "",
+          subscriptionId: "",
+          accountId: "",
+          region: "",
+          roleArn: ""
+        }
+      ],
+      false
+    );
     expect(markup).not.toContain("js-cred-createenv");
     expect(markup).toContain(
       'disabled title="This credential provider is not supported"'
@@ -625,6 +692,28 @@ describe("credential table loading", () => {
     );
     expect(page.browser.net.calls).toHaveLength(0);
   });
+
+  it.each([
+    [false, 'disabled title="AWS environments are not yet supported"'],
+    [true, 'js-cred-createenv" data-name="acme-aws"']
+  ])(
+    "renders the AWS profile's Create Env action for the AWS switch (%s)",
+    async (awsEnabled, action) => {
+      const page = renderPage("octo/app", awsEnabled);
+      page.browser.net.handle(
+        `${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`,
+        () =>
+          jsonResponse({
+            profiles: [
+              { name: "acme-aws", provider: "aws", status: "verified" }
+            ]
+          })
+      );
+      page.controller.loadCredentialTable();
+      await flushPromises();
+      expect(page.elements.credTableBody.innerHTML).toContain(action);
+    }
+  );
 
   it("loads, renders, and wires profile rows", async () => {
     const page = renderPage();
@@ -1418,6 +1507,11 @@ describe("Azure verification", () => {
 });
 
 describe("AWS verification", () => {
+  function fillValidAwsFields(page: ReturnType<typeof renderPage>) {
+    page.elements.awsAccountId.value = "111122223333";
+    page.elements.awsRegion.value = "us-west-2";
+  }
+
   async function openAwsForm(page: ReturnType<typeof renderPage>) {
     page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
       jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
@@ -1461,10 +1555,47 @@ describe("AWS verification", () => {
     expect(page.elements.saveCredBtn.disabled).toBe(false);
   });
 
+  it.each([
+    [
+      "an 11-digit account id",
+      "11112222333",
+      "us-west-2",
+      'Account ID "11112222333" is not valid. Enter the 12-digit AWS account ID.'
+    ],
+    [
+      "a blank region",
+      "111122223333",
+      "",
+      'Region "" is not valid. Enter an AWS region such as us-west-2.'
+    ]
+  ])(
+    "rejects %s at the field without calling the server",
+    async (_label, accountId, region, message) => {
+      const page = renderPage();
+      await openAwsForm(page);
+      page.elements.credNameInput.value = "acme-aws";
+      page.elements.awsAccountId.value = accountId;
+      page.elements.awsRegion.value = region;
+
+      page.elements.btnVerifyAws.dispatch("click");
+      await flushPromises();
+
+      expect(page.elements.credVerifyStatus.innerHTML).toContain(
+        message.replace(/"/g, "&quot;")
+      );
+      expect(
+        page.browser.net.calls.some((call) => call.url === VERIFY_AWS_PATH)
+      ).toBe(false);
+      expect(page.elements.envVerifyModal.style.display).not.toBe("flex");
+      expect(page.elements.saveCredBtn.disabled).toBe(true);
+    }
+  );
+
   it("shows the server error message on failure", async () => {
     const page = renderPage();
     await openAwsForm(page);
     page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
     page.browser.net.handle(VERIFY_AWS_PATH, () =>
       jsonResponse({ error: "not authorized" })
     );
@@ -1479,6 +1610,7 @@ describe("AWS verification", () => {
     const page = renderPage();
     await openAwsForm(page);
     page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
     page.browser.net.handle(VERIFY_AWS_PATH, () =>
       Promise.reject(new Error("raw secret"))
     );
@@ -1493,16 +1625,17 @@ describe("AWS verification", () => {
     );
   });
 
-  it("keeps the form's blank account id when the server response omits one, and saves the blank fallback", async () => {
+  it("keeps the form's account id when the server response omits one, and saves that fallback", async () => {
     const page = renderPage();
     await openAwsForm(page);
     page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
     page.browser.net.handle(VERIFY_AWS_PATH, () =>
       jsonResponse({ user: "iam-user" })
     );
     page.elements.btnVerifyAws.dispatch("click");
     await flushPromises();
-    expect(page.elements.awsAccountId.value).toBe("");
+    expect(page.elements.awsAccountId.value).toBe("111122223333");
     expect(page.elements.credVerifyStatus.innerHTML).toContain("iam-user");
     expect(page.elements.saveCredBtn.disabled).toBe(false);
 
@@ -1515,9 +1648,8 @@ describe("AWS verification", () => {
         name: "acme-aws",
         provider: "aws",
         user: "iam-user",
-        accountId: "",
-        region: "",
-        roleArn: ""
+        accountId: "111122223333",
+        region: "us-west-2"
       });
       return jsonResponse({});
     });
@@ -1530,6 +1662,7 @@ describe("AWS verification", () => {
     const page = renderPage();
     await openAwsForm(page);
     page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
     const deferred = createDeferred<HttpResponse>();
     page.browser.net.handle(VERIFY_AWS_PATH, () => deferred.promise);
     page.elements.btnVerifyAws.dispatch("click");
@@ -1548,9 +1681,11 @@ describe("AWS verification", () => {
     const page = renderPage();
     await openAwsForm(page);
     page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
     const deferred = createDeferred<HttpResponse>();
     page.browser.net.handle(VERIFY_AWS_PATH, () => deferred.promise);
     page.elements.btnVerifyAws.dispatch("click");
+    expect(page.elements.envVerifyModal.style.display).toBe("flex");
     const statusBefore = page.elements.credVerifyStatus.innerHTML;
 
     page.controller.teardown();
@@ -1743,7 +1878,7 @@ describe("saving a credential profile", () => {
     expect(page.elements.credSuccessBanner.style.display).toBe("flex");
   });
 
-  it("saves an aws profile including the role arn", async () => {
+  it("saves an aws profile with its account and region but no role arn", async () => {
     const page = renderPage();
     page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
       jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
@@ -1755,7 +1890,6 @@ describe("saving a credential profile", () => {
     page.elements.credNameInput.value = "acme-aws";
     page.elements.awsAccountId.value = "111122223333";
     page.elements.awsRegion.value = "us-west-2";
-    page.elements.awsRoleArn.value = "arn:aws:iam::111122223333:role/radius";
     page.browser.net.handle(VERIFY_AWS_PATH, () =>
       jsonResponse({
         arn: "arn:aws:iam::111122223333:user/me",
@@ -1775,8 +1909,7 @@ describe("saving a credential profile", () => {
         provider: "aws",
         user: "arn:aws:iam::111122223333:user/me",
         accountId: "111122223333",
-        region: "us-west-2",
-        roleArn: "arn:aws:iam::111122223333:role/radius"
+        region: "us-west-2"
       });
       return jsonResponse({});
     });

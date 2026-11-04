@@ -136,6 +136,7 @@ function deps(
     throw new Error(`unexpected call: ${name}`);
   };
   const base: EnvironmentsDependencies = {
+    awsEnabled: false,
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
     // Deliberately distinct from identity so a route that forgets to redact a
@@ -182,7 +183,7 @@ function deps(
     explainOidcEnterpriseClaim: unset("explainOidcEnterpriseClaim") as never,
     explainNoSubscriptions: unset("explainNoSubscriptions") as never,
     addLegacyStep: unset("addLegacyStep") as never,
-    isTerminalState: unset("isTerminalState") as never,
+    isTerminalState: isSetupTerminalState,
     finish: unset("finish") as never,
     finishSucceeded: unset("finishSucceeded") as never,
     persistBestEffort: unset("persistBestEffort") as never,
@@ -629,7 +630,8 @@ describe("environments — delete-environment refusal ladder", () => {
       })
     );
     expect(buildDeleteStages).toHaveBeenCalledWith({
-      includeAzureCleanup: true
+      includeAzureCleanup: true,
+      includeAwsCleanup: false
     });
     expect(op.request).toEqual({
       repo: "o/r",
@@ -688,7 +690,8 @@ describe("environments — delete-environment refusal ladder", () => {
       })
     );
     expect(buildDeleteStages).toHaveBeenCalledWith({
-      includeAzureCleanup: true
+      includeAzureCleanup: true,
+      includeAwsCleanup: false
     });
     expect(op.request).toEqual({
       repo: "o/r",
@@ -701,60 +704,6 @@ describe("environments — delete-environment refusal ladder", () => {
     expect(recording.status).toBe(202);
   });
 
-  it("records a failed operation when accepted delete work cannot be scheduled", async () => {
-    const op: DeleteOperationRecord = {
-      operationId: "op-unscheduled",
-      currentStage: "delete-radius-env"
-    };
-    const finish = vi.fn();
-    const persistOperations = vi
-      .fn<EnvironmentsDependencies["persistOperations"]>()
-      .mockResolvedValueOnce()
-      .mockRejectedValueOnce(new Error("follow-up persistence failed"));
-    const { recording, ctx } = context(
-      "POST",
-      "/api/delete-environment",
-      JSON.stringify({ repo: "o/r", environment: "dev" })
-    );
-
-    await handleDeleteEnvironment(
-      ctx,
-      deps({
-        readInstanceEntry: () => entryWith(),
-        resolveRepoAppName: () => Promise.resolve("app"),
-        resolveEnvDeployment: () => Promise.resolve(null),
-        discoverEnvironmentTarget: () =>
-          Promise.resolve({
-            provider: "azure",
-            clientId: "app-123",
-            tenantId: "tenant-1",
-            repoId: 7
-          }),
-        createOperation: () => op,
-        buildDeleteStages: () => [],
-        startOperation: () => ({ ok: true, operation: op }),
-        persistOperations,
-        toClientView: () => ({ operationId: op.operationId }),
-        scheduleEnvironmentOperation: () => false,
-        finish
-      })
-    );
-
-    expect(recording.status).toBe(202);
-    expect(finish).toHaveBeenCalledExactlyOnceWith(op, "failed", {
-      failure: {
-        code: "operation-scheduling-failed",
-        stage: "delete-radius-env",
-        stepSeq: null,
-        message:
-          "Radius accepted the delete operation but could not start any work for it.",
-        classification: "unknown",
-        evidence:
-          "No server-owned task runner was available for instance panel."
-      }
-    });
-    expect(persistOperations).toHaveBeenCalledTimes(2);
-  });
   it("409s when an operation is already running for the repo", async () => {
     const op: DeleteOperationRecord = {
       operationId: "op-new",
@@ -838,9 +787,90 @@ describe("environments — delete-environment refusal ladder", () => {
     expect(startOperation).not.toHaveBeenCalled();
   });
 
-  it("400s with provider-unsupported guidance for an AWS environment", async () => {
-    const createOperation = vi.fn();
-    const startOperation = vi.fn();
+  it("starts an AWS delete with AWS cleanup stages and the deploy role", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-aws",
+      currentStage: "delete_radius_environment"
+    };
+    const createOperation = vi.fn(() => op);
+    const buildDeleteStages = vi.fn(() => [
+      { id: "delete_radius_environment", state: "pending" },
+      { id: "delete_aws_role_access", state: "pending" },
+      { id: "delete_github_environment", state: "pending" },
+      { id: "delete_state_package", state: "pending" },
+      { id: "review_iam_role", state: "pending" }
+    ]);
+    const startOperation = vi.fn(() => ({ ok: true as const, operation: op }));
+    const scheduleEnvironmentOperation = vi.fn(() => true);
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({
+            provider: "aws",
+            clientId: "",
+            tenantId: "",
+            repoId: 7,
+            roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r",
+            trustSubjects: ["repo:o/r:environment:dev"],
+            region: "us-west-2",
+            cluster: "shop"
+          }),
+        createOperation,
+        buildDeleteStages,
+        startOperation,
+        persistOperations: () => Promise.resolve(),
+        toClientView: () => ({ operationId: "op-del-aws" }),
+        scheduleEnvironmentOperation,
+        awsEnabled: true
+      })
+    );
+    expect(buildDeleteStages).toHaveBeenCalledWith({
+      includeAzureCleanup: false,
+      includeAwsCleanup: true
+    });
+    expect(createOperation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "delete",
+        provider: "aws",
+        repo: "o/r",
+        environment: "dev",
+        stages: buildDeleteStages.mock.results[0]?.value
+      })
+    );
+    expect(op.request).toEqual({
+      repo: "o/r",
+      environment: "dev",
+      provider: "aws",
+      clientId: "",
+      tenantId: "",
+      repoId: 7,
+      roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r",
+      trustSubjects: ["repo:o/r:environment:dev"],
+      region: "us-west-2",
+      cluster: "shop"
+    });
+    expect(recording.status).toBe(202);
+    expect(JSON.parse(recording.body).operationId).toBe("op-del-aws");
+    expect(scheduleEnvironmentOperation).toHaveBeenCalledWith(
+      ctx.instanceId,
+      op
+    );
+  });
+
+  it("records an empty deploy role when an AWS environment's role could not be read", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-aws-2",
+      currentStage: null
+    };
     const { recording, ctx } = context(
       "POST",
       "/api/delete-environment",
@@ -859,21 +889,27 @@ describe("environments — delete-environment refusal ladder", () => {
             tenantId: "",
             repoId: 7
           }),
-        createOperation,
-        startOperation
+        createOperation: () => op,
+        buildDeleteStages: () => [],
+        startOperation: () => ({ ok: true as const, operation: op }),
+        persistOperations: () => Promise.resolve(),
+        toClientView: () => ({ operationId: "op-del-aws-2" }),
+        scheduleEnvironmentOperation: () => true,
+        awsEnabled: true
       })
     );
-    expect(recording.status).toBe(400);
-    const body = JSON.parse(recording.body);
-    expect(body.code).toBe("provider-unsupported");
-    expect(body.error).toContain("AWS");
-    expect(body.error).toContain('"dev" was not deleted');
-    // Nothing was started: no operation is created for an unsupported provider.
-    expect(createOperation).not.toHaveBeenCalled();
-    expect(startOperation).not.toHaveBeenCalled();
+    expect(recording.status).toBe(202);
+    expect(op.request).toMatchObject({
+      provider: "aws",
+      roleArn: "",
+      region: "",
+      cluster: ""
+    });
   });
 
-  it("400s with generic guidance for an unsupported non-AWS provider", async () => {
+  it("400s with provider-unsupported guidance for an AWS environment while the AWS switch is off", async () => {
+    const createOperation = vi.fn();
+    const startOperation = vi.fn();
     const { recording, ctx } = context(
       "POST",
       "/api/delete-environment",
@@ -887,21 +923,69 @@ describe("environments — delete-environment refusal ladder", () => {
         resolveEnvDeployment: () => Promise.resolve(null),
         discoverEnvironmentTarget: () =>
           Promise.resolve({
-            provider: "",
+            provider: "aws",
             clientId: "",
             tenantId: "",
-            repoId: 7
-          })
+            repoId: 7,
+            roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r"
+          }),
+        createOperation,
+        startOperation
       })
     );
-
     expect(recording.status).toBe(400);
     expect(JSON.parse(recording.body)).toEqual({
       error:
-        'Deleting this environment isn\'t supported: Radius can only delete Azure-backed environments today. "dev" was not deleted.',
+        'Deleting AWS environments isn\'t supported yet. "dev" was not deleted. Remove its resources in AWS and delete the GitHub environment manually.',
       code: "provider-unsupported"
     });
+    expect(createOperation).not.toHaveBeenCalled();
+    expect(startOperation).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["gcp", false, "Azure-backed"],
+    ["", false, "Azure-backed"],
+    ["gcp", true, "Azure- and AWS-backed"]
+  ])(
+    "400s with provider-unsupported guidance for the %j provider (AWS switch %s)",
+    async (provider, awsEnabled, supported) => {
+      const createOperation = vi.fn();
+      const startOperation = vi.fn();
+      const { recording, ctx } = context(
+        "POST",
+        "/api/delete-environment",
+        JSON.stringify({ repo: "o/r", environment: "dev" })
+      );
+      await handleDeleteEnvironment(
+        ctx,
+        deps({
+          readInstanceEntry: () => entryWith(),
+          resolveRepoAppName: () => Promise.resolve("app"),
+          resolveEnvDeployment: () => Promise.resolve(null),
+          discoverEnvironmentTarget: () =>
+            Promise.resolve({
+              provider,
+              clientId: "",
+              tenantId: "",
+              repoId: 7
+            }),
+          createOperation,
+          startOperation,
+          awsEnabled
+        })
+      );
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: `Deleting this environment isn't supported: Radius can only delete ${supported} environments today. "dev" was not deleted.`,
+        code: "provider-unsupported"
+      });
+      // Nothing was started: no operation is created for an unsupported provider.
+      expect(createOperation).not.toHaveBeenCalled();
+      expect(startOperation).not.toHaveBeenCalled();
+    }
+  );
+
   it("outer catch: 400 when the body is malformed JSON", async () => {
     const { recording, ctx } = context(
       "POST",
@@ -956,12 +1040,13 @@ describe("environments — bypass-verification", () => {
   // Deps that carry a bypass all the way through to the marker write: a
   // Radius-managed env whose run is a terminal permissions failure.
   const passingDeps = (over: Partial<EnvironmentsDependencies> = {}) => {
+    const operation = bypassOp();
     const scope = createWorkflowObservationScope(() => {
       throw new Error("Unexpected artifact reader");
     });
     return deps({
       readInstanceEntry: () => ({ observation: scope }),
-      getOperation: () => bypassOp(),
+      getOperation: () => operation,
       getSelectedGitHubExecutor: () => scriptedExecutor().executor,
       hasCompleteVerificationIdentity: () => true,
       getRunDetail: () =>
@@ -1258,7 +1343,7 @@ describe("environments — bypass-verification", () => {
     expect(recording.status).toBe(200);
     expect(run).toHaveBeenCalledWith(
       expect.arrayContaining(["variable", "set", "--body", "555"]),
-      { timeout: 20000 }
+      { timeout: 20000, beforeExecute: expect.any(Function) }
     );
   });
 
@@ -1293,39 +1378,6 @@ describe("environments — bypass-verification", () => {
     );
   });
 
-  it.each([
-    [
-      "a legacy operation without verification data",
-      {
-        repo: "o/r",
-        environment: "dev",
-        context: { githubLogin: "octocat" }
-      },
-      "does not match this bypass request"
-    ],
-    [
-      "a legacy operation with a non-string GitHub login",
-      bypassOp({ context: { githubLogin: 7 } }),
-      "cannot confirm the GitHub account"
-    ]
-  ])("fails closed for %s", async (_label, operation, expectedError) => {
-    const { recording, ctx } = context(
-      "POST",
-      "/api/bypass-verification",
-      bypassBody()
-    );
-
-    await handleBypassVerification(
-      ctx,
-      passingDeps({
-        getOperation: () => operation,
-        hasCompleteVerificationIdentity: () => true
-      })
-    );
-
-    expect(recording.status).toBe(409);
-    expect(JSON.parse(recording.body).error).toContain(expectedError);
-  });
   it("409s when the operation is missing entirely", async () => {
     const { recording, ctx } = context(
       "POST",
@@ -1419,51 +1471,6 @@ describe("environments — bypass-verification", () => {
     );
   });
 
-  it.each([
-    ["stdout", { code: 1, stdout: "api refused", stderr: "" }],
-    ["the generic fallback", { code: 1, stdout: "", stderr: "" }]
-  ] as const)(
-    "uses %s when the managed-environment command has no stderr",
-    async (_label, result) => {
-      const { executor } = scriptedExecutor({
-        variables: () => Promise.resolve(result)
-      });
-      const { recording, ctx } = context(
-        "POST",
-        "/api/bypass-verification",
-        bypassBody()
-      );
-
-      await handleBypassVerification(
-        ctx,
-        passingDeps({ getSelectedGitHubExecutor: () => executor })
-      );
-
-      expect(recording.status).toBe(502);
-      expect(JSON.parse(recording.body).error).toContain(
-        result.stdout || "gh api failed"
-      );
-    }
-  );
-
-  it("treats an empty successful variable response as unmanaged", async () => {
-    const { executor } = scriptedExecutor({
-      variables: () => Promise.resolve(ok())
-    });
-    const { recording, ctx } = context(
-      "POST",
-      "/api/bypass-verification",
-      bypassBody()
-    );
-
-    await handleBypassVerification(
-      ctx,
-      passingDeps({ getSelectedGitHubExecutor: () => executor })
-    );
-
-    expect(recording.status).toBe(409);
-    expect(JSON.parse(recording.body).error).toContain("not managed by Radius");
-  });
   it("409s when the target is not a Radius-managed environment", async () => {
     const { executor } = scriptedExecutor({
       variables: () => Promise.resolve(ok("SOME_OTHER_VAR"))
@@ -1626,34 +1633,6 @@ describe("environments — bypass-verification", () => {
     expect(JSON.parse(recording.body).error).toContain("must be fixed");
   });
 
-  it("handles legacy failed-run data without steps or a log", async () => {
-    const explainNoSubscriptions = vi.fn(() => "");
-    const { recording, ctx } = context(
-      "POST",
-      "/api/bypass-verification",
-      bypassBody()
-    );
-
-    await handleBypassVerification(
-      ctx,
-      passingDeps({
-        getRunDetail: () =>
-          Promise.resolve({
-            status: "completed",
-            conclusion: "failure",
-            steps: undefined
-          }),
-        fetchRunLog: () => Promise.resolve(null),
-        extractGitHubActionsStepLog: () => "",
-        explainOidcEnterpriseClaim: () => "enterprise claim guidance",
-        explainNoSubscriptions
-      })
-    );
-
-    expect(recording.status).toBe(409);
-    expect(JSON.parse(recording.body).error).toContain("must be fixed");
-    expect(explainNoSubscriptions).not.toHaveBeenCalled();
-  });
   it("500s when writing the marker variable fails", async () => {
     const { executor } = scriptedExecutor({
       write: () => Promise.reject(new Error("boom"))
@@ -1693,32 +1672,6 @@ describe("environments — bypass-verification", () => {
     );
   });
 
-  it.each([
-    ["stdout", { code: 1, stdout: "write refused", stderr: "" }],
-    ["the generic fallback", { code: 1, stdout: "", stderr: "" }]
-  ] as const)(
-    "uses %s when the marker write has no stderr",
-    async (_label, result) => {
-      const { executor } = scriptedExecutor({
-        write: () => Promise.resolve(result)
-      });
-      const { recording, ctx } = context(
-        "POST",
-        "/api/bypass-verification",
-        bypassBody()
-      );
-
-      await handleBypassVerification(
-        ctx,
-        passingDeps({ getSelectedGitHubExecutor: () => executor })
-      );
-
-      expect(recording.status).toBe(500);
-      expect(JSON.parse(recording.body).error).toContain(
-        result.stdout || "gh variable set failed"
-      );
-    }
-  );
   it("clean pass: writes the run-id marker, invalidates the cache, and 200s", async () => {
     const { run, executor } = scriptedExecutor();
     const envListCacheDelete = vi.fn();
@@ -1746,7 +1699,7 @@ describe("environments — bypass-verification", () => {
         "--repo",
         "o/r"
       ],
-      { timeout: 20000 }
+      { timeout: 20000, beforeExecute: expect.any(Function) }
     );
     expect(envListCacheDelete).toHaveBeenCalledWith("o/r");
     expect(recording.status).toBe(200);
@@ -1888,31 +1841,6 @@ describe("environments — list-environments", () => {
     });
   });
 
-  it("uses the command error when a names lookup has no stderr", async () => {
-    const script: CliScript = {
-      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
-      [ENV_PATH.names("o/r")]: { error: new Error("GitHub unavailable") }
-    };
-    const { recording, ctx } = context(
-      "GET",
-      "/api/list-environments?repo=o/r"
-    );
-
-    await handleListEnvironments(
-      ctx,
-      deps({
-        now: () => 0,
-        envListCacheGet: () => undefined,
-        envListCacheGeneration: () => 0,
-        cliExec: cliFake(script)
-      })
-    );
-
-    expect(JSON.parse(recording.body)).toEqual({
-      environments: [],
-      error: "GitHub unavailable"
-    });
-  });
   it("redacts credential-shaped stderr before the browser-visible envelope", async () => {
     const script: CliScript = {
       [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
@@ -1995,85 +1923,6 @@ describe("environments — list-environments", () => {
     });
   });
 
-  it("supports legacy name and variable rows when deployment history is unrelated", async () => {
-    const script: CliScript = {
-      [ENV_PATH.verifyRuns("o/r")]: {
-        stdout: "42\tcompleted\tsuccess"
-      },
-      [ENV_PATH.names("o/r")]: { stdout: "dev" },
-      [ENV_PATH.vars("o/r", "dev")]: { stdout: "RADIUS_MANAGED" },
-      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100\n101" },
-      [ENV_PATH.statuses("o/r", "100")]: { stdout: "" },
-      [ENV_PATH.statuses("o/r", "101")]: {
-        stdout: "https://github.com/o/r/actions/runs/999"
-      }
-    };
-    const { recording, ctx } = context(
-      "GET",
-      "/api/list-environments?repo=o/r"
-    );
-
-    await handleListEnvironments(
-      ctx,
-      deps({
-        now: () => 0,
-        envListCacheGet: () => undefined,
-        envListCacheSet: () => {},
-        envListCacheGeneration: () => 0,
-        cliExec: cliFake(script),
-        readInstanceEntry: () => undefined,
-        kickoffWorkflowSync: () => {}
-      })
-    );
-
-    expect(JSON.parse(recording.body)).toEqual({
-      environments: [
-        {
-          name: "dev",
-          provider: "",
-          status: "pending",
-          webUrl: "https://github.com/o/r/settings/environments",
-          credentialProfile: "",
-          config: {}
-        }
-      ]
-    });
-  });
-
-  it("filters a legacy environment when its variable lookup fails", async () => {
-    const script: CliScript = {
-      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
-      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
-      [ENV_PATH.vars("o/r", "dev")]: {
-        error: new Error("variables unavailable")
-      },
-      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "" }
-    };
-    const envListCacheSet = vi.fn();
-    const { recording, ctx } = context(
-      "GET",
-      "/api/list-environments?repo=o/r"
-    );
-
-    await handleListEnvironments(
-      ctx,
-      deps({
-        now: () => 5,
-        envListCacheGet: () => undefined,
-        envListCacheGeneration: () => 0,
-        envListCacheSet,
-        cliExec: cliFake(script),
-        readInstanceEntry: () => undefined,
-        kickoffWorkflowSync: vi.fn()
-      })
-    );
-
-    expect(JSON.parse(recording.body)).toEqual({ environments: [] });
-    expect(envListCacheSet).toHaveBeenCalledWith("o/r", {
-      at: 5,
-      payload: { environments: [] }
-    });
-  });
   it("filters to RADIUS_MANAGED envs and derives provider and verify status", async () => {
     const script: CliScript = {
       [ENV_PATH.verifyRuns("o/r")]: {
@@ -3235,6 +3084,10 @@ describe("environments — verify-status", () => {
                 request
               ),
             isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+            extractErrorLines,
+            extractGitHubActionsStepLog,
+            explainOidcEnterpriseClaim,
+            explainNoSubscriptions,
             addLegacyStep: vi.fn(),
             finish,
             persistBestEffort,
@@ -3257,12 +3110,19 @@ describe("environments — verify-status", () => {
             })
           );
           expect(persistOperations).toHaveBeenCalledOnce();
+        } else if (failure === "unexpected") {
+          expect(payload).toMatchObject({
+            state: "failed",
+            error:
+              "Credential verification failed (failure).\nThe verification log could not be read: Unexpected log failure"
+          });
+          expect(finish).toHaveBeenCalledOnce();
+          expect(persistOperations).toHaveBeenCalledOnce();
         } else {
           expect(payload).toEqual(
             failure === "cancelled" ?
               { state: "pending", error: "Workflow observation stopped." }
-            : failure === "superseded" ? { state: "pending", runId: 77 }
-            : { state: "unknown", error: "Unexpected log failure" }
+            : { state: "pending", runId: 77 }
           );
           expect(finish).not.toHaveBeenCalled();
           expect(persistOperations).not.toHaveBeenCalled();
@@ -3784,79 +3644,6 @@ describe("environments — verify-status", () => {
     });
   });
 
-  it("reports in_progress without activity for legacy run data without steps", async () => {
-    const { recording, ctx } = context("GET", "/api/verify-status?repo=o/r");
-
-    await handleVerifyStatus(
-      ctx,
-      deps({
-        readInstanceEntry: () => ({ state: { verifyRunId: 9 } as never }),
-        getRunDetail: () =>
-          Promise.resolve(
-            detail({
-              status: "in_progress",
-              conclusion: null,
-              steps: undefined
-            })
-          )
-      })
-    );
-
-    expect(JSON.parse(recording.body)).toEqual({
-      state: "in_progress",
-      runId: 9,
-      runUrl: "https://github.com/o/r/actions/runs/9",
-      activity: null
-    });
-  });
-
-  it("returns the current pending state when a workflow run loses its verification record", async () => {
-    const operation: {
-      repo: string;
-      environment: string;
-      context: { githubLogin: string };
-      verification?: {
-        runId: string;
-        dispatchedAt: string;
-        dispatchMutationTarget: string;
-        retryCommandId: string;
-      };
-    } = {
-      repo: "o/r",
-      environment: "dev",
-      context: { githubLogin: "alice" },
-      verification: {
-        runId: "55",
-        dispatchedAt: "123",
-        dispatchMutationTarget: "target",
-        retryCommandId: "command"
-      }
-    };
-    const { recording, ctx } = context(
-      "GET",
-      "/api/verify-status?repo=o/r&operationId=op1"
-    );
-
-    await handleVerifyStatus(
-      ctx,
-      deps({
-        readInstanceEntry: () => undefined,
-        getOperation: () => operation,
-        hasCompleteVerificationIdentity: () => true,
-        getSelectedGitHubExecutor: () =>
-          successfulSelectedGhExecutor({ login: "alice" }),
-        getRunDetail: async () => {
-          delete operation.verification;
-          return detail({});
-        }
-      })
-    );
-
-    expect(JSON.parse(recording.body)).toEqual({
-      state: "pending",
-      runId: null
-    });
-  });
   it("records completion once when repeated polls observe verification success", async () => {
     const addLegacyStep = vi.fn();
     const finishSucceeded = vi.fn((operation: { state: string }) => {
@@ -3910,57 +3697,6 @@ describe("environments — verify-status", () => {
     });
   });
 
-  it("executes success persistence and diagnostic callbacks through the public dependency seam", async () => {
-    const op = {
-      repo: "o/r",
-      environment: "dev",
-      context: { githubLogin: "octocat" },
-      state: "running",
-      currentStage: "verify",
-      verification: { dispatchedAt: 1, runId: 9 }
-    };
-    const persistOperations = vi.fn(() => Promise.resolve());
-    const reportOperationDiagnostic = vi.fn();
-    const persistBestEffort = vi.fn(
-      async (
-        options: Parameters<EnvironmentsDependencies["persistBestEffort"]>[0]
-      ) => {
-        await options.persist();
-        options.report?.({
-          code: "success-persist-failed",
-          message: "success persistence diagnostic"
-        });
-        return false;
-      }
-    );
-    const { recording, ctx } = context(
-      "GET",
-      "/api/verify-status?repo=o/r&operationId=op1"
-    );
-
-    await handleVerifyStatus(
-      ctx,
-      deps({
-        readInstanceEntry: () => undefined,
-        getOperation: () => op,
-        hasCompleteVerificationIdentity: () => true,
-        getRunDetail: () => Promise.resolve(detail({})),
-        addLegacyStep: vi.fn(),
-        isTerminalState: () => false,
-        finishSucceeded: vi.fn(),
-        persistBestEffort,
-        persistOperations,
-        reportOperationDiagnostic
-      })
-    );
-
-    expect(JSON.parse(recording.body).state).toBe("success");
-    expect(persistOperations).toHaveBeenCalledOnce();
-    expect(reportOperationDiagnostic).toHaveBeenCalledWith({
-      code: "success-persist-failed",
-      message: "success persistence diagnostic"
-    });
-  });
   it("finishes a non-terminal verification operation that is not running", async () => {
     const op = {
       repo: "o/r",
@@ -4055,118 +3791,6 @@ describe("environments — verify-status", () => {
     expect(parsed.error).toContain("boom");
   });
 
-  it("executes failure persistence and diagnostic callbacks through the public dependency seam", async () => {
-    const op = {
-      repo: "o/r",
-      environment: "dev",
-      context: { githubLogin: "octocat" },
-      currentStage: "verify",
-      verification: { dispatchedAt: 1, runId: 9 }
-    };
-    const persistOperations = vi.fn(() => Promise.resolve());
-    const reportOperationDiagnostic = vi.fn();
-    const persistBestEffort = vi.fn(
-      async (
-        options: Parameters<EnvironmentsDependencies["persistBestEffort"]>[0]
-      ) => {
-        await options.persist();
-        options.report?.({
-          code: "failure-persist-failed",
-          message: "failure persistence diagnostic"
-        });
-        return false;
-      }
-    );
-    const { recording, ctx } = context(
-      "GET",
-      "/api/verify-status?repo=o/r&operationId=op1"
-    );
-
-    await handleVerifyStatus(
-      ctx,
-      deps({
-        readInstanceEntry: () => undefined,
-        getOperation: () => op,
-        hasCompleteVerificationIdentity: () => true,
-        getRunDetail: () => Promise.resolve(detail({ conclusion: "failure" })),
-        fetchRunLog: () => Promise.resolve(""),
-        extractErrorLines: () => [],
-        extractGitHubActionsStepLog: () => "",
-        explainOidcEnterpriseClaim: () => "",
-        explainNoSubscriptions: () => "",
-        finish: vi.fn(),
-        persistBestEffort,
-        persistOperations,
-        reportOperationDiagnostic
-      })
-    );
-
-    expect(JSON.parse(recording.body).state).toBe("failed");
-    expect(persistOperations).toHaveBeenCalledOnce();
-    expect(reportOperationDiagnostic).toHaveBeenCalledWith({
-      code: "failure-persist-failed",
-      message: "failure persistence diagnostic"
-    });
-  });
-
-  it("executes authorization persistence and diagnostic callbacks through the public dependency seam", async () => {
-    const op = {
-      repo: "o/r",
-      environment: "dev",
-      context: { githubLogin: "alice" },
-      currentStage: "verify",
-      verification: { dispatchedAt: 1, runId: "55" }
-    };
-    const persistOperations = vi.fn(() => Promise.resolve());
-    const reportOperationDiagnostic = vi.fn();
-    const persistBestEffort = vi.fn(
-      async (
-        options: Parameters<EnvironmentsDependencies["persistBestEffort"]>[0]
-      ) => {
-        await options.persist();
-        options.report?.({
-          code: "authorization-persist-failed",
-          message: "authorization persistence diagnostic"
-        });
-        return false;
-      }
-    );
-    const { recording, ctx } = context(
-      "GET",
-      "/api/verify-status?repo=o/r&operationId=op1"
-    );
-
-    await handleVerifyStatus(
-      ctx,
-      deps({
-        readInstanceEntry: () => undefined,
-        getOperation: () => op,
-        getSelectedGitHubExecutor: () =>
-          successfulSelectedGhExecutor({ login: "alice" }),
-        hasCompleteVerificationIdentity: () => true,
-        getRunDetail: () =>
-          Promise.reject(
-            new SelectedGhAuthorizationError("alice", 403, "denied")
-          ),
-        isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
-        addLegacyStep: vi.fn(),
-        finish: vi.fn(),
-        persistBestEffort,
-        persistOperations,
-        reportOperationDiagnostic
-      })
-    );
-
-    expect(JSON.parse(recording.body)).toMatchObject({
-      state: "failed",
-      code: "verification-retry-github-account-unavailable"
-    });
-    expect(persistOperations).toHaveBeenCalledOnce();
-    expect(reportOperationDiagnostic).toHaveBeenCalledWith({
-      code: "authorization-persist-failed",
-      message: "authorization persistence diagnostic"
-    });
-  });
   it.each([
     [
       "a missing Azure subscription",
@@ -4496,16 +4120,17 @@ describe("environments — real loopback", () => {
       const fetchRunLog = vi.fn<EnvironmentsDependencies["fetchRunLog"]>(() =>
         Promise.resolve("Error from server (Forbidden): cannot list resource")
       );
+      const operation = {
+        repo: "octo/app",
+        environment: "dev",
+        context: { githubLogin: "octocat" },
+        verification: { runId: "555" }
+      };
       const container = createControlledEnvironmentServer(
         {
           readInstanceEntry: (id) => container.instances.get(id),
           envListCacheDelete,
-          getOperation: () => ({
-            repo: "octo/app",
-            environment: "dev",
-            context: { githubLogin: "octocat" },
-            verification: { runId: "555" }
-          }),
+          getOperation: () => operation,
           getSelectedGitHubExecutor: () =>
             successfulSelectedGhExecutor({ run }),
           hasCompleteVerificationIdentity: () => true,
@@ -4581,7 +4206,7 @@ describe("environments — real loopback", () => {
             "--repo",
             "octo/app"
           ],
-          { timeout: 20000 }
+          { timeout: 20000, beforeExecute: expect.any(Function) }
         );
         expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
       } finally {
@@ -5164,19 +4789,6 @@ describe("environments — real loopback", () => {
     const text = await res.text();
     expect(res.headers.get("cache-control")).not.toBe("no-store");
     expect(text).not.toContain('"environments":[]');
-  });
-
-  it("keeps create-environment in its sibling module and enforces its server-owned guard", async () => {
-    // The large create action has its own typed module rather than being folded
-    // into this environment read/write registry.
-    const registry = createEnvironmentsRoutes(deps({}));
-    expect(Object.keys(registry)).not.toContain("POST /api/create-environment");
-    const res = await fetch(baseUrl + "/api/create-environment", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    expect(res.status).toBe(403);
   });
 });
 

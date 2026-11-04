@@ -17,6 +17,9 @@ export {
   KUBERNETES_NAMESPACE_PATTERN,
   isKubernetesNamespace
 } from "./kubernetes.js";
+export * from "./aws-cli-error.js";
+export * from "./aws-identity.js";
+export * from "./aws-network.js";
 
 const REGISTRY: Record<string, ComputePlatform> = {
   [azure.id]: azure,
@@ -24,10 +27,9 @@ const REGISTRY: Record<string, ComputePlatform> = {
 };
 
 // Placeholder deep-link context. See generatePortalUrl below: no live source
-// populates a real subscription, resource group, or region today.
+// populates a real subscription or resource group today.
 const PLACEHOLDER_SUBSCRIPTION_ID = "00000000-0000-0000-0000-000000000000";
 const PLACEHOLDER_RESOURCE_GROUP = "radius-rg";
-const PLACEHOLDER_REGION = "us-east-1";
 
 /** Look up a registered compute platform by id, or undefined if unknown. */
 export function getPlatform(id: string): ComputePlatform | undefined {
@@ -38,7 +40,8 @@ export function getPlatform(id: string): ComputePlatform | undefined {
  * Cloud-portal deep link for a deployed resource.
  *
  * The link is built from a fixed placeholder context (subscription, resource
- * group, region). Nothing populates a real context today: the canvas state
+ * group). An AWS link needs neither: it takes its region from the resource ID.
+ * Nothing populates a real context today: the canvas state
  * fields this once read were only ever written by the OIDC bootstrap route,
  * which has been removed. Restoring real deep links requires a live source for
  * that context, not a state read.
@@ -52,7 +55,6 @@ export function generatePortalUrl(
   return platform.portalUrl(resourceType, {
     subscriptionId: PLACEHOLDER_SUBSCRIPTION_ID,
     resourceGroup: PLACEHOLDER_RESOURCE_GROUP,
-    region: PLACEHOLDER_REGION,
     clusterName: ""
   });
 }

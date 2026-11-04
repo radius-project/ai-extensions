@@ -35,6 +35,11 @@ on:
     - cron: "23 4 * * *"
   workflow_dispatch:
     inputs:
+      radius-version:
+        description: Published Radius tag (for example v0.62.0 or v0.63.0-rc.1); blank uses the checked-in pin
+        type: string
+        required: false
+        default: ""
       # Where the journey drives the Radius canvas. "harness" is the production
       # path: this checkout's canvas in headless Chromium on Linux.
       # "copilot-app" is opt-in: the GitHub Copilot desktop app on Windows,
@@ -107,6 +112,9 @@ jobs:
       RADIUS_CLOUD_E2E: "1"
       # Read by playwright.cloud.config.ts and the spec. See the input above.
       RADIUS_CLOUD_E2E_CANVAS_HOST: ${{ (inputs.canvas-host || vars.AIEXT_CLOUD_E2E_CANVAS_HOST || 'harness') }}
+      # Remote workflow actions must come from the same source as either host,
+      # including support for the selected Radius release.
+      RADIUS_SOURCE_REF: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -186,6 +194,22 @@ jobs:
       - name: Install dependencies
         if: steps.fixture.outputs.configured == 'true'
         run: pnpm install --frozen-lockfile
+
+      - name: Select the Radius release
+        if: steps.fixture.outputs.configured == 'true' && inputs.radius-version != ''
+        shell: bash
+        env:
+          REQUESTED_RADIUS_VERSION: ${{ inputs.radius-version }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          output="$(mktemp)"
+          trap 'rm -f "$output"' EXIT
+          GITHUB_OUTPUT="$output" bash build/scripts/update-radius-installer.sh --version "$REQUESTED_RADIUS_VERSION"
+          release="$(sed -n 's/^release=//p' "$output")"
+          test -n "$release"
+          echo "RADIUS_CLOUD_E2E_RELEASE=$release" >>"$GITHUB_ENV"
+          echo "Radius release: $release" >>"$GITHUB_STEP_SUMMARY"
 
       - name: Install the Chromium browser
         if: steps.fixture.outputs.configured == 'true' && env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'harness'

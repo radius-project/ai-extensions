@@ -64,7 +64,8 @@ const REQUIRED_INPUTS = [
   "az-sub-id",
   "aws-account-id",
   "aws-region",
-  "aws-role-arn",
+  "aws-role-name-input",
+  "aws-selected-role-arn",
   "save-cred-btn",
   "btn-verify-azure",
   "btn-verify-aws",
@@ -95,12 +96,13 @@ const REQUIRED_SELECTS = [
   "azure-rg-select",
   "azure-namespace-select",
   "aws-cluster-select",
-  "aws-namespace-select",
-  "aws-vpc-select",
-  "aws-subnets-select"
+  "aws-namespace-select"
 ] as const;
 
 const REQUIRED_ELEMENTS = [
+  "aws-role-help",
+  "aws-vpc-value",
+  "aws-cluster-note",
   "pane-environments",
   "pane-credentials",
   "env-landing",
@@ -169,7 +171,9 @@ const REQUIRED_ELEMENTS = [
   "env-confirm-ok",
   "env-confirm-cancel",
   "azure-namespace-error",
-  "aws-namespace-error"
+  "aws-namespace-error",
+  "aws-subnets-list",
+  "aws-subnets-error"
 ] as const;
 
 function fixture(
@@ -177,6 +181,7 @@ function fixture(
     repo?: string;
     branch?: string;
     activeSubtab?: string;
+    awsEnabled?: boolean;
     search?: string;
     omit?: readonly string[];
   } = {}
@@ -194,6 +199,7 @@ function fixture(
     repo,
     branch,
     activeSubtab: state.activeSubtab ?? "environments",
+    awsEnabled: state.awsEnabled ?? false,
     mutationNonce: "browser-nonce"
   });
   add(stateElement);
@@ -217,6 +223,12 @@ function fixture(
   setValue("target-repo", repo);
   setValue("deploy-branch-select", branch);
   setValue("cred-provider-select", "azure");
+  // The markup prefills the proposed role name and keeps it as the default a
+  // cleared pin restores.
+  elements["aws-role-name-input"]?.setAttribute(
+    "data-default-name",
+    "radius-deploy-octo-app"
+  );
   elements["env-profile-menu"].style.display = "none";
   const environmentTab = createFakeElement("environment-subtab", "a");
   environmentTab.setAttribute("data-subtab", "environments");
@@ -301,9 +313,39 @@ function profile(provider: "azure" | "aws") {
         name: "aws-prod",
         provider,
         accountId: "123456789012",
-        region: "us-east-1",
-        roleArn: "arn:aws:iam::123456789012:role/radius"
+        region: "us-east-1"
       };
+}
+
+function awsDiscovery(
+  subnets: ReadonlyArray<{ id: string; availabilityZone: string }> = [
+    { id: "subnet-a", availabilityZone: "us-east-1a" },
+    { id: "subnet-b", availabilityZone: "us-east-1b" }
+  ],
+  cluster: Record<string, unknown> = {}
+) {
+  return {
+    clusters: [
+      {
+        id: "eks-1",
+        name: "eks-1",
+        vpcId: "vpc-1",
+        authenticationMode: "API",
+        status: "ACTIVE",
+        usable: true,
+        ...cluster
+      }
+    ],
+    namespaces: ["default"],
+    vpcs: [{ id: "vpc-1", name: "vpc-1" }],
+    subnets: subnets.map((subnet) => ({
+      ...subnet,
+      name: subnet.id,
+      vpcId: "vpc-1",
+      routing: "private",
+      zoneKind: "standard"
+    }))
+  };
 }
 
 async function openWithProfile(
@@ -325,12 +367,7 @@ async function openWithProfile(
           resourceGroups: [{ id: "app-rg", name: "app-rg" }],
           namespaces: ["default"]
         }
-      : {
-          clusters: [{ id: "eks-1", name: "eks-1" }],
-          namespaces: ["default"],
-          vpcs: [{ id: "vpc-1", name: "vpc-1" }],
-          subnets: [{ id: "subnet-1", name: "subnet-1" }]
-        }
+      : awsDiscovery()
     )
   );
   const teardown = initializeEnvironmentPage(page.browser.context, {
@@ -489,7 +526,35 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["env-step1-hint"].style.display).toBe("none");
   });
 
-  it("keeps AWS profiles unavailable in the production environment wizard", async () => {
+  it("offers AWS profiles in the environment wizard with the AWS switch on and discovers in their account and region", async () => {
+    const page = fixture({ awsEnabled: true });
+    page.browser.nav.search = "?page=environment&new=1&profile=aws-prod";
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => jsonResponse({ profiles: [profile("aws")] })
+    );
+    const discoverBodies: unknown[] = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      discoverBodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse(awsDiscovery());
+    });
+
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    await flushPromises();
+
+    expect(page.elements["env-profile-summary"].textContent).toBe(
+      "aws-prod (AWS)"
+    );
+    expect(pageInput(page, "env-step1-next").disabled).toBe(false);
+    expect(discoverBodies).toContainEqual({
+      provider: "aws",
+      accountId: "123456789012",
+      region: "us-east-1"
+    });
+  });
+
+  it("keeps AWS profiles out of the wizard while the AWS switch is off", async () => {
     const page = fixture();
     page.browser.nav.search = "?page=environment&new=1&profile=aws-prod";
     page.browser.net.handle(
@@ -498,6 +563,27 @@ describe("initializeEnvironmentPage", () => {
     );
 
     initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    await flushPromises();
+
+    expect(page.elements["env-profile-summary"].textContent).toBe(
+      "No credential profile selected"
+    );
+    expect(pageInput(page, "env-step1-next").disabled).toBe(true);
+    expect(page.elements["env-profile-options"].children).toHaveLength(0);
+  });
+
+  it("keeps AWS profiles unavailable when the wizard only selects Azure", async () => {
+    const page = fixture();
+    page.browser.nav.search = "?page=environment&new=1&profile=aws-prod";
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => jsonResponse({ profiles: [profile("aws")] })
+    );
+
+    initializeEnvironmentPage(page.browser.context, {
+      selectableProviders: ["azure"]
+    });
     await flushPromises();
     await flushPromises();
 
@@ -1341,8 +1427,6 @@ describe("initializeEnvironmentPage", () => {
     pageInput(page, "env-name-input").value = "prod";
     pageInput(page, "aws-cluster-select").value = "eks-1";
     pageInput(page, "aws-namespace-select").value = "default";
-    pageInput(page, "aws-vpc-select").value = "vpc-1";
-    pageInput(page, "aws-subnets-select").value = "subnet-1";
     page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, (init) => {
       createInit = init;
       return jsonResponse({ operationId: "op-aws" }, true, 202);
@@ -1357,47 +1441,35 @@ describe("initializeEnvironmentPage", () => {
       cluster: "eks-1",
       accountId: "123456789012",
       region: "us-east-1",
-      roleArn: "arn:aws:iam::123456789012:role/radius",
+      roleName: "radius-deploy-octo-app",
+      existingRoleArn: "",
       vpcId: "vpc-1",
-      subnetIds: "subnet-1"
+      subnetIds: "subnet-a,subnet-b"
     });
+    expect(body).not.toHaveProperty("roleArn");
     expect(body).not.toHaveProperty("resourceGroup");
     expect(createInit?.signal).toBeUndefined();
   });
 
-  it("dispatches an AWS profile with no optional role ARN", async () => {
+  it("names the environment being typed in the AWS deploy role help", async () => {
+    const page = fixture();
+    await openWithProfile(page, "aws");
+    pageInput(page, "env-name-input").value = " staging ";
+
+    page.elements["env-name-input"].dispatch("input");
+
+    expect(page.elements["aws-role-help"].textContent).toContain(
+      "for the staging environment"
+    );
+  });
+
+  it("dispatches a pinned existing IAM role ARN instead of a role name", async () => {
     const page = fixture();
     let createInit: HttpRequestInit | undefined;
-    page.browser.nav.search = "?page=environment&new=1&profile=aws-basic";
-    page.browser.net.handle(
-      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
-      () =>
-        jsonResponse({
-          profiles: [
-            {
-              name: "aws-basic",
-              provider: "aws",
-              accountId: "123456789012",
-              region: "us-east-1"
-            }
-          ]
-        })
-    );
-    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      jsonResponse({
-        clusters: [{ id: "eks-1", name: "eks-1" }],
-        namespaces: ["default"],
-        vpcs: [],
-        subnets: []
-      })
-    );
-    initializeEnvironmentPage(page.browser.context, {
-      selectableProviders: ["azure", "aws"]
-    });
-    await flushPromises();
-    await flushPromises();
+    await openWithProfile(page, "aws");
     pageInput(page, "env-name-input").value = "prod";
-    pageInput(page, "aws-cluster-select").value = "eks-1";
+    pageInput(page, "aws-selected-role-arn").value =
+      "arn:aws:iam::123456789012:role/platform-deploy";
     page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, (init) => {
       createInit = init;
       return jsonResponse({ operationId: "op-aws" }, true, 202);
@@ -1408,8 +1480,96 @@ describe("initializeEnvironmentPage", () => {
 
     expect(JSON.parse(String(createInit?.body))).toMatchObject({
       provider: "aws",
-      roleArn: ""
+      roleName: "",
+      existingRoleArn: "arn:aws:iam::123456789012:role/platform-deploy"
     });
+  });
+
+  it.each(["", "team/deploy", "r".repeat(65)])(
+    "refuses an AWS create with the IAM role name %j",
+    async (roleName) => {
+      const page = fixture();
+      await openWithProfile(page, "aws");
+      pageInput(page, "env-name-input").value = "prod";
+      pageInput(page, "aws-role-name-input").value = roleName;
+
+      page.elements["deploy-btn"].dispatch("click");
+      await flushPromises();
+
+      expect(page.elements["deploy-status"].textContent).toBe(
+        "Enter an IAM role name of up to 64 letters, digits, or + = , . @ _ - characters."
+      );
+      expect(
+        page.browser.net.calls.some(
+          (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+        )
+      ).toBe(false);
+    }
+  );
+
+  it("disables Create Environment while the AWS subnets span fewer than two zones", async () => {
+    const page = fixture({ awsEnabled: true });
+    page.browser.nav.search = "?page=environment&new=1&profile=aws-prod";
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => jsonResponse({ profiles: [profile("aws")] })
+    );
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      jsonResponse(
+        awsDiscovery([
+          { id: "subnet-a", availabilityZone: "us-east-1a" },
+          { id: "subnet-b", availabilityZone: "us-east-1a" }
+        ])
+      )
+    );
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    await flushPromises();
+    pageInput(page, "env-name-input").value = "prod";
+
+    expect(pageInput(page, "deploy-btn").disabled).toBe(true);
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(page.elements["deploy-status"].textContent).toBe(
+      "Select subnets in at least two availability zones."
+    );
+    expect(
+      page.browser.net.calls.some(
+        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+      )
+    ).toBe(false);
+  });
+
+  it("enables Create Environment once the AWS subnets span two zones", async () => {
+    const page = fixture();
+    await openWithProfile(page, "aws");
+
+    expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+  });
+
+  it("disables Create Environment after Refresh clears a cluster that can no longer be used", async () => {
+    const page = fixture();
+    await openWithProfile(page, "aws");
+    expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      jsonResponse(
+        awsDiscovery(undefined, {
+          status: "DELETING",
+          usable: false,
+          unusableReason: "status"
+        })
+      )
+    );
+
+    page.elements["aws-refresh-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(pageInput(page, "aws-cluster-select").value).toBe("");
+    expect(pageInput(page, "deploy-btn").disabled).toBe(true);
+    expect(fakeText(page.elements["aws-cluster-note"])).toContain(
+      "eks-1 is DELETING."
+    );
   });
 
   it("dispatches only one create while a request is pending", async () => {
@@ -2281,58 +2441,80 @@ describe("initializeEnvironmentPage", () => {
     teardown();
   });
 
-  it("does not show the acknowledgement dialog after an aws delete succeeds", async () => {
-    const page = fixture();
-    const remove = createFakeInput("delete-row");
-    remove.setAttribute("data-env", "dev");
-    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
-    page.browser.net.handle(
-      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
-      () =>
-        jsonResponse({
-          environments: [{ name: "dev", status: "success", provider: "aws" }]
-        })
-    );
-    let deleteRequested = false;
-    let operationPolls = 0;
-    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
-      deleteRequested = true;
-      return jsonResponse({ success: true }, true, 202);
-    });
-    page.browser.net.handle(
-      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
-      () => {
-        if (!deleteRequested) return jsonResponse({ operation: null });
-        operationPolls += 1;
-        const terminal = operationPolls >= 2;
-        return jsonResponse({
-          operation: {
-            operationId: "del-1",
-            environment: "dev",
-            provider: "aws",
-            state: terminal ? "succeeded" : "running",
-            terminalState: terminal ? "succeeded" : null,
-            summary: "Deleting dev…"
-          }
-        });
-      }
-    );
+  it.each([
+    ["succeeded", "Environment deleted"],
+    ["succeeded_with_warnings", "Environment deleted with warnings"]
+  ])(
+    "acknowledges that the IAM role was kept after an aws delete ends %s",
+    async (outcome, title) => {
+      const page = fixture();
+      const remove = createFakeInput("delete-row");
+      remove.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+      page.browser.net.handle(
+        `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+        () =>
+          jsonResponse({
+            environments: [{ name: "dev", status: "success", provider: "aws" }]
+          })
+      );
+      let deleteRequested = false;
+      let operationPolls = 0;
+      page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+        deleteRequested = true;
+        return jsonResponse({ success: true }, true, 202);
+      });
+      page.browser.net.handle(
+        `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+        () => {
+          if (!deleteRequested) return jsonResponse({ operation: null });
+          operationPolls += 1;
+          const terminal = operationPolls >= 2;
+          return jsonResponse({
+            operation: {
+              operationId: "del-1",
+              environment: "dev",
+              provider: "aws",
+              state: terminal ? outcome : "running",
+              terminalState: terminal ? outcome : null,
+              summary: "Deleting dev…"
+            }
+          });
+        }
+      );
 
-    const teardown = initializeEnvironmentPage(page.browser.context);
-    await flushPromises();
+      const teardown = initializeEnvironmentPage(page.browser.context);
+      await flushPromises();
 
-    remove.dispatch("click");
-    page.elements["env-confirm-ok"].dispatch("click");
-    await flushPromises();
-    // The initial delete confirmation closes and no acknowledgement replaces it.
-    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
-    page.browser.clock.tick(1600);
-    await flushPromises();
-    await flushPromises();
+      remove.dispatch("click");
+      page.elements["env-confirm-ok"].dispatch("click");
+      await flushPromises();
+      expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+      page.browser.clock.tick(1600);
+      await flushPromises();
+      await flushPromises();
 
-    expect(operationPolls).toBeGreaterThanOrEqual(2);
-    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+      expect(operationPolls).toBeGreaterThanOrEqual(2);
+      expect(page.elements["env-confirm-modal"].style.display).toBe("flex");
+      expect(page.elements["env-confirm-title"].textContent).toBe(title);
+      const acknowledgement = fakeText(page.elements["env-confirm-message"]);
+      expect(acknowledgement).toContain('The environment "dev" was deleted');
+      expect(acknowledgement).toContain(
+        "The progress panel lists what was removed from the deploy IAM role and the cluster's access, and what was kept. Radius never deletes the role itself"
+      );
+      expect(acknowledgement).not.toContain(
+        "Its trust subject and permission policy were removed"
+      );
+      expect(acknowledgement).not.toContain("Microsoft Entra");
+      const consoleLink = page.elements["env-confirm-message"].children[1];
+      expect(consoleLink?.textContent).toBe("AWS IAM console");
+      expect(consoleLink?.getAttribute("href")).toBe(
+        "https://console.aws.amazon.com/iam/home#/roles"
+      );
+      expect(page.elements["env-confirm-ok"].textContent).toBe("Done");
+      expect(page.elements["env-confirm-cancel"].style.display).toBe("none");
 
-    teardown();
-  });
+      teardown();
+    }
+  );
 });

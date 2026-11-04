@@ -125,6 +125,10 @@ function build(value: unknown = operation(), version = "0.3.0-edge.1") {
 }
 
 describe("createOperationDiagnosticExport", () => {
+  it.each(["azure", "aws"])("reports the %s provider", (provider) => {
+    expect(build(operation({ provider })).operation.provider).toBe(provider);
+  });
+
   it("builds the exact local support schema from allowlisted states and counts", () => {
     expect(build()).toEqual({
       diagnosticSchemaVersion: 2,
@@ -501,6 +505,25 @@ describe("createOperationDiagnosticExport", () => {
     );
     expect(diagnostic.operation.lifecycle.terminalState).toBeNull();
     expect(diagnostic.operation.timing.durationMs).toBe(5_000);
+  });
+
+  it("reports a stage a pause left unfinished as paused", () => {
+    const diagnostic = build(
+      operation({
+        state: "cancelled",
+        failure: null,
+        stages: [
+          { id: "authorize_identity", state: "paused" },
+          { id: "configure_environment", state: "skipped" },
+          { id: "verify", state: "skipped" }
+        ]
+      })
+    );
+    expect(diagnostic.operation.stages[0]).toEqual({
+      id: "authorize_identity",
+      state: "paused"
+    });
+    expect(diagnostic.operation.unrecognizedValueCount).toBe(0);
   });
 
   it("reports missing nested control, cleanup, and recovery state without exposing defaults", () => {

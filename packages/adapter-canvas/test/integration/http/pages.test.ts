@@ -17,6 +17,7 @@ import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { CanvasState } from "../../../src/shared.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
 import { pageStateCases } from "../../support/pages/page-state-cases.js";
+import { ENVIRONMENT_PAGE_STATE_ID } from "../../../src/pages/browser-state-ids.js";
 import { readBrowserPageState } from "../../support/pages/browser-state.js";
 import {
   HOSTILE_STATE,
@@ -357,7 +358,7 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(entry.state.activeSubtab).toBe("environments");
   });
 
-  it("serves the AWS credential provider as visible but disabled", async () => {
+  it("serves the AWS credential provider as visible but disabled while the AWS switch is off", async () => {
     resetState({ contextRepo: "octo/app" });
 
     const response = await get("/?page=credentials");
@@ -365,6 +366,38 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(response.body).toContain(
       '<option value="aws" disabled>AWS (coming soon)</option>'
     );
+    expect(
+      readBrowserPageState(response.body, ENVIRONMENT_PAGE_STATE_ID)
+    ).toMatchObject({ awsEnabled: false });
+  });
+
+  it("serves the AWS credential provider as an enabled option with the AWS switch on", async () => {
+    const aws = createTestCanvasServerRuntime({
+      executionOwner: createEnvironmentExecutionOwner(),
+      awsEnabled: true
+    });
+    const awsEntry = await aws.getOrCreateServer("pages-http-aws", "graph");
+    try {
+      Object.assign(awsEntry.state, { contextRepo: "octo/app" });
+      const response = await fetch(awsEntry.baseUrl + "/?page=credentials");
+      const body = await response.text();
+
+      expect(body).toContain('<option value="aws">AWS</option>');
+      expect(body).not.toContain("coming soon");
+      expect(
+        readBrowserPageState(body, ENVIRONMENT_PAGE_STATE_ID)
+      ).toMatchObject({ awsEnabled: true });
+    } finally {
+      await aws.stopServer("pages-http-aws", true);
+    }
+  });
+
+  it("keeps the deploy role out of the AWS credential profile form", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=credentials");
+
+    expect(response.body).not.toContain('id="aws-role-arn"');
     expect(response.body).toContain(
       '<div id="cred-panel-aws" class="rad-section" style="display:none;">'
     );

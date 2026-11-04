@@ -224,10 +224,10 @@ export function createDeployMonitorService(
           r.outputResources.forEach((o) => {
             o.deployStatus = s;
             if (s === "success") {
+              // The platform builds the link; an ID carries what it needs,
+              // such as an AWS resource's region.
               const portalUrlKey = dependencies.optionalString(
-                provider === "azure" ?
-                  o.id || o.type || o.displayType || ""
-                : o.type || o.displayType || o.id || ""
+                o.id || o.type || o.displayType || ""
               );
               o.portalUrl = dependencies.generatePortalUrl(
                 portalUrlKey,

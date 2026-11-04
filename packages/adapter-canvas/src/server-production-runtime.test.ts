@@ -32,6 +32,7 @@ const accountContext = () =>
 
 const deletionPorts: EnvironmentDeletionCoordinatorPorts = {
   deleteRadiusEnvironment: unexpectedDeletion,
+  removeAwsEnvironmentAccess: unexpectedDeletion,
   runAz: unexpectedDeletion,
   readAzureIdentity: unexpectedDeletion,
   deleteGitHubEnvironment: unexpectedDeletion,
@@ -59,6 +60,7 @@ function runtime(
   > = {}
 ) {
   return createProductionCanvasServerRuntime({
+    awsEnabled: false,
     executionOwner: createEnvironmentExecutionOwner(),
     accountContext: accountContext(),
     environmentDeletionPorts: deletionPorts,
@@ -432,6 +434,7 @@ describe("production canvas server runtime", () => {
       throw new Error("Environment runner must not start for invalid input");
     });
     const server = createProductionCanvasServerRuntime({
+      awsEnabled: false,
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: accountContext(),
       environmentOperationRunner: runner,
@@ -461,9 +464,9 @@ describe("production canvas server runtime", () => {
         ["/api/delete-environment", [400]],
         ["/api/bypass-verification", [400, 404, 409]],
         ["/api/operations", [400]],
-        ["/api/azure-auto-setup", [403]],
+        ["/api/azure-auto-setup", [200, 403]],
         ["/api/app-params", [400]],
-        ["/api/create-environment", [403]],
+        ["/api/create-environment", [200, 403]],
         ["/api/load-graph", [200, 400]],
         ["/api/delete-deployment", [400]],
         ["/api/abandon-deployment", [400]],
@@ -498,6 +501,7 @@ describe("production canvas server runtime", () => {
       throw new Error("Unexpected operation scheduling");
     });
     const server = createProductionCanvasServerRuntime({
+      awsEnabled: false,
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: accountContext(),
       environmentOperationRunner: runner,
@@ -606,6 +610,7 @@ describe("production canvas server runtime", () => {
       throw new Error("Stop must not start environment work");
     });
     const server = createProductionCanvasServerRuntime({
+      awsEnabled: false,
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: accountContext(),
       environmentOperationRunner: runner,

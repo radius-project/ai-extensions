@@ -24,6 +24,7 @@ import type {
   EnvironmentFormPreset
 } from "./environments.js";
 import type { RemediationView } from "@radius-project/core/remediations";
+import { isAwsAccountId, isAwsRegion } from "@radius-project/core/platforms";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
@@ -64,6 +65,20 @@ export function payloadRemediation(
     ghCommandPresentation
   );
   return view.runnable ? view : null;
+}
+
+// Checked at the field, before verification runs.
+export function awsProfileFieldError(
+  accountId: string,
+  region: string
+): string {
+  if (!isAwsAccountId(accountId)) {
+    return `Account ID "${accountId}" is not valid. Enter the 12-digit AWS account ID.`;
+  }
+  if (!isAwsRegion(region)) {
+    return `Region "${region}" is not valid. Enter an AWS region such as us-west-2.`;
+  }
+  return "";
 }
 
 export interface CredentialProfile {
@@ -131,6 +146,8 @@ export interface CredentialsPaneOptions {
   /** Nonce for mutating requests; run-command hand-off is rejected without it. */
   mutationNonce: string;
   ghCommandPresentation?: GhCommandPresentation;
+  // The developer-only AWS switch; off, AWS profiles cannot create environments.
+  awsEnabled?: boolean;
   decisions: EnvironmentDecisionPort;
   confirmDialog?: EnvironmentConfirmDialog;
 }
@@ -165,7 +182,8 @@ export function parseCredentialProfiles(payload: unknown): CredentialProfile[] {
 }
 
 export function credentialRowsMarkup(
-  profiles: readonly CredentialProfile[]
+  profiles: readonly CredentialProfile[],
+  awsEnabled: boolean
 ): string {
   if (profiles.length === 0) {
     return '<tr><td class="rad-table__env">No credential profiles created yet.</td><td></td><td></td><td class="rad-table__actions"></td></tr>';
@@ -181,7 +199,10 @@ export function credentialRowsMarkup(
         )}</td>` +
         `<td>${environmentStatusMarkup(profile.status)}</td>` +
         '<td class="rad-table__actions">' +
-        (profile.provider !== "azure" ?
+        ((
+          profile.provider !== "azure" &&
+          (profile.provider !== "aws" || !awsEnabled)
+        ) ?
           `<button class="rad-btn rad-btn--neutral" style="margin:0;" disabled title="${profile.provider === "aws" ? "AWS environments are not yet supported" : "This credential provider is not supported"}">Create Env</button>`
         : `<button class="rad-btn rad-btn--neutral js-cred-createenv" data-name="${name}" style="margin:0;">Create Env</button>`) +
         `<button class="rad-btn rad-btn--danger-outline js-cred-delete" data-name="${name}" style="margin:0;">Delete Profile</button>` +
@@ -400,7 +421,6 @@ export function initializeCredentialsPane(
   const azSubId = context.dom.inputById("az-sub-id");
   const awsAccountId = context.dom.inputById("aws-account-id");
   const awsRegion = context.dom.inputById("aws-region");
-  const awsRoleArn = context.dom.inputById("aws-role-arn");
   const credVerifyStatus = context.dom.byId("cred-verify-status");
   const credVerifyHint = context.dom.byId("cred-verify-hint");
   const saveCredBtn = context.dom.inputById("save-cred-btn");
@@ -434,7 +454,6 @@ export function initializeCredentialsPane(
     !azSubId ||
     !awsAccountId ||
     !awsRegion ||
-    !awsRoleArn ||
     !credVerifyStatus ||
     !credVerifyHint ||
     !saveCredBtn ||
@@ -595,7 +614,7 @@ export function initializeCredentialsPane(
     const request = ++tableRequest;
     release(rows);
     if (!options.repo) {
-      credTableBody.innerHTML = credentialRowsMarkup([]);
+      credTableBody.innerHTML = credentialRowsMarkup([], false);
       return;
     }
     credTableBody.innerHTML =
@@ -612,7 +631,10 @@ export function initializeCredentialsPane(
         (payload) => {
           if (!active || request !== tableRequest) return;
           const profiles = parseCredentialProfiles(payload);
-          credTableBody.innerHTML = credentialRowsMarkup(profiles);
+          credTableBody.innerHTML = credentialRowsMarkup(
+            profiles,
+            options.awsEnabled === true
+          );
           wireRows();
         },
         (error: unknown) => {
@@ -680,7 +702,6 @@ export function initializeCredentialsPane(
     azSubId.value = "";
     awsAccountId.value = "";
     awsRegion.value = "";
-    awsRoleArn.value = "";
     resetVerification();
     credPackagesVerified = false;
     updateSaveState();
@@ -897,6 +918,11 @@ export function initializeCredentialsPane(
       verifyError("Please enter a Profile Name before verifying.");
       return;
     }
+    const fieldError = awsProfileFieldError(accountId, region);
+    if (fieldError !== "") {
+      verifyError(fieldError);
+      return;
+    }
     const token = formToken;
     btnVerifyAws.disabled = true;
     btnVerifyAws.textContent = "⏳ Verifying…";
@@ -966,7 +992,6 @@ export function initializeCredentialsPane(
     } else {
       profile.accountId = credVerified.accountId;
       profile.region = credVerified.region;
-      profile.roleArn = awsRoleArn.value.trim();
     }
     const token = formToken;
     const wizard = formContext === "wizard";

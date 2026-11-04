@@ -21,15 +21,40 @@ export interface SessionLogOptions {
   ephemeral?: boolean;
 }
 
+export interface SessionPluginsPort {
+  list(): Promise<{
+    plugins: Array<{
+      name: string;
+      marketplace: string;
+      version?: string;
+      enabled: boolean;
+      installedFrom?: string;
+      source?: string;
+      managed?: boolean;
+    }>;
+  }>;
+  update(input: { name: string }): Promise<{
+    previousVersion?: string;
+    newVersion?: string;
+    skillsInstalled: number;
+  }>;
+}
+
 // The slice of the SDK's joined-session object the runtime factories need.
 // Intentionally structural/loose (rather than importing an SDK type) so a test
 // fake only needs to implement the members actually used.
 export interface SessionPort {
   workspacePath?: string;
   cwd?: string;
+  capabilities?: { ui?: { elicitation?: boolean } };
+  ui?: {
+    select(message: string, options: string[]): Promise<string | null>;
+    confirm?(message: string): Promise<boolean>;
+  };
   log?(message: string, options?: SessionLogOptions): void | Promise<void>;
   send(message: unknown): unknown;
   rpc: {
+    plugins?: SessionPluginsPort;
     canvas: {
       open(options: CanvasRpcOpenOptions): Promise<unknown>;
     };

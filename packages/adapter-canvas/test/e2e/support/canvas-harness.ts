@@ -199,9 +199,11 @@ export interface EnvironmentDeletionFailure {
 }
 
 // The terminal a driven deletion should reach: a clean success that walks every
-// stage to succeeded, or a partial failure that fails the first stage.
+// stage to succeeded, a success that records one warning step, or a partial
+// failure that fails the first stage.
 export type EnvironmentDeletionOutcome =
   | { state: "succeeded" }
+  | { state: "succeeded_with_warnings"; warning: string }
   | { state: "failed_partial"; failure: EnvironmentDeletionFailure };
 
 // Hands the test a release it can await: it resolves only once the runner has
@@ -438,6 +440,8 @@ interface CanvasHarnessOptions {
   initialPage?: string;
   /** Defaults to "fake", so every existing suite is unaffected. */
   mode?: CanvasHarnessMode;
+  /** The developer-only AWS switch. Off by default, as users run. */
+  awsEnabled?: boolean;
   /**
    * Cloud mode only: an absolute path to a real clone to run against, disjoint
    * from the checkout running the suite. The caller owns its lifecycle; the
@@ -1456,6 +1460,7 @@ export class CanvasHarness {
         ...createTestCanvasServerRuntime({
           executionOwner: createEnvironmentExecutionOwner(),
           accountContext,
+          awsEnabled: options.awsEnabled ?? false,
           get environmentOperationRunner() {
             return environmentOperationRunner;
           }
@@ -1725,6 +1730,44 @@ export class CanvasHarness {
     return restored.operationId;
   }
 
+  /**
+   * A live AWS setup waiting for a deploy identity lock another run has held
+   * long enough for Remove lock to be offered.
+   */
+  async seedAwsLockWait(lock: {
+    policyArn: string;
+    policyId: string;
+  }): Promise<string> {
+    const operationModule: OperationsModule =
+      await import("../../../src/operations.js");
+    const operation = operationModule.createOperation({
+      operationId: "op_chromium_aws_lock_wait",
+      provider: "aws",
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      stages: operationModule.buildStages({ includeIdentity: true }),
+      journey: { origin: "environments" }
+    });
+    operation.context = { githubLogin: "repo-user" };
+    operationModule.enterStage(
+      operation,
+      operationModule.STAGE_AUTHORIZE_IDENTITY
+    );
+    operationModule.setContext(operation, {
+      awsLockWait: {
+        ...lock,
+        holder: "The setup of environment prod in fixture/app",
+        holderOperationId: "op_chromium_aws_lock_holder",
+        since: "2026-10-30T11:00:00Z",
+        removable: true
+      }
+    });
+    operationModule.operations.put(operation);
+    await operationModule.operations.persist();
+    this.seededOperationIds.add(operation.operationId);
+    return operation.operationId;
+  }
+
   async operationRecord(operationId: string): Promise<Record<string, unknown>> {
     const operationModule: OperationsModule =
       await import("../../../src/operations.js");
@@ -1880,10 +1923,16 @@ export class CanvasHarness {
         releaseRunner = resolve;
         signalArrived?.();
       });
-      if (outcome.state === "succeeded") {
+      if (outcome.state !== "failed_partial") {
         for (const stage of op.stages) {
           ops.enterStage(op, stage.id);
           ops.setStageState(op, stage.id, "succeeded");
+        }
+        if (outcome.state === "succeeded_with_warnings") {
+          ops.addStep(op, {
+            label: outcome.warning,
+            warning: { code: "harness-warning", message: outcome.warning }
+          });
         }
         ops.finishSucceeded(op, "succeeded");
       } else {
@@ -2001,11 +2050,17 @@ export class CanvasHarness {
   }
 }
 
-export const test = base.extend<{ canvas: CanvasHarness }>({
-  canvas: async ({ page }, use, testInfo) => {
+export const test = base.extend<{
+  awsEnabled: boolean;
+  canvas: CanvasHarness;
+}>({
+  // Opt in per describe block with `test.use({ awsEnabled: true })`.
+  awsEnabled: [false, { option: true }],
+  canvas: async ({ page, awsEnabled }, use, testInfo) => {
     const canvas = await CanvasHarness.create({
       page,
-      title: testInfo.title
+      title: testInfo.title,
+      awsEnabled
     });
     try {
       await use(canvas);

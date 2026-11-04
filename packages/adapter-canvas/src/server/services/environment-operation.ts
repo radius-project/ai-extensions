@@ -1,4 +1,7 @@
 import {
+  assertSetupExecutionActive,
+  isAwsRoleName,
+  parseAwsRoleArn,
   runSetupCoordinator,
   type SetupCoordinatorPorts
 } from "@radius-project/core";
@@ -53,9 +56,11 @@ export interface EnvironmentOperationRequest {
 }
 
 export interface EnvironmentOperationWorkflowDependencies {
+  isStopped(): boolean;
   preflightRepoAdmin(
     repo: string,
-    executor: SelectedGhExecutor
+    executor: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<string>;
   guardStopBoundary(
     operation: EnvironmentOperationRecord,
@@ -110,7 +115,22 @@ export interface EnvironmentOperationWorkflowDependencies {
   ): Promise<void>;
   getOperation(operationId: string): EnvironmentOperationRecord | undefined;
   setupServices: SetupServices;
-  instanceId: string;
+  // AWS only: prepare the deploy identity under `Authorize deploy identity`
+  // and answer the role ARN the GitHub environment records.
+  setupAwsDeployIdentity(
+    operation: EnvironmentOperationRecord,
+    request: Record<string, unknown>,
+    executor: SelectedGhExecutor
+  ): Promise<
+    | { ok: true; roleArn: string; subjects: readonly string[] }
+    | { ok: false; status: number; error: string; code: string }
+    | { ok: false; stopped: true }
+  >;
+  // AWS only: release the deploy identity lock setup took. Never throws.
+  releaseAwsDeployIdentity(
+    operation: EnvironmentOperationRecord
+  ): Promise<void>;
+  instanceId?: string;
   now(): number;
 }
 
@@ -129,6 +149,7 @@ async function failResolution(
   dependencies: EnvironmentOperationWorkflowDependencies,
   error: unknown
 ): Promise<{ shouldMonitor: false }> {
+  assertSetupExecutionActive(dependencies.isStopped);
   const unresolvedMutation = unresolvedProviderMutations(operation)[0];
   if (unresolvedMutation) {
     return recordProviderReconciliationFailure(
@@ -174,6 +195,40 @@ async function failResolution(
   return { shouldMonitor: false };
 }
 
+// Why an AWS setup cannot reuse this GitHub environment, or null when it can.
+// The deploy workflow checks Azure first, so an AWS setup on top of Azure
+// variables would keep deploying to Azure. Fails closed when the variables
+// cannot be read.
+export async function awsEnvironmentConflict(
+  repo: string,
+  environment: string,
+  executor: SelectedGhExecutor,
+  dependencies: Pick<EnvironmentOperationWorkflowDependencies, "readGitHubJson">
+): Promise<{ status: number; message: string; code: string } | null> {
+  const result = await dependencies.readGitHubJson(
+    `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`,
+    executor
+  );
+  if (!result.ok) {
+    return {
+      status: 502,
+      message: `Radius could not read the variables of GitHub environment "${environment}" to confirm it is not set up for Azure. Nothing was changed in AWS. Retry setup.`,
+      code: "github-environment-variables-unreadable"
+    };
+  }
+  const variables = record(result.json).variables;
+  const names =
+    Array.isArray(variables) ?
+      variables.map((variable) => record(variable).name)
+    : [];
+  if (!names.includes("AZURE_CLIENT_ID")) return null;
+  return {
+    status: 409,
+    message: `GitHub environment "${environment}" is already set up for Azure. Radius did not change it or anything in AWS. Choose a different environment name, or delete the Azure environment first.`,
+    code: "github-environment-provider-conflict"
+  };
+}
+
 export function createSetupCoordinatorPorts(
   operation: EnvironmentOperationRecord,
   executor: SelectedGhExecutor,
@@ -187,7 +242,8 @@ export function createSetupCoordinatorPorts(
     preflightRepository: async () => {
       const message = await dependencies.preflightRepoAdmin(
         operation.repo,
-        executor
+        executor,
+        () => assertSetupExecutionActive(dependencies.isStopped)
       );
       if (!message) return true;
       preflightFailure = {
@@ -221,6 +277,7 @@ export function createSetupCoordinatorPorts(
         runGh: (args) => executor.run(args),
         now: dependencies.now,
         mutationRecovery: {
+          isStopped: dependencies.isStopped,
           operation,
           persist: dependencies.persistProviderMutation
         },
@@ -266,12 +323,11 @@ export function createSetupCoordinatorPorts(
         operation,
         executor,
         dependencies,
-        failure.kind === "environment-resolution" ?
-          failure.error
-        : preflightFailure
+        "error" in failure ? failure.error : preflightFailure
       );
     },
     reconcileFailure: (mutationId, error) => {
+      assertSetupExecutionActive(dependencies.isStopped);
       const live = unresolvedProviderMutations(operation).find(
         (mutation) => mutation.mutationId === mutationId
       );
@@ -289,6 +345,53 @@ export function createSetupCoordinatorPorts(
           copySetupRequest(request)
         )
       ),
+    authorizeAws: async ({ reused, ...request }) => {
+      if (
+        !isAwsRoleName(String(request.roleName || "")) &&
+        parseAwsRoleArn(String(request.existingRoleArn || "")) === null
+      ) {
+        return {
+          kind: "failed",
+          error: {
+            status: 400,
+            code: "invalid-aws-operation-input",
+            message:
+              "AWS setup requires a valid IAM role name or an existing role ARN. Start a new setup with roleName or existingRoleArn."
+          }
+        };
+      }
+      const conflict =
+        reused ?
+          await awsEnvironmentConflict(
+            operation.repo,
+            request.environment,
+            executor,
+            dependencies
+          )
+        : null;
+      if (conflict) return { kind: "failed", error: conflict };
+      const result = await dependencies.setupAwsDeployIdentity(
+        operation,
+        request,
+        executor
+      );
+      if ("stopped" in result) return { kind: "stopped" };
+      return result.ok ?
+          {
+            kind: "completed",
+            roleArn: result.roleArn,
+            trustSubjects: result.subjects
+          }
+        : {
+            kind: "failed",
+            error: {
+              status: result.status,
+              message: result.error,
+              code: result.code
+            }
+          };
+    },
+    releaseAws: () => dependencies.releaseAwsDeployIdentity(operation),
     configureEnvironment: async (request) =>
       setupStageResult(
         await dependencies.setupServices.configureEnvironment(

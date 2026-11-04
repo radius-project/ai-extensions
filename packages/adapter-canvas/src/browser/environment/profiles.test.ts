@@ -15,6 +15,7 @@ import {
   parseGithubIdentity,
   parseGithubReadiness,
   profileDetailSpecs,
+  profileDiscoveryScope,
   providerLabel
 } from "./profiles.js";
 import type {
@@ -34,6 +35,7 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import type { FakeBrowser } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
+import type { DiscoverResourcesOptions } from "./discovery.js";
 import { COMMAND_RUN_LABEL } from "../command-action.js";
 
 const HOSTILE = "<img src=x onerror=alert(1)>'\"&";
@@ -59,6 +61,7 @@ interface ProfilesPage {
   providerInput: ReturnType<typeof createFakeInput>;
   identityAzureEl: ReturnType<typeof createFakeElement>;
   identityAwsEl: ReturnType<typeof createFakeElement>;
+  identityDescEl: ReturnType<typeof createFakeElement>;
   panelAzureEl: ReturnType<typeof createFakeElement>;
   panelAwsEl: ReturnType<typeof createFakeElement>;
   deployBtn: ReturnType<typeof createFakeInput>;
@@ -110,6 +113,7 @@ function renderProfilesPage(
   const providerInput = createFakeInput("env-selected-provider");
   const identityAzureEl = createFakeElement("env-identity-azure");
   const identityAwsEl = createFakeElement("env-identity-aws");
+  const identityDescEl = createFakeElement("env-identity-desc");
   const panelAzureEl = createFakeElement("panel-azure");
   const panelAwsEl = createFakeElement("panel-aws");
   const deployBtn = createFakeInput("deploy-btn");
@@ -140,6 +144,7 @@ function renderProfilesPage(
     providerInput,
     identityAzureEl,
     identityAwsEl,
+    identityDescEl,
     panelAzureEl,
     panelAwsEl,
     deployBtn,
@@ -173,6 +178,7 @@ function renderProfilesPage(
     providerInput,
     identityAzureEl,
     identityAwsEl,
+    identityDescEl,
     panelAzureEl,
     panelAwsEl,
     deployBtn,
@@ -197,6 +203,7 @@ function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
     provider: string;
     subscriptionId: string;
     tenantId: string;
+    options?: DiscoverResourcesOptions;
   }>;
 } {
   const profileChanges: Array<CredentialProfile | null> = [];
@@ -204,6 +211,7 @@ function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
     provider: string;
     subscriptionId: string;
     tenantId: string;
+    options?: DiscoverResourcesOptions;
   }> = [];
   const deps: CredentialProfilesPanelDeps = {
     repo: "octo/cat",
@@ -212,8 +220,8 @@ function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
     environmentName: () => "dev",
     onProfileChange: (profile) => profileChanges.push(profile),
     onReadinessChange: () => {},
-    discoverResources: (provider, subscriptionId, tenantId) =>
-      discoverCalls.push({ provider, subscriptionId, tenantId }),
+    discoverResources: (provider, subscriptionId, tenantId, options) =>
+      discoverCalls.push({ provider, subscriptionId, tenantId, options }),
     ...overrides
   };
   return { deps, profileChanges, discoverCalls };
@@ -488,6 +496,33 @@ describe("parseGithubReadiness", () => {
       parse({ id: "github-account-scopes", params: { login: "octocat" } })
     ).toBeNull();
   });
+});
+
+describe("profileDiscoveryScope", () => {
+  it("scopes Azure discovery by subscription and tenant", () => {
+    expect(
+      profileDiscoveryScope(
+        { name: "a", provider: "azure", subscriptionId: "s", tenantId: "t" },
+        "azure"
+      )
+    ).toEqual(["s", "t"]);
+  });
+
+  it("scopes AWS discovery by account and region", () => {
+    expect(profileDiscoveryScope(AWS_PROFILE, "aws")).toEqual([
+      "123456789012",
+      "us-east-1"
+    ]);
+  });
+
+  it.each(["azure", "aws"] as const)(
+    "falls back to empty %s scope values a profile does not carry",
+    (provider) => {
+      expect(
+        profileDiscoveryScope({ name: "bare", provider }, provider)
+      ).toEqual(["", ""]);
+    }
+  );
 });
 
 describe("findProfile", () => {
@@ -1042,6 +1077,37 @@ describe("loadProfiles", () => {
     expect(page.deployBtn.disabled).toBe(false);
     expect(page.identityAzureEl.style.display).toBe("");
     expect(page.identityAwsEl.style.display).toBe("none");
+    expect(page.identityDescEl.textContent).toBe(
+      "The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets."
+    );
+  });
+
+  it("shows the IAM role identity and discovers in the account and region for an AWS profile", async () => {
+    const page = renderProfilesPage();
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
+      () => profilesResponse([AWS_PROFILE])
+    );
+    const { deps, discoverCalls } = makeDeps();
+    const handle = initializeCredentialProfilesPanel(
+      page.browser.context,
+      deps
+    );
+
+    await handle?.loadProfiles("aws-prod");
+
+    expect(page.identityAzureEl.style.display).toBe("none");
+    expect(page.identityAwsEl.style.display).toBe("");
+    expect(page.identityDescEl.textContent).toBe(
+      "The IAM role GitHub Actions assumes to deploy, over OIDC, with no stored secrets."
+    );
+    // The harness records discovery's two scope arguments under their Azure
+    // names; for AWS they carry the account and region.
+    expect(discoverCalls.at(-1)).toEqual({
+      provider: "aws",
+      subscriptionId: "123456789012",
+      tenantId: "us-east-1"
+    });
   });
 
   it("omits disabled and unknown providers and refuses to preselect them", async () => {
@@ -1379,6 +1445,8 @@ describe("profile selection", () => {
     expect(discoverCalls).toEqual([
       { provider: "azure", subscriptionId: "sub-1", tenantId: "tenant-1" }
     ]);
+    // Azure Refresh doesn't hold the selection.
+    expect(discoverCalls[0].options).toBeUndefined();
 
     page.awsRefreshBtn.dispatch("click");
     // Selected profile is azure, so the AWS refresh button re-discovers azure too:
@@ -1397,8 +1465,15 @@ describe("profile selection", () => {
     discoverCalls.splice(0);
 
     page.awsRefreshBtn.dispatch("click");
+    // AWS discovery is scoped by the profile's account and region, carried in
+    // the same two positions Azure uses for its subscription and tenant.
     expect(discoverCalls).toEqual([
-      { provider: "aws", subscriptionId: "", tenantId: "" }
+      {
+        provider: "aws",
+        subscriptionId: "123456789012",
+        tenantId: "us-east-1",
+        options: { keepSelection: true }
+      }
     ]);
   });
 

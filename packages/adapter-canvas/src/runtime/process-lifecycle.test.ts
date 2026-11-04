@@ -19,7 +19,7 @@ function createPorts(
   } = {
     extension: {
       isShutDown: () => false,
-      shutdown: vi.fn(async () => {})
+      shutdown: vi.fn(async () => ({ exitCode: 0 }))
     },
     signals: new Map(),
     uncaught: null,
@@ -46,7 +46,7 @@ function createPorts(
 
 describe("configureProcessLifecycle", () => {
   it("registers supported signals and shuts down only once", async () => {
-    const shutdown = vi.fn(async () => {});
+    const shutdown = vi.fn(async () => ({ exitCode: 7 }));
     const ports = createPorts({
       extension: { isShutDown: () => false, shutdown }
     });
@@ -58,14 +58,14 @@ describe("configureProcessLifecycle", () => {
     await lifecycle.gracefulShutdown("manual");
 
     expect(shutdown).toHaveBeenCalledExactlyOnceWith("SIGTERM");
-    expect(ports.exit).toHaveBeenCalledExactlyOnceWith(0);
+    expect(ports.exit).toHaveBeenCalledExactlyOnceWith(7);
   });
 
   it("ignores unsupported signal registration and reports shutdown state", () => {
     const ports = createPorts({
       extension: {
         isShutDown: () => true,
-        shutdown: vi.fn(async () => {})
+        shutdown: vi.fn(async () => ({ exitCode: 0 }))
       },
       onSignal: (signal, handler) => {
         if (signal === "SIGINT") throw new Error("unsupported");
@@ -78,6 +78,35 @@ describe("configureProcessLifecycle", () => {
     expect([...ports.signals.keys()]).toEqual(["SIGTERM", "SIGHUP"]);
     expect(lifecycle.isShuttingDown()).toBe(true);
   });
+
+  it.each([
+    ["error", new Error("shutdown broke")],
+    [
+      "stackless error",
+      Object.assign(new Error("shutdown broke"), { stack: "" })
+    ],
+    ["string", "shutdown broke"]
+  ])(
+    "logs a %s shutdown failure and exits unsuccessfully",
+    async (_name, error) => {
+      const ports = createPorts({
+        extension: {
+          isShutDown: () => false,
+          shutdown: vi.fn(async () => {
+            throw error;
+          })
+        }
+      });
+      const lifecycle = configureProcessLifecycle(ports);
+
+      await lifecycle.gracefulShutdown("manual");
+
+      expect(ports.log).toHaveBeenCalledWith(
+        expect.stringContaining("shutdown broke")
+      );
+      expect(ports.exit).toHaveBeenCalledExactlyOnceWith(1);
+    }
+  );
 
   it("logs error, stackless error, and non-error failures without crashing", () => {
     const log = vi.fn();

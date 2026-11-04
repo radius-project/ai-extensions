@@ -51,6 +51,7 @@ const APP_NAME = "radius-deploy-fixture-owner-fixture-repo";
 const ENVIRONMENT_PATH = `repos/${REPOSITORY}/environments/${ENVIRONMENT}`;
 const PROBE_NAME = "radtest-orphan?probe";
 const PROBE_DEPLOYMENTS_PATH = `repos/${REPOSITORY}/deployments?environment=${encodeURIComponent(PROBE_NAME)}&per_page=100`;
+const ENVIRONMENTS_LIST_PATH = `repos/${REPOSITORY}/environments?per_page=100`;
 const COMMITS_PATH = `repos/${REPOSITORY}/commits/${BRANCH}`;
 const MATCHING_REFS_PATH = `repos/${REPOSITORY}/git/matching-refs/heads/radius/setup-`;
 const PULLS_PATH = `repos/${REPOSITORY}/pulls?state=open&per_page=100`;
@@ -80,6 +81,14 @@ const DELETE_RUN_LIST: readonly string[] = [
 
 const pullPages = (...pages: readonly unknown[][]): string =>
   JSON.stringify(pages);
+
+const environmentPages = (names: readonly string[]): string =>
+  JSON.stringify([
+    {
+      total_count: names.length,
+      environments: names.map((name) => ({ name }))
+    }
+  ]);
 
 const NOT_FOUND = {
   code: 1,
@@ -263,6 +272,11 @@ function baselineStubs(): FakeCommandStub[] {
     { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" } },
     { tool: "gh", match: ["api", ENVIRONMENT_PATH], respond: NOT_FOUND },
+    {
+      tool: "gh",
+      match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
+      respond: { stdout: environmentPages([]) }
+    },
     {
       tool: "gh-package",
       match: ["api", "users/fixture-owner", "--jq", ".type"],
@@ -1019,6 +1033,63 @@ describe("createCloudFixture", () => {
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         /service principal sp-9 for "radius-deploy-fixture-owner-fixture-repo"/
+      );
+    });
+
+    // The run's own environment name is unique, so only the full listing can
+    // see an environment an earlier run leaked. The wizard refuses to create an
+    // environment in a namespace a listed one owns, which hung run 39901220095
+    // for the whole test timeout.
+    it("reports a GitHub environment an earlier run leaked", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
+          respond: {
+            stdout: environmentPages([
+              "radtest-ecdb9f66c276",
+              "production",
+              ENVIRONMENT
+            ])
+          }
+        }
+      ]);
+
+      const error = await captureError(fixture.assertCleanSlate());
+      expect(error.message).toMatch(
+        /GitHub environment "radtest-ecdb9f66c276" in fixture-owner\/fixture-repo from an earlier run/
+      );
+      expect(error.message).not.toContain('"production"');
+      expect(error.message).not.toContain(
+        `"${ENVIRONMENT}" in fixture-owner/fixture-repo from an earlier run`
+      );
+    });
+
+    it("fails closed when the GitHub environment listing fails", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
+          respond: { code: 1, stderr: "gh: Forbidden (HTTP 403)" }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /Listing GitHub environments in fixture-owner\/fixture-repo/
+      );
+    });
+
+    it("fails closed when the GitHub environment listing is empty", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
+          respond: { stdout: "" }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        "returned an empty response instead of JSON"
       );
     });
 

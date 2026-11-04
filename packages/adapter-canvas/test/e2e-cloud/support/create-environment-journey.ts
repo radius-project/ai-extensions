@@ -642,6 +642,36 @@ export function readOperationId(payload: unknown): string {
 }
 
 /**
+ * Waits for the request a click should send, or fails at once when the page
+ * refuses the click instead.
+ *
+ * The wizard checks the form before it sends anything. A refusal such as "the
+ * namespace already belongs to environment X" shows an error and sends no
+ * request, so a plain wait for the response hangs until the test timeout. That
+ * refusal is terminal: nothing changes it while the test waits. `refusal`
+ * resolves with the error text the page shows. When it cannot be read (for
+ * example, the page closed), only the response decides the result.
+ */
+export async function awaitRequestOrRefusal<T>(
+  response: Promise<T>,
+  refusal: Promise<string>,
+  action: string
+): Promise<T> {
+  const outcome = await Promise.race([
+    response.then((value) => ({ kind: "response" as const, value })),
+    refusal.then(
+      (message) => ({ kind: "refusal" as const, message }),
+      () => new Promise<never>(() => undefined)
+    )
+  ]);
+  if (outcome.kind === "refusal")
+    throw new Error(
+      `${action} was refused before any request was sent: ${outcome.message.trim() || "the page showed an empty error."}`
+    );
+  return outcome.value;
+}
+
+/**
  * Narrows one `/api/operations/{id}` poll.
  *
  * An unreadable payload fails immediately. Treating it as a non-terminal state

@@ -20,29 +20,38 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 } from "@radius-project/core";
 import { VERIFY_OPERATION_INPUT } from "./verification-run-identity.js";
 import type { DeployWorkflowOptions } from "@radius-project/core";
+
 import { parse as parseYaml } from "yaml";
 import {
   fetchFileFromRepoResult,
   fetchFileFromRepo,
   getDefaultBranch,
   getBranchHeadSha,
-  commitFileToRepo
+  commitFileToRepo,
+  cliExec
 } from "./gh.js";
 
 // Removed from target repos so it cannot double-trigger beside the dispatcher.
 export const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
+
+export interface ProviderWorkflowOptions {
+  // Commit the AWS provider workflows and keep the dispatchers' `aws:` jobs.
+  // Off unless the developer-only AWS switch is on.
+  includeAws?: boolean;
+}
 
 interface ManagedEnvironment {
   name: string;
   provider?: string;
 }
 
-interface SyncWorkflowOptions {
+interface SyncWorkflowOptions extends ProviderWorkflowOptions {
   log?: (message: string) => void;
   only?: string[];
   workingBranch?: string;
@@ -117,8 +126,8 @@ function own(mapping: Record<string, unknown>, key: string): boolean {
 }
 
 function containsAwsWorkflowReference(value: unknown): boolean {
-  return [DEPLOY_AWS_FILE, DELETE_AWS_FILE].some((fileName) =>
-    containsWorkflowReference(value, fileName)
+  return [DEPLOY_AWS_FILE, DELETE_AWS_FILE, DELETE_ENV_AWS_FILE].some(
+    (fileName) => containsWorkflowReference(value, fileName)
   );
 }
 
@@ -138,7 +147,7 @@ function assertTrustedGeneratedWorkflow(
   workflow: string,
   artifact: GeneratedWorkflowArtifact,
   context: string,
-  expectedProviderWorkflow?: string
+  expectedProviderWorkflows: readonly string[] = []
 ): void {
   let parsed: unknown;
   try {
@@ -216,18 +225,18 @@ function assertTrustedGeneratedWorkflow(
       fail("workflow dispatch input `environment` is required.");
     }
     if (
-      Object.keys(jobs).some((job) => job.toLowerCase() === "aws") ||
-      containsAwsWorkflowReference(jobs)
+      !expectedProviderWorkflows.some((file) => AWS_WORKFLOW_FILES.has(file)) &&
+      (Object.keys(jobs).some((job) => job.toLowerCase() === "aws") ||
+        containsAwsWorkflowReference(jobs))
     ) {
       fail("the dispatcher must not contain an AWS job or workflow reference.");
     }
-    if (
-      !expectedProviderWorkflow ||
-      !containsWorkflowReference(jobs, expectedProviderWorkflow)
-    ) {
-      fail(
-        `the dispatcher must invoke \`./.github/workflows/${expectedProviderWorkflow || "<provider>"}\`.`
-      );
+    for (const providerWorkflow of expectedProviderWorkflows) {
+      if (!containsWorkflowReference(jobs, providerWorkflow)) {
+        fail(
+          `the dispatcher must invoke \`./.github/workflows/${providerWorkflow}\`.`
+        );
+      }
     }
     return;
   }
@@ -306,9 +315,37 @@ export {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 };
+
+const AWS_WORKFLOW_FILES: ReadonlySet<string> = new Set([
+  DEPLOY_AWS_FILE,
+  DELETE_AWS_FILE,
+  DELETE_ENV_AWS_FILE
+]);
+
+// The workflow files a deploy, application delete, or environment delete needs
+// on the branch it runs from. The AWS provider files are only included while
+// the developer-only AWS switch is on.
+export function deployWorkflowFiles(includeAws: boolean): string[] {
+  return includeAws ?
+      [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE]
+    : [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
+}
+
+export function deleteApplicationWorkflowFiles(includeAws: boolean): string[] {
+  return includeAws ?
+      [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE]
+    : [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
+}
+
+export function deleteEnvironmentWorkflowFiles(includeAws: boolean): string[] {
+  return includeAws ?
+      [DELETE_ENV_DISPATCHER_FILE, DELETE_ENV_AZURE_FILE, DELETE_ENV_AWS_FILE]
+    : [DELETE_ENV_DISPATCHER_FILE, DELETE_ENV_AZURE_FILE];
+}
 
 /**
  * Fetch a workflow template from radius-project/ai-extensions `.github/extension/` at
@@ -522,29 +559,29 @@ ${indent}    echo "✅ GHCR accepted a non-mutating upload-session probe."`;
 export async function generateDeployWorkflow(
   env: string,
   appFile: string,
-  options: DeployWorkflowOptions = {}
+  options: DeployWorkflowOptions & ProviderWorkflowOptions = {}
 ): Promise<Record<string, string>> {
-  // Only the dispatcher + the Azure provider workflow are fetched and committed;
-  // the AWS provider workflow is intentionally never fetched or committed. The
-  // dispatcher's `aws:` job (which `uses:` the absent AWS provider file) is
-  // stripped below so GitHub can still parse the committed workflow.
-  const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
+  const { includeAws = false, ...deployOptions } = options;
+  // The dispatcher picks the provider at run time from the environment's
+  // variables, and GitHub rejects it unless every workflow it `uses:` exists.
+  // Without the AWS switch only the Azure provider is fetched and committed,
+  // and the dispatcher's `aws:` job is stripped below.
+  const files = deployWorkflowFiles(includeAws);
   const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
   const templates: Record<string, string> = {};
   files.forEach((f, i) => {
     templates[f] = bodies[i];
   });
   // Satisfy core's "all files required" contract without a network lookup for
-  // the AWS template; the generated AWS output is dropped below and never
-  // committed.
-  templates[DEPLOY_AWS_FILE] = templates[DEPLOY_AZURE_FILE];
+  // the AWS template; the generated AWS output is dropped below.
+  if (!includeAws) templates[DEPLOY_AWS_FILE] = templates[DEPLOY_AZURE_FILE];
   const generated = coreGenerateDeployWorkflow(
     env,
     appFile,
     templates,
-    options
+    deployOptions
   );
-  delete generated[DEPLOY_AWS_FILE];
+  if (!includeAws) delete generated[DEPLOY_AWS_FILE];
   // Creating an environment should ONLY run the verify-credentials workflow.
   // The upstream dispatcher auto-triggers the deploy via a `workflow_run`
   // trigger once verify completes; strip it so `run-rad-commands` runs only on
@@ -553,16 +590,20 @@ export async function generateDeployWorkflow(
     generated[DEPLOY_DISPATCHER_FILE] = stripWorkflowRunTrigger(
       generated[DEPLOY_DISPATCHER_FILE]
     );
-    generated[DEPLOY_DISPATCHER_FILE] = stripAwsDispatcherJob(
-      generated[DEPLOY_DISPATCHER_FILE]
-    );
+    if (!includeAws) {
+      generated[DEPLOY_DISPATCHER_FILE] = stripAwsDispatcherJob(
+        generated[DEPLOY_DISPATCHER_FILE]
+      );
+    }
   }
   for (const [file, workflow] of Object.entries(generated)) {
     assertTrustedGeneratedWorkflow(
       workflow,
       file === DEPLOY_DISPATCHER_FILE ? "dispatcher" : "provider",
       `deploy workflow "${file}"`,
-      file === DEPLOY_DISPATCHER_FILE ? DEPLOY_AZURE_FILE : undefined
+      file === DEPLOY_DISPATCHER_FILE ?
+        deployWorkflowFiles(includeAws).slice(1)
+      : []
     );
   }
   return generated;
@@ -571,8 +612,8 @@ export async function generateDeployWorkflow(
 /**
  * Generate the delete workflow files. Returns an object mapping bare workflow
  * filename -> YAML content; the caller commits each under `.github/workflows/`.
- * As with deploy, the AWS provider workflow is never committed and the
- * application dispatcher's `aws:` job is stripped.
+ * As with deploy, the AWS provider workflows are only committed, and the
+ * dispatchers' `aws:` jobs only kept, while the AWS switch is on.
  *
  * Application and environment delete templates are all fetched from
  * radius-project/ai-extensions at DELETE_RADIUS_REF. This keeps one canonical
@@ -580,14 +621,13 @@ export async function generateDeployWorkflow(
  * with the source commit pinned into first-party composite-action references.
  */
 export async function generateDeleteWorkflow(
-  env: string
+  env: string,
+  options: ProviderWorkflowOptions = {}
 ): Promise<Record<string, string>> {
-  const fetched = [
-    DELETE_APP_DISPATCHER_FILE,
-    DELETE_AZURE_FILE,
-    DELETE_ENV_DISPATCHER_FILE,
-    DELETE_ENV_AZURE_FILE
-  ];
+  const includeAws = options.includeAws ?? false;
+  const applicationFiles = deleteApplicationWorkflowFiles(includeAws);
+  const environmentFiles = deleteEnvironmentWorkflowFiles(includeAws);
+  const fetched = [...applicationFiles, ...environmentFiles];
   const fetchedBodies = await Promise.all(
     fetched.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
   );
@@ -595,18 +635,20 @@ export async function generateDeleteWorkflow(
   fetched.forEach((f, i) => {
     templates[f] = fetchedBodies[i];
   });
-  templates[DELETE_AWS_FILE] = templates[DELETE_AZURE_FILE];
+  if (!includeAws) {
+    templates[DELETE_AWS_FILE] = templates[DELETE_AZURE_FILE];
+    templates[DELETE_ENV_AWS_FILE] = templates[DELETE_ENV_AZURE_FILE];
+  }
   const generated = coreGenerateDeleteWorkflow(env, templates);
-  delete generated[DELETE_AWS_FILE];
-  // The application dispatcher references the never-committed AWS provider file
-  // via its `aws:` job; strip it so GitHub can parse the committed workflow. The
-  // static environment dispatcher is authored Azure-only, so this is a no-op for
-  // it, but running it keeps both dispatchers guarded the same way.
-  for (const dispatcher of [
-    DELETE_APP_DISPATCHER_FILE,
-    DELETE_ENV_DISPATCHER_FILE
-  ]) {
-    if (typeof generated[dispatcher] === "string") {
+  if (!includeAws) {
+    delete generated[DELETE_AWS_FILE];
+    delete generated[DELETE_ENV_AWS_FILE];
+    // The dispatchers reference the AWS provider files through their `aws:`
+    // jobs; strip them so GitHub can parse the committed workflows.
+    for (const dispatcher of [
+      DELETE_APP_DISPATCHER_FILE,
+      DELETE_ENV_DISPATCHER_FILE
+    ]) {
       generated[dispatcher] = stripAwsDispatcherJob(generated[dispatcher]);
     }
   }
@@ -614,27 +656,106 @@ export async function generateDeleteWorkflow(
     const isDispatcher =
       file === DELETE_APP_DISPATCHER_FILE ||
       file === DELETE_ENV_DISPATCHER_FILE;
-    const providerWorkflow =
-      file === DELETE_APP_DISPATCHER_FILE ? DELETE_AZURE_FILE
-      : file === DELETE_ENV_DISPATCHER_FILE ? DELETE_ENV_AZURE_FILE
-      : undefined;
+    const providerWorkflows =
+      file === DELETE_APP_DISPATCHER_FILE ? applicationFiles.slice(1)
+      : file === DELETE_ENV_DISPATCHER_FILE ? environmentFiles.slice(1)
+      : [];
     assertTrustedGeneratedWorkflow(
       workflow,
       isDispatcher ? "dispatcher" : "provider",
       `delete workflow "${file}"`,
-      providerWorkflow
+      providerWorkflows
     );
   }
   return generated;
 }
 
+// Ensure the deploy workflow files exist on `branch` so that dispatching
+// `run-rad-commands.yml` with `--ref branch` resolves — both the dispatcher
+// itself and the provider workflow it pulls in via a local-path `uses:`. The
+// env-creation flow commits these to the repo's DEFAULT branch only (the GitHub
+// contents API commit is branch-less), so a feature/worktree branch usually
+// lacks them. Missing files are generated from the pinned upstream templates and
+// committed onto `branch`; existing ones are left untouched. Best-effort per
+// file — a commit failure is surfaced by the caller, not thrown here.
+export async function ensureDeployWorkflowsOnBranch(
+  includeAws: boolean,
+  repo: string,
+  branch: string,
+  envName: string,
+  log: (message: string) => void,
+  onWorkflowWritten: (file: string) => void
+): Promise<void> {
+  if (!repo || !branch) return;
+  // A `--ref` dispatch needs the dispatcher and every provider workflow it
+  // `uses:` on the branch.
+  const wanted = deployWorkflowFiles(includeAws);
+  const existsOnBranch = (file: string): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      cliExec(
+        "gh",
+        [
+          "api",
+          `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(
+            branch
+          )}`,
+          "--jq",
+          ".sha"
+        ],
+        { timeout: 15000 },
+        (err, stdout) => resolve(!err && stdout.trim() !== "")
+      );
+    });
+  const presence = await Promise.all(wanted.map(existsOnBranch));
+  const missing = wanted.filter((_, i) => !presence[i]);
+  if (missing.length === 0) return;
+  log(
+    'Publishing deploy workflow(s) to branch "' +
+      branch +
+      '": ' +
+      missing.join(", ")
+  );
+  const generated = await generateDeployWorkflow(envName, ".radius/app.bicep", {
+    includeAws
+  });
+  for (const file of missing) {
+    const written = await commitFileToRepo(
+      repo,
+      ".github/workflows/" + file,
+      generated[file],
+      branch,
+      "Add Radius deploy workflow (" +
+        file +
+        ") to " +
+        branch +
+        " for worktree-consistent deploy"
+    );
+    if (written) onWorkflowWritten(file);
+  }
+}
+
+export interface WorkflowTemplates {
+  deploy(environment: string, appFile: string): Promise<Record<string, string>>;
+  delete(environment: string): Promise<Record<string, string>>;
+}
+
+// The deploy and delete templates one runtime commits, with its AWS switch
+// bound in.
+export function workflowTemplates(includeAws: boolean): WorkflowTemplates {
+  return {
+    deploy: (environment, appFile) =>
+      generateDeployWorkflow(environment, appFile, { includeAws }),
+    delete: (environment) => generateDeleteWorkflow(environment, { includeAws })
+  };
+}
+
 /**
  * Remove the `aws:` job (and any contiguous comment lines directly above it)
- * from a dispatcher workflow. The extension only commits the Azure provider
- * workflow, so the dispatcher's `aws:` job — which `uses:` the never-committed
- * AWS provider file — would otherwise make GitHub reject the whole workflow with
- * a parse error (HTTP 422). Jobs are indented two spaces; the block runs until
- * the next two-space-indented key, a top-level key, or EOF.
+ * from a dispatcher workflow. Without the AWS switch only the Azure provider
+ * workflow is committed, so the dispatcher's `aws:` job, which `uses:` the
+ * uncommitted AWS provider file, would otherwise make GitHub reject the whole
+ * workflow with a parse error (HTTP 422). Jobs are indented two spaces; the
+ * block runs until the next two-space-indented key, a top-level key, or EOF.
  */
 function stripAwsDispatcherJob(yaml: string): string {
   const lines = yaml.split("\n");
@@ -807,13 +928,14 @@ export async function syncRepoWorkflows(
         );
       }
     }
-    // Deploy + delete workflows are provider-agnostic (only the Azure provider
-    // file is committed and the content doesn't vary by env provider), so
-    // generate them once per environment with a null provider tag.
+    // Deploy + delete workflows are provider-agnostic (the content doesn't
+    // vary by env provider), so generate them once per environment with a null
+    // provider tag.
     try {
       const deploy = await generateDeployWorkflow(
         env.name,
-        ".radius/app.bicep"
+        ".radius/app.bicep",
+        { includeAws: opts.includeAws }
       );
       for (const [file, content] of Object.entries(deploy))
         add(wf(file), content, null);
@@ -821,7 +943,9 @@ export async function syncRepoWorkflows(
       log(`skipped deploy templates for "${env.name}": ${errorMessage(e)}`);
     }
     try {
-      const del = await generateDeleteWorkflow(env.name);
+      const del = await generateDeleteWorkflow(env.name, {
+        includeAws: opts.includeAws
+      });
       for (const [file, content] of Object.entries(del))
         add(wf(file), content, null);
     } catch (e) {
@@ -844,34 +968,86 @@ export async function syncRepoWorkflows(
     return exists;
   };
 
+  // Each dispatcher `uses:` its provider workflows by path, and GitHub rejects
+  // the whole dispatcher when one is missing. Whenever a dispatcher is on a
+  // branch, its providers are authored even in the background pass (a
+  // `workflow_call`-only provider never runs on push, so that is safe), and a
+  // dispatcher is only written once every provider it references is there.
+  const includeAws = opts.includeAws ?? false;
+  const dispatcherProviders = new Map<string, string[]>([
+    [DEPLOY_DISPATCHER_FILE, deployWorkflowFiles(includeAws).slice(1)],
+    [
+      DELETE_APP_DISPATCHER_FILE,
+      deleteApplicationWorkflowFiles(includeAws).slice(1)
+    ],
+    [
+      DELETE_ENV_DISPATCHER_FILE,
+      deleteEnvironmentWorkflowFiles(includeAws).slice(1)
+    ]
+  ]);
+  const fileNameOf = (path: string): string =>
+    path.slice(path.lastIndexOf("/") + 1);
+  const isDispatcher = (path: string): boolean =>
+    dispatcherProviders.has(fileNameOf(path));
+  // Providers first, so a dispatcher is never written ahead of a file it uses.
+  const ordered = [...byPath.entries()].sort(
+    ([a], [b]) => Number(isDispatcher(a)) - Number(isDispatcher(b))
+  );
+
   for (const branch of branches) {
-    // The env-delete dispatcher (`delete-environment.yml`) hard-references its
-    // reusable provider via `uses: ./.github/workflows/delete-environment-azure.yml`,
-    // so the two static files must always be committed together. byPath is built
-    // with the dispatcher inserted before the provider, so this flag is set while
-    // the dispatcher is processed and read when the provider is reached: whenever
-    // the dispatcher is present on a branch, author the provider too even in the
-    // background pass (no `opts.create`), so a drift rewrite of the dispatcher can
-    // never leave a dangling `uses:` reference behind.
-    let envDeleteDispatcherPresent = false;
-    for (const [path, candidates] of byPath.entries()) {
-      const fileName = path.split("/").pop();
-      const committed = await fetchFileFromRepo(repo, path, branch);
+    const committedFiles = new Map<string, string | null>();
+    for (const [path] of ordered) {
+      committedFiles.set(path, await fetchFileFromRepo(repo, path, branch));
+    }
+    const present = new Set(
+      [...committedFiles]
+        .filter(([, content]) => content != null && content !== "")
+        .map(([path]) => fileNameOf(path))
+    );
+    // A provider outside this pass (`opts.only`) still has to be on the branch
+    // before a dispatcher that uses it is written.
+    for (const [path] of ordered) {
+      for (const provider of dispatcherProviders.get(fileNameOf(path)) || []) {
+        if (committedFiles.has(wf(provider)) || present.has(provider)) continue;
+        const content = await fetchFileFromRepo(repo, wf(provider), branch);
+        if (content != null && content !== "") present.add(provider);
+      }
+    }
+    const requiredProviders = new Set(
+      [...dispatcherProviders]
+        .filter(([dispatcher]) => present.has(dispatcher))
+        .flatMap(([, providers]) => providers)
+    );
+    for (const [path, candidates] of ordered) {
+      const fileName = fileNameOf(path);
+      const committed = committedFiles.get(path);
       const missing = committed == null || committed === "";
+      const absentProviders = (dispatcherProviders.get(fileName) || []).filter(
+        (provider) => !present.has(provider)
+      );
+      if (absentProviders.length > 0) {
+        // A write this pass would have made is reported as failed, so callers
+        // that check `failed` for the dispatcher still name the branch.
+        const wanted =
+          missing ?
+            opts.create
+          : !candidates.some((candidate) => candidate.content === committed);
+        // An unpushed branch takes no writes at all, so nothing failed there.
+        if (wanted && (await remoteHasBranch(branch))) {
+          failed.push({ path, branch });
+          log(
+            `left ${path} unchanged on "${branch}" until ${absentProviders.join(", ")} can be committed`
+          );
+        }
+        continue;
+      }
       if (missing) {
         // By default don't author missing files here (environment creation owns
         // that), and an unpushed working branch simply reads as "missing" and is
-        // skipped. When `opts.create` is set, author the file so the workflow is
-        // present on the branch it will run from — but only if the branch exists
-        // on the remote, so we never author onto an unpushed working branch. The
-        // env-delete provider is additionally force-authored when its dispatcher
-        // is present (see envDeleteDispatcherPresent), since a committed
-        // dispatcher without its provider is always a broken workflow; a
-        // `workflow_call`-only provider never triggers a run on push, so
-        // authoring it early is safe.
-        const forceAuthorEnvDeleteProvider =
-          fileName === DELETE_ENV_AZURE_FILE && envDeleteDispatcherPresent;
-        if (!opts.create && !forceAuthorEnvDeleteProvider) continue;
+        // skipped. When `opts.create` is set, or a dispatcher on this branch uses
+        // the file, author it, but only if the branch exists on the remote, so we
+        // never author onto an unpushed working branch.
+        if (!opts.create && !requiredProviders.has(fileName)) continue;
         if (!(await remoteHasBranch(branch))) {
           log(`skipped creating ${path} on "${branch}" (branch not on remote)`);
           continue;
@@ -891,16 +1067,13 @@ export async function syncRepoWorkflows(
           } else {
             registrationPending.add(path);
           }
+          present.add(fileName);
         } catch (e) {
           failed.push({ path, branch });
           log(`could not create ${path} on "${branch}": ${errorMessage(e)}`);
         }
         continue;
       }
-      // The env-delete dispatcher is present on this branch, so its reusable
-      // provider must be committed alongside it (see envDeleteDispatcherPresent).
-      if (fileName === DELETE_ENV_DISPATCHER_FILE)
-        envDeleteDispatcherPresent = true;
       // In sync if the committed copy matches any environment's generated
       // content — the only per-env difference is the cosmetic dispatch default.
       if (candidates.some((c) => c.content === committed)) continue;

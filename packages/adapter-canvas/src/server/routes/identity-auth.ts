@@ -95,7 +95,7 @@ export async function handleVerifyAzureLogin(
     // Reject non-GUID credential identifiers before using them in command
     // guidance or the az argv. The Windows process adapter quotes argv values,
     // but this remains the domain boundary and defense in depth. Empty falls
-    // back to the ambient CLI context. Mirrors /api/azure-auto-setup.
+    // back to the ambient CLI context. Mirrors the direct Azure setup service.
     const validationError = dependencies.azureCredentialIdValidationError({
       tenantId,
       subscriptionId
@@ -276,12 +276,29 @@ export async function handleVerifyAwsLogin(
       );
       return;
     }
+    const sessionAccount = String(ident.Account || "");
+    const requestedAccount = String(data.accountId || "").trim();
+    // A session in another account would verify, then deploy somewhere the
+    // profile does not describe. Fail and keep Save blocked instead.
+    if (requestedAccount && sessionAccount !== requestedAccount) {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(200);
+      response.end(
+        JSON.stringify({
+          error: `Your AWS CLI session is signed in to account ${sessionAccount || "(unknown)"}, but this profile is for account ${requestedAccount}. Sign in to account ${requestedAccount}, or change the Account ID, then verify again.`,
+          code: "aws-account-mismatch",
+          sessionAccountId: sessionAccount,
+          accountId: requestedAccount
+        })
+      );
+      return;
+    }
     response.setHeader("Content-Type", "application/json");
     response.writeHead(200);
     response.end(
       JSON.stringify({
         success: true,
-        accountId: ident.Account || data.accountId || "",
+        accountId: sessionAccount || requestedAccount,
         arn: ident.Arn || "",
         user:
           ident.Arn ? String(ident.Arn).split("/").pop() : ident.Account || "",

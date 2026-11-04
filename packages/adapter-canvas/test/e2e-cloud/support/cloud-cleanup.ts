@@ -201,6 +201,33 @@ export function selectExpiredApplications(
   return applications;
 }
 
+/**
+ * Every Entra application with the fixture's display name, whatever its age
+ * or tags.
+ *
+ * `selectExpiredApplications` deletes only an application that has Radius
+ * provenance tags. Setup can stop after it creates the application and before
+ * it adds the tags, so an untagged application can remain. The fixture's
+ * clean-slate check finds that application by name and refuses to start. A
+ * check that deletes nothing must therefore report it too.
+ */
+export function selectNamedApplications(
+  payload: unknown,
+  displayName: string
+): CleanupApplication[] {
+  if (!displayName.trim())
+    throw new Error(
+      "An application display name is required to select applications."
+    );
+  return requireArray(payload, "Microsoft Graph applications")
+    .map(asRecord)
+    .filter((item) => item?.displayName === displayName)
+    .map((item) => ({
+      id: requireString(item?.id) || "(no id)",
+      appId: requireString(item?.appId) || "(no appId)"
+    }));
+}
+
 export function selectExpiredServicePrincipals(
   payload: unknown,
   displayName: string,
@@ -265,13 +292,16 @@ export function selectAppIdsWithUnprocessedServicePrincipals(
   return [...blocked];
 }
 
-export function selectExpiredEnvironments(
+function prefixedEnvironmentEntries(
   payload: unknown,
-  prefix: string,
-  cutoff: string
-): string[] {
-  const cutoffMilliseconds = requireCutoff(cutoff);
-  const names: string[] = [];
+  prefix: string
+): Array<{ readonly name: string; readonly createdAt: unknown }> {
+  if (!prefix.trim())
+    throw new Error(
+      "An environment prefix is required to select environments."
+    );
+  const entries: Array<{ readonly name: string; readonly createdAt: unknown }> =
+    [];
   for (const page of requireArray(payload, "GitHub Environments")) {
     const environments = asRecord(page)?.environments;
     if (!Array.isArray(environments))
@@ -280,15 +310,37 @@ export function selectExpiredEnvironments(
       );
     for (const entry of environments) {
       const item = asRecord(entry);
-      if (
-        typeof item?.name === "string" &&
-        item.name.startsWith(prefix) &&
-        expired(item.created_at, cutoffMilliseconds)
-      )
-        names.push(item.name);
+      if (typeof item?.name === "string" && item.name.startsWith(prefix))
+        entries.push({ name: item.name, createdAt: item.created_at });
     }
   }
-  return names;
+  return entries;
+}
+
+export function selectExpiredEnvironments(
+  payload: unknown,
+  prefix: string,
+  cutoff: string
+): string[] {
+  const cutoffMilliseconds = requireCutoff(cutoff);
+  return prefixedEnvironmentEntries(payload, prefix)
+    .filter((entry) => expired(entry.createdAt, cutoffMilliseconds))
+    .map((entry) => entry.name);
+}
+
+/**
+ * Every GitHub Environment with the suite's prefix, whatever its age.
+ *
+ * The Canvas wizard refuses to create an environment in a namespace that a
+ * listed environment already owns. So one leaked `radtest-*` environment blocks
+ * every later run, and the clean-slate check and the cleanup's final
+ * verification must see all of them, not only expired ones.
+ */
+export function selectPrefixedEnvironments(
+  payload: unknown,
+  prefix: string
+): string[] {
+  return prefixedEnvironmentEntries(payload, prefix).map((entry) => entry.name);
 }
 
 // Deleting a GitHub Environment does not delete the deployment records that
@@ -481,6 +533,29 @@ export function selectStaleStatePackages(
       names.push(name);
   }
   return names;
+}
+
+/**
+ * Every GHCR state package the fixture has left behind, whatever its age.
+ *
+ * `selectStaleStatePackages` keeps a package whose `updated_at` cannot be
+ * read, so a check that only asks it with a future cutoff can miss state that
+ * remains. This selector applies the same name checks and ignores the
+ * timestamp.
+ */
+export function selectStatePackages(
+  payload: unknown,
+  prefix: string
+): string[] {
+  if (!prefix.trim())
+    throw new Error("A state package prefix is required to select packages.");
+  return flattenPages(payload, "GHCR packages")
+    .map((entry) => requireString(asRecord(entry)?.name))
+    .filter(
+      (name) =>
+        name.startsWith(prefix) &&
+        STATE_PACKAGE_SUFFIX.test(name.slice(prefix.length))
+    );
 }
 
 export interface ReclaimableGroupResource {

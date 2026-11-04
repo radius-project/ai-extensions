@@ -70,6 +70,7 @@ ${browserScriptTag("deploy-result-page")}`
     "main";
   const activeSubtab =
     state?.activeSubtab === "credentials" ? "credentials" : "environments";
+  const awsEnabled = state.awsEnabled === true;
 
   return pageShell(
     "Environments",
@@ -92,7 +93,7 @@ ${environmentsPaneMarkup({
   ctxRepo,
   deployDefaultBranch
 })}
-${credentialsPaneMarkup(activeSubtab)}
+${credentialsPaneMarkup(activeSubtab, awsEnabled)}
 
 ${confirmDialogMarkup()}
 
@@ -327,6 +328,7 @@ ${renderPageState(ENVIRONMENT_PAGE_STATE_ID, {
   repo: ctxRepo,
   branch: ctxBranch,
   activeSubtab,
+  awsEnabled,
   ghCommandPresentation: state.ghCommandPresentation,
   mutationNonce:
     typeof state.browserMutationNonce === "string" ?

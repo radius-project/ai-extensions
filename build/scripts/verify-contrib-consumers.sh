@@ -394,7 +394,13 @@ verify_git_recipes() {
             sed -nE 's/.*radius_contrib_resource_git_source (Radius\.[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+) ([A-Za-z0-9._\/-]+).*/\1 \2/p' |
             sort -u
     )
-    ((count > 0)) || fail "no Git recipe catalog consumers found."
+    ((count > 0)) && return 0
+    # No workflow has to consume a Git recipe. One that calls the helper in a
+    # form this parser cannot read must still fail rather than go unverified.
+    if printf '%s\n' "${RUN_BLOCKS}" | grep -Fq 'radius_contrib_resource_git_source'; then
+        fail "no Git recipe catalog consumers found."
+    fi
+    echo "  No workflow consumes a Git recipe source."
 }
 
 fetch_defaults_catalog() {

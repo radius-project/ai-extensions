@@ -183,7 +183,8 @@ describe("graph chip polling", () => {
     expect(browser.label.textContent).toBe(
       `${GRAPH_STAGE_LABELS.building_graph} · 1:05`
     );
-    expect(browser.chip.getAttribute("aria-label")).toBe(
+    expect(browser.chip.getAttribute("aria-label")).toBeNull();
+    expect(browser.chip.getAttribute("title")).toBe(
       "Compiling the application model."
     );
     expect(browser.chip.getAttribute("title")).toBe(
@@ -226,7 +227,8 @@ describe("graph chip polling", () => {
     initializeGraphChip(browser.context);
     await flushPromises();
 
-    expect(browser.chip.getAttribute("aria-label")).toBe(
+    expect(browser.chip.getAttribute("aria-label")).toBeNull();
+    expect(browser.chip.getAttribute("title")).toBe(
       `${GRAPH_STAGE_LABELS.building_graph} · 0:05`
     );
   });

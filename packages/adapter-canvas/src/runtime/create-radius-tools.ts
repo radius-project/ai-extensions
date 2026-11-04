@@ -1,4 +1,4 @@
-// createRadiusTools — builds the 7 radius_* tools from RADIUS_TOOL_DECLARATIONS
+// createRadiusTools — builds the radius_* tools from RADIUS_TOOL_DECLARATIONS
 // plus a RadiusExtensionDependencies dependency object. Same shape as
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
@@ -248,7 +248,7 @@ export function createRadiusTools(
 
           if (!baseContent && !headContent) {
             return unavailableGraphDiffResult(
-              `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
+              `No .radius/app.bicep or app.bicep could be read for ${baseBranch} or ${headBranch}. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
             );
           }
 
@@ -484,6 +484,21 @@ export function createRadiusTools(
           return `⚠️ Could not read the deploy status: ${errorMessage(err)}`;
         }
       }
+    },
+    {
+      ...declarationByName.get("radius_setup_environment")!,
+      handler: async (args: ToolArgs) =>
+        JSON.stringify(await deps.environment.start(args))
+    },
+    {
+      ...declarationByName.get("radius_environment_status")!,
+      handler: async (args: ToolArgs) =>
+        JSON.stringify(await deps.environment.status(args))
+    },
+    {
+      ...declarationByName.get("radius_environment_control")!,
+      handler: async (args: ToolArgs) =>
+        JSON.stringify(await deps.environment.control(args))
     }
   ];
 }

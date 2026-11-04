@@ -29,6 +29,15 @@ write_control_plane 'runs:' '  steps:' '    - env:' '        RADIUS_INSTALL_REF:
 [[ "$(bash "${RESOLVER}" "abc123" "${TEST_ROOT}/action.yml")" == "abc123" ]] ||
     fail "resolver ignored an explicit catalog ref"
 
+[[ "$(RADIUS_INSTALL_COMMIT=cccccccccccccccccccccccccccccccccccccccc \
+    bash "${RESOLVER}" "" "${TEST_ROOT}/missing.yml")" == cccccccccccccccccccccccccccccccccccccccc ]] ||
+    fail "resolver ignored the installed release commit"
+[[ "$(RADIUS_INSTALL_COMMIT=cccccccccccccccccccccccccccccccccccccccc \
+    bash "${RESOLVER}" "abc123" "${TEST_ROOT}/action.yml")" == abc123 ]] ||
+    fail "installed commit took precedence over an explicit catalog ref"
+RADIUS_INSTALL_COMMIT=invalid bash "${RESOLVER}" "" >/dev/null 2>&1 &&
+    fail "resolver accepted a malformed installed commit"
+
 # A missing or malformed pin fails instead of fetching an unintended ref.
 write_control_plane 'runs:' '  steps:' '    - run: echo ok'
 if bash "${RESOLVER}" "" "${TEST_ROOT}/action.yml" >/dev/null 2>&1; then

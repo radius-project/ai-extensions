@@ -213,6 +213,10 @@ set -uo pipefail
 
 case "${1:-} ${2:-}" in
     "app graph")
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
+            exit 64
+        fi
         if [[ "${3:-}" != "${APP_FILE:-}" ]]; then
             echo "rad: app graph must receive APP_FILE as its positional argument" >&2
             exit 64
@@ -225,11 +229,15 @@ case "${1:-} ${2:-}" in
             '{"resources":[{"id":"/planes/radius/local/rg/web","name":"web","type":"Radius.Compute/containers","outputResources":[{"id":"/planes/kubernetes/local/providers/apps/Deployment/web","name":"web","type":"apps/Deployment"},{"id":"/planes/kubernetes/local/providers/core/Service/web","name":"web","type":"core/Service"}]},{"id":"/planes/radius/local/rg/db","name":"db","type":"Radius.Data/mySqlDatabases","outputResources":[{"id":"/subscriptions/test/providers/Microsoft.DBforMySQL/flexibleServers/db","name":"db","type":"Microsoft.DBforMySQL/flexibleServers"}]}]}'
         ;;
     "app list")
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
+            exit 64
+        fi
         printf '[{"name":"%s"}]\n' "${RAD_APP_LIST_NAME-fallback-app}"
         ;;
     "resource list")
-        if [[ " $* " != *" --preview "* ]]; then
-            echo "rad: resource list must use --preview" >&2
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
             exit 64
         fi
         if [[ "${RAD_RESOURCE_LIST_SHOULD_FAIL:-false}" == "true" ]]; then
@@ -265,11 +273,11 @@ case "${1:-} ${2:-}" in
         echo "RELEASE VERSION 0.99.0-test"
         ;;
     "env list")
-        if [[ " $* " != *" --preview "* ]]; then
-            echo "rad: env list must use --preview" >&2
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
             exit 64
         fi
-        printf '%s\n' '[{"name":"aks-dev"}]'
+        printf '%s\n' "${RAD_ENV_LIST_JSON-[{\"name\":\"aks-dev\"\}]}"
         ;;
     *)
         printf '{}\n'
@@ -400,6 +408,12 @@ assert_status_file_contains() {
 $(cat "${file}")"
 }
 
+assert_environment_list() {
+    local actual
+    actual="$(sed '1,/^# rad env list$/d' "${STATUS_DIR}/deploy-controlplane.log")"
+    assert_equals "environment listing" "${actual}" "$1"
+}
+
 assert_status_files_differ() {
     if cmp -s "${STATUS_DIR}/$1" "${STATUS_DIR}/$2"; then
         fail "'$1' and '$2' must carry distinct content"
@@ -493,6 +507,7 @@ reset_environment() {
     export APP_FILE="${LITERAL_APP_FILE}"
     unset RAD_GRAPH_SHOULD_FAIL RAD_APP_LIST_NAME
     unset RAD_RESOURCE_LIST_SHOULD_FAIL
+    unset RAD_ENV_LIST_JSON
     printf '{"outcome":"success","exitCode":0}\n' >"${RESULT_FILE}"
 }
 
@@ -565,8 +580,8 @@ progress_jq 'any(.resources[]; .name == "queue"
 
 assert_status_file_contains "deploy-activity.log" '"outcome":"success"'
 assert_status_file_contains "deploy-controlplane.log" "# rad version"
-assert_status_file_contains "deploy-controlplane.log" "# rad env list --preview"
-assert_status_file_contains "deploy-controlplane.log" "aks-dev"
+assert_status_file_contains "deploy-controlplane.log" "# rad env list"
+assert_environment_list '[{"name":"aks-dev"}]'
 assert_status_file_contains "deploy-state.txt" "state=success"
 assert_status_file_contains "deploy-state.txt" "application=todolist"
 assert_status_file_contains "deploy-state.txt" "sha=deadbeefcafe"
@@ -579,6 +594,17 @@ jq -e 'all(.resources[]?; (.properties.containers // {}) |
 assert_status_files_differ "deploy-progress.json" "deploy-activity.log"
 assert_status_files_differ "deploy-progress.json" "deploy-controlplane.log"
 assert_status_files_differ "deploy-activity.log" "deploy-controlplane.log"
+
+for empty_list in '[]' 'null'; do
+    reset_environment
+    export RAD_ENV_LIST_JSON="${empty_list}"
+    run_publisher
+    assert_exit_zero "empty environment list: ${empty_list}"
+    assert_step_outputs "radius-deploy-status-aks-dev-todolist" "true"
+    assert_environment_list "${empty_list}"
+    assert_progress_contract
+    assert_run_state "succeeded"
+done
 
 # A successful live publisher checkpoint hands the terminal publisher the next
 # sequence, so the fixed-name artifact always wins over live ring snapshots.
@@ -632,7 +658,7 @@ assert_status_dir_contains_exactly "${EXPECTED_STATUS_FILES}"
 assert_progress_contract
 progress_jq '.resources == []' ||
     fail "expected an empty .resources array when rad resource list fails"
-assert_output_contains "::warning::rad resource list --preview failed; deploy progress will contain no resources."
+assert_output_contains "::warning::rad resource list failed; deploy progress will contain no resources."
 assert_output_contains "rad: could not reach the control plane"
 
 # ---------------------------------------------------------------------------
@@ -772,7 +798,7 @@ grep -q "LC_ALL=C sed" "${PROGRESS_HELPER}" ||
     fail "artifact name sanitization must strip invalid bytes under LC_ALL=C"
 # APP_NAME is intentionally literal because this checks the generated script.
 # shellcheck disable=SC2016
-grep -q 'rad resource list --preview -a "$APP_NAME" -o json' "${BODY_SCRIPT}" ||
-    fail "deploy progress must list Radius.Core resources with --preview"
+grep -q 'rad resource list -a "$APP_NAME" -o json' "${BODY_SCRIPT}" ||
+    fail "deploy progress must list Radius.Core resources for the application"
 
 echo "publish-deploy-status tests passed"

@@ -32,15 +32,100 @@ describe("environmentsPaneMarkup", () => {
     const html = environmentsPaneMarkup(baseOptions);
     for (const [id, name] of [
       ["azure-namespace-custom", "Namespace (custom)"],
-      ["aws-cluster-custom", "EKS Cluster (custom)"],
-      ["aws-namespace-custom", "Namespace (custom)"],
-      ["aws-vpc-custom", "VPC (custom)"],
-      ["aws-subnets-custom", "Subnets (custom)"]
+      ["aws-namespace-custom", "Namespace (custom)"]
     ]) {
       const tag = new RegExp(`<input id="${id}"[^>]*>`).exec(html)?.[0] ?? "";
       expect(tag, `${id} should be rendered`).not.toBe("");
       expect(tag).toContain(`aria-label="${name}"`);
     }
+  });
+
+  it("requires discovered AWS infrastructure with a labelled subnet checklist", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    for (const id of [
+      "aws-cluster-custom",
+      "aws-vpc-custom",
+      "aws-vpc-select",
+      "aws-subnets-select",
+      "aws-subnets-custom"
+    ]) {
+      expect(html).not.toContain(`id="${id}"`);
+    }
+    expect(html).toContain(
+      '<span id="aws-subnets-label" style="display:block; font-weight:600; font-size:12px; color:var(--rad-text-tertiary); margin:0 0 4px;">Subnets</span>'
+    );
+    expect(html).toMatch(
+      /<div id="aws-subnets-list" role="group" aria-labelledby="aws-subnets-label" aria-describedby="aws-restore-note aws-subnets-note aws-subnets-error"/
+    );
+    expect(html).toMatch(
+      /<div id="aws-restore-note" class="status info" role="status" hidden[^>]*><\/div>\s*<div id="aws-subnets-list"/
+    );
+    expect(html).toContain(
+      '<div class="rad-field__help" id="aws-subnets-note">Two availability zones are required. Local Zone, Wavelength Zone, and Outpost subnets can\'t be selected.</div>'
+    );
+    expect(html).toContain(
+      '<div id="aws-subnets-error" class="status error" role="alert" hidden></div>'
+    );
+    expect(html).toMatch(
+      /<div id="aws-infra-warning" class="status info" role="status" hidden/
+    );
+    expect(html).toContain(
+      "Managed data services need subnets in at least two availability zones."
+    );
+  });
+
+  it("shows the cluster VPC as text and describes the cluster select with its note", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      '<select id="aws-cluster-select" aria-describedby="aws-cluster-note">'
+    );
+    expect(html).toContain(
+      '<div id="aws-cluster-note" class="rad-field__help" hidden></div>'
+    );
+    expect(html).toMatch(/<span id="aws-vpc-label"[^>]*>VPC<\/span>/);
+    expect(html).toMatch(
+      /<output id="aws-vpc-value" aria-labelledby="aws-vpc-label" aria-describedby="aws-vpc-note"[^>]*>Select a cluster to see its VPC\.<\/output>/
+    );
+    expect(html).toContain(
+      '<div id="aws-vpc-note" class="status info" role="status" hidden></div>'
+    );
+  });
+
+  it("renders a hidden note for the AWS namespace list", () => {
+    expect(environmentsPaneMarkup(baseOptions)).toContain(
+      '<div id="aws-namespace-note" class="status info" role="status" hidden></div>'
+    );
+  });
+
+  it("proposes a per-repository IAM role as the AWS deploy identity", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      '<div class="rad-section__desc" id="env-identity-desc">The Microsoft Entra app GitHub Actions signs in as'
+    );
+    expect(html).toContain('<label for="aws-role-name-input">IAM role</label>');
+    expect(html).toMatch(
+      /<input id="aws-role-name-input"[^>]*maxlength="64"[^>]*value="radius-deploy-octo-app" data-default-name="radius-deploy-octo-app" \/>/
+    );
+    expect(html).toContain(
+      '<input type="hidden" id="aws-selected-role-arn" value="" />'
+    );
+    expect(html).toContain('<span id="aws-role-help">');
+    expect(html).toContain("<code>repo:octo/app</code>");
+    expect(html).toContain('id="aws-use-existing-role-link"');
+    expect(html).toContain('id="aws-selected-role-note"');
+    expect(html).toContain('id="aws-clear-role-link"');
+    expect(html).not.toContain(
+      "GitHub Actions assumes the IAM role from your credential profile"
+    );
+  });
+
+  it("escapes the repository in the AWS deploy identity markup", () => {
+    const html = environmentsPaneMarkup({
+      ...baseOptions,
+      ctxRepo: '<img src=x onerror="1">/app'
+    });
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("<code>repo:&lt;img");
   });
 
   it("requires discovered Azure infrastructure while explaining namespace creation", () => {
@@ -100,6 +185,19 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain('value="radius-deploy-octo-app"');
     expect(html).toContain('data-default-name="radius-deploy-octo-app"');
     expect(html).toContain("<code>repo:octo/app</code>");
+  });
+
+  it("renders the hashed IAM role name for a long repository", () => {
+    // The browser restores the field from `data-default-name`, so the server
+    // must render the hashed name there as well as in `value`.
+    const ctxRepo = `contoso/${"a".repeat(60)}`;
+    const roleName = `radius-deploy-contoso-${"a".repeat(35)}-baeeb7`;
+    const html = environmentsPaneMarkup({ ...baseOptions, ctxRepo });
+    expect(html).toMatch(
+      new RegExp(
+        `<input id="aws-role-name-input"[^>]*value="${roleName}" data-default-name="${roleName}" />`
+      )
+    );
   });
 
   it("distinguishes required and best-effort Azure role assignments", () => {
@@ -246,9 +344,11 @@ describe("environmentsPaneMarkup", () => {
     expect(actions).toContain(
       '<div id="env-progress-bottom-buttons" class="env-progress__bottom-buttons"></div>'
     );
+    // The accessible name is the visible text, so speech input can name it.
     expect(actions).toContain(
-      'aria-label="Dismiss completed environment setup progress"'
+      'title="Dismiss completed environment setup progress">Dismiss</button>'
     );
+    expect(actions).not.toContain("aria-label");
     // Only the acknowledgement is static: every other control in this row is
     // whatever the operation record projected.
     expect(actions.match(/<button/g) ?? []).toHaveLength(1);
@@ -389,6 +489,12 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
         '<div id="azure-discover-remediation" hidden></div>'
       );
     });
+
+    it("provides a separate host beside AWS discovery status and refresh", () => {
+      expect(html).toMatch(
+        /id="aws-refresh-btn"[^>]*>↻ Refresh<\/button>\s*<div id="aws-discover-remediation" hidden><\/div>/
+      );
+    });
   });
 
   it("renders a guidance list for a path Radius cannot offer", () => {
@@ -470,21 +576,26 @@ describe("namespace constraint guidance", () => {
   );
 
   // The constraint has to reach a screen reader on the control it constrains,
-  // not just sit next to it visually.
+  // not just sit next to it visually. The AWS fields also name the note that
+  // says when the list shows common names.
   it.each([
-    ["azure-namespace-select", "azure-namespace-help"],
-    ["azure-namespace-custom", "azure-namespace-help"],
-    ["aws-namespace-select", "aws-namespace-help"],
-    ["aws-namespace-custom", "aws-namespace-help"]
-  ])("describes %s by the constraint text", (control, help) => {
+    ["azure-namespace-select", "azure-namespace-help azure-namespace-error"],
+    ["azure-namespace-custom", "azure-namespace-help azure-namespace-error"],
+    [
+      "aws-namespace-select",
+      "aws-namespace-help aws-namespace-note aws-namespace-error"
+    ],
+    [
+      "aws-namespace-custom",
+      "aws-namespace-help aws-namespace-note aws-namespace-error"
+    ]
+  ])("describes %s by the constraint text", (control, describedBy) => {
     const html = environmentsPaneMarkup(baseOptions);
     const tag =
       new RegExp(`<(?:select|input) id="${control}"[^>]*>`).exec(html)?.[0] ??
       "";
     expect(tag, `${control} should be rendered`).not.toBe("");
-    expect(tag).toContain(
-      `aria-describedby="${help} ${control.replace(/-(?:select|custom)$/u, "-error")}"`
-    );
+    expect(tag).toContain(`aria-describedby="${describedBy}"`);
   });
 
   it.each(["azure", "aws"])(

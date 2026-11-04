@@ -36,6 +36,7 @@ export interface BootstrapGhcrOptions {
   targetRepository: string;
   registry: string;
   credentials?: GhCredentials;
+  assertActive?(): void;
   fetchImpl?: FetchImplementation;
   registryOrigin?: string;
   apiBaseUrl?: string;

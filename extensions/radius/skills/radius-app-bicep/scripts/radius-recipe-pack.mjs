@@ -11,31 +11,33 @@ const AZURE_RECIPE_PACKS = [
   { name: "azure", path: "recipe-packs/azure/aks-recipepack.bicep" }
 ];
 
-export function parseAzureRecipePackPin(source) {
+function parseCatalogEntries(source, sectionName) {
   if (typeof source !== "string") {
     throw new Error("Radius release defaults must be text.");
   }
 
   const entries = [];
-  let recipePacksIndent;
+  let sectionIndent;
   let current;
   let currentIndent;
   for (const line of source.replaceAll("\r\n", "\n").split("\n")) {
-    if (recipePacksIndent === undefined) {
-      const section = /^([ \t]*)recipePacks:\s*$/u.exec(line);
+    if (sectionIndent === undefined) {
+      const section = new RegExp(`^([ \\t]*)${sectionName}:\\s*$`, "u").exec(
+        line
+      );
       if (section === null) continue;
-      recipePacksIndent = section[1].length;
+      sectionIndent = section[1].length;
       continue;
     }
     const trimmed = line.trim();
     const indentation = /^[ \t]*/u.exec(line)[0].length;
     const nameMatch = /^([ \t]*)-\s+name:\s*(\S+)\s*$/u.exec(line);
     const indentationlessEntry =
-      nameMatch !== null && indentation === recipePacksIndent;
+      nameMatch !== null && indentation === sectionIndent;
     if (
       trimmed !== "" &&
       !trimmed.startsWith("#") &&
-      indentation <= recipePacksIndent &&
+      indentation <= sectionIndent &&
       !indentationlessEntry
     ) {
       break;
@@ -55,13 +57,34 @@ export function parseAzureRecipePackPin(source) {
       const property = field[2] === "repo" ? "repository" : "commit";
       if (current[property] !== undefined) {
         throw new Error(
-          'Radius release Recipe pack entry contains a duplicate "repo" or "ref" field.'
+          'Radius release catalog entry contains a duplicate "repo" or "ref" field.'
         );
       }
       current[property] = field[3];
     }
   }
   if (current !== undefined) entries.push(current);
+  return entries;
+}
+
+export function parseResourceTypeCommit(source, resourceType) {
+  const namespace = resourceType.split("/")[0];
+  const entries = parseCatalogEntries(source, "resourceTypes").filter(
+    (entry) => entry.name === namespace
+  );
+  if (
+    entries.length !== 1 ||
+    !/^[0-9a-f]{40}$/u.test(entries[0].commit ?? "")
+  ) {
+    throw new Error(
+      `Recipe release defaults must contain exactly one resourceTypes entry for "${namespace}" with a lowercase full commit SHA.`
+    );
+  }
+  return entries[0].commit;
+}
+
+export function parseAzureRecipePackPin(source) {
+  const entries = parseCatalogEntries(source, "recipePacks");
 
   const pack = AZURE_RECIPE_PACKS.find((candidate) =>
     entries.some((entry) => entry.name === candidate.name)

@@ -48,7 +48,9 @@ export interface EnvironmentPaneDependencies {
     config: EnvironmentInfrastructure | null,
     provider: "azure" | "aws"
   ): void;
-  currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
+  // Hold the selection across a subtab switch, so the next discovery restores
+  // it.
+  preserveInfraSelection?(provider: "azure" | "aws"): void;
   canSubmit?(): boolean;
   // Deletion is an async operation (Radius env delete, credential cleanup,
   // GitHub env delete, app-registration cleanup). The page composes the
@@ -228,6 +230,19 @@ function normalizeNamespace(value: string | undefined): string {
 // conflicting whenever their application resource groups differ — the exact
 // duplicate this guard exists to catch. The cluster's own resource group is
 // part of the key, because it is what scopes an AKS cluster's name.
+// The delete confirmation names what leaves the cloud account and what stays.
+export function deleteEnvironmentMessage(
+  name: string,
+  environment:
+    { provider?: string; config?: EnvironmentInfrastructure } | undefined
+): string {
+  if (environment?.provider === "aws") {
+    const cluster = environment.config?.cluster || "its EKS cluster";
+    return `This deletes the GitHub environment "${name}" and removes the Radius environment from ${cluster}. It removes this environment's trust subjects and its radius-deploy-${name} policy from the deploy IAM role, and the role's access entry on ${cluster} when nothing else can use it. The role itself and the account's GitHub identity provider are kept, because other environments or repositories may use them. Applications already deployed to it must be deleted first.`;
+  }
+  return `This deletes the GitHub environment "${name}", removes the Radius environment from the cluster, and permanently deletes the environment's federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.`;
+}
+
 export function findNamespaceConflict(
   environments: readonly EnvironmentRecord[],
   claim: NamespaceClaim
@@ -520,7 +535,7 @@ export function initializeEnvironmentPane(
         const provider = environment?.provider ?? "";
         options.confirmDialog?.show({
           title: "Delete environment?",
-          message: `This deletes the GitHub environment "${name}", removes the Radius environment from the cluster, and permanently deletes the environment's federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.`,
+          message: deleteEnvironmentMessage(name, environment),
           confirmLabel: "Delete environment",
           onConfirm: () => deleteEnvironment(name, provider, button)
         });
@@ -690,10 +705,7 @@ export function initializeEnvironmentPane(
         context.dom.inputById("env-selected-provider")?.value === "aws" ?
           "aws"
         : "azure";
-      dependencies.setPendingInfraSelection?.(
-        dependencies.currentInfraSelection?.(provider) ?? {},
-        provider
-      );
+      dependencies.preserveInfraSelection?.(provider);
       void dependencies.loadProfiles(profileSelect.value);
     }
   };

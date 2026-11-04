@@ -3,7 +3,10 @@ import {
   GitHubEnvironmentEnsureError,
   type EnsuredGitHubEnvironment
 } from "./setup-github-environment.js";
-import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import {
+  isSetupExecutionInterrupted,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 
 export interface SetupCoordinatorTarget {
   operationId: string;
@@ -24,9 +27,16 @@ export type SetupCoordinatorStageResult =
   | { kind: "completed" | "input-required"; clientId?: unknown }
   | { kind: "reconciling"; message?: unknown };
 
+export type SetupCoordinatorAwsResult =
+  | { kind: "completed"; roleArn: string; trustSubjects: readonly string[] }
+  | { kind: "failed"; error: unknown }
+  // A pause arrived during AWS setup, which recorded what it changed and ran
+  // nothing after the pause.
+  | { kind: "stopped" };
+
 export type SetupCoordinatorFailure =
   | { kind: "repository-access" | "package-access" }
-  | { kind: "environment-resolution"; error: unknown };
+  | { kind: "environment-resolution" | "aws-authorization"; error: unknown };
 
 export type SetupCoordinatorEvent =
   | { kind: "environment-owned" | "environment-resolved"; name: string }
@@ -69,6 +79,16 @@ export interface SetupCoordinatorPorts {
       operationId: string;
     }
   ): Promise<SetupCoordinatorStageResult>;
+  authorizeAws(
+    request: Record<string, unknown> & {
+      repo: string;
+      environment: string;
+      reused: boolean;
+    }
+  ): Promise<SetupCoordinatorAwsResult>;
+  // Release the deploy identity lock `authorizeAws` took. Called once after
+  // Configure environment, or as soon as setup stops early. Never throws.
+  releaseAws(): Promise<void>;
   configureEnvironment(
     request: Record<string, unknown> &
       SetupCoordinatorTarget & {
@@ -195,6 +215,7 @@ export async function runSetupCoordinator(
     try {
       return await action();
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       if (
         outstanding &&
         ports
@@ -236,27 +257,96 @@ export async function runSetupCoordinator(
     return { shouldMonitor: false };
   }
   const environmentRequest = record(request.environment);
-  const clientId =
-    setupResult && "clientId" in setupResult ? setupResult.clientId : undefined;
-  const liveContext = ports.operation().context;
-  const environmentResult = await invoke(() =>
-    ports.configureEnvironment({
-      ...environmentRequest,
-      repo: target.repo,
-      environment: ensured.name,
-      operationEnvironment: target.environment,
-      provider: target.provider,
-      operationId: target.operationId,
-      clientId:
-        (typeof clientId === "string" && clientId) ||
-        (typeof liveContext?.clientId === "string" && liveContext.clientId) ||
-        (typeof environmentRequest.clientId === "string" &&
-          environmentRequest.clientId) ||
-        ""
-    })
-  );
-  if (environmentResult.kind === "reconciling") {
-    ports.raiseReconciling("environment", environmentResult.message);
+  let awsRoleArn = "";
+  let awsTrustSubjects: readonly string[] = [];
+  // AWS setup takes the deploy identity lock and keeps it until Configure
+  // environment has written the GitHub environment. Until then a delete that
+  // checks which environments use a cluster could not see this one, and could
+  // remove the cluster access this setup just granted.
+  //
+  // A resume with `outstanding` work skips the deploy identity step, so it
+  // takes no lock and runs the rest of setup without one. That resume path
+  // belongs to #1096.
+  const awsLocked = target.provider === "aws" && !outstanding;
+  try {
+    if (awsLocked) {
+      const aws = await ports.authorizeAws({
+        ...environmentRequest,
+        repo: target.repo,
+        environment: ensured.name,
+        reused: ensured.state === "reused"
+      });
+      if (aws.kind === "stopped") {
+        // The pause is still requested, so this boundary stops the operation.
+        // Should it not, finish as a failure rather than configure the
+        // environment without a deploy identity.
+        if (await ports.stopBoundary("after-aws-deploy-identity")) {
+          await ports.finalizeFailure({
+            kind: "aws-authorization",
+            error: {
+              status: 409,
+              message:
+                "AWS setup stopped for a pause before the deploy identity was ready.",
+              code: "aws-setup-interrupted"
+            }
+          });
+        }
+        return { shouldMonitor: false };
+      }
+      if (aws.kind === "failed") {
+        if (!(await ports.stopBoundary("before-setup-failure-cleanup"))) {
+          return { shouldMonitor: false };
+        }
+        await ports.finalizeFailure({
+          kind: "aws-authorization",
+          error: aws.error
+        });
+        return { shouldMonitor: false };
+      }
+      awsRoleArn = aws.roleArn;
+      awsTrustSubjects = aws.trustSubjects;
+    }
+    const clientId =
+      setupResult && "clientId" in setupResult ?
+        setupResult.clientId
+      : undefined;
+    const liveContext = ports.operation().context;
+    if (!awsRoleArn && typeof liveContext?.awsRoleArn === "string") {
+      awsRoleArn = liveContext.awsRoleArn;
+    }
+    if (
+      awsTrustSubjects.length === 0 &&
+      Array.isArray(liveContext?.awsTrustSubjects)
+    ) {
+      awsTrustSubjects = liveContext.awsTrustSubjects.filter(
+        (subject): subject is string => typeof subject === "string"
+      );
+    }
+    const environmentResult = await invoke(() =>
+      ports.configureEnvironment({
+        ...environmentRequest,
+        repo: target.repo,
+        environment: ensured.name,
+        operationEnvironment: target.environment,
+        provider: target.provider,
+        operationId: target.operationId,
+        ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
+        ...(awsTrustSubjects.length > 0 ?
+          { trustSubjects: awsTrustSubjects }
+        : {}),
+        clientId:
+          (typeof clientId === "string" && clientId) ||
+          (typeof liveContext?.clientId === "string" && liveContext.clientId) ||
+          (typeof environmentRequest.clientId === "string" &&
+            environmentRequest.clientId) ||
+          ""
+      })
+    );
+    if (environmentResult.kind === "reconciling") {
+      ports.raiseReconciling("environment", environmentResult.message);
+    }
+    return { shouldMonitor: true };
+  } finally {
+    if (awsLocked) await ports.releaseAws();
   }
-  return { shouldMonitor: true };
 }

@@ -18,6 +18,7 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AWS_FILE,
   DELETE_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_ENV_AZURE_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_RADIUS_REF,
@@ -55,7 +56,8 @@ const deployTemplates = {
 const deleteTemplates = {
   [DELETE_APP_DISPATCHER_FILE]: DELETE_DISPATCHER_TEMPLATE,
   [DELETE_ENV_DISPATCHER_FILE]: DELETE_ENV_DISPATCHER_TEMPLATE,
-  [DELETE_ENV_AZURE_FILE]: DELETE_ENV_PROVIDER_TEMPLATE,
+  [DELETE_ENV_AZURE_FILE]: DELETE_ENV_PROVIDER_TEMPLATE("Azure"),
+  [DELETE_ENV_AWS_FILE]: DELETE_ENV_PROVIDER_TEMPLATE("AWS"),
   [DELETE_AZURE_FILE]: DELETE_PROVIDER_TEMPLATE("Azure"),
   [DELETE_AWS_FILE]: DELETE_PROVIDER_TEMPLATE("AWS")
 };
@@ -138,6 +140,7 @@ describe("environment provisioning journey", () => {
       DELETE_ENV_DISPATCHER_FILE,
       DELETE_ENV_AZURE_FILE,
       DELETE_AZURE_FILE,
+      DELETE_ENV_AWS_FILE,
       DELETE_AWS_FILE
     ]);
 
@@ -151,6 +154,16 @@ describe("environment provisioning journey", () => {
     expect(referenced).toEqual([DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE]);
     for (const file of referenced) {
       expect(deploy[file]).toBeDefined();
+    }
+
+    const envDispatcher = parseYaml(remove[DELETE_ENV_DISPATCHER_FILE]);
+    const envReferenced = Object.values<any>(envDispatcher.jobs)
+      .map((job) => job.uses)
+      .filter(Boolean)
+      .map((uses: string) => uses.replace("./.github/workflows/", ""));
+    expect(envReferenced).toEqual([DELETE_ENV_AZURE_FILE, DELETE_ENV_AWS_FILE]);
+    for (const file of envReferenced) {
+      expect(remove[file]).toBeDefined();
     }
   });
 

@@ -56,12 +56,20 @@ case "${1:-} ${2:-}" in
         fi
         ;;
     "app list")
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
+            exit 64
+        fi
         if [[ "${RAD_DISCOVERY_FAIL}" == "app" ]]; then
             exit 1
         fi
         printf '%s\n' "${APP_LIST_JSON}"
         ;;
     "resource list")
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
+            exit 64
+        fi
         if [[ "${RAD_DISCOVERY_FAIL}" == "resource" ]]; then
             exit 1
         fi
@@ -655,7 +663,7 @@ jq -nc '{
 }' >"${COMPILED}"
 run_action
 assert_success "nested module routes"
-assert_call "rad env show test --preview -o json"
+assert_call "rad env show test -o json"
 
 reset_case
 jq -nc '{
@@ -1001,11 +1009,13 @@ assert_failure "malformed application discovery"
 assert_output "invalid JSON"
 assert_no_call "kubectl delete"
 
-reset_case
-APP_LIST_JSON='null'
-export APP_LIST_JSON
-run_action cleanup
-assert_success "empty application discovery"
+for empty_list in '[]' 'null'; do
+    reset_case
+    APP_LIST_JSON="${empty_list}"
+    export APP_LIST_JSON
+    run_action cleanup
+    assert_success "empty application discovery: ${empty_list}"
+done
 
 reset_case
 APP_LIST_JSON="$(jq -nc '[{name:"empty"}]')"
@@ -1278,12 +1288,20 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
         fail "${workflow}: explicit Gateway boolean is not preserved"
 done
 
-grep -qF "radius_contrib_kube_recipe_source Radius.Compute/routes routes" \
+# The AWS pack's routes Recipe is the Radius default OCI recipe, pinned from
+# the catalog like every other Kubernetes recipe in the pack, and its Gateway
+# comes from the same variable and managed default as Azure's.
+# shellcheck disable=SC2016
+grep -qF 'radius_contrib_pin_kube_recipes "$RECIPE_PACK_BICEP" AWS' \
     "${AWS_WORKFLOW}" ||
     fail "AWS route recipe must use the Radius default OCI recipe"
-grep -qF "gatewayName: '\${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}'" \
+grep -qF "RADIUS_ROUTES_GATEWAY_NAME: \${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}" \
     "${AWS_WORKFLOW}" ||
     fail "AWS route recipe is missing the managed Gateway default"
+# shellcheck disable=SC2016
+grep -qF -- '--parameters routesGatewayName="$RADIUS_ROUTES_GATEWAY_NAME"' \
+    "${AWS_WORKFLOW}" ||
+    fail "AWS recipe pack does not receive the routes Gateway name"
 
 for workflow in \
     "${REPO_ROOT}/.github/extension/delete-azure.yml" \

@@ -11,6 +11,8 @@
 // Every exported declaration is deep-frozen so a consumer (or a careless test)
 // cannot mutate the canonical shape out from under other importers.
 
+import { ENVIRONMENT_TOOL_DECLARATIONS } from "./environment-tool-schema.js";
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     for (const key of Object.keys(value as Record<string, unknown>)) {
@@ -164,16 +166,23 @@ export const RADIUS_ACTION_DECLARATIONS: readonly ActionDeclaration[] =
 // wiring that returns it lives in extension.ts (createRadiusExtension).
 export const RADIUS_CANVAS_INSTANCE_ID = "radius-panel";
 
+export const RADIUS_FAILURE_REPORT_CONTEXT =
+  "When a Radius operation reaches a terminal failure and automatic recovery has stopped, use the radius-report-issue skill. This includes app modeling, environment setup or verification, deployment, graph rendering, deletion or cleanup, and dispatch or monitoring failures with an unknown remote outcome. Ask whether the user wants to log an issue with the Radius team and state that they can review it before submission. Collect extra diagnostics only after they agree; remove personal data and secrets, include known session type, model and reasoning level, and use the ai-extensions bug-report template. Show the complete draft and require separate explicit permission before submitting to radius-project/ai-extensions. Do not offer reports for active retries, pending input, deliberate cancellation, or expected unsupported features, and do not ask twice for the same failed operation.";
+
 export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (canvasId: "radius"), ALWAYS:
 1. Reuse the instanceId of any Radius Canvas already open in this session. If none is open, use instanceId "${RADIUS_CANVAS_INSTANCE_ID}". Reopening the existing instance refreshes its server and client connections and ensures only ONE Radius Canvas panel is open.
 2. Pass the current session's repository as the "repo" input in owner/repo format.
 3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 In every example below, "<radius-instance>" means the existing Radius Canvas instanceId when one is open, or "${RADIUS_CANVAS_INSTANCE_ID}" only when none is open.
 
-When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
-1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
-2. If it does not, author it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure, and writes the file to the working tree) and follow that skill to completion.
-3. Only AFTER the skill has written app.bicep to the working tree, open: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }). For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
+When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion. For a combined request such as "generate the model and show me the graph", this explicit-authoring instruction takes precedence over the graph-only flow below: complete authoring successfully, then open the requested graph.
+
+When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases, without explicitly requesting model creation or updates:
+1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).
+2. Let the Canvas detect a missing app.bicep and queue its automatic radius-app-bicep authoring handoff. Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-bicep skill, or a delegated agent.
+3. After opening, do not wait for the model. Continue with any other part of the user's request, or end the turn. You may inspect an already-ready graph for missing source references. For that check, call get_graph_resources at most once; if ready is false, stop the reference check without waiting or retrying. Repair missing source references on a ready graph through the radius-app-graph skill's radius-app-bicep repair workflow.
+
+For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
 
 The planned page resolves .radius/app.bicep from the working tree the same way. The graph-diff page also reads an on-disk .radius/app.bicep for whichever side exactly matches the current workspace repo and branch. Do not commit or push the current worktree merely to compare it. A different repo or branch is read from GitHub and must already contain a committed model; if it does not, report that the diff is unavailable rather than publishing the worktree.
 
@@ -187,7 +196,9 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Once a Radius Canvas is open, always use its actual instanceId for every Radius Canvas operation. Use "${RADIUS_CANVAS_INSTANCE_ID}" only for the first open when no Radius instance exists.
 
-When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.`;
+When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.
+
+${RADIUS_FAILURE_REPORT_CONTEXT}`;
 
 export interface ToolDeclaration {
   name: string;
@@ -372,5 +383,6 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         }
       }
     }
-  }
+  },
+  ...ENVIRONMENT_TOOL_DECLARATIONS
 ]);

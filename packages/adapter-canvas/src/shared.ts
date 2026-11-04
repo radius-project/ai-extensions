@@ -262,6 +262,9 @@ export interface CanvasState {
   existingEnvs?: string[];
   activeSubtab?: string;
   ghCommandPresentation?: import("./gh-command-display.js").GhCommandPresentation;
+  // The developer-only AWS switch, stamped on each page render so the
+  // environment page can offer AWS only while it is on.
+  awsEnabled?: boolean;
   deployResult?: CanvasDeployResult;
   deployingRepo?: string;
   deployingBranch?: string;

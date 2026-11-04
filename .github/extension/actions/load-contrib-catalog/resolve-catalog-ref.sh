@@ -16,6 +16,15 @@ if [ -n "$requested" ]; then
     exit 0
 fi
 
+if [[ -n "${RADIUS_INSTALL_COMMIT:-}" ]]; then
+    [[ "${RADIUS_INSTALL_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "::error::RADIUS_INSTALL_COMMIT must be a 40-character commit." >&2
+        exit 1
+    }
+    printf '%s\n' "${RADIUS_INSTALL_COMMIT}"
+    exit 0
+fi
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 control_plane_action="${2:-${script_dir}/../setup-control-plane/action.yml}"
 

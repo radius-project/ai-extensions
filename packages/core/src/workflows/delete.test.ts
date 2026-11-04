@@ -4,6 +4,7 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AWS_FILE,
   DELETE_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_ENV_AZURE_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_GUARD_STEP_NAME,
@@ -56,6 +57,18 @@ jobs:
       - name: ${DELETE_ENV_GUARD_STEP_NAME}
         run: rad application list --output json
 `,
+  [DELETE_ENV_AWS_FILE]: `name: delete-environment-aws
+on:
+  workflow_call:
+env:
+  ENVIRONMENT: "{{ENV}}"
+jobs:
+  delete:
+    steps:
+      - uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+      - name: ${DELETE_ENV_GUARD_STEP_NAME}
+        run: rad application list --output json
+`,
   [DELETE_AZURE_FILE]: `name: delete-azure
 on:
   workflow_call:
@@ -82,6 +95,7 @@ const ALL_FILES = [
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 ];
@@ -102,6 +116,7 @@ describe("delete workflow constants", () => {
     expect(DELETE_AWS_FILE).toBe("delete-aws.yml");
     expect(DELETE_ENV_DISPATCHER_FILE).toBe("delete-environment.yml");
     expect(DELETE_ENV_AZURE_FILE).toBe("delete-environment-azure.yml");
+    expect(DELETE_ENV_AWS_FILE).toBe("delete-environment-aws.yml");
   });
 
   it("keeps the environment guard step name a stable contract", () => {
@@ -161,6 +176,8 @@ describe("generateDeleteWorkflow", () => {
     expect(files[DELETE_ENV_DISPATCHER_FILE]).not.toContain("{{ENV}}");
     expect(files[DELETE_AZURE_FILE]).toContain('ENVIRONMENT: "staging"');
     expect(files[DELETE_AWS_FILE]).toContain('ENVIRONMENT: "staging"');
+    expect(files[DELETE_ENV_AZURE_FILE]).toContain('ENVIRONMENT: "staging"');
+    expect(files[DELETE_ENV_AWS_FILE]).toContain('ENVIRONMENT: "staging"');
   });
 
   it("pins each provider workflow's composite action to the delete ref", () => {
@@ -169,7 +186,8 @@ describe("generateDeleteWorkflow", () => {
     for (const file of [
       DELETE_AZURE_FILE,
       DELETE_AWS_FILE,
-      DELETE_ENV_AZURE_FILE
+      DELETE_ENV_AZURE_FILE,
+      DELETE_ENV_AWS_FILE
     ]) {
       expect(files[file]).toContain(
         `radius-project/ai-extensions/.github/extension/actions/delete-resource@${DELETE_RADIUS_REF}`
@@ -178,17 +196,16 @@ describe("generateDeleteWorkflow", () => {
     }
   });
 
-  it("fills the environment-delete provider and keeps the guard step name", () => {
-    const files = generateDeleteWorkflow("prod", BASE_TEMPLATES);
+  it.each([DELETE_ENV_AZURE_FILE, DELETE_ENV_AWS_FILE])(
+    "fills the %s environment-delete provider and keeps the guard step name",
+    (file) => {
+      const files = generateDeleteWorkflow("prod", BASE_TEMPLATES);
 
-    expect(files[DELETE_ENV_AZURE_FILE]).toContain(
-      `delete-resource@${DELETE_RADIUS_REF}`
-    );
-    expect(files[DELETE_ENV_AZURE_FILE]).not.toContain("{{RADIUS_REF}}");
-    expect(files[DELETE_ENV_AZURE_FILE]).toContain(
-      `name: ${DELETE_ENV_GUARD_STEP_NAME}`
-    );
-  });
+      expect(files[file]).toContain(`delete-resource@${DELETE_RADIUS_REF}`);
+      expect(files[file]).not.toContain("{{RADIUS_REF}}");
+      expect(files[file]).toContain(`name: ${DELETE_ENV_GUARD_STEP_NAME}`);
+    }
+  );
 
   it("leaves GitHub Actions expressions in the dispatcher untouched", () => {
     const files = generateDeleteWorkflow("prod", BASE_TEMPLATES);

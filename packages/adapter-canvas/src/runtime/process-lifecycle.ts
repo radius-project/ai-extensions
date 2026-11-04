@@ -1,6 +1,6 @@
 export interface ExtensionProcess {
   isShutDown(): boolean;
-  shutdown(signal: string): Promise<void>;
+  shutdown(signal: string): Promise<{ exitCode: number }>;
 }
 
 export interface ProcessLifecyclePorts {
@@ -31,8 +31,15 @@ export function configureProcessLifecycle(
   const gracefulShutdown = async (signal: string): Promise<void> => {
     if (gracefulShutdownStarted) return;
     gracefulShutdownStarted = true;
-    await ports.extension.shutdown(signal);
-    ports.setTimer(() => ports.exit(0), 50);
+    let exitCode = 1;
+    try {
+      exitCode = (await ports.extension.shutdown(signal)).exitCode;
+    } catch (error) {
+      try {
+        ports.log(`[radius] shutdown failed: ${errorDetail(error)}`);
+      } catch {}
+    }
+    ports.setTimer(() => ports.exit(exitCode), 50);
   };
 
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {

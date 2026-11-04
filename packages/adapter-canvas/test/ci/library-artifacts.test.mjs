@@ -25,7 +25,16 @@ function manifest() {
   return {
     name: "@radius-project/graph-react",
     version: "0.1.0",
-    private: true,
+    private: false,
+    publishConfig: {
+      access: "public",
+      registry: "https://registry.npmjs.org/"
+    },
+    repository: {
+      type: "git",
+      url: "git+https://github.com/radius-project/ai-extensions.git",
+      directory: "packages/graph-react"
+    },
     license: "Apache-2.0",
     type: "module",
     typesVersions: {
@@ -343,7 +352,16 @@ describe("packed library contracts", () => {
   it("accepts only the browser-safe graph and domain subpaths of core", () => {
     const core = {
       name: "@radius-project/core",
-      private: true,
+      private: false,
+      publishConfig: {
+        access: "public",
+        registry: "https://registry.npmjs.org/"
+      },
+      repository: {
+        type: "git",
+        url: "git+https://github.com/radius-project/ai-extensions.git",
+        directory: "packages/core"
+      },
       type: "module",
       license: "Apache-2.0",
       typesVersions: {
@@ -395,6 +413,30 @@ describe("packed library contracts", () => {
   });
 
   it.each([
+    [
+      "private package",
+      (value) => {
+        value.private = true;
+      }
+    ],
+    [
+      "restricted package",
+      (value) => {
+        value.publishConfig.access = "restricted";
+      }
+    ],
+    [
+      "wrong registry",
+      (value) => {
+        value.publishConfig.registry = "https://example.invalid/";
+      }
+    ],
+    [
+      "wrong provenance repository",
+      (value) => {
+        value.repository.url = "git+https://github.com/example/other.git";
+      }
+    ],
     [
       "missing classic TypeScript subpath declarations",
       (value) => {

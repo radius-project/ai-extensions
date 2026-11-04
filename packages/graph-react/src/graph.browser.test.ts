@@ -1320,6 +1320,31 @@ describe("graph view in a real browser", () => {
     ]);
   });
 
+  it("names a deployed AWS resource's link for the AWS console", async () => {
+    mount({
+      deployMode: true,
+      resources: [
+        {
+          id: "queue",
+          name: "queue",
+          outputResources: [
+            {
+              id: "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers/AWS.SQS/Queue/jobs",
+              type: "AWS.SQS/Queue"
+            }
+          ]
+        }
+      ]
+    });
+    const node = await card("queue");
+    const link = within(node).getByRole("link", {
+      name: "Open queue in AWS console"
+    });
+    expect(link.getAttribute("href")).toBe(
+      "https://us-west-2.console.aws.amazon.com/sqs/v3/home?region=us-west-2#/queues"
+    );
+  });
+
   it("does not open details when a deployed portal link is activated", async () => {
     const { recorded } = mount({
       deployMode: true,

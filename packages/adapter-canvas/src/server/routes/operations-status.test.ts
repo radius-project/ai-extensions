@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
@@ -141,6 +142,7 @@ function createDependencies(
   overrides: Partial<CreateOperationDependencies> = {}
 ): CreateOperationDependencies {
   return {
+    awsEnabled: true,
     claimSelectionHandle: () => ({
       ok: true,
       login: "octocat",
@@ -193,6 +195,7 @@ function actionDependencies(
   overrides: Partial<OperationActionDependencies> = {}
 ): OperationActionDependencies {
   return {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     getOperation: () => {
       throw new Error("getOperation not stubbed");
     },
@@ -258,7 +261,7 @@ interface HappyPathCapture {
   built: unknown[];
   started: OperationRecord[];
   persistCalls: number;
-  scheduled: Array<{ instanceId: string; op: OperationRecord }>;
+  scheduled: Array<{ instanceId: string | undefined; op: OperationRecord }>;
   finished: unknown[];
 }
 
@@ -835,6 +838,15 @@ describe("operations-status routes (SU-16)", () => {
 
 // A recorder response paired with the create handler over a streamed POST body.
 // Async because the handler reads the body with `for await`.
+const VALID_AWS_INPUT = {
+  roleName: "radius-deploy-octo-app",
+  accountId: "123456789012",
+  region: "us-west-2",
+  cluster: "c",
+  vpcId: "vpc-1",
+  subnetIds: "subnet-a,subnet-b"
+};
+
 async function runCreate(
   body: string,
   deps: CreateOperationDependencies,
@@ -1066,24 +1078,152 @@ describe("handleCreateOperation (POST /api/operations)", () => {
   );
 
   it.each([
-    ["roleArn", { roleArn: "", accountId: "a", region: "r", cluster: "c" }],
-    ["accountId", { roleArn: "arn", accountId: "", region: "r", cluster: "c" }],
-    ["region", { roleArn: "arn", accountId: "a", region: "", cluster: "c" }],
-    ["cluster", { roleArn: "arn", accountId: "a", region: "r", cluster: "" }]
+    ["accountId is missing", { accountId: "" }],
+    ["accountId has 11 digits", { accountId: "12345678901" }],
+    ["accountId has 13 digits", { accountId: "1234567890123" }],
+    ["accountId is not numeric", { accountId: "12345678901a" }],
+    ["region is missing", { region: "" }],
+    ["region is upper case", { region: "US-WEST-2" }],
+    ["region has no zone number", { region: "us-west" }],
+    ["cluster is blank", { cluster: "  " }],
+    ["cluster is missing", { cluster: "" }],
+    ["vpcId is blank", { vpcId: " " }],
+    ["subnetIds is blank", { subnetIds: "" }],
+    ["both role inputs are missing", { roleName: "", existingRoleArn: "" }],
+    ["roleName exceeds 64 characters", { roleName: "r".repeat(65) }],
+    ["roleName has a path separator", { roleName: "team/deploy" }],
+    [
+      "existingRoleArn is malformed and roleName is missing",
+      { roleName: "", existingRoleArn: "arn:aws:iam::123:role/r" }
+    ],
+    ["vpcId is missing", { vpcId: "" }],
+    ["subnetIds is missing", { subnetIds: "" }],
+    [
+      "existingRoleArn is not a role and roleName is missing",
+      {
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:user/r"
+      }
+    ],
+    [
+      "existingRoleArn ends in a slash and roleName is missing",
+      {
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:role/team/"
+      }
+    ]
+  ])("rejects aws setup with 400 when %s", async (_label, fields) => {
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        ...VALID_AWS_INPUT,
+        ...fields
+      }),
+      createDependencies({ isValidRepoSlug: () => true })
+    );
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        "AWS setup requires a valid accountId, region, cluster, vpcId, subnetIds, and either an IAM role name or an existing role ARN.",
+      code: "invalid-aws-operation-input"
+    });
+  });
+
+  it.each([
+    ["vpcId is not a VPC ID", { vpcId: "main" }],
+    ["vpcId has upper-case hex", { vpcId: "vpc-0ABC" }],
+    ["vpcId has surrounding spaces", { vpcId: " vpc-1 " }],
+    ["subnetIds has a non-subnet ID", { subnetIds: "subnet-a,sg-b" }],
+    ["subnetIds is separated by spaces", { subnetIds: "subnet-a, subnet-b" }],
+    ["subnetIds ends in a comma", { subnetIds: "subnet-a,subnet-b," }],
+    ["subnetIds has one subnet", { subnetIds: "subnet-a" }],
+    ["subnetIds repeats one subnet", { subnetIds: "subnet-a,subnet-a" }],
+    ["vpcId is an array", { vpcId: ["vpc-1"] }],
+    ["subnetIds is an array", { subnetIds: ["subnet-a", "subnet-b"] }]
   ])(
-    "rejects aws setup with 400 when %s is missing",
+    "rejects aws setup before any operation starts when %s",
     async (_label, fields) => {
+      const claimSelectionHandle = vi.fn();
+      const startConflict = vi.fn();
+      const startOperation = vi.fn();
       const recording = await runCreate(
-        JSON.stringify({ repo: "octo/app", provider: "aws", ...fields }),
-        createDependencies({ isValidRepoSlug: () => true })
+        JSON.stringify({
+          repo: "octo/app",
+          provider: "aws",
+          ...VALID_AWS_INPUT,
+          ...fields
+        }),
+        createDependencies({
+          isValidRepoSlug: () => true,
+          claimSelectionHandle,
+          startConflict,
+          startOperation
+        })
       );
+
       expect(recording.status).toBe(400);
       expect(JSON.parse(recording.body)).toEqual({
-        error: "AWS setup requires roleArn, accountId, region, and cluster.",
-        code: "invalid-aws-operation-input"
+        error:
+          "AWS setup requires a VPC ID such as vpc-0123abcd and at least two different subnet IDs such as subnet-0123abcd, separated by commas.",
+        code: "invalid-aws-network-input"
       });
+      expect(startConflict).not.toHaveBeenCalled();
+      expect(claimSelectionHandle).not.toHaveBeenCalled();
+      expect(startOperation).not.toHaveBeenCalled();
     }
   );
+
+  it("refuses an AWS environment without starting an operation while the AWS switch is off", async () => {
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        environment: "staging",
+        provider: "aws",
+        ...VALID_AWS_INPUT
+      }),
+      createDependencies({ awsEnabled: false, isValidRepoSlug: () => true })
+    );
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        'Creating AWS environments isn\'t supported yet. "staging" was not created.',
+      code: "provider-unsupported"
+    });
+  });
+
+  it.each([
+    ["a 64-character role name", { roleName: "r".repeat(64) }],
+    ["a one-character role name", { roleName: "r" }],
+    ["a GovCloud region", { region: "us-gov-west-1" }],
+    [
+      "an existing role ARN instead of a role name",
+      {
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+      }
+    ],
+    [
+      "an existing partitioned role ARN with a path",
+      {
+        roleName: "",
+        existingRoleArn: "arn:aws-us-gov:iam::123456789012:role/team/deploy"
+      }
+    ],
+    ["three subnets", { subnetIds: "subnet-0a1,subnet-0b2,subnet-0c3" }]
+  ])("admits aws setup with %s", async (_label, fields) => {
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        ...VALID_AWS_INPUT,
+        ...fields
+      }),
+      happyPathCreate(emptyCapture(), newOperationRecord())
+    );
+
+    expect(recording.status).toBe(202);
+  });
 
   it("registers, persists, answers 202, then schedules — in that order", async () => {
     const capture = emptyCapture();
@@ -1332,20 +1472,49 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, op)
     );
     expect(op.resumeRequest).toBeUndefined();
-    // AWS still needs no azure credentials, and identity stages are only for
-    // azure credential acquisition.
-    expect(capture.built).toEqual([{ includeIdentity: false }]);
-    expect(
-      (op.request as { environment: { provider: string } }).environment.provider
-    ).toBe("aws");
+    // AWS needs no azure credentials, but its deploy role is authorized during
+    // setup, so the identity stage is included.
+    expect(capture.built).toEqual([{ includeIdentity: true }]);
+    expect(op.request).toMatchObject({
+      needsAzureCredentials: false,
+      environment: {
+        provider: "aws",
+        roleName: "radius-deploy-octo-app",
+        existingRoleArn: "",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "c",
+        vpcId: "vpc-1",
+        subnetIds: "subnet-a,subnet-b"
+      }
+    });
+    expect(op.request).not.toHaveProperty("environment.roleArn");
+  });
+
+  it("persists an existing AWS role ARN on the environment request", async () => {
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        ...VALID_AWS_INPUT,
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+      }),
+      happyPathCreate(emptyCapture(), op)
+    );
+
+    expect(op.request).toMatchObject({
+      environment: {
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+      }
+    });
   });
 
   it("answers 409 with the conflicting operation id and never persists or schedules", async () => {
@@ -1354,10 +1523,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, newOperationRecord(), {
         startOperation: () => ({
@@ -1391,10 +1557,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, newOperationRecord(), {
         claimSelectionHandle: claim,
@@ -1429,10 +1592,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, op, {
         persistOperations: () => {
@@ -1487,10 +1647,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, op, {
         persistOperations: () => {
@@ -1540,10 +1697,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, op, {
         persistOperations: () => {
@@ -1581,10 +1735,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
         JSON.stringify({
           repo: "octo/app",
           provider: "aws",
-          roleArn: "arn",
-          accountId: "a",
-          region: "r",
-          cluster: "c"
+          ...VALID_AWS_INPUT
         }),
         response
       )
@@ -1714,6 +1865,7 @@ describe("operation resume and abandon actions", () => {
 
   it("turns a malformed resume body into an empty object before the 409 check", async () => {
     const seen: unknown[] = [];
+    const operation = actionRecord({ operationId: "op/action" });
     const recording = await runAction(
       "/api/operations/op%2Faction/resume/app-selection-required",
       "{not json",
@@ -1721,7 +1873,7 @@ describe("operation resume and abandon actions", () => {
       actionDependencies({
         getOperation: (operationId) => {
           expect(operationId).toBe("op/action");
-          return actionRecord({ operationId });
+          return operation;
         },
         canResumeInput: (_operation, input) => {
           seen.push(input);
@@ -2021,7 +2173,9 @@ describe("operation resume and abandon actions", () => {
         },
         persistOperations: () => {
           order.push("persist");
-          return Promise.reject(new Error("disk unavailable"));
+          return order.length === 2 ?
+              Promise.reject(new Error("disk unavailable"))
+            : Promise.resolve();
         },
         requireInput: (restored, input) => {
           order.push("restore");
@@ -2031,7 +2185,7 @@ describe("operation resume and abandon actions", () => {
         errorMessage: (error) => (error as Error).message
       })
     );
-    expect(order).toEqual(["resume", "persist", "restore"]);
+    expect(order).toEqual(["resume", "persist", "persist"]);
     expect(operation.request).toEqual(requestBefore);
     expect(operation.resumeRequest).toBeUndefined();
     expect(operation.inputRequired).toEqual(originalInput);

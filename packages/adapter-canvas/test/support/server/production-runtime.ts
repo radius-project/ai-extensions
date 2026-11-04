@@ -5,11 +5,21 @@ import {
 import { createProductionGitHubAccountContext } from "../../../src/runtime/production-github-account-context.js";
 
 export function createTestCanvasServerRuntime(
-  options: Omit<ProductionCanvasServerRuntimeOptions, "accountContext"> &
-    Partial<Pick<ProductionCanvasServerRuntimeOptions, "accountContext">>
+  options: Omit<
+    ProductionCanvasServerRuntimeOptions,
+    "accountContext" | "awsEnabled"
+  > &
+    Partial<
+      Pick<
+        ProductionCanvasServerRuntimeOptions,
+        "accountContext" | "awsEnabled"
+      >
+    >
 ) {
   return createProductionCanvasServerRuntime({
     ...options,
+    // Tests see what users see unless they turn the AWS switch on.
+    awsEnabled: options.awsEnabled ?? false,
     accountContext:
       options.accountContext ?? createProductionGitHubAccountContext(),
     get environmentOperationRunner() {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ResolveOidcSubjectResult } from "../../azure-oidc.js";
 import { configureAzureAutoSetupCredentials } from "./azure-auto-setup-credentials.js";
 import type {
@@ -9,6 +9,11 @@ import type {
 } from "./azure-auto-setup-types.js";
 import { deterministicProviderUuid } from "../services/provider-mutation-recovery.js";
 import { createAzureAutoSetupTestDependencies } from "../../../test/support/server/azure-auto-setup.js";
+import {
+  prepareProviderMutation,
+  providerMutationsByKind,
+  settleProviderMutation
+} from "../../operations.js";
 
 const APP_ID = "33333333-3333-3333-3333-333333333333";
 const APP_OBJECT_ID = "55555555-5555-5555-5555-555555555555";
@@ -24,6 +29,106 @@ const LIVE_CREDENTIAL = {
   audiences: ["api://AzureADTokenExchange"]
 };
 const APPLICATION_NOT_FOUND = `ERROR: Resource 'Application_${APP_OBJECT_ID}' does not exist or one of its queried reference-property objects are not present.`;
+
+describe("Azure credential recovery shutdown", () => {
+  it.each(
+    [0, 11].flatMap((attempts) =>
+      [
+        "role-absent",
+        "role-mismatch",
+        "credential-absent",
+        "credential-mismatch"
+      ].map((kind) => ({ attempts, kind }))
+    )
+  )(
+    "preserves $kind recovery at $attempts attempts after the read returns",
+    async ({ attempts, kind }) => {
+      let stopped = false;
+      const role = kind.startsWith("role");
+      const test = harness({
+        runAz: async (args) => {
+          if (args.join(" ").includes("federated-credential list"))
+            return result({
+              stdout: JSON.stringify(role ? [LIVE_CREDENTIAL] : [])
+            });
+          throw new Error(`Unexpected Azure command ${args.join(" ")}`);
+        }
+      });
+      const scope = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius`;
+      const target =
+        role ?
+          deterministicProviderUuid(
+            `op-credentials\0${OBJECT_ID}\0Contributor\0${scope}`
+          )
+        : `${APP_ID}:dev`;
+      const mutation = prepareProviderMutation(test.workflow.operation, {
+        kind:
+          role ?
+            "azure_role_assignment.create"
+          : "azure_federated_credential.create",
+        target
+      });
+      settleProviderMutation(
+        test.workflow.operation,
+        mutation.mutationId,
+        "outcome_unknown",
+        "Lost acknowledgement"
+      );
+      const live = providerMutationsByKind(
+        test.workflow.operation,
+        mutation.kind
+      )[0];
+      if (attempts) live.reconcileAttempts = attempts;
+      const original = structuredClone(
+        test.workflow.operation.providerRecovery
+      );
+      const persist = vi.fn(async () => {});
+      test.input.dependencies.operations.persist = persist;
+      test.workflow.isStopped = () => stopped;
+      const runAz = test.workflow.runAz;
+      test.workflow.runAz = async (args) => {
+        const line = args.join(" ");
+        if (
+          line.startsWith("role assignment list") ||
+          line.includes("federated-credential show")
+        ) {
+          stopped = true;
+          if (kind === "credential-absent")
+            return result({ code: 1, stderr: "not found" });
+          if (kind === "credential-mismatch")
+            return result({
+              stdout: JSON.stringify({
+                ...LIVE_CREDENTIAL,
+                description: "different operation"
+              })
+            });
+          return result({
+            stdout: JSON.stringify(
+              kind === "role-absent" ?
+                []
+              : [
+                  {
+                    principalId: "different-principal",
+                    roleDefinitionName: "Contributor",
+                    scope
+                  }
+                ]
+            )
+          });
+        }
+        return runAz(args);
+      };
+      await expect(
+        configureAzureAutoSetupCredentials(test.input)
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(test.workflow.operation.providerRecovery).toEqual(original);
+      expect(persist).not.toHaveBeenCalled();
+      expect(test.failures).toEqual([]);
+      expect(test.recordedRoleAssignments).toEqual([]);
+      if (!role) expect(test.ficEntries).toEqual([]);
+    }
+  );
+});
 
 const OIDC: ResolveOidcSubjectResult = {
   federatedCredentials: [{ name: "dev", subject: SUBJECT }],
@@ -137,6 +242,7 @@ function harness(options: {
     }
   });
   const workflow: AzureAutoSetupWorkflow = {
+    isStopped: () => false,
     operation,
     steps: [],
     respond: () => {},
@@ -208,6 +314,69 @@ function harness(options: {
 }
 
 describe("Azure auto-setup credentials and roles service (SU-08)", () => {
+  it.each([
+    "azure_federated_credential.create",
+    "azure_role_assignment.create"
+  ])(
+    "interrupts the real credential workflow before an unsent %s after a held save",
+    async (kind) => {
+      const test = harness({
+        runAz: async (args) => {
+          const line = args.join(" ");
+          if (line.includes("federated-credential list"))
+            return result({ stdout: "[]" });
+          if (
+            kind === "azure_role_assignment.create" &&
+            line.includes("federated-credential create")
+          )
+            return result({ stdout: JSON.stringify(LIVE_CREDENTIAL) });
+          throw new Error(`Unexpected provider write: ${line}`);
+        }
+      });
+      let stopped = false;
+      let entered = () => {};
+      let release = () => {};
+      const prepared = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const saved: string[] = [];
+      test.workflow.isStopped = () => stopped;
+      test.input.dependencies.operations.persist = async () => {
+        const mutation = providerMutationsByKind(
+          test.workflow.operation,
+          kind
+        ).at(-1);
+        if (!mutation) return;
+        saved.push(mutation.status);
+        if (mutation.status === "prepared") {
+          entered();
+          await gate;
+        }
+      };
+      const pending = configureAzureAutoSetupCredentials(test.input);
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      await prepared;
+      const calls = test.calls.filter((call) => call.startsWith("az:"));
+      stopped = true;
+      release();
+      await rejected;
+      expect(test.calls.filter((call) => call.startsWith("az:"))).toEqual(
+        calls
+      );
+      expect(saved).toEqual(["prepared", "not_applied"]);
+      expect(test.failures).toEqual([]);
+      expect(test.recordedRoleAssignments).toEqual([]);
+      expect(test.calls.filter((call) => call.startsWith("remove:"))).toEqual([
+        "remove:C:\\temp\\fic.json"
+      ]);
+    }
+  );
+
   it("reports a Service Principal failure before listing credentials", async () => {
     const test = harness({
       runAz: async (args) => {

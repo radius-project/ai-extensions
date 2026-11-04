@@ -100,7 +100,7 @@ describe("fetchRecipePack", () => {
     expect(secrets?.concreteResources[0].type).toBe("core/Secret");
   });
 
-  it("reads the kubernetes default pack for aws and kubernetes providers", async () => {
+  it("reads the kubernetes default pack for the kubernetes provider", async () => {
     const KUBE_PACK = `
 resource kubernetesRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default'
@@ -114,17 +114,42 @@ resource kubernetesRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   }
 }
 `;
-    // Both providers resolve to recipe-packs/kubernetes/default.bicep.
-    expect(recipePackContentPath("aws")).toBe(
-      recipePackContentPath("kubernetes")
-    );
     const gh = fakeGitHub({
-      content: { [recipePackContentPath("aws")]: KUBE_PACK }
+      content: { [recipePackContentPath("kubernetes")]: KUBE_PACK }
     });
-    const recipes = await fetchRecipePack(gh, "aws");
+    const recipes = await fetchRecipePack(gh, "kubernetes");
     expect(recipes).toHaveLength(1);
     expect(recipes[0].resourceType).toBe("Radius.Data/redisCaches");
     expect(recipes[0].concreteResources[0].type).toBe("apps/Deployment");
+  });
+
+  it("reads the pinned aws-eks pack for the aws provider", async () => {
+    const AWS_PACK = `
+resource awsEksRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'aws-eks'
+  properties: {
+    recipes: {
+      'Radius.Data/mySqlDatabases': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/aws-eks-recipes/mysqldatabases:latest'
+      }
+    }
+  }
+}
+`;
+    expect(recipePackContentPath("aws")).not.toBe(
+      recipePackContentPath("kubernetes")
+    );
+    const gh = fakeGitHub({
+      content: { [recipePackContentPath("aws")]: AWS_PACK }
+    });
+    const recipes = await fetchRecipePack(gh, "aws");
+    expect(recipes).toHaveLength(1);
+    expect(recipes[0].concreteResources[0]).toMatchObject({
+      type: "AWS.RDS/DBInstance",
+      displayType: "Amazon RDS for MySQL",
+      provider: "aws"
+    });
   });
 
   it("yields an entry with no concrete resource when the source is unrecognized", async () => {

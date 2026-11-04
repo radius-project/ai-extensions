@@ -30,6 +30,7 @@ import type {
   DomEventTarget
 } from "../ports.js";
 import type { ScopeTimer } from "../lifecycle.js";
+import type { DiscoverResourcesOptions } from "./discovery.js";
 
 export const PROFILES_PANEL_ENTRY_KEY = "environment-profiles-panel";
 export const CREDENTIAL_PROFILES_ENDPOINT = "/api/credential-profiles";
@@ -524,7 +525,8 @@ export interface CredentialProfilesPanelDeps {
   discoverResources(
     provider: CredentialProvider,
     subscriptionId: string,
-    tenantId: string
+    tenantId: string,
+    options?: DiscoverResourcesOptions
   ): void;
 }
 
@@ -559,6 +561,17 @@ function releaseTracked(into: Registration[]): void {
 
 function clickedOutside(target: unknown, comboSelector: string): boolean {
   return !isDomElement(target) || target.closest(comboSelector) === null;
+}
+
+// The two values discovery is scoped by: subscription and tenant on Azure,
+// account and region on AWS.
+export function profileDiscoveryScope(
+  profile: CredentialProfile,
+  provider: CredentialProvider
+): [string, string] {
+  return provider === "aws" ?
+      [profile.accountId ?? "", profile.region ?? ""]
+    : [profile.subscriptionId ?? "", profile.tenantId ?? ""];
 }
 
 export function initializeCredentialProfilesPanel(
@@ -675,6 +688,13 @@ export function initializeCredentialProfilesPanel(
     }
     if (identityAzureEl)
       identityAzureEl.style.display = provider === "azure" ? "" : "none";
+    const identityDesc = context.dom.byId("env-identity-desc");
+    if (identityDesc) {
+      identityDesc.textContent =
+        provider === "aws" ?
+          "The IAM role GitHub Actions assumes to deploy, over OIDC, with no stored secrets."
+        : "The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.";
+    }
     if (identityAwsEl)
       identityAwsEl.style.display = provider === "aws" ? "" : "none";
     if (panelAzureEl)
@@ -686,8 +706,7 @@ export function initializeCredentialProfilesPanel(
     deps.onProfileChange(selectedProfile);
     deps.discoverResources(
       provider,
-      selectedProfile.subscriptionId ?? "",
-      selectedProfile.tenantId ?? ""
+      ...profileDiscoveryScope(selectedProfile, provider)
     );
   };
 
@@ -1083,12 +1102,18 @@ export function initializeCredentialProfilesPanel(
     if (!refreshButton) continue;
     scope.on(refreshButton, "click", () => {
       if (!selectedProfile) return;
-      const provider: CredentialProvider =
-        selectedProfile.provider === "aws" ? "aws" : "azure";
+      if (selectedProfile.provider === "aws") {
+        // AWS Refresh keeps the selected cluster, namespace, and subnets.
+        deps.discoverResources(
+          "aws",
+          ...profileDiscoveryScope(selectedProfile, "aws"),
+          { keepSelection: true }
+        );
+        return;
+      }
       deps.discoverResources(
-        provider,
-        selectedProfile.subscriptionId ?? "",
-        selectedProfile.tenantId ?? ""
+        "azure",
+        ...profileDiscoveryScope(selectedProfile, "azure")
       );
     });
   }

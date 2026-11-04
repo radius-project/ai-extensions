@@ -11,7 +11,11 @@ import {
   initializeCredentialsPane,
   isCredentialsPaneController
 } from "./credentials.js";
-import { initializeDiscoveryPanel } from "./discovery.js";
+import {
+  initializeDiscoveryPanel,
+  type DiscoveryPanelHandle
+} from "./discovery.js";
+import { initializeAwsDeployIdentity } from "./aws-deploy-identity.js";
 import { createEnvironmentConfirmDialog } from "./confirm-dialog.js";
 import { validateEnvironmentName } from "./form-validation.js";
 import {
@@ -35,6 +39,7 @@ import type { BrowserTeardown } from "../lifecycle.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
 import {
   KUBERNETES_NAMESPACE_ERROR,
+  isAwsRoleName,
   isKubernetesNamespace
 } from "@radius-project/core/platforms";
 
@@ -46,6 +51,7 @@ interface EnvironmentPageState {
   readonly repo: string;
   readonly branch: string;
   readonly activeSubtab: "credentials" | "environments";
+  readonly awsEnabled: boolean;
   readonly mutationNonce: string;
   readonly ghCommandPresentation: GhCommandPresentation;
 }
@@ -60,6 +66,7 @@ function parsePageState(context: BrowserContext): EnvironmentPageState {
     repo: readString(state, "repo"),
     branch: readString(state, "branch"),
     mutationNonce: readString(state, "mutationNonce"),
+    awsEnabled: state.awsEnabled === true,
     ghCommandPresentation: parseGhCommandPresentation(
       state.ghCommandPresentation
     ),
@@ -162,27 +169,46 @@ export function initializeEnvironmentPage(
   const scope = beginEntry(context, ENVIRONMENT_PAGE_ENTRY_KEY);
   if (!scope) return NOOP_TEARDOWN;
 
-  const discovery = initializeDiscoveryPanel(context, {
-    mutationNonce: state.mutationNonce
-  });
   let selectedProfile: CredentialProfile | null = null;
   let githubReadiness: GithubReadiness | null = null;
   let creating = false;
   let createAbort: AbortHandle | null = null;
+  // Assigned right after construction; the discovery panel only reports
+  // infrastructure changes in response to later discovery or user input.
+  let discoveryHandle: DiscoveryPanelHandle | null = null;
+  const awsInfrastructureError = (): string =>
+    selectedProfile?.provider === "aws" && discoveryHandle ?
+      discoveryHandle.awsInfrastructureError()
+    : "";
   const refreshCreateEligibility = (): void => {
     createButton.disabled =
-      creating || !selectedProfile || githubReadiness?.ready !== true;
+      creating ||
+      !selectedProfile ||
+      githubReadiness?.ready !== true ||
+      awsInfrastructureError() !== "";
   };
+  const discovery = initializeDiscoveryPanel(context, {
+    mutationNonce: state.mutationNonce,
+    onInfrastructureChange: refreshCreateEligibility
+  });
+  discoveryHandle = discovery;
 
   if (!discovery) {
     scope.teardown();
     return NOOP_TEARDOWN;
   }
   const confirmDialog = createEnvironmentConfirmDialog(context);
+  const awsIdentity = initializeAwsDeployIdentity(context, scope, {
+    repo: state.repo,
+    environmentName: () => environmentInput.value,
+    promptRoleSelection: discovery.promptAppSelection
+  });
 
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
-    selectableProviders: options.selectableProviders ?? ["azure"],
+    selectableProviders:
+      options.selectableProviders ??
+      (state.awsEnabled ? ["azure", "aws"] : ["azure"]),
     mutationNonce: state.mutationNonce,
     ghCommandPresentation: state.ghCommandPresentation,
     environmentName: () => environmentInput.value,
@@ -192,6 +218,7 @@ export function initializeEnvironmentPage(
     },
     onProfileChange(profile) {
       selectedProfile = profile;
+      awsIdentity.setProfile(profile?.provider === "aws" ? profile : null);
       refreshCreateEligibility();
       const summary = context.dom.byId("env-profile-summary");
       if (summary) {
@@ -211,8 +238,13 @@ export function initializeEnvironmentPage(
       const hint = context.dom.byId("env-step1-hint");
       if (hint) hint.style.display = profile ? "none" : "";
     },
-    discoverResources(provider, subscriptionId, tenantId) {
-      void discovery.discoverResources(provider, subscriptionId, tenantId);
+    discoverResources(provider, subscriptionId, tenantId, options) {
+      void discovery.discoverResources(
+        provider,
+        subscriptionId,
+        tenantId,
+        options
+      );
     }
   });
   if (!profiles) {
@@ -222,6 +254,7 @@ export function initializeEnvironmentPage(
     return NOOP_TEARDOWN;
   }
   scope.on(environmentInput, "input", profiles.invalidateReadiness);
+  scope.on(environmentInput, "input", awsIdentity.refreshHelp);
 
   // Credential actions call into the environment controller only after user
   // interaction, so construct credentials first and close over the controller
@@ -242,12 +275,36 @@ export function initializeEnvironmentPage(
     // Azure environments own a Microsoft Entra app registration that Radius
     // never deletes automatically (it may be shared). Tell the user it was left
     // behind so they can remove it in Azure if they want to.
-    if (!succeeded || op.provider !== "azure" || !confirmDialog) return;
+    if (
+      !succeeded ||
+      (op.provider !== "azure" && op.provider !== "aws") ||
+      !confirmDialog
+    ) {
+      return;
+    }
     const withWarnings = op.terminalState === "succeeded_with_warnings";
     const outcome =
       withWarnings ?
         `The environment "${op.environment}" was deleted, but some cleanup steps reported warnings — check the progress panel for details.`
       : `The environment "${op.environment}" was deleted.`;
+    if (op.provider === "aws") {
+      confirmDialog.show({
+        title:
+          withWarnings ?
+            "Environment deleted with warnings"
+          : "Environment deleted",
+        message: `${outcome}\n\nThe progress panel lists what was removed from the deploy IAM role and the cluster's access, and what was kept. Radius never deletes the role itself, because other environments or repositories may use it. If nothing needs it, delete it in the `,
+        messageLink: {
+          label: "AWS IAM console",
+          href: "https://console.aws.amazon.com/iam/home#/roles",
+          suffix: "."
+        },
+        confirmLabel: "Done",
+        confirmVariant: "primary",
+        hideCancel: true
+      });
+      return;
+    }
     confirmDialog.show({
       title:
         withWarnings ?
@@ -276,6 +333,7 @@ export function initializeEnvironmentPage(
       repo: state.repo,
       mutationNonce: state.mutationNonce,
       ghCommandPresentation: state.ghCommandPresentation,
+      awsEnabled: state.awsEnabled,
       decisions: context.dialogs,
       ...(confirmDialog ? { confirmDialog } : {})
     },
@@ -325,14 +383,15 @@ export function initializeEnvironmentPage(
       setPendingInfraSelection(config, provider) {
         discovery.setPendingInfraSelection(config, provider);
       },
-      currentInfraSelection(provider) {
-        return discovery.currentInfraSelection(provider);
+      preserveInfraSelection(provider) {
+        discovery.preserveInfraSelection(provider);
       },
       canSubmit() {
         return (
           !creating &&
           selectedProfile !== null &&
-          githubReadiness?.ready === true
+          githubReadiness?.ready === true &&
+          awsInfrastructureError() === ""
         );
       },
       startDeleteProgress(environment, provider) {
@@ -517,6 +576,20 @@ export function initializeEnvironmentPage(
       );
       return;
     }
+    const awsRole = awsIdentity.request();
+    if (provider === "aws") {
+      const infrastructureError = awsInfrastructureError();
+      if (infrastructureError !== "") {
+        showFormError(infrastructureError);
+        return;
+      }
+      if (awsRole.existingRoleArn === "" && !isAwsRoleName(awsRole.roleName)) {
+        showFormError(
+          "Enter an IAM role name of up to 64 letters, digits, or + = , . @ _ - characters."
+        );
+        return;
+      }
+    }
     // The resource group the chosen AKS cluster lives in, which scopes its name
     // within the subscription. Resolved once: the same value identifies the
     // cluster for the conflict check below and is sent for the environment to
@@ -570,7 +643,8 @@ export function initializeEnvironmentPage(
       body.appName = appNameInput.value.trim();
       body.appId = appIdInput.value;
     } else {
-      body.roleArn = selectedProfile.roleArn ?? "";
+      body.roleName = awsRole.roleName;
+      body.existingRoleArn = awsRole.existingRoleArn;
       body.region = region;
       body.accountId = accountId;
       body.vpcId = (infrastructure.vpcId ?? "").trim();

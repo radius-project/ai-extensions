@@ -24,7 +24,7 @@ Open the run, open the failing step, and answer one question: **did the product'
 
 Then download the `cloud-e2e-diagnostics` artifact. It is uploaded on success as well as failure, so a passing run's artifact is the baseline you read the failing one against.
 
-For a service-principal creation failure, read the terminal operation's `failure.message` in the Playwright trace. While the create outcome is unknown, the browser does not receive the diagnostic. The server calls `/api/azure-auto-setup` itself, so the trace has no `202` body. Radius shows the diagnostic in `failure.message` only when reconciliation ends. Radius preserves the command exit code, timeout flag, and available error output, even if later reads find no principal. It redacts credentials and limits each saved diagnostic to 2,000 characters, plus a truncation marker. Diagnostic text alone never authorizes a retry. Runs recorded before this fix can contain only the generic service-principal error; that missing output cannot be recovered from the trace.
+For a service-principal creation failure, read the terminal operation's `failure.message` in the Playwright trace. While the create outcome is unknown, the browser does not receive the diagnostic. The operation coordinator invokes the Azure setup service directly, so the trace has no setup-endpoint `202` body. Radius shows the diagnostic in `failure.message` only when reconciliation ends. Radius preserves the command exit code, timeout flag, and available error output, even if later reads find no principal. It redacts credentials and limits each saved diagnostic to 2,000 characters, plus a truncation marker. Diagnostic text alone never authorizes a retry. Runs recorded before this fix can contain only the generic service-principal error; that missing output cannot be recovered from the trace.
 
 After an uncertain service-principal create, Radius makes up to six reads with bounded delays. A not-found response can reflect directory propagation, so it does not prove the create failed. If the outcome stays unknown, Radius neither repeats the create nor starts cleanup. Only a definite temporary rejection, such as throttling or an application-not-found rejection, permits another create, with at most six create attempts. Stop is checked before and after each retry delay. Failure cleanup uses the operation's selected GitHub account for variable rollback, environment identity checks, and deletion. A missing account, an unreadable identity, or a replacement environment cannot authorize deletion.
 
@@ -96,6 +96,34 @@ The cleanup workflow runs automatically once daily, two hours before the schedul
 gh workflow run cloud-e2e-cleanup.yml --repo radius-project/ai-extensions
 ```
 
+By default, cleanup deletes only state that is older than 6 hours. To delete all leaked state, whatever its age, set `max_age_hours` to `0`. Do this only when no Cloud E2E run is in progress. The value must be a whole number from 0 to 720:
+
+```bash
+gh workflow run cloud-e2e-cleanup.yml --repo radius-project/ai-extensions -f max_age_hours=0
+```
+
+Cleanup verifies each delete:
+
+| Delete                                  | Verification                                       | Timeout     |
+|-----------------------------------------|----------------------------------------------------|-------------|
+| Radius workloads on the shared cluster  | The labelled workloads are gone                    | 180 seconds |
+| `default-cloud-e2e` namespace           | The namespace is gone                              | 120 seconds |
+| Resources in the shared resource group  | Only the AKS cluster remains                       | 300 seconds |
+| Entra service principal                 | Microsoft Graph returns `Request_ResourceNotFound` | 60 seconds  |
+| Entra application                       | Microsoft Graph returns `Request_ResourceNotFound` | 60 seconds  |
+| GitHub deployment record                | The REST API returns `404`                         | 60 seconds  |
+| Radius environment (GitHub Environment) | The REST API returns `404`                         | 60 seconds  |
+| GHCR state package                      | The package cannot be read                         | 12 seconds  |
+| Fallback pull request and branch        | The pull request is closed and the branch is gone  | 60 seconds  |
+
+Each check call gets only the time that remains before its timeout. If a call stalls, cleanup stops it and its child processes, and the wait between calls never passes the timeout.
+
+A failure that a retry cannot fix stops the step at once. Examples are HTTP `400`, `401`, `403`, `405`, `409`, `410`, or `422` from GitHub (but not a rate limit), `Forbidden` from Kubernetes, `AuthorizationFailed` from Azure, and `Authorization_RequestDenied` from Microsoft Graph. A `422` from the `delete-application.yml` dispatch means that the workflow is not on the fixture default branch, for example after a reset. In that case, Radius cannot delete the application, so the independent Kubernetes and Azure sweeps must reclaim the resources. Recovery takes two cleanup runs. In the first run, the dispatch fails, so the GHCR state step does not run and the branch is not reset. If the Kubernetes and Azure sweeps pass, the later steps still delete the environment, its Entra identity, and its deployment records. The second run finds no environment to dispatch for, so it can delete the remaining state and reset the branch. Do not delete the environment by hand.
+
+Before cleanup resets the fixture default branch, a final step checks for leaked state of any age: GitHub Environments with the test prefix, the Entra application, labelled cluster workloads, the `default-cloud-e2e` namespace, and GHCR state packages. It finds the Entra application by name, also when it has no Radius tags, and it finds a state package also when its update time cannot be read. If it finds any, cleanup does not reset the branch. A reset removes the generated `delete-application.yml`, so a reset while an environment remains makes that environment harder to delete. Run cleanup again with `max_age_hours=0` to clear recent state.
+
+The Cloud E2E run also stops at once on leaked state of any age. For example, if an earlier environment still owns the `default` namespace, the create wizard refuses the request, and the test fails at once instead of waiting for its timeout.
+
 If you must inspect first:
 
 ```bash
@@ -124,6 +152,22 @@ Two boundaries worth knowing before you go looking for a gap:
 ## When a run is cancelled
 
 Do not cancel a Cloud E2E run. Cancelling mid-flight can strand a deployment, an Entra application, and GitHub state, converting one slow run into a failure on the next one. The workflow is configured never to cancel itself for this reason. If a CI run must be stopped, dispatch the cleanup workflow after cancellation completes. If cleanup reports that Radius deletion failed, do not remove its retained identity or GitHub state manually; those are the recovery inputs needed to retry deletion. Cleanup always preserves the shared resource group and AKS cluster.
+
+## Select a Radius version
+
+Set the optional `radius-version` dispatch input to an exact published Radius tag. Stable releases and release candidates are supported:
+
+```bash
+gh workflow run cloud-e2e.yml --repo radius-project/ai-extensions -f radius-version=v0.63.0-rc.1
+```
+
+Omit the input, or leave it blank, to use the checked-in Radius pin. Scheduled runs keep that pin. Combine `radius-version` with `canvas-host=copilot-app` to test the same version in the desktop app.
+
+The workflow resolves the tag to its commit, downloads the installer from that commit, and computes its SHA-256 checksum. A missing release, draft release, invalid tag, or failed download stops version selection. It does not fall back to another version. The run summary records the selected tag, commit, and checksum.
+
+Selection changes only the runner checkout and the test environment. The local managed CLI uses the selected pin. After the product creates the GitHub Environment, the fixture adds `RADIUS_RELEASE_OVERRIDE` with the selected tag, commit, and checksum. The deploy and delete runners use that value to install the matching CLI and control plane, verify the installer checksum, and load the recipe catalog from the same commit. The fixture sets the value again after environment recreation. Environment deletion removes it. No repository-wide variable or source commit is changed.
+
+The cloud workflow pins remote templates and actions to its own source commit, so both hosts use the matching workflow support. Older Radius versions must still support the commands, chart options, recipes, and application model used by the journey. Version selection does not add compatibility for removed or missing Radius features.
 
 ## Run the journey in the GitHub Copilot app
 

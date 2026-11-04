@@ -155,7 +155,7 @@ export function buildAppGraphRadCommand(appName: unknown): string {
       `Invalid application name for rad command: ${JSON.stringify(safe)}`
     );
   }
-  return `app graph --application ${safe} --preview --include-icons`;
+  return `app graph --application ${safe} --include-icons`;
 }
 
 // Extract the Radius application name from an app.bicep source. The name is

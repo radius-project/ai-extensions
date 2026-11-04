@@ -926,6 +926,151 @@ describe("planned and deploying graphs", () => {
     );
   });
 
+  it("links a recognized AWS output to its console and drops an unrecognized one", () => {
+    const scope =
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers";
+    const rds = `${scope}/AWS.RDS/DBInstance/db`;
+    const role = `${scope}/AWS.IAM/Role/db-role`;
+    const resources: GraphResource[] = [
+      {
+        id: "db",
+        name: "db",
+        outputResources: [
+          { id: rds, name: "instance", type: "AWS.RDS/DBInstance" },
+          { id: role, name: "role", type: "AWS.IAM/Role" }
+        ]
+      }
+    ];
+    const deployed = buildGraph(settings({ deployMode: true }), resources);
+    expect(deployed.dataById.db.portalUrl).toBe(
+      "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2#databases:"
+    );
+    expect(JSON.parse(deployed.dataById.db.cloudResources)).toEqual([
+      { name: "instance", type: "AWS.RDS/DBInstance", id: rds }
+    ]);
+
+    const modeled = buildGraph(settings(), resources);
+    expect(modeled.dataById["db/output/0/instance"].cloudId).toBe(rds);
+    expect(modeled.dataById["db/output/1/role"].cloudId).toBe("");
+  });
+
+  it("links an RDS database card to its instance when the recipe declares supporting resources first", () => {
+    const scope =
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers";
+    const rds = `${scope}/AWS.RDS/DBInstance/db`;
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "db",
+        name: "db",
+        outputResources: [
+          {
+            id: `${scope}/AWS.RDS/DBSubnetGroup/db-subnets`,
+            name: "db-subnets",
+            type: "AWS.RDS/DBSubnetGroup"
+          },
+          {
+            id: `${scope}/AWS.RDS/DBParameterGroup/db-params`,
+            name: "db-params",
+            type: "AWS.RDS/DBParameterGroup"
+          },
+          { id: rds, name: "instance", type: "AWS.RDS/DBInstance" }
+        ]
+      }
+    ]);
+    expect(built.dataById.db.concreteType).toContain("DBInstance");
+    expect(built.dataById.db.portalUrl).toBe(
+      "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2#databases:"
+    );
+  });
+
+  it("falls back to a linkable AWS output when the primary has no console page", () => {
+    const scope =
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers";
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "queue",
+        name: "queue",
+        outputResources: [
+          {
+            id: `${scope}/AWS.Logs/LogGroup/queue-logs`,
+            name: "queue-logs",
+            type: "AWS.Logs/LogGroup"
+          },
+          {
+            id: `${scope}/AWS.SQS/Queue/jobs`,
+            name: "jobs",
+            type: "AWS.SQS/Queue"
+          }
+        ]
+      }
+    ]);
+    expect(built.dataById.queue.portalUrl).toBe(
+      "https://us-west-2.console.aws.amazon.com/sqs/v3/home?region=us-west-2#/queues"
+    );
+  });
+
+  it("gives an Azure card no fallback link outside resolved mode", () => {
+    const id =
+      "/subscriptions/s1/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql";
+    const resources: GraphResource[] = [
+      {
+        id: "mysql",
+        name: "mysql",
+        outputResources: [
+          { id, name: "server", type: "Microsoft.DBforMySQL/flexibleServers" }
+        ]
+      }
+    ];
+    const modeled = buildGraph(settings(), resources);
+    expect(modeled.dataById.mysql.portalUrl).toBe("");
+    // The output keeps its own Azure portal row, as it does on main.
+    expect(modeled.dataById["mysql/output/0/server"].cloudId).toBe(id);
+  });
+
+  it("links an AWS card to its first linkable output outside resolved mode", () => {
+    const scope =
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers";
+    const modeled = buildGraph(settings(), [
+      {
+        id: "db",
+        name: "db",
+        outputResources: [
+          {
+            id: `${scope}/AWS.IAM/Role/db-role`,
+            name: "db-role",
+            type: "AWS.IAM/Role"
+          },
+          {
+            id: `${scope}/AWS.RDS/DBInstance/db`,
+            name: "db",
+            type: "AWS.RDS/DBInstance"
+          }
+        ]
+      }
+    ]);
+    expect(modeled.dataById.db.portalUrl).toBe(
+      "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2#databases:"
+    );
+  });
+
+  it("gives an unrecognized AWS resource no console link", () => {
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "role",
+        name: "role",
+        outputResources: [
+          {
+            id: "/planes/aws/aws/accounts/1/regions/us-west-2/providers/AWS.IAM/Role/r",
+            name: "r",
+            type: "AWS.IAM/Role"
+          }
+        ]
+      }
+    ]);
+    expect(built.dataById.role.portalUrl).toBe("");
+    expect(built.dataById.role.cloudResources).toBe("[]");
+  });
+
   it("keeps the modeled resource's own icon rather than the output's glyph", () => {
     const built = buildGraph(settings({ plannedMode: true }), [
       {

@@ -1766,7 +1766,7 @@ describe("deploy monitor settlement", () => {
     ]);
   });
 
-  it("prefers the type over the id for a non-Azure provider", async () => {
+  it("prefers the id for an AWS provider too", async () => {
     const aws: CanvasGraphResource = {
       id: "r1",
       deployStatus: "pending",
@@ -1787,8 +1787,8 @@ describe("deploy monitor settlement", () => {
     settle.calls[0].setStatus(aws, "success");
 
     expect(aws.outputResources?.map((o) => o.portalUrl)).toEqual([
-      "https://portal.test/aws/aws-type",
-      "https://portal.test/aws/aws-display",
+      "https://portal.test/aws/aws-id",
+      "https://portal.test/aws/aws-id-2",
       "https://portal.test/aws/id-only",
       "https://portal.test/aws/"
     ]);

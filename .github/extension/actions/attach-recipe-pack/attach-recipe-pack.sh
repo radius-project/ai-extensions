@@ -51,7 +51,7 @@ done < <(jq -r '.[]' <<<"${RECIPE_PACK_NAMES}")
 
 echo "Reading recipe packs attached to environment '${ENVIRONMENT}'..."
 if ! EXISTING_PACKS="$(
-    rad env show "${ENVIRONMENT}" --preview -o json |
+    rad env show "${ENVIRONMENT}" -o json |
         jq -sce '
           if length == 0 or (.[0] | type) != "object" then
             error("environment response must begin with an object")
@@ -97,5 +97,5 @@ PACK_IDS="$(
 )"
 
 echo "Attaching recipe packs '${PACK_IDS}' to environment '${ENVIRONMENT}'..."
-rad env update "${ENVIRONMENT}" --recipe-packs "${PACK_IDS}" --preview
+rad env update "${ENVIRONMENT}" --recipe-packs "${PACK_IDS}"
 echo "✅ Environment '${ENVIRONMENT}' updated with recipe packs."
