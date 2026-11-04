@@ -4214,6 +4214,23 @@ export function setupStepLabel(step: any): string {
 }
 
 /**
+ * Where the last setup attempt stopped.
+ *
+ * An AWS continuation always resumes from Authorize deploy identity, so its
+ * resume point says nothing about where it stopped: the failed stage does.
+ * Every other resume point is also the step the attempt stopped at.
+ */
+function setupStopLabel(op: any, resumeFrom: any): string {
+  if (resumeFrom === "aws_deploy_identity") {
+    const stage = op?.stages?.find(
+      (entry: any) => entry?.id === op?.failure?.stage
+    );
+    if (stage?.label) return stage.label;
+  }
+  return setupStepLabel(resumeFrom);
+}
+
+/**
  * What a continuation would reuse, and where it would start.
  *
  * Built here rather than in the browser so the sentence beside **Continue
@@ -4503,7 +4520,7 @@ export function projectOperationHeadline(op: any): any {
     return {
       code: "continue-failed",
       title: "Setup could not continue",
-      message: `Radius stopped at ${setupStepLabel(op.resumeFrom)}. Review what exists, then retry setup or delete what this attempt created.`
+      message: `Radius stopped at ${setupStopLabel(op, op.resumeFrom)}. Review what exists, then retry setup or delete what this attempt created.`
     };
   }
   return null;
@@ -4744,7 +4761,8 @@ export function projectOperationActions(op: any): any[] {
       placement: "row",
       tone: "primary",
       requiresConfirmation: false,
-      description: `The last attempt stopped at ${setupStepLabel(
+      description: `The last attempt stopped at ${setupStopLabel(
+        op,
         op.resumeFrom || setup.resumeFrom
       )}. Radius reuses the resources it already recorded and starts again from ${setupStepLabel(
         setup.resumeFrom
