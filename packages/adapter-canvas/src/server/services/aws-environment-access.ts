@@ -1,6 +1,7 @@
 import {
   AWS_TRUST_SUBJECTS_VARIABLE,
   namesRepositoryEnvironment,
+  subjectNamesRepository,
   type GitHubRepositoryIdentity,
   buildEnvironmentSuffix,
   formatAwsLockTime,
@@ -446,9 +447,9 @@ export function createAwsEnvironmentAccess<Operation>(
       operations.enterStage(operation, stage);
       const repo = text(input.repo);
       const environment = text(input.environment);
-      let subjects: string[];
+      let oidc: ResolveOidcSubjectResult;
       try {
-        subjects = await resolveSubjects(repo, environment, executor);
+        oidc = await resolveOidc(repo, environment, executor);
         if (dependencies.isStopRequested(operation)) {
           return pausedBeforeReady(operation, []);
         }
@@ -458,6 +459,24 @@ export function createAwsEnvironmentAccess<Operation>(
           status: 400,
           error: dependencies.errorMessage(error),
           code: "oidc-subject-unresolved"
+        };
+      }
+      const subjects = oidc.federatedCredentials.map(
+        (credential) => credential.subject
+      );
+      // The same check Repair makes, but before the lock, which is the first
+      // AWS write. Only a customized subject can leave the repository out, and
+      // the claim keys that did it are known only here.
+      const shared = subjects.filter(
+        (subject) => !subjectNamesRepository(subject)
+      );
+      if (shared.length > 0) {
+        const keys = oidc.subjectConfig.includeClaimKeys ?? [];
+        return {
+          ok: false,
+          status: 400,
+          error: `GitHub's OIDC subject for this environment, ${shared.join(", ")}, does not name the repository, because the OIDC subject customization for ${oidc.fullName}, set on the repository or its organization, includes only the claims ${keys.join(", ")}. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. Nothing was created in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry.`,
+          code: "aws-subject-not-repository-specific"
         };
       }
       const accountId = text(input.accountId);
