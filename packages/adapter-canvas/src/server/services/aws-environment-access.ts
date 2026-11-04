@@ -548,6 +548,7 @@ export function createAwsEnvironmentAccess<Operation>(
       const roleName = text(input.roleName) || defaultAwsDeployRoleName(repo);
       const existingRoleArn = text(input.existingRoleArn);
       let policyName: string | undefined;
+      let reconcileLegacyPolicy = false;
       try {
         policyName = await savedPolicyName(
           repo,
@@ -576,6 +577,7 @@ export function createAwsEnvironmentAccess<Operation>(
               "The recorded partial AWS policy identity does not match this setup. Reconcile its grant before retrying. Nothing was changed."
             );
           }
+          reconcileLegacyPolicy = policyName === undefined;
           policyName = recovery.policyName;
         }
       } catch (error) {
@@ -604,6 +606,7 @@ export function createAwsEnvironmentAccess<Operation>(
           roleName,
           existingRoleArn,
           policyName,
+          reconcileLegacyPolicy,
           subjects
         },
         {

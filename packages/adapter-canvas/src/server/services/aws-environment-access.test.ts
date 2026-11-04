@@ -295,6 +295,63 @@ const input = {
 };
 
 describe("AWS environment access setup", () => {
+  it.each([
+    "legacy deletion failed",
+    "quota replacement restored the legacy grant"
+  ])("finishes legacy migration on retry after %s", async (failure) => {
+    const quota = failure.startsWith("quota");
+    const script = {
+      ...happyPath,
+      "iam get-role": ok({
+        Role: {
+          Arn: ROLE_ARN,
+          AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [
+            DEV,
+            DEV_ID
+          ])
+        }
+      }),
+      "iam get-role-policy": ok({
+        PolicyName: "radius-deploy-dev",
+        PolicyDocument: buildAwsEnvironmentPermissionPolicy("us-west-2")
+      }),
+      "iam list-role-policies": ok({ PolicyNames: ["radius-deploy-dev"] })
+    };
+    const first = harness(
+      {
+        ...script,
+        "iam put-role-policy":
+          quota ? [fail("LimitExceeded"), fail("AccessDenied"), ok()] : ok(),
+        "iam delete-role-policy": quota ? ok() : fail("AccessDenied")
+      },
+      defaultSubject
+    );
+    const setup = { ...input, existingRoleArn: ROLE_ARN };
+    expect(await first.access.setup(operation, setup, EXECUTOR)).toMatchObject({
+      ok: false
+    });
+    await first.access.release(operation);
+    const saved = first.persistedContexts.get(operation.id);
+    if (!saved) throw new Error("Missing persisted policy identity");
+    const retry = harness(
+      {
+        ...script,
+        "iam put-role-policy": quota ? [fail("LimitExceeded"), ok()] : ok(),
+        "iam delete-role-policy": ok()
+      },
+      defaultSubject
+    );
+    retry.contexts.set(operation.id, saved);
+    expect(await retry.access.setup(operation, setup, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+    expect(retry.find("iam get-role-policy")).toContain("radius-deploy-dev");
+    expect(retry.find("iam delete-role-policy")).toContain("radius-deploy-dev");
+    expect(retry.find("iam put-role-policy")).toContain(
+      "radius-deploy-dev-f5fb7acf8f59"
+    );
+  });
+
   it.each(["failure", "pause"])(
     "recovers the policy identity after an EKS %s and a repository rename",
     async (outcome) => {

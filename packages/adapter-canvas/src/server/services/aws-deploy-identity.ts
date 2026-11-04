@@ -97,6 +97,8 @@ export interface AwsDeployIdentityRequest {
   // A role the developer picked deliberately. Radius adds to it but never owns it.
   existingRoleArn: string;
   policyName?: string;
+  // A partial operation's intended name does not prove migration completed.
+  reconcileLegacyPolicy?: boolean;
   // Every GitHub OIDC subject this environment's workflows may present: one for
   // a repository that uses immutable subjects, otherwise the name-based and
   // the ID-based form. At least one.
@@ -464,7 +466,10 @@ export async function setupAwsDeployIdentity(
   }
 
   const legacy =
-    roleMissing || request.policyName !== undefined ?
+    (
+      roleMissing ||
+      (request.policyName !== undefined && !request.reconcileLegacyPolicy)
+    ) ?
       { ok: true as const, name: null, document: null }
     : await readLegacyEnvironmentPolicy({ ...request, roleName }, role, ports);
   if (!legacy.ok) {
