@@ -24,7 +24,7 @@ The environment tools and Canvas wizard share one operation owner: collect the e
 
 AWS setup remains disabled by default. Enable the developer switch at extension startup; it is not a tool argument.
 
-1. **Form inputs**: env name, IAM role name or existing role ARN, AWS region, account ID, EKS cluster name, VPC ID and comma-separated subnet IDs. Both role selectors may be supplied; the existing role ARN takes precedence. Setup authorizes the deploy identity and records its resolved role ARN and cloud settings as GitHub Environment variables.
+1. **Form inputs**: env name, IAM role name or existing role ARN, AWS region, account ID, EKS cluster name, the cluster's VPC ID, and comma-separated subnet IDs in that VPC that cover at least two standard availability zones. Both role selectors may be supplied; the existing role ARN takes precedence. Setup authorizes the deploy identity and records its resolved role ARN and cloud settings as GitHub Environment variables.
 2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-aws.yml` and dispatches it. The workflow logs into AWS via OIDC and runs `aws sts get-caller-identity`, then runs `aws eks update-kubeconfig` for the EKS cluster and `kubectl cluster-info` to confirm cluster access. Status is polled and shown live in the canvas.
 
 ### Azure
@@ -34,7 +34,7 @@ AWS setup remains disabled by default. Enable the developer switch at extension 
 
 ## How to invoke
 
-Use `radius_setup_environment` to start setup without opening a panel. Supply `repo`, `environment`, `provider`, and the provider's required fields. Azure requires `tenantId`, `subscriptionId`, `resourceGroup` and `cluster`; an optional `clientId` uses an existing credential identity, otherwise the existing application selection/creation flow applies. AWS requires `accountId`, `region`, `cluster`, `vpcId`, `subnetIds` and a valid `roleName` or `existingRoleArn`; subnet IDs are a comma-separated string. Both selectors are retained for the operation's lifetime in this runtime, and `existingRoleArn` takes precedence. The unreleased `roleArn` input is not accepted or aliased. Within the same runtime, Continue/Retry refuses a request without a valid selector rather than authorizing a default role. AWS setup requests are not durably saved: after a runtime restart, Continue/Retry reports the request as missing, so start a new setup. Namespace defaults to `default`. An omitted branch means the current worktree branch only for the session repository; another repository requires an explicit branch.
+Use `radius_setup_environment` to start setup without opening a panel. Supply `repo`, `environment`, `provider`, and the provider's required fields. Azure requires `tenantId`, `subscriptionId`, `resourceGroup` and `cluster`; an optional `clientId` uses an existing credential identity, otherwise the existing application selection/creation flow applies. AWS requires `accountId`, `region`, `cluster`, `vpcId`, `subnetIds` and a valid `roleName` or `existingRoleArn`; `vpcId` is the cluster's VPC, and `subnetIds` is a comma-separated string, with no spaces, of at least two different subnet IDs in that VPC that cover two standard availability zones. Both selectors are retained for the operation's lifetime in this runtime, and `existingRoleArn` takes precedence. The unreleased `roleArn` input is not accepted or aliased. Within the same runtime, Continue/Retry refuses a request without a valid selector rather than authorizing a default role. AWS setup requests are not durably saved: after a runtime restart, Continue/Retry reports the request as missing, so start a new setup. Namespace defaults to `default`. An omitted branch means the current worktree branch only for the session repository; another repository requires an explicit branch.
 
 With AWS disabled, shared admission refuses AWS before account readiness, account choice or setup work. Tool schema, workspace and branch checks happen first, so a missing branch can still require an explicit target. Closing a panel does not stop runtime-owned setup. AWS user Stop remains cooperative and saves known partial progress, but nested AWS commands and subsequent local context/persistence updates are not fully fenced by runtime shutdown. That shutdown correction and wider AWS mutation recovery remain deferred.
 
@@ -108,7 +108,7 @@ The managed Contour Gateway supports HTTP and TLS routes. TCP and UDP routes req
 
 **AWS** — also set from the form for deploys (not read by verification):
 
-- `AWS_ACCOUNT_ID`, `RADIUS_VPC_ID`, `RADIUS_SUBNET_IDS`
+- `AWS_ACCOUNT_ID`, `RADIUS_VPC_ID` (the EKS cluster's VPC), `RADIUS_SUBNET_IDS`
 
 **AWS**, recorded for environment deletion (not read by any workflow):
 

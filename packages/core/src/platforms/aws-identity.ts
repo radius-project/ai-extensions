@@ -804,6 +804,22 @@ export function eksAuthenticationMode(describeCluster: unknown): string {
   return typeof mode === "string" && mode ? mode : "CONFIG_MAP";
 }
 
+/**
+ * Why setup cannot use a cluster. When more than one applies, the first in
+ * this order wins: the cluster could not be described, its status is not
+ * ACTIVE or UPDATING, or its CONFIG_MAP authentication cannot take an access
+ * entry.
+ */
+export type AwsClusterUnusableReason =
+  "not-described" | "status" | "config-map";
+
+const EKS_CLUSTER_NAME_PATTERN = /^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$/;
+
+/** Whether a value has the form of an EKS cluster name. */
+export function isEksClusterName(value: string): boolean {
+  return EKS_CLUSTER_NAME_PATTERN.test(value);
+}
+
 /** Whether a cluster in this authentication mode accepts access entries. */
 export function eksAcceptsAccessEntries(authenticationMode: string): boolean {
   return authenticationMode !== "CONFIG_MAP";

@@ -5,6 +5,7 @@ import {
   parsePolicyDocument
 } from "@radius-project/core";
 import {
+  CLUSTER_ACTIVE_WAIT_DELAYS_MS,
   removeAwsEnvironmentFromRole,
   repairAwsEnvironmentTrust,
   setupAwsDeployIdentity,
@@ -161,7 +162,10 @@ const freeChecks: Script = {
   "--version": ok("aws-cli/2.17.0 Python/3.11 Darwin/23"),
   "sts get-caller-identity": ok({ Account: ACCOUNT }),
   "eks describe-cluster": ok({
-    cluster: { accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" } }
+    cluster: {
+      status: "ACTIVE",
+      accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" }
+    }
   })
 };
 
@@ -419,11 +423,29 @@ describe("setupAwsDeployIdentity", () => {
         "--version": freeChecks["--version"],
         "sts get-caller-identity": freeChecks["sts get-caller-identity"],
         "eks describe-cluster": ok({
-          cluster: { accessConfig: { authenticationMode: "CONFIG_MAP" } }
+          cluster: {
+            status: "ACTIVE",
+            accessConfig: { authenticationMode: "CONFIG_MAP" }
+          }
         })
       },
       "aws-cluster-config-map",
       "Cluster shop uses CONFIG_MAP authentication"
+    ],
+    [
+      "a cluster that is being deleted",
+      {
+        "--version": freeChecks["--version"],
+        "sts get-caller-identity": freeChecks["sts get-caller-identity"],
+        "eks describe-cluster": ok({
+          cluster: {
+            status: "DELETING",
+            accessConfig: { authenticationMode: "API" }
+          }
+        })
+      },
+      "aws-cluster-not-active",
+      "Cluster shop in us-west-2 is DELETING. Setup needs an ACTIVE cluster"
     ],
     [
       "an unreadable cluster",
@@ -446,6 +468,8 @@ describe("setupAwsDeployIdentity", () => {
         message: expect.stringContaining(message),
         created: []
       });
+      expect(aws.sleeps).toEqual([]);
+      expect(aws.locks).toEqual([]);
     }
   );
 
@@ -669,7 +693,7 @@ describe("setupAwsDeployIdentity failure paths", () => {
       {
         "--version": freeChecks["--version"],
         "sts get-caller-identity": freeChecks["sts get-caller-identity"],
-        "eks describe-cluster": ok({})
+        "eks describe-cluster": ok({ cluster: { status: "ACTIVE" } })
       },
       "aws-cluster-config-map",
       "shop"
@@ -1960,7 +1984,7 @@ describe("deploy identity lock order", () => {
     ],
     [
       "the cluster uses CONFIG_MAP",
-      { "eks describe-cluster": ok({ cluster: {} }) }
+      { "eks describe-cluster": ok({ cluster: { status: "ACTIVE" } }) }
     ]
   ])("takes no lock when %s", async (_label, override) => {
     const aws = fakeAws({ ...happyPath, ...override });
@@ -2014,6 +2038,79 @@ describe("deploy identity lock order", () => {
     await removeAwsEnvironmentFromRole(removalRequest, {
       ...aws.ports,
       listOtherEnvironments: unexpectedListing
+    });
+    expect(aws.locks).toEqual([]);
+  });
+});
+
+describe("waiting for an ACTIVE cluster", () => {
+  const described = (status: string, authenticationMode: string) =>
+    ok({ cluster: { status, accessConfig: { authenticationMode } } });
+
+  it("waits while the cluster switches to access entries, then sets it up", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "eks describe-cluster": [
+        described("UPDATING", "CONFIG_MAP"),
+        described("UPDATING", "API_AND_CONFIG_MAP"),
+        described("ACTIVE", "API_AND_CONFIG_MAP")
+      ]
+    });
+
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+
+    expect(result.ok).toBe(true);
+    expect(
+      aws.calls.slice(0, 5).map((args) => args.slice(0, 2).join(" "))
+    ).toEqual([
+      "--version",
+      "sts get-caller-identity",
+      "eks describe-cluster",
+      "eks describe-cluster",
+      "eks describe-cluster"
+    ]);
+    expect(aws.locks).toEqual([{ roleName: ROLE, after: 5 }]);
+    expect(aws.sleeps).toEqual([15000, 15000]);
+    expect(aws.steps).toContain(
+      "ℹ️ Cluster shop is UPDATING. Setup waits for it to be ACTIVE before it changes anything."
+    );
+  });
+
+  it("changes nothing when the cluster stays UPDATING", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "eks describe-cluster": described("UPDATING", "API")
+    });
+
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+
+    expect(result).toEqual({
+      ok: false,
+      code: "aws-cluster-not-active",
+      message:
+        "Cluster shop in us-west-2 is UPDATING. Setup needs an ACTIVE cluster, so nothing was changed. Retry when the cluster is ACTIVE.",
+      created: []
+    });
+    expect(aws.sleeps).toEqual(CLUSTER_ACTIVE_WAIT_DELAYS_MS);
+    expect(aws.locks).toEqual([]);
+    expect(aws.calls.some((args) => args[0] === "iam")).toBe(false);
+  });
+
+  it("changes nothing when the cluster can't be read during the wait", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "eks describe-cluster": [
+        described("UPDATING", "API"),
+        fail("ThrottlingException")
+      ]
+    });
+
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-cluster-unreadable",
+      created: []
     });
     expect(aws.locks).toEqual([]);
   });
