@@ -118,8 +118,8 @@ Each step runs in the canvas, in order, with the AWS switch on.
 
 Why some steps work the way they do:
 
-- **15 minutes:** an EKS token lasts 15 minutes, so a later Kubernetes write proves token refresh works. The clock starts at the refresher's first log line. RDS create time varies, so a gate in the fixture app forces the late write.
-- **Failed deploy on the second environment:** after a failed redeploy, Radius loses track of what it created, a known Radius issue, so the failure runs where there's no database to lose.
+- **15 minutes:** an EKS token lasts 15 minutes, so a later Kubernetes write proves token refresh works. The clock starts at the refresher's first log line. RDS create time varies, so the fixture app forces a Kubernetes write at least 16 minutes into the deploy, for example with a resource that waits on the container, whose readiness is held back. The exact resource is picked during the local run.
+- **Failed deploy on the second environment:** the failing app fails in Kubernetes before any AWS call. It runs on the second environment because after a failed redeploy, Radius loses track of what it created, a known Radius issue, so the failure runs where there's no database to lose. The exact resource is picked during the local run.
 - **Final snapshot:** AWS Cloud Control always takes one when it deletes an RDS instance, also a known Radius issue. The recipe commit the canvas pins doesn't copy the app's tags to it yet, so the test finds it by instance name, and checks the tags once the pin moves.
 - **Radius build:** the AWS workflows use Radius `edge` on purpose, because no Radius release has the fixes AWS needs yet. A planned change moves AWS to that release before AWS ships. Each run records the Radius versions it used.
 - **Probe pods:** Kubernetes Jobs in the app's namespace with the app's Radius labels, so the lifecycle design's cleanup rule covers them. A probe that can't start fails the test instead of passing as a timeout.
@@ -179,12 +179,6 @@ About $160 a month: $73 for each cluster's control plane, about $13 for nodes th
 - **Unit tests:** the cleanup rules, which never select resources shaped like Radius's. Cleanup keeping retry inputs when a step fails. The connection, snapshot, and 15-minute checks. The stage limits fitting the job timeout.
 - **Workflow tests:** the AWS job never runs on pull requests, uses no GitHub environment, shares the concurrency group, and skips when the fixture variable is unset.
 - **Local run:** the full test in the developer's own AWS account, plus a check that the deploy role's boundary refuses `s3:PutAccountPublicAccessBlock`, IAM, and RDS in `us-west-2`.
-
-## Open questions
-
-1. **Will the Radius maintainers who own `radius-test` accept about $160 a month?** Almost half of it is the second cluster, which exists only to test a second region.
-2. **Which fixture gate forces a Kubernetes write at least 16 minutes into the deploy, every time?** For example, a resource that waits on the container, whose readiness is held back for 16 minutes. The local run picks it.
-3. **Which resource fails in Kubernetes, before any AWS call, every time?** The local run picks it.
 
 ## Alternatives considered
 
