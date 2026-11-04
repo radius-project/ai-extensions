@@ -166,6 +166,104 @@ afterEach(() => {
 });
 
 describe("bounded runtime shutdown drain", () => {
+  it.each(
+    ["user", "repos/fixture/app"].flatMap((path) =>
+      [false, true].map((reject) => ({ path, reject }))
+    )
+  )(
+    "drains held preflight $path and restores its account without another read (reject=$reject)",
+    async ({ path, reject }) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = deferred();
+      const gate = deferred();
+      let activeLogin = "original";
+      const run = vi.fn(async (args: string[]) => {
+        expect(args[0]).toBe("api");
+        if (args[1] === path) {
+          entered.resolve();
+          await gate.promise;
+          if (reject) throw new Error("Held preflight rejected");
+        }
+        if (args[1] === "user")
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        if (args[1] === "repos/fixture/app")
+          return {
+            code: 0,
+            stdout: '{"permissions":{"admin":true}}',
+            stderr: ""
+          };
+        throw new Error(`Unexpected subsequent command: ${args.join(" ")}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const packages = vi.spyOn(executor, "packageCredentials");
+      const accountContext = createEnvironmentAccountContext(
+        "runtime-preflight",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => activeLogin,
+          switchKeyringAccount: async (login) => {
+            activeLogin = login;
+            return { ok: true };
+          },
+          resetIdentityCache() {}
+        })
+      );
+      const server = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext
+      });
+      const fake = createFakeDependencies();
+      const extension = await bootstrapRadiusExtension(
+        { ...fake.deps, ...server, executionOwner: owner },
+        {
+          createCanvas: (declaration) => declaration,
+          joinSession: async () => createFakeSession()
+        }
+      );
+      const op = createOperation({
+        operationId: "runtime-preflight",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.request = { needsAzureCredentials: true, azure: {}, environment: {} };
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      const cli = vi.spyOn(gh, "cliExec").mockImplementation(() => {
+        throw new Error("Unexpected ambient CLI or mutation");
+      });
+      try {
+        expect(server.setupExecution.scheduleEnvironmentOperation(op)).toBe(
+          true
+        );
+        await entered.promise;
+        const reads = run.mock.calls.length;
+        const shutdown = extension.shutdown();
+        expect(activeLogin).toBe("saved-account");
+        expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+        gate.resolve();
+        await expect(shutdown).resolves.toEqual({
+          complete: true,
+          exitCode: 0
+        });
+        expect(run).toHaveBeenCalledTimes(reads);
+        expect(packages).not.toHaveBeenCalled();
+        expect(cli).not.toHaveBeenCalled();
+        expect(activeLogin).toBe("original");
+        expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
+        expect(op.endedAt).toBeNull();
+        expect(op.failure).toBeNull();
+      } finally {
+        gate.resolve();
+        await extension.shutdown();
+      }
+    }
+  );
+
   it.each(["initial", "accepted"])("fences %s Azure reads", async (mode) => {
     const owner = createEnvironmentExecutionOwner();
     const entered = deferred();

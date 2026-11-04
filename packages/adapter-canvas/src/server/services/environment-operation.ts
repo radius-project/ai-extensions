@@ -59,7 +59,8 @@ export interface EnvironmentOperationWorkflowDependencies {
   isStopped(): boolean;
   preflightRepoAdmin(
     repo: string,
-    executor: SelectedGhExecutor
+    executor: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<string>;
   guardStopBoundary(
     operation: EnvironmentOperationRecord,
@@ -241,7 +242,8 @@ export function createSetupCoordinatorPorts(
     preflightRepository: async () => {
       const message = await dependencies.preflightRepoAdmin(
         operation.repo,
-        executor
+        executor,
+        () => assertSetupExecutionActive(dependencies.isStopped)
       );
       if (!message) return true;
       preflightFailure = {
