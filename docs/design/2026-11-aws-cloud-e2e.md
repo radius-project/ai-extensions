@@ -19,21 +19,16 @@ Add an AWS job to the daily Cloud E2E workflow. It runs the AWS journey in the c
 
 ### Goals
 
-1. The AWS journey runs once a day and on manual dispatch, and never on pull requests.
-2. The run creates two environments in two regions on one deploy identity.
-3. The run deploys MySQL on Amazon RDS and a container that connects to it, with a Kubernetes write after the first EKS token expires.
-4. A pod can reach every managed service the `aws-eks` recipe pack has.
-5. The connection check fails, naming the service, from nodes that aren't in the cluster security group.
-6. A deploy that fails shows the failed resource in the deployed graph.
-7. After delete, only the deploy identity and the GitHub identity provider are left.
-8. The cleanup workflow removes what a failed run leaves behind.
-9. Neither Radius's own cleanup job nor this test's cleanup can delete the other's resources.
+- The AWS journey runs in Cloud E2E once a day and on manual dispatch, and never on pull requests.
+- A pod can reach every managed service in the `aws-eks` recipe pack, and the check catches nodes that can't.
+- Deleting both environments leaves only the deploy identity and the GitHub identity provider.
+- Cleanup removes what a failed run leaves behind, without touching Radius's own test resources.
 
 ### Non-goals
 
 - Running the AWS journey in the GitHub Copilot app host: the harness host already proves the cloud calls.
 - Creating or deleting EKS clusters in the test: the canvas only discovers clusters, the same as for AKS.
-- Testing first-time creation of the deploy identity in CI: see [The deploy identity](#the-deploy-identity).
+- Testing first-time creation of the deploy identity in CI: CI can't create roles in the shared account, so server tests and local runs cover it.
 
 ## Design
 
@@ -102,18 +97,16 @@ Both clusters use authentication mode `API` and a public endpoint, because GitHu
 
 Each step runs in the canvas, in order, with the AWS switch on.
 
-| Step                          | What the test checks                                                                                                                                                                   |
-|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Preflight                     | The account, both clusters, and the isolated node group are as expected. Nothing from an earlier run is left                                                                           |
-| Create the main environment   | Setup reuses the deploy identity, and adds one trust subject, one inline policy, and one access entry. Verify succeeds                                                                 |
-| Create the second environment | Same deploy identity, now with two of each                                                                                                                                             |
-| Failed deploy                 | The failing app, deployed to the second environment, shows its resource as failed in the deployed graph. Nothing is created in AWS                                                     |
-| Deploy                        | The baseline app deploys to the main environment. A Kubernetes write happens more than 15 minutes after the deploy got its first EKS token                                             |
-| Connection check              | The app's container is ready. A probe pod on the default nodes signs in to each managed service. The same probe on the isolated node times out, and the check names the service        |
-| Delete the apps               | The RDS instance and its groups are gone. Exactly one final RDS snapshot exists. The test deletes it                                                                                   |
-| Delete the second environment | Its subject, policy, and access entry are removed, and the main environment still passes verify                                                                                        |
-| Delete the main environment   | Its subject, policy, and access entry are removed                                                                                                                                      |
-| Leftovers                     | Only the deploy identity, with no inline policies and the deny trust statement, and the GitHub identity provider are left. No RDS, Kubernetes, or GitHub resources from the run remain |
+1. **Preflight.** The account, both clusters, and the isolated node group are as expected, and nothing from an earlier run is left.
+2. **Create the main environment.** Setup reuses the deploy identity, and adds one trust subject, one inline policy, and one access entry. Verify succeeds.
+3. **Create the second environment.** It uses the same deploy identity, which now has two of each.
+4. **Failed deploy.** The failing app, deployed to the second environment, shows its resource as failed in the deployed graph. Nothing is created in AWS.
+5. **Deploy.** The baseline app deploys to the main environment, and a Kubernetes write happens more than 15 minutes after the deploy got its first EKS token.
+6. **Connection check.** The app's container is ready. A probe pod on the default nodes signs in to each managed service. The same probe on the isolated node times out, and the check names the service.
+7. **Delete the apps.** The RDS instance and its groups are gone, and exactly one final RDS snapshot exists. The test deletes it.
+8. **Delete the second environment.** Its subject, policy, and access entry are removed, and the main environment still passes verify.
+9. **Delete the main environment.** Its subject, policy, and access entry are removed.
+10. **Leftovers.** Only the deploy identity, with no inline policies and the deny trust statement, and the GitHub identity provider are left. No RDS, Kubernetes, or GitHub resources from the run remain.
 
 Why some steps work the way they do:
 
