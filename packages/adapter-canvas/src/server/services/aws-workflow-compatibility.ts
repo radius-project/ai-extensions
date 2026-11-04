@@ -1,9 +1,10 @@
+import type { ClassifiedProvider } from "../../provider-classification.js";
 import { verifyWorkflowFilesMatchSource } from "./delete-environment-workflow-verification.js";
 
 export async function requireCurrentAwsWorkflows(
   input: { provider: string; files: readonly string[]; workingBranch: string },
   ports: {
-    environmentProvider(): Promise<string>;
+    environmentProvider(): Promise<ClassifiedProvider>;
     defaultBranch(): Promise<string | null>;
     templates(): Promise<Record<string, string>>;
     readFile(path: string, branch: string): Promise<string | null>;
@@ -14,12 +15,9 @@ export async function requireCurrentAwsWorkflows(
     (file) => file === "run-rad-commands-aws.yml" || file === "delete-aws.yml"
   );
   if (!files.length) return;
-  const provider = await ports.environmentProvider();
-  if (provider === "azure") return;
-  if (provider !== "aws")
-    throw new Error(
-      "Could not determine the saved environment provider before dispatch."
-    );
+  // The dispatchers run their AWS job only for an environment saved as AWS.
+  // Azure and unconfigured environments never run these files.
+  if ((await ports.environmentProvider()) !== "aws") return;
   const branch = await ports.defaultBranch();
   if (!branch)
     throw new Error(

@@ -124,7 +124,10 @@ import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identi
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
-import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
+import {
+  createEnvironmentProviderReader,
+  createEnvironmentTargetReader
+} from "./server/services/environment-target.js";
 import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
 import { requireCurrentAwsWorkflows } from "./server/services/aws-workflow-compatibility.js";
 import {
@@ -1189,9 +1192,8 @@ async function ensureWorkflowsCurrent(
     await requireCurrentAwsWorkflows(
       { provider, files: only, workingBranch },
       {
-        environmentProvider: async () =>
-          (await createEnvironmentTargetReader(runCommand)(repo, environment))
-            .provider,
+        environmentProvider: () =>
+          createEnvironmentProviderReader(runCommand)(repo, environment),
         defaultBranch: () => getDefaultBranch(repo),
         templates: async () => ({
           ...(await workflowTemplates(true).deploy(

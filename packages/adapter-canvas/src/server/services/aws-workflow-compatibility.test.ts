@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ClassifiedProvider } from "../../provider-classification.js";
 import { requireCurrentAwsWorkflows } from "./aws-workflow-compatibility.js";
 
 const file = "run-rad-commands-aws.yml";
@@ -8,7 +9,7 @@ function harness(content: string | null = "current") {
   return {
     reads,
     ports: {
-      environmentProvider: async () => "aws",
+      environmentProvider: async (): Promise<ClassifiedProvider> => "aws",
       defaultBranch: async () => "main",
       templates: async () => ({ [file]: "current" }),
       readFile: async (path: string, branch: string) => {
@@ -36,36 +37,26 @@ describe("AWS workflow compatibility", () => {
       ).rejects.toThrow("pull request if the branch is protected");
     }
   );
-  it("does not alter Azure dispatch when its unused AWS provider is stale", async () => {
-    const h = harness("old AWS workflow");
-    await requireCurrentAwsWorkflows(
-      { ...input, provider: "aws" },
-      {
-        ...h.ports,
-        environmentProvider: async () => "azure"
-      }
-    );
-    expect(h.reads).toEqual([]);
-  });
+  it.each(["azure", ""] as const)(
+    "does not alter dispatch for a saved %j environment, which never runs its stale AWS provider",
+    async (provider) => {
+      const h = harness("old AWS workflow");
+      await requireCurrentAwsWorkflows(
+        { ...input, provider: "aws" },
+        {
+          ...h.ports,
+          environmentProvider: async () => provider
+        }
+      );
+      expect(h.reads).toEqual([]);
+    }
+  );
   it.each(["", "azure", "aws"])(
     "uses saved AWS configuration instead of provider hint %j",
     async (provider) => {
       await expect(
         requireCurrentAwsWorkflows({ ...input, provider }, harness("old").ports)
       ).rejects.toThrow("EKS access");
-    }
-  );
-  it.each(["", "unknown"])(
-    "refuses an unresolved saved provider %j",
-    async (provider) => {
-      const h = harness();
-      await expect(
-        requireCurrentAwsWorkflows(input, {
-          ...h.ports,
-          environmentProvider: async () => provider
-        })
-      ).rejects.toThrow("provider");
-      expect(h.reads).toEqual([]);
     }
   );
   it("does not trust the hint when reading saved provider configuration fails", async () => {

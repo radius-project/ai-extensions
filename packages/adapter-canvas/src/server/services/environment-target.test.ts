@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEnvironmentTargetReader } from "./environment-target.js";
+import {
+  createEnvironmentProviderReader,
+  createEnvironmentTargetReader
+} from "./environment-target.js";
 
 const VARIABLES = [
   "api",
@@ -7,6 +10,40 @@ const VARIABLES = [
   "--jq",
   '.variables[] | .name + "\\t" + (.value // "")'
 ];
+
+describe("reading the provider a dispatcher selects", () => {
+  it.each([
+    [
+      "AZURE_CLIENT_ID\tclient\nAWS_ROLE_ARN\tarn:aws:iam::123456789012:role/d",
+      "azure"
+    ],
+    ["AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer", "aws"],
+    [
+      "AZURE_CLIENT_ID\t\nAWS_ROLE_ARN\tarn:aws:iam::123456789012:role/d",
+      "aws"
+    ],
+    ["AWS_ROLE_ARN\t", ""],
+    ["OTHER\tvalue", ""]
+  ])(
+    "classifies %j as %j from the variables alone",
+    async (variables, provider) => {
+      const run = vi.fn(async () => variables);
+      expect(
+        await createEnvironmentProviderReader(run)("octo/shop", "dev one")
+      ).toBe(provider);
+      expect(run.mock.calls).toEqual([["gh", VARIABLES, { timeout: 15000 }]]);
+    }
+  );
+
+  it("propagates a failed variable read", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("HTTP 403");
+    });
+    await expect(
+      createEnvironmentProviderReader(run)("octo/shop", "dev")
+    ).rejects.toThrow("HTTP 403");
+  });
+});
 
 describe("reading the environment a deletion targets", () => {
   it("returns the deploy role and cluster an AWS environment recorded", async () => {

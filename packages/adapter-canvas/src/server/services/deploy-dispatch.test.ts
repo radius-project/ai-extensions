@@ -10,7 +10,7 @@ import type { BicepParam } from "../../bicep.js";
 import type { CanvasState } from "../../shared.js";
 import type { GitHubJsonResponse, GitHubJsonRunner } from "../../azure-oidc.js";
 import { requireCurrentAwsWorkflows } from "./aws-workflow-compatibility.js";
-import { createEnvironmentTargetReader } from "./environment-target.js";
+import { createEnvironmentProviderReader } from "./environment-target.js";
 
 const OK: DeployCommandResult = { code: 0, stdout: "", stderr: "" };
 
@@ -229,7 +229,7 @@ describe("deploy dispatch construction", () => {
       const { input } = request();
       input.provider = hint;
       const gh = recordingGh();
-      const readTarget = createEnvironmentTargetReader(
+      const readProvider = createEnvironmentProviderReader(
         async (command, args) => {
           expect(command).toBe("gh");
           expect(args[1]).toBe(
@@ -262,8 +262,7 @@ describe("deploy dispatch construction", () => {
             await requireCurrentAwsWorkflows(
               { provider, files, workingBranch },
               {
-                environmentProvider: async () =>
-                  (await readTarget(repo, environment)).provider,
+                environmentProvider: () => readProvider(repo, environment),
                 defaultBranch: async () => "main",
                 templates: async () => ({
                   "run-rad-commands-aws.yml": "current"
