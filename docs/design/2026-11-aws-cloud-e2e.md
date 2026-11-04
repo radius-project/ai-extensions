@@ -50,7 +50,9 @@ AWS can't be added to the Azure job, because that job's 340-minute timeout is al
 
 ### The fixture repository
 
-The lifecycle design uses one long-lived repository with per-run isolation from environment names. This adds a second one for AWS. The lifecycle design rejected a repository per run because it needs organization-wide rights to create repositories; a second long-lived repository needs none, only the existing Cloud E2E GitHub App installed on it.
+The fixture repository is the GitHub repository the test runs the canvas against. It holds a ready-made app, and setup commits its workflows there, the same as in a user's repository. Azure uses `radius-project/ai-extensions-fixture`. AWS gets a new private one, `radius-project/ai-extensions-fixture-aws`.
+
+The lifecycle design uses one long-lived fixture repository, with each run kept apart by its environment names. AWS keeps that model with a second repository. The lifecycle design rejected a repository per run because it needs organization-wide rights to create repositories; a second long-lived repository needs none, only the existing Cloud E2E GitHub App installed on it.
 
 Its baseline commit carries a `.radius/` directory produced by the real modeling flow, with two resources:
 
