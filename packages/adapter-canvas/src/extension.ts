@@ -114,6 +114,8 @@ import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
+import { automaticPluginUpdatesEnabled } from "./runtime/plugin-update.js";
+import { createPluginUpdatePreferences } from "./runtime/plugin-update-preferences.js";
 import { githubAccountChoice } from "./runtime/github-account-choice.js";
 import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
 import { createGitHubAccountReadinessService } from "./server/services/github-account-readiness.js";
@@ -161,6 +163,15 @@ const {
 });
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
+  automaticPluginUpdates: automaticPluginUpdatesEnabled(process.env),
+  pluginUpdatePreferences: createPluginUpdatePreferences(
+    join(
+      process.env.USERPROFILE || os.homedir(),
+      ".copilot",
+      "radius",
+      "plugin-update-responses"
+    )
+  ),
   session: sessionHolder,
   executionOwner,
   environment: createEnvironmentTools({

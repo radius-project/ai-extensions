@@ -520,6 +520,96 @@ describe("acquireAwsDeployIdentityLock", () => {
   });
 });
 
+describe("acquireAwsDeployIdentityLock without waiting", () => {
+  const acquireNow = (iam: ReturnType<typeof fakeIam>) =>
+    acquireAwsDeployIdentityLock(
+      { accountId: ACCOUNT, roleName: ROLE, holder: HOLDER, wait: false },
+      iam.ports
+    );
+
+  it("returns the holder at once instead of waiting", async () => {
+    const iam = fakeIam({
+      "iam create-policy": EXISTS,
+      "iam get-policy": policy("LOCK0", {
+        Description: OTHER,
+        CreateDate: "2026-10-30T11:00:00Z"
+      })
+    });
+
+    expect(await acquireNow(iam)).toEqual({
+      ok: false,
+      busy: true,
+      holder: {
+        policyArn: LOCK_ARN,
+        policyId: "LOCK0",
+        holder: "The setup of environment prod in octo/shop",
+        holderOperationId: "op-2",
+        since: "2026-10-30T11:00:00Z",
+        removable: true
+      }
+    });
+    expect(iam.sleeps).toEqual([]);
+    expect(iam.waits).toEqual([]);
+  });
+
+  it("tries a lock released between create and read once more, at once", async () => {
+    const iam = fakeIam({
+      "iam create-policy": [EXISTS, policy("LOCK1")],
+      "iam get-policy": [MISSING, policy("LOCK1")]
+    });
+    expect(await acquireNow(iam)).toMatchObject({ ok: true });
+    expect(iam.sleeps).toEqual([]);
+  });
+
+  it("names no holder when IAM keeps saying the lock exists but cannot read it", async () => {
+    const iam = fakeIam({
+      "iam create-policy": EXISTS,
+      "iam get-policy": MISSING
+    });
+    expect(await acquireNow(iam)).toEqual({
+      ok: false,
+      busy: true,
+      holder: null
+    });
+    expect(iam.commands()).toEqual([
+      "iam create-policy",
+      "iam get-policy",
+      "iam create-policy",
+      "iam get-policy"
+    ]);
+    expect(iam.sleeps).toEqual([]);
+  });
+
+  it.each([
+    ["creating", { "iam create-policy": THROTTLED }],
+    [
+      "reading the holder",
+      { "iam create-policy": EXISTS, "iam get-policy": THROTTLED }
+    ]
+  ])(
+    "stops without backing off when IAM is unreachable while %s",
+    async (_label, script) => {
+      const iam = fakeIam(script);
+      expect(await acquireNow(iam)).toMatchObject({
+        ok: false,
+        code: "aws-lock-unreachable"
+      });
+      expect(iam.sleeps).toEqual([]);
+    }
+  );
+
+  it("passes through a lock it created that IAM never shows", async () => {
+    const iam = fakeIam({
+      "iam create-policy": policy("LOCK1"),
+      "iam get-policy": MISSING
+    });
+    expect(await acquireNow(iam)).toMatchObject({
+      ok: false,
+      code: "aws-lock-unconfirmed"
+    });
+  });
+});
+
 describe("a held deploy identity lock", () => {
   it("is still held while the lock has its ID", async () => {
     const { lock } = await held({ "iam get-policy": policy("LOCK1") });
@@ -733,7 +823,10 @@ describe("isAwsWrite", () => {
 });
 
 describe("removeAwsDeployIdentityLock", () => {
-  const signedIn = { "sts get-caller-identity": ok({ Account: ACCOUNT }) };
+  const signedIn = {
+    "--version": ok("aws-cli/2.39.0"),
+    "sts get-caller-identity": ok({ Account: ACCOUNT })
+  };
   const remove = (
     script: Record<string, AwsCommandResult | AwsCommandResult[]>,
     request = { policyArn: LOCK_ARN, policyId: "LOCK1" }
@@ -753,6 +846,7 @@ describe("removeAwsDeployIdentityLock", () => {
     });
     expect(await result).toEqual({ ok: true, removed: true });
     expect(iam.commands()).toEqual([
+      "--version",
       "sts get-caller-identity",
       "iam get-policy",
       "iam delete-policy"
@@ -790,31 +884,39 @@ describe("removeAwsDeployIdentityLock", () => {
     expect(iam.calls).toEqual([]);
   });
 
-  it("asks for a sign-in, with the CLI's error, when there is no session", async () => {
+  it("offers sign-in without echoing provider output when there is no session", async () => {
     const { iam, result } = remove({
+      ...signedIn,
       "sts get-caller-identity": fail("Unable to locate credentials")
     });
     expect(await result).toEqual({
       ok: false,
       code: "aws-cli-login-required",
       message:
-        'Radius could not read the AWS CLI session (Unable to locate credentials), so it removed nothing. Run "aws sso login" (or "aws configure"), then try again.'
+        'No active AWS CLI session. Sign in with "aws sso login", or refresh your configured credential provider, then verify again.'
     });
-    expect(iam.commands()).toEqual(["sts get-caller-identity"]);
+    expect(iam.commands()).toEqual(["--version", "sts get-caller-identity"]);
   });
 
   it.each([
-    ["another account", ok({ Account: "999999999999" })],
-    ["unreadable identity", ok("{")]
+    [
+      "another account",
+      ok({ Account: "999999999999" }),
+      "aws-account-mismatch"
+    ],
+    ["unreadable identity", ok("{"), "aws-identity-invalid"]
   ])(
     "refuses when the CLI is signed in to %s, where the lock would look missing",
-    async (_label, answer) => {
-      const { iam, result } = remove({ "sts get-caller-identity": answer });
+    async (_label, answer, code) => {
+      const { iam, result } = remove({
+        ...signedIn,
+        "sts get-caller-identity": answer
+      });
       expect(await result).toMatchObject({
         ok: false,
-        code: "aws-account-mismatch"
+        code
       });
-      expect(iam.commands()).toEqual(["sts get-caller-identity"]);
+      expect(iam.commands()).toEqual(["--version", "sts get-caller-identity"]);
     }
   );
 

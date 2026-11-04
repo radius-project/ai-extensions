@@ -124,7 +124,12 @@ import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identi
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
-import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
+import {
+  createEnvironmentProviderReader,
+  createEnvironmentTargetReader
+} from "./server/services/environment-target.js";
+import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
+import { requireCurrentAwsWorkflows } from "./server/services/aws-workflow-compatibility.js";
 import {
   appParams,
   resolveDeployParams,
@@ -363,7 +368,10 @@ import {
   graphRepairHandoffMessage,
   type GraphRepairRequest
 } from "./graph-model-repair.js";
-import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
+import {
+  createGhNamespaceClaimsPorts,
+  createSelectedNamespaceClaimsPorts
+} from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import type { EnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import {
@@ -753,6 +761,7 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   runSessionPrompt: (prompt) =>
     invokeSessionPrompt(sessionPromptHandler, prompt),
   runCommand: (command, args, options) => runCommand(command, args, options),
+  runAws: (args) => runCliCommand("aws", args, 15000),
   errorMessage
 });
 
@@ -1117,7 +1126,9 @@ function kickoffWorkflowSync(
 // copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
 // scoped to just the workflow about to run (`only`), authors a missing file
 // (`create`), and is awaited so any create/update lands before the dispatch —
-// but a sync failure never blocks the dispatch (we log and proceed). `provider`
+// but Azure keeps its best-effort behavior. AWS provider workflows must pass
+// read-back verification before dispatch because older copies administer EKS
+// access that the deployment role no longer grants. `provider`
 // may be "" when unknown; deploy and delete workflow content is
 // provider-agnostic, so it only matters for verify. `workingBranch` (when it
 // matches the repo) is synced alongside the default branch so a
@@ -1136,6 +1147,11 @@ async function ensureWorkflowsCurrent(
 }> {
   if (!repo || !environment || !only || only.length === 0)
     return { created: [], updated: [], failed: [] };
+  let result: Awaited<ReturnType<typeof ensureWorkflowsCurrent>> = {
+    created: [],
+    updated: [],
+    failed: []
+  };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -1161,7 +1177,7 @@ async function ensureWorkflowsCurrent(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
-    return {
+    result = {
       // Downstream dispatchers use this list only to decide whether GitHub may
       // still be registering a workflow, including one created concurrently.
       created: [
@@ -1172,8 +1188,27 @@ async function ensureWorkflowsCurrent(
     };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
-    return { created: [], updated: [], failed: [] };
   }
+  if (includeAws) {
+    await requireCurrentAwsWorkflows(
+      { provider, files: only, workingBranch },
+      {
+        environmentProvider: () =>
+          createEnvironmentProviderReader(runCommand)(repo, environment),
+        defaultBranch: () => getDefaultBranch(repo),
+        templates: async () => ({
+          ...(await workflowTemplates(true).deploy(
+            environment,
+            ".radius/app.bicep"
+          )),
+          ...(await workflowTemplates(true).delete(environment))
+        }),
+        readFile: (path, branch) => fetchFileFromRepo(repo, path, branch),
+        errorMessage
+      }
+    );
+  }
+  return result;
 }
 
 // no access to the SDK `session`, so when a graph/generate route finds no
@@ -5628,12 +5663,15 @@ export function createProductionCanvasServerRuntime(
     createAwsEnvironmentAccess<EnvironmentOperationRecord>({
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
+      environments: createGhNamespaceClaimsPorts(cliExec),
       sleep: sleepMs,
       now: () => Date.now(),
       isStopRequested: shouldStop,
       operationId: (operation) => operation.operationId,
       operations: {
+        getContext: (operation) => operation.context ?? {},
         enterStage,
+        setStageState,
         addLegacyStep,
         setContext,
         touch: (operation) => {
@@ -5654,6 +5692,7 @@ export function createProductionCanvasServerRuntime(
   );
   const githubSelectionHandles = createGitHubSelectionHandleStore();
   const identityProfilesRoutes = createIdentityProfilesRoutes({
+    runAws: (args) => runCliCommand("aws", args, 15000),
     listCredentialProfiles,
     saveCredentialProfile,
     deleteCredentialProfile,
@@ -6012,6 +6051,15 @@ export function createProductionCanvasServerRuntime(
         });
       }),
     readProcessEnv: () => process.env,
+    awsTrustRepair: createAwsTrustRepairService({
+      awsEnabled,
+      readInstanceState: (instanceId) =>
+        canvasServer.instances.get(instanceId)?.state,
+      cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
+      readEnvironmentTarget: createEnvironmentTargetReader(runCommand),
+      repair: (input) => awsEnvironmentAccess.repair(input),
+      errorMessage
+    }),
     setTimer: (callback, ms) => setTimeout(callback, ms),
     // Declared as a getter for the same temporal-dead-zone reason as the cache
     // above: the deploy services are composed further down, after the workflow

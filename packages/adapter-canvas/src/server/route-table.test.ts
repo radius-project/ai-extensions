@@ -164,6 +164,13 @@ const productionHandlers = {
           "unexpected deployment abandonment from the route-table suite"
         );
       }
+    },
+    awsTrustRepair: {
+      repair: () => {
+        throw new Error(
+          "unexpected AWS trust repair from the route-table suite"
+        );
+      }
     }
   }),
   ...createAzureDiscoveryRoutes({
@@ -178,6 +185,9 @@ const productionHandlers = {
   }),
   ...createAwsDiscoveryRoutes({ runCli: () => Promise.resolve("") }),
   ...createIdentityProfilesRoutes({
+    runAws: async () => {
+      throw new Error("AWS not scripted");
+    },
     listCredentialProfiles: () => [],
     saveCredentialProfile: () => null,
     deleteCredentialProfile: () => false,
@@ -218,6 +228,9 @@ const productionHandlers = {
     errorMessage: (error) => String(error)
   }),
   ...createIdentityAuthRoutes({
+    runAws: async () => {
+      throw new Error("AWS not scripted");
+    },
     azureCredentialIdValidationError: () => "",
     azureLoginRequiredResponse: () => ({
       error: "",
@@ -456,6 +469,7 @@ describe("server route ownership boundary", () => {
       "POST /api/bypass-verification",
       "POST /api/operations",
       "POST /api/abandon-deployment",
+      "POST /api/deploy/repair-aws-trust",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon",
       "POST /api/operations/:operationId/dismiss",

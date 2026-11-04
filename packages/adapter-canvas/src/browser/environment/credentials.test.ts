@@ -1543,6 +1543,7 @@ describe("AWS verification", () => {
         region: "us-west-2"
       });
       return jsonResponse({
+        success: true,
         arn: "arn:aws:iam::111122223333:user/me",
         accountId: "111122223333"
       });
@@ -1625,7 +1626,7 @@ describe("AWS verification", () => {
     );
   });
 
-  it("keeps the form's account id when the server response omits one, and saves that fallback", async () => {
+  it("rejects a response that does not confirm the requested account", async () => {
     const page = renderPage();
     await openAwsForm(page);
     page.elements.credNameInput.value = "acme-aws";
@@ -1636,9 +1637,31 @@ describe("AWS verification", () => {
     page.elements.btnVerifyAws.dispatch("click");
     await flushPromises();
     expect(page.elements.awsAccountId.value).toBe("111122223333");
-    expect(page.elements.credVerifyStatus.innerHTML).toContain("iam-user");
-    expect(page.elements.saveCredBtn.disabled).toBe(false);
+    expect(page.elements.credVerifyStatus.innerHTML).toContain(
+      "did not confirm this account"
+    );
+    expect(page.elements.saveCredBtn.disabled).toBe(true);
+    page.elements.saveCredBtn.dispatch("click");
+    await flushPromises();
+    expect(
+      page.browser.net.calls.some((call) => call.url === CREDENTIAL_SAVE_PATH)
+    ).toBe(false);
+  });
 
+  it("saves only verified AWS profile metadata", async () => {
+    const page = renderPage();
+    await openAwsForm(page);
+    page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
+    page.browser.net.handle(VERIFY_AWS_PATH, () =>
+      jsonResponse({
+        success: true,
+        accountId: "111122223333",
+        user: "iam-user"
+      })
+    );
+    page.elements.btnVerifyAws.dispatch("click");
+    await flushPromises();
     page.browser.net.handle(`${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({ profiles: [] })
     );
@@ -1658,6 +1681,167 @@ describe("AWS verification", () => {
     expect(page.elements.credSuccessBanner.style.display).toBe("flex");
   });
 
+  it.each(["success", "server-error", "network-error"])(
+    "locks AWS fields during a deferred save and reports %s",
+    async (outcome) => {
+      const page = renderPage();
+      await openAwsForm(page);
+      page.elements.credNameInput.value = "acme-aws";
+      fillValidAwsFields(page);
+      page.browser.net.handle(VERIFY_AWS_PATH, () =>
+        jsonResponse({ success: true, accountId: "111122223333" })
+      );
+      page.elements.btnVerifyAws.dispatch("click");
+      await flushPromises();
+      const pending = createDeferred<HttpResponse>();
+      page.browser.net.handle(CREDENTIAL_SAVE_PATH, () => pending.promise);
+      page.browser.net.handle(
+        `${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`,
+        () => jsonResponse({ profiles: [] })
+      );
+
+      page.elements.saveCredBtn.dispatch("click");
+      for (const field of [
+        "awsAccountId",
+        "awsRegion",
+        "credProviderSelect",
+        "credNameInput"
+      ] as const) {
+        expect(page.elements[field].disabled).toBe(true);
+      }
+      page.elements.credGhcrRetry.dispatch("click");
+      await flushPromises();
+      expect(page.elements.saveCredBtn.disabled).toBe(true);
+
+      if (outcome === "network-error")
+        pending.reject(new Error("connection lost"));
+      else
+        pending.resolve(
+          jsonResponse(
+            outcome === "server-error" ? { error: "account changed" } : {}
+          )
+        );
+      await flushPromises();
+
+      expect(page.elements.saveCredBtn.textContent).toBe(
+        "Save Credential Profile"
+      );
+      expect(page.elements.awsAccountId.disabled).toBe(false);
+      expect(page.elements.awsRegion.disabled).toBe(false);
+      if (outcome === "success") {
+        expect(page.elements.credSuccessBanner.style.display).toBe("flex");
+      } else {
+        expect(page.decisions.notify).toHaveBeenCalledWith(
+          outcome === "server-error" ?
+            "Could not save profile: account changed"
+          : "Could not save the credential profile. Please try again."
+        );
+        expect(page.elements.saveCredBtn.disabled).toBe(false);
+      }
+    }
+  );
+
+  it.each(["awsAccountId", "awsRegion"] as const)(
+    "invalidates verified credentials when %s changes",
+    async (field) => {
+      const page = renderPage();
+      await openAwsForm(page);
+      page.elements.credNameInput.value = "acme-aws";
+      fillValidAwsFields(page);
+      page.browser.net.handle(VERIFY_AWS_PATH, () =>
+        jsonResponse({ success: true, accountId: "111122223333" })
+      );
+      page.elements.btnVerifyAws.dispatch("click");
+      await flushPromises();
+      expect(page.elements.saveCredBtn.disabled).toBe(false);
+      page.elements[field].dispatch("input");
+      expect(page.elements.saveCredBtn.disabled).toBe(true);
+      expect(page.elements.credVerifyStatus.innerHTML).toBe("");
+    }
+  );
+
+  it("ignores an in-flight response after an account edit and permits retry", async () => {
+    const page = renderPage();
+    await openAwsForm(page);
+    page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
+    const pending = createDeferred<HttpResponse>();
+    page.browser.net.handle(VERIFY_AWS_PATH, () => pending.promise);
+    page.elements.btnVerifyAws.dispatch("click");
+    page.elements.awsAccountId.value = "999988887777";
+    page.elements.awsAccountId.dispatch("input");
+    pending.resolve(jsonResponse({ success: true, accountId: "111122223333" }));
+    await flushPromises();
+    expect(page.elements.awsAccountId.value).toBe("999988887777");
+    expect(page.elements.saveCredBtn.disabled).toBe(true);
+    expect(page.elements.btnVerifyAws.disabled).toBe(false);
+    expect(page.elements.envVerifyModal.style.display).toBe("none");
+  });
+
+  it("offers the installer remediation when the AWS CLI is unsupported", async () => {
+    const page = renderPage();
+    await openAwsForm(page);
+    page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
+    page.browser.net.handle(VERIFY_AWS_PATH, () =>
+      jsonResponse({
+        error: "AWS CLI 2.15.3 or newer is required.",
+        code: "aws-cli-unsupported",
+        remediation: { id: "aws-cli-install", params: {} }
+      })
+    );
+    page.elements.btnVerifyAws.dispatch("click");
+    await flushPromises();
+    expect(page.elements.saveCredBtn.disabled).toBe(true);
+    expect(fakeText(page.elements.credVerifyAction)).toContain(
+      "Install or upgrade AWS CLI"
+    );
+    expect(page.elements.credVerifyStatus.innerHTML).not.toContain("<a");
+  });
+
+  it("rejects a non-OK response even when its JSON claims success", async () => {
+    const page = renderPage();
+    await openAwsForm(page);
+    page.elements.credNameInput.value = "acme-aws";
+    fillValidAwsFields(page);
+    page.browser.net.handle(VERIFY_AWS_PATH, () => ({
+      ...jsonResponse({ success: true, accountId: "111122223333" }),
+      ok: false,
+      status: 500
+    }));
+    page.elements.btnVerifyAws.dispatch("click");
+    await flushPromises();
+    expect(page.elements.saveCredBtn.disabled).toBe(true);
+    expect(page.elements.btnVerifyAws.disabled).toBe(false);
+    expect(page.elements.envVerifyModal.style.display).toBe("none");
+    expect(page.elements.credVerifyStatus.innerHTML).toContain(
+      "Could not verify credentials"
+    );
+  });
+
+  it("clears an interrupted Azure verification when the provider changes", async () => {
+    const page = renderPage();
+    page.elements.newCredBtn.dispatch("click");
+    await flushPromises();
+    page.elements.credNameInput.value = "azure";
+    page.elements.azTenantId.value = "tenant";
+    page.elements.azSubId.value = "subscription";
+    const pending = createDeferred<HttpResponse>();
+    page.browser.net.handle(VERIFY_AZURE_PATH, () => pending.promise);
+    page.elements.btnVerifyAzure.dispatch("click");
+    expect(page.elements.btnVerifyAzure.disabled).toBe(true);
+    expect(page.elements.envVerifyModal.style.display).toBe("flex");
+    page.elements.credProviderSelect.value = "aws";
+    page.elements.credProviderSelect.dispatch("change");
+    expect(page.elements.btnVerifyAzure.disabled).toBe(false);
+    expect(page.elements.envVerifyModal.style.display).toBe("none");
+    pending.resolve(
+      jsonResponse({ tenantId: "tenant", subscriptionId: "subscription" })
+    );
+    await flushPromises();
+    expect(page.elements.saveCredBtn.disabled).toBe(true);
+    expect(page.elements.credVerifyStatus.innerHTML).toBe("");
+  });
   it("ignores a stale verify success response after switching provider away", async () => {
     const page = renderPage();
     await openAwsForm(page);
@@ -1892,6 +2076,7 @@ describe("saving a credential profile", () => {
     page.elements.awsRegion.value = "us-west-2";
     page.browser.net.handle(VERIFY_AWS_PATH, () =>
       jsonResponse({
+        success: true,
         arn: "arn:aws:iam::111122223333:user/me",
         accountId: "111122223333"
       })

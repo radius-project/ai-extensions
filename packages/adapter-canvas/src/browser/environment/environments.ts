@@ -48,7 +48,9 @@ export interface EnvironmentPaneDependencies {
     config: EnvironmentInfrastructure | null,
     provider: "azure" | "aws"
   ): void;
-  currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
+  // Hold the selection across a subtab switch, so the next discovery restores
+  // it.
+  preserveInfraSelection?(provider: "azure" | "aws"): void;
   canSubmit?(): boolean;
   // Deletion is an async operation (Radius env delete, credential cleanup,
   // GitHub env delete, app-registration cleanup). The page composes the
@@ -236,7 +238,7 @@ export function deleteEnvironmentMessage(
 ): string {
   if (environment?.provider === "aws") {
     const cluster = environment.config?.cluster || "its EKS cluster";
-    return `This deletes the GitHub environment "${name}" and removes the Radius environment from ${cluster}. It removes this environment's trust subject and its radius-deploy-${name} policy from the deploy IAM role. The role itself and the account's GitHub identity provider are kept, because other environments in this repository may use them. Applications already deployed to it must be deleted first.`;
+    return `This deletes the GitHub environment "${name}" and removes the Radius environment from ${cluster}. It removes this environment's trust subjects and its repository-scoped permission policy from the deploy IAM role, and the role's access entry on ${cluster} when nothing else can use it. The role itself and the account's GitHub identity provider are kept, because other environments or repositories may use them. Applications already deployed to it must be deleted first.`;
   }
   return `This deletes the GitHub environment "${name}", removes the Radius environment from the cluster, and permanently deletes the environment's federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.`;
 }
@@ -703,10 +705,7 @@ export function initializeEnvironmentPane(
         context.dom.inputById("env-selected-provider")?.value === "aws" ?
           "aws"
         : "azure";
-      dependencies.setPendingInfraSelection?.(
-        dependencies.currentInfraSelection?.(provider) ?? {},
-        provider
-      );
+      dependencies.preserveInfraSelection?.(provider);
       void dependencies.loadProfiles(profileSelect.value);
     }
   };

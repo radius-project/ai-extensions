@@ -1,7 +1,11 @@
-import { AWS_TRUST_SUBJECTS_VARIABLE } from "@radius-project/core";
+import {
+  AWS_TRUST_SUBJECTS_VARIABLE,
+  AWS_PERMISSION_POLICY_NAME_VARIABLE
+} from "@radius-project/core";
 import {
   classifyProvider,
-  parseGitHubEnvironmentVariables
+  parseGitHubEnvironmentVariables,
+  type ClassifiedProvider
 } from "../../provider-classification.js";
 
 // What environment deletion needs to know about a GitHub environment: its
@@ -17,9 +21,14 @@ export interface EnvironmentTarget {
   // environment created before setup recorded them, or when the variable is
   // unreadable; deletion then resolves them from the repository.
   trustSubjects: string[];
+  // AWS only: the cluster whose access entry deletion may remove. Empty for an
+  // environment that did not record it.
+  region: string;
+  cluster: string;
+  policyName?: string;
 }
 
-function parseTrustSubjects(value: string | undefined): string[] {
+export function parseTrustSubjects(value: string | undefined): string[] {
   if (!value) return [];
   try {
     const parsed: unknown = JSON.parse(value);
@@ -40,16 +49,13 @@ export type EnvironmentTargetCommandRunner = (
   options: { timeout: number }
 ) => Promise<string>;
 
-/**
- * Reads the environment's stored GitHub variables to determine its provider and
- * the identity the delete cleanup targets. Throws on an API or permission
- * failure so the delete route fails closed.
- */
-export function createEnvironmentTargetReader(
-  runCommand: EnvironmentTargetCommandRunner
-): (repo: string, environment: string) => Promise<EnvironmentTarget> {
-  return async (repo, environment) => {
-    const out = await runCommand(
+async function readEnvironmentVariables(
+  runCommand: EnvironmentTargetCommandRunner,
+  repo: string,
+  environment: string
+): Promise<Record<string, string>> {
+  return parseGitHubEnvironmentVariables(
+    await runCommand(
       "gh",
       [
         "api",
@@ -60,8 +66,36 @@ export function createEnvironmentTargetReader(
         '.variables[] | .name + "\\t" + (.value // "")'
       ],
       { timeout: 15000 }
+    )
+  );
+}
+
+/**
+ * Reads the provider whose job the dispatcher workflows run. They test the
+ * marker variables with `-n`, so empty values are ignored here too. Throws on
+ * an API or permission failure.
+ */
+export function createEnvironmentProviderReader(
+  runCommand: EnvironmentTargetCommandRunner
+): (repo: string, environment: string) => Promise<ClassifiedProvider> {
+  return async (repo, environment) => {
+    const vars = await readEnvironmentVariables(runCommand, repo, environment);
+    return classifyProvider(
+      Object.fromEntries(Object.entries(vars).filter(([, value]) => value))
     );
-    const vars = parseGitHubEnvironmentVariables(out);
+  };
+}
+
+/**
+ * Reads the environment's stored GitHub variables to determine its provider and
+ * the identity the delete cleanup targets. Throws on an API or permission
+ * failure so the delete route fails closed.
+ */
+export function createEnvironmentTargetReader(
+  runCommand: EnvironmentTargetCommandRunner
+): (repo: string, environment: string) => Promise<EnvironmentTarget> {
+  return async (repo, environment) => {
+    const vars = await readEnvironmentVariables(runCommand, repo, environment);
     // Classify the provider by the presence of a canonical, exact-named
     // configuration variable (see classifyProvider) rather than a regex over
     // every variable name, and share that logic with the environment listing so
@@ -85,7 +119,12 @@ export function createEnvironmentTargetReader(
       tenantId: vars.AZURE_TENANT_ID || "",
       repoId,
       roleArn: vars.AWS_ROLE_ARN || "",
-      trustSubjects: parseTrustSubjects(vars[AWS_TRUST_SUBJECTS_VARIABLE])
+      trustSubjects: parseTrustSubjects(vars[AWS_TRUST_SUBJECTS_VARIABLE]),
+      region: vars.AWS_REGION || "",
+      cluster: vars.AWS_EKS_CLUSTER_NAME || "",
+      ...(vars[AWS_PERMISSION_POLICY_NAME_VARIABLE] !== undefined ?
+        { policyName: vars[AWS_PERMISSION_POLICY_NAME_VARIABLE] }
+      : {})
     };
   };
 }

@@ -3205,13 +3205,32 @@ export const SETUP_RESUME_STEPS = Object.freeze([
   "service_principal",
   "federated_credentials",
   "role_assignments",
+  "aws_deploy_identity",
   "github_environment",
   "workflow_commit",
   "verification"
 ]);
 
-/** The first step the ledger does not already prove finished. */
-export function nextIncompleteSetupStep(op: any): string {
+/**
+ * The step a continuation resumes from.
+ *
+ * An AWS setup with an identity stage resumes from Authorize deploy identity:
+ * it takes the deploy identity lock again and holds it through Configure
+ * environment (see runSetupCoordinator), unless it only monitors the saved
+ * verification run. Every other setup resumes from the first step the ledger
+ * does not already prove finished.
+ */
+export function nextIncompleteSetupStep(
+  op: any,
+  { recoveredVerification = false }: { recoveredVerification?: boolean } = {}
+): string {
+  if (
+    op?.provider === "aws" &&
+    op.stages?.some((stage: any) => stage?.id === STAGE_AUTHORIZE_IDENTITY) &&
+    !recoveredVerification
+  ) {
+    return "aws_deploy_identity";
+  }
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return "azure_app";
   // A rolled-back artifact is incomplete again: cleanup proved it is gone, so
@@ -3236,7 +3255,8 @@ const SETUP_IDENTITY_RESUME_STEPS = Object.freeze([
   "azure_app",
   "service_principal",
   "federated_credentials",
-  "role_assignments"
+  "role_assignments",
+  "aws_deploy_identity"
 ]);
 
 export type SetupContinuationPlan = {
@@ -3395,12 +3415,15 @@ function setupForwardEligibility(
   // resources the customer just asked Radius to remove.
   if (intent === "continue" && rollbackRemovedEverything(op))
     return { ok: false, code: "setup-continue-rolled-back" };
+  // Continue then only monitors the saved verification run, so the resume
+  // point and the scheduled work must both come from this one answer.
+  const recoveredVerification =
+    isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY;
   return {
     ok: true,
     code: `${prefix}-allowed`,
-    resumeFrom: nextIncompleteSetupStep(op),
-    recoveredVerification:
-      isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY
+    resumeFrom: nextIncompleteSetupStep(op, { recoveredVerification }),
+    recoveredVerification
   };
 }
 
@@ -4179,6 +4202,7 @@ const SETUP_STEP_LABELS: Record<string, string> = {
   service_principal: "Create the Service Principal",
   federated_credentials: "Add the federated credentials",
   role_assignments: "Grant the Azure role assignments",
+  aws_deploy_identity: "Authorize the deploy identity",
   github_environment: "Configure the GitHub environment",
   workflow_commit: "Commit the deploy workflows",
   verification: "Verify the credentials"
@@ -4187,6 +4211,23 @@ const SETUP_STEP_LABELS: Record<string, string> = {
 /** The customer-facing name of a resume point. */
 export function setupStepLabel(step: any): string {
   return SETUP_STEP_LABELS[String(step || "")] || "the next setup step";
+}
+
+/**
+ * Where the last setup attempt stopped.
+ *
+ * An AWS continuation always resumes from Authorize deploy identity, so its
+ * resume point says nothing about where it stopped: the failed stage does.
+ * Every other resume point is also the step the attempt stopped at.
+ */
+function setupStopLabel(op: any, resumeFrom: any): string {
+  if (resumeFrom === "aws_deploy_identity") {
+    const stage = op?.stages?.find(
+      (entry: any) => entry?.id === op?.failure?.stage
+    );
+    if (stage?.label) return stage.label;
+  }
+  return setupStepLabel(resumeFrom);
 }
 
 /**
@@ -4479,7 +4520,7 @@ export function projectOperationHeadline(op: any): any {
     return {
       code: "continue-failed",
       title: "Setup could not continue",
-      message: `Radius stopped at ${setupStepLabel(op.resumeFrom)}. Review what exists, then retry setup or delete what this attempt created.`
+      message: `Radius stopped at ${setupStopLabel(op, op.resumeFrom)}. Review what exists, then retry setup or delete what this attempt created.`
     };
   }
   return null;
@@ -4720,7 +4761,8 @@ export function projectOperationActions(op: any): any[] {
       placement: "row",
       tone: "primary",
       requiresConfirmation: false,
-      description: `The last attempt stopped at ${setupStepLabel(
+      description: `The last attempt stopped at ${setupStopLabel(
+        op,
         op.resumeFrom || setup.resumeFrom
       )}. Radius reuses the resources it already recorded and starts again from ${setupStepLabel(
         setup.resumeFrom
@@ -5695,8 +5737,8 @@ const PERSISTED_OPERATION_KEYS = new Set([
 // restart. The live delete op carries its inputs in a broad `op.request` (which
 // is deliberately NOT persisted — it can be large and may hold secrets), so a
 // hydrated delete op would otherwise lose the `clientId` its Azure-cleanup and
-// app-registration stages depend on, or the AWS role and trust subjects its
-// role cleanup depends on. We persist only these typed fields.
+// app-registration stages depend on, or the AWS role, trust subjects, and
+// cluster its role cleanup depends on. We persist only these typed fields.
 interface PersistedDeleteRecovery {
   repo?: string;
   environment?: string;
@@ -5704,7 +5746,10 @@ interface PersistedDeleteRecovery {
   clientId?: string;
   tenantId?: string;
   roleArn?: string;
+  policyName?: string;
   trustSubjects?: string[];
+  region?: string;
+  cluster?: string;
   repoId?: number;
   credentialConsumerRetirementReady?: boolean;
 }
@@ -5718,7 +5763,10 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "provider",
     "clientId",
     "tenantId",
-    "roleArn"
+    "roleArn",
+    "policyName",
+    "region",
+    "cluster"
   ] as const) {
     if (typeof request[key] === "string") out[key] = request[key];
   }
