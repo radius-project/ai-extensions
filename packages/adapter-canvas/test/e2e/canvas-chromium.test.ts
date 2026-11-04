@@ -5022,6 +5022,7 @@ test.describe("Radius Canvas in Chromium", () => {
         isStopRequested: ops.shouldStop,
         operationId: (operation) => operation.operationId,
         operations: {
+          getContext: (operation) => operation.context ?? {},
           enterStage: ops.enterStage,
           setStageState: ops.setStageState,
           addLegacyStep: ops.addLegacyStep,
