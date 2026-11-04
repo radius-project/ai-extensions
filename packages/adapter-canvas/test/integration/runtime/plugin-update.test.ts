@@ -208,61 +208,78 @@ describe("session-start Radius plugin update", () => {
     }
   });
 
-  it("honors a saved decline in a later runtime without showing another request", async () => {
-    let declined = false;
-    const preferences: PluginUpdatePreferences = {
-      hasDeclined: vi.fn(async () => declined),
-      rememberDecline: vi.fn(async () => {
-        declined = true;
-      })
-    };
-    const confirm = vi.fn(async () => false);
-    const update = vi.fn(async () => ({ skillsInstalled: 5 }));
-    const configure = (
-      deps: {
-        automaticPluginUpdates: boolean;
-        pluginUpdatePreferences: PluginUpdatePreferences;
-      },
-      session: SessionPort
-    ) => {
-      deps.automaticPluginUpdates = true;
-      deps.pluginUpdatePreferences = preferences;
-      configureApproval(session, confirm);
-      session.rpc.plugins = {
-        list: async () => ({
-          plugins: [
-            {
-              name: "radius",
-              marketplace: "radius-plugins",
-              version: "0.4.0",
-              enabled: true
-            }
-          ]
-        }),
-        update
+  it.each([false, true])(
+    "honors answer %s across runtimes and asks again after seven days",
+    async (approved) => {
+      let answeredAt: number | undefined;
+      let now = Date.UTC(2026, 0, 1);
+      const preferences: PluginUpdatePreferences = {
+        lastAnsweredAt: vi.fn(async () => answeredAt),
+        rememberAnswer: vi.fn(async (_marketplace, timestamp) => {
+          answeredAt = timestamp;
+        })
       };
-    };
-    const first = await createRuntimeSdkHarness({}, configure);
-    try {
-      await vi.waitFor(() =>
-        expect(preferences.rememberDecline).toHaveBeenCalledOnce()
-      );
-    } finally {
-      await first.extension.shutdown("test");
+      const confirm = vi.fn(async () => approved);
+      const update = vi.fn(async () => ({ skillsInstalled: 5 }));
+      const configure = (
+        deps: {
+          automaticPluginUpdates: boolean;
+          pluginUpdatePreferences: PluginUpdatePreferences;
+          clock: { now(): number };
+        },
+        session: SessionPort
+      ) => {
+        deps.automaticPluginUpdates = true;
+        deps.pluginUpdatePreferences = preferences;
+        deps.clock.now = () => now;
+        configureApproval(session, confirm);
+        session.rpc.plugins = {
+          list: async () => ({
+            plugins: [
+              {
+                name: "radius",
+                marketplace: "radius-plugins",
+                version: "0.4.0",
+                enabled: true
+              }
+            ]
+          }),
+          update
+        };
+      };
+      const first = await createRuntimeSdkHarness({}, configure);
+      try {
+        await vi.waitFor(() =>
+          expect(preferences.rememberAnswer).toHaveBeenCalledOnce()
+        );
+      } finally {
+        await first.extension.shutdown("test");
+      }
+      const next = await createRuntimeSdkHarness({}, configure);
+      try {
+        await vi.waitFor(() =>
+          expect(preferences.lastAnsweredAt).toHaveBeenCalledTimes(2)
+        );
+        await expect(
+          next.host.open("panel", { page: "environment" })
+        ).resolves.toBeDefined();
+        expect(confirm).toHaveBeenCalledOnce();
+        expect(update).toHaveBeenCalledTimes(approved ? 1 : 0);
+        expect(next.session.log).not.toHaveBeenCalled();
+      } finally {
+        await next.extension.shutdown("test");
+      }
+      now += 7 * 24 * 60 * 60 * 1000;
+      const expired = await createRuntimeSdkHarness({}, configure);
+      try {
+        await vi.waitFor(() =>
+          expect(preferences.rememberAnswer).toHaveBeenCalledTimes(2)
+        );
+        expect(confirm).toHaveBeenCalledTimes(2);
+        expect(answeredAt).toBe(now);
+      } finally {
+        await expired.extension.shutdown("test");
+      }
     }
-    const next = await createRuntimeSdkHarness({}, configure);
-    try {
-      await vi.waitFor(() =>
-        expect(preferences.hasDeclined).toHaveBeenCalledTimes(2)
-      );
-      await expect(
-        next.host.open("panel", { page: "environment" })
-      ).resolves.toBeDefined();
-      expect(confirm).toHaveBeenCalledOnce();
-      expect(update).not.toHaveBeenCalled();
-      expect(next.session.log).not.toHaveBeenCalled();
-    } finally {
-      await next.extension.shutdown("test");
-    }
-  });
+  );
 });

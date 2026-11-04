@@ -3,6 +3,8 @@ import type { SessionPluginsPort, SessionPort } from "./session.js";
 import type { PluginUpdatePreferences } from "./plugin-update-preferences.js";
 import { errorMessage } from "./util.js";
 
+const APPROVAL_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+
 function environmentFlag(value: string | undefined, defaultValue: boolean) {
   const normalized = value?.trim().toLowerCase();
   return normalized ?
@@ -23,6 +25,7 @@ export function automaticPluginUpdatesEnabled(environment: {
 export function createRadiusPluginUpdater(options: {
   enabled: boolean;
   preferences: PluginUpdatePreferences;
+  now(): number;
   isShutDown(): boolean;
   logError(message: string): void;
 }): (session: SessionPort) => Promise<void> {
@@ -62,24 +65,43 @@ export function createRadiusPluginUpdater(options: {
       ) {
         return;
       }
-      const version = plugin.version?.trim();
-      if (!version) {
+      let answeredAt: number | undefined;
+      try {
+        answeredAt = await options.preferences.lastAnsweredAt(
+          plugin.marketplace
+        );
+      } catch (error) {
+        if (options.isShutDown()) return;
         options.logError(
-          "Radius skipped its plugin update request: the installed version is unavailable, so a decline cannot be remembered safely."
+          redactCredentials(
+            `Radius skipped its plugin update request because it could not read its approval history: ${errorMessage(error)}`
+          )
         );
         return;
       }
-      const identity = { marketplace: plugin.marketplace, version };
-      const declined = await options.preferences.hasDeclined(identity);
-      if (options.isShutDown() || declined) return;
+      if (options.isShutDown()) return;
+      if (answeredAt !== undefined) {
+        const elapsed = options.now() - answeredAt;
+        if (elapsed >= 0 && elapsed < APPROVAL_COOLDOWN_MS) return;
+      }
       const approved = await ui.confirm(
-        `Update radius@${plugin.marketplace} to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code. If you decline or cancel, Radius will not ask again for this installed version and marketplace.`
+        `Update radius@${plugin.marketplace} to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code. After any answer, including cancellation, Radius waits 7 days before asking again for this marketplace.`
       );
       if (options.isShutDown()) return;
-      if (approved !== true) {
-        await options.preferences.rememberDecline(identity);
-        return;
+      try {
+        await options.preferences.rememberAnswer(
+          plugin.marketplace,
+          options.now()
+        );
+      } catch (error) {
+        if (options.isShutDown()) return;
+        options.logError(
+          redactCredentials(
+            `Radius could not save its plugin update approval history: ${errorMessage(error)}`
+          )
+        );
       }
+      if (options.isShutDown() || approved !== true) return;
       result = await plugins.update({
         name: `${plugin.name}@${plugin.marketplace}`
       });

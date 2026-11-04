@@ -1,29 +1,22 @@
 import { createHash } from "node:crypto";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, utimes } from "node:fs/promises";
 import { join } from "node:path";
 
-interface PluginUpdateIdentity {
-  marketplace: string;
-  version: string;
-}
-
 export interface PluginUpdatePreferences {
-  hasDeclined(identity: PluginUpdateIdentity): Promise<boolean>;
-  rememberDecline(identity: PluginUpdateIdentity): Promise<void>;
+  lastAnsweredAt(marketplace: string): Promise<number | undefined>;
+  rememberAnswer(marketplace: string, answeredAt: number): Promise<void>;
 }
 
 export function createPluginUpdatePreferences(
   directory: string
 ): PluginUpdatePreferences {
-  function markerPath(identity: PluginUpdateIdentity): string {
-    const key = createHash("sha256")
-      .update(JSON.stringify([identity.marketplace, identity.version]))
-      .digest("hex");
+  function markerPath(marketplace: string): string {
+    const key = createHash("sha256").update(marketplace).digest("hex");
     return join(directory, key);
   }
 
   return {
-    async hasDeclined(identity) {
+    async lastAnsweredAt(marketplace) {
       try {
         const root = await stat(directory);
         if (!root.isDirectory()) {
@@ -31,25 +24,28 @@ export function createPluginUpdatePreferences(
             "Invalid Radius plugin update preferences directory."
           );
         }
-        const marker = await stat(markerPath(identity));
+        const marker = await stat(markerPath(marketplace));
         if (!marker.isDirectory()) {
-          throw new Error("Invalid Radius plugin update decline record.");
+          throw new Error("Invalid Radius plugin update answer record.");
         }
-        return true;
+        return marker.mtimeMs;
       } catch (error) {
         if (
           error instanceof Error &&
           "code" in error &&
           error.code === "ENOENT"
         ) {
-          return false;
+          return undefined;
         }
         throw error;
       }
     },
-    async rememberDecline(identity) {
-      // An empty directory is an atomic, idempotent marker across processes.
-      await mkdir(markerPath(identity), { recursive: true });
+    async rememberAnswer(marketplace, answeredAt) {
+      // Directory metadata avoids partially written timestamp files.
+      const marker = markerPath(marketplace);
+      await mkdir(marker, { recursive: true });
+      const timestamp = new Date(answeredAt);
+      await utimes(marker, timestamp, timestamp);
     }
   };
 }

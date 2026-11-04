@@ -14,8 +14,12 @@ const radius = {
   enabled: true
 };
 
-function fixture(enabled = true, declines = new Set<string>()) {
+const NOW = Date.UTC(2026, 0, 1);
+const WEEK = 7 * 24 * 60 * 60 * 1000;
+
+function fixture(enabled = true, answers = new Map<string, number>()) {
   let shutDown = false;
+  let now = NOW;
   const list = vi.fn<SessionPluginsPort["list"]>(async () => ({
     plugins: [radius]
   }));
@@ -35,12 +39,12 @@ function fixture(enabled = true, declines = new Set<string>()) {
   };
   session.rpc.plugins = { list, update };
   const preferences = {
-    hasDeclined: vi.fn<PluginUpdatePreferences["hasDeclined"]>(
-      async (identity) => declines.has(JSON.stringify(identity))
+    lastAnsweredAt: vi.fn<PluginUpdatePreferences["lastAnsweredAt"]>(
+      async (marketplace) => answers.get(marketplace)
     ),
-    rememberDecline: vi.fn<PluginUpdatePreferences["rememberDecline"]>(
-      async (identity) => {
-        declines.add(JSON.stringify(identity));
+    rememberAnswer: vi.fn<PluginUpdatePreferences["rememberAnswer"]>(
+      async (marketplace, answeredAt) => {
+        answers.set(marketplace, answeredAt);
       }
     )
   };
@@ -48,6 +52,7 @@ function fixture(enabled = true, declines = new Set<string>()) {
   const run = createRadiusPluginUpdater({
     enabled,
     preferences,
+    now: () => now,
     isShutDown: () => shutDown,
     logError
   });
@@ -57,7 +62,10 @@ function fixture(enabled = true, declines = new Set<string>()) {
     update,
     confirm,
     preferences,
-    declines,
+    answers,
+    setNow: (value: number) => {
+      now = value;
+    },
     logError,
     run: () => run(session),
     stop: () => {
@@ -97,7 +105,7 @@ describe("approval-based Radius plugin updates", () => {
     await f.run();
     expect(f.list).toHaveBeenCalledOnce();
     expect(f.confirm).toHaveBeenCalledExactlyOnceWith(
-      "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code. If you decline or cancel, Radius will not ask again for this installed version and marketplace."
+      "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code. After any answer, including cancellation, Radius waits 7 days before asking again for this marketplace."
     );
     expect(f.update).toHaveBeenCalledExactlyOnceWith({
       name: "radius@radius-plugins"
@@ -173,64 +181,120 @@ describe("approval-based Radius plugin updates", () => {
     expect(f.update).not.toHaveBeenCalled();
     expect(f.session.log).not.toHaveBeenCalled();
     expect(f.logError).not.toHaveBeenCalled();
-    expect(f.preferences.rememberDecline).toHaveBeenCalledExactlyOnceWith({
-      marketplace: radius.marketplace,
-      version: radius.version
-    });
+    expect(f.preferences.rememberAnswer).toHaveBeenCalledExactlyOnceWith(
+      radius.marketplace,
+      NOW
+    );
   });
 
-  it("remembers a decline across new updater instances", async () => {
-    const first = fixture();
-    first.confirm.mockResolvedValue(false);
-    await first.run();
-    const next = fixture(true, first.declines);
-    await next.run();
-    expect(next.confirm).not.toHaveBeenCalled();
-    expect(next.update).not.toHaveBeenCalled();
-    expect(next.session.log).not.toHaveBeenCalled();
-  });
-
-  it.each(["version", "marketplace"] as const)(
-    "asks again when the installed %s changes",
-    async (field) => {
+  it.each([false, true])(
+    "suppresses another request after answer %s across updater instances and version changes",
+    async (approved) => {
       const first = fixture();
-      first.confirm.mockResolvedValue(false);
+      first.confirm.mockResolvedValue(approved);
       await first.run();
-      const next = fixture(true, first.declines);
+      const next = fixture(true, first.answers);
       next.list.mockResolvedValue({
-        plugins: [
-          {
-            ...radius,
-            [field]: field === "version" ? "0.5.0" : "another-marketplace"
-          }
-        ]
+        plugins: [{ ...radius, version: "0.5.0" }]
       });
       await next.run();
-      expect(next.confirm).toHaveBeenCalledOnce();
-      expect(next.update).toHaveBeenCalledOnce();
+      expect(next.confirm).not.toHaveBeenCalled();
+      expect(next.update).not.toHaveBeenCalled();
+      expect(next.session.log).not.toHaveBeenCalled();
     }
   );
 
+  it("asks again for a different marketplace", async () => {
+    const first = fixture();
+    first.confirm.mockResolvedValue(false);
+    await first.run();
+    const next = fixture(true, first.answers);
+    next.list.mockResolvedValue({
+      plugins: [
+        {
+          ...radius,
+          marketplace: "another-marketplace"
+        }
+      ]
+    });
+    await next.run();
+    expect(next.confirm).toHaveBeenCalledOnce();
+    expect(next.update).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [0, false],
+    [WEEK - 1, false],
+    [WEEK, true],
+    [WEEK + 1, true],
+    [-1, true]
+  ])(
+    "checks the seven-day boundary at elapsed %d ms",
+    async (elapsed, asks) => {
+      const f = fixture(true, new Map([[radius.marketplace, NOW]]));
+      f.setNow(NOW + elapsed);
+      await f.run();
+      expect(f.confirm).toHaveBeenCalledTimes(asks ? 1 : 0);
+      expect(f.update).toHaveBeenCalledTimes(asks ? 1 : 0);
+      expect(f.preferences.rememberAnswer).toHaveBeenCalledTimes(asks ? 1 : 0);
+    }
+  );
+
+  it("recognizes an answer saved at the Unix epoch", async () => {
+    const f = fixture(true, new Map([[radius.marketplace, 0]]));
+    f.setNow(WEEK - 1);
+    await f.run();
+    expect(f.confirm).not.toHaveBeenCalled();
+  });
+
+  it("starts the cooldown when the answer arrives, not when the prompt opens", async () => {
+    const f = fixture();
+    f.confirm.mockImplementation(async () => {
+      f.setNow(NOW + WEEK);
+      return true;
+    });
+    await f.run();
+    expect(f.preferences.rememberAnswer).toHaveBeenCalledExactlyOnceWith(
+      radius.marketplace,
+      NOW + WEEK
+    );
+  });
+
+  it("records approval even when the plugin is already current", async () => {
+    const first = fixture();
+    first.update.mockResolvedValue({
+      previousVersion: radius.version,
+      newVersion: radius.version,
+      skillsInstalled: 5
+    });
+    await first.run();
+    const next = fixture(true, first.answers);
+    await next.run();
+    expect(next.confirm).not.toHaveBeenCalled();
+    expect(next.update).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, "", " "])(
-    "skips unavailable installed version metadata %j without a user warning",
+    "can save a marketplace cooldown without installed version metadata %j",
     async (version) => {
       const f = fixture();
       f.list.mockResolvedValue({ plugins: [{ ...radius, version }] });
       await f.run();
-      expect(f.confirm).not.toHaveBeenCalled();
-      expect(f.update).not.toHaveBeenCalled();
-      expect(f.session.log).not.toHaveBeenCalled();
-      expect(f.logError).toHaveBeenCalledWith(
-        expect.stringContaining("installed version is unavailable")
+      expect(f.confirm).toHaveBeenCalledOnce();
+      expect(f.update).toHaveBeenCalledOnce();
+      expect(f.preferences.rememberAnswer).toHaveBeenCalledExactlyOnceWith(
+        radius.marketplace,
+        NOW
       );
+      expect(f.logError).not.toHaveBeenCalled();
     }
   );
 
   it("does not ask or update after shutdown during preference loading", async () => {
     const f = fixture();
-    f.preferences.hasDeclined.mockImplementation(async () => {
+    f.preferences.lastAnsweredAt.mockImplementation(async () => {
       f.stop();
-      return false;
+      return undefined;
     });
     await f.run();
     expect(f.confirm).not.toHaveBeenCalled();
@@ -238,28 +302,72 @@ describe("approval-based Radius plugin updates", () => {
     expect(f.session.log).not.toHaveBeenCalled();
   });
 
-  it.each(["read", "save"])(
-    "reports preference %s failures without installing an update",
-    async (operation) => {
+  it("skips a preference read failure with only a diagnostic", async () => {
+    const f = fixture();
+    f.preferences.lastAnsweredAt.mockRejectedValue(
+      new Error("preference read failed")
+    );
+    await f.run();
+    expect(f.confirm).not.toHaveBeenCalled();
+    expect(f.update).not.toHaveBeenCalled();
+    expect(f.session.log).not.toHaveBeenCalled();
+    expect(f.logError).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining(
+        "could not read its approval history: preference read failed"
+      )
+    );
+  });
+
+  it.each([false, true])(
+    "retains answer %s when saving its timestamp fails, without a warning",
+    async (approved) => {
       const f = fixture();
-      if (operation === "read") {
-        f.preferences.hasDeclined.mockRejectedValue(
-          new Error("preference read failed")
-        );
-      } else {
-        f.confirm.mockResolvedValue(false);
-        f.preferences.rememberDecline.mockRejectedValue(
-          new Error("preference save failed")
-        );
-      }
+      f.confirm.mockResolvedValue(approved);
+      f.preferences.rememberAnswer.mockRejectedValue(
+        new Error("preference save failed")
+      );
       await f.run();
-      expect(f.update).not.toHaveBeenCalled();
-      expect(f.session.log).toHaveBeenCalledWith(
-        expect.stringContaining(`preference ${operation} failed`),
-        { level: "warning", ephemeral: true }
+      expect(f.update).toHaveBeenCalledTimes(approved ? 1 : 0);
+      expect(f.session.log).not.toHaveBeenCalledWith(expect.anything(), {
+        level: "warning",
+        ephemeral: true
+      });
+      expect(f.logError).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining(
+          "could not save its plugin update approval history: preference save failed"
+        )
       );
     }
   );
+
+  it.each(["read", "save"] as const)(
+    "does not report a late preference %s failure after shutdown",
+    async (operation) => {
+      const f = fixture();
+      const fail = async () => {
+        f.stop();
+        throw new Error("interrupted preference access");
+      };
+      if (operation === "read")
+        f.preferences.lastAnsweredAt.mockImplementation(fail);
+      else f.preferences.rememberAnswer.mockImplementation(fail);
+      await f.run();
+      expect(f.confirm).toHaveBeenCalledTimes(operation === "read" ? 0 : 1);
+      expect(f.update).not.toHaveBeenCalled();
+      expect(f.session.log).not.toHaveBeenCalled();
+      expect(f.logError).not.toHaveBeenCalled();
+    }
+  );
+
+  it("does not update after shutdown while saving an answer", async () => {
+    const f = fixture();
+    f.preferences.rememberAnswer.mockImplementation(async () => {
+      f.stop();
+    });
+    await f.run();
+    expect(f.update).not.toHaveBeenCalled();
+    expect(f.session.log).not.toHaveBeenCalled();
+  });
 
   it("waits for explicit approval and shares a pending request across starts", async () => {
     const f = fixture();
@@ -276,7 +384,7 @@ describe("approval-based Radius plugin updates", () => {
     await vi.waitFor(() => expect(f.confirm).toHaveBeenCalledOnce());
     expect(f.run()).toBe(first);
     expect(f.update).not.toHaveBeenCalled();
-    expect(f.preferences.rememberDecline).not.toHaveBeenCalled();
+    expect(f.preferences.rememberAnswer).not.toHaveBeenCalled();
     approve(true);
     await first;
     expect(f.update).toHaveBeenCalledOnce();

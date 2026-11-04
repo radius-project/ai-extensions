@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPluginUpdatePreferences } from "./plugin-update-preferences.js";
 
-const identity = { marketplace: "radius-plugins", version: "0.4.0" };
+const marketplace = "radius-plugins";
+const answeredAt = Date.UTC(2026, 0, 1);
 
-describe("persistent plugin update declines", () => {
+describe("persistent plugin update answers", () => {
   let directory: string;
 
   beforeEach(async () => {
@@ -17,60 +18,72 @@ describe("persistent plugin update declines", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("does not report a decline before one is saved", async () => {
-    const preferences = createPluginUpdatePreferences(directory);
-    expect(await preferences.hasDeclined(identity)).toBe(false);
+  it.each(["root", "record"])(
+    "returns no timestamp for a missing %s",
+    async (missing) => {
+      const preferences = createPluginUpdatePreferences(
+        missing === "root" ? join(directory, "missing") : directory
+      );
+      expect(await preferences.lastAnsweredAt(marketplace)).toBeUndefined();
+    }
+  );
+
+  it("retains the answer timestamp when the adapter is recreated", async () => {
+    await createPluginUpdatePreferences(directory).rememberAnswer(
+      marketplace,
+      answeredAt
+    );
+    expect(
+      await createPluginUpdatePreferences(directory).lastAnsweredAt(marketplace)
+    ).toBe(answeredAt);
   });
 
-  it("retains a decline when the preferences adapter is recreated", async () => {
-    await createPluginUpdatePreferences(directory).rememberDecline(identity);
-    expect(
-      await createPluginUpdatePreferences(directory).hasDeclined(identity)
-    ).toBe(true);
+  it("replaces an expired answer timestamp with the new answer", async () => {
+    const preferences = createPluginUpdatePreferences(directory);
+    await preferences.rememberAnswer(marketplace, answeredAt);
+    const nextAnswer = answeredAt + 7 * 24 * 60 * 60 * 1000;
+    await preferences.rememberAnswer(marketplace, nextAnswer);
+    expect(await preferences.lastAnsweredAt(marketplace)).toBe(nextAnswer);
   });
 
   it("creates missing parent directories and handles concurrent saves", async () => {
     const preferences = createPluginUpdatePreferences(
-      join(directory, "nested", "declines")
+      join(directory, "nested", "responses")
     );
     await Promise.all([
-      preferences.rememberDecline(identity),
-      preferences.rememberDecline(identity)
+      preferences.rememberAnswer(marketplace, answeredAt),
+      preferences.rememberAnswer(marketplace, answeredAt)
     ]);
-    expect(await preferences.hasDeclined(identity)).toBe(true);
+    expect(await preferences.lastAnsweredAt(marketplace)).toBe(answeredAt);
   });
 
-  it.each([
-    { ...identity, marketplace: "another-marketplace" },
-    { ...identity, version: "0.5.0" }
-  ])("does not suppress a changed installation: %j", async (changed) => {
+  it("keeps answers from different marketplaces separate", async () => {
     const preferences = createPluginUpdatePreferences(directory);
-    await preferences.rememberDecline(identity);
-    expect(await preferences.hasDeclined(changed)).toBe(false);
+    await preferences.rememberAnswer(marketplace, answeredAt);
+    expect(
+      await preferences.lastAnsweredAt("another-marketplace")
+    ).toBeUndefined();
   });
 
-  it("confines path-like identity values to a fixed-length marker name", async () => {
+  it("confines a path-like marketplace to a fixed-length record name", async () => {
     const preferences = createPluginUpdatePreferences(directory);
-    const pathLike = {
-      marketplace: "../outside-marketplace",
-      version: "..\\outside-version"
-    };
-    await preferences.rememberDecline(pathLike);
+    const pathLike = "../outside\\marketplace";
+    await preferences.rememberAnswer(pathLike, answeredAt);
     const names = await readdir(directory);
     expect(names).toHaveLength(1);
     expect(names[0]).toMatch(/^[a-f0-9]{64}$/);
-    expect(await preferences.hasDeclined(pathLike)).toBe(true);
+    expect(await preferences.lastAnsweredAt(pathLike)).toBe(answeredAt);
   });
 
-  it("rejects a corrupt decline marker instead of treating it as a saved choice", async () => {
+  it("rejects a file in place of an answer record", async () => {
     const preferences = createPluginUpdatePreferences(directory);
-    await preferences.rememberDecline(identity);
+    await preferences.rememberAnswer(marketplace, answeredAt);
     const [name] = await readdir(directory);
     const marker = join(directory, name);
     await rmdir(marker);
     await writeFile(marker, "invalid marker");
-    await expect(preferences.hasDeclined(identity)).rejects.toThrow(
-      "Invalid Radius plugin update decline record"
+    await expect(preferences.lastAnsweredAt(marketplace)).rejects.toThrow(
+      "Invalid Radius plugin update answer record"
     );
   });
 
@@ -78,12 +91,16 @@ describe("persistent plugin update declines", () => {
     const blocked = join(directory, "not-a-directory");
     await writeFile(blocked, "blocked");
     const preferences = createPluginUpdatePreferences(blocked);
-    await expect(preferences.hasDeclined(identity)).rejects.toThrow();
-    await expect(preferences.rememberDecline(identity)).rejects.toThrow();
+    await expect(preferences.lastAnsweredAt(marketplace)).rejects.toThrow(
+      "Invalid Radius plugin update preferences directory"
+    );
+    await expect(
+      preferences.rememberAnswer(marketplace, answeredAt)
+    ).rejects.toThrow();
   });
 
-  it("propagates invalid filesystem path errors rather than reporting no saved decline", async () => {
+  it("propagates invalid filesystem path errors rather than reporting no saved answer", async () => {
     const preferences = createPluginUpdatePreferences("\0");
-    await expect(preferences.hasDeclined(identity)).rejects.toThrow();
+    await expect(preferences.lastAnsweredAt(marketplace)).rejects.toThrow();
   });
 });

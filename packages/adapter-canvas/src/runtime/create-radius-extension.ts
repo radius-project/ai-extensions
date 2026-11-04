@@ -306,6 +306,7 @@ export function createRadiusExtension(
   const updatePlugin = createRadiusPluginUpdater({
     enabled: deps.automaticPluginUpdates,
     preferences: deps.pluginUpdatePreferences,
+    now: () => deps.clock.now(),
     isShutDown: () => shuttingDown,
     logError: deps.logError
   });

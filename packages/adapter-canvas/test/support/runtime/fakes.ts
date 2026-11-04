@@ -125,7 +125,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   const servers = new Map<string, CanvasServerEntry>();
   const sessionHolder = createSessionHolder();
   const executionOwner = createEnvironmentExecutionOwner();
-  const declinedPluginUpdates = new Set<string>();
+  const pluginUpdateAnswers = new Map<string, number>();
 
   const workspaceContext: WorkspaceContext = options.workspaceContext ?? {
     workspacePath: "/workspace",
@@ -195,10 +195,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     logError: vi.fn(),
     automaticPluginUpdates: false,
     pluginUpdatePreferences: {
-      hasDeclined: async (identity) =>
-        declinedPluginUpdates.has(JSON.stringify(identity)),
-      rememberDecline: async (identity) => {
-        declinedPluginUpdates.add(JSON.stringify(identity));
+      lastAnsweredAt: async (marketplace) =>
+        pluginUpdateAnswers.get(marketplace),
+      rememberAnswer: async (marketplace, answeredAt) => {
+        pluginUpdateAnswers.set(marketplace, answeredAt);
       }
     },
     session: sessionHolder,

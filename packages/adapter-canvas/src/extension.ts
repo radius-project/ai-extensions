@@ -169,7 +169,7 @@ const dependencies: RadiusExtensionDependencies = {
       process.env.USERPROFILE || os.homedir(),
       ".copilot",
       "radius",
-      "plugin-update-declines"
+      "plugin-update-responses"
     )
   ),
   session: sessionHolder,

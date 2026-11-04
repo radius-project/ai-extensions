@@ -383,7 +383,7 @@ describe("P0-C built Radius extension artifact", () => {
       {
         stage: "approval",
         detail:
-          "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code. If you decline or cancel, Radius will not ask again for this installed version and marketplace."
+          "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code. After any answer, including cancellation, Radius waits 7 days before asking again for this marketplace."
       },
       { stage: "update", detail: "radius@radius-plugins" }
     ]);
@@ -437,46 +437,63 @@ describe("P0-C built Radius extension artifact", () => {
     }
   );
 
-  it("retains a declined update across separate extension processes and workspaces", async () => {
-    const profile = mkdtempSync(join(tmpdir(), "radius-artifact-profile-"));
-    try {
-      const first = await runArtifactSmoke(
-        ARTIFACT,
-        20_000,
-        DIST,
-        "clean",
-        "decline",
-        profile
-      );
-      expect(first.pluginUpdateEvents.map((event) => event.stage)).toEqual([
-        "approval"
-      ]);
-      expect(first.exitCode).toBe(0);
-      const preferences = createPluginUpdatePreferences(
-        join(profile, ".copilot", "radius", "plugin-update-declines")
-      );
-      expect(
-        await preferences.hasDeclined({
-          marketplace: "radius-plugins",
-          version: "0.4.0"
-        })
-      ).toBe(true);
-      const next = await runArtifactSmoke(
-        ARTIFACT,
-        20_000,
-        DIST,
-        "clean",
-        "approve",
-        profile
-      );
-      expect(next.pluginUpdateEvents).toEqual([]);
-      expect(next.registration).toEqual(EXPECTED_REGISTRATION);
-      expect(next.exitCode).toBe(0);
-      expect(next.closeCount).toBe(1);
-    } finally {
-      rmSync(profile, { recursive: true, force: true });
+  it.each(["decline", "approve"] as const)(
+    "retains the cooldown after %s across processes and workspaces, then expires it",
+    async (answer) => {
+      const profile = mkdtempSync(join(tmpdir(), "radius-artifact-profile-"));
+      try {
+        const first = await runArtifactSmoke(
+          ARTIFACT,
+          20_000,
+          DIST,
+          "clean",
+          answer,
+          profile
+        );
+        expect(first.pluginUpdateEvents.map((event) => event.stage)).toEqual([
+          ...(answer === "approve" ? ["approval", "update"] : ["approval"])
+        ]);
+        expect(first.exitCode).toBe(0);
+        const preferences = createPluginUpdatePreferences(
+          join(profile, ".copilot", "radius", "plugin-update-responses")
+        );
+        expect(
+          await preferences.lastAnsweredAt("radius-plugins")
+        ).toBeGreaterThan(0);
+        const next = await runArtifactSmoke(
+          ARTIFACT,
+          20_000,
+          DIST,
+          "clean",
+          "approve",
+          profile
+        );
+        expect(next.pluginUpdateEvents).toEqual([]);
+        expect(next.registration).toEqual(EXPECTED_REGISTRATION);
+        expect(next.exitCode).toBe(0);
+        expect(next.closeCount).toBe(1);
+        await preferences.rememberAnswer(
+          "radius-plugins",
+          Date.now() - 7 * 24 * 60 * 60 * 1000
+        );
+        const expired = await runArtifactSmoke(
+          ARTIFACT,
+          20_000,
+          DIST,
+          "clean",
+          "decline",
+          profile
+        );
+        expect(expired.pluginUpdateEvents.map((event) => event.stage)).toEqual([
+          "approval"
+        ]);
+        expect(expired.exitCode).toBe(0);
+        expect(expired.closeCount).toBe(1);
+      } finally {
+        rmSync(profile, { recursive: true, force: true });
+      }
     }
-  });
+  );
   it("registers flat object tool parameters without provider-rejected root unions", () => {
     for (const tool of smoke.registration.tools) {
       expect(tool.parameters).toMatchObject({
