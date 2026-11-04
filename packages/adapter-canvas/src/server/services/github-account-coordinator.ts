@@ -423,7 +423,7 @@ export function createGitHubAccountCoordinator(
 
         if (restoration.state === "failed") {
           throw new Error(
-            "Radius stopped before work that runs without the GitHub account lease."
+            `Radius stopped because it could not switch the GitHub CLI back to @${restoration.originalLogin}.`
           );
         }
       },

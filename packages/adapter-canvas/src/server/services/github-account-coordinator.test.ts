@@ -679,7 +679,7 @@ describe("GitHub account coordinator", () => {
     }
   );
 
-  it("does not give up the lease when it cannot restore the original account", async () => {
+  it("stops work when it cannot restore the original account", async () => {
     let activeLogin = "original";
 
     const coordinator = createGitHubAccountCoordinator({
@@ -713,7 +713,7 @@ describe("GitHub account coordinator", () => {
     expect(result).toBeInstanceOf(GitHubAccountRestorationError);
     expect(result).toMatchObject({
       message: expect.stringContaining(
-        "Radius stopped before work that runs without the GitHub account lease."
+        "Radius stopped because it could not switch the GitHub CLI back to @original."
       ),
       restoration: { state: "failed" }
     });

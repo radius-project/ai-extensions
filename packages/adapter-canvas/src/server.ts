@@ -4484,16 +4484,7 @@ export function createEnvironmentOperationExecution(
                 assertSetupExecutionActive(attachment.isShuttingDown);
                 return setupServices.authorizeAzure(request);
               },
-              configureEnvironment: async (request, projectionInstanceId) => {
-                // Configure environment runs gh as the selected account, so
-                // it takes back the lease AWS setup gave up. No lease holder
-                // waits for the deploy identity lock this setup holds.
-                await lease.retake(() => {
-                  addLegacyStep(
-                    op,
-                    "⏳ Waiting for another Radius run to finish with the GitHub CLI account."
-                  );
-                });
+              configureEnvironment: (request, projectionInstanceId) => {
                 assertSetupExecutionActive(attachment.isShuttingDown);
                 return setupServices.configureEnvironment(
                   request,
@@ -4503,21 +4494,52 @@ export function createEnvironmentOperationExecution(
               }
             },
             // The deploy identity lock wait has no deadline, so AWS setup
-            // gives up the GitHub account lease. A failed or paused AWS setup
-            // never needs it again.
+            // gives up the GitHub account lease while it runs. It takes the
+            // lease back for Configure environment, which runs gh as the
+            // selected account. No lease holder waits for the deploy identity
+            // lock this setup holds. A failed or paused AWS setup never needs
+            // the lease again.
             setupAwsDeployIdentity: async (
               operation,
               input,
               selectedExecutor
             ) => {
-              await lease.release();
+              // Returned as an AWS setup failure, so setup cleans up.
+              const switchFailure = (error: unknown) => ({
+                ok: false as const,
+                status: 409,
+                error: errorMessage(error),
+                code: "github-account-switch-failed"
+              });
+
+              try {
+                await lease.release();
+              } catch (error) {
+                return switchFailure(error);
+              }
+
               // Shutdown can start while the release restores the account.
               assertSetupExecutionActive(attachment.isShuttingDown);
-              return awsEnvironmentAccess.setup(
+              const result = await awsEnvironmentAccess.setup(
                 operation,
                 input,
                 selectedExecutor
               );
+
+              if (!result.ok) return result;
+
+              try {
+                await lease.retake(() => {
+                  addLegacyStep(
+                    operation,
+                    "⏳ Waiting for another Radius run to finish with the GitHub CLI account."
+                  );
+                });
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              return result;
             },
             // Runs during shutdown too: a lock left behind blocks every other
             // run on this deploy identity until someone removes it.
