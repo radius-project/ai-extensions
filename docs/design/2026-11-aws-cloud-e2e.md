@@ -73,6 +73,7 @@ An account administrator creates both once.
 **The test role.** The Cloud E2E job signs in to it with GitHub's OIDC token. It trusts only `repo:radius-project/ai-extensions:ref:refs/heads/main`, so no pull request or branch can use it. The job doesn't use a GitHub environment, because that would change the subject GitHub sends. The role can:
 
 - Read EKS, EC2, and RDS, and run `kubectl` on the two clusters.
+- Scale and update the two node groups on the main cluster.
 - Change only the deploy role's trust policy and inline policies, its lock policy, and access entries on the two clusters.
 - Delete only RDS instances, groups, and snapshots named `mysql-*` and `rds-snapshot-*`.
 
@@ -90,19 +91,21 @@ The deploy role can't create service-linked roles. RDS's already exists; a new s
 
 ### The clusters
 
-The main cluster, in `us-east-2`, has two node groups. The default one has two `t3.medium` nodes. The isolated one has one `t3.small` node whose launch template sets its own security group, so EKS doesn't add it to the cluster security group, and nothing allows TCP 3306 from it. A taint keeps app pods off it.
+The main cluster, in `us-east-2`, has two node groups. The default one has up to two `t3.medium` nodes. The isolated one has one `t3.small` node whose launch template sets its own security group, so EKS doesn't add it to the cluster security group, and nothing allows TCP 3306 from it. A taint keeps app pods off it.
 
 The second cluster, in `us-west-1`, has no nodes. The run only creates an environment on it, deploys an app that fails before any pod is scheduled, and deletes it.
 
 Both clusters use authentication mode `API` and a public endpoint, so GitHub-hosted runners can reach them. Nodes use public subnets, so no NAT gateway is needed, and RDS uses private subnets.
 
-The ai-extensions maintainers own both clusters and upgrade them. A cluster must stay on a Kubernetes version in EKS standard support, because extended support costs six times as much. The test's preflight is the reminder: it warns when a cluster's version is within 60 days of leaving standard support, and fails once it has left.
+Both node groups stay at zero nodes between runs. The test scales them up at the start and back to zero at the end, even when the run fails, and cleanup scales them down if a run was cut off. This adds about 5 minutes to a run.
+
+The ai-extensions maintainers own both clusters, and upgrades are automated. Each cluster's upgrade policy is `STANDARD`, so when its Kubernetes version leaves EKS standard support, AWS upgrades the control plane itself instead of moving it to extended support, which costs six times as much. Managed node groups don't upgrade themselves, so the test updates a node group to the control plane's version while it's still at zero nodes. Each run records the cluster's version, so a failure right after an automatic upgrade is easy to trace.
 
 ### What the test does
 
 Each step runs in the canvas, in order, with the AWS switch on.
 
-1. **Preflight.** The account, both clusters, and the isolated node group are as expected, both clusters are on a Kubernetes version in standard support, and nothing from an earlier run is left.
+1. **Preflight.** The account, both clusters, and the isolated node group are as expected, and both clusters' upgrade policy is `STANDARD`. Nothing from an earlier run is left. The node groups are updated if needed and scaled up.
 2. **Create the main environment.** Setup reuses the deploy role, and adds one trust subject, one inline policy, and one access entry. Verify succeeds.
 3. **Create the second environment.** It uses the same deploy role, which now has two of each.
 4. **Failed deploy.** The failing app, deployed to the second environment, shows its resource as failed in the deployed graph. Nothing is created in AWS.
@@ -132,7 +135,7 @@ Each managed service in the pack gets a row in the connection check and a resour
 3. Checks nothing is left.
 4. Only then removes the environment's trust subject, inline policy, access entry, GitHub environment, and state.
 
-If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs.
+If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs. Cleanup also scales the node groups to zero if a run left them up.
 
 It deletes a resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with an expired test environment, and in one of the clusters' VPCs. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the roles, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
 
@@ -144,7 +147,7 @@ Radius's daily cleanup job in the same account deletes RDS, S3, and log resource
 
 ### Time budget
 
-The AWS suite has its own stage limits, about 230 minutes in total, under a 270-minute job timeout. Reusing the Azure limits would add up to about 370 minutes, over GitHub's 6-hour limit. The local run sets the limits from measured times.
+The AWS suite has its own stage limits, about 235 minutes in total, under a 270-minute job timeout. Reusing the Azure limits would add up to about 370 minutes, over GitHub's 6-hour limit. The local run sets the limits from measured times.
 
 ### Rollout
 
@@ -158,18 +161,18 @@ Until the fixture variable is set, the AWS job and sweep skip and say why, as th
 
 ### Cost
 
-About $240 a month: $165 for the main cluster and its nodes, $73 for the second cluster, and about $1 for RDS.
+About $160 a month: $73 for each cluster's control plane, about $13 for nodes that run only during the test, and about $1 for RDS.
 
 ## Error handling
 
-| Scenario                                                              | What happens                                                                                            |
-|-----------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| Signing in to AWS fails                                               | The job fails before the test starts. The runbook points to the trust policy, which accepts only `main` |
-| Preflight finds the account or clusters wrong                         | The job fails before any write, reported as an infrastructure failure                                   |
-| A cluster's Kubernetes version leaves standard support within 60 days | The run continues, with a warning in its summary that names the cluster and the date                    |
-| A cluster's Kubernetes version is past standard support               | Preflight fails and names the cluster, so it's upgraded before it costs more                            |
-| Preflight finds something from an earlier run                         | The job fails and names it, and points to the cleanup workflow. It doesn't delete it                    |
-| The isolated probe connects                                           | The connection check fails, because the isolated node no longer tests a missing network rule            |
+| Scenario                                      | What happens                                                                                            |
+|-----------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| Signing in to AWS fails                       | The job fails before the test starts. The runbook points to the trust policy, which accepts only `main` |
+| Preflight finds the account or clusters wrong | The job fails before any write, reported as an infrastructure failure                                   |
+| A cluster's upgrade policy isn't `STANDARD`   | Preflight fails and names the cluster, because it would move to extended support and cost more          |
+| Nodes don't become ready after scaling up     | Preflight fails as an infrastructure failure, and the nodes are scaled back to zero                     |
+| Preflight finds something from an earlier run | The job fails and names it, and points to the cleanup workflow. It doesn't delete it                    |
+| The isolated probe connects                   | The connection check fails, because the isolated node no longer tests a missing network rule            |
 
 ## Test plan
 
@@ -179,7 +182,7 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 
 ## Open questions
 
-1. **Will the Radius maintainers who own `radius-test` accept about $240 a month?** About a third of the cost is the second cluster, which exists only to test a second region.
+1. **Will the Radius maintainers who own `radius-test` accept about $160 a month?** Almost half of it is the second cluster, which exists only to test a second region.
 2. **Which fixture gate forces a Kubernetes write at least 16 minutes into the deploy, every time?** For example, a resource that waits on the container, whose readiness is held back for 16 minutes. The local run picks it.
 3. **Which resource fails in Kubernetes, before any AWS call, every time?** The local run picks it.
 
@@ -187,7 +190,7 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 
 - **A new AWS account only for these tests.** Cleaner, but needs someone with organization rights. Separate regions and a permissions boundary give enough separation.
 - **Running in `us-west-2` with Radius's tests.** Rejected: shared regional quotas and Radius's cleanup region.
-- **A cluster per run.** About $25 a month instead of $165. Rejected: 30 to 40 more minutes a run, rights to create clusters, VPCs, and roles, and a leaked cluster costs $73 a month until someone finds it.
+- **A cluster per run.** About $25 a month instead of about $160. Rejected: 30 to 40 more minutes a run, rights to create clusters, VPCs, and roles, and a leaked cluster costs $73 a month until someone finds it.
 - **Sharing the Azure fixture repository.** Rejected: AWS would wait behind Azure on the lease, and a broken fixture would stop both.
 - **Letting the product create the deploy role in CI.** Rejected in a shared account: the test role could then create a role with any permissions.
 - **Trusting a protected GitHub environment so branches can run the AWS job before merge.** Rejected: a permanent second way to get the CI credential. Local runs cover the test before merge.
