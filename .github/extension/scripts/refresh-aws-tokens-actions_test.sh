@@ -12,7 +12,7 @@ readonly SCRIPT_DIR
 readonly ACTIONS_DIR="${SCRIPT_DIR}/../actions"
 TEST_ROOT="$(mktemp -d)"
 readonly TEST_ROOT
-trap 'rm -rf "${TEST_ROOT}"' EXIT
+trap 'if [[ -s "${WATCH_PID_FILE:-}" ]]; then kill "$(cat "${WATCH_PID_FILE}")" 2>/dev/null || true; fi; rm -rf "${TEST_ROOT}"' EXIT
 
 readonly EXT="${TEST_ROOT}/extension"
 readonly OUTPUT_DIR="${TEST_ROOT}/output"
@@ -84,7 +84,21 @@ extract_step run-rad-commands "Run rad commands"
 extract_step delete-resource "Delete Radius resource"
 mkdir -p "${EXT}/actions/deploy-progress" "${EXT}/scripts" "${TEST_ROOT}/bin"
 cp "${ACTIONS_DIR}/deploy-progress/progress.sh" "${EXT}/actions/deploy-progress/"
-cp "${ACTIONS_DIR}/run-rad-commands/deploy-parameters.sh" "${EXT}/actions/run-rad-commands/"
+# The fake parameter loader records the app file it reads, so the default
+# deploy's calls show whether it stopped at the refresh. With WAIT_FOR_WATCHER
+# set, it first waits for the watcher, so the order of the calls is fixed.
+cat >"${EXT}/actions/run-rad-commands/deploy-parameters.sh" <<'EOF'
+load_declared_app_params() {
+    if [[ -n "${WAIT_FOR_WATCHER:-}" ]]; then
+        for _ in $(seq 1 100); do
+            [[ -s "${WATCH_PID_FILE}" ]] && break
+            /bin/sleep 0.05
+        done
+    fi
+    printf 'load parameters %s\n' "$1" >>"${CALLS}"
+}
+append_generated_app_params() { GENERATED_APP_PARAMS=(); }
+EOF
 
 # The fake refresher records each call with the AWS settings it received.
 # PREPARE_STATUS sets the --prepare exit status. --watch records its process
@@ -131,7 +145,7 @@ readonly ROLE="arn:aws:iam::111122223333:role/radius-deploy"
 readonly REFRESHER_ARGS="role=${ROLE} cluster=demo-cluster region=us-west-2"
 
 # Runs an action step as GitHub runs a bash step and prints its exit status, or
-# 124 when the step has not exited after 10 seconds, so a step that waits on a
+# 124 when the step has not exited after 15 seconds, so a step that waits on a
 # watcher it never stopped fails instead of hanging the suite.
 run_step() {
     local action="$1"
@@ -146,7 +160,7 @@ run_step() {
         bash --noprofile --norc -eo pipefail "${EXT}/actions/${action}/step.sh" \
         >"${STEP_LOG}" 2>&1 &
     pid=$!
-    for _ in $(seq 1 200); do
+    for _ in $(seq 1 300); do
         kill -0 "${pid}" 2>/dev/null || break
         /bin/sleep 0.05
     done
@@ -233,17 +247,33 @@ status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" RAD_COMMANDS='["kubectl get pods"]' run_
 expect_calls "" "a disallowed command"
 expect_result "${COMMANDS_RESULT}" disallowed_command 2 "a disallowed command"
 
-# The default deploy refreshes before it reads the app's parameters. The app
-# file is missing, so a step that went on past the failed refresh would fail on
-# that file instead, with the same exit code and result.
-status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" PREPARE_STATUS=1 RAD_COMMANDS="" \
-    APP_FILE="${TEST_ROOT}/missing/app.bicep" run_step run-rad-commands)"
+# The default deploy refreshes before it reads the app's parameters, keeps the
+# watcher running through `rad deploy`, and stops it on exit.
+status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" WAIT_FOR_WATCHER=1 RAD_COMMANDS="" run_step run-rad-commands)"
+[[ "${status}" == "0" ]] || fail "the default deploy: expected success, got ${status}"
+expect_calls "refresher --prepare ${REFRESHER_ARGS}
+refresher --watch ${REFRESHER_ARGS}
+load parameters .radius/app.bicep
+watcher running
+rad deploy .radius/app.bicep --environment dev" "the default deploy"
+expect_watcher_stopped "the default deploy"
+expect_result "${COMMANDS_RESULT}" succeeded 0 "the default deploy"
+
+status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" WAIT_FOR_WATCHER=1 RAD_STATUS=1 RAD_COMMANDS="" run_step run-rad-commands)"
+[[ "${status}" == "1" ]] || fail "a failed default deploy: expected exit 1, got ${status}"
+expect_watcher_stopped "a failed default deploy"
+expect_result "${COMMANDS_RESULT}" command_failed 1 "a failed default deploy"
+
+status="$(RADIUS_AWS_ROLE_ARN="" RAD_COMMANDS="" run_step run-rad-commands)"
+[[ "${status}" == "0" ]] || fail "the default deploy without a deploy role: expected success, got ${status}"
+expect_calls "load parameters .radius/app.bicep
+rad deploy .radius/app.bicep --environment dev" "the default deploy without a deploy role"
+
+status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" PREPARE_STATUS=1 RAD_COMMANDS="" run_step run-rad-commands)"
 [[ "${status}" == "1" ]] || fail "a failed token refresh before the default deploy: expected exit 1, got ${status}"
 expect_calls "refresher --prepare ${REFRESHER_ARGS}" "a failed token refresh before the default deploy"
+[[ ! -f "${WATCH_PID_FILE}" ]] || fail "a failed token refresh before the default deploy: expected no watcher"
 expect_result "${COMMANDS_RESULT}" command_failed 1 "a failed token refresh before the default deploy"
-if grep -q 'missing/app.bicep not found' "${STEP_LOG}"; then
-    fail "a failed token refresh before the default deploy: expected the step to stop before reading the app file"
-fi
 
 # delete-resource.
 export RESOURCE_TYPE="application" RESOURCE_NAME="todo" FORCE_DELETE="false"
