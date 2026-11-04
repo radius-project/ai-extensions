@@ -470,8 +470,8 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
           accountId: "123456789012",
           region: "us-west-2",
           cluster: "eks",
-          vpcId: "vpc",
-          subnetIds: "subnet",
+          vpcId: "vpc-1",
+          subnetIds: "subnet-a,subnet-b",
           selectionHandle: "selected-account",
           ...selectors
         })
@@ -513,6 +513,43 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
         error:
           "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number.",
         code: "invalid-kubernetes-namespace"
+      });
+      expect(harness.running.size).toBe(0);
+      expect(harness.persistCalls).toEqual([]);
+      expect(harness.scheduled).toEqual([]);
+    }
+  );
+
+  it.each([
+    ["one subnet", { subnetIds: "subnet-a" }],
+    ["subnet IDs as an array", { subnetIds: ["subnet-a", "subnet-b"] }],
+    ["a VPC name instead of an ID", { vpcId: "main" }]
+  ])(
+    "rejects AWS setup with %s before registering setup work",
+    async (_label, fields) => {
+      const harness = start(false, true);
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/operations`, {
+        method: "POST",
+        body: JSON.stringify({
+          repo: "octo/app",
+          provider: "aws",
+          roleName: "radius-deploy-octo-app",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "c",
+          vpcId: "vpc-1",
+          subnetIds: "subnet-a,subnet-b",
+          ...fields
+        })
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error:
+          "AWS setup requires a VPC ID such as vpc-0123abcd and at least two different subnet IDs such as subnet-0123abcd, separated by commas.",
+        code: "invalid-aws-network-input"
       });
       expect(harness.running.size).toBe(0);
       expect(harness.persistCalls).toEqual([]);

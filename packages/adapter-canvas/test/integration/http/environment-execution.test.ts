@@ -1051,7 +1051,8 @@ describe("production environment owner HTTP binding", () => {
       "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
       "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
       "eks describe-cluster": {
-        stdout: '{"cluster":{"accessConfig":{"authenticationMode":"API"}}}'
+        stdout:
+          '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
       },
       "iam create-policy": {
         stderr: "An error occurred (AccessDenied) when calling CreatePolicy",

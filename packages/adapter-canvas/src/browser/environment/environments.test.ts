@@ -89,7 +89,7 @@ function renderPage(repo = "octo/app", withoutInfraSelection = false) {
     loadGitHubIdentity: vi.fn(),
     clearSharedAppPin: vi.fn(),
     setPendingInfraSelection: vi.fn(),
-    currentInfraSelection: vi.fn(() => ({})),
+    preserveInfraSelection: vi.fn(),
     startDeleteProgress: vi.fn()
   };
   const decisions = {
@@ -105,7 +105,7 @@ function renderPage(repo = "octo/app", withoutInfraSelection = false) {
     browser.context,
     { repo, decisions, confirmDialog },
     withoutInfraSelection ?
-      { ...dependencies, currentInfraSelection: undefined }
+      { ...dependencies, preserveInfraSelection: undefined }
     : dependencies
   );
   if (!isEnvironmentPaneController(initialized)) {
@@ -164,9 +164,7 @@ function renderRequiredOnly() {
       loadGitHubIdentity() {},
       clearSharedAppPin() {},
       setPendingInfraSelection() {},
-      currentInfraSelection() {
-        return {};
-      },
+      preserveInfraSelection() {},
       startDeleteProgress() {}
     }
   );
@@ -705,38 +703,31 @@ describe("environment pane initialization", () => {
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({ environments: [] })
     );
-    page.dependencies.currentInfraSelection.mockReturnValue({
-      cluster: "eks-1"
-    });
     page.controller.showEnvironmentForm();
     await flushPromises();
     page.dependencies.setPendingInfraSelection.mockClear();
 
     page.controller.switchSubtab("environments");
 
-    expect(page.dependencies.currentInfraSelection).toHaveBeenCalledWith("aws");
-    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
-      { cluster: "eks-1" },
+    expect(page.dependencies.preserveInfraSelection).toHaveBeenCalledWith(
       "aws"
     );
+    expect(page.dependencies.setPendingInfraSelection).not.toHaveBeenCalled();
     expect(page.dependencies.loadProfiles).toHaveBeenCalledWith("");
   });
 
-  it("falls back to an empty selection when no discovery panel is wired", async () => {
+  it("reloads the profiles when no discovery panel is wired", async () => {
     const page = renderPage("octo/app", true);
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({ environments: [] })
     );
     page.controller.showEnvironmentForm();
     await flushPromises();
-    page.dependencies.setPendingInfraSelection.mockClear();
+    page.dependencies.loadProfiles.mockClear();
 
     page.controller.switchSubtab("environments");
 
-    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
-      {},
-      "azure"
-    );
+    expect(page.dependencies.loadProfiles).toHaveBeenCalledWith("");
   });
 
   it("ignores an edit request for a row that is no longer listed", async () => {

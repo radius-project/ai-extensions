@@ -1386,7 +1386,10 @@ describe("runEnvironmentOperationWorkflow", () => {
       }),
       "eks describe-cluster": command({
         stdout: JSON.stringify({
-          cluster: { accessConfig: { authenticationMode: "API" } }
+          cluster: {
+            status: "ACTIVE",
+            accessConfig: { authenticationMode: "API" }
+          }
         })
       }),
       // Another run holds the lock for the whole test.
@@ -1568,7 +1571,10 @@ describe("runEnvironmentOperationWorkflow", () => {
       "--version": "aws-cli/2.17.0 Python/3.11 Darwin/23",
       "sts get-caller-identity": { Account: account },
       "eks describe-cluster": {
-        cluster: { accessConfig: { authenticationMode: "API" } }
+        cluster: {
+          status: "ACTIVE",
+          accessConfig: { authenticationMode: "API" }
+        }
       },
       "iam create-policy": { Policy: { PolicyId: "LOCK1" } },
       "iam get-policy": { Policy: { PolicyId: "LOCK1" } },

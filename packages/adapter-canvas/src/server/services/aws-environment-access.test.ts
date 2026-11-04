@@ -54,7 +54,7 @@ const happyPath: Record<string, Answer> = {
   "--version": ok("aws-cli/2.17.0 Python/3.11 Darwin/23"),
   "sts get-caller-identity": ok({ Account: ACCOUNT }),
   "eks describe-cluster": ok({
-    cluster: { accessConfig: { authenticationMode: "API" } }
+    cluster: { status: "ACTIVE", accessConfig: { authenticationMode: "API" } }
   }),
   "iam get-role": fail("An error occurred (NoSuchEntity) when calling GetRole"),
   "iam list-open-id-connect-providers": ok({ OpenIDConnectProviderList: [] }),
@@ -1847,7 +1847,12 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
       case "sts get-caller-identity":
         return ok({ Account: ACCOUNT });
       case "eks describe-cluster":
-        return ok({ cluster: { accessConfig: { authenticationMode: "API" } } });
+        return ok({
+          cluster: {
+            status: "ACTIVE",
+            accessConfig: { authenticationMode: "API" }
+          }
+        });
       case "iam create-policy": {
         const name = value("--policy-name");
         if (locks.has(name)) return fail("EntityAlreadyExists");

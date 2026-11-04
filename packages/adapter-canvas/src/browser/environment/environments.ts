@@ -48,7 +48,9 @@ export interface EnvironmentPaneDependencies {
     config: EnvironmentInfrastructure | null,
     provider: "azure" | "aws"
   ): void;
-  currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
+  // Hold the selection across a subtab switch, so the next discovery restores
+  // it.
+  preserveInfraSelection?(provider: "azure" | "aws"): void;
   canSubmit?(): boolean;
   // Deletion is an async operation (Radius env delete, credential cleanup,
   // GitHub env delete, app-registration cleanup). The page composes the
@@ -703,10 +705,7 @@ export function initializeEnvironmentPane(
         context.dom.inputById("env-selected-provider")?.value === "aws" ?
           "aws"
         : "azure";
-      dependencies.setPendingInfraSelection?.(
-        dependencies.currentInfraSelection?.(provider) ?? {},
-        provider
-      );
+      dependencies.preserveInfraSelection?.(provider);
       void dependencies.loadProfiles(profileSelect.value);
     }
   };
