@@ -1235,6 +1235,7 @@ describe("the async delete route through its background runner", () => {
       isStopRequested: () => false,
       operationId: () => "",
       operations: {
+        getContext: () => ({}),
         enterStage: () => {},
         setStageState: () => {},
         addLegacyStep: () => {},

@@ -2,14 +2,17 @@ import {
   buildAwsEnvironmentPermissionPolicy,
   buildLegacyAwsEnvironmentPolicyName,
   isAwsEnvironmentPolicyName,
+  namesOneEnvironment,
   legacyAwsPolicyOwnershipError,
   parsePolicyDocument,
   type PolicyDocument
 } from "@radius-project/core";
+import { parseServedReposFromSubjects } from "../../azure-oidc.js";
 import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
 import type {
   AwsCommandResult,
-  AwsDeployIdentityPorts
+  AwsDeployIdentityPorts,
+  AwsDeployIdentitySetupPorts
 } from "./aws-deploy-identity.js";
 
 type PolicyPorts = Pick<AwsDeployIdentityPorts, "runAws">;
@@ -210,11 +213,88 @@ export async function resolveEnvironmentPolicyForRemoval(
             "The recorded AWS permission policy name is invalid for this environment. Review its saved AWS configuration before deletion."
         };
   }
+  const inventory = await readPolicyNames(input.roleName, ports);
+  if (!inventory.ok) return inventory;
+  const expected = awsEnvironmentPolicyName(input.repo, input.environment);
+  if (inventory.names.includes(expected))
+    return { ok: true, policyName: expected };
+  if (
+    inventory.names.some((name) =>
+      isAwsEnvironmentPolicyName(name, input.environment)
+    )
+  ) {
+    return {
+      ok: false,
+      message:
+        "The environment has no recorded AWS permission policy name, and the role has a matching environment policy under another repository hash. Radius did not guess or report it removed. Repair the saved AWS configuration before deletion."
+    };
+  }
+  return { ok: true, policyName: null };
+}
+
+export async function resolveEnvironmentPolicyForSetup(
+  input: {
+    repo: string;
+    environment: string;
+    roleName: string;
+    roleArn: string;
+    subjects: readonly string[];
+  },
+  ports: PolicyPorts &
+    Pick<AwsDeployIdentitySetupPorts, "isRecordedForeignPolicy">
+): Promise<{ ok: true; policyName: string } | Failure> {
+  const inventory = await readPolicyNames(input.roleName, ports);
+  if (!inventory.ok) return inventory;
+  const expected = awsEnvironmentPolicyName(input.repo, input.environment);
+  const legacy = buildLegacyAwsEnvironmentPolicyName(input.environment);
+  const repositories = parseServedReposFromSubjects(
+    input.subjects.filter((subject) =>
+      namesOneEnvironment(subject, input.environment)
+    )
+  );
+  const unresolved: Failure = {
+    ok: false,
+    message:
+      "An existing AWS environment policy cannot be reconciled with this repository. No new policy was attached. Recover the exact saved policy identity or ask the role owner to reconcile the grants before retrying."
+  };
+  for (const name of inventory.names) {
+    if (
+      name === expected ||
+      name === legacy ||
+      !isAwsEnvironmentPolicyName(name, input.environment)
+    )
+      continue;
+    const repo = repositories.find(
+      (candidate) =>
+        awsEnvironmentPolicyName(candidate, input.environment) === name
+    );
+    if (!repo) return unresolved;
+    try {
+      if (
+        !(await ports.isRecordedForeignPolicy({
+          repo,
+          environment: input.environment,
+          roleArn: input.roleArn,
+          policyName: name
+        }))
+      )
+        return unresolved;
+    } catch {
+      return unresolved;
+    }
+  }
+  return { ok: true, policyName: expected };
+}
+
+async function readPolicyNames(
+  roleName: string,
+  ports: PolicyPorts
+): Promise<{ ok: true; names: string[] } | Failure> {
   const result = await ports.runAws([
     "iam",
     "list-role-policies",
     "--role-name",
-    input.roleName,
+    roleName,
     "--output",
     "json"
   ]);
@@ -236,26 +316,12 @@ export async function resolveEnvironmentPolicyForRemoval(
     ) {
       throw new Error("IAM returned an invalid policy inventory");
     }
-    const expected = awsEnvironmentPolicyName(input.repo, input.environment);
-    if (data.PolicyNames.includes(expected))
-      return { ok: true, policyName: expected };
-    if (
-      data.PolicyNames.some((name) =>
-        isAwsEnvironmentPolicyName(name, input.environment)
-      )
-    ) {
-      return {
-        ok: false,
-        message:
-          "The environment has no recorded AWS permission policy name, and the role has a matching environment policy under another repository hash. Radius did not guess or report it removed. Repair the saved AWS configuration before deletion."
-      };
-    }
-    return { ok: true, policyName: null };
+    return { ok: true, names: data.PolicyNames };
   } catch {
     return {
       ok: false,
       message:
-        "IAM did not return a readable policy inventory. Radius stopped before deletion."
+        "IAM did not return a readable policy inventory. Radius stopped before changing the role."
     };
   }
 }

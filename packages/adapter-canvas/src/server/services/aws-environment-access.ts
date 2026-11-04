@@ -64,6 +64,7 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
   isStopRequested(operation: Operation): boolean;
   operationId(operation: Operation): string;
   operations: {
+    getContext(operation: Operation): Record<string, unknown>;
     enterStage(operation: Operation, stage: string): void;
     // Record a stage's verdict, which settling the operation keeps.
     setStageState(operation: Operation, stage: string, state: string): void;
@@ -140,6 +141,7 @@ export interface AwsEnvironmentAccess<Operation> {
     repo: string;
     environment: string;
     roleArn: string;
+    policyName?: string;
     // Run once the lock is held, before any write: null when the environment
     // still names `roleArn`, otherwise why Repair must stop.
     confirmTarget(): Promise<{ code: string; message: string } | null>;
@@ -387,10 +389,11 @@ export function createAwsEnvironmentAccess<Operation>(
     repo: string,
     environment: string,
     executor?: SelectedGhExecutor
-  ): Promise<{ repo: string; subjects: string[] }> {
+  ): Promise<{ repo: string; repoId: number; subjects: string[] }> {
     const oidc = await resolveOidc(repo, environment, executor);
     return {
       repo: oidc.fullName,
+      repoId: oidc.repoId,
       subjects: oidc.federatedCredentials.map(
         (credential) => credential.subject
       )
@@ -524,9 +527,11 @@ export function createAwsEnvironmentAccess<Operation>(
       let repo = text(input.repo);
       const environment = text(input.environment);
       let subjects: string[];
+      let repoId: number;
       try {
         const identity = await resolveIdentity(repo, environment, executor);
         repo = identity.repo;
+        repoId = identity.repoId;
         subjects = identity.subjects;
         if (dependencies.isStopRequested(operation)) {
           return pausedBeforeReady(operation, []);
@@ -550,7 +555,32 @@ export function createAwsEnvironmentAccess<Operation>(
           existingRoleArn || awsRoleArn(accountId, roleName),
           executor
         );
+        const recovery = operations.getContext(operation).awsPolicyIdentity;
+        if (recovery !== undefined) {
+          if (
+            typeof recovery !== "object" ||
+            recovery === null ||
+            !("repoId" in recovery) ||
+            recovery.repoId !== repoId ||
+            !("environment" in recovery) ||
+            recovery.environment !== environment ||
+            !("roleArn" in recovery) ||
+            recovery.roleArn !==
+              (existingRoleArn || awsRoleArn(accountId, roleName)) ||
+            !("policyName" in recovery) ||
+            typeof recovery.policyName !== "string" ||
+            !isAwsEnvironmentPolicyName(recovery.policyName, environment) ||
+            (policyName !== undefined && policyName !== recovery.policyName)
+          ) {
+            throw new Error(
+              "The recorded partial AWS policy identity does not match this setup. Reconcile its grant before retrying. Nothing was changed."
+            );
+          }
+          policyName = recovery.policyName;
+        }
       } catch (error) {
+        if (dependencies.isStopRequested(operation))
+          return pausedBeforeReady(operation, []);
         return {
           ok: false,
           status: 400,
@@ -600,6 +630,28 @@ export function createAwsEnvironmentAccess<Operation>(
           },
           step: (line) => {
             operations.addLegacyStep(operation, line, stage);
+          },
+          recordPolicyIdentity: async (identity) => {
+            operations.setContext(operation, {
+              awsPolicyIdentity: { repoId, environment, ...identity }
+            });
+            await dependencies.store.persist();
+          },
+          isRecordedForeignPolicy: async (candidate) => {
+            const identity = await resolveIdentity(
+              candidate.repo,
+              environment,
+              executor
+            );
+            return (
+              identity.repoId !== repoId &&
+              (await savedPolicyName(
+                identity.repo,
+                environment,
+                candidate.roleArn,
+                executor
+              )) === candidate.policyName
+            );
           },
           sleep: dependencies.sleep,
           acquireLock: async ({ roleName }): Promise<AwsLockResult> => {
@@ -809,7 +861,13 @@ export function createAwsEnvironmentAccess<Operation>(
         : { ok: false, message: `${result.message} ${released.message}` };
     },
 
-    async repair({ repo, environment: requested, roleArn, confirmTarget }) {
+    async repair({
+      repo,
+      environment: requested,
+      roleArn,
+      policyName,
+      confirmTarget
+    }) {
       // GitHub finds an environment by name in any casing, but its tokens
       // carry the stored spelling, so the subjects are built from that.
       const lookup = await dependencies.runGitHubJson(
@@ -832,7 +890,7 @@ export function createAwsEnvironmentAccess<Operation>(
         null,
         (ports) =>
           repairAwsEnvironmentTrust(
-            { repo, environment, roleArn, subjects },
+            { repo, environment, roleArn, subjects, policyName },
             {
               ...ports,
               // A delete can run between the first read of the environment and

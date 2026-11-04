@@ -14,8 +14,12 @@ export async function requireCurrentAwsWorkflows(
     (file) => file === "run-rad-commands-aws.yml" || file === "delete-aws.yml"
   );
   if (!files.length) return;
-  const provider = input.provider || (await ports.environmentProvider());
-  if (provider !== "aws") return;
+  const provider = await ports.environmentProvider();
+  if (provider === "azure") return;
+  if (provider !== "aws")
+    throw new Error(
+      "Could not determine the saved environment provider before dispatch."
+    );
   const branch = await ports.defaultBranch();
   if (!branch)
     throw new Error(

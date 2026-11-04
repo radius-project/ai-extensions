@@ -7,7 +7,8 @@ import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
 import {
   attachEnvironmentPolicy,
   readLegacyEnvironmentPolicy,
-  resolveEnvironmentPolicyForRemoval
+  resolveEnvironmentPolicyForRemoval,
+  resolveEnvironmentPolicyForSetup
 } from "./aws-environment-policy.js";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
 
@@ -206,6 +207,98 @@ describe("recorded policy identity", () => {
       )
     ).toEqual({ ok: true, policyName });
     expect(ports.calls).toEqual([]);
+  });
+
+  describe("unrecorded setup policies", () => {
+    const setup = {
+      ...request,
+      roleArn: `arn:aws:iam::${ACCOUNT}:role/picked`
+    };
+    const unexpectedForeignPolicy = async (): Promise<never> => {
+      throw new Error("unexpected foreign policy lookup");
+    };
+    it("allows new and existing grants without changing unrelated policies", async () => {
+      const ports = runner(
+        ok({
+          PolicyNames: [
+            policyName,
+            legacy.name,
+            awsEnvironmentPolicyName("octo/shop", "prod")
+          ]
+        })
+      );
+      expect(
+        await resolveEnvironmentPolicyForSetup(setup, {
+          ...ports,
+          isRecordedForeignPolicy: unexpectedForeignPolicy
+        })
+      ).toEqual({ ok: true, policyName });
+    });
+    it("refuses an older hash that has no repository ownership evidence", async () => {
+      expect(
+        await resolveEnvironmentPolicyForSetup(setup, {
+          ...runner(
+            ok({ PolicyNames: [awsEnvironmentPolicyName("old/name", "dev")] })
+          ),
+          isRecordedForeignPolicy: unexpectedForeignPolicy
+        })
+      ).toMatchObject({ ok: false });
+    });
+    it.each([true, false])(
+      "preserves another repository's same-name environment only with saved binding: %s",
+      async (recorded) => {
+        const foreign = awsEnvironmentPolicyName("octo/other", "dev");
+        const result = await resolveEnvironmentPolicyForSetup(
+          {
+            ...setup,
+            subjects: [SUBJECT, "repo:octo/other:environment:dev"]
+          },
+          {
+            ...runner(ok({ PolicyNames: [foreign] })),
+            isRecordedForeignPolicy: async (candidate) => {
+              expect(candidate).toEqual({
+                repo: "octo/other",
+                environment: "dev",
+                roleArn: setup.roleArn,
+                policyName: foreign
+              });
+              return recorded;
+            }
+          }
+        );
+        expect(result).toMatchObject({ ok: recorded });
+        if (recorded) expect(result).toEqual({ ok: true, policyName });
+      }
+    );
+    it("fails closed when another repository's binding cannot be read", async () => {
+      expect(
+        await resolveEnvironmentPolicyForSetup(
+          {
+            ...setup,
+            subjects: ["repo:old/name:environment:dev"]
+          },
+          {
+            ...runner(
+              ok({ PolicyNames: [awsEnvironmentPolicyName("old/name", "dev")] })
+            ),
+            isRecordedForeignPolicy: async () => {
+              throw new Error("GitHub AccessDenied");
+            }
+          }
+        )
+      ).toMatchObject({ ok: false });
+    });
+    it.each([fail("AccessDenied"), ok({ PolicyNames: [42] })])(
+      "refuses an unreadable inventory before a new grant",
+      async (answer) => {
+        expect(
+          await resolveEnvironmentPolicyForSetup(setup, {
+            ...runner(answer),
+            isRecordedForeignPolicy: unexpectedForeignPolicy
+          })
+        ).toMatchObject({ ok: false });
+      }
+    );
   });
   it.each(["", "unrelated", awsEnvironmentPolicyName("octo/shop", "prod")])(
     "rejects an invalid recorded name %s",

@@ -38,16 +38,48 @@ describe("AWS workflow compatibility", () => {
   );
   it("does not alter Azure dispatch when its unused AWS provider is stale", async () => {
     const h = harness("old AWS workflow");
-    await requireCurrentAwsWorkflows({ ...input, provider: "azure" }, h.ports);
+    await requireCurrentAwsWorkflows(
+      { ...input, provider: "aws" },
+      {
+        ...h.ports,
+        environmentProvider: async () => "azure"
+      }
+    );
     expect(h.reads).toEqual([]);
   });
-  it("resolves an application-delete environment whose provider was not supplied", async () => {
+  it.each(["", "azure", "aws"])(
+    "uses saved AWS configuration instead of provider hint %j",
+    async (provider) => {
+      await expect(
+        requireCurrentAwsWorkflows({ ...input, provider }, harness("old").ports)
+      ).rejects.toThrow("EKS access");
+    }
+  );
+  it.each(["", "unknown"])(
+    "refuses an unresolved saved provider %j",
+    async (provider) => {
+      const h = harness();
+      await expect(
+        requireCurrentAwsWorkflows(input, {
+          ...h.ports,
+          environmentProvider: async () => provider
+        })
+      ).rejects.toThrow("provider");
+      expect(h.reads).toEqual([]);
+    }
+  );
+  it("does not trust the hint when reading saved provider configuration fails", async () => {
     await expect(
       requireCurrentAwsWorkflows(
-        { ...input, provider: "" },
-        harness("old").ports
+        { ...input, provider: "azure" },
+        {
+          ...harness().ports,
+          environmentProvider: async () => {
+            throw new Error("Access denied");
+          }
+        }
       )
-    ).rejects.toThrow("EKS access");
+    ).rejects.toThrow("Access denied");
   });
   it("does not inspect unrelated workflow files", async () => {
     const h = harness(null);

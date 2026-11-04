@@ -35,7 +35,8 @@ import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
 import {
   attachEnvironmentPolicy,
   readLegacyEnvironmentPolicy,
-  resolveEnvironmentPolicyForRemoval
+  resolveEnvironmentPolicyForRemoval,
+  resolveEnvironmentPolicyForSetup
 } from "./aws-environment-policy.js";
 
 // Sets up the AWS deploy identity for one environment: the account's GitHub
@@ -100,6 +101,19 @@ export interface AwsDeployIdentityRequest {
   // a repository that uses immutable subjects, otherwise the name-based and
   // the ID-based form. At least one.
   subjects: readonly string[];
+}
+
+export interface AwsDeployIdentitySetupPorts extends AwsDeployIdentityPorts {
+  recordPolicyIdentity(identity: {
+    roleArn: string;
+    policyName: string;
+  }): Promise<void>;
+  isRecordedForeignPolicy(input: {
+    repo: string;
+    environment: string;
+    roleArn: string;
+    policyName: string;
+  }): Promise<boolean>;
 }
 
 export type AwsDeployIdentityResult =
@@ -267,7 +281,7 @@ function mergeGitHubTrustSubjects(
 
 export async function setupAwsDeployIdentity(
   request: AwsDeployIdentityRequest,
-  ports: AwsDeployIdentityPorts
+  ports: AwsDeployIdentitySetupPorts
 ): Promise<AwsDeployIdentityResult> {
   const created: string[] = [];
   const fail = (code: string, message: string): AwsDeployIdentityResult => ({
@@ -459,10 +473,12 @@ export async function setupAwsDeployIdentity(
   // Read the existing role's trust before anything is written, so a policy
   // Radius cannot read stops setup with nothing created.
   let trust: ReturnType<typeof mergeGitHubTrustSubjects> | null = null;
+  let existingTrust: PolicyDocument | null = null;
   if (!roleMissing) {
     try {
+      existingTrust = parsePolicyDocument(role?.AssumeRolePolicyDocument);
       trust = mergeGitHubTrustSubjects(
-        parsePolicyDocument(role?.AssumeRolePolicyDocument),
+        existingTrust,
         accountId,
         request.subjects
       );
@@ -472,6 +488,23 @@ export async function setupAwsDeployIdentity(
         `Could not read the trust policy of IAM role ${roleName}: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+  }
+  let policyName =
+    request.policyName ??
+    awsEnvironmentPolicyName(request.repo, request.environment);
+  if (existingTrust && request.policyName === undefined) {
+    const resolved = await resolveEnvironmentPolicyForSetup(
+      {
+        ...request,
+        roleName,
+        roleArn: picked || awsRoleArn(accountId, roleName),
+        subjects: acceptedGitHubSubjects(existingTrust, accountId)
+      },
+      ports
+    );
+    if (!resolved.ok)
+      return fail("aws-policy-name-unresolved", resolved.message);
+    policyName = resolved.policyName;
   }
 
   // The account-wide GitHub identity provider. Created once, never removed.
@@ -659,11 +692,9 @@ export async function setupAwsDeployIdentity(
     }
   }
 
-  const policyName =
-    request.policyName ??
-    awsEnvironmentPolicyName(request.repo, request.environment);
+  await ports.recordPolicyIdentity({ roleArn, policyName });
   const attached = await attachEnvironmentPolicy(
-    { ...request, roleName, legacy },
+    { ...request, roleName, legacy, policyName },
     ports
   );
   if (attached.ok || attached.policyWritten) {
@@ -1324,6 +1355,7 @@ export interface AwsTrustRepairRequest {
   // AWS_ROLE_ARN as the GitHub environment states it. Untrusted: anyone who
   // can edit the environment's variables can point it at any role.
   roleArn: string;
+  policyName?: string;
   // Every subject the environment's workflows may present, worked out from
   // GitHub for this repository and environment, never read from a variable.
   subjects: readonly string[];
@@ -1364,7 +1396,19 @@ async function repairEvidenceProblem(
       };
     }
   }
-  const policyName = buildLegacyAwsEnvironmentPolicyName(request.environment);
+  const policyName =
+    request.policyName ??
+    buildLegacyAwsEnvironmentPolicyName(request.environment);
+  if (
+    request.policyName !== undefined &&
+    !isAwsEnvironmentPolicyName(policyName, request.environment)
+  ) {
+    return {
+      code: "aws-policy-name-invalid",
+      message:
+        "The recorded AWS permission policy name is invalid for this environment. Repair its saved configuration before restoring trust."
+    };
+  }
   const policy = await ports.runAws([
     "iam",
     "get-role-policy",

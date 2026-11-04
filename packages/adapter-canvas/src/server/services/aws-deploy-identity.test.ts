@@ -104,12 +104,27 @@ function fakeAws(
   const sleeps: number[] = [];
   // The roles locked, and how many AWS commands had run before each lock.
   const locks: Array<{ roleName: string; after: number }> = [];
+  const identities: Array<{
+    roleArn: string;
+    policyName: string;
+    after: number;
+  }> = [];
   return {
     calls,
     steps,
     sleeps,
     locks,
+    identities,
     ports: {
+      async recordPolicyIdentity(identity: {
+        roleArn: string;
+        policyName: string;
+      }) {
+        identities.push({ ...identity, after: calls.length });
+      },
+      async isRecordedForeignPolicy(): Promise<never> {
+        throw new Error("unexpected foreign policy lookup");
+      },
       listOtherEnvironments: unexpectedListing,
       async acquireLock(role: { accountId: string; roleName: string }) {
         expect(role.accountId).toBe(ACCOUNT);
@@ -452,6 +467,50 @@ describe("legacy environment policy migration", () => {
 });
 
 describe("setupAwsDeployIdentity", () => {
+  it("records the exact policy identity before attaching its grant", async () => {
+    const aws = fakeAws(happyPath);
+    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
+      ok: true
+    });
+    expect(aws.identities).toEqual([
+      {
+        roleArn: ROLE_ARN,
+        policyName: "radius-deploy-dev-f5fb7acf8f59",
+        after: aws.calls.findIndex((args) => args[1] === "put-role-policy")
+      }
+    ]);
+  });
+
+  it("does not attach permissions when durable identity recording fails", async () => {
+    const aws = fakeAws(happyPath);
+    await expect(
+      setupAwsDeployIdentity(request, {
+        ...aws.ports,
+        recordPolicyIdentity: async () => {
+          throw new Error("Disk full");
+        }
+      })
+    ).rejects.toThrow("Disk full");
+    expect(aws.find("iam put-role-policy")).toBeUndefined();
+    expect(aws.find("eks create-access-entry")).toBeUndefined();
+  });
+
+  it("refuses a fresh setup when an older grant cannot be reconciled", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-role": ok(managedRole([DEV])),
+      "iam list-role-policies": ok({
+        PolicyNames: ["radius-deploy-dev-111111111111"]
+      })
+    });
+    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
+      ok: false,
+      code: "aws-policy-name-unresolved"
+    });
+    expect(aws.find("iam put-role-policy")).toBeUndefined();
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
   it("creates the provider, role, policy, and cluster access on a fresh account", async () => {
     const aws = fakeAws(happyPath);
     const result = await setupAwsDeployIdentity(request, aws.ports);
@@ -2540,6 +2599,51 @@ describe("repairAwsEnvironmentTrust", () => {
     );
   };
 
+  it.each([undefined, "radius-deploy-dev-111111111111"])(
+    "repairs against the exact saved policy %s",
+    async (policyName) => {
+      const aws = fakeAws({
+        ...ready,
+        "iam get-role-policy": ok({
+          PolicyName: policyName ?? "radius-deploy-dev"
+        })
+      });
+      expect(
+        await repairAwsEnvironmentTrust({ ...repair, policyName }, aws.ports)
+      ).toMatchObject({ ok: true, added: [DEV_ID] });
+      expect(aws.find("iam get-role-policy")).toContain(
+        policyName ?? "radius-deploy-dev"
+      );
+    }
+  );
+
+  it.each(["", "unrelated", "radius-deploy-prod-111111111111"])(
+    "refuses an invalid saved Repair policy %j before writing",
+    async (policyName) => {
+      const aws = fakeAws(ready);
+      expect(
+        await repairAwsEnvironmentTrust({ ...repair, policyName }, aws.ports)
+      ).toMatchObject({ ok: false, code: "aws-policy-name-invalid" });
+      expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+    }
+  );
+
+  it("does not fall back to a legacy grant when the recorded Repair policy is missing", async () => {
+    const policyName = "radius-deploy-dev-111111111111";
+    const aws = fakeAws({
+      ...ready,
+      "iam get-role-policy": fail("NoSuchEntity")
+    });
+    expect(
+      await repairAwsEnvironmentTrust({ ...repair, policyName }, aws.ports)
+    ).toMatchObject({ ok: false, code: "aws-environment-not-set-up" });
+    expect(
+      aws.calls.filter((args) => args[1] === "get-role-policy")
+    ).toHaveLength(1);
+    expect(aws.find("iam get-role-policy")).toContain(policyName);
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
+  });
+
   it("adds back only the missing subjects and keeps everything else", async () => {
     const aws = fakeAws(ready);
 
@@ -2595,13 +2699,27 @@ describe("repairAwsEnvironmentTrust", () => {
     }
   });
 
-  it("adds to a role Radius did not tag that still trusts this environment in one form", async () => {
-    const aws = fakeAws({ ...ready, "iam get-role": ok(unmanagedRole([DEV])) });
-    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
-      ok: true,
-      added: [DEV_ID]
-    });
-  });
+  it.each([undefined, "radius-deploy-dev-111111111111"])(
+    "repairs a picked role with policy %j that still trusts this environment",
+    async (policyName) => {
+      const aws = fakeAws({
+        ...ready,
+        "iam get-role": ok(unmanagedRole([DEV])),
+        "iam get-role-policy": ok({
+          PolicyName: policyName ?? "radius-deploy-dev"
+        })
+      });
+      expect(
+        await repairAwsEnvironmentTrust({ ...repair, policyName }, aws.ports)
+      ).toMatchObject({
+        ok: true,
+        added: [DEV_ID]
+      });
+      expect(aws.find("iam get-role-policy")).toContain(
+        policyName ?? "radius-deploy-dev"
+      );
+    }
+  );
 
   it("adds to a role Radius created for this repository even when it trusts nothing", async () => {
     const role = managedRole([]);

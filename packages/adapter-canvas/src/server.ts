@@ -5666,6 +5666,7 @@ export function createProductionCanvasServerRuntime(
       isStopRequested: shouldStop,
       operationId: (operation) => operation.operationId,
       operations: {
+        getContext: (operation) => operation.context ?? {},
         enterStage,
         setStageState,
         addLegacyStep,

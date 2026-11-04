@@ -14,7 +14,9 @@ import {
   addLegacyStep,
   buildStages,
   createOperation,
-  finishSucceeded
+  finishSucceeded,
+  toPersistedOperation,
+  fromPersistedOperation
 } from "../../operations.js";
 
 const ACCOUNT = "123456789012";
@@ -138,6 +140,8 @@ function harness(
     executor: SelectedGhExecutor | undefined;
   }> = [];
   const events: unknown[][] = [];
+  const contexts = new Map<string, Record<string, unknown>>();
+  const persistedContexts = new Map<string, Record<string, unknown>>();
   let clock = Date.parse("2026-10-30T12:00:00Z");
   let writtenTrust: unknown = undefined;
   const access = createAwsEnvironmentAccess<Operation>({
@@ -217,6 +221,7 @@ function harness(
       if (pauseDuring === "sleep") stopRequested = true;
     },
     operations: {
+      getContext: (operation) => contexts.get(operation.id) ?? {},
       enterStage: (operation, stage) => {
         events.push(["enterStage", operation.id, stage]);
       },
@@ -228,6 +233,7 @@ function harness(
       },
       setContext: (operation, patch) => {
         events.push(["setContext", operation.id, patch]);
+        contexts.set(operation.id, { ...contexts.get(operation.id), ...patch });
       },
       touch: (operation) => {
         events.push(["touch", operation.id]);
@@ -237,6 +243,9 @@ function harness(
       persist: async () => {
         events.push(["persist"]);
         if (persistError) throw persistError;
+        for (const [id, context] of contexts) {
+          persistedContexts.set(id, JSON.parse(JSON.stringify(context)));
+        }
       }
     },
     stageAuthorizeIdentity: STAGE,
@@ -262,6 +271,8 @@ function harness(
     awsCalls,
     githubCalls,
     events,
+    contexts,
+    persistedContexts,
     environmentReads,
     find,
     commands,
@@ -284,6 +295,210 @@ const input = {
 };
 
 describe("AWS environment access setup", () => {
+  it.each(["failure", "pause"])(
+    "recovers the policy identity after an EKS %s and a repository rename",
+    async (outcome) => {
+      const role = ok({
+        Role: {
+          Arn: ROLE_ARN,
+          AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [
+            DEV,
+            DEV_ID
+          ])
+        }
+      });
+      const first = harness(
+        {
+          ...happyPath,
+          "iam get-role": role,
+          "iam list-role-policies": ok({ PolicyNames: [] }),
+          "eks create-access-entry": fail("AccessDenied")
+        },
+        defaultSubject,
+        outcome === "pause" ? "eks create-access-entry" : undefined
+      );
+      const setup = { ...input, existingRoleArn: ROLE_ARN };
+      expect(
+        await first.access.setup(operation, setup, EXECUTOR)
+      ).toMatchObject({ ok: false });
+      await first.access.release(operation);
+      const saved = first.persistedContexts.get(operation.id);
+      expect(saved).toMatchObject({
+        awsPolicyIdentity: {
+          repoId: 42,
+          environment: "dev",
+          roleArn: ROLE_ARN,
+          policyName: "radius-deploy-dev-f5fb7acf8f59"
+        }
+      });
+      if (!saved) throw new Error("The partial setup was not persisted");
+      const retry = harness(
+        {
+          ...happyPath,
+          "iam get-role": role,
+          "iam update-assume-role-policy": ok()
+        },
+        {
+          "/repos/octo/renamed": {
+            ok: true,
+            status: 200,
+            json: { full_name: "octo/renamed", id: 42, owner: { id: 7 } }
+          },
+          "/repos/octo/renamed/actions/oidc/customization/sub": {
+            ok: true,
+            status: 200,
+            json: { use_default: true, use_immutable_subject: false }
+          },
+          "/repos/octo/renamed/environments/dev/variables?per_page=100": {
+            ok: true,
+            status: 200,
+            json: { variables: [] }
+          }
+        }
+      );
+      const persisted = toPersistedOperation({
+        ...createOperation({
+          provider: "aws",
+          repo: "octo/shop",
+          environment: "dev"
+        }),
+        context: saved
+      });
+      const restored = fromPersistedOperation(
+        JSON.parse(JSON.stringify(persisted))
+      );
+      retry.contexts.set(operation.id, restored.context);
+      expect(
+        await retry.access.setup(
+          operation,
+          { ...setup, repo: "octo/renamed" },
+          EXECUTOR
+        )
+      ).toMatchObject({
+        ok: true,
+        policyName: "radius-deploy-dev-f5fb7acf8f59"
+      });
+      expect(retry.find("iam put-role-policy")).toContain(
+        "radius-deploy-dev-f5fb7acf8f59"
+      );
+      expect(retry.find("iam put-role-policy")).not.toContain(
+        awsEnvironmentPolicyName("octo/renamed", "dev")
+      );
+    }
+  );
+
+  const recordedPolicyIdentity = {
+    repoId: 42,
+    environment: "dev",
+    roleArn: ROLE_ARN,
+    policyName: "radius-deploy-dev-f5fb7acf8f59"
+  };
+  it.each([
+    null,
+    {},
+    { ...recordedPolicyIdentity, repoId: 99 },
+    { ...recordedPolicyIdentity, environment: "prod" },
+    { ...recordedPolicyIdentity, roleArn: `${ROLE_ARN}-other` },
+    { ...recordedPolicyIdentity, policyName: "unrelated" }
+  ])(
+    "rejects a partial policy binding that does not match setup: %j",
+    async (identity) => {
+      const h = harness(happyPath, defaultSubject);
+      h.contexts.set(operation.id, {
+        awsPolicyIdentity: identity
+      });
+      expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+        ok: false,
+        code: "aws-policy-name-unresolved"
+      });
+      expect(h.awsCalls).toEqual([]);
+    }
+  );
+
+  it("refuses conflicting GitHub and partial-operation policy identities", async () => {
+    const h = harness(happyPath, {
+      ...defaultSubject,
+      "/repos/octo/shop/environments/dev/variables?per_page=100": {
+        ok: true,
+        status: 200,
+        json: {
+          variables: [
+            { name: "AWS_ROLE_ARN", value: ROLE_ARN },
+            {
+              name: "AWS_PERMISSION_POLICY_NAME",
+              value: "radius-deploy-dev-111111111111"
+            }
+          ]
+        }
+      }
+    });
+    h.contexts.set(operation.id, { awsPolicyIdentity: recordedPolicyIdentity });
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: false,
+      code: "aws-policy-name-unresolved"
+    });
+    expect(h.awsCalls).toEqual([]);
+  });
+
+  it.each([42, 77])(
+    "checks another grant's GitHub repository ID and saved binding (%s)",
+    async (foreignId) => {
+      const foreignName = awsEnvironmentPolicyName("octo/other", "dev");
+      const h = harness(
+        {
+          ...happyPath,
+          "iam get-role": ok({
+            Role: {
+              Arn: ROLE_ARN,
+              AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [
+                "repo:octo/other:environment:dev"
+              ])
+            }
+          }),
+          "iam list-role-policies": ok({ PolicyNames: [foreignName] }),
+          "iam update-assume-role-policy": ok()
+        },
+        {
+          ...defaultSubject,
+          "/repos/octo/other": {
+            ok: true,
+            status: 200,
+            json: { full_name: "octo/other", id: foreignId, owner: { id: 7 } }
+          },
+          "/repos/octo/other/actions/oidc/customization/sub": {
+            ok: false,
+            status: 404,
+            json: null
+          },
+          "/repos/octo/other/environments/dev/variables?per_page=100": {
+            ok: true,
+            status: 200,
+            json: {
+              variables: [
+                { name: "AWS_ROLE_ARN", value: ROLE_ARN },
+                { name: "AWS_PERMISSION_POLICY_NAME", value: foreignName }
+              ]
+            }
+          }
+        }
+      );
+      const result = await h.access.setup(
+        operation,
+        { ...input, existingRoleArn: ROLE_ARN },
+        EXECUTOR
+      );
+      expect(result).toMatchObject({ ok: foreignId !== 42 });
+      if (foreignId === 42) {
+        expect(h.find("iam put-role-policy")).toBeUndefined();
+        expect(h.find("iam update-assume-role-policy")).toBeUndefined();
+      } else {
+        expect(h.find("iam put-role-policy")).toContain(
+          "radius-deploy-dev-f5fb7acf8f59"
+        );
+      }
+    }
+  );
+
   it("reuses a saved policy from before a rename instead of creating a second grant", async () => {
     const policyName = awsEnvironmentPolicyName("octo/old", "dev");
     const h = harness(
@@ -386,6 +601,32 @@ describe("AWS environment access setup", () => {
 
   it("honors a pause during the saved-policy read before making any AWS call", async () => {
     const h = harness(happyPath, defaultSubject, "saved-policy");
+    expect(await h.access.setup(operation, input, EXECUTOR)).toEqual({
+      ok: false,
+      stopped: true
+    });
+    expect(h.awsCalls).toEqual([]);
+    expect(h.events).toContainEqual([
+      "setStageState",
+      operation.id,
+      STAGE,
+      "paused"
+    ]);
+  });
+
+  it("keeps the identity stage paused when its saved-policy read fails during Stop", async () => {
+    const h = harness(
+      happyPath,
+      {
+        ...defaultSubject,
+        "/repos/octo/shop/environments/dev/variables?per_page=100": {
+          ok: false,
+          status: 403,
+          stderr: "Access denied"
+        }
+      },
+      "saved-policy"
+    );
     expect(await h.access.setup(operation, input, EXECUTOR)).toEqual({
       ok: false,
       stopped: true
@@ -2124,6 +2365,8 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
         return ok({ ClientIDList: ["sts.amazonaws.com"] });
       case "iam get-role-policy":
         return fail("NoSuchEntity");
+      case "iam list-role-policies":
+        return ok({ PolicyNames: [] });
       case "iam update-assume-role-policy":
         writes.push(command);
         previousTrust = role?.trust;
@@ -2171,6 +2414,7 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
           await new Promise((resolve) => setImmediate(resolve));
         },
         operations: {
+          getContext: () => ({}),
           enterStage: () => {},
           setStageState: () => {},
           addLegacyStep: () => {},
