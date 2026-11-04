@@ -7,7 +7,7 @@ This amends the [Cloud E2E environment lifecycle](./2026-08-cloud-e2e-environmen
 
 ## Current state
 
-The Cloud E2E tests run once a day against real Azure and real GitHub. They create an environment in the canvas, deploy the fixture app to a shared AKS cluster, delete everything, and check that nothing is left. AWS has no such test. The AWS path (setup, deploy, delete) is on `main` behind the `RADIUS_CANVAS_AWS=1` developer switch, and only unit and server tests with a fake `aws` CLI cover it.
+The Cloud E2E tests run once a day against real Azure and real GitHub. They create an environment in the canvas, deploy the fixture app to a shared AKS cluster, delete everything, and check that nothing is left. AWS has no such test. The AWS path (setup, deploy, delete) is on `main` behind the `RADIUS_CANVAS_AWS=1` developer switch, and only unit and server tests with a fake `aws` CLI cover it. Setup creates one IAM role per repository that the repository's GitHub deploy workflows sign in to, called the deploy identity, and each environment adds its own permissions to it.
 
 A fake CLI can't show that AWS accepts the IAM, EKS, and RDS calls the product makes, that a pod can reach the database a recipe created, or that delete leaves nothing behind. Without a live test, a change that breaks AWS setup or delete reaches users silently, and a leak keeps billing until someone notices.
 
@@ -75,7 +75,7 @@ Everything except IAM is limited to the two regions. The role can't create or de
 
 ### The deploy identity
 
-The product's deploy identity gets its permissions from inline policies that setup writes, so whoever can run setup can change what the role can do. In an account shared with Radius's tests, that must be capped.
+Setup gives the deploy identity its permissions by writing inline policies on it, so anyone who can run setup can change what the role can do. In an account shared with Radius's tests, that must be capped.
 
 An account administrator creates it once, `radius-deploy-radius-project-ai-extensions-fixture-aws`, with:
 
