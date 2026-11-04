@@ -3,6 +3,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
+  applySetupResumePoint,
+  setupStepLabel,
   onOperationTerminal,
   isStale,
   VERIFY_STALE_AFTER_MS,
@@ -4810,6 +4812,46 @@ describe("durable stop", () => {
     expect(op.state).toBe("cancelled");
   });
 
+  it("keeps a paused stage paused when the pause settles, and Continue runs it again", () => {
+    const op = newOp({ provider: "aws" });
+    enterStage(op, STAGE_AUTHORIZE_IDENTITY);
+    setStageState(op, STAGE_AUTHORIZE_IDENTITY, "paused");
+    requestStop(op);
+    stopAtBoundary(op, "after-aws-deploy-identity");
+    expect(op.stages.map((stage) => [stage.id, stage.state])).toEqual([
+      [STAGE_AUTHORIZE_IDENTITY, "paused"],
+      [STAGE_CONFIGURE_ENVIRONMENT, "skipped"],
+      [STAGE_VERIFY, "skipped"]
+    ]);
+
+    beginRetryAttempt(op, "setup");
+    applySetupResumePoint(op, "aws_deploy_identity");
+    expect(op.stages[0]).toEqual({
+      id: STAGE_AUTHORIZE_IDENTITY,
+      label: "Authorize deploy identity",
+      state: "running"
+    });
+  });
+
+  // Azure output is unchanged on purpose: only the AWS pause path sets paused.
+  it.each([
+    ["before any stage started", null, "skipped"],
+    ["during Authorize deploy identity", STAGE_AUTHORIZE_IDENTITY, "succeeded"]
+  ])(
+    "keeps an Azure pause %s showing what it showed before",
+    (_label, entered, verdict) => {
+      const op = newOp();
+      if (entered) enterStage(op, entered);
+      requestStop(op);
+      stopAtBoundary(op, "after-app-registration");
+      expect(op.stages.map((stage) => stage.state)).toEqual([
+        verdict,
+        "skipped",
+        "skipped"
+      ]);
+    }
+  );
+
   it("loses the race to a continuation that was saved first", () => {
     const op = newOp();
     requireInput(op, { code: "app-selection-required", message: "Pick one." });
@@ -5263,7 +5305,96 @@ describe("retry eligibility", () => {
       repo: "contoso/store",
       environment: "dev"
     });
-    expect(nextIncompleteSetupStep(aws)).toBe("github_environment");
+    expect(nextIncompleteSetupStep(aws)).toBe("aws_deploy_identity");
+  });
+
+  describe("an AWS continuation", () => {
+    const awsOp = () =>
+      createOperation({
+        provider: "aws",
+        repo: "contoso/store",
+        environment: "dev",
+        stages: buildStages({ includeIdentity: true })
+      });
+
+    it("resumes from Authorize deploy identity wherever setup stopped, because it takes the lock again", () => {
+      const op = awsOp();
+      expect(nextIncompleteSetupStep(op)).toBe("aws_deploy_identity");
+      recordGitHubEnvironment(op, { state: "created", repo: "r", name: "dev" });
+      expect(nextIncompleteSetupStep(op)).toBe("aws_deploy_identity");
+      recordCommittedWorkflowFile(op, {
+        path: ".github/workflows/verify.yml",
+        mode: "default_branch",
+        branch: "main"
+      });
+      expect(nextIncompleteSetupStep(op)).toBe("aws_deploy_identity");
+      expect(setupStepLabel("aws_deploy_identity")).toBe(
+        "Authorize the deploy identity"
+      );
+    });
+
+    it("keeps the ledger walk when there is no identity stage to rerun", () => {
+      const op = createOperation({
+        provider: "aws",
+        repo: "contoso/store",
+        environment: "dev",
+        stages: buildStages({ includeIdentity: false })
+      });
+      expect(nextIncompleteSetupStep(op)).toBe("github_environment");
+    });
+
+    it("keeps monitoring the saved run after a restart at Verify credentials", () => {
+      const op = addSafeResumeRequest(awsOp());
+      recordGitHubEnvironment(op, { state: "created", repo: "r", name: "dev" });
+      recordCommittedWorkflowFile(op, {
+        path: ".github/workflows/verify.yml",
+        mode: "default_branch",
+        branch: "main"
+      });
+      enterStage(op, STAGE_VERIFY);
+      pauseForProviderRestart(op);
+      // The resume point and the scheduled monitor come from one answer.
+      expect(canContinueSetup(op)).toMatchObject({
+        ok: true,
+        resumeFrom: "verification",
+        recoveredVerification: true
+      });
+      expect(nextIncompleteSetupStep(op, { recoveredVerification: true })).toBe(
+        "verification"
+      );
+
+      // Any other stop at Verify credentials still reruns the identity.
+      const stopped = addSafeResumeRequest(awsOp());
+      enterStage(stopped, STAGE_VERIFY);
+      requestStop(stopped);
+      stopAtBoundary(stopped, "verification-observation");
+      expect(canContinueSetup(stopped)).toMatchObject({
+        ok: true,
+        resumeFrom: "aws_deploy_identity",
+        recoveredVerification: false
+      });
+    });
+
+    it("positions Continue on Authorize deploy identity with every later stage pending", () => {
+      const op = awsOp();
+      recordGitHubEnvironment(op, { state: "created", repo: "r", name: "dev" });
+      enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
+      requestStop(op);
+      stopAtBoundary(op, "after-github-environment");
+
+      expect(applySetupResumePoint(op, nextIncompleteSetupStep(op))).toEqual({
+        resumeFrom: "aws_deploy_identity",
+        stage: STAGE_AUTHORIZE_IDENTITY,
+        runIdentity: true,
+        runEnvironment: true
+      });
+      expect(op.stages.map((stage) => [stage.id, stage.state])).toEqual([
+        [STAGE_AUTHORIZE_IDENTITY, "running"],
+        [STAGE_CONFIGURE_ENVIRONMENT, "pending"],
+        [STAGE_VERIFY, "pending"]
+      ]);
+      expect(op.currentStage).toBe(STAGE_AUTHORIZE_IDENTITY);
+    });
   });
 
   it("retries only unresolved resources Radius proved it created", () => {
@@ -6180,6 +6311,103 @@ describe("stopped operations offer continuing and rolling back", () => {
       code: "continue-failed",
       title: "Setup could not continue"
     });
+  });
+
+  describe("Retry after a failed AWS continuation", () => {
+    // Paused during the lock wait, continued, then failed at `failedStage`.
+    function failedAwsContinuation(failure: Record<string, unknown>) {
+      const op = addSafeResumeRequest(
+        newOp({
+          provider: "aws",
+          stages: buildStages({ includeIdentity: true })
+        })
+      );
+      enterStage(op, STAGE_AUTHORIZE_IDENTITY);
+      setStageState(op, STAGE_AUTHORIZE_IDENTITY, "paused");
+      requestStop(op);
+      stopAtBoundary(op, "after-aws-deploy-identity");
+      const continuation = canContinueSetup(op);
+      beginRetryAttempt(op, "setup");
+      acceptContinuation(op);
+      applySetupResumePoint(op, continuation.resumeFrom);
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: op.repo,
+        name: op.environment
+      });
+      enterStage(op, STAGE_VERIFY);
+      finish(op, "failed_partial", {
+        failure: { code: "verify-run-failed", message: "failed", ...failure }
+      });
+      return op;
+    }
+
+    it("names the stage that failed, and starts again from Authorize deploy identity", () => {
+      const op = failedAwsContinuation({ stage: STAGE_VERIFY });
+
+      expect(projectOperationHeadline(op)).toEqual({
+        code: "continue-failed",
+        title: "Setup could not continue",
+        message:
+          "Radius stopped at Verify credentials. Review what exists, then retry setup or delete what this attempt created."
+      });
+      expect(
+        projectOperationActions(op).find(
+          (action) => action.kind === "retry_setup"
+        )?.description
+      ).toBe(
+        "The last attempt stopped at Verify credentials. Radius reuses the resources it already recorded and starts again from Authorize the deploy identity."
+      );
+
+      const retry = canRetrySetup(op);
+      expect(retry).toMatchObject({
+        ok: true,
+        resumeFrom: "aws_deploy_identity"
+      });
+      beginRetryAttempt(op, "setup");
+      applySetupResumePoint(op, retry.resumeFrom);
+      expect(op.stages.map((stage) => [stage.id, stage.state])).toEqual([
+        [STAGE_AUTHORIZE_IDENTITY, "running"],
+        [STAGE_CONFIGURE_ENVIRONMENT, "pending"],
+        [STAGE_VERIFY, "pending"]
+      ]);
+    });
+
+    it("names the resume point when the failure names no stage", () => {
+      const op = failedAwsContinuation({});
+
+      expect(projectOperationHeadline(op).message).toBe(
+        "Radius stopped at Authorize the deploy identity. Review what exists, then retry setup or delete what this attempt created."
+      );
+    });
+  });
+
+  // Azure resumes where it stopped, so its resume point still names the stop.
+  it("keeps the Azure continuation failure text naming the resume point", () => {
+    const op = stoppedWithCreatedResources();
+    const continuation = canContinueSetup(op);
+    beginRetryAttempt(op, "setup");
+    acceptContinuation(op);
+    applySetupResumePoint(op, continuation.resumeFrom);
+    finish(op, "failed_partial", {
+      failure: {
+        code: "verify-run-failed",
+        message: "failed",
+        stage: STAGE_VERIFY
+      }
+    });
+
+    expect(continuation.resumeFrom).toBe("workflow_commit");
+    expect(projectOperationHeadline(op).message).toBe(
+      "Radius stopped at Commit the deploy workflows. Review what exists, then retry setup or delete what this attempt created."
+    );
+    expect(
+      projectOperationActions(op).find(
+        (action) => action.kind === "retry_setup"
+      )?.description
+    ).toBe(
+      "The last attempt stopped at Commit the deploy workflows. Radius reuses the resources it already recorded and starts again from Commit the deploy workflows."
+    );
   });
 
   it("keeps the forward action on Continue after a rollback attempt failed", () => {

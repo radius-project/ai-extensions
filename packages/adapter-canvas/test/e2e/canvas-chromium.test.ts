@@ -4147,6 +4147,225 @@ test.describe("Radius Canvas in Chromium", () => {
       await done.click();
       await expect(page.locator("#env-progress-panel")).toBeVisible();
     });
+
+    test("pauses an AWS setup during the deploy identity lock wait and continues from Authorize deploy identity by keyboard @safety", async ({
+      page,
+      canvas
+    }) => {
+      const ops = await import("../../src/operations.js");
+      const { createAwsEnvironmentAccess } =
+        await import("../../src/server/services/aws-environment-access.js");
+      const { runEnvironmentOperationWorkflow } =
+        await import("../../src/server/services/environment-operation.js");
+      const { honorStopBoundary } =
+        await import("../../src/server/services/operation-stop-boundary.js");
+      const { successfulSelectedGhExecutor } =
+        await import("../support/server/selected-gh.js");
+      const persist = () => ops.operations.persist();
+      const unexpected = (what: string) => () => {
+        throw new Error(`unexpected ${what}`);
+      };
+      const awsCommands: string[] = [];
+      // Another run holds the deploy identity lock for the whole test, so every
+      // run waits at the lock until the customer pauses it.
+      const access = createAwsEnvironmentAccess<
+        NonNullable<ReturnType<typeof ops.operations.get>>
+      >({
+        async runAws(args) {
+          const command = args.slice(0, 2).join(" ");
+          awsCommands.push(command);
+          const ok = (stdout: unknown) => ({
+            code: 0,
+            stdout:
+              typeof stdout === "string" ? stdout : JSON.stringify(stdout),
+            stderr: ""
+          });
+          switch (command) {
+            case "--version":
+              return ok("aws-cli/2.17.0 Python/3.11 Linux/6");
+            case "sts get-caller-identity":
+              return ok({ Account: AWS_ACCOUNT });
+            case "eks describe-cluster":
+              return ok({
+                cluster: { accessConfig: { authenticationMode: "API" } }
+              });
+            case "iam create-policy":
+              return {
+                code: 254,
+                stdout: "",
+                stderr:
+                  "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation"
+              };
+            case "iam get-policy":
+              return ok({
+                Policy: {
+                  PolicyId: "LOCK0",
+                  CreateDate: new Date().toISOString()
+                }
+              });
+            default:
+              throw new Error(`unexpected aws ${args.join(" ")}`);
+          }
+        },
+        async runGitHubJson(apiPath) {
+          if (apiPath === `/repos/${REPOSITORY}`) {
+            return {
+              ok: true,
+              status: 200,
+              json: { full_name: REPOSITORY, id: 42, owner: { id: 7 } }
+            };
+          }
+          return { ok: false, status: 404, json: null };
+        },
+        environments: {
+          listEnvironmentNames: unexpected("environment listing"),
+          readEnvironmentVariables: unexpected("variable read")
+        },
+        sleep: (milliseconds) =>
+          new Promise((resolve) =>
+            setTimeout(resolve, Math.min(milliseconds, 50))
+          ),
+        now: () => Date.now(),
+        isStopRequested: ops.shouldStop,
+        operationId: (operation) => operation.operationId,
+        operations: {
+          enterStage: ops.enterStage,
+          setStageState: ops.setStageState,
+          addLegacyStep: ops.addLegacyStep,
+          setContext: ops.setContext,
+          touch: (operation) => {
+            ops.touchOperation(operation);
+          }
+        },
+        store: { persist },
+        stageAuthorizeIdentity: ops.STAGE_AUTHORIZE_IDENTITY,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "repo-user",
+        run: unexpected("gh command")
+      });
+      // The real setup coordinator and stop boundary; only GitHub and AWS
+      // are scripted.
+      canvas.setEnvironmentOperationRunner(async (operationId) => {
+        const operation = ops.operations.get(operationId);
+        if (!operation) throw new Error("Setup operation was not saved.");
+        await runEnvironmentOperationWorkflow(operation, executor, {
+          isStopped: () => false,
+          preflightRepoAdmin: async () => "",
+          preflightGhcrPackageWriteAccess: async () => ({ ok: true }),
+          guardStopBoundary: (target, boundary) =>
+            honorStopBoundary({ operation: target, boundary, persist }),
+          readGitHubJson: async (apiPath) => ({
+            ok: true,
+            status: 200,
+            json:
+              apiPath.includes("/variables") ?
+                { variables: [] }
+              : { name: "dev", id: 77 },
+            stderr: ""
+          }),
+          setCanonicalEnvironment: ops.setCanonicalEnvironment,
+          recordGitHubEnvironment: ops.recordGitHubEnvironment,
+          promoteCreatedGitHubEnvironment: ops.promoteCreatedGitHubEnvironment,
+          addLegacyStep: (target, text) => {
+            ops.addLegacyStep(target, text);
+          },
+          persistEnvironmentResolution: async () => {
+            await persist();
+            return true;
+          },
+          persistProviderMutation: persist,
+          finalizeEnvironmentResolutionFailure: unexpected("setup failure"),
+          getOperation: (id) => ops.operations.get(id),
+          setupServices: {
+            authorizeAzure: unexpected("Azure authorization"),
+            configureEnvironment: unexpected("Configure environment")
+          },
+          setupAwsDeployIdentity: (target, request, selected) =>
+            access.setup(target, request, selected),
+          releaseAwsDeployIdentity: (target) => access.release(target),
+          now: () => Date.now()
+        });
+      });
+      await routeAwsProfileAndDiscovery(page);
+      await gotoCanvas(page, canvas, "environment");
+      await openAwsEnvironmentWizard(page);
+      await page.getByLabel("Environment name").fill("dev");
+      const started = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/operations" &&
+          response.request().method() === "POST"
+      );
+      const create = page.locator("#deploy-btn:not([disabled])");
+      await create.focus();
+      await page.keyboard.press("Enter");
+      const response = await started;
+      expect(response.status()).toBe(202);
+      const { operationId } = await response.json();
+      const recordState = async () =>
+        (await canvas.operationRecord(operationId)).state;
+
+      const stages = page.locator("#env-progress-panel .env-progress__stage");
+      const pausedStages = [
+        /^‖Authorize deploy identity — paused$/,
+        /Configure environment — skipped$/,
+        /Verify credentials — skipped$/
+      ];
+      const waitingForLock = [
+        /Authorize deploy identity — running$/,
+        /Configure environment — pending$/,
+        /Verify credentials — pending$/
+      ];
+      await expect(stages).toHaveText(waitingForLock);
+      await expect(page.locator("#env-progress-panel")).toContainText(
+        "Waiting for the lock on IAM role"
+      );
+      const pause = page.getByRole("button", { name: "Pause setup" });
+      await pause.focus();
+      await page.keyboard.press("Enter");
+
+      // Nothing changed in AWS, so authorization has not started, and
+      // Continue starts there rather than past it.
+      await expect.poll(recordState).toBe("cancelled");
+      await expect(stages).toHaveText(pausedStages, { timeout: 15_000 });
+      await expect(page.locator("#env-progress-panel")).toContainText(
+        "Paused before any AWS change. Nothing was created in AWS."
+      );
+      const continueSetup = page.getByRole("button", {
+        name: "Continue setup"
+      });
+      await expect(continueSetup).toHaveAccessibleDescription(
+        "Radius continues from Authorize the deploy identity and reuses the resources it already recorded."
+      );
+      await expectNoWcagViolations(page);
+      const createdPolicies = awsCommands.filter(
+        (command) => command === "iam create-policy"
+      ).length;
+      await continueSetup.focus();
+      await page.keyboard.press("Enter");
+
+      // Continue waits for the lock again, and only authorization is running.
+      await expect
+        .poll(
+          () =>
+            awsCommands.filter((command) => command === "iam create-policy")
+              .length
+        )
+        .toBeGreaterThan(createdPolicies);
+      await expect(stages).toHaveText(waitingForLock, { timeout: 15_000 });
+      await expect(
+        page.locator("#env-progress-panel .env-progress__stage--running")
+      ).toHaveCount(1);
+
+      await page.getByRole("button", { name: "Pause setup" }).focus();
+      await page.keyboard.press("Enter");
+      await expect.poll(recordState).toBe("cancelled");
+      await expect(stages).toHaveText(pausedStages, { timeout: 15_000 });
+      expect(awsCommands).not.toContain("iam get-role");
+      await expectNoWcagViolations(page);
+    });
   });
 
   test("keeps unsupported credential profiles out of environment creation @safety", async ({

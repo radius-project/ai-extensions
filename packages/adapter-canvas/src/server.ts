@@ -5638,6 +5638,7 @@ export function createProductionCanvasServerRuntime(
       operationId: (operation) => operation.operationId,
       operations: {
         enterStage,
+        setStageState,
         addLegacyStep,
         setContext,
         touch: (operation) => {
