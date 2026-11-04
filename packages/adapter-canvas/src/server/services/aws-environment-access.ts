@@ -475,7 +475,7 @@ export function createAwsEnvironmentAccess<Operation>(
         return {
           ok: false,
           status: 400,
-          error: `GitHub's OIDC subject for this environment, ${shared.join(", ")}, does not name the repository, because the OIDC subject customization for ${oidc.fullName}, set on the repository or its organization, includes only the claims ${keys.join(", ")}. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. Nothing was created in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry.`,
+          error: `GitHub's OIDC subject for this environment, ${shared.join(", ")}, does not name the repository, because the OIDC subject customization for ${oidc.fullName}, set on the repository or its organization, includes only the claims ${keys.join(", ")}. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry.`,
           code: "aws-subject-not-repository-specific"
         };
       }

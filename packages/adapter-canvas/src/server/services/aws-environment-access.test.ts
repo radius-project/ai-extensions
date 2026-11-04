@@ -455,7 +455,7 @@ describe("AWS environment access setup", () => {
       status: 400,
       code: "aws-subject-not-repository-specific",
       error:
-        "GitHub's OIDC subject for this environment, repository_owner:octo:environment:dev, does not name the repository, because the OIDC subject customization for octo/shop, set on the repository or its organization, includes only the claims repository_owner, context. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. Nothing was created in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry."
+        "GitHub's OIDC subject for this environment, repository_owner:octo:environment:dev, does not name the repository, because the OIDC subject customization for octo/shop, set on the repository or its organization, includes only the claims repository_owner, context. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry."
     });
     expect(h.awsCalls).toEqual([]);
     expect(h.events).toEqual([["enterStage", "op-1", STAGE]]);
