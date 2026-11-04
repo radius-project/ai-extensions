@@ -169,9 +169,11 @@ case "$1" in
             esac
         done
         ;;
+    # `create` and `apply` run at the same time in the step's pipe. Logging after
+    # `cat` reaches EOF, which follows `create` exiting, keeps the order fixed.
     apply)
-        printf 'kubectl %s\n' "$*" >>"${CALLS}"
         cat >"${APPLIED}"
+        printf 'kubectl %s\n' "$*" >>"${CALLS}"
         ;;
     rollout) printf 'kubectl %s\n' "$*" >>"${CALLS}" ;;
     --kubeconfig)
