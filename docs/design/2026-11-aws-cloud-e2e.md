@@ -120,8 +120,6 @@ Both clusters use authentication mode `API` and a public endpoint, because GitHu
 
 The isolated node group's launch template sets its own security group, so EKS doesn't add its nodes to the cluster security group. That group allows the traffic EKS needs between nodes and the control plane, and nothing on TCP 3306. Its nodes have the label `radius-cloud-e2e/node-group=isolated` and the taint `radius-cloud-e2e/isolated=true:NoSchedule`, so app pods never run there.
 
-The main cluster also has an empty namespace, `radius-cloud-e2e-probes`, for the connection check's probe pods. The test never creates or deletes it.
-
 The second cluster needs no nodes. The run only creates an environment on it, deploys an app that fails in Kubernetes before any pod is scheduled, and deletes it.
 
 Both clusters must stay on a Kubernetes version in EKS standard support. A cluster on extended support costs six times as much.
@@ -132,7 +130,7 @@ Each step runs in the canvas, in the order below, as one serial suite with the A
 
 | Step                          | What the test checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 |-------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Preflight                     | The account matches. Both clusters are `ACTIVE` with mode `API`. The isolated node group exists and its security group isn't the cluster security group. The probe namespace exists. Nothing from an earlier run is left (see [Leftovers](#leftovers)).                                                                                                                                                                                                                                 |
+| Preflight                     | The account matches. Both clusters are `ACTIVE` with mode `API`. The isolated node group exists and its security group isn't the cluster security group. Nothing from an earlier run is left (see [Leftovers](#leftovers)).                                                                                                                                                                                                                                                             |
 | Create the main environment   | Setup reuses the deploy identity, and adds one subject, one inline policy, and one access entry. Verify succeeds.                                                                                                                                                                                                                                                                                                                                                                       |
 | Create the second environment | Same deploy identity. It now has two subjects, two inline policies, and an access entry on each cluster.                                                                                                                                                                                                                                                                                                                                                                                |
 | Failed deploy                 | Deploys the failing variant to the second environment. The deployed graph shows the resource as failed. Nothing is created in AWS.                                                                                                                                                                                                                                                                                                                                                      |
@@ -153,23 +151,23 @@ The AWS deploy workflows use the Radius `edge` build on purpose, because no Radi
 
 Each managed service in the `aws-eks` pack has one row in the connection check: its resource type, the fixture resource, and the probe command. Each recipe that adds a service also adds its row and its fixture resource.
 
-The probe pods are Kubernetes Jobs that the test creates in `radius-cloud-e2e-probes`. Each has the label `radius-cloud-e2e/run-id=<run id>` and a 5-minute deadline, and Kubernetes removes it 10 minutes after it finishes. The probe exits with a different code when it can't resolve the host or can't start, so an image pull failure fails the test instead of counting as the expected network failure.
+The probe pods are Kubernetes Jobs that the test creates in the app's namespace. They have the same `radapp.io/environment` and `radapp.io/application` labels as the app's own workloads, so the lifecycle design's cleanup rule already covers them, and no new rule is needed. Each has a 5-minute deadline, and Kubernetes removes it 10 minutes after it finishes. The probe exits with a different code when it can't resolve the host or can't start, so an image pull failure fails the test instead of counting as the expected network failure.
 
 ### Leftovers
 
 After delete, the test checks AWS and GitHub.
 
-| Thing                                                                                      | Expected                                                                                    |
-|--------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
-| GitHub identity provider                                                                   | Present, unchanged                                                                          |
-| Deploy identity                                                                            | Present, with no inline policies and only the `RadiusNoTrustedEnvironments` trust statement |
-| Deploy identity lock                                                                       | Absent                                                                                      |
-| Access entries for the deploy identity                                                     | None on either cluster                                                                      |
-| RDS instances, subnet groups, and parameter groups with the run's environment tags         | None in either region                                                                       |
-| RDS snapshots with the run's environment tags                                              | None                                                                                        |
-| Kubernetes workloads with the run's application label, and probe Jobs with the run's label | None                                                                                        |
-| The application namespace the deploy created on each cluster                               | None. The probe namespace stays                                                             |
-| GitHub environments, deployment records, and GHCR state packages for the run               | None, the same as for Azure                                                                 |
+| Thing                                                                              | Expected                                                                                    |
+|------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
+| GitHub identity provider                                                           | Present, unchanged                                                                          |
+| Deploy identity                                                                    | Present, with no inline policies and only the `RadiusNoTrustedEnvironments` trust statement |
+| Deploy identity lock                                                               | Absent                                                                                      |
+| Access entries for the deploy identity                                             | None on either cluster                                                                      |
+| RDS instances, subnet groups, and parameter groups with the run's environment tags | None in either region                                                                       |
+| RDS snapshots with the run's environment tags                                      | None                                                                                        |
+| Kubernetes workloads with the run's application label, including probe Jobs        | None                                                                                        |
+| The application namespace the deploy created on each cluster                       | None                                                                                        |
+| GitHub environments, deployment records, and GHCR state packages for the run       | None, the same as for Azure                                                                 |
 
 ### Cleanup
 
@@ -194,8 +192,8 @@ It deletes a resource only when every rule for its kind matches:
 | Trust subject on the deploy identity | Names the AWS fixture repository, in the name or ID form, and a `radtest-` environment that no longer exists                                                                                                                                                                                                                                                                                |
 | Deploy identity lock                 | Older than the cutoff                                                                                                                                                                                                                                                                                                                                                                       |
 | Access entry                         | For the deploy identity, tagged `radius-managed=true`, on one of the two clusters, when no `radtest-` environment uses that cluster                                                                                                                                                                                                                                                         |
-| Kubernetes workloads                 | The lifecycle design's rule: only workloads with a registered application label. Probe Jobs only by their run label, and only in `radius-cloud-e2e-probes`                                                                                                                                                                                                                                  |
-| Kubernetes namespace                 | The application namespace the run registered for an expired environment, after its workloads are gone. Never `radius-cloud-e2e-probes`, `default`, or a system namespace                                                                                                                                                                                                                    |
+| Kubernetes workloads                 | The lifecycle design's rule: only workloads with a registered application label, which includes the probe Jobs                                                                                                                                                                                                                                                                              |
+| Kubernetes namespace                 | The application namespace the run registered for an expired environment, after its workloads are gone. Never `default` or a system namespace                                                                                                                                                                                                                                                |
 
 Subnet groups and parameter groups have no creation time, and parameter groups have no VPC, so their rules use the group's own environment tag instead. An expired environment is one whose GitHub environment in the AWS fixture repository was created before the cutoff, or no longer exists. The tag is on the group itself, so the rule still works after the DB instance is deleted, or when the instance was never created.
 
@@ -203,7 +201,7 @@ It never deletes the deploy identity, the GitHub identity provider, a cluster, a
 
 `us-east-2` already holds manual RDS snapshots from older sample apps. None of them matches the snapshot rule, because their source instances aren't named `mysql-*` and they are in other VPCs.
 
-The job has a `dry-run` input that lists what it would delete and deletes nothing. The cleanup workflow has no dry run today. The AWS sweep adds one because it deletes in an account shared with another project, so its first run on `main` should show what it selects before it deletes anything.
+The sweep has no dry run, the same as the Azure sweep, which also deletes in a subscription shared with Radius. Its rules are unit-tested against resources shaped like Radius's, and the CI role can't act in `us-west-2`.
 
 ### Radius's purge job
 
@@ -258,7 +256,7 @@ When the fixture variable is unset, the AWS job and the AWS sweep skip and say w
 2. An administrator of `radius-test` creates the AWS resources above. An organization administrator creates the AWS fixture repository and installs the Cloud E2E GitHub App on it, and an `ai-extensions` administrator adds the secrets and variables.
 3. The AWS sweep lands first, so the scheduled AWS run never runs without cleanup.
 4. The AWS journey lands. Before merge, it runs locally from the branch against the developer's own AWS account and their fork of the AWS fixture repository, which the lifecycle design already allows.
-5. On `main`, in order: cleanup in dry run, cleanup, then a manual Cloud E2E dispatch. The daily schedule starts once all three pass.
+5. On `main`, in order: a manual cleanup run, then a manual Cloud E2E dispatch. The daily schedule starts once both pass.
 
 ### Cost
 
@@ -281,7 +279,7 @@ A NAT gateway instead of public node subnets would add about $33. One `t3.medium
 | Situation                                                                                         | What happens                                                                                                                                                    |
 |---------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Signing in to AWS fails                                                                           | The job fails before the journey. The runbook points to the role's trust policy, which accepts only `main`.                                                     |
-| Account, cluster status, authentication mode, isolated node group, or probe namespace is wrong    | Preflight fails before any write, reported as an infrastructure failure.                                                                                        |
+| Account, cluster status, authentication mode, or isolated node group is wrong                     | Preflight fails before any write, reported as an infrastructure failure.                                                                                        |
 | Something from an earlier run is left                                                             | Preflight fails, names what's left, and points to the cleanup workflow. The run doesn't delete it.                                                              |
 | The deploy identity is missing                                                                    | Setup stops with the product's "not permitted to create IAM roles" message. Nothing changes.                                                                    |
 | No Kubernetes write happened more than 15 minutes after the first EKS token                       | The deploy step fails, because the token refresh wasn't tested.                                                                                                 |
@@ -298,7 +296,6 @@ A NAT gateway instead of public node subnets would add about $33. One `t3.medium
 
 - **Unit tests**
   - The cleanup rules for each kind, including a subnet group and a parameter group left without an instance, and resources shaped like Radius's tests: in `us-west-2`, tagged `RadiusCreationTimestamp`, or without our tags. None of them is selected.
-  - A dry run selects the same resources and makes no delete call.
   - The connection check: success, a timeout that names the service, and a probe that didn't start.
   - The final snapshot check: one, none, and two. With tag checking on, one with the app's tags and one without.
   - The cleanup order: a failed app delete, a failed sweep, and a failed leftover check each keep the environment's retry inputs. A snapshot created by the cleanup run's own app delete is deleted in the same run.
