@@ -1483,8 +1483,6 @@ export function enterStage(op: any, stageId: any): any {
   if (!op) return op;
   let seen = false;
   for (const stage of op.stages) {
-    // Work is running again, so no stage waits to be reopened any more.
-    delete stage.reopened;
     if (stage.id === stageId) {
       stage.state = "running";
       seen = true;
@@ -1506,21 +1504,6 @@ export function setStageState(op: any, stageId: any, state: any): any {
   if (!op) return op;
   const stage = op.stages.find((s) => s.id === stageId);
   if (stage) stage.state = state;
-  return op;
-}
-
-/**
- * Put a started stage back to not started, because a pause arrived before its
- * work was done and Continue runs it again. A pause then shows it pending,
- * where a stage that never started shows skipped.
- */
-export function reopenStage(op: any, stageId: any): any {
-  if (!op) return op;
-  const stage = op.stages.find((s) => s.id === stageId);
-  if (stage) {
-    stage.state = "pending";
-    stage.reopened = true;
-  }
   return op;
 }
 
@@ -5015,8 +4998,6 @@ export function finish(
   if (failure) op.failure = failure;
   for (const stage of op.stages) {
     if (stage.state === "pending") {
-      // Reopened by a pause before the stage's work was done: Continue runs it.
-      if (state === "cancelled" && stage.reopened === true) continue;
       // Never entered, so genuinely skipped whatever the outcome.
       stage.state = "skipped";
     } else if (stage.state === "running") {

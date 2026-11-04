@@ -45,8 +45,8 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
   operationId(operation: Operation): string;
   operations: {
     enterStage(operation: Operation, stage: string): void;
-    // Put a started stage back to not started after a pause.
-    reopenStage(operation: Operation, stage: string): void;
+    // Record a stage's verdict, which settling the operation keeps.
+    setStageState(operation: Operation, stage: string, state: string): void;
     addLegacyStep(operation: Operation, text: string, stage: string): void;
     setContext(operation: Operation, patch: Record<string, unknown>): void;
     // Record activity without a step, so a long wait is not taken as stale.
@@ -241,13 +241,13 @@ export function createAwsEnvironmentAccess<Operation>(
       : "⏸️ Paused before any AWS change. Nothing was created in AWS.";
   }
 
-  // The deploy identity is not ready, so the stage is not done: the pause
-  // shows it not started, and Continue runs it again.
+  // The deploy identity is not ready, so the stage is paused rather than done,
+  // and Continue runs it again.
   function pausedBeforeReady(
     operation: Operation,
     created: readonly string[]
   ): Promise<AwsEnvironmentSetupResult> {
-    operations.reopenStage(operation, stage);
+    operations.setStageState(operation, stage, "paused");
     return paused(operation, pausedLine(created));
   }
 

@@ -11,7 +11,6 @@ import {
   canContinueSetup,
   createOperation,
   enterStage,
-  reopenStage,
   prepareProviderMutation,
   projectOperationActions,
   promoteCreatedGitHubEnvironment,
@@ -22,6 +21,7 @@ import {
   recordGitHubEnvironment,
   setCanonicalEnvironment,
   setContext,
+  setStageState,
   STAGE_AUTHORIZE_IDENTITY,
   unresolvedProviderMutations
 } from "../../operations.js";
@@ -1329,7 +1329,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.posts).toEqual([]);
   });
 
-  it("keeps Authorize deploy identity not started when a pause lands during the lock wait, and Continue reruns only that stage", async () => {
+  it("shows Authorize deploy identity paused when a pause lands during the lock wait, and Continue reruns only that stage", async () => {
     const account = "123456789012";
     const op = createOperation({
       provider: "aws",
@@ -1407,7 +1407,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       operationId: (target) => target.operationId,
       operations: {
         enterStage,
-        reopenStage,
+        setStageState,
         addLegacyStep,
         setContext,
         touch: () => {}
@@ -1433,7 +1433,7 @@ describe("runEnvironmentOperationWorkflow", () => {
 
     expect(op.state).toBe("cancelled");
     expect(stageStates()).toEqual({
-      authorize_identity: "pending",
+      authorize_identity: "paused",
       configure_environment: "skipped",
       verify: "skipped"
     });
@@ -1470,7 +1470,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     ]);
     expect(test.posts).toEqual([]);
     expect(op.state).toBe("cancelled");
-    expect(stageStates().authorize_identity).toBe("pending");
+    expect(stageStates().authorize_identity).toBe("paused");
   });
 
   it("finalizes an AWS deploy identity failure without creating the environment", async () => {
@@ -1586,7 +1586,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       operationId: (target) => target.operationId,
       operations: {
         enterStage,
-        reopenStage,
+        setStageState,
         addLegacyStep,
         setContext,
         touch: () => {}

@@ -167,8 +167,8 @@ function harness(
       enterStage: (operation, stage) => {
         events.push(["enterStage", operation.id, stage]);
       },
-      reopenStage: (operation, stage) => {
-        events.push(["reopenStage", operation.id, stage]);
+      setStageState: (operation, stage, state) => {
+        events.push(["setStageState", operation.id, stage, state]);
       },
       addLegacyStep: (operation, text, stage) => {
         events.push(["step", operation.id, text, stage]);
@@ -455,7 +455,7 @@ describe("pausing AWS environment access setup", () => {
       "⏸️ Paused before any AWS change. Nothing was created in AWS."
     );
     expect(h.events.slice(-3)).toEqual([
-      ["reopenStage", "op-1", STAGE],
+      ["setStageState", "op-1", STAGE, "paused"],
       [
         "step",
         "op-1",
@@ -481,7 +481,7 @@ describe("pausing AWS environment access setup", () => {
     expect(steps(h).at(-1)).toBe(
       `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}.`
     );
-    expect(h.events).toContainEqual(["reopenStage", "op-1", STAGE]);
+    expect(h.events).toContainEqual(["setStageState", "op-1", STAGE, "paused"]);
     expect(h.events.at(-1)).toEqual(["persist"]);
     expect(h.roleRecorded()).toBe(false);
   });
@@ -502,7 +502,7 @@ describe("pausing AWS environment access setup", () => {
       `⏸️ Paused after AWS setup finished. ${ROLE_ARN} is ready for this environment.`
     );
     // The deploy identity is ready, so its stage stays done.
-    expect(h.events.map(([kind]) => kind)).not.toContain("reopenStage");
+    expect(h.events.map(([kind]) => kind)).not.toContain("setStageState");
     expect(h.events.at(-1)).toEqual(["persist"]);
   });
 
@@ -998,7 +998,7 @@ describe("the deploy identity lock during setup", () => {
     );
     // The lock was never taken, so Authorize deploy identity has not started.
     expect(h.events.slice(-3)).toEqual([
-      ["reopenStage", "op-1", STAGE],
+      ["setStageState", "op-1", STAGE, "paused"],
       [
         "step",
         "op-1",
@@ -1362,7 +1362,7 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
         },
         operations: {
           enterStage: () => {},
-          reopenStage: () => {},
+          setStageState: () => {},
           addLegacyStep: () => {},
           setContext: () => {},
           touch: () => {}

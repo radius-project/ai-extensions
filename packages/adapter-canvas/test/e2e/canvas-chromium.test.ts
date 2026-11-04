@@ -4171,7 +4171,7 @@ test.describe("Radius Canvas in Chromium", () => {
         operationId: (operation) => operation.operationId,
         operations: {
           enterStage: ops.enterStage,
-          reopenStage: ops.reopenStage,
+          setStageState: ops.setStageState,
           addLegacyStep: ops.addLegacyStep,
           setContext: ops.setContext,
           touch: (operation) => {
@@ -4250,7 +4250,7 @@ test.describe("Radius Canvas in Chromium", () => {
 
       const stages = page.locator("#env-progress-panel .env-progress__stage");
       const pausedStages = [
-        /Authorize deploy identity — pending$/,
+        /^‖Authorize deploy identity — paused$/,
         /Configure environment — skipped$/,
         /Verify credentials — skipped$/
       ];

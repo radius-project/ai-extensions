@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
   applySetupResumePoint,
-  reopenStage,
   setupStepLabel,
   onOperationTerminal,
   isStale,
@@ -4805,14 +4804,14 @@ describe("durable stop", () => {
     expect(op.state).toBe("cancelled");
   });
 
-  it("shows a reopened stage not started after a pause, and Continue clears the mark", () => {
+  it("keeps a paused stage paused when the pause settles, and Continue runs it again", () => {
     const op = newOp({ provider: "aws" });
     enterStage(op, STAGE_AUTHORIZE_IDENTITY);
-    reopenStage(op, STAGE_AUTHORIZE_IDENTITY);
+    setStageState(op, STAGE_AUTHORIZE_IDENTITY, "paused");
     requestStop(op);
     stopAtBoundary(op, "after-aws-deploy-identity");
     expect(op.stages.map((stage) => [stage.id, stage.state])).toEqual([
-      [STAGE_AUTHORIZE_IDENTITY, "pending"],
+      [STAGE_AUTHORIZE_IDENTITY, "paused"],
       [STAGE_CONFIGURE_ENVIRONMENT, "skipped"],
       [STAGE_VERIFY, "skipped"]
     ]);
@@ -4826,25 +4825,7 @@ describe("durable stop", () => {
     });
   });
 
-  it("skips a reopened stage when the operation ends any way other than a pause", () => {
-    const op = newOp({ provider: "aws" });
-    enterStage(op, STAGE_AUTHORIZE_IDENTITY);
-    reopenStage(op, STAGE_AUTHORIZE_IDENTITY);
-    finish(op, "failed", { failure: { code: "x", message: "x" } });
-    expect(op.stages[0].state).toBe("skipped");
-  });
-
-  it("ignores a reopen without an operation or for a stage it does not have", () => {
-    expect(reopenStage(null, STAGE_AUTHORIZE_IDENTITY)).toBeNull();
-    const op = newOp({ stages: buildStages({ includeIdentity: false }) });
-    reopenStage(op, STAGE_AUTHORIZE_IDENTITY);
-    expect(op.stages.map((stage) => stage.state)).toEqual([
-      "pending",
-      "pending"
-    ]);
-  });
-
-  // Azure output is unchanged on purpose: only the AWS pause path reopens.
+  // Azure output is unchanged on purpose: only the AWS pause path sets paused.
   it.each([
     ["before any stage started", null, "skipped"],
     ["during Authorize deploy identity", STAGE_AUTHORIZE_IDENTITY, "succeeded"]
