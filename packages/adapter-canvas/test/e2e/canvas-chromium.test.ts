@@ -3836,6 +3836,77 @@ test.describe("Radius Canvas in Chromium", () => {
       };
     }
 
+    async function openAwsCredentialForm(
+      page: Page,
+      canvas: CanvasHarness
+    ): Promise<void> {
+      await gotoCanvas(page, canvas, "credentials");
+      await page.locator("#new-cred-btn").click();
+      await page.locator("#cred-provider-select").selectOption("aws");
+      await page.locator("#cred-name-input").fill("aws-verification");
+      await page.locator("#aws-account-id").fill(AWS_ACCOUNT);
+      await page.locator("#aws-region").fill("us-east-2");
+    }
+
+    test("invalidates AWS verification after account and region edits in Chromium @safety", async ({
+      page,
+      canvas
+    }) => {
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText(
+        "Credentials verified"
+      );
+      await page.locator("#aws-account-id").fill("999988887777");
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      await expect(page.locator("#cred-verify-status")).toBeHidden();
+      await page.locator("#aws-account-id").fill(AWS_ACCOUNT);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText(
+        "Credentials verified"
+      );
+      await page.locator("#aws-region").fill("us-west-2");
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      await expect(page.locator("#cred-verify-status")).toBeHidden();
+      expect(
+        (await canvas.cliCalls())
+          .filter((call) => call.tool === "aws")
+          .map((call) => call.args)
+      ).toContainEqual([
+        "sts",
+        "get-caller-identity",
+        "--output",
+        "json",
+        "--region",
+        "us-east-2"
+      ]);
+    });
+
+    test("offers the AWS installer remediation before STS in Chromium @safety", async ({
+      page,
+      canvas
+    }) => {
+      const scenario = defaultFakeCliScenario();
+      const version = scenario.commands.find(
+        (command) => command.tool === "aws" && command.args?.[0] === "--version"
+      );
+      if (!version) throw new Error("AWS version command is not modeled");
+      version.stdout = "aws-cli/2.15.2";
+      await canvas.setScenario(scenario);
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText("2.15.3");
+      await expect(page.locator("#cred-verify-action")).toContainText(
+        "Install or upgrade AWS CLI"
+      );
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      expect(
+        (await canvas.cliCalls()).some(
+          (call) => call.tool === "aws" && call.args[0] === "sts"
+        )
+      ).toBe(false);
+    });
+
     // Answers each discovery with the next reply. The last reply repeats.
     async function routeAwsProfileAndDiscovery(
       page: Page,

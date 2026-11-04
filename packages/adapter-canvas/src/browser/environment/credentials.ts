@@ -523,6 +523,11 @@ export function initializeCredentialsPane(
   const resetVerification = (): void => {
     formToken += 1;
     credVerified = null;
+    btnVerifyAws.disabled = false;
+    btnVerifyAws.textContent = "Verify Credentials";
+    btnVerifyAzure.disabled = false;
+    btnVerifyAzure.textContent = "Verify Credentials";
+    envVerifyModal.style.display = "none";
     mountCommandAction(credVerifyAction, null, "cred-verify");
     credVerifyStatus.style.display = "none";
     credVerifyStatus.innerHTML = "";
@@ -833,6 +838,10 @@ export function initializeCredentialsPane(
     resetVerification();
   });
 
+  for (const input of [awsAccountId, awsRegion]) {
+    scope.on(input, "input", () => resetVerification());
+  }
+
   scope.on(newCredBtn, "click", () => showCredentialsForm("standalone"));
   scope.on(cancelCredBtn, "click", () => {
     if (formContext === "wizard") {
@@ -934,7 +943,10 @@ export function initializeCredentialsPane(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ accountId, region })
       })
-      .then((response) => response.json())
+      .then((response) => {
+        if (!response.ok) throw new Error("AWS CLI verification failed.");
+        return response.json();
+      })
       .then(
         (payload) => {
           if (!active || token !== formToken) return;
@@ -950,11 +962,19 @@ export function initializeCredentialsPane(
             return;
           }
           const returnedAccountId = readString(payload, "accountId");
-          if (returnedAccountId) awsAccountId.value = returnedAccountId;
+          if (
+            !readBoolean(payload, "success") ||
+            returnedAccountId !== accountId
+          ) {
+            verifyError(
+              "The AWS CLI did not confirm this account. Verify your credentials again."
+            );
+            return;
+          }
           markVerified({
             provider: "aws",
             user: readString(payload, "user") || readString(payload, "arn"),
-            accountId: returnedAccountId || accountId,
+            accountId: returnedAccountId,
             region
           });
         },

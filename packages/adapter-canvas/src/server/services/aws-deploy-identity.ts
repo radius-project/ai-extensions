@@ -10,7 +10,6 @@ import {
   buildGitHubTrustPolicy,
   AWS_CLI_MINIMUM_VERSION,
   awsRoleArn,
-  checkAwsCliVersion,
   configMapClusterMessage,
   eksAcceptsAccessEntries,
   eksAuthenticationMode,
@@ -31,6 +30,11 @@ import {
   trustedGitHubSubjects,
   type PolicyDocument
 } from "@radius-project/core";
+import {
+  verifyAwsCliSession,
+  type AwsCommandResult
+} from "./aws-cli-session.js";
+export type { AwsCommandResult } from "./aws-cli-session.js";
 
 // Sets up the AWS deploy identity for one environment: the account's GitHub
 // identity provider, the repository's IAM role and its trust in this
@@ -40,14 +44,6 @@ import {
 // Every check that cannot change anything runs first. Nothing is written to
 // AWS until the CLI version, the signed-in account, and the cluster's auth
 // mode are known to be usable.
-
-export interface AwsCommandResult {
-  code: number | string;
-  stdout: string;
-  stderr: string;
-  // The CLI ran past its time limit and was stopped, so its output is empty.
-  timedOut?: boolean;
-}
 
 export interface AwsDeployIdentityPorts {
   // Run `aws <args>`. Never throws; a spawn failure is a non-zero result.
@@ -279,45 +275,14 @@ export async function setupAwsDeployIdentity(
     );
   }
 
-  const version = await ports.runAws(["--version"]);
-  const versionCheck = checkAwsCliVersion(
-    `${version.stdout} ${version.stderr}`.trim()
+  const session = await verifyAwsCliSession(
+    { accountId, region },
+    ports.runAws
   );
-  if (!succeeded(version) || !versionCheck.ok) {
-    return fail(
-      "aws-cli-unsupported",
-      versionCheck.ok ?
-        `Could not run the AWS CLI: ${detail(version)}`
-      : versionCheck.message
-    );
-  }
+  if (!session.ok) return fail(session.code, session.message);
   ports.step(
-    `✅ AWS CLI ${versionCheck.version} meets the ${AWS_CLI_MINIMUM_VERSION} minimum.`
+    `✅ AWS CLI ${session.version} meets the ${AWS_CLI_MINIMUM_VERSION} minimum.`
   );
-
-  const identity = await ports.runAws([
-    "sts",
-    "get-caller-identity",
-    "--output",
-    "json"
-  ]);
-  const caller = parseJson(identity.stdout);
-  const sessionAccount =
-    isRecord(caller) && typeof caller.Account === "string" ?
-      caller.Account
-    : "";
-  if (!succeeded(identity)) {
-    return fail(
-      "aws-cli-login-required",
-      `No active AWS CLI session. Run "aws sso login" (or "aws configure"), then retry. ${detail(identity)}`
-    );
-  }
-  if (sessionAccount !== accountId) {
-    return fail(
-      "aws-account-mismatch",
-      `Your AWS CLI session is signed in to account ${sessionAccount || "(unknown)"}, but this environment's profile is for account ${accountId}. Nothing was changed.`
-    );
-  }
 
   const describeCluster = (): Promise<AwsCommandResult> =>
     ports.runAws([
@@ -1106,13 +1071,10 @@ export async function removeAwsEnvironmentFromRole(
       message: `IAM role ${request.roleArn} is outside the commercial AWS partition, so Radius did not change it.`
     };
   }
-  const session = await signedInAccountProblem(
-    ports,
-    accountId,
-    roleName,
-    "clean up"
-  );
-  if (session) return { ok: false, message: session.message };
+  // IAM addresses the role by name in whichever account the CLI is signed in
+  // to, so confirm that is the role's account before reading or writing.
+  const session = await verifyAwsCliSession({ accountId }, ports.runAws);
+  if (!session.ok) return { ok: false, message: session.message };
   const locked = await ports.acquireLock({ accountId, roleName });
   if (!locked.ok) return { ok: false, message: locked.message };
   const getRole = await ports.runAws([

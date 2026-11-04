@@ -101,6 +101,9 @@ function dependencies(
   overrides: Partial<IdentityProfilesDependencies> = {}
 ): IdentityProfilesDependencies {
   return {
+    runAws: async () => {
+      throw new Error("runAws not stubbed");
+    },
     listCredentialProfiles: () => {
       throw new Error("listCredentialProfiles not stubbed");
     },

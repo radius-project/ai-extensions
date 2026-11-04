@@ -69,19 +69,24 @@ describe("AWS CLI version gate", () => {
     });
   });
 
-  it("shows the CLI's own output when no version can be read", () => {
+  it("reports an unreadable version without echoing process output", () => {
     const result = checkAwsCliVersion("command not found: aws");
     expect(result.ok).toBe(false);
     expect(!result.ok && result.message).toContain(
-      "Could not run the AWS CLI: command not found: aws"
+      "Could not read the AWS CLI version."
+    );
+    expect(!result.ok && result.message).not.toContain("command not found");
+    expect(!result.ok && result.message).toContain("2.15.3");
+    expect(!result.ok && result.message).toContain(
+      "getting-started-install.html"
     );
     expect(parseAwsCliVersion("")).toBeNull();
   });
 
-  it("says there was no version output when the CLI printed nothing", () => {
+  it("reports an unreadable version when the CLI printed nothing", () => {
     const result = checkAwsCliVersion("  ");
     expect(!result.ok && result.message).toContain(
-      "Could not run the AWS CLI: no version output."
+      "Could not read the AWS CLI version."
     );
   });
 
