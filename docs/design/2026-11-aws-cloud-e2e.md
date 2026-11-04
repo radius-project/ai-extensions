@@ -7,7 +7,7 @@ This amends the [Cloud E2E environment lifecycle](./2026-08-cloud-e2e-environmen
 
 ## Current state
 
-The Cloud E2E tests run once a day against real Azure and real GitHub. They create an environment in the canvas, deploy the fixture app to a shared AKS cluster, delete everything, and check that nothing is left. AWS has no such test. The AWS path (setup, deploy, delete) is on `main` behind the `RADIUS_CANVAS_AWS=1` developer switch, and only unit and server tests with a fake `aws` CLI cover it. Setup creates one IAM role per repository that the repository's GitHub deploy workflows sign in to, called the deploy identity, and each environment adds its own permissions to it.
+The Cloud E2E tests run once a day against real Azure and real GitHub. They create an environment in the canvas, deploy the fixture app to a shared AKS cluster, delete everything, and check that nothing is left. AWS has no such test. The AWS path (setup, deploy, delete) is on `main` behind the `RADIUS_CANVAS_AWS=1` developer switch, and only unit and server tests with a fake `aws` CLI cover it. Setup creates one IAM role per repository that the repository's GitHub deploy workflows sign in to, called the deploy role, and each environment adds its own permissions to it.
 
 A fake CLI can't show that AWS accepts the IAM, EKS, and RDS calls the product makes, that a pod can reach the database a recipe created, or that delete leaves nothing behind. Without a live test, a change that breaks AWS setup or delete reaches users silently, and a leak keeps billing until someone notices.
 
@@ -21,18 +21,18 @@ Add an AWS job to the daily Cloud E2E workflow. It drives the canvas through AWS
 
 - The AWS test runs in Cloud E2E once a day and on manual dispatch, and never on pull requests.
 - A pod can reach every managed service in the `aws-eks` recipe pack, and the check catches nodes that can't.
-- Deleting both environments leaves only the deploy identity and the GitHub identity provider.
+- Deleting both environments leaves only the deploy role and the GitHub identity provider.
 - Cleanup removes what a failed run leaves behind, without touching Radius's own test resources.
 
 ### Non-goals
 
 - Running the AWS test in the GitHub Copilot app host: the harness host already proves the cloud calls.
 - Creating or deleting EKS clusters in the test: the canvas only discovers clusters, the same as for AKS.
-- Testing first-time creation of the deploy identity in CI: CI can't create roles in the shared account, so server tests and local runs cover it.
+- Testing first-time creation of the deploy role in CI: the test role can't create roles in the shared account, so server tests and local runs cover it.
 
 ## Design
 
-Each day, the AWS job signs in to `radius-test`, uses the canvas to set up two environments, deploy, and delete, and then checks that nothing is left. The sections below cover where it runs, the two AWS identities it uses, what the test does step by step, and how cleanup works.
+Each day, the AWS job signs in to `radius-test`, uses the canvas to set up two environments, deploy, and delete, and then checks that nothing is left. The sections below cover where it runs, the two AWS roles it uses, what the test does step by step, and how cleanup works.
 
 ### Where it runs
 
@@ -61,33 +61,36 @@ The database password is a fixed test value in the private fixture model. The in
 
 A second pinned commit carries the app for the failed deploy: one resource that fails in Kubernetes before any AWS call, and no AWS resources.
 
-### The CI identity
+### How the test signs in to AWS
 
-An account administrator creates an IAM role, `ai-extensions-cloud-e2e`, that the AWS job signs in to with GitHub's OIDC token. It trusts only `repo:radius-project/ai-extensions:ref:refs/heads/main`, so no pull request or branch can use it. The job doesn't use a GitHub environment, because that would change the subject GitHub sends.
+The test uses two IAM roles, because it plays two parts: the developer who runs setup in the canvas, and the GitHub workflows that deploy the app.
 
-The role acts as the developer in the test, and also checks and cleans up. It can:
+| Role                                                                  | Who uses it                                                                                | What it stands in for                                                                                         |
+|-----------------------------------------------------------------------|--------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| Test role, `ai-extensions-cloud-e2e`                                  | The Cloud E2E job in this repository, to run setup in the canvas and to check and clean up | The developer's own AWS sign-in                                                                               |
+| Deploy role, `radius-deploy-radius-project-ai-extensions-fixture-aws` | The deploy workflows that setup commits to the fixture repository                          | The role setup creates for each repository in real use, which the AWS canvas design calls the deploy identity |
+
+An account administrator creates both once.
+
+**The test role.** The Cloud E2E job signs in to it with GitHub's OIDC token. It trusts only `repo:radius-project/ai-extensions:ref:refs/heads/main`, so no pull request or branch can use it. The job doesn't use a GitHub environment, because that would change the subject GitHub sends. The role can:
 
 - Read EKS, EC2, and RDS, and run `kubectl` on the two clusters.
-- Change only the deploy identity's trust policy and inline policies, its lock policy, and access entries on the two clusters.
+- Change only the deploy role's trust policy and inline policies, its lock policy, and access entries on the two clusters.
 - Delete only RDS instances, groups, and snapshots named `mysql-*` and `rds-snapshot-*`.
 
-Everything except IAM is limited to the two regions. The role can't create or delete roles, change a permissions boundary, or create an identity provider. Its session lasts 6 hours, as long as the job, because AWS's default is 1 hour and the test signs in only once.
+Everything except IAM is limited to the two regions. The test role can't create or delete roles, change a permissions boundary, or create an identity provider. Its session lasts 6 hours, as long as the job, because AWS's default is 1 hour and the job signs in only once.
 
-### The deploy identity
+**The deploy role.** Setup gives it permissions by writing inline policies on it, so whoever runs setup controls what it can do. In an account shared with Radius's tests, that must be capped, so the administrator creates it ahead of time with:
 
-Setup gives the deploy identity its permissions by writing inline policies on it, so anyone who can run setup can change what the role can do. In an account shared with Radius's tests, that must be capped.
-
-An account administrator creates it once, `radius-deploy-radius-project-ai-extensions-fixture-aws`, with:
-
-- The tags the product puts on a role it owns, so setup reuses it.
-- The trust policy the product leaves when no environment uses the role: one deny statement, `RadiusNoTrustedEnvironments`.
+- The tags setup puts on a role it creates, so setup reuses it instead of creating one.
+- The trust policy setup leaves when no environment uses the role: one deny statement, `RadiusNoTrustedEnvironments`.
 - A permissions boundary, which is the most a role can ever do, whatever its own policies say. It allows only the services the recipes use (Cloud Control, RDS, and a few EKS and EC2 reads), only in the two regions. It denies IAM, account settings, and `s3:PutAccountPublicAccessBlock`. Each new recipe adds its service.
 
 The boundary lists services instead of allowing everything in the two regions, because a region condition limits where a request is sent, not what it changes. For example, `s3:PutAccountPublicAccessBlock` sent to `us-east-2` turns off S3 Block Public Access for every bucket in the account, including Radius's.
 
-The deploy identity can't create service-linked roles. RDS's already exists in the account; a recipe for a new service may need an administrator to create one first.
+The deploy role can't create service-linked roles. RDS's already exists in the account; a recipe for a new service may need an administrator to create one first.
 
-Because CI can't create roles, a run that finds the deploy identity missing stops at setup and changes nothing. Creating it for the first time is covered by server tests and by local runs in a developer's own account.
+Because the test role can't create roles, a run that finds the deploy role missing stops at setup and changes nothing. Creating it for the first time is covered by server tests and by local runs in a developer's own account.
 
 ### The clusters
 
@@ -102,15 +105,15 @@ Both clusters use authentication mode `API` and a public endpoint, because GitHu
 Each step runs in the canvas, in order, with the AWS switch on.
 
 1. **Preflight.** The account, both clusters, and the isolated node group are as expected, and nothing from an earlier run is left.
-2. **Create the main environment.** Setup reuses the deploy identity, and adds one trust subject, one inline policy, and one access entry. Verify succeeds.
-3. **Create the second environment.** It uses the same deploy identity, which now has two of each.
+2. **Create the main environment.** Setup reuses the deploy role, and adds one trust subject, one inline policy, and one access entry. Verify succeeds.
+3. **Create the second environment.** It uses the same deploy role, which now has two of each.
 4. **Failed deploy.** The failing app, deployed to the second environment, shows its resource as failed in the deployed graph. Nothing is created in AWS.
 5. **Deploy.** The baseline app deploys to the main environment, and a Kubernetes write happens more than 15 minutes after the deploy got its first EKS token.
 6. **Connection check.** The app's container is ready. A probe pod on the default nodes signs in to each managed service. The same probe on the isolated node times out, and the check names the service.
 7. **Delete the apps.** The RDS instance and its groups are gone, and exactly one final RDS snapshot exists. The test deletes it.
 8. **Delete the second environment.** Its subject, policy, and access entry are removed, and the main environment still passes verify.
 9. **Delete the main environment.** Its subject, policy, and access entry are removed.
-10. **Leftovers.** Only the deploy identity, with no inline policies and the deny trust statement, and the GitHub identity provider are left. No RDS, Kubernetes, or GitHub resources from the run remain.
+10. **Leftovers.** Only the deploy role, with no inline policies and the deny trust statement, and the GitHub identity provider are left. No RDS, Kubernetes, or GitHub resources from the run remain.
 
 Why some steps work the way they do:
 
@@ -133,13 +136,13 @@ Each managed service in the pack gets a row in the connection check and a resour
 
 If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs.
 
-A resource is deleted only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with an expired test environment, and in one of the two clusters' VPCs where the resource has one. Kubernetes workloads follow the lifecycle design's label rule. Cleanup never deletes the deploy identity, the identity provider, a cluster, a node group, a VPC, or anything in another region. A read that fails stops that kind of sweep without deleting.
+A resource is deleted only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with an expired test environment, and in one of the two clusters' VPCs where the resource has one. Kubernetes workloads follow the lifecycle design's label rule. Cleanup never deletes the deploy role, the identity provider, a cluster, a node group, a VPC, or anything in another region. A read that fails stops that kind of sweep without deleting.
 
-The sweep has no dry run, the same as the Azure sweep, which also deletes in a subscription shared with Radius. Its rules are unit-tested against resources shaped like Radius's, and the CI role can't act in `us-west-2`.
+The sweep has no dry run, the same as the Azure sweep, which also deletes in a subscription shared with Radius. Its rules are unit-tested against resources shaped like Radius's, and the test role can't act in `us-west-2`.
 
 ### Radius's cleanup job
 
-Radius's own daily job in the same account deletes RDS, S3, and log resources in `us-west-2` tagged `RadiusCreationTimestamp` and older than 6 hours. It can't delete this test's database: it looks only in `us-west-2`, the MySQL recipe doesn't set that tag, and the AWS job finishes in under 6 hours. This test can't delete Radius's resources either, because neither the CI role nor the deploy identity can act in `us-west-2`.
+Radius's own daily job in the same account deletes RDS, S3, and log resources in `us-west-2` tagged `RadiusCreationTimestamp` and older than 6 hours. It can't delete this test's database: it looks only in `us-west-2`, the MySQL recipe doesn't set that tag, and the AWS job finishes in under 6 hours. This test can't delete Radius's resources either, because neither the test role nor the deploy role can act in `us-west-2`.
 
 ### Time budget
 
@@ -148,7 +151,7 @@ The AWS suite has its own stage limits, about 230 minutes in total, under a 270-
 ### Rollout
 
 1. This design is reviewed.
-2. An administrator of `radius-test` creates the CI role, the deploy identity, and the clusters. An organization administrator creates the AWS fixture repository and installs the Cloud E2E GitHub App on it. An `ai-extensions` administrator adds the role and account secrets and the region and cluster variables.
+2. An administrator of `radius-test` creates the test role, the deploy role, and the clusters. An organization administrator creates the AWS fixture repository and installs the Cloud E2E GitHub App on it. An `ai-extensions` administrator adds the role and account secrets and the region and cluster variables.
 3. The AWS sweep lands first, so the scheduled AWS run never runs without cleanup.
 4. The AWS test lands. Before merge, it runs locally in the developer's own AWS account and their fork of the fixture repository, which the lifecycle design already allows.
 5. On `main`, a manual cleanup run, then a manual Cloud E2E run. The daily schedule starts once both pass.
@@ -166,7 +169,7 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 | Signing in to AWS fails                           | The job fails before the test starts. The runbook points to the trust policy, which accepts only `main` |
 | Preflight finds the account or clusters wrong     | The job fails before any write, reported as an infrastructure failure                                   |
 | Preflight finds something from an earlier run     | The job fails and names it, and points to the cleanup workflow. It doesn't delete it                    |
-| The deploy identity is missing                    | Setup stops with the product's "not permitted to create IAM roles" message                              |
+| The deploy role is missing                        | Setup stops with the product's "not permitted to create IAM roles" message                              |
 | No Kubernetes write after the first token expired | The deploy step fails, because token refresh wasn't tested                                              |
 | The isolated probe connects                       | The connection check fails, because the isolated node no longer tests a missing network rule            |
 | No final snapshot, or more than one               | The delete step fails and names the instance                                                            |
@@ -176,7 +179,7 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 
 - **Unit tests:** the cleanup rules, including resources shaped like Radius's (in `us-west-2`, tagged `RadiusCreationTimestamp`, or without our tags), none of which is selected. Groups left without an instance. Cleanup keeping retry inputs when a step fails. The connection check, snapshot check, and 15-minute check. The stage limits fitting the job timeout.
 - **Workflow tests:** the AWS job never runs on pull requests, has the repository guard, uses no GitHub environment, shares the concurrency group, and skips when the fixture variable is unset.
-- **Local run:** the full test in the developer's own AWS account. It also checks that the deploy identity's boundary refuses `s3:PutAccountPublicAccessBlock`, an IAM action, and an RDS call in `us-west-2`.
+- **Local run:** the full test in the developer's own AWS account. It also checks that the deploy role's boundary refuses `s3:PutAccountPublicAccessBlock`, an IAM action, and an RDS call in `us-west-2`.
 
 ## Open questions
 
@@ -190,5 +193,5 @@ About $240 a month: $165 for the main cluster and its nodes, $73 for the second 
 - **Running in `us-west-2` with Radius's tests.** Rejected: shared regional quotas and Radius's cleanup region.
 - **A cluster per run.** About $25 a month instead of $165. Rejected: 30 to 40 more minutes a run, rights to create clusters, VPCs, and roles, and a leaked cluster costs $73 a month until someone finds it.
 - **Sharing the Azure fixture repository.** Rejected: AWS would wait behind Azure on the lease, and a broken fixture would stop both.
-- **Letting the product create the deploy identity in CI.** Rejected in a shared account: the CI role could then create a role with any permissions.
+- **Letting the product create the deploy role in CI.** Rejected in a shared account: the test role could then create a role with any permissions.
 - **Trusting a protected GitHub environment so branches can run the AWS job before merge.** Rejected: a permanent second way to get the CI credential. Local runs cover the test before merge.
