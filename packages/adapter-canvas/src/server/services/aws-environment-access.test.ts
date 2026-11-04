@@ -116,6 +116,24 @@ function githubSubjects(
 }
 const defaultSubject = githubSubjects(false);
 
+// GitHub answers for octo/shop with a subject customized to these claim keys.
+function customTemplate(
+  includeClaimKeys: string[]
+): Record<string, GitHubJsonResponse> {
+  return {
+    ...defaultSubject,
+    "/repos/octo/shop/actions/oidc/customization/sub": {
+      ok: true,
+      status: 200,
+      json: {
+        use_default: false,
+        include_claim_keys: includeClaimKeys,
+        use_immutable_subject: false
+      }
+    }
+  };
+}
+
 interface Operation {
   id: string;
 }
@@ -995,6 +1013,105 @@ describe("AWS environment access setup", () => {
     expect(h.events).toEqual([["enterStage", "op-1", STAGE]]);
   });
 
+  it("refuses a subject without the repository before any AWS call, naming the claim keys", async () => {
+    const h = harness(
+      happyPath,
+      customTemplate(["repository_owner", "context"])
+    );
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toEqual({
+      ok: false,
+      status: 400,
+      code: "aws-subject-not-repository-specific",
+      error:
+        "GitHub's OIDC subject for this environment, repository_owner:octo:environment:dev, does not name the repository, because the OIDC subject customization for octo/shop, set on the repository or its organization, includes only the claims repository_owner, context. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry."
+    });
+    expect(h.awsCalls).toEqual([]);
+    expect(h.events).toEqual([["enterStage", "op-1", STAGE]]);
+  });
+
+  it.each([
+    [
+      ["repository_owner_id", "environment"],
+      "repository_owner_id:7:environment:dev"
+    ],
+    [["context"], "environment:dev"]
+  ])(
+    "refuses the subject a %j template gives before any AWS call",
+    async (keys, subject) => {
+      const h = harness(happyPath, customTemplate(keys));
+
+      const result = await h.access.setup(operation, input, EXECUTOR);
+
+      expect(result).toMatchObject({
+        ok: false,
+        status: 400,
+        code: "aws-subject-not-repository-specific"
+      });
+      expect("error" in result && result.error).toContain(
+        `this environment, ${subject}, does not name the repository`
+      );
+      expect("error" in result && result.error).toContain(
+        `includes only the claims ${keys.join(", ")}.`
+      );
+      expect(h.awsCalls).toEqual([]);
+    }
+  );
+
+  it.each([
+    [["repository_id", "context"], "repository_id:42:environment:dev"],
+    [["repo", "context"], "repo:octo/shop:environment:dev"]
+  ])(
+    "authorizes the subject a %j template gives, since it names the repository",
+    async (keys, subject) => {
+      const h = harness(happyPath, customTemplate(keys));
+
+      const result = await h.access.setup(operation, input, EXECUTOR);
+
+      expect(result).toMatchObject({
+        ok: true,
+        roleArn: ROLE_ARN,
+        subjects: [subject]
+      });
+      const createRole = h.find("iam create-role") ?? [];
+      const trust = parsePolicyDocument(
+        JSON.parse(
+          createRole[createRole.indexOf("--assume-role-policy-document") + 1] ??
+            "{}"
+        )
+      );
+      expect(trustedGitHubSubjects(trust, ACCOUNT)).toEqual([subject]);
+    }
+  );
+
+  it("authorizes an environment whose name has a colon, which GitHub encodes", async () => {
+    const h = harness(happyPath, {
+      ...defaultSubject,
+      "/repos/octo/shop/environments/prod%3Aeu/variables?per_page=100": {
+        ok: true,
+        status: 200,
+        json: { variables: [] }
+      }
+    });
+
+    const result = await h.access.setup(
+      operation,
+      { ...input, environment: "prod:eu" },
+      EXECUTOR
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      roleArn: ROLE_ARN,
+      subjects: [
+        "repo:octo/shop:environment:prod%3Aeu",
+        "repo:octo@7/shop@42:environment:prod%3Aeu"
+      ]
+    });
+  });
+
   it("says nothing was created when setup stops before writing to AWS", async () => {
     const h = harness({
       ...happyPath,
@@ -1341,20 +1458,6 @@ describe("AWS environment access removal", () => {
 
   const sharedWarning = (subject: string) =>
     `Kept trust subject ${subject}, because it doesn't name one repository and the environment dev, so other environments or repositories may present it too. If nothing else needs it, remove it from the role's trust policy by hand.`;
-  const customTemplate = (
-    includeClaimKeys: string[]
-  ): Record<string, GitHubJsonResponse> => ({
-    "/repos/octo/shop": defaultSubject["/repos/octo/shop"],
-    "/repos/octo/shop/actions/oidc/customization/sub": {
-      ok: true,
-      status: 200,
-      json: {
-        use_default: false,
-        include_claim_keys: includeClaimKeys,
-        use_immutable_subject: false
-      }
-    }
-  });
 
   it.each([
     ["the environment", ["repo"], "repo:octo/shop"],
@@ -2659,6 +2762,23 @@ describe("repairing an environment's trust under the lock", () => {
       expect(h.commands()).not.toContain("iam delete-policy");
     }
   );
+
+  it("refuses a subject without the repository with setup's message and fix", async () => {
+    const h = harness(
+      missingId,
+      customTemplate(["repository_owner", "context"])
+    );
+
+    const result = await h.access.repair(repairInput);
+
+    expect(result).toEqual({
+      ok: false,
+      code: "aws-subject-not-repository-specific",
+      message:
+        "GitHub's OIDC subject for this environment, repository_owner:octo:environment:dev, does not name the repository, because the OIDC subject customization for octo/shop, set on the repository or its organization, includes only the claims repository_owner, context. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry."
+    });
+    expect(h.commands()).not.toContain("iam update-assume-role-policy");
+  });
 
   it("stops without writing when its lock is lost", async () => {
     const h = harness({
