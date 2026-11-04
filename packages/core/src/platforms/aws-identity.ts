@@ -524,6 +524,38 @@ export interface GitHubRepositoryIdentity {
   readonly repoId: number;
 }
 
+// Unlike repository names, IDs still distinguish owners after a rename.
+export function immutableEnvironmentRepository(
+  subject: string,
+  environment: string
+): { repo: string; repoId: number } | null {
+  const claims = subjectClaims(subject);
+  if (!claims || !namesOneEnvironment(subject, environment)) return null;
+  const repositories = claims.filter(
+    ([key]) => key === "repo" || key === "repository"
+  );
+  if (repositories.length !== 1) return null;
+  const match =
+    /^([a-z0-9_.-]+)(?:@[1-9]\d*)?\/([a-z0-9_.-]+)(?:@([1-9]\d*))?$/i.exec(
+      repositories[0][1]
+    );
+  if (!match) return null;
+  const ids = claims
+    .filter(([key]) => key === "repository_id")
+    .map(([, value]) => value);
+  if (match[3]) ids.push(match[3]);
+  if (
+    !ids.length ||
+    !/^[1-9]\d*$/.test(ids[0]) ||
+    ids.some((id) => id !== ids[0])
+  )
+    return null;
+  const repoId = Number(ids[0]);
+  return Number.isSafeInteger(repoId) && repoId > 0 ?
+      { repo: `${match[1]}/${match[2]}`, repoId }
+    : null;
+}
+
 // A subject's claims when none is a wildcard. A wildcard admits workflows the
 // subject doesn't spell out, so it can't be tied to one environment.
 function exactClaims(subject: string): [string, string][] | null {

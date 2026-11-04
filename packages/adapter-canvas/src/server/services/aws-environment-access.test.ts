@@ -441,6 +441,42 @@ describe("AWS environment access setup", () => {
   });
 
   it.each([42, 77])(
+    "uses immutable ownership without access to the other GitHub repository (%s)",
+    async (foreignId) => {
+      const h = harness(
+        {
+          ...happyPath,
+          "iam get-role": ok({
+            Role: {
+              Arn: ROLE_ARN,
+              AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [
+                `repo:octo@7/other@${foreignId}:environment:dev`
+              ])
+            }
+          }),
+          "iam list-role-policies": ok({
+            PolicyNames: [awsEnvironmentPolicyName("octo/other", "dev")]
+          }),
+          "iam update-assume-role-policy": ok()
+        },
+        defaultSubject
+      );
+      expect(
+        await h.access.setup(
+          operation,
+          { ...input, existingRoleArn: ROLE_ARN },
+          EXECUTOR
+        )
+      ).toMatchObject({ ok: foreignId !== 42 });
+      expect(
+        h.githubCalls.some((call) => call.path.includes("/octo/other"))
+      ).toBe(false);
+      if (foreignId === 42)
+        expect(h.find("iam put-role-policy")).toBeUndefined();
+    }
+  );
+
+  it.each([42, 77])(
     "checks another grant's GitHub repository ID and saved binding (%s)",
     async (foreignId) => {
       const foreignName = awsEnvironmentPolicyName("octo/other", "dev");

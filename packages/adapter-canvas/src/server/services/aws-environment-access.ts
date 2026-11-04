@@ -638,6 +638,8 @@ export function createAwsEnvironmentAccess<Operation>(
             await dependencies.store.persist();
           },
           isRecordedForeignPolicy: async (candidate) => {
+            if (candidate.repoId !== undefined)
+              return candidate.repoId !== repoId;
             const identity = await resolveIdentity(
               candidate.repo,
               environment,

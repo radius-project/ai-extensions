@@ -3,6 +3,7 @@ import {
   buildLegacyAwsEnvironmentPolicyName,
   isAwsEnvironmentPolicyName,
   namesOneEnvironment,
+  immutableEnvironmentRepository,
   legacyAwsPolicyOwnershipError,
   parsePolicyDocument,
   type PolicyDocument
@@ -269,10 +270,24 @@ export async function resolveEnvironmentPolicyForSetup(
         awsEnvironmentPolicyName(candidate, input.environment) === name
     );
     if (!repo) return unresolved;
+    const ids = new Set(
+      input.subjects.flatMap((subject) => {
+        const identity = immutableEnvironmentRepository(
+          subject,
+          input.environment
+        );
+        return identity?.repo.toLowerCase() === repo.toLowerCase() ?
+            [identity.repoId]
+          : [];
+      })
+    );
+    if (ids.size > 1) return unresolved;
+    const repoId = [...ids][0];
     try {
       if (
         !(await ports.isRecordedForeignPolicy({
           repo,
+          ...(repoId !== undefined ? { repoId } : {}),
           environment: input.environment,
           roleArn: input.roleArn,
           policyName: name

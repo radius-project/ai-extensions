@@ -148,6 +148,7 @@ const EXPECTED_FUNCTIONS = [
   "namesGitHubProvider",
   "trustAllowsOnlySubjects",
   "namesRepositoryEnvironment",
+  "immutableEnvironmentRepository",
   "namesOneEnvironment",
   "buildGitHubTrustPolicy",
   "mergeGitHubTrustSubject",

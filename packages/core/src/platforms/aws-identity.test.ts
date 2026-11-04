@@ -38,12 +38,45 @@ import {
   radiusRoleRepository,
   namesOneEnvironment,
   namesRepositoryEnvironment,
+  immutableEnvironmentRepository,
   removeGitHubTrustSubject,
   restrictedGitHubSubjects,
   subjectNamesRepository,
   trustAllowsOnlySubjects,
   trustedGitHubSubjects
 } from "./aws-identity.js";
+
+describe("immutable environment repository ownership", () => {
+  it.each([
+    "repo:old-owner@7/old-name@42:environment:dev",
+    "repo:old-owner/old-name:repository_id:42:environment:dev",
+    "repository:old-owner/old-name:repository_id:42:environment:dev"
+  ])("retains the repository ID behind an old name: %s", (subject) => {
+    expect(immutableEnvironmentRepository(subject, "dev")).toEqual({
+      repo: "old-owner/old-name",
+      repoId: 42
+    });
+  });
+  it.each([
+    "",
+    "repo:old/name:environment:dev",
+    "repo:old@7/name:environment:dev",
+    "repo:old@invalid/name@42:environment:dev",
+    "repo:old@7/name@42:environment:prod",
+    "repo:old@7/name@42:environment:*",
+    "repo:old@7/name@42:repository:other/name:environment:dev",
+    "repo:old@7/name@42:repository_id:43:environment:dev",
+    "repo:old/name:repository_id:0:environment:dev",
+    "repo:old/name:repository_id:1e2:environment:dev",
+    "repo:old/name:repository_id:99999999999999999:environment:dev",
+    "repository_id:42:environment:dev"
+  ])(
+    "does not infer ownership from incomplete or ambiguous claims: %s",
+    (subject) => {
+      expect(immutableEnvironmentRepository(subject, "dev")).toBeNull();
+    }
+  );
+});
 
 const ACCOUNT = "123456789012";
 const GITHUB = "token.actions.githubusercontent.com";

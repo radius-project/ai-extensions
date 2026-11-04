@@ -217,6 +217,27 @@ describe("recorded policy identity", () => {
     const unexpectedForeignPolicy = async (): Promise<never> => {
       throw new Error("unexpected foreign policy lookup");
     };
+    it("refuses conflicting immutable owners without consulting mutable metadata", async () => {
+      expect(
+        await resolveEnvironmentPolicyForSetup(
+          {
+            ...setup,
+            subjects: [
+              "repo:octo@7/other@42:environment:dev",
+              "repo:octo@7/other@77:environment:dev"
+            ]
+          },
+          {
+            ...runner(
+              ok({
+                PolicyNames: [awsEnvironmentPolicyName("octo/other", "dev")]
+              })
+            ),
+            isRecordedForeignPolicy: unexpectedForeignPolicy
+          }
+        )
+      ).toMatchObject({ ok: false });
+    });
     it("allows new and existing grants without changing unrelated policies", async () => {
       const ports = runner(
         ok({

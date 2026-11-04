@@ -110,6 +110,7 @@ export interface AwsDeployIdentitySetupPorts extends AwsDeployIdentityPorts {
   }): Promise<void>;
   isRecordedForeignPolicy(input: {
     repo: string;
+    repoId?: number;
     environment: string;
     roleArn: string;
     policyName: string;
