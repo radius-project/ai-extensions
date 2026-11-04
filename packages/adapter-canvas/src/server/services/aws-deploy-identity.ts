@@ -66,6 +66,13 @@ export type AwsLockResult =
 // rejects it meanwhile as an invalid principal. Retry that one answer only.
 export const ACCESS_ENTRY_RETRY_DELAYS_MS = [2000, 4000, 8000, 15000, 30000];
 const PRINCIPAL_NOT_YET_VISIBLE = /InvalidParameterException/;
+// EKS can reject an access entry until a cluster is ACTIVE, for example while it
+// switches to access entries. Setup waits up to 10 minutes for an UPDATING
+// cluster before it writes anything.
+export const CLUSTER_ACTIVE_WAIT_DELAYS_MS: readonly number[] = Array.from(
+  { length: 40 },
+  () => 15000
+);
 
 export interface AwsDeployIdentityRequest {
   repo: string;
@@ -122,6 +129,14 @@ function parseJson(text: string): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The status in `aws eks describe-cluster` output, or empty when it has none. */
+function clusterStatus(stdout: string): string {
+  const output = parseJson(stdout);
+  const status =
+    isRecord(output) && isRecord(output.cluster) ? output.cluster.status : "";
+  return typeof status === "string" ? status : "";
 }
 
 const ACCESS_DENIED = /AccessDenied|UnauthorizedOperation|not authorized/i;
@@ -299,19 +314,40 @@ export async function setupAwsDeployIdentity(
     );
   }
 
-  const describe = await ports.runAws([
-    "eks",
-    "describe-cluster",
-    "--name",
-    cluster,
-    ...regionArgs,
-    "--output",
-    "json"
-  ]);
+  const describeCluster = (): Promise<AwsCommandResult> =>
+    ports.runAws([
+      "eks",
+      "describe-cluster",
+      "--name",
+      cluster,
+      ...regionArgs,
+      "--output",
+      "json"
+    ]);
+  let describe = await describeCluster();
+  let status = succeeded(describe) ? clusterStatus(describe.stdout) : "";
+  if (status === "UPDATING") {
+    ports.step(
+      `ℹ️ Cluster ${cluster} is UPDATING. Setup waits for it to be ACTIVE before it changes anything.`
+    );
+    for (const delay of CLUSTER_ACTIVE_WAIT_DELAYS_MS) {
+      await ports.sleep(delay);
+      describe = await describeCluster();
+      if (!succeeded(describe)) break;
+      status = clusterStatus(describe.stdout);
+      if (status !== "UPDATING") break;
+    }
+  }
   if (!succeeded(describe)) {
     return fail(
       "aws-cluster-unreadable",
       `Could not read EKS cluster ${cluster} in ${region}: ${detail(describe)}`
+    );
+  }
+  if (status !== "ACTIVE") {
+    return fail(
+      "aws-cluster-not-active",
+      `Cluster ${cluster} in ${region} is ${status || "in an unknown state"}. Setup needs an ACTIVE cluster, so nothing was changed. Retry when the cluster is ACTIVE.`
     );
   }
   const authenticationMode = eksAuthenticationMode(parseJson(describe.stdout));

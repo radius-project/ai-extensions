@@ -1273,7 +1273,7 @@ describe("registered environment tools with production runtime services", () => 
           else if (key === "eks describe-cluster")
             callback(
               null,
-              '{"cluster":{"accessConfig":{"authenticationMode":"API"}}}',
+              '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}',
               ""
             );
           else if (key === "iam create-policy" || key === "iam get-policy")
