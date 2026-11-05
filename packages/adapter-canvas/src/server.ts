@@ -5739,7 +5739,9 @@ export function createProductionCanvasServerRuntime(
           touchOperation(operation);
         }
       },
-      store: operations,
+      // Read through the live binding: the extension configures the
+      // file-backed registry after this runtime is created.
+      store: { persist: () => operations.persist() },
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage
     });

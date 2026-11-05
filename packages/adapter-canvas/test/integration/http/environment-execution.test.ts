@@ -1198,6 +1198,46 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it("saves the AWS lock to the operation store configured after the runtime, before reading the role", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout:
+          '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+      },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": {
+        stderr: "An error occurred (AccessDenied) when calling GetRole",
+        code: 254
+      },
+      "iam delete-policy": { stdout: "" }
+    });
+    // Created first, as extension.ts does at module load.
+    const runtime = awsSetupRuntime();
+    const lockSaves: string[][] = [];
+    await configureOperationStore({
+      load: async () => null,
+      save: async (envelope) => {
+        const held = JSON.stringify(envelope.operations).includes(
+          '"policyId":"LOCK1"'
+        );
+        if (held) lockSaves.push(await aws.calls());
+      }
+    });
+    try {
+      await runAwsSetup(runtime, "op_aws_saved_lock");
+      expect(lockSaves.length).toBeGreaterThan(0);
+      expect(lockSaves[0]).not.toContainEqual(
+        expect.stringMatching(/^iam get-role /)
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
   it("continues a restarted AWS setup from its saved request, taking back its own lock", async () => {
     const lockArn =
       "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
