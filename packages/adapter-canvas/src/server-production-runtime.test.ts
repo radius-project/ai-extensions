@@ -1,3 +1,4 @@
+import { ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -112,11 +113,12 @@ describe("production canvas server runtime", () => {
       }
     });
 
-    const first = await server.getOrCreateServer("panel-a", "graph");
-    const reused = await server.getOrCreateServer("panel-a", "planned");
-    const second = await server.getOrCreateServer("panel-b", "environment");
-
+    let firstBaseUrl: string | undefined;
     try {
+      const first = await server.getOrCreateServer("panel-a", "graph");
+      firstBaseUrl = first.baseUrl;
+      const reused = await server.getOrCreateServer("panel-a", "planned");
+      const second = await server.getOrCreateServer("panel-b", "environment");
       expect(new URL(first.baseUrl).hostname).toBe("127.0.0.1");
       expect(Number(new URL(first.baseUrl).port)).toBeGreaterThan(0);
       expect(reused).toBe(first);
@@ -133,7 +135,7 @@ describe("production canvas server runtime", () => {
       });
       expect(server.getLastWebviewActivityAt()).toBe(101);
     } finally {
-      await Promise.all([
+      await Promise.allSettled([
         server.stopServer("panel-a", true),
         server.stopServer("panel-b", true)
       ]);
@@ -141,25 +143,25 @@ describe("production canvas server runtime", () => {
     }
 
     expect(server.servers.size).toBe(0);
-    await expect(fetch(first.baseUrl)).rejects.toThrow();
+    if (!firstBaseUrl) throw new Error("The first server did not start");
+    await expect(fetch(firstBaseUrl)).rejects.toThrow();
   });
 
   it("coalesces concurrent opens and permits a clean reopen after shutdown", async () => {
     const server = runtime();
-    const [first, second] = await Promise.all([
-      server.getOrCreateServer("single-flight", "graph"),
-      server.getOrCreateServer("single-flight", "deploying")
-    ]);
-
-    expect(first).toBe(second);
-    expect(first.page).toBe("deploying");
-    await server.stopServer("single-flight", true);
-
-    const reopened = await server.getOrCreateServer(
-      "single-flight",
-      "credentials"
-    );
     try {
+      const [first, second] = await Promise.all([
+        server.getOrCreateServer("single-flight", "graph"),
+        server.getOrCreateServer("single-flight", "deploying")
+      ]);
+      expect(first).toBe(second);
+      expect(first.page).toBe("deploying");
+      await server.stopServer("single-flight", true);
+
+      const reopened = await server.getOrCreateServer(
+        "single-flight",
+        "credentials"
+      );
       expect(reopened).not.toBe(first);
       expect(reopened.page).toBe("credentials");
       expect((await fetch(reopened.baseUrl)).status).toBe(200);
@@ -197,11 +199,13 @@ describe("production canvas server runtime", () => {
       const entry = await server.getOrCreateServer("fallback", "graph");
       expect(Number(new URL(entry.baseUrl).port)).not.toBe(address.port);
       expect((await fetch(`${entry.baseUrl}/api/ping`)).status).toBe(200);
-      await server.stopServer("fallback", true);
     } finally {
-      await new Promise<void>((resolve, reject) => {
-        occupied.close((error) => (error ? reject(error) : resolve()));
-      });
+      await Promise.allSettled([
+        server.stopServer("fallback", true),
+        new Promise<void>((resolve, reject) => {
+          occupied.close((error) => (error ? reject(error) : resolve()));
+        })
+      ]);
     }
   });
 
@@ -427,6 +431,17 @@ describe("production canvas server runtime", () => {
   });
 
   it("returns validation failures for safe empty requests across route families without invoking external systems", async () => {
+    const cliExec = vi.fn(
+      (
+        _command: string,
+        args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout: string, stderr: string) => void
+      ) => {
+        callback(null, args.includes("--jq") ? "" : "[]", "");
+        return new ChildProcess();
+      }
+    );
     setOpenSourceHandler(() => {
       throw new Error("Open source must not run for invalid input");
     });
@@ -439,6 +454,7 @@ describe("production canvas server runtime", () => {
       accountContext: accountContext(),
       environmentOperationRunner: runner,
       environmentDeletionPorts: deletionPorts,
+      cliExec,
       serverDependencies: {
         preferredPort: async () => 0,
         prepareIdentity: () => {}
@@ -457,30 +473,69 @@ describe("production canvas server runtime", () => {
       });
 
     try {
-      const cases: Array<[string, number[]]> = [
-        ["/api/open-source", [400]],
-        ["/api/run-remediation", [400]],
-        ["/api/github-account", [400]],
-        ["/api/delete-environment", [400]],
+      const invalidRoutes = [
+        "/api/open-source",
+        "/api/run-remediation",
+        "/api/github-account",
+        "/api/delete-environment",
+        "/api/operations",
+        "/api/app-params",
+        "/api/delete-deployment",
+        "/api/abandon-deployment",
+        "/api/deploy"
+      ];
+      for (const path of invalidRoutes) {
+        const response = await post(path);
+        expect(response.status, path).toBe(400);
+        expect(response.headers.get("content-type"), path).toContain(
+          "application/json"
+        );
+        expect(await json(response), path).toMatchObject({
+          error: expect.any(String)
+        });
+      }
+
+      const jsonRoutes: Array<[string, number[]]> = [
         ["/api/bypass-verification", [400, 404, 409]],
-        ["/api/operations", [400]],
-        ["/api/azure-auto-setup", [200, 403]],
-        ["/api/app-params", [400]],
-        ["/api/create-environment", [200, 403]],
         ["/api/load-graph", [200, 400]],
-        ["/api/delete-deployment", [400]],
-        ["/api/abandon-deployment", [400]],
-        ["/api/repo-branches", [200, 400]],
         ["/api/plan-graph", [200, 400]],
-        ["/api/discover-branches", [200, 400]],
         ["/api/diff-branches", [200, 400]],
-        ["/api/deploy", [400]],
         ["/api/discover", [200, 400]]
       ];
-      for (const [path, statuses] of cases) {
+      for (const [path, statuses] of jsonRoutes) {
         const response = await post(path);
         expect(statuses, path).toContain(response.status);
-        await response.text();
+        expect(response.headers.get("content-type"), path).toContain(
+          "application/json"
+        );
+        expect(await json(response), path).toEqual(expect.any(Object));
+      }
+
+      const repositoryBranches = await post("/api/repo-branches");
+      expect(repositoryBranches.status).toBe(200);
+      expect(await json(repositoryBranches)).toEqual({ branches: [] });
+      expect(cliExec).not.toHaveBeenCalled();
+
+      const discoveredBranches = await post("/api/discover-branches");
+      expect(discoveredBranches.status).toBe(200);
+      expect(discoveredBranches.headers.get("content-type")).toContain(
+        "application/json"
+      );
+      expect(await json(discoveredBranches)).toEqual({ branches: [] });
+      expect(cliExec).toHaveBeenCalledExactlyOnceWith(
+        "gh",
+        ["api", "--paginate", "/repos//branches?per_page=100"],
+        { timeout: 15000 },
+        expect.any(Function)
+      );
+
+      for (const path of ["/api/azure-auto-setup", "/api/create-environment"]) {
+        const response = await post(path);
+        expect(response.status, path).toBe(200);
+        expect(response.headers.get("content-type"), path).toContain(
+          "text/html"
+        );
+        expect(await response.text(), path).toContain("<!doctype html>");
       }
 
       const reset = await fetch(`${entry.baseUrl}/api/deploy-reset`, {

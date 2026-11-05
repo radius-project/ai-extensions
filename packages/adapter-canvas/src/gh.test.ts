@@ -2499,11 +2499,8 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
     process.env.GITHUB_TOKEN = "ambient-github";
     process.env.GH_HOST = "enterprise.example";
     const { runGhKeyringCommand } = await loadGh("linux");
-    childProcess.execFile.mockImplementation((_file, _args, options, cb) => {
+    childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
       cb(null, " keyring-token \n", "");
-      expect(options.env.GH_TOKEN).toBeUndefined();
-      expect(options.env.GITHUB_TOKEN).toBeUndefined();
-      expect(options.env.GH_HOST).toBeUndefined();
       return stubChild();
     });
 
@@ -2512,6 +2509,10 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
         env: { PATH: "/fixture", GH_TOKEN: "override" }
       })
     ).resolves.toBe("keyring-token");
+    const options = childProcess.execFile.mock.calls[0]?.[2];
+    expect(options?.env?.GH_TOKEN).toBeUndefined();
+    expect(options?.env?.GITHUB_TOKEN).toBeUndefined();
+    expect(options?.env?.GH_HOST).toBeUndefined();
   });
 
   it.each([
@@ -2522,14 +2523,15 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
     "reads repository text content on %s",
     async (_name, error, stdout, expected) => {
       const { ghApiGetContent } = await loadGh("linux");
-      childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+      childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
         cb(error, stdout, "");
-        expect(args).toEqual(["api", "/contents/file", "--jq", ".content"]);
-        expect(options.timeout).toBe(15000);
         return stubChild();
       });
 
       await expect(ghApiGetContent("/contents/file")).resolves.toBe(expected);
+      const call = childProcess.execFile.mock.calls[0];
+      expect(call?.[1]).toEqual(["api", "/contents/file", "--jq", ".content"]);
+      expect(call?.[2]?.timeout).toBe(15000);
     }
   );
 
@@ -2553,21 +2555,22 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
     "reads repository byte content for %s",
     async (_name, error, stdout, expected) => {
       const { ghApiGetContentBytes } = await loadGh("linux");
-      childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+      childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
         cb(error, stdout, "");
-        expect(args).toEqual([
-          "api",
-          "/contents/archive",
-          "--jq",
-          "{content: .content, encoding: .encoding}"
-        ]);
-        expect(options.timeout).toBe(20000);
         return stubChild();
       });
 
       await expect(ghApiGetContentBytes("/contents/archive")).resolves.toEqual(
         expected
       );
+      const call = childProcess.execFile.mock.calls[0];
+      expect(call?.[1]).toEqual([
+        "api",
+        "/contents/archive",
+        "--jq",
+        "{content: .content, encoding: .encoding}"
+      ]);
+      expect(call?.[2]?.timeout).toBe(20000);
     }
   );
 
@@ -2577,14 +2580,15 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
     ["malformed response", null, "{", []]
   ])("lists repository names on %s", async (_name, error, stdout, expected) => {
     const { ghApiListNames } = await loadGh("linux");
-    childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+    childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
       cb(error, stdout, "");
-      expect(args).toEqual(["api", "/contents", "--jq", "[.[].name]"]);
-      expect(options.timeout).toBe(15000);
       return stubChild();
     });
 
     await expect(ghApiListNames("/contents")).resolves.toEqual(expected);
+    const call = childProcess.execFile.mock.calls[0];
+    expect(call?.[1]).toEqual(["api", "/contents", "--jq", "[.[].name]"]);
+    expect(call?.[2]?.timeout).toBe(15000);
   });
 
   it("routes repository file and github facade calls through their public behavior", async () => {
@@ -2626,10 +2630,8 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
     ["branch head failure", "head", new Error("missing"), "abc123", ""]
   ])("reports %s", async (_name, operation, error, stdout, expected) => {
     const gh = await loadGh("linux");
-    childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+    childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
       cb(error, stdout, "");
-      expect(options.timeout).toBe(15000);
-      if (operation === "head") expect(args[1]).toContain("feature%2Fa%20b");
       return stubChild();
     });
 
@@ -2638,6 +2640,10 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
         gh.getDefaultBranch("octo/app")
       : gh.getBranchHeadSha("octo/app", "feature/a b");
     await expect(result).resolves.toBe(expected);
+    const call = childProcess.execFile.mock.calls[0];
+    expect(call?.[2]?.timeout).toBe(15000);
+    if (operation === "head")
+      expect(call?.[1]?.[1]).toContain("feature%2Fa%20b");
   });
 
   it.each([
@@ -2846,25 +2852,26 @@ describe("GitHub account switching", { concurrent: false }, () => {
         token: "fixture-secret",
         githubToken: "other-token"
       });
-      childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+      childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
         cb(error, "", stderr);
-        expect(args).toEqual([
-          "auth",
-          "switch",
-          "--hostname",
-          "github.com",
-          "--user",
-          "octocat"
-        ]);
-        expect(options.env.GH_TOKEN).toBeUndefined();
-        expect(options.env.GITHUB_TOKEN).toBeUndefined();
-        expect(options.env.GH_HOST).toBeUndefined();
         return stubChild();
       });
 
       await expect(switchGhKeyringAccount(" octocat ")).resolves.toEqual(
         expected
       );
+      const call = childProcess.execFile.mock.calls[0];
+      expect(call?.[1]).toEqual([
+        "auth",
+        "switch",
+        "--hostname",
+        "github.com",
+        "--user",
+        "octocat"
+      ]);
+      expect(call?.[2]?.env?.GH_TOKEN).toBeUndefined();
+      expect(call?.[2]?.env?.GITHUB_TOKEN).toBeUndefined();
+      expect(call?.[2]?.env?.GH_HOST).toBeUndefined();
     }
   );
 });

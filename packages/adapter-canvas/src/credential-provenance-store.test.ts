@@ -301,12 +301,22 @@ describe("createFileCredentialProvenanceStore", () => {
     const utimesSpy = vi
       .spyOn(fs, "utimes")
       .mockRejectedValue(new Error("heartbeat denied"));
+    let observeHeartbeat: () => void = () => {};
+    const heartbeatObserved = new Promise<void>((resolve) => {
+      observeHeartbeat = resolve;
+    });
+    utimesSpy.mockImplementation(async () => {
+      observeHeartbeat();
+      throw new Error("heartbeat denied");
+    });
 
-    await store.withLock(
-      () => new Promise<void>((resolve) => setTimeout(resolve, 10))
-    );
-
-    expect(utimesSpy).toHaveBeenCalled();
-    utimesSpy.mockRestore();
+    try {
+      await store.withLock(async () => {
+        await heartbeatObserved;
+      });
+      expect(utimesSpy).toHaveBeenCalled();
+    } finally {
+      utimesSpy.mockRestore();
+    }
   });
 });
