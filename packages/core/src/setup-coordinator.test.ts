@@ -94,7 +94,12 @@ function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
     },
     authorizeAws: async (request) => {
       transcript.push(["aws", request]);
-      return { kind: "completed", roleArn: ROLE_ARN, trustSubjects: SUBJECTS };
+      return {
+        kind: "completed",
+        roleArn: ROLE_ARN,
+        trustSubjects: SUBJECTS,
+        policyName: "radius-deploy-dev-f5fb7acf8f59"
+      };
     },
     releaseAws: async () => {
       transcript.push(["release-aws"]);
@@ -400,6 +405,7 @@ describe("runSetupCoordinator", () => {
             operationEnvironment: "dev",
             roleArn: ROLE_ARN,
             trustSubjects: SUBJECTS,
+            policyName: "radius-deploy-dev-f5fb7acf8f59",
             clientId: ""
           }
         ]
@@ -582,14 +588,19 @@ describe("runSetupCoordinator", () => {
       test.mutations.push({ mutationId: "pending", kind: "github_variable" });
       test.operation.context = {
         awsRoleArn: ROLE_ARN,
-        awsTrustSubjects: [...SUBJECTS, 7]
+        awsTrustSubjects: [...SUBJECTS, 7],
+        awsPolicyName: "radius-deploy-dev-111111111111"
       };
       expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
         shouldMonitor: true
       });
       expect(test.transcript).toContainEqual([
         "configure",
-        expect.objectContaining({ roleArn: ROLE_ARN, trustSubjects: SUBJECTS })
+        expect.objectContaining({
+          roleArn: ROLE_ARN,
+          trustSubjects: SUBJECTS,
+          policyName: "radius-deploy-dev-111111111111"
+        })
       ]);
     });
 

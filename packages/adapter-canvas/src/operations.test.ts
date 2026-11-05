@@ -4345,7 +4345,7 @@ describe("startup reconciliation", () => {
     expect(toPersistedOperation(create).deleteRecovery).toBeUndefined();
   });
 
-  it("persists the AWS role, cluster, and an exact trust subject list for delete recovery", () => {
+  it("persists the AWS role, cluster, exact policy name and trust subjects for delete recovery", () => {
     const subjects = [
       "repo:contoso/store:environment:dev",
       "repo:contoso@1/store@2:environment:dev"
@@ -4353,12 +4353,14 @@ describe("startup reconciliation", () => {
     const del = newDeleteOp({
       provider: "aws",
       roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+      policyName: "radius-deploy-dev-111111111111",
       trustSubjects: subjects,
       region: "us-west-2",
       cluster: "store"
     });
     expect(toPersistedOperation(del).deleteRecovery).toMatchObject({
       roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+      policyName: "radius-deploy-dev-111111111111",
       trustSubjects: subjects,
       region: "us-west-2",
       cluster: "store"

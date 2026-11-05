@@ -823,7 +823,10 @@ describe("isAwsWrite", () => {
 });
 
 describe("removeAwsDeployIdentityLock", () => {
-  const signedIn = { "sts get-caller-identity": ok({ Account: ACCOUNT }) };
+  const signedIn = {
+    "--version": ok("aws-cli/2.39.0"),
+    "sts get-caller-identity": ok({ Account: ACCOUNT })
+  };
   const remove = (
     script: Record<string, AwsCommandResult | AwsCommandResult[]>,
     request = { policyArn: LOCK_ARN, policyId: "LOCK1" }
@@ -843,6 +846,7 @@ describe("removeAwsDeployIdentityLock", () => {
     });
     expect(await result).toEqual({ ok: true, removed: true });
     expect(iam.commands()).toEqual([
+      "--version",
       "sts get-caller-identity",
       "iam get-policy",
       "iam delete-policy"
@@ -880,31 +884,39 @@ describe("removeAwsDeployIdentityLock", () => {
     expect(iam.calls).toEqual([]);
   });
 
-  it("asks for a sign-in, with the CLI's error, when there is no session", async () => {
+  it("offers sign-in without echoing provider output when there is no session", async () => {
     const { iam, result } = remove({
+      ...signedIn,
       "sts get-caller-identity": fail("Unable to locate credentials")
     });
     expect(await result).toEqual({
       ok: false,
       code: "aws-cli-login-required",
       message:
-        'Radius could not read the AWS CLI session (Unable to locate credentials), so it removed nothing. Run "aws sso login" (or "aws configure"), then try again.'
+        'No active AWS CLI session. Sign in with "aws sso login", or refresh your configured credential provider, then verify again.'
     });
-    expect(iam.commands()).toEqual(["sts get-caller-identity"]);
+    expect(iam.commands()).toEqual(["--version", "sts get-caller-identity"]);
   });
 
   it.each([
-    ["another account", ok({ Account: "999999999999" })],
-    ["unreadable identity", ok("{")]
+    [
+      "another account",
+      ok({ Account: "999999999999" }),
+      "aws-account-mismatch"
+    ],
+    ["unreadable identity", ok("{"), "aws-identity-invalid"]
   ])(
     "refuses when the CLI is signed in to %s, where the lock would look missing",
-    async (_label, answer) => {
-      const { iam, result } = remove({ "sts get-caller-identity": answer });
+    async (_label, answer, code) => {
+      const { iam, result } = remove({
+        ...signedIn,
+        "sts get-caller-identity": answer
+      });
       expect(await result).toMatchObject({
         ok: false,
-        code: "aws-account-mismatch"
+        code
       });
-      expect(iam.commands()).toEqual(["sts get-caller-identity"]);
+      expect(iam.commands()).toEqual(["--version", "sts get-caller-identity"]);
     }
   );
 

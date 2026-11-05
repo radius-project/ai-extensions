@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
   acceptedGitHubSubjects,
   AWS_CLI_MINIMUM_VERSION,
@@ -10,10 +11,12 @@ import {
   buildAwsDeployRoleName,
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
+  buildLegacyAwsEnvironmentPolicyName,
   buildAwsLockPolicyDocument,
   buildAwsLockPolicyName,
   buildGitHubTrustPolicy,
   checkAwsCliVersion,
+  classifyAwsCliFailure,
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
   describeAwsLockHolder,
@@ -26,6 +29,7 @@ import {
   isAwsRoleName,
   isEksClusterName,
   isRadiusManagedRole,
+  legacyAwsPolicyOwnershipError,
   mergeGitHubTrustSubject,
   namesGitHubProvider,
   parseAwsCliVersion,
@@ -35,17 +39,94 @@ import {
   radiusRoleRepository,
   namesOneEnvironment,
   namesRepositoryEnvironment,
+  immutableEnvironmentRepository,
   removeGitHubTrustSubject,
   restrictedGitHubSubjects,
+  repositoryLessSubjectMessage,
   subjectNamesRepository,
   trustAllowsOnlySubjects,
   trustedGitHubSubjects
 } from "./aws-identity.js";
 
+describe("immutable environment repository ownership", () => {
+  it.each([
+    "repo:old-owner@7/old-name@42:environment:dev",
+    "repo:old-owner/old-name:repository_id:42:environment:dev",
+    "repository:old-owner/old-name:repository_id:42:environment:dev"
+  ])("retains the repository ID behind an old name: %s", (subject) => {
+    expect(immutableEnvironmentRepository(subject, "dev")).toEqual({
+      repo: "old-owner/old-name",
+      repoId: 42
+    });
+  });
+  it.each([
+    "",
+    "repo:old/name:environment:dev",
+    "repo:old@7/name:environment:dev",
+    "repo:old@invalid/name@42:environment:dev",
+    "repo:old@7/name@42:environment:prod",
+    "repo:old@7/name@42:environment:*",
+    "repo:old@7/name@42:repository:other/name:environment:dev",
+    "repo:old@7/name@42:repository_id:43:environment:dev",
+    "repo:old/name:repository_id:0:environment:dev",
+    "repo:old/name:repository_id:1e2:environment:dev",
+    "repo:old/name:repository_id:99999999999999999:environment:dev",
+    "repository_id:42:environment:dev"
+  ])(
+    "does not infer ownership from incomplete or ambiguous claims: %s",
+    (subject) => {
+      expect(immutableEnvironmentRepository(subject, "dev")).toBeNull();
+    }
+  );
+});
+
 const ACCOUNT = "123456789012";
 const GITHUB = "token.actions.githubusercontent.com";
 const DEV = "repo:octo/shop:environment:dev";
 const PROD = "repo:octo/shop:environment:prod";
+
+describe("AWS CLI failure classification", () => {
+  it.each([
+    ["spawn aws ENOENT", "missing-cli"],
+    ["aws: command not found", "missing-cli"],
+    ["aws is not recognized as an internal command", "missing-cli"],
+    [
+      "Error when retrieving credentials from custom-process: credential-helper: command not found",
+      "provider-failed"
+    ],
+    ["credential_process: spawn helper ENOENT", "provider-failed"],
+    [
+      "Error when retrieving token from sso: Token has expired and refresh failed",
+      "login-required"
+    ],
+    ["Unable to locate credentials", "login-required"],
+    ["ExpiredToken", "credentials-expired"],
+    ["InvalidClientTokenId", "credentials-invalid"],
+    ["AccessDenied", "access-denied"],
+    [
+      "An error occurred (AccessDenied) when calling the AssumeRole operation: User: arn:aws:iam::123456789012:user/dev is not authorized to perform: sts:AssumeRole on resource: arn:aws:iam::123456789012:role/MFA-admin",
+      "access-denied"
+    ],
+    [
+      "Enter MFA code for arn:aws:iam::123456789012:mfa/dev:",
+      "provider-failed"
+    ],
+    ["credential process failed", "provider-failed"],
+    ["connection timed out", "timeout"],
+    ["unavailable endpoint", "command-failed"]
+  ])("classifies %s as %s", (output, failure) => {
+    expect(classifyAwsCliFailure({ output })).toBe(failure);
+  });
+
+  it("preserves a subprocess timeout over provider diagnostics", () => {
+    expect(
+      classifyAwsCliFailure({
+        output: "credential_process is waiting for input",
+        timedOut: true
+      })
+    ).toBe("timeout");
+  });
+});
 
 describe("AWS CLI version gate", () => {
   it.each([
@@ -69,19 +150,24 @@ describe("AWS CLI version gate", () => {
     });
   });
 
-  it("shows the CLI's own output when no version can be read", () => {
+  it("reports an unreadable version without echoing process output", () => {
     const result = checkAwsCliVersion("command not found: aws");
     expect(result.ok).toBe(false);
     expect(!result.ok && result.message).toContain(
-      "Could not run the AWS CLI: command not found: aws"
+      "Could not read the AWS CLI version."
+    );
+    expect(!result.ok && result.message).not.toContain("command not found");
+    expect(!result.ok && result.message).toContain("2.15.3");
+    expect(!result.ok && result.message).toContain(
+      "getting-started-install.html"
     );
     expect(parseAwsCliVersion("")).toBeNull();
   });
 
-  it("says there was no version output when the CLI printed nothing", () => {
+  it("reports an unreadable version when the CLI printed nothing", () => {
     const result = checkAwsCliVersion("  ");
     expect(!result.ok && result.message).toContain(
-      "Could not run the AWS CLI: no version output."
+      "Could not read the AWS CLI version."
     );
   });
 
@@ -133,11 +219,48 @@ describe("names and identifiers", () => {
     expect(hashed).toEqual([`octo/${"a".repeat(60)}`]);
   });
 
-  it("names the environment policy after the environment only", () => {
-    expect(buildAwsEnvironmentPolicyName("dev")).toBe("radius-deploy-dev");
-    expect(buildAwsEnvironmentPolicyName("qa:east")).toBe(
+  it("recognizes legacy policy names without using them for new policies", () => {
+    expect(buildLegacyAwsEnvironmentPolicyName("dev")).toBe(
+      "radius-deploy-dev"
+    );
+    expect(buildLegacyAwsEnvironmentPolicyName("qa:east")).toBe(
       "radius-deploy-qa-east"
     );
+  });
+
+  const hash = (value: string): string =>
+    createHash("sha256").update(value).digest("hex");
+
+  it("separates repositories and environments on a shared role", () => {
+    const names = [
+      buildAwsEnvironmentPolicyName("octo/shop", "dev", hash),
+      buildAwsEnvironmentPolicyName("octo/api", "dev", hash),
+      buildAwsEnvironmentPolicyName("octo/shop", "prod", hash),
+      buildAwsEnvironmentPolicyName("octo/shop", "qa:east", hash),
+      buildAwsEnvironmentPolicyName("octo/shop", "qa-east", hash)
+    ];
+    expect(new Set(names).size).toBe(names.length);
+    expect(names[0]).toBe("radius-deploy-dev-f5fb7acf8f59");
+  });
+
+  it("uses the same policy for case-insensitive repository and environment names", () => {
+    expect(buildAwsEnvironmentPolicyName("Octo/Shop", "DEV", hash)).toBe(
+      buildAwsEnvironmentPolicyName("octo/shop", "dev", hash)
+    );
+  });
+
+  it("keeps the identity suffix when environment names require truncation", () => {
+    const environment = "a".repeat(200);
+    const first = buildAwsEnvironmentPolicyName("octo/shop", environment, hash);
+    const second = buildAwsEnvironmentPolicyName(
+      "octo/shop",
+      `${environment}b`,
+      hash
+    );
+    expect(first).toHaveLength(128);
+    expect(first).toMatch(/-[a-f0-9]{12}$/);
+    expect(second).toHaveLength(128);
+    expect(first).not.toBe(second);
   });
 
   it.each([
@@ -662,13 +785,112 @@ describe("trust policy", () => {
 });
 
 describe("permissions and provenance", () => {
+  it.each(["us-east-2", "ap-southeast-7"])(
+    "fits 17 regional grants without account-email access in %s",
+    (region) => {
+      const policy = buildAwsEnvironmentPermissionPolicy(region);
+      expect(JSON.stringify(policy).length * 17).toBeLessThanOrEqual(10240);
+      expect(JSON.stringify(policy)).not.toContain("account:GetPrimaryEmail");
+    }
+  );
+
+  it("compact exclusions omit only access administration, preserving the EKS read APIs", () => {
+    const patterns =
+      buildAwsEnvironmentPermissionPolicy("us-east-2").Statement[0].NotAction;
+    if (!Array.isArray(patterns)) throw new Error("Missing exclusions");
+    const excluded = (action: string) =>
+      patterns.some(
+        (pattern) =>
+          typeof pattern === "string" &&
+          new RegExp(`^${pattern.replaceAll("*", ".*")}$`, "i").test(
+            `eks:${action}`
+          )
+      );
+    for (const action of [
+      "CreateAccessEntry",
+      "UpdateAccessEntry",
+      "DeleteAccessEntry",
+      "AssociateAccessPolicy",
+      "DisassociateAccessPolicy"
+    ])
+      expect(excluded(action)).toBe(true);
+    for (const action of [
+      "DescribeAccessEntry",
+      "ListAccessEntries",
+      "ListAccessPolicies",
+      "ListAssociatedAccessPolicies",
+      "DescribeCluster"
+    ])
+      expect(excluded(action)).toBe(false);
+  });
+
+  it("recognizes picked-role ownership from trust and refuses unknown trust conditions", () => {
+    const input = {
+      repo: "octo/shop",
+      environment: "dev",
+      accountId: ACCOUNT,
+      subjects: [DEV]
+    };
+    const trust = buildGitHubTrustPolicy(ACCOUNT, [DEV, PROD]);
+    expect(
+      legacyAwsPolicyOwnershipError({
+        ...input,
+        role: { AssumeRolePolicyDocument: trust }
+      })
+    ).toBeNull();
+    trust.Statement.push({
+      Effect: "Allow",
+      Principal: { Federated: githubOidcProviderArn(ACCOUNT) },
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: { Bool: { "aws:MultiFactorAuthPresent": true } }
+    });
+    expect(
+      legacyAwsPolicyOwnershipError({
+        ...input,
+        role: { AssumeRolePolicyDocument: trust }
+      })
+    ).toContain("cannot interpret");
+  });
+
   it("limits the power-user grant to the environment's region and never grants IAM", () => {
     const policy = buildAwsEnvironmentPermissionPolicy("us-west-2");
     expect(policy.Statement[0]).toMatchObject({
-      NotAction: ["iam:*", "organizations:*", "account:*"],
-      Condition: { StringEquals: { "aws:RequestedRegion": ["us-west-2"] } }
+      NotAction: [
+        "iam:*",
+        "organizations:*",
+        "account:*",
+        "eks:*teAccessEntry",
+        "eks:*AccessPolicy"
+      ],
+      Condition: { StringEquals: { "aws:RequestedRegion": "us-west-2" } }
     });
     expect(JSON.stringify(policy)).not.toContain('"iam:*"]');
+  });
+
+  it("allows only recipe service-linked-role creation and never adds a deny", () => {
+    const policy = buildAwsEnvironmentPermissionPolicy("us-east-2");
+    expect(
+      policy.Statement.every((statement) => statement.Effect === "Allow")
+    ).toBe(true);
+    expect(policy.Statement[1].Action).not.toContain(
+      "iam:CreateServiceLinkedRole"
+    );
+    expect(JSON.stringify(policy)).not.toContain("iam:DeleteServiceLinkedRole");
+    expect(policy.Statement[1]).not.toHaveProperty("Condition");
+    expect(policy.Statement[2]).toEqual({
+      Effect: "Allow",
+      Action: "iam:CreateServiceLinkedRole",
+      Resource: "*",
+      Condition: {
+        StringEquals: {
+          "iam:AWSServiceName": [
+            "rds.amazonaws.com",
+            "elasticache.amazonaws.com",
+            "opensearchservice.amazonaws.com"
+          ]
+        }
+      }
+    });
   });
 
   it("skips malformed role tags", () => {
@@ -1035,6 +1257,36 @@ describe("subjectNamesRepository", () => {
     ["", false]
   ])("%s names a repository: %s", (subject, names) => {
     expect(subjectNamesRepository(subject)).toBe(names);
+  });
+});
+
+describe("repositoryLessSubjectMessage", () => {
+  it("names the subjects, the claim keys, and the fix", () => {
+    expect(
+      repositoryLessSubjectMessage(
+        ["repository_owner:octo:environment:dev"],
+        "octo/shop",
+        { useDefault: false, includeClaimKeys: ["repository_owner", "context"] }
+      )
+    ).toBe(
+      "GitHub's OIDC subject for this environment, repository_owner:octo:environment:dev, does not name the repository, because the OIDC subject customization for octo/shop, set on the repository or its organization, includes only the claims repository_owner, context. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry."
+    );
+  });
+
+  it("lists several subjects and leaves out claim keys GitHub did not report", () => {
+    const message = repositoryLessSubjectMessage(
+      ["environment:dev", "environment:prod"],
+      "octo/shop",
+      { useDefault: false }
+    );
+
+    expect(message).toContain(
+      "this environment, environment:dev, environment:prod, does not name"
+    );
+    expect(message).toContain(
+      "customization for octo/shop, set on the repository or its organization. Other"
+    );
+    expect(message).not.toContain("includes only");
   });
 });
 

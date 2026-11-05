@@ -150,6 +150,7 @@ export interface EnvironmentDeletionPorts {
     // Empty when the environment did not record its cluster.
     region: string;
     cluster: string;
+    policyName?: string;
     operationId: string;
     // Called on every poll while another run holds the lock, with a progress
     // line when there is something new to say.
@@ -442,6 +443,9 @@ export async function runEnvironmentDeletion(
         trustSubjects,
         region: String(op.request?.region || ""),
         cluster: String(op.request?.cluster || ""),
+        ...(op.request?.policyName !== undefined ?
+          { policyName: String(op.request.policyName) }
+        : {}),
         operationId: op.operationId,
         // Shown on the deletion's progress, where Remove lock is offered.
         waiting: async (wait, line) => {

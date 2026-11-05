@@ -124,8 +124,12 @@ import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identi
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
-import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
+import {
+  createEnvironmentProviderReader,
+  createEnvironmentTargetReader
+} from "./server/services/environment-target.js";
 import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
+import { requireCurrentAwsWorkflows } from "./server/services/aws-workflow-compatibility.js";
 import {
   appParams,
   resolveDeployParams,
@@ -757,6 +761,7 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   runSessionPrompt: (prompt) =>
     invokeSessionPrompt(sessionPromptHandler, prompt),
   runCommand: (command, args, options) => runCommand(command, args, options),
+  runAws: (args) => runCliCommand("aws", args, 15000),
   errorMessage
 });
 
@@ -1121,7 +1126,9 @@ function kickoffWorkflowSync(
 // copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
 // scoped to just the workflow about to run (`only`), authors a missing file
 // (`create`), and is awaited so any create/update lands before the dispatch —
-// but a sync failure never blocks the dispatch (we log and proceed). `provider`
+// but Azure keeps its best-effort behavior. AWS provider workflows must pass
+// read-back verification before dispatch because older copies administer EKS
+// access that the deployment role no longer grants. `provider`
 // may be "" when unknown; deploy and delete workflow content is
 // provider-agnostic, so it only matters for verify. `workingBranch` (when it
 // matches the repo) is synced alongside the default branch so a
@@ -1140,6 +1147,11 @@ async function ensureWorkflowsCurrent(
 }> {
   if (!repo || !environment || !only || only.length === 0)
     return { created: [], updated: [], failed: [] };
+  let result: Awaited<ReturnType<typeof ensureWorkflowsCurrent>> = {
+    created: [],
+    updated: [],
+    failed: []
+  };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -1165,7 +1177,7 @@ async function ensureWorkflowsCurrent(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
-    return {
+    result = {
       // Downstream dispatchers use this list only to decide whether GitHub may
       // still be registering a workflow, including one created concurrently.
       created: [
@@ -1176,8 +1188,27 @@ async function ensureWorkflowsCurrent(
     };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
-    return { created: [], updated: [], failed: [] };
   }
+  if (includeAws) {
+    await requireCurrentAwsWorkflows(
+      { provider, files: only, workingBranch },
+      {
+        environmentProvider: () =>
+          createEnvironmentProviderReader(runCommand)(repo, environment),
+        defaultBranch: () => getDefaultBranch(repo),
+        templates: async () => ({
+          ...(await workflowTemplates(true).deploy(
+            environment,
+            ".radius/app.bicep"
+          )),
+          ...(await workflowTemplates(true).delete(environment))
+        }),
+        readFile: (path, branch) => fetchFileFromRepo(repo, path, branch),
+        errorMessage
+      }
+    );
+  }
+  return result;
 }
 
 // no access to the SDK `session`, so when a graph/generate route finds no
@@ -4350,7 +4381,7 @@ export function createEnvironmentOperationExecution(
       const setup = await githubAccountCoordinator.withSelectedAccount(
         selectedLogin,
         { ownerKey: accountContext.ownerKey, operationId },
-        async (executor) => {
+        async (executor, lease) => {
           releaseExecutor = accountContext.registerExecutor(
             operationId,
             executor
@@ -4462,13 +4493,57 @@ export function createEnvironmentOperationExecution(
                 );
               }
             },
-            setupAwsDeployIdentity: (operation, input, selectedExecutor) => {
+            // The deploy identity lock wait has no deadline, so AWS setup
+            // gives up the GitHub account lease while it runs. It takes the
+            // lease back for Configure environment, which runs gh as the
+            // selected account. No lease holder waits for the deploy identity
+            // lock this setup holds. A failed or paused AWS setup never needs
+            // the lease again.
+            setupAwsDeployIdentity: async (
+              operation,
+              input,
+              selectedExecutor
+            ) => {
+              // Returned as an AWS setup failure, so setup cleans up.
+              const switchFailure = (error: unknown) => ({
+                ok: false as const,
+                status: 409,
+                error: errorMessage(error),
+                code: "github-account-switch-failed"
+              });
+
+              // Entered before the release, so a failed release fails this
+              // stage.
+              enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+
+              try {
+                await lease.release();
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              // Shutdown can start while the release restores the account.
               assertSetupExecutionActive(attachment.isShuttingDown);
-              return awsEnvironmentAccess.setup(
+              const result = await awsEnvironmentAccess.setup(
                 operation,
                 input,
                 selectedExecutor
               );
+
+              if (!result.ok) return result;
+
+              try {
+                await lease.retake(() => {
+                  addLegacyStep(
+                    operation,
+                    "⏳ Waiting for another Radius run to finish with the GitHub CLI account."
+                  );
+                });
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              return result;
             },
             // Runs during shutdown too: a lock left behind blocks every other
             // run on this deploy identity until someone removes it.
@@ -5638,6 +5713,7 @@ export function createProductionCanvasServerRuntime(
       isStopRequested: shouldStop,
       operationId: (operation) => operation.operationId,
       operations: {
+        getContext: (operation) => operation.context ?? {},
         enterStage,
         setStageState,
         addLegacyStep,
@@ -5660,6 +5736,7 @@ export function createProductionCanvasServerRuntime(
   );
   const githubSelectionHandles = createGitHubSelectionHandleStore();
   const identityProfilesRoutes = createIdentityProfilesRoutes({
+    runAws: (args) => runCliCommand("aws", args, 15000),
     listCredentialProfiles,
     saveCredentialProfile,
     deleteCredentialProfile,

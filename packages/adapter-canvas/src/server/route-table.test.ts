@@ -185,6 +185,9 @@ const productionHandlers = {
   }),
   ...createAwsDiscoveryRoutes({ runCli: () => Promise.resolve("") }),
   ...createIdentityProfilesRoutes({
+    runAws: async () => {
+      throw new Error("AWS not scripted");
+    },
     listCredentialProfiles: () => [],
     saveCredentialProfile: () => null,
     deleteCredentialProfile: () => false,
@@ -225,6 +228,9 @@ const productionHandlers = {
     errorMessage: (error) => String(error)
   }),
   ...createIdentityAuthRoutes({
+    runAws: async () => {
+      throw new Error("AWS not scripted");
+    },
     azureCredentialIdValidationError: () => "",
     azureLoginRequiredResponse: () => ({
       error: "",

@@ -704,6 +704,43 @@ function trackDeletions(): {
 }
 
 describe("the async delete route through its background runner", () => {
+  it("schedules AWS deletion using the saved policy identity, never the request's replacement name", async () => {
+    let captured: unknown;
+    const policyName = "radius-deploy-dev-111111111111";
+    const harness = await start(listingScript("7\tdev"), {
+      awsEnabled: true,
+      discoverEnvironmentTarget: createEnvironmentTargetReader(
+        async () =>
+          `AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/picked\nAWS_TRUST_SUBJECTS\t["repo:old/name:environment:dev"]\nAWS_PERMISSION_POLICY_NAME\t${policyName}`
+      ),
+      createOperation,
+      buildDeleteStages,
+      startOperation: (op) => ({ ok: true, operation: op }),
+      toClientView,
+      persistOperations: async () => {},
+      scheduleEnvironmentOperation: (_instance, op) => {
+        captured = op.request;
+        return true;
+      }
+    });
+    const response = await fetch(`${harness.baseUrl}/api/delete-environment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo: REPO,
+        environment: "dev",
+        policyName: "client-replacement"
+      })
+    });
+    expect(response.status).toBe(202);
+    expect(captured).toMatchObject({
+      repo: REPO,
+      provider: "aws",
+      policyName,
+      trustSubjects: ["repo:old/name:environment:dev"]
+    });
+  });
+
   /** A deferred the test resolves once the scheduled runner has finished. */
   function deferred(): { promise: Promise<void>; resolve: () => void } {
     let resolve = (): void => {};
@@ -1101,9 +1138,18 @@ describe("the async delete route through its background runner", () => {
       }
     };
     const awsAnswers: Record<string, unknown> = {
+      "--version": "aws-cli/2.17.0 Python/3.11 Darwin/23",
       "iam create-policy": lock,
       "iam get-policy": lock,
       "iam delete-policy": "",
+      "iam list-role-policies": { PolicyNames: ["radius-deploy-dev"] },
+      "iam get-role-policy": {
+        PolicyName: "radius-deploy-dev",
+        PolicyDocument: {
+          Version: "2012-10-17",
+          Statement: [{ Effect: "Allow", Action: "ec2:*", Resource: "*" }]
+        }
+      },
       "sts get-caller-identity": { Account: account },
       "iam get-role": {
         Role: {
@@ -1190,6 +1236,7 @@ describe("the async delete route through its background runner", () => {
       isStopRequested: () => false,
       operationId: () => "",
       operations: {
+        getContext: () => ({}),
         enterStage: () => {},
         setStageState: () => {},
         addLegacyStep: () => {},

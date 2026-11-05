@@ -9,6 +9,7 @@ import {
   type AwsLockHolder
 } from "@radius-project/core";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
+import { verifyAwsCliSession } from "./aws-cli-session.js";
 
 // The lock a Radius run takes before it reads and rewrites a deploy identity's
 // trust policy. Setup and delete take it today, and Repair takes it in the
@@ -515,35 +516,9 @@ export async function removeAwsDeployIdentityLock(
   }
   // Read in another account, the lock would look missing and the removal would
   // report success while the real lock stays.
-  const identity = await runAws([
-    "sts",
-    "get-caller-identity",
-    "--output",
-    "json"
-  ]);
-  let sessionAccount = "";
-  try {
-    const caller: unknown = JSON.parse(identity.stdout || "null");
-    if (isRecord(caller) && typeof caller.Account === "string") {
-      sessionAccount = caller.Account;
-    }
-  } catch {
-    sessionAccount = "";
-  }
-  if (!succeeded(identity)) {
-    return {
-      ok: false,
-      code: "aws-cli-login-required",
-      message: `Radius could not read the AWS CLI session (${detail(identity)}), so it removed nothing. Run "aws sso login" (or "aws configure"), then try again.`
-    };
-  }
-  if (sessionAccount !== account[1]) {
-    return {
-      ok: false,
-      code: "aws-account-mismatch",
-      message: `Your AWS CLI session is signed in to account ${sessionAccount || "(unknown)"}, but the lock is in account ${account[1]}. Sign in to account ${account[1]}, then try again. Nothing was removed.`
-    };
-  }
+  const session = await verifyAwsCliSession({ accountId: account[1] }, runAws);
+  if (!session.ok)
+    return { ok: false, code: session.code, message: session.message };
   const get = await runAws([
     "iam",
     "get-policy",

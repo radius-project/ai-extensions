@@ -101,6 +101,9 @@ function dependencies(
   overrides: Partial<IdentityProfilesDependencies> = {}
 ): IdentityProfilesDependencies {
   return {
+    runAws: async () => {
+      throw new Error("runAws not stubbed");
+    },
     listCredentialProfiles: () => {
       throw new Error("listCredentialProfiles not stubbed");
     },
@@ -578,6 +581,66 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
   });
 
   // ── POST /api/save-credential-profile (SU-07) ──────────────────────────────
+
+  it("persists normalized AWS identifiers and replaces a forged user with the STS identity", async () => {
+    const saves: { repo: string; profile: unknown }[] = [];
+    const commands: string[][] = [];
+    const input = {
+      repo: "  octo/app  ",
+      name: "  prod  ",
+      provider: "aws",
+      accountId: " 123456789012 ",
+      region: " us-west-2 ",
+      user: "forged-user"
+    };
+    const recording = await run(
+      "POST",
+      "/api/save-credential-profile",
+      JSON.stringify(input),
+      handleSaveCredentialProfile,
+      dependencies({
+        runAws: async (args) => {
+          commands.push(args);
+          if (args[0] === "--version") {
+            return { code: 0, stdout: "aws-cli/2.39.0", stderr: "" };
+          }
+          expect(args).toEqual([
+            "sts",
+            "get-caller-identity",
+            "--output",
+            "json",
+            "--region",
+            "us-west-2"
+          ]);
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              Account: "123456789012",
+              Arn: "arn:aws:iam::123456789012:user/verified-user"
+            }),
+            stderr: ""
+          };
+        },
+        saveCredentialProfile: (repo, profile) => {
+          saves.push({ repo, profile });
+          return { name: "prod", provider: "aws", status: "verified" };
+        }
+      })
+    );
+    expect(recording.status).toBe(200);
+    expect(commands).toHaveLength(2);
+    expect(saves).toEqual([
+      {
+        repo: "octo/app",
+        profile: {
+          ...input,
+          accountId: "123456789012",
+          region: "us-west-2",
+          user: "verified-user"
+        }
+      }
+    ]);
+  });
 
   it("saves a profile and echoes what the store returned", async () => {
     const saves: { repo: string; profile: unknown }[] = [];

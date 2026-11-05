@@ -997,6 +997,32 @@ describe("production environment owner HTTP binding", () => {
     }
   );
 
+  it("refuses a subject without the repository before running the AWS CLI", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" }
+    });
+    const runtime = awsSetupRuntime({
+      use_default: false,
+      include_claim_keys: ["repository_owner", "context"]
+    });
+    try {
+      const op = await runAwsSetup(runtime, "op_aws_shared_subject");
+
+      expect(await aws.calls()).toEqual([]);
+      expect(op.state).toBe("failed");
+      expect(op.failure.code).toBe("aws-subject-not-repository-specific");
+      expect(op.failure.message).toContain(
+        "repository_owner:fixture:environment:dev, does not name the repository"
+      );
+      expect(op.failure.message).toContain(
+        "includes only the claims repository_owner, context."
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
   it("runs the AWS CLI on PATH for AWS deploy identity setup", async () => {
     // Answers the version check, then refuses the sign-in check so setup
     // stops before anything could be written.
@@ -1009,10 +1035,11 @@ describe("production environment owner HTTP binding", () => {
 
       expect(await aws.calls()).toEqual([
         "--version",
-        "sts get-caller-identity --output json"
+        "sts get-caller-identity --output json --region us-west-2"
       ]);
       expect(op.state).toBe("failed");
-      expect(op.failure.message).toContain("fake aws: refused");
+      expect(op.failure.message).toContain("AWS CLI verification failed");
+      expect(op.failure.message).not.toContain("fake aws: refused");
       expect(op.failure.message).toContain("Nothing was created in AWS.");
     } finally {
       await runtime.stopServer("aws-panel", true);
@@ -1053,6 +1080,7 @@ describe("production environment owner HTTP binding", () => {
 
   it("removes exactly the AWS lock a waiting run was shown, through the AWS CLI on PATH", async () => {
     const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.39.0" },
       "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
       "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK0"}}' },
       "iam delete-policy": { stdout: "" }
@@ -1099,6 +1127,7 @@ describe("production environment owner HTTP binding", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ code: "aws-lock-removed" });
       expect(await aws.calls()).toEqual([
+        "--version",
         "sts get-caller-identity --output json",
         `iam get-policy --policy-arn ${lockArn} --output json`,
         `iam delete-policy --policy-arn ${lockArn}`
@@ -1479,6 +1508,8 @@ interface FakeAwsAnswer {
 async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
   const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
   const log = path.join(fakeBin, "calls.log");
+  // Created up front, so a run that never calls `aws` reads as no calls.
+  await fs.writeFile(log, "");
   const originalPath = process.env.PATH;
   const originalPathExt = process.env.PATHEXT;
   const originalLog = process.env.FAKE_AWS_LOG;
@@ -1553,8 +1584,9 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
 }
 
 // A canvas runtime with the AWS switch on whose GitHub account answers the
-// reads AWS setup makes for fixture/app.
-function awsSetupRuntime() {
+// reads AWS setup makes for fixture/app. `subjectCustomization` is GitHub's
+// OIDC subject customization for it; by default it has none.
+function awsSetupRuntime(subjectCustomization?: unknown) {
   const run = vi.fn(async (args: string[]) => {
     const command = args.join(" ");
     if (command === "api user") {
@@ -1585,7 +1617,9 @@ function awsSetupRuntime() {
       return { code: 0, stdout: '{"variables":[]}', stderr: "" };
     }
     if (command === "api /repos/fixture/app/actions/oidc/customization/sub") {
-      return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      return subjectCustomization ?
+          { code: 0, stdout: JSON.stringify(subjectCustomization), stderr: "" }
+        : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
     }
     throw new Error(`Unexpected selected command: ${command}`);
   });

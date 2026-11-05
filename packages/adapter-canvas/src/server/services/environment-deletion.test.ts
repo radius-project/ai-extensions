@@ -607,7 +607,7 @@ describe("runEnvironmentDeletion — AWS", () => {
     );
   });
 
-  it("keeps the role, recorded subjects, and cluster across a restart and a retry", async () => {
+  it("keeps the role, cluster, subjects and exact policy name across a restart and a retry", async () => {
     const subjects = [
       "repo:octo/app:environment:dev",
       "repo:octo@7/app@42:environment:dev"
@@ -619,7 +619,11 @@ describe("runEnvironmentDeletion — AWS", () => {
         )
       );
     const op = makeAwsOp();
-    op.request = { ...op.request, trustSubjects: subjects };
+    op.request = {
+      ...op.request,
+      trustSubjects: subjects,
+      policyName: "radius-deploy-dev-111111111111"
+    };
     // The extension stops after the Radius environment is gone, inside the
     // role cleanup stage.
     setStageState(op, STAGE_DELETE_RADIUS_ENV, "succeeded");
@@ -655,6 +659,7 @@ describe("runEnvironmentDeletion — AWS", () => {
       environment: "dev",
       roleArn: ROLE_ARN,
       trustSubjects: subjects,
+      policyName: "radius-deploy-dev-111111111111",
       region: "us-west-2",
       cluster: "shop",
       operationId: retried.operationId
@@ -1086,7 +1091,7 @@ describe("runEnvironmentDeletion — AWS", () => {
 describe("runEnvironmentDeletion — best-effort warnings", () => {
   it("fails closed and stops before cleanup when the radius env delete fails", async () => {
     const op = makeOp({ provider: "aws", includeAzureCleanup: false });
-    const ports = makePorts({
+    const { log: _log, ...ports } = makePorts({
       deleteRadiusEnvironment: vi.fn(async () => ({
         outcome: "failed" as const,
         detail: "workflow failed"
