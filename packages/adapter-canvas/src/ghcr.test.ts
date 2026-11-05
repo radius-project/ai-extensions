@@ -631,6 +631,21 @@ test.each(["token", "username"])(
   }
 );
 
+test("withGhcrDockerConfig does not invoke the publish callback when credential loading fails", async () => {
+  const publish = vi.fn();
+
+  await assert.rejects(
+    withGhcrDockerConfig(publish, {
+      loadCredentials: async () => {
+        throw new Error("credential unavailable");
+      }
+    }),
+    /credential unavailable/
+  );
+
+  assert.equal(publish.mock.calls.length, 0);
+});
+
 test("uses the real keyring process binding for default package and publish credentials without ambient authority", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "radius-keyring-test-"));
   const executable = path.join(

@@ -5712,6 +5712,7 @@ export interface ProductionCanvasServerRuntimeOptions {
   accountContext: EnvironmentAccountContext;
   environmentOperationRunner?: EnvironmentOperationRunner;
   environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
+  cliExec?: typeof cliExec;
   // The developer-only AWS switch, read once by the composition root. Off, AWS
   // stays hidden: no AWS provider, no AWS environment create or delete, and no
   // AWS workflows committed to the repository.
@@ -5734,7 +5735,8 @@ export function createProductionCanvasServerRuntime(
     accountContext,
     environmentDeletionPorts,
     serverDependencies,
-    awsEnabled
+    awsEnabled,
+    cliExec: cliExecPort = cliExec
   } = options;
   if (!executionOwner)
     throw new Error("Missing canvas server dependency: executionOwner");
@@ -5747,7 +5749,7 @@ export function createProductionCanvasServerRuntime(
     createAwsEnvironmentAccess<EnvironmentOperationRecord>({
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
-      environments: createGhNamespaceClaimsPorts(cliExec),
+      environments: createGhNamespaceClaimsPorts(cliExecPort),
       sleep: sleepMs,
       now: () => Date.now(),
       isStopRequested: shouldStop,
@@ -5766,7 +5768,9 @@ export function createProductionCanvasServerRuntime(
           touchOperation(operation);
         }
       },
-      store: operations,
+      // Read through the live binding: the extension configures the
+      // file-backed registry after this runtime is created.
+      store: { persist: () => operations.persist() },
       journal: createAwsSetupJournal<EnvironmentOperationRecord>({
         runAws: runAwsCli,
         persist: () => operations.persist(),
@@ -5894,7 +5898,7 @@ export function createProductionCanvasServerRuntime(
     canDismissOperation,
     dismissOperation,
     persistOperations: () => operations.persist(),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     errorMessage,
     inputRequiredState: INPUT_REQUIRED_STATE
@@ -5957,7 +5961,7 @@ export function createProductionCanvasServerRuntime(
       latest: (repo) => operations.latest(repo),
       latestAny: () => operations.latestAny(),
       get: (operationId) => operations.get(operationId),
-      toClientView,
+      toClientView: (record: any) => toClientView(record, { awsEnabled }),
       productVersion: resolveGeneratorVersion,
       now: () => Date.now()
     },
@@ -6091,7 +6095,7 @@ export function createProductionCanvasServerRuntime(
   // injected rather than copied.
   const repositoriesRoutes = createRepositoriesRoutes({
     cliExec: (command, args, options, callback) => {
-      cliExec(command, args, options, callback);
+      cliExecPort(command, args, options, callback);
     },
     readInstanceState: (instanceId) =>
       canvasServer.instances.get(instanceId)?.state,
@@ -6139,7 +6143,7 @@ export function createProductionCanvasServerRuntime(
       new Promise((resolve) => {
         const opts: CliOptions = { timeout };
         if (extraEnv) opts.env = extraEnv;
-        cliExec("gh", args, opts, (err, stdout, stderr) => {
+        cliExecPort("gh", args, opts, (err, stdout, stderr) => {
           resolve(toGhCommandResult(err, stdout, stderr, { trimStdout: true }));
         });
       }),
@@ -6522,10 +6526,10 @@ export function createProductionCanvasServerRuntime(
     createOperation,
     buildDeleteStages: (options) => buildDeleteStages(options),
     startOperation: (op) => operations.start(op),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     cliExec: (command, args, options, callback) => {
-      cliExec(command, args, options, callback);
+      cliExecPort(command, args, options, callback);
     },
     activeDeleteEnvironment: (repo) => {
       const op = operations.latest(repo);
@@ -6596,7 +6600,7 @@ export function createProductionCanvasServerRuntime(
     getSelectedGitHubExecutor: (operationId) =>
       accountContext.getExecutor(operationId),
     cliExec: (command, args, options, callback) =>
-      cliExec(command, args, options, callback),
+      cliExecPort(command, args, options, callback),
     readProcessEnv: () => process.env,
     isValidRepoSlug,
     getOperation: (operationId) => operations.get(operationId),

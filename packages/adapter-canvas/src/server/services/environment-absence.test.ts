@@ -3,6 +3,7 @@ import {
   ENVIRONMENT_PAGE_SIZE,
   environmentListingArgs,
   environmentNameFromApiPath,
+  environmentProviderIdFrom,
   environmentsApiPath,
   isNotFoundResponse,
   proveEnvironmentAbsent
@@ -63,6 +64,21 @@ describe("deriving the environments listing a delete path belongs to", () => {
   it("names the listing and the environment the path targets", () => {
     expect(environmentsApiPath(PATH)).toBe(`/repos/${REPO}/environments`);
     expect(environmentNameFromApiPath(PATH)).toBe(NAME);
+  });
+
+  describe("reading GitHub environment provider ids", () => {
+    it.each([
+      [JSON.stringify({ id: 42 }), "42"],
+      [JSON.stringify({ id: "  environment-id  " }), "environment-id"],
+      [JSON.stringify({ node_id: "  node-id  " }), "node-id"],
+      [JSON.stringify({ id: Number.POSITIVE_INFINITY }), ""],
+      [JSON.stringify({ id: " ", node_id: "" }), ""],
+      [JSON.stringify(null), ""],
+      ["{invalid", ""],
+      [undefined, ""]
+    ])("reads %j as %j", (stdout, expected) => {
+      expect(environmentProviderIdFrom(stdout)).toBe(expected);
+    });
   });
 
   it("decodes the environment back to the name a listing reports", () => {
@@ -268,6 +284,42 @@ describe("an environment whose name was reused after the delete", () => {
       recordedProviderId: "100",
       ports: {
         listEnvironments: async () => listing(["dev"]),
+        readEnvironment: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ name: "dev" }),
+          stderr: ""
+        })
+      }
+    });
+
+    expect(proof.state).toBe("unknown");
+  });
+
+  it("confirms absence when the exact-name read returns a replacement id", async () => {
+    const proof = await proveEnvironmentAbsent({
+      repo: "octo/app",
+      name: "dev",
+      recordedProviderId: "100",
+      ports: {
+        listEnvironments: async () => listing(["prod"]),
+        readEnvironment: async () => ({
+          code: "0",
+          stdout: JSON.stringify({ name: "dev", node_id: "replacement" }),
+          stderr: ""
+        })
+      }
+    });
+
+    expect(proof.state).toBe("absent");
+  });
+
+  it("refuses absence when the exact-name read has no readable provider id", async () => {
+    const proof = await proveEnvironmentAbsent({
+      repo: "octo/app",
+      name: "dev",
+      recordedProviderId: "100",
+      ports: {
+        listEnvironments: async () => listing(["prod"]),
         readEnvironment: async () => ({
           code: 0,
           stdout: JSON.stringify({ name: "dev" }),

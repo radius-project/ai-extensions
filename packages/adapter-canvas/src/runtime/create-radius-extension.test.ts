@@ -484,6 +484,23 @@ describe("RU-19: onSessionStart hook", () => {
 
     expect(() => ext.attachSession(session)).not.toThrow();
   });
+
+  it("does not leak an asynchronous startup diagnostic logging failure", async () => {
+    const fake = createFakeDependencies();
+    const ext = createRadiusExtension(fake.deps);
+    (
+      fake.deps.workspace.hasRadiusApplicationModel as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(new Error("worktree still materializing"));
+    await ext.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    const session = createFakeSession({
+      log: vi.fn(() => Promise.reject(new Error("log unavailable")))
+    });
+
+    expect(() => ext.attachSession(session)).not.toThrow();
+    await Promise.resolve();
+  });
 });
 
 describe("RU-19: host-channel callback wiring (context/permission/session)", () => {

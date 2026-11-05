@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     include: [
       "src/deploy-artifacts.test.ts",
+      "src/promote-app-model.test.ts",
+      "../core/src/modeling/app-staging.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
       "../core/src/workflow-read-policy.test.ts",
       "../core/src/setup-{admission,boundary,provider-configuration}.test.ts",
@@ -13,6 +15,7 @@ export default defineConfig({
       "src/server/routes/operations-{control,status}.test.ts",
       "../core/src/setup-{coordinator,github-environment*}.test.ts",
       "src/server/services/environment-operation.test.ts",
+      "src/server/services/radius-environment-workflow-deletion.test.ts",
       "src/server/services/{azure-setup,configure-environment,setup-outcome}.test.ts",
       "src/server/services/azure-setup-orchestration.test.ts",
       "src/server/services/azure-setup-recovery.test.ts",

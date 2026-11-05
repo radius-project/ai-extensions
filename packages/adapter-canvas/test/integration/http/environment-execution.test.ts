@@ -1713,6 +1713,86 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it("saves the AWS lock to the operation store configured after the runtime, before reading the role", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout:
+          '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+      },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": {
+        stderr: "An error occurred (AccessDenied) when calling GetRole",
+        code: 254
+      },
+      "iam delete-policy": { stdout: "" }
+    });
+    // Created first, as extension.ts does at module load.
+    const runtime = awsSetupRuntime();
+    const lockSaves: string[][] = [];
+    await configureOperationStore({
+      load: async () => null,
+      save: async (envelope) => {
+        const held = JSON.stringify(envelope.operations).includes(
+          '"policyId":"LOCK1"'
+        );
+        if (held) lockSaves.push(await aws.calls());
+      }
+    });
+    try {
+      await runAwsSetup(runtime, "op_aws_saved_lock");
+      expect(lockSaves.length).toBeGreaterThan(0);
+      expect(lockSaves[0]).not.toContainEqual(
+        expect.stringMatching(/^iam get-role /)
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it.each([
+    [true, "releases the lock it holds"],
+    [false, "The lock it holds on the deploy identity stays"]
+  ])(
+    "projects the AWS switch (%s) into the status route's exit wording",
+    async (awsEnabled, wording) => {
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: createEnvironmentExecutionOwner(),
+        awsEnabled
+      });
+      try {
+        const entry = await runtime.getOrCreateServer("aws-off", "environment");
+        const op = createOperation({
+          operationId: "op_aws_switch_view",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        setContext(op, {
+          awsDeployIdentityLock: {
+            policyArn:
+              "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app",
+            policyId: "LOCK0"
+          }
+        });
+        finish(op, "failed");
+        operations.put(op);
+        const status = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}`
+        );
+        const exit = (await status.json()).operation.actions.find(
+          (action: { id: string }) => action.id === "exit-setup"
+        );
+        expect(exit.description).toContain(wording);
+      } finally {
+        await runtime.stopServer("aws-off", true);
+      }
+    }
+  );
+
   it("continues a restarted AWS setup from its saved request, taking back its own lock", async () => {
     const lockArn =
       "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
@@ -1729,16 +1809,23 @@ describe("production environment owner HTTP binding", () => {
         stdout:
           '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
       },
-      "iam create-policy": {
-        stderr:
-          "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
-        code: 254
-      },
-      "iam get-policy": {
-        stdout: JSON.stringify({
-          Policy: { PolicyId: "LOCK0", Description: mine }
-        })
-      },
+      // Its own earlier lock is there, so it is replaced with a fresh one.
+      "iam create-policy": [
+        {
+          stderr:
+            "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
+          code: 254
+        },
+        { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' }
+      ],
+      "iam get-policy": [
+        {
+          stdout: JSON.stringify({
+            Policy: { PolicyId: "LOCK0", Description: mine }
+          })
+        },
+        { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' }
+      ],
       "iam get-role": {
         stderr: "An error occurred (AccessDenied) when calling GetRole",
         code: 254
@@ -1809,17 +1896,23 @@ describe("production environment owner HTTP binding", () => {
       await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
         timeout: 15000
       });
-      // Released after Authorize ends, which is after the record ends.
+      // Released after Authorize ends, which is after the record ends. The
+      // first delete replaced the earlier lock; the second is the release.
       await vi.waitFor(
         async () =>
-          expect(await aws.calls()).toContain(
-            `iam delete-policy --policy-arn ${lockArn}`
-          ),
+          expect(
+            (await aws.calls()).filter(
+              (call) => call === `iam delete-policy --policy-arn ${lockArn}`
+            )
+          ).toHaveLength(2),
         { timeout: 15000 }
       );
 
       const calls = await aws.calls();
       expect(calls.filter((call) => call.startsWith("iam "))).toEqual([
+        expect.stringMatching(/^iam create-policy /),
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        `iam delete-policy --policy-arn ${lockArn}`,
         expect.stringMatching(/^iam create-policy /),
         `iam get-policy --policy-arn ${lockArn} --output json`,
         "iam get-role --role-name radius-deploy-fixture-app --output json",
@@ -2331,9 +2424,12 @@ interface FakeAwsAnswer {
 
 /**
  * Put a fake `aws` first on PATH. It logs every call and answers by its first
- * two words; anything else is refused, so setup stops rather than writes.
+ * two words; anything else is refused, so setup stops rather than writes. A
+ * list answers successive calls in order, repeating its last entry.
  */
-async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
+async function fakeAwsOnPath(
+  answers: Record<string, FakeAwsAnswer | FakeAwsAnswer[]>
+) {
   const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
   const log = path.join(fakeBin, "calls.log");
   // Created up front, so a run that never calls `aws` reads as no calls.
@@ -2341,14 +2437,35 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
   const originalPath = process.env.PATH;
   const originalPathExt = process.env.PATHEXT;
   const originalLog = process.env.FAKE_AWS_LOG;
-  const shCases = Object.entries(answers).map(([command, answer]) =>
-    [
+  const shAnswer = (answer: FakeAwsAnswer, indent: string) => [
+    ...(answer.stdout ? [`${indent}printf '%s\\n' '${answer.stdout}'`] : []),
+    ...(answer.stderr ?
+      [`${indent}printf '%s\\n' '${answer.stderr}' >&2`]
+    : []),
+    `${indent}exit ${answer.code ?? 0}`
+  ];
+  const shCases = Object.entries(answers).map(([command, answer]) => {
+    if (!Array.isArray(answer)) {
+      return [
+        `  ${JSON.stringify(command)})`,
+        ...shAnswer(answer, "    "),
+        "    ;;"
+      ].join("\n");
+    }
+    // The log already holds this call, so the count is its 1-based turn.
+    return [
       `  ${JSON.stringify(command)})`,
-      ...(answer.stdout ? [`    printf '%s\\n' '${answer.stdout}'`] : []),
-      ...(answer.stderr ? [`    printf '%s\\n' '${answer.stderr}' >&2`] : []),
-      `    exit ${answer.code ?? 0} ;;`
-    ].join("\n")
-  );
+      `    n=$(grep -c -e "^${command}" "$FAKE_AWS_LOG")`,
+      "    case $n in",
+      ...answer.flatMap((entry, index) => [
+        index === answer.length - 1 ? "      *)" : `      ${index + 1})`,
+        ...shAnswer(entry, "        "),
+        "        ;;"
+      ]),
+      "    esac",
+      "    ;;"
+    ].join("\n");
+  });
   await fs.writeFile(
     path.join(fakeBin, "aws"),
     [
@@ -2374,7 +2491,15 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
       `const answers = ${JSON.stringify(answers)};`,
       "const args = process.argv.slice(2);",
       'fs.appendFileSync(process.env.FAKE_AWS_LOG, `${args.join(" ")}\\n`);',
-      'const answer = answers[args.slice(0, 2).join(" ")];',
+      'const key = args.slice(0, 2).join(" ");',
+      "const listed = answers[key];",
+      "const turn = fs",
+      '  .readFileSync(process.env.FAKE_AWS_LOG, "utf8")',
+      "  .split(/\\r?\\n/)",
+      "  .filter((line) => line.startsWith(key)).length;",
+      "const answer = Array.isArray(listed)",
+      "  ? listed[Math.min(turn, listed.length) - 1]",
+      "  : listed;",
       "if (answer) {",
       "  if (answer.stdout) console.log(answer.stdout);",
       "  if (answer.stderr) console.error(answer.stderr);",

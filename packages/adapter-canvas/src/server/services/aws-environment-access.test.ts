@@ -2081,8 +2081,11 @@ describe("the deploy identity lock during setup", () => {
     });
     const h = harness({
       ...happyPath,
-      "iam create-policy": EXISTS,
-      "iam get-policy": lockPolicy("LOCK0", { Description: MINE })
+      "iam create-policy": [EXISTS, lockPolicy("LOCK1")],
+      "iam get-policy": [
+        lockPolicy("LOCK0", { Description: MINE }),
+        lockPolicy("LOCK1")
+      ]
     });
     h.contexts.set("op-1", {
       awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
@@ -2096,9 +2099,11 @@ describe("the deploy identity lock during setup", () => {
       `🔒 Took back the lock this setup holds on IAM role ${ROLE} from its earlier attempt.`
     );
     expect(h.steps().some((text) => String(text).startsWith("⏳"))).toBe(false);
+    // Replaced, so the lock's creation time is this run's.
     expect(
       h.commands().filter((command) => command === "iam create-policy")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
+    expect(h.commands()).toContain("iam delete-policy");
     await h.access.release(operation);
     expect(h.commands().at(-1)).toBe("iam delete-policy");
     expect(h.contexts.get("op-1")).toMatchObject({
