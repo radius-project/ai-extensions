@@ -1029,6 +1029,143 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it("keeps an AWS role whose policy rollback could not delete, then removes both on Retry deletion", async () => {
+    const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+    const answers = (deletePolicy: FakeAwsAnswer) => ({
+      "--version": { stdout: "aws-cli/2.39.0" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": {
+        stdout: JSON.stringify({
+          Role: {
+            Arn: roleArn,
+            RoleId: "AROA1",
+            AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
+          }
+        })
+      },
+      "iam delete-role-policy": deletePolicy,
+      "iam list-role-policies": { stdout: '{"PolicyNames":[]}' },
+      "iam list-attached-role-policies": { stdout: '{"AttachedPolicies":[]}' },
+      "iam delete-role": { stdout: "" },
+      "iam delete-policy": { stdout: "" }
+    });
+    let aws = await fakeAwsOnPath(
+      answers({
+        code: 254,
+        stderr:
+          "An error occurred (ServiceFailure) when calling the DeleteRolePolicy operation"
+      })
+    );
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      requiresKeyringSwitch: false,
+      run: vi.fn(async (args: string[]) => {
+        throw new Error(`Unexpected cleanup command: ${args.join(" ")}`);
+      })
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      awsEnabled: true,
+      accountContext: createEnvironmentAccountContext(
+        "aws-retry",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => executor.login,
+          switchKeyringAccount: async () => {
+            throw new Error("Unexpected keyring switch");
+          },
+          resetIdentityCache: () => {}
+        })
+      )
+    });
+    try {
+      const entry = await runtime.getOrCreateServer("aws-retry", "environment");
+      const op = createOperation({
+        operationId: "op_aws_retry",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      op.context.githubLogin = executor.login;
+      recordAwsRole(op, {
+        state: "created",
+        origin: "this_operation",
+        roleArn,
+        roleName: "radius-deploy-fixture-app",
+        roleId: "AROA1"
+      });
+      recordAwsRolePolicy(op, {
+        roleArn,
+        roleName: "radius-deploy-fixture-app",
+        policyName: "radius-deploy-dev-1"
+      });
+      finish(op, "failed");
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      const post = async (id: string) => {
+        const status = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}`
+        );
+        const action = (await status.json()).operation.actions.find(
+          (candidate: { id: string }) => candidate.id === id
+        );
+        return fetch(`${entry.baseUrl}${action.path}`, {
+          method: "POST",
+          headers: {
+            origin: entry.baseUrl,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+          }
+        });
+      };
+
+      expect((await post("rollback")).status).toBe(202);
+      await vi.waitFor(
+        () =>
+          expect(op.setupArtifacts.cleanup).toMatchObject({
+            attempts: 1,
+            state: "succeeded_with_warnings"
+          }),
+        { timeout: 15000 }
+      );
+      expect(op.state).toBe("failed_partial");
+      expect(op.failure?.code).toBe("setup-cleanup-incomplete");
+      expect(
+        op.setupArtifacts.cleanup.results.map(
+          (result: { artifactType: string; outcome: string }) =>
+            `${result.artifactType} ${result.outcome}`
+        )
+      ).toEqual(["aws_role_policy warning", "aws_role warning"]);
+      expect(op.setupArtifacts.awsRolePolicies[0].state).toBe("created");
+      expect(op.setupArtifacts.awsRole.state).toBe("created");
+      expect(
+        (await aws.calls()).some((call) => call.startsWith("iam delete-role "))
+      ).toBe(false);
+
+      await aws.restore();
+      aws = await fakeAwsOnPath(answers({ stdout: "" }));
+      expect((await post("retry-cleanup")).status).toBe(202);
+      await vi.waitFor(
+        () => expect(op.setupArtifacts.awsRole.state).toBe("deleted"),
+        { timeout: 15000 }
+      );
+      expect(op.setupArtifacts.awsRolePolicies[0].state).toBe("deleted");
+      const retried = (await aws.calls()).map((call) =>
+        call.split(" ").slice(0, 2).join(" ")
+      );
+      expect(retried).toContain("iam delete-role-policy");
+      expect(retried).toContain("iam delete-role");
+      expect(retried.at(-1)).toBe("iam delete-policy");
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("aws-retry", true);
+      await aws.restore();
+    }
+  });
+
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {

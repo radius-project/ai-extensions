@@ -1696,14 +1696,23 @@ async function deleteCreatedRole(
     changesKept: boolean;
   }
 ): Promise<AwsSetupRollbackOutcome> {
-  const keep = (reason: string) =>
+  // A role kept until a failed step succeeds is a warning, so Retry deletion
+  // tries it again. One kept because something else uses it is skipped.
+  const keep = (reason: string, outcome: "skipped" | "warning" = "skipped") =>
     rollbackOutcome(
       key,
-      "skipped",
-      `Kept IAM role ${roleName}, because ${reason}. Delete it in the IAM console if nothing needs it.`
+      outcome,
+      `Kept IAM role ${roleName}, because ${reason}. ${
+        outcome === "warning" ?
+          "Retry deletion to try again."
+        : "Delete it in the IAM console if nothing needs it."
+      }`
     );
   if (ports.changesKept) {
-    return keep("Radius could not remove everything this setup added to it");
+    return keep(
+      "Radius could not remove everything this setup added to it",
+      "warning"
+    );
   }
   if (trustedGitHubSubjects(trust, ports.accountId).length > 0) {
     return keep("it trusts other GitHub environments");
@@ -1727,7 +1736,8 @@ async function deleteCreatedRole(
       : null;
     if (items === null) {
       return keep(
-        `Radius could not list its ${noun} policies (${detail(listed)})`
+        `Radius could not list its ${noun} policies (${detail(listed)})`,
+        "warning"
       );
     }
     if (items.length > 0) return keep(`it has other ${noun} policies`);

@@ -3338,7 +3338,19 @@ describe("rollbackAwsSetupChanges", () => {
         })
       },
       "it has other attached policies"
-    ],
+    ]
+  ])("keeps a created role with %s", async (_label, script, reason) => {
+    const aws = fakeAws({ ...fullRollback, ...script });
+    const result = await rollback(aws);
+    expect(result.find((entry) => entry.key === "role")).toEqual({
+      key: "role",
+      outcome: "skipped",
+      detail: `Kept IAM role ${ROLE}, because ${reason}. Delete it in the IAM console if nothing needs it.`
+    });
+  });
+
+  // A warning, not a skip, so Retry deletion tries the role again.
+  it.each([
     [
       "policies it cannot list",
       { "iam list-role-policies": fail("AccessDenied") },
@@ -3354,15 +3366,18 @@ describe("rollbackAwsSetupChanges", () => {
       { "iam update-assume-role-policy": fail("AccessDenied") },
       "Radius could not remove everything this setup added to it"
     ]
-  ])("keeps a created role with %s", async (_label, script, reason) => {
-    const aws = fakeAws({ ...fullRollback, ...script });
-    const result = await rollback(aws);
-    expect(result.find((entry) => entry.key === "role")).toEqual({
-      key: "role",
-      outcome: "skipped",
-      detail: `Kept IAM role ${ROLE}, because ${reason}. Delete it in the IAM console if nothing needs it.`
-    });
-  });
+  ])(
+    "keeps a created role for a retry with %s",
+    async (_label, script, reason) => {
+      const aws = fakeAws({ ...fullRollback, ...script });
+      const result = await rollback(aws);
+      expect(result.find((entry) => entry.key === "role")).toEqual({
+        key: "role",
+        outcome: "warning",
+        detail: `Kept IAM role ${ROLE}, because ${reason}. Retry deletion to try again.`
+      });
+    }
+  );
 
   it("reports a role IAM will not delete", async () => {
     const aws = fakeAws({

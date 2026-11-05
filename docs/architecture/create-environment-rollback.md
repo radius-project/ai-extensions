@@ -120,7 +120,7 @@ Rollback rule:
 
 - Rollback takes the deploy identity lock with action `rollback`. It takes back the setup's own recorded lock rather than waiting on it, and it does not wait for a lock another run holds: those changes report the holder and **Retry deletion** tries again.
 - It removes, in order, the access entry (by environment delete's rule, so one another environment uses stays), the policy, the trust subjects, then the role.
-- It deletes the role only when its role ID still matches, it trusts no other GitHub subject, and it has no other inline or attached policy. It never deletes the GitHub identity provider or a role setup did not create.
+- It deletes the role only when its role ID still matches, it trusts no other GitHub subject, and it has no other inline or attached policy. It never deletes the GitHub identity provider or a role setup did not create. A role kept because an earlier step failed, or because its policies could not be listed, is a warning that **Retry deletion** tries again. A role kept because something else uses it, or because it was replaced, is reported once and left for the customer.
 - A change whose answer was lost is settled by reading AWS, never by sending it again. After a restart, an AWS setup then pauses for **Continue setup** or **Delete setup**. Azure setups instead roll back automatically.
 
 ### Azure role assignments
