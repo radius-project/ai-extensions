@@ -26,8 +26,10 @@ import {
   namesOneEnvironment,
   trustAllowsOnlySubjects,
   restrictedGitHubSubjects,
+  repositoryLessSubjectMessage,
   subjectNamesRepository,
   trustedGitHubSubjects,
+  type OidcSubjectConfig,
   type PolicyDocument
 } from "@radius-project/core";
 import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
@@ -1327,6 +1329,8 @@ export interface AwsTrustRepairRequest {
   // Every subject the environment's workflows may present, worked out from
   // GitHub for this repository and environment, never read from a variable.
   subjects: readonly string[];
+  // The repository's OIDC subject customization the subjects were built from.
+  subjectConfig: OidcSubjectConfig;
 }
 
 // Why Repair may not add this environment's trust back, or null when the role
@@ -1537,7 +1541,11 @@ export async function repairAwsEnvironmentTrust(
     return {
       ok: false,
       code: "aws-subject-not-repository-specific",
-      message: `GitHub's OIDC subject for this environment, ${shared.join(", ")}, does not name the repository, so trusting it would let other repositories' workflows sign in to IAM role ${roleName}. Nothing was changed. Customize the repository's OIDC subject to include the repository, or add the subject to the role's trust policy yourself if that is intended.`
+      message: repositoryLessSubjectMessage(
+        shared,
+        request.repo,
+        request.subjectConfig
+      )
     };
   }
   // A subject the role still covers, by name or pattern, under conditions

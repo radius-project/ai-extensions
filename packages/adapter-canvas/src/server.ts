@@ -4381,7 +4381,7 @@ export function createEnvironmentOperationExecution(
       const setup = await githubAccountCoordinator.withSelectedAccount(
         selectedLogin,
         { ownerKey: accountContext.ownerKey, operationId },
-        async (executor) => {
+        async (executor, lease) => {
           releaseExecutor = accountContext.registerExecutor(
             operationId,
             executor
@@ -4493,13 +4493,57 @@ export function createEnvironmentOperationExecution(
                 );
               }
             },
-            setupAwsDeployIdentity: (operation, input, selectedExecutor) => {
+            // The deploy identity lock wait has no deadline, so AWS setup
+            // gives up the GitHub account lease while it runs. It takes the
+            // lease back for Configure environment, which runs gh as the
+            // selected account. No lease holder waits for the deploy identity
+            // lock this setup holds. A failed or paused AWS setup never needs
+            // the lease again.
+            setupAwsDeployIdentity: async (
+              operation,
+              input,
+              selectedExecutor
+            ) => {
+              // Returned as an AWS setup failure, so setup cleans up.
+              const switchFailure = (error: unknown) => ({
+                ok: false as const,
+                status: 409,
+                error: errorMessage(error),
+                code: "github-account-switch-failed"
+              });
+
+              // Entered before the release, so a failed release fails this
+              // stage.
+              enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+
+              try {
+                await lease.release();
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              // Shutdown can start while the release restores the account.
               assertSetupExecutionActive(attachment.isShuttingDown);
-              return awsEnvironmentAccess.setup(
+              const result = await awsEnvironmentAccess.setup(
                 operation,
                 input,
                 selectedExecutor
               );
+
+              if (!result.ok) return result;
+
+              try {
+                await lease.retake(() => {
+                  addLegacyStep(
+                    operation,
+                    "⏳ Waiting for another Radius run to finish with the GitHub CLI account."
+                  );
+                });
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              return result;
             },
             // Runs during shutdown too: a lock left behind blocks every other
             // run on this deploy identity until someone removes it.

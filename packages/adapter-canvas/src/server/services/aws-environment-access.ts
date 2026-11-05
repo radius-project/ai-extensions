@@ -1,7 +1,10 @@
 import {
   AWS_TRUST_SUBJECTS_VARIABLE,
   namesRepositoryEnvironment,
+  repositoryLessSubjectMessage,
+  subjectNamesRepository,
   type GitHubRepositoryIdentity,
+  type OidcSubjectConfig,
   buildEnvironmentSuffix,
   AWS_PERMISSION_POLICY_NAME_VARIABLE,
   awsRoleArn,
@@ -389,24 +392,21 @@ export function createAwsEnvironmentAccess<Operation>(
     repo: string,
     environment: string,
     executor?: SelectedGhExecutor
-  ): Promise<{ repo: string; repoId: number; subjects: string[] }> {
+  ): Promise<{
+    repo: string;
+    repoId: number;
+    subjects: string[];
+    subjectConfig: OidcSubjectConfig;
+  }> {
     const oidc = await resolveOidc(repo, environment, executor);
     return {
       repo: oidc.fullName,
       repoId: oidc.repoId,
       subjects: oidc.federatedCredentials.map(
         (credential) => credential.subject
-      )
+      ),
+      subjectConfig: oidc.subjectConfig
     };
-  }
-
-  async function resolveSubjects(
-    repo: string,
-    environment: string,
-    executor?: SelectedGhExecutor
-  ): Promise<string[]> {
-    const oidc = await resolveOidc(repo, environment, executor);
-    return oidc.federatedCredentials.map((credential) => credential.subject);
   }
 
   // The repository's AWS environments other than `environment`. Any read that
@@ -528,11 +528,13 @@ export function createAwsEnvironmentAccess<Operation>(
       const environment = text(input.environment);
       let subjects: string[];
       let repoId: number;
+      let subjectConfig: OidcSubjectConfig;
       try {
         const identity = await resolveIdentity(repo, environment, executor);
         repo = identity.repo;
         repoId = identity.repoId;
         subjects = identity.subjects;
+        subjectConfig = identity.subjectConfig;
         if (dependencies.isStopRequested(operation)) {
           return pausedBeforeReady(operation, []);
         }
@@ -542,6 +544,20 @@ export function createAwsEnvironmentAccess<Operation>(
           status: 400,
           error: dependencies.errorMessage(error),
           code: "oidc-subject-unresolved"
+        };
+      }
+      // The same check Repair makes, but before the lock, which is the first
+      // AWS write. Only a customized subject can leave the repository out, and
+      // the claim keys that did it are known only here.
+      const shared = subjects.filter(
+        (subject) => !subjectNamesRepository(subject)
+      );
+      if (shared.length > 0) {
+        return {
+          ok: false,
+          status: 400,
+          error: repositoryLessSubjectMessage(shared, repo, subjectConfig),
+          code: "aws-subject-not-repository-specific"
         };
       }
       const accountId = text(input.accountId);
@@ -889,13 +905,16 @@ export function createAwsEnvironmentAccess<Operation>(
       const environment = stored;
       // Always from GitHub: AWS_TRUST_SUBJECTS is editable by anyone with
       // admin on the repository, so it cannot decide what Repair trusts.
-      const subjects = await resolveSubjects(repo, environment);
+      const { subjects, subjectConfig } = await resolveIdentity(
+        repo,
+        environment
+      );
       const { result, lost, released } = await runUnderLock(
         { repo, environment, action: "repair", operationId: "" },
         null,
         (ports) =>
           repairAwsEnvironmentTrust(
-            { repo, environment, roleArn, subjects, policyName },
+            { repo, environment, roleArn, subjects, subjectConfig, policyName },
             {
               ...ports,
               // A delete can run between the first read of the environment and

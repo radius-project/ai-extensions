@@ -146,6 +146,7 @@ const EXPECTED_FUNCTIONS = [
   "acceptedGitHubSubjects",
   "restrictedGitHubSubjects",
   "subjectNamesRepository",
+  "repositoryLessSubjectMessage",
   "namesGitHubProvider",
   "trustAllowsOnlySubjects",
   "namesRepositoryEnvironment",

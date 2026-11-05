@@ -3,7 +3,8 @@ import {
   buildGitHubTrustPolicy,
   buildAwsEnvironmentPermissionPolicy,
   trustedGitHubSubjects,
-  parsePolicyDocument
+  parsePolicyDocument,
+  repositoryLessSubjectMessage
 } from "@radius-project/core";
 import {
   CLUSTER_ACTIVE_WAIT_DELAYS_MS,
@@ -2595,7 +2596,8 @@ describe("repairAwsEnvironmentTrust", () => {
     repo: "octo/shop",
     environment: "dev",
     roleArn: ROLE_ARN,
-    subjects: [DEV, DEV_ID]
+    subjects: [DEV, DEV_ID],
+    subjectConfig: { useDefault: true }
   };
   const ready: Script = {
     "sts get-caller-identity": ok({ Account: ACCOUNT }),
@@ -2849,16 +2851,26 @@ describe("repairAwsEnvironmentTrust", () => {
     const shared = "repository_owner:octo:environment:dev";
     const aws = fakeAws({ ...ready, "iam get-role": ok(managedRole([PROD])) });
 
+    const subjectConfig = {
+      useDefault: false,
+      includeClaimKeys: ["repository_owner", "context"]
+    };
+
     const result = await repairAwsEnvironmentTrust(
-      { ...repair, subjects: [shared] },
+      { ...repair, subjects: [shared], subjectConfig },
       aws.ports
     );
 
-    expect(result).toMatchObject({
+    // The same refusal setup gives, with the same fix.
+    expect(result).toEqual({
       ok: false,
-      code: "aws-subject-not-repository-specific"
+      code: "aws-subject-not-repository-specific",
+      message: repositoryLessSubjectMessage(
+        [shared],
+        "octo/shop",
+        subjectConfig
+      )
     });
-    expect("message" in result && result.message).toContain(shared);
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
 

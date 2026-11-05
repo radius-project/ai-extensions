@@ -139,7 +139,7 @@ jobs:
           # setup already granted the role access through an EKS access entry.
           ENDPOINT=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.endpoint' --output text)
           CA_DATA=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.certificateAuthority.data' --output text)
-          TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -r '.status.token')
+          TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -er '.status.token | strings | select(length > 0)')
           printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: %s\n' "$CA_DATA" "$ENDPOINT" "$TOKEN" > "$RADIUS_TARGET_KUBECONFIG"
           echo "EKS kubeconfig saved with static token"
 
@@ -204,7 +204,7 @@ jobs:
           echo "Generating fresh EKS token..."
           ENDPOINT=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.endpoint' --output text)
           CA_DATA=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.certificateAuthority.data' --output text)
-          TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -r '.status.token')
+          TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -er '.status.token | strings | select(length > 0)')
           printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: %s\n' "$CA_DATA" "$ENDPOINT" "$TOKEN" > "$TARGET_KUBECONFIG"
 
           # Update the secret the chart mounted at install with the refreshed

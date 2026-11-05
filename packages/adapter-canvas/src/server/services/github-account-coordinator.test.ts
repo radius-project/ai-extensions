@@ -307,7 +307,13 @@ describe("GitHub account coordinator", () => {
       const result = await coordinator.withSelectedAccount(
         "selected",
         { ownerKey: "runtime" },
-        async () => "done"
+        async (_executor, lease) => {
+          await lease.release();
+          events.push("released");
+          await lease.retake();
+
+          return "done";
+        }
       );
       expect(result).toMatchObject({
         value: "done",
@@ -315,7 +321,11 @@ describe("GitHub account coordinator", () => {
         switched: false,
         restoration: { state: "not_required" }
       });
-      expect(events).toEqual(["verify:selected"]);
+      expect(events).toEqual(
+        scenario.requiresKeyringSwitch ?
+          ["verify:selected", "released", "verify:selected"]
+        : ["verify:selected", "released"]
+      );
     }
   });
 
@@ -399,6 +409,321 @@ describe("GitHub account coordinator", () => {
     expect(events.at(-1)).toBe("reset");
   });
 
+  it.each([
+    [
+      "before it gives up the lease",
+      true,
+      ["external", "selected"],
+      {
+        state: "changed_externally",
+        originalLogin: "original",
+        currentLogin: "external"
+      }
+    ],
+    [
+      "while the lease is given up",
+      false,
+      ["original", "selected"],
+      { state: "restored", originalLogin: "external" }
+    ]
+  ] as const)(
+    "keeps an account someone else selects %s",
+    async (_when, beforeRelease, value, restoration) => {
+      let activeLogin = "original";
+
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async (login) => executor(login, "keyring", true, []),
+        getActiveKeyringLogin: async () => activeLogin,
+        switchKeyringAccount: async (login) => {
+          activeLogin = login;
+
+          return { ok: true };
+        },
+        resetIdentityCache() {}
+      });
+
+      const result = await coordinator.withSelectedAccount(
+        "selected",
+        { ownerKey: "runtime" },
+        async (_executor, lease) => {
+          if (beforeRelease) activeLogin = "external";
+          await lease.release();
+          const released = activeLogin;
+
+          if (!beforeRelease) activeLogin = "external";
+          await lease.retake();
+
+          return [released, activeLogin];
+        }
+      );
+
+      expect(result).toMatchObject({ value, switched: true, restoration });
+      expect(activeLogin).toBe("external");
+    }
+  );
+
+  it("reports an external change when work fails after giving up the lease", async () => {
+    let activeLogin = "original";
+
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async (login) => executor(login, "keyring", true, []),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        activeLogin = login;
+
+        return { ok: true };
+      },
+      resetIdentityCache() {}
+    });
+
+    const failure = new Error("AWS setup failed");
+
+    const result = await coordinator
+      .withSelectedAccount(
+        "selected",
+        { ownerKey: "runtime" },
+        async (_executor, lease) => {
+          activeLogin = "external";
+          await lease.release();
+          throw failure;
+        }
+      )
+      .catch((cause: unknown) => cause);
+
+    expect(result).toBeInstanceOf(GitHubAccountRestorationError);
+    expect(result).toMatchObject({
+      cause: failure,
+      restoration: { state: "changed_externally", originalLogin: "original" }
+    });
+  });
+
+  it("keeps an earlier external change when it cannot take the lease back", async () => {
+    let activeLogin = "original";
+
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async (login) => executor(login, "keyring", true, []),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        // The switch reports success but leaves the external account active.
+        if (activeLogin !== "external") activeLogin = login;
+
+        return { ok: true };
+      },
+      resetIdentityCache() {}
+    });
+
+    const result = await coordinator
+      .withSelectedAccount(
+        "selected",
+        { ownerKey: "runtime" },
+        async (_executor, lease) => {
+          activeLogin = "external";
+          await lease.release();
+          await lease.retake();
+        }
+      )
+      .catch((cause: unknown) => cause);
+
+    expect(result).toBeInstanceOf(GitHubAccountRestorationError);
+    expect(result).toMatchObject({
+      message: expect.stringContaining(
+        "expected @selected, received @external"
+      ),
+      cause: expect.objectContaining({
+        message:
+          "GitHub CLI account switch failed: expected @selected, received @external."
+      }),
+      restoration: {
+        state: "changed_externally",
+        originalLogin: "original",
+        currentLogin: "external",
+        guidance: expect.stringContaining("--user original")
+      }
+    });
+  });
+
+  it("lets another run take the lease while it is given up, and waits for it with no timeout", async () => {
+    vi.useFakeTimers();
+    const events: string[] = [];
+
+    const coordinator = createGitHubAccountCoordinator(
+      ports({ activeLogin: "original", events })
+    );
+
+    let releaseOther: () => void = () => {};
+
+    const otherGate = new Promise<void>((resolve) => {
+      releaseOther = resolve;
+    });
+
+    let other: Promise<unknown> = Promise.resolve();
+
+    const run = coordinator.withSelectedAccount(
+      "selected",
+      { ownerKey: "setup" },
+      async (_executor, lease) => {
+        await lease.release();
+        let otherEntered: () => void = () => {};
+
+        const entered = new Promise<void>((resolve) => {
+          otherEntered = resolve;
+        });
+
+        other = coordinator.withSelectedAccount(
+          "other",
+          { ownerKey: "readiness" },
+          async () => {
+            events.push("other work");
+            otherEntered();
+            await otherGate;
+          }
+        );
+        await entered;
+        await lease.retake(() => {
+          events.push("waiting");
+          setTimeout(releaseOther, 60_000);
+        });
+        events.push("selected work");
+
+        return "done";
+      }
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await run;
+    await other;
+
+    expect(result).toMatchObject({
+      value: "done",
+      switched: true,
+      restoration: { state: "restored", originalLogin: "original" }
+    });
+    expect(events).toEqual([
+      "switch:selected",
+      "reset",
+      "verify:selected",
+      "switch:original",
+      "reset",
+      "switch:other",
+      "reset",
+      "verify:other",
+      "other work",
+      "waiting",
+      "switch:original",
+      "reset",
+      "switch:selected",
+      "reset",
+      "verify:selected",
+      "selected work",
+      "switch:original",
+      "reset"
+    ]);
+  });
+
+  it.each([
+    {
+      resume: "rejected",
+      error: Error,
+      message: "switch denied"
+    },
+    {
+      resume: "wrong account",
+      error: GitHubAccountRestorationError,
+      message: "expected @selected, received @original"
+    }
+  ])(
+    "fails to take the lease back like the first switch and releases it: $resume",
+    async ({ resume, error, message }) => {
+      let activeLogin = "original";
+      let selectedSwitches = 0;
+
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async (login) => executor(login, "keyring", true, []),
+        getActiveKeyringLogin: async () => activeLogin,
+        switchKeyringAccount: async (login) => {
+          if (login === "selected" && ++selectedSwitches === 2) {
+            return resume === "rejected" ?
+                { ok: false, error: "switch denied" }
+              : { ok: true };
+          }
+
+          activeLogin = login;
+
+          return { ok: true };
+        },
+        resetIdentityCache() {}
+      });
+
+      const result = await coordinator
+        .withSelectedAccount(
+          "selected",
+          { ownerKey: "runtime" },
+          async (_executor, lease) => {
+            await lease.release();
+            await lease.retake();
+
+            return "done";
+          }
+        )
+        .catch((cause: unknown) => cause);
+
+      expect(result).toBeInstanceOf(error);
+      expect(result).toMatchObject({
+        message: expect.stringContaining(message)
+      });
+      expect(activeLogin).toBe("original");
+      await expect(
+        coordinator.withSelectedAccount(
+          "selected",
+          { ownerKey: "runtime" },
+          async () => "next"
+        )
+      ).resolves.toMatchObject({ value: "next" });
+    }
+  );
+
+  it("stops work when it cannot restore the original account", async () => {
+    let activeLogin = "original";
+
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async (login) => executor(login, "keyring", true, []),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        if (login === "original") {
+          return { ok: false, error: "restore denied" };
+        }
+
+        activeLogin = login;
+
+        return { ok: true };
+      },
+      resetIdentityCache() {}
+    });
+
+    const outsideWork = vi.fn();
+
+    const result = await coordinator
+      .withSelectedAccount(
+        "selected",
+        { ownerKey: "runtime" },
+        async (_executor, lease) => {
+          await lease.release();
+          outsideWork();
+        }
+      )
+      .catch((cause: unknown) => cause);
+
+    expect(result).toBeInstanceOf(GitHubAccountRestorationError);
+    expect(result).toMatchObject({
+      message: expect.stringContaining(
+        "Radius stopped because it could not switch the GitHub CLI back to @original."
+      ),
+      restoration: { state: "failed" }
+    });
+    expect(outsideWork).not.toHaveBeenCalled();
+    expect(activeLogin).toBe("selected");
+  });
+
   it("restores after selected work fails", async () => {
     const coordinator = createGitHubAccountCoordinator(
       ports({ activeLogin: "original", events: [] })
@@ -415,6 +740,53 @@ describe("GitHub account coordinator", () => {
       )
     ).rejects.toBe(failure);
   });
+
+  it.each([false, true])(
+    "does not take the lease back after work that gave it up ends, failed=%s",
+    async (fails) => {
+      const events: string[] = [];
+
+      const coordinator = createGitHubAccountCoordinator(
+        ports({ activeLogin: "original", events })
+      );
+
+      const failure = new Error("AWS setup failed");
+
+      const result = await coordinator
+        .withSelectedAccount(
+          "selected",
+          { ownerKey: "runtime" },
+          async (_executor, lease) => {
+            await lease.release();
+            await lease.release();
+            events.push("released");
+
+            if (fails) throw failure;
+
+            return "done";
+          }
+        )
+        .catch((cause: unknown) => cause);
+
+      expect(result).toEqual(
+        fails ? failure : (
+          expect.objectContaining({
+            value: "done",
+            switched: true,
+            restoration: expect.objectContaining({ state: "restored" })
+          })
+        )
+      );
+      expect(events).toEqual([
+        "switch:selected",
+        "reset",
+        "verify:selected",
+        "switch:original",
+        "reset",
+        "released"
+      ]);
+    }
+  );
 
   it("reports setup and restoration failures together", async () => {
     let activeLogin = "original";
