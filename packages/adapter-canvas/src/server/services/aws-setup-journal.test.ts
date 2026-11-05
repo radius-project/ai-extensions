@@ -156,26 +156,34 @@ describe("AWS setup change identity", () => {
 });
 
 describe("reconcileAwsSetupChange", () => {
-  const role = (created: string, subjects = SUBJECTS) =>
+  const OP = "op_journal";
+  const role = (operationTag: string | null, subjects = SUBJECTS) =>
     ok({
       Role: {
         Arn: ROLE_ARN,
         RoleId: "AROA1",
-        CreateDate: created,
-        AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects)
+        CreateDate: REQUESTED,
+        AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects),
+        Tags: [
+          { Key: "radius-managed", Value: "true" },
+          ...(operationTag === null ?
+            []
+          : [{ Key: "radius-operation", Value: operationTag }])
+        ]
       }
     });
 
+  // Creation time is no proof: a role another setup created later under the
+  // same name dates after the request just as well.
   it.each([
-    ["created after the request", "2026-10-30T12:00:30Z", "applied"],
-    ["created a minute before it", "2026-10-30T11:59:00Z", "applied"],
-    ["older than that", "2026-10-30T11:58:59Z", "not_applied"],
-    ["with no date", "", "not_applied"]
-  ])("settles a role %s", async (_label, created, state) => {
-    const aws = fakeAws({ ...SESSION, "iam get-role": role(created) });
+    ["tagged with this operation", OP, "applied"],
+    ["tagged with another operation", "op_later", "not_applied"],
+    ["with no operation tag", null, "not_applied"]
+  ])("settles a role %s", async (_label, tag, state) => {
+    const aws = fakeAws({ ...SESSION, "iam get-role": role(tag) });
     const outcome = await reconcileAwsSetupChange(
       CHANGES["aws_role.create"],
-      REQUESTED,
+      OP,
       aws.runAws
     );
     expect(outcome.state).toBe(state);
@@ -184,17 +192,34 @@ describe("reconcileAwsSetupChange", () => {
     }
   });
 
+  it("settles a role IAM lists no tags for as not applied", async () => {
+    const aws = fakeAws({
+      ...SESSION,
+      "iam get-role": ok({ Role: { Arn: ROLE_ARN, RoleId: "AROA1" } })
+    });
+    expect(
+      (
+        await reconcileAwsSetupChange(
+          CHANGES["aws_role.create"],
+          OP,
+          aws.runAws
+        )
+      ).state
+    ).toBe("not_applied");
+  });
+
   it("settles a created role IAM gives no id for", async () => {
     const aws = fakeAws({
       ...SESSION,
-      "iam get-role": ok({ Role: { Arn: ROLE_ARN, CreateDate: REQUESTED } })
+      "iam get-role": ok({
+        Role: {
+          Arn: ROLE_ARN,
+          Tags: [{ Key: "radius-operation", Value: OP }]
+        }
+      })
     });
     expect(
-      await reconcileAwsSetupChange(
-        CHANGES["aws_role.create"],
-        REQUESTED,
-        aws.runAws
-      )
+      await reconcileAwsSetupChange(CHANGES["aws_role.create"], OP, aws.runAws)
     ).toMatchObject({ state: "applied", providerId: null });
   });
 
@@ -206,13 +231,13 @@ describe("reconcileAwsSetupChange", () => {
     async (trusted, state) => {
       const aws = fakeAws({
         ...SESSION,
-        "iam get-role": role(REQUESTED, trusted)
+        "iam get-role": role(null, trusted)
       });
       expect(
         (
           await reconcileAwsSetupChange(
             CHANGES["aws_trust.add"],
-            REQUESTED,
+            OP,
             aws.runAws
           )
         ).state
@@ -237,7 +262,7 @@ describe("reconcileAwsSetupChange", () => {
         [read]: fail(`An error occurred (${missing})`)
       });
       expect(
-        await reconcileAwsSetupChange(CHANGES[kind], REQUESTED, aws.runAws)
+        await reconcileAwsSetupChange(CHANGES[kind], OP, aws.runAws)
       ).toMatchObject({ state: "not_applied" });
     }
   );
@@ -251,7 +276,7 @@ describe("reconcileAwsSetupChange", () => {
     async (kind, read) => {
       const aws = fakeAws({ ...SESSION, [read]: fail("AccessDenied") });
       await expect(
-        reconcileAwsSetupChange(CHANGES[kind], REQUESTED, aws.runAws)
+        reconcileAwsSetupChange(CHANGES[kind], OP, aws.runAws)
       ).rejects.toThrow(/Could not read the .*AccessDenied/);
     }
   );
@@ -262,7 +287,7 @@ describe("reconcileAwsSetupChange", () => {
       "sts get-caller-identity": ok({ Account: "999999999999" })
     });
     await expect(
-      reconcileAwsSetupChange(CHANGES["aws_role.create"], REQUESTED, aws.runAws)
+      reconcileAwsSetupChange(CHANGES["aws_role.create"], OP, aws.runAws)
     ).rejects.toThrow(/999999999999/);
     expect(aws.calls).not.toContain("iam get-role");
   });
@@ -272,25 +297,33 @@ describe("reconcileAwsSetupChange", () => {
     expect(
       await reconcileAwsSetupChange(
         CHANGES["aws_role_policy.put"],
-        REQUESTED,
+        OP,
         aws.runAws
       )
     ).toEqual({ state: "applied", value: "" });
   });
 
   it.each([
-    ["created after the request", "2026-10-30T12:00:10Z", "applied"],
-    ["that existed before it", "2026-10-29T12:00:00Z", "not_applied"]
-  ])("settles an access entry %s", async (_label, createdAt, state) => {
+    ["tagged with this operation", { "radius-operation": OP }, "applied"],
+    [
+      "tagged with another operation",
+      { "radius-operation": "op_later" },
+      "not_applied"
+    ],
+    ["with no operation tag", { "radius-managed": "true" }, "not_applied"],
+    ["with no tags", undefined, "not_applied"]
+  ])("settles an access entry %s", async (_label, tags, state) => {
     const aws = fakeAws({
       ...SESSION,
-      "eks describe-access-entry": ok({ accessEntry: { createdAt } })
+      "eks describe-access-entry": ok({
+        accessEntry: { createdAt: REQUESTED, tags }
+      })
     });
     expect(
       (
         await reconcileAwsSetupChange(
           CHANGES["aws_access_entry.create"],
-          REQUESTED,
+          OP,
           aws.runAws
         )
       ).state
@@ -444,7 +477,11 @@ describe("createAwsSetupJournal", () => {
     const { journal: j, aws } = journal({
       ...SESSION,
       "iam get-role": ok({
-        Role: { Arn: ROLE_ARN, RoleId: "AROA2", CreateDate: REQUESTED }
+        Role: {
+          Arn: ROLE_ARN,
+          RoleId: "AROA2",
+          Tags: [{ Key: "radius-operation", Value: "op_journal" }]
+        }
       })
     });
     const op = operation();
@@ -653,6 +690,30 @@ describe("createAwsSetupJournal", () => {
       expect(op.providerRecovery.mutations[0].status).toBe("confirmed");
       expect(op.setupArtifacts.awsRolePolicies).toHaveLength(1);
     });
+
+    it.each([
+      ["op_journal", "created"],
+      ["op_later", "not_started"]
+    ])(
+      "claims a role found after a restart only when it is tagged %s",
+      async (tag, state) => {
+        const { journal: j } = journal({
+          ...SESSION,
+          "iam get-role": ok({
+            Role: {
+              Arn: ROLE_ARN,
+              RoleId: "AROA2",
+              Tags: [{ Key: "radius-operation", Value: tag }]
+            }
+          })
+        });
+        const op = interrupted("aws_role.create");
+
+        await j.reconcile(op);
+
+        expect(op.setupArtifacts.awsRole.state).toBe(state);
+      }
+    );
 
     it("asks to pause, not roll back, during restart reconciliation", async () => {
       const { journal: j } = journal({

@@ -15,6 +15,7 @@ import {
   type AwsCommandResult,
   type AwsSetupChange,
   type AwsSetupRollbackOutcome,
+  type AwsSetupRollbackTarget,
   type AwsDeployIdentityRequest,
   type AwsDeployIdentityRemovalRequest,
   type AwsEnvironmentListing,
@@ -555,6 +556,21 @@ describe("setupAwsDeployIdentity", () => {
     const createEntry = aws.find("eks create-access-entry") ?? [];
     expect(createEntry[createEntry.indexOf("--tags") + 1]).toBe(
       "radius-managed=true"
+    );
+  });
+
+  it("tags the role and access entry it creates with the setup's operation", async () => {
+    const aws = fakeAws(happyPath);
+    await setupAwsDeployIdentity(
+      { ...request, operationId: "op_1" },
+      aws.ports
+    );
+    expect(aws.find("iam create-role")).toContain(
+      "Key=radius-operation,Value=op_1"
+    );
+    const createEntry = aws.find("eks create-access-entry") ?? [];
+    expect(createEntry[createEntry.indexOf("--tags") + 1]).toBe(
+      "radius-managed=true,radius-operation=op_1"
     );
   });
 
@@ -3252,7 +3268,10 @@ describe("rollbackAwsSetupChanges", () => {
       }
     });
   const tagged = ok({
-    accessEntry: { tags: { "radius-managed": "true" } }
+    accessEntry: {
+      createdAt: "2026-09-01T00:00:00+00:00",
+      tags: { "radius-managed": "true" }
+    }
   });
   const fullRollback: Script = {
     "--version": ok("aws-cli/2.17.0"),
@@ -3272,11 +3291,16 @@ describe("rollbackAwsSetupChanges", () => {
   });
   const rollback = (
     aws: ReturnType<typeof fakeAws>,
-    which = all,
+    which: readonly AwsSetupRollbackTarget[] = all,
     listOtherEnvironments = noOtherEnvironments
   ) =>
     rollbackAwsSetupChanges(
-      { repo: "octo/shop", roleArn: ROLE_ARN, targets: which },
+      {
+        repo: "octo/shop",
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        targets: which
+      },
       { ...aws.ports, listOtherEnvironments }
     );
   const outcomes = (result: AwsSetupRollbackOutcome[]) =>
@@ -3319,7 +3343,7 @@ describe("rollbackAwsSetupChanges", () => {
       role: "skipped"
     });
     expect(result.find((entry) => entry.key === "role")?.detail).toBe(
-      `Kept IAM role ${ROLE}, because it trusts other GitHub environments. Delete it in the IAM console if nothing needs it.`
+      `Kept IAM role ${ROLE}, because its trust policy still lets in GitHub subjects. Delete it in the IAM console if nothing needs it.`
     );
     expect(writes(aws)).not.toContain("iam delete-role");
   });
@@ -3496,6 +3520,7 @@ describe("rollbackAwsSetupChanges", () => {
     const result = await rollbackAwsSetupChanges(
       {
         repo: "octo/shop",
+        environment: "dev",
         roleArn: "arn:aws-cn:iam::123456789012:role/x",
         targets: all
       },
@@ -3529,7 +3554,7 @@ describe("rollbackAwsSetupChanges", () => {
     expect(writes(aws)).toEqual(["eks delete-access-entry"]);
   });
 
-  it("leaves a role created again under the same name", async () => {
+  it("leaves a role created again under the same name, removing only the old role's entry", async () => {
     const aws = fakeAws({
       ...fullRollback,
       "iam get-role": ok({
@@ -3544,6 +3569,88 @@ describe("rollbackAwsSetupChanges", () => {
       role: "skipped"
     });
     expect(writes(aws)).toEqual(["eks delete-access-entry"]);
+  });
+
+  it.each([
+    [
+      "created after the new role",
+      "2026-10-02T00:00:00+00:00",
+      ROLE_CREATED_AT
+    ],
+    ["with no creation time", undefined, ROLE_CREATED_AT],
+    [
+      "when the new role has no creation time",
+      "2026-09-01T00:00:00+00:00",
+      undefined
+    ]
+  ])(
+    "keeps an access entry %s, because it may be the new role's",
+    async (_label, createdAt, roleCreatedAt) => {
+      const aws = fakeAws({
+        ...fullRollback,
+        "iam get-role": ok({
+          Role: {
+            ...managedRole([DEV]).Role,
+            RoleId: "AROA9",
+            CreateDate: roleCreatedAt
+          }
+        }),
+        "eks describe-access-entry": ok({
+          accessEntry: { createdAt, tags: { "radius-managed": "true" } }
+        })
+      });
+      const result = await rollback(aws, [targets.entry, targets.role]);
+      expect(result.find((entry) => entry.key === "entry")).toEqual({
+        key: "entry",
+        outcome: "skipped",
+        detail: `Kept the access entry for ${ROLE} on shop, because IAM role ${ROLE} was created again and Radius can't show this entry is older than it, so it may be the new role's. If nothing uses it, run: aws eks delete-access-entry --cluster-name shop --principal-arn ${ROLE_ARN} --region us-west-2.`
+      });
+      expect(writes(aws)).toEqual([]);
+    }
+  );
+
+  it("changes nothing for a created role whose IAM ID was not recorded", async () => {
+    const aws = fakeAws(fullRollback);
+    const result = await rollback(aws, [
+      ...all.filter((target) => target.key !== "role"),
+      { ...targets.role, roleId: null }
+    ]);
+    expect(result.every((entry) => entry.outcome === "skipped")).toBe(true);
+    expect(result[0]?.detail).toBe(
+      `Radius didn't record IAM's ID for role ${ROLE}, so it can't tell whether the role there now is the one this setup created. Nothing was changed. Check the role in the IAM console and remove what this setup added by hand.`
+    );
+    expect(aws.calls).toEqual([]);
+    expect(aws.locks).toEqual([]);
+  });
+
+  it("keeps a recorded subject other environments may present, and the role with it", async () => {
+    // A custom OIDC template that names no environment.
+    const SHARED = "repository_owner_id:11:repository_id:22";
+    const aws = fakeAws({
+      ...fullRollback,
+      "iam get-role": createdRole([DEV, SHARED])
+    });
+    const result = await rollback(aws, [
+      targets.subject,
+      { ...targets.subject, key: "shared", subject: SHARED },
+      targets.role
+    ]);
+    expect(outcomes(result)).toEqual({
+      subject: "deleted",
+      shared: "skipped",
+      role: "skipped"
+    });
+    expect(result.find((entry) => entry.key === "shared")?.detail).toBe(
+      `Kept trust subject ${SHARED}, because it doesn't name one repository and the environment dev, so other environments or repositories may present it too. If nothing else needs it, remove it from the role's trust policy by hand.`
+    );
+    const update = aws.find("iam update-assume-role-policy") ?? [];
+    expect(
+      trustedGitHubSubjects(
+        parsePolicyDocument(JSON.parse(update[update.length - 1] ?? "{}")),
+        ACCOUNT
+      )
+    ).toEqual([SHARED]);
+    expect(writes(aws)).not.toContain("iam delete-role");
   });
 
   it("does nothing when the trust policy cannot be read", async () => {

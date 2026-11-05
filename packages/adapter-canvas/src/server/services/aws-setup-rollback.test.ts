@@ -1,3 +1,4 @@
+import { assertSetupExecutionActive } from "@radius-project/core";
 import { describe, expect, it, vi } from "vitest";
 import {
   createOperation,
@@ -17,6 +18,17 @@ import {
 const ROLE = "radius-deploy-octo-shop";
 const ROLE_ARN = `arn:aws:iam::123456789012:role/${ROLE}`;
 const LOCK_ARN = `arn:aws:iam::123456789012:policy/radius-lock-${ROLE}`;
+const persist = async () => {};
+
+// The error an ended execution raises before its next AWS command.
+function interruption(): unknown {
+  try {
+    assertSetupExecutionActive(() => true);
+  } catch (error) {
+    return error;
+  }
+  return null;
+}
 
 function setupWithChanges() {
   const op = createOperation({
@@ -54,20 +66,31 @@ function setupWithChanges() {
 
 function fakeAccess(
   outcome: (key: string) => AwsSetupRollbackOutcome | null,
-  { released = true, warnings = [] as string[] } = {}
+  {
+    released = true,
+    warnings = [] as string[],
+    // The lock the fake rollback takes, if any.
+    lock = null as { policyArn: string; policyId: string } | null,
+    fails = null as unknown
+  } = {}
 ) {
   return {
     rollback: vi.fn(
       async (input: {
         targets: readonly { key: string; artifactType: string }[];
-      }) => ({
-        outcomes: input.targets.flatMap((target) => {
-          const result = outcome(target.key);
-          return result ? [result] : [];
-        }),
-        warnings,
-        released
-      })
+        onLocked?(lock: { policyArn: string; policyId: string }): Promise<void>;
+      }) => {
+        if (lock) await input.onLocked?.(lock);
+        if (fails) throw fails;
+        return {
+          outcomes: input.targets.flatMap((target) => {
+            const result = outcome(target.key);
+            return result ? [result] : [];
+          }),
+          warnings,
+          released
+        };
+      }
     )
   };
 }
@@ -98,6 +121,7 @@ describe("rollbackAwsSetupArtifacts", () => {
     const steps: string[] = [];
 
     const pass = await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: provenOwnedCleanupTargets(op),
@@ -110,6 +134,7 @@ describe("rollbackAwsSetupArtifacts", () => {
       environment: "dev",
       operationId: "op_rollback",
       roleArn: ROLE_ARN,
+      onLocked: expect.any(Function),
       targets: [
         expect.objectContaining({
           artifactType: "aws_access_entry",
@@ -148,9 +173,12 @@ describe("rollbackAwsSetupArtifacts", () => {
     setContext(op, {
       awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
     });
-    const access = fakeAccess(deleted);
+    const access = fakeAccess(deleted, {
+      lock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+    });
 
     await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: provenOwnedCleanupTargets(op),
@@ -172,12 +200,14 @@ describe("rollbackAwsSetupArtifacts", () => {
     const steps: string[] = [];
 
     const pass = await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: provenOwnedCleanupTargets(op),
       access: fakeAccess(deleted, {
         released: false,
-        warnings: ["Radius could not release its lock."]
+        warnings: ["Radius could not release its lock."],
+        lock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
       }),
       steps
     });
@@ -190,28 +220,139 @@ describe("rollbackAwsSetupArtifacts", () => {
     expect(steps).toContain("⚠️ Radius could not release its lock.");
   });
 
-  it("does not take back a lock recorded for another role", async () => {
+  it("leaves a role alone while the lock on another role is still recorded", async () => {
     const op = setupWithChanges();
-    setContext(op, {
-      awsDeployIdentityLock: {
-        policyArn: "arn:aws:iam::123456789012:policy/radius-lock-other",
-        policyId: "LOCK0"
-      }
-    });
+    const other = {
+      policyArn: "arn:aws:iam::123456789012:policy/radius-lock-other",
+      policyId: "LOCK0"
+    };
+    setContext(op, { awsDeployIdentityLock: other });
     const access = fakeAccess(deleted);
-    await rollbackAwsSetupArtifacts(op, {
+    const pass = await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: provenOwnedCleanupTargets(op),
       access,
       steps: []
     });
-    expect(access.rollback.mock.calls[0]?.[0]).not.toHaveProperty("adopt");
+    expect(access.rollback).not.toHaveBeenCalled();
+    expect(pass.results.every((entry) => entry.outcome === "warning")).toBe(
+      true
+    );
+    expect(pass.warnings[0]).toBe(
+      `Radius still holds the lock on IAM role other, so it did not change IAM role ${ROLE} on EKS cluster shop (us-west-2) yet. Retry deletion to try again.`
+    );
+    expect(op.context.awsDeployIdentityLock).toEqual(other);
+  });
+
+  it("records a lock the rollback takes before any change, and forgets it once released", async () => {
+    const op = setupWithChanges();
+    const saved: unknown[] = [];
+    const lock = { policyArn: LOCK_ARN, policyId: "LOCK7" };
+    await rollbackAwsSetupArtifacts(op, {
+      persist: async () => {
+        saved.push(structuredClone(op.context.awsDeployIdentityLock));
+      },
+      attempt: 1,
+      awsEnabled: true,
+      selected: provenOwnedCleanupTargets(op),
+      access: fakeAccess(deleted, { lock }),
+      steps: []
+    });
+    expect(saved).toEqual([lock]);
+    expect(op.context.awsDeployIdentityLock).toBeNull();
+  });
+
+  it("keeps a lock the rollback took when its release fails", async () => {
+    const op = setupWithChanges();
+    const lock = { policyArn: LOCK_ARN, policyId: "LOCK7" };
+    await rollbackAwsSetupArtifacts(op, {
+      persist,
+      attempt: 1,
+      awsEnabled: true,
+      selected: provenOwnedCleanupTargets(op),
+      access: fakeAccess(deleted, { lock, released: false }),
+      steps: []
+    });
+    expect(op.context.awsDeployIdentityLock).toEqual(lock);
+  });
+
+  it("keeps a recorded lock it could not take back", async () => {
+    const op = setupWithChanges();
+    const recorded = { policyArn: LOCK_ARN, policyId: "LOCK0" };
+    setContext(op, { awsDeployIdentityLock: recorded });
+    await rollbackAwsSetupArtifacts(op, {
+      persist,
+      attempt: 1,
+      awsEnabled: true,
+      selected: provenOwnedCleanupTargets(op),
+      access: fakeAccess(() => null),
+      steps: []
+    });
+    expect(op.context.awsDeployIdentityLock).toEqual(recorded);
+  });
+
+  it("sends nothing once the execution has ended", async () => {
+    const op = setupWithChanges();
+    const access = fakeAccess(deleted);
+    expect(
+      await rollbackAwsSetupArtifacts(op, {
+        persist,
+        isStopped: () => true,
+        attempt: 1,
+        awsEnabled: true,
+        selected: provenOwnedCleanupTargets(op),
+        access,
+        steps: []
+      })
+    ).toEqual({
+      attempted: true,
+      results: [],
+      warnings: [],
+      interrupted: true
+    });
+    expect(access.rollback).not.toHaveBeenCalled();
+  });
+
+  it("stops when the execution ends during a rollback, keeping the lock it recorded", async () => {
+    const op = setupWithChanges();
+    const lock = { policyArn: LOCK_ARN, policyId: "LOCK7" };
+    const isStopped = vi.fn(() => false);
+    const access = fakeAccess(deleted, { lock, fails: interruption() });
+    const pass = await rollbackAwsSetupArtifacts(op, {
+      persist,
+      isStopped,
+      attempt: 1,
+      awsEnabled: true,
+      selected: provenOwnedCleanupTargets(op),
+      access,
+      steps: []
+    });
+    expect(pass).toMatchObject({ interrupted: true, results: [] });
+    expect(access.rollback.mock.calls[0]?.[0]).toMatchObject({ isStopped });
+    expect(op.context.awsDeployIdentityLock).toEqual(lock);
+    expect(op.setupArtifacts.awsRole.state).toBe("created");
+  });
+
+  it("passes on any other rollback error", async () => {
+    const op = setupWithChanges();
+    await expect(
+      rollbackAwsSetupArtifacts(op, {
+        persist,
+        attempt: 1,
+        awsEnabled: true,
+        selected: provenOwnedCleanupTargets(op),
+        access: fakeAccess(deleted, { fails: new Error("boom") }),
+        steps: []
+      })
+    ).rejects.toThrow("boom");
   });
 
   it("keeps an artifact it was kept from removing, and says why", async () => {
     const op = setupWithChanges();
     const pass = await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: provenOwnedCleanupTargets(op),
@@ -237,6 +378,7 @@ describe("rollbackAwsSetupArtifacts", () => {
     const op = setupWithChanges();
     const access = fakeAccess(deleted);
     const pass = await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: false,
       selected: provenOwnedCleanupTargets(op),
@@ -257,6 +399,7 @@ describe("rollbackAwsSetupArtifacts", () => {
     const access = fakeAccess(deleted);
     expect(
       await rollbackAwsSetupArtifacts(op, {
+        persist,
         attempt: 1,
         awsEnabled: true,
         selected: provenOwnedCleanupTargets(op).filter(
@@ -274,6 +417,7 @@ describe("rollbackAwsSetupArtifacts", () => {
     op.context = {};
     const access = fakeAccess(deleted);
     await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: provenOwnedCleanupTargets(op),
@@ -290,6 +434,7 @@ describe("rollbackAwsSetupArtifacts", () => {
     op.setupArtifacts.awsRole.roleName = null;
     const access = fakeAccess(deleted);
     await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: provenOwnedCleanupTargets(op),
@@ -305,6 +450,7 @@ describe("rollbackAwsSetupArtifacts", () => {
     const op = setupWithChanges();
     const steps: string[] = [];
     const pass = await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: provenOwnedCleanupTargets(op),
@@ -333,6 +479,7 @@ describe("rollbackAwsSetupArtifacts", () => {
     op.setupArtifacts.awsAccessEntries = [];
     const access = fakeAccess(deleted);
     await rollbackAwsSetupArtifacts(op, {
+      persist,
       attempt: 1,
       awsEnabled: true,
       selected: [

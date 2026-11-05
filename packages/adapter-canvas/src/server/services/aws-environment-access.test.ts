@@ -924,9 +924,14 @@ describe("AWS environment access setup", () => {
           executor: EXECUTOR
         }
       ]);
-      // No role name was given, so the repository's default role is created.
+      // No role name was given, so the repository's default role is created,
+      // tagged with this operation.
       expect(h.find("iam create-role")).toEqual(
-        expect.arrayContaining(["--role-name", ROLE])
+        expect.arrayContaining([
+          "--role-name",
+          ROLE,
+          "Key=radius-operation,Value=op-1"
+        ])
       );
       const createRole = h.find("iam create-role") ?? [];
       const trust = parsePolicyDocument(
@@ -3271,6 +3276,78 @@ describe("AWS environment access rollback", () => {
     );
     expect(h.commands().at(-1)).toBe("iam delete-policy");
   });
+
+  it("hands over the lock it takes before changing anything", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      })
+    );
+    const seen: Array<[unknown, string[]]> = [];
+
+    await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target],
+      onLocked: async (lock) => {
+        seen.push([lock, h.commands()]);
+      }
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.[0]).toEqual({
+      policyArn: `arn:aws:iam::${ACCOUNT}:policy/radius-lock-${ROLE}`,
+      policyId: "LOCK1"
+    });
+    expect(seen[0]?.[1]).not.toContain("iam delete-role-policy");
+  });
+
+  it("sends nothing once the execution has ended", async () => {
+    const h = harness(rollbackScript({}));
+    await expect(
+      h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [target],
+        isStopped: () => true
+      })
+    ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+    expect(h.commands()).toEqual([]);
+  });
+
+  it.each([
+    ["before the lock", "sts get-caller-identity"],
+    ["while it holds the lock", "iam get-role"]
+  ])(
+    "stops %s once the execution ends, and still releases the lock",
+    async (_label, last) => {
+      const h = harness(
+        rollbackScript({
+          "iam create-policy": lockPolicy("LOCK1"),
+          "iam get-policy": lockPolicy("LOCK1")
+        })
+      );
+      await expect(
+        h.access.rollback({
+          repo: "octo/shop",
+          environment: "dev",
+          operationId: "op-1",
+          roleArn: ROLE_ARN,
+          targets: [target],
+          isStopped: () => h.commands().includes(last)
+        })
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(h.commands()).not.toContain("iam delete-role-policy");
+      expect(h.commands().includes("iam create-policy")).toBe(
+        h.commands().at(-1) === "iam delete-policy"
+      );
+    }
+  );
 
   it("takes back the setup's recorded lock instead of waiting on it", async () => {
     const h = harness(

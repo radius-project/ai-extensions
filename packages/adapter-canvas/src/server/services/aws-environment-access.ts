@@ -12,6 +12,7 @@ import {
   isAwsEnvironmentPolicyName,
   formatAwsLockTime,
   readRecordedAwsLock,
+  assertSetupExecutionActive,
   type AwsLockAction
 } from "@radius-project/core";
 import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
@@ -160,6 +161,12 @@ export interface AwsEnvironmentAccess<Operation> {
     targets: readonly AwsSetupRollbackTarget[];
     // The policy ID of the lock this setup still records, to take back.
     adopt?: string;
+    // True once the execution running this rollback has ended. Checked before
+    // every AWS command; the lock is still released.
+    isStopped?(): boolean;
+    // Called with the lock once it is held and before the first change, so the
+    // operation can record it in case the release never happens.
+    onLocked?(lock: { policyArn: string; policyId: string }): Promise<void>;
   }): Promise<{
     outcomes: AwsSetupRollbackOutcome[];
     // Sentences about the lock, such as one that could not be released.
@@ -358,7 +365,8 @@ export function createAwsEnvironmentAccess<Operation>(
       adopt?: string;
     },
     waiting: ((wait: AwsLockWait, line: string | null) => unknown) | null,
-    work: (ports: AwsRoleChangePorts) => Promise<T>
+    work: (ports: AwsRoleChangePorts) => Promise<T>,
+    onAcquired?: (lock: AwsDeployIdentityLock) => Promise<void>
   ): Promise<{ result: T; lost: string; released: AwsLockReleaseResult }> {
     // Boxed so the closures below and this function see one value.
     const state: {
@@ -400,6 +408,7 @@ export function createAwsEnvironmentAccess<Operation>(
           );
           if (!taken.ok) return taken;
           state.lock = taken.lock;
+          await onAcquired?.(taken.lock);
           return { ok: true };
         }
       });
@@ -697,6 +706,7 @@ export function createAwsEnvironmentAccess<Operation>(
       const result = await setupAwsDeployIdentity(
         {
           repo,
+          operationId: dependencies.operationId(operation),
           environment,
           accountId,
           region: text(input.region),
@@ -978,8 +988,12 @@ export function createAwsEnvironmentAccess<Operation>(
       operationId,
       roleArn,
       targets,
-      adopt
+      adopt,
+      isStopped,
+      onLocked
     }) {
+      const active = () => assertSetupExecutionActive(isStopped);
+      active();
       const { result, lost, released } = await runUnderLock(
         {
           repo,
@@ -991,12 +1005,21 @@ export function createAwsEnvironmentAccess<Operation>(
         null,
         (ports) =>
           rollbackAwsSetupChanges(
-            { repo, roleArn, targets },
+            { repo, environment, roleArn, targets },
             {
               ...ports,
+              runAws: async (args) => {
+                active();
+                return ports.runAws(args);
+              },
+              acquireLock: async (role) => {
+                active();
+                return ports.acquireLock(role);
+              },
               // Only the access entry needs this, so a GitHub read that fails
               // keeps that entry rather than stopping the whole rollback.
               listOtherEnvironments: async () => {
+                active();
                 try {
                   const oidc = await resolveOidc(repo, environment);
                   return await listOtherAwsEnvironments(
@@ -1012,7 +1035,10 @@ export function createAwsEnvironmentAccess<Operation>(
                 }
               }
             }
-          )
+          ),
+        onLocked &&
+          ((lock) =>
+            onLocked({ policyArn: lock.policyArn, policyId: lock.policyId }))
       );
       return {
         outcomes: result,

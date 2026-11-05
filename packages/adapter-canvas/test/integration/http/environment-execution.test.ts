@@ -783,7 +783,7 @@ describe("production environment owner HTTP binding", () => {
           Role: {
             Arn: roleArn,
             RoleId: "AROA1",
-            CreateDate: "2026-10-30T12:00:05Z"
+            Tags: [{ Key: "radius-operation", Value: "op_aws_crashed" }]
           }
         })
       }
@@ -1165,6 +1165,125 @@ describe("production environment owner HTTP binding", () => {
       await aws.restore();
     }
   });
+
+  it.each([
+    ["before any AWS change", 1],
+    ["after the first role's changes", 2]
+  ])(
+    "stops an AWS rollback when its operation is replaced %s, and releases the lock",
+    async (_label, stopAtLock) => {
+      const roles = [
+        "radius-deploy-fixture-app",
+        "radius-deploy-fixture-other"
+      ];
+      const arn = (role: string) => `arn:aws:iam::123456789012:role/${role}`;
+      const aws = await fakeAwsOnPath({
+        "--version": { stdout: "aws-cli/2.39.0" },
+        "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+        "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+        "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+        "iam get-role": {
+          stdout: JSON.stringify({
+            Role: {
+              Arn: arn(roles[0] as string),
+              AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
+            }
+          })
+        },
+        "iam delete-role-policy": { stdout: "" },
+        "iam delete-policy": { stdout: "" }
+      });
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        awsEnabled: true
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "aws-replaced",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: "op_aws_replaced",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        for (const role of roles) {
+          recordAwsRolePolicy(op, {
+            roleArn: arn(role),
+            roleName: role,
+            policyName: "radius-deploy-dev-1"
+          });
+        }
+        finish(op, "failed");
+        operations.put(op);
+        let locks = 0;
+        // Each rollback saves its lock before its first change. Replacing the
+        // record then ends this execution, as a restart or a new setup does.
+        vi.spyOn(operations, "persist").mockImplementation(async () => {
+          if (
+            op.context.awsDeployIdentityLock &&
+            ++locks === stopAtLock &&
+            operations.get(op.operationId) === op
+          ) {
+            operations.put(structuredClone(op));
+          }
+        });
+
+        const status = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}`
+        );
+        const rollback = (await status.json()).operation.actions.find(
+          (action: { id: string }) => action.id === "rollback"
+        );
+        const response = await fetch(`${entry.baseUrl}${rollback.path}`, {
+          method: "POST",
+          headers: {
+            origin: entry.baseUrl,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+          }
+        });
+        expect(response.status).toBe(202);
+        const commands = async () =>
+          (await aws.calls()).map((call) =>
+            call.split(" ").slice(0, 2).join(" ")
+          );
+        await vi.waitFor(
+          async () =>
+            expect(
+              (await commands()).filter(
+                (command) => command === "iam delete-policy"
+              )
+            ).toHaveLength(stopAtLock),
+          { timeout: 15000 }
+        );
+        await vi.waitFor(() =>
+          expect(owner.hasActiveEnvironmentTasks("aws-replaced")).toBe(false)
+        );
+
+        const sent = await commands();
+        // The role the stop interrupted was never changed.
+        expect(
+          sent.filter((command) => command === "iam delete-role-policy")
+        ).toHaveLength(stopAtLock - 1);
+        expect(sent.at(-1)).toBe("iam delete-policy");
+        expect(op.endedAt).toBeNull();
+        // The role that finished first keeps its recorded result.
+        expect(
+          op.setupArtifacts.cleanup.results.map(
+            (result: { artifactType: string; outcome: string }) =>
+              `${result.artifactType} ${result.outcome}`
+          )
+        ).toEqual(stopAtLock === 1 ? [] : ["aws_role_policy deleted"]);
+      } finally {
+        owner.shutdown();
+        await runtime.stopServer("aws-replaced", true);
+        await aws.restore();
+      }
+    }
+  );
 
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};

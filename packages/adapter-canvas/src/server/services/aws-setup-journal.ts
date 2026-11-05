@@ -13,9 +13,10 @@ import {
   unresolvedProviderMutations
 } from "../../operations.js";
 import { verifyAwsCliSession } from "./aws-cli-session.js";
-import type {
-  AwsCommandResult,
-  AwsSetupChange
+import {
+  AWS_OPERATION_TAG,
+  type AwsCommandResult,
+  type AwsSetupChange
 } from "./aws-deploy-identity.js";
 import {
   executeRecoverableMutation,
@@ -34,10 +35,6 @@ export const AWS_SETUP_MUTATION_KINDS: readonly AwsSetupChange["kind"][] = [
   "aws_role_policy.put",
   "aws_access_entry.create"
 ];
-
-// A resource IAM or EKS dates within this much before the request is taken as
-// the one the request created. Anything older existed before it.
-const CREATION_CLOCK_SKEW_MS = 60_000;
 
 type Intent = Record<string, string | number | boolean | null>;
 
@@ -197,23 +194,25 @@ export function awsSetupChangeFromIntent(
   }
 }
 
-function createdSince(created: unknown, requestedAt: string): boolean {
-  const createdMs = Date.parse(text(created));
-  const requestedMs = Date.parse(requestedAt);
-  return (
-    Number.isFinite(createdMs) &&
-    Number.isFinite(requestedMs) &&
-    createdMs >= requestedMs - CREATION_CLOCK_SKEW_MS
-  );
+// IAM lists a role's tags as Key and Value pairs.
+function roleTag(role: Record<string, unknown>, key: string): string {
+  const tags = Array.isArray(role.Tags) ? role.Tags : [];
+  for (const tag of tags) {
+    const entry = record(tag);
+    if (entry.Key === key) return text(entry.Value);
+  }
+  return "";
 }
 
 /**
- * Read AWS to learn whether `change` happened. A read that fails throws, so
- * the journal keeps the outcome unknown instead of guessing.
+ * Read AWS to learn whether `change` happened. A role or access entry is this
+ * request's only when it carries `operationId` in its operation tag, which
+ * nothing else writes. A read that fails throws, so the journal keeps the
+ * outcome unknown instead of guessing.
  */
 export async function reconcileAwsSetupChange(
   change: AwsSetupChange,
-  requestedAt: string,
+  operationId: string,
   runAws: (args: string[]) => Promise<AwsCommandResult>
 ): Promise<ProviderMutationReconciliation<string>> {
   // IAM names roles per account, so a read in another account would report
@@ -243,11 +242,12 @@ export async function reconcileAwsSetupChange(
       throw new Error(`Could not read the access entry: ${detail(read)}`);
     }
     const entry = record(parse(read.stdout).accessEntry);
-    return createdSince(entry.createdAt, requestedAt) ?
+    return record(entry.tags)[AWS_OPERATION_TAG] === operationId ?
         { state: "applied", value: read.stdout }
       : {
           state: "not_applied",
-          evidence: "The access entry existed before this setup asked for it."
+          evidence:
+            "The access entry does not carry this setup's operation tag, so another request created it."
         };
   }
   if (change.kind === "aws_role_policy.put") {
@@ -285,7 +285,7 @@ export async function reconcileAwsSetupChange(
   }
   const role = record(parse(read.stdout).Role);
   if (change.kind === "aws_role.create") {
-    return createdSince(role.CreateDate, requestedAt) ?
+    return roleTag(role, AWS_OPERATION_TAG) === operationId ?
         {
           state: "applied",
           value: read.stdout,
@@ -293,7 +293,8 @@ export async function reconcileAwsSetupChange(
         }
       : {
           state: "not_applied",
-          evidence: "The role existed before this setup asked for it."
+          evidence:
+            "The role does not carry this setup's operation tag, so another request created it."
         };
   }
   const trusted = trustedGitHubSubjects(
@@ -389,7 +390,11 @@ export function createAwsSetupJournal<
         createdByOperation: () => true,
         acceptedEvidence: () => "AWS accepted the change.",
         reconcile: () =>
-          reconcileAwsSetupChange(change, requestedAt, dependencies.runAws),
+          reconcileAwsSetupChange(
+            change,
+            operation.operationId,
+            dependencies.runAws
+          ),
         onConfirmed: (stdout) => recordAwsSetupChange(operation, change, stdout)
       });
       if (outcome.state === "applied") {
@@ -418,8 +423,7 @@ export function createAwsSetupJournal<
       );
       for (const mutation of unresolved) {
         const change = awsSetupChangeFromIntent(mutation.kind, mutation.intent);
-        const requestedAt = text(mutation.intent?.requestedAt);
-        if (!change || !requestedAt) {
+        if (!change) {
           const guidance = `Radius did not save enough about ${mutation.kind} for ${mutation.target} to check it in AWS. Review the deploy identity in the IAM console, then delete this setup.`;
           settleProviderMutation(
             operation,
@@ -443,7 +447,11 @@ export function createAwsSetupJournal<
           },
           accept: (result) => result.stdout,
           reconcile: () =>
-            reconcileAwsSetupChange(change, requestedAt, dependencies.runAws),
+            reconcileAwsSetupChange(
+              change,
+              operation.operationId,
+              dependencies.runAws
+            ),
           onConfirmed: (stdout) =>
             recordAwsSetupChange(operation, change, stdout)
         });

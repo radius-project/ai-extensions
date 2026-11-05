@@ -84,8 +84,15 @@ export const CLUSTER_ACTIVE_WAIT_DELAYS_MS: readonly number[] = Array.from(
   () => 15000
 );
 
+// Names the setup operation whose request created a role or access entry. A
+// restarted setup that never saw the answer claims only a resource carrying
+// its own ID: creation time cannot tell it from one made later.
+export const AWS_OPERATION_TAG = "radius-operation";
+
 export interface AwsDeployIdentityRequest {
   repo: string;
+  // The setup operation, tagged on the role and access entry it creates.
+  operationId?: string;
   environment: string;
   accountId: string;
   region: string;
@@ -639,6 +646,9 @@ export async function setupAwsDeployIdentity(
         "--tags",
         `Key=${AWS_MANAGED_TAG},Value=true`,
         `Key=${AWS_REPOSITORY_TAG},Value=${request.repo}`,
+        ...(request.operationId ?
+          [`Key=${AWS_OPERATION_TAG},Value=${request.operationId}`]
+        : []),
         "--output",
         "json"
       ]
@@ -787,7 +797,12 @@ export async function setupAwsDeployIdentity(
       // Delete removes only an entry carrying this tag, so it never removes
       // one an administrator made for the same role.
       "--tags",
-      `${AWS_MANAGED_TAG}=true`
+      [
+        `${AWS_MANAGED_TAG}=true`,
+        ...(request.operationId ?
+          [`${AWS_OPERATION_TAG}=${request.operationId}`]
+        : [])
+      ].join(",")
     ];
     let result = await write(entryChange, args);
     for (const delay of ACCESS_ENTRY_RETRY_DELAYS_MS) {
@@ -1023,7 +1038,7 @@ async function readAccessEntry(
 ): Promise<
   | { kind: "absent" }
   | { kind: "unreadable"; detail: string }
-  | { kind: "present"; tagged: boolean }
+  | { kind: "present"; tagged: boolean; createdAt: unknown }
 > {
   const describe = await ports.runAws([
     "eks",
@@ -1046,7 +1061,14 @@ async function readAccessEntry(
     ) ?
       described.accessEntry.tags
     : {};
-  return { kind: "present", tagged: tags[AWS_MANAGED_TAG] === "true" };
+  return {
+    kind: "present",
+    tagged: tags[AWS_MANAGED_TAG] === "true",
+    createdAt:
+      isRecord(described) && isRecord(described.accessEntry) ?
+        described.accessEntry.createdAt
+      : undefined
+  };
 }
 
 async function deleteAccessEntry(
@@ -1152,14 +1174,27 @@ async function removeUnusedAccessEntry(
 // An access entry whose role is gone grants nothing: EKS ties an entry to the
 // role's unique ID, and a role created later with the same name is a different
 // principal. EKS doesn't remove it with the role, so remove the one setup
-// tagged, and name any other.
+// tagged, and name any other. When a role was created again under the name,
+// `replacedAt` is its creation time: only an entry older than that role is
+// the old role's, since a newer one may be the new role's working entry.
 async function removeOrphanedAccessEntry(
   target: AccessEntryTarget,
-  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
+  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">,
+  replacedAt?: unknown
 ): Promise<AccessEntryOutcome> {
   if (!target.cluster || !target.region) return { kind: "absent" };
   const found = await readAccessEntry(target, ports);
   if (found.kind === "absent") return found;
+  if (replacedAt !== undefined && found.kind === "present") {
+    const entryMs = Date.parse(String(found.createdAt ?? ""));
+    const roleMs = Date.parse(String(replacedAt ?? ""));
+    if (!(entryMs < roleMs)) {
+      return {
+        kind: "kept",
+        text: `${entryLabel(target)}, because IAM role ${target.roleName} was created again and Radius can't show this entry is older than it, so it may be the new role's. If nothing uses it, run: ${deleteEntryCommand(target)}`
+      };
+    }
+  }
   const remove = `It grants nothing now that the role is gone. To remove it, run: ${deleteEntryCommand(target)}`;
   if (found.kind === "unreadable") {
     return {
@@ -1499,6 +1534,8 @@ function entryOutcome(
 export async function rollbackAwsSetupChanges(
   request: {
     repo: string;
+    // The environment setup was for. Only a subject naming it is its own.
+    environment: string;
     roleArn: string;
     targets: readonly AwsSetupRollbackTarget[];
   },
@@ -1515,6 +1552,17 @@ export async function rollbackAwsSetupChanges(
     );
   }
   const { accountId, roleName } = parsed;
+  const roleTarget = targets.find(
+    (target) => target.artifactType === "aws_role"
+  );
+  // Without IAM's ID, a role created again under the name looks the same as
+  // the one setup created, and its policies and trust would go with it.
+  if (roleTarget?.artifactType === "aws_role" && !roleTarget.roleId) {
+    return everyTarget(
+      "skipped",
+      `Radius didn't record IAM's ID for role ${roleName}, so it can't tell whether the role there now is the one this setup created. Nothing was changed. Check the role in the IAM console and remove what this setup added by hand.`
+    );
+  }
   const session = await verifyAwsCliSession({ accountId }, ports.runAws);
   if (!session.ok) return everyTarget("warning", session.message);
   const locked = await ports.acquireLock({ accountId, roleName });
@@ -1522,9 +1570,6 @@ export async function rollbackAwsSetupChanges(
 
   const entries = targets.filter(
     (target) => target.artifactType === "aws_access_entry"
-  );
-  const roleTarget = targets.find(
-    (target) => target.artifactType === "aws_role"
   );
   const getRole = await ports.runAws([
     "iam",
@@ -1535,13 +1580,18 @@ export async function rollbackAwsSetupChanges(
     "json"
   ]);
   const outcomes: AwsSetupRollbackOutcome[] = [];
-  // An entry whose role is gone, or replaced, grants nothing to anyone.
-  const removeOrphanedEntries = async () => {
+  // An entry whose role is gone grants nothing to anyone. When the role was
+  // replaced, only an entry older than the new role is the old role's.
+  const removeOrphanedEntries = async (replacedAt?: unknown) => {
     for (const entry of entries) {
       outcomes.push(
         entryOutcome(
           entry.key,
-          await removeOrphanedAccessEntry({ ...entry, roleName }, ports)
+          await removeOrphanedAccessEntry(
+            { ...entry, roleName },
+            ports,
+            replacedAt
+          )
         )
       );
     }
@@ -1571,10 +1621,9 @@ export async function rollbackAwsSetupChanges(
   const role = roleRecord.Role;
   if (
     roleTarget?.artifactType === "aws_role" &&
-    roleTarget.roleId &&
     role.RoleId !== roleTarget.roleId
   ) {
-    await removeOrphanedEntries();
+    await removeOrphanedEntries(role.CreateDate ?? null);
     const replaced = `IAM role ${roleName} was deleted and created again after this setup, so Radius left the new role and its policies as they are.`;
     for (const target of targets) {
       if (target.artifactType !== "aws_access_entry") {
@@ -1598,6 +1647,19 @@ export async function rollbackAwsSetupChanges(
   );
   const removedSubjects: typeof subjects = [];
   for (const target of subjects) {
+    // The same rule as environment delete: a subject such as
+    // `repository_id:<id>` from a custom OIDC template is presented by other
+    // environments too, and a later setup may rely on it.
+    if (!namesOneEnvironment(target.subject, request.environment)) {
+      outcomes.push(
+        rollbackOutcome(
+          target.key,
+          "skipped",
+          `Kept trust subject ${target.subject}, because it doesn't name one repository and the environment ${request.environment}, so other environments or repositories may present it too. If nothing else needs it, remove it from the role's trust policy by hand.`
+        )
+      );
+      continue;
+    }
     const removal = removeGitHubTrustSubject(policy, accountId, target.subject);
     policy = removal.policy;
     if (removal.removed) removedSubjects.push(target);
@@ -1715,7 +1777,7 @@ async function deleteCreatedRole(
     );
   }
   if (trustedGitHubSubjects(trust, ports.accountId).length > 0) {
-    return keep("it trusts other GitHub environments");
+    return keep("its trust policy still lets in GitHub subjects");
   }
   for (const [command, field, noun] of [
     ["list-role-policies", "PolicyNames", "inline"],

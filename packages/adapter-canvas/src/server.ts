@@ -4942,13 +4942,17 @@ export function createEnvironmentOperationExecution(
       awsEnabled: dependencies.awsEnabled,
       selected,
       access: awsEnvironmentAccess,
-      steps
+      steps,
+      persist,
+      isStopped
     });
     if (awsPass.attempted) {
+      if (awsPass.interrupted && awsPass.results.length === 0) return;
       warnings.push(...awsPass.warnings);
       results = [...results, ...awsPass.results];
       recordCleanupState(op, { state: "running", results: carriedResults() });
       await persist();
+      if (awsPass.interrupted) return;
     }
 
     if (isStopped()) return;
