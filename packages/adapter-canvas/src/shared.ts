@@ -482,11 +482,14 @@ export function deleteCredentialProfile(repo: string, name: unknown): boolean {
   const list = root[repo];
   if (!Array.isArray(list)) return false;
   const lower = String(name || "").toLowerCase();
-  const next = list.filter(
-    (profile) =>
-      isRecord(profile) && String(profile.name).toLowerCase() !== lower
-  );
+  let deleted = false;
+  const next = list.filter((profile) => {
+    if (!isRecord(profile)) return false;
+    const matches = String(profile.name).toLowerCase() === lower;
+    if (matches) deleted = true;
+    return !matches;
+  });
   root[repo] = next;
   saveCredentials();
-  return next.length !== list.length;
+  return deleted;
 }

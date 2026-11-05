@@ -81,6 +81,23 @@ describe("credential profiles", () => {
     expect(deleteCredentialProfile(REPO, "other")).toBe(false);
   });
 
+  it("deletes only a matching valid profile from malformed stored data", () => {
+    sharedCredentials.profiles = {
+      [REPO]: [{ name: "kept" }, null, { name: "removed" }]
+    };
+
+    expect(deleteCredentialProfile(REPO, "removed")).toBe(true);
+    expect(sharedCredentials.profiles).toEqual({
+      [REPO]: [{ name: "kept" }]
+    });
+
+    sharedCredentials.profiles = { [REPO]: [{ name: "kept" }, null] };
+    expect(deleteCredentialProfile(REPO, "missing")).toBe(false);
+    expect(sharedCredentials.profiles).toEqual({
+      [REPO]: [{ name: "kept" }]
+    });
+  });
+
   it("saves an azure profile with normalized fields and 'verified' status", () => {
     const saved = saveCredentialProfile(REPO, {
       name: "azure-staging",

@@ -2388,7 +2388,9 @@ describe("managed Bicep publishing", () => {
   let previousScenario: string | undefined;
 
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-publish-"));
+    root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "rad-publish-"))
+    );
     preload = path.join(root, "fake-rad.cjs");
     invocation = path.join(root, "invocation.json");
     previousBinary = process.env.RADIUS_RAD_BINARY;
