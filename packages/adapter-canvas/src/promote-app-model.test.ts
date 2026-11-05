@@ -67,6 +67,7 @@ function repo(existingModel?: string): Repo {
   git(root, ["init", "--quiet", "--initial-branch", "main"]);
   git(root, ["config", "user.email", "radius@example.invalid"]);
   git(root, ["config", "user.name", "Radius Test"]);
+  git(root, ["config", "commit.gpgsign", "false"]);
   const radiusDir = path.join(root, ".radius");
   fs.mkdirSync(radiusDir, { recursive: true });
   if (existingModel !== undefined) {
@@ -356,6 +357,31 @@ describe("publish", () => {
       false
     );
   });
+
+  it.each([
+    "emailCommunicationServices-recipe.bicep",
+    "email-communication-services-recipe.bicep"
+  ])(
+    "publishes and stages the authored recipe %s before removing staging",
+    (name) => {
+      const target = repo();
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+      for (const file of CUSTOM_TYPE_STAGED_FILES) {
+        fs.writeFileSync(path.join(stagingDir, file), "artifact");
+      }
+      fs.writeFileSync(path.join(stagingDir, name), "// authored recipe\n");
+
+      const result = run(target.root, ["--staging", stagingDir]);
+
+      expect(result.status).toBe(0);
+      expect(fs.readFileSync(path.join(target.radiusDir, name), "utf8")).toBe(
+        "// authored recipe\n"
+      );
+      expect(stagedInGit(target.root)).toContain(`.radius/${name}`);
+      expect(fs.existsSync(stagingDir)).toBe(false);
+    }
+  );
 
   it.each(REQUIRED_STAGED_FILES)(
     "refuses a run missing %s and leaves .radius byte-identical",
@@ -704,48 +730,56 @@ describe("publish", () => {
   // re-modelable. The recipe name is a pattern, so the baseline has to pick up
   // whatever is already on disk or the next run reads it as having appeared
   // mid-run and refuses forever, blaming the user for an edit nobody made.
-  it("re-models a repository that already has an authored recipe", () => {
-    const target = repo(MODEL);
-    fs.writeFileSync(
-      path.join(target.radiusDir, "postgres-recipe.bicep"),
-      "// authored\n"
-    );
-    const stagingDir = begin(target);
-    stageCompleteRun(stagingDir);
-    fs.writeFileSync(
-      path.join(stagingDir, "postgres-recipe.bicep"),
-      "// regenerated\n"
-    );
+  it.each(["postgres", "emailCommunicationServices"])(
+    "re-models a repository that already has a %s recipe",
+    (type) => {
+      const target = repo(MODEL);
+      fs.writeFileSync(
+        path.join(target.radiusDir, `${type}-recipe.bicep`),
+        "// authored\n"
+      );
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+      fs.writeFileSync(
+        path.join(stagingDir, `${type}-recipe.bicep`),
+        "// regenerated\n"
+      );
 
-    const result = run(target.root, ["--staging", stagingDir]);
+      const result = run(target.root, ["--staging", stagingDir]);
 
-    expect(result.status).toBe(0);
-    expect(
-      fs.readFileSync(
-        path.join(target.radiusDir, "postgres-recipe.bicep"),
-        "utf8"
-      )
-    ).toBe("// regenerated\n");
-  });
+      expect(result.status).toBe(0);
+      expect(
+        fs.readFileSync(
+          path.join(target.radiusDir, `${type}-recipe.bicep`),
+          "utf8"
+        )
+      ).toBe("// regenerated\n");
+    }
+  );
 
-  it("still refuses when an authored recipe is edited during the run", () => {
-    const target = repo(MODEL);
-    const recipe = path.join(target.radiusDir, "postgres-recipe.bicep");
-    fs.writeFileSync(recipe, "// authored\n");
-    const stagingDir = begin(target);
-    stageCompleteRun(stagingDir);
-    fs.writeFileSync(
-      path.join(stagingDir, "postgres-recipe.bicep"),
-      "// new\n"
-    );
-    fs.writeFileSync(recipe, "// hand edited\n");
+  it.each(["postgres", "emailCommunicationServices"])(
+    "refuses when a %s recipe is edited during the run",
+    (type) => {
+      const target = repo(MODEL);
+      const recipe = path.join(target.radiusDir, `${type}-recipe.bicep`);
+      fs.writeFileSync(recipe, "// authored\n");
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+      fs.writeFileSync(
+        path.join(stagingDir, `${type}-recipe.bicep`),
+        "// new\n"
+      );
+      fs.writeFileSync(recipe, "// hand edited\n");
 
-    const result = run(target.root, ["--staging", stagingDir]);
+      const result = run(target.root, ["--staging", stagingDir]);
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(".radius/postgres-recipe.bicep");
-    expect(fs.readFileSync(recipe, "utf8")).toBe("// hand edited\n");
-  });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`.radius/${type}-recipe.bicep`);
+      expect(fs.readFileSync(recipe, "utf8")).toBe("// hand edited\n");
+      expect(stagedInGit(target.root)).toEqual([]);
+      expect(fs.existsSync(stagingDir)).toBe(false);
+    }
+  );
 
   // A publish that fails PARTWAY: the first renames succeed, then a later one
   // cannot. macOS `chflags uchg` makes one destination immutable, which is the

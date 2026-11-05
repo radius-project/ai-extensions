@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     include: [
       "src/deploy-artifacts.test.ts",
+      "src/promote-app-model.test.ts",
+      "../core/src/modeling/app-staging.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
       "../core/src/workflow-read-policy.test.ts",
       "../core/src/setup-{admission,boundary,provider-configuration}.test.ts",
