@@ -68,6 +68,30 @@ Record this contract for every executable role:
 
 Model separate web, worker, producer, consumer, and init roles separately even when they share an image.
 
+## Fixed peer hostnames
+
+A peer address can be a configurable input or a literal built into the image. A `hosts` output can supply an input the process reads; it cannot change a literal in a copied Nginx config, generated frontend bundle, or compiled client.
+
+1. Trace the selected Dockerfile's stages, `COPY`/`ADD` inputs, build-time generation, entrypoint, and loaded configuration. Inspect active upstreams, URLs, and client defaults for calls to modeled peers. Follow only the selected runtime path, not unrelated examples or test files. Treat localhost, external endpoints, and backing-service addresses according to their actual consumers; do not rename a peer for every hostname found in the repository.
+2. Record each peer's exact expected hostname, caller source path and line, port, and any runtime override in the requirement ledger. A default is configurable only when the pinned source or image entrypoint proves that the running process consumes the override. An Nginx file containing `proxy_pass http://order-service:3000;` does not expand an environment variable merely because the model declares one.
+3. Prefer a source-supported runtime override and bind it to the peer's verified `properties.hosts['<containerKey>']` output. Preserve the source's scheme, port, and path. A template, command override, or mounted config is usable only when the exact schema supports it and the pinned image proves its tools, expansion rules, file path, permissions, and startup behavior. Do not edit application source, patch an image, or add an unverified startup wrapper to hide a mismatch.
+4. If the hostname is fixed, prove the exact DNS name from the selected Recipe implementation. For a managed-default Recipe, inspect `recipe.implementation.template` returned by `show-radius-type.mjs`; for an explicit target Recipe, inspect its implementation already supplied in the modeling context or stored in the target repository, as required by [Evidence to inspect](#evidence-to-inspect). A Recipe registration or a naming example in this guidance is not implementation evidence. Account for resource-name and container-key normalization, prefixes or suffixes, namespace/search-domain behavior, length limits, and collisions across all port-exposing containers. Do not assume a short-name alias exists or that the resource `name` is itself the Service name.
+5. Choose resource names and container keys that yield the fixed hostname only when that mapping is proved, all callers remain compatible, and no explicit deployment-contract name or parameter is changed. Naming defaults yield to this verified runtime constraint. Do not change the Recipe's naming rule, omit the Recipe-appended container-key suffix, invent an alias property, add an internal route, or create a separate Kubernetes Service outside the supported model to force a match.
+6. If the name cannot be represented, callers require conflicting names, or Recipe/image evidence is missing, stop before publication. Report the caller source location, expected hostname, generated name or missing mapping, and why no proven override resolves it. State the needed application configuration or Recipe capability without claiming to have changed it. Abort the staged run as required by [When a step fails](../SKILL.md#when-a-step-fails); do not publish a compiling model with an unresolved runtime caveat.
+
+For example, consider these active files copied into the final images:
+
+```nginx
+# src/store-front/nginx.conf
+proxy_pass http://order-service:3000;
+proxy_pass http://product-service:3002;
+
+# src/store-admin/nginx.conf
+proxy_pass http://makeline-service:3001/order;
+```
+
+If the selected Recipe creates `<resource-name>-<container-key>`, resources named `order-service`, `product-service`, and `makeline-service` with the key `service` create `order-service-service`, `product-service-service`, and `makeline-service-service`. None matches the image's fixed peer hostname. If permitted by the deployment contract and proved safe by that Recipe, resources named `order`, `product`, and `makeline` with the key `service` produce the required short names. Check every caller and namespace before using that mapping. If a required resource name is fixed, or the Recipe uses another naming rule, do not apply this example as a workaround: use a proven override or report the incompatibility. A clean Bicep compile or graph does not check DNS inside an image.
+
 ## Map every required value
 
 For each required app-native input, choose exactly one supported source:
@@ -154,3 +178,4 @@ Before returning the model:
 11. Confirm each workload's primary feature is ready and every selected typed resource is both mandatory and used by that feature.
 12. Confirm every route follows the authoring rule in [app.bicep Structure](../SKILL.md#appbicep-structure-mandatory-order).
 13. Confirm no required binding or dependency was deleted to satisfy stale mutable extension metadata or obtain a clean compile.
+14. Confirm every fixed peer hostname in the selected image has a proven consumed override or resolves to the exact selected Recipe's DNS name. Reject unresolved mismatches, conflicting caller names, and missing naming evidence before publishing.
