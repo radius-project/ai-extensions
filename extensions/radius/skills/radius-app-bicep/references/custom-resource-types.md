@@ -141,6 +141,8 @@ Use the exact output names the module emits (for example the AVM `service-bus/na
 
 When no AVM module fits, author a Bicep recipe that provisions the service on Azure. A recipe takes a single `context` object and returns a `result` object with exactly three maps, as in the skeleton below.
 
+Use the lowerCamelCase type name in the filename, for example `emailCommunicationServices-recipe.bicep`. Promotion also accepts existing kebab-case recipe filenames, such as `email-communication-services-recipe.bicep`.
+
 The Azure-only scope at the top of this page still applies. Do not author a Kubernetes or other non-Azure recipe as a fallback. If the service cannot be provisioned on Azure, report the unsupported dependency and stop for that resource.
 
 ```bicep
