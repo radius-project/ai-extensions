@@ -474,7 +474,7 @@ ${remove}
           ],
           {
             encoding: "utf8",
-            timeout: 4_000,
+            timeout: 8_000,
             env: {
               PATH: process.env.PATH,
               SystemRoot: process.env.SystemRoot,

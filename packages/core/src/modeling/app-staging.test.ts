@@ -122,6 +122,19 @@ describe("requiredStagedFiles", () => {
 });
 
 describe("publishableFiles", () => {
+  it.each([
+    "emailCommunicationServices-recipe.bicep",
+    "email-communication-services-recipe.bicep",
+    "azureServiceBusNamespaces2-recipe.bicep",
+    "a-recipe.bicep",
+    "123-recipe.bicep"
+  ])("publishes the authored recipe %s", (name) => {
+    expect(publishableFiles([...REQUIRED_STAGED_FILES, name, name])).toEqual([
+      ...REQUIRED_STAGED_FILES,
+      name
+    ]);
+  });
+
   it("publishes the known supporting artifacts after the required set", () => {
     expect(
       publishableFiles([
@@ -147,7 +160,15 @@ describe("publishableFiles", () => {
     ".env",
     "scratch.bicep",
     "app.bicep.published-backup",
-    "Widget-Recipe.bicep"
+    "Widget-Recipe.bicep",
+    "EmailCommunicationServices-recipe.bicep",
+    "email_communication_services-recipe.bicep",
+    "emailCommunicationServices-recipe.bicep.bak",
+    "emailCommunicationServices-recipe.bicep\n",
+    "../emailCommunicationServices-recipe.bicep",
+    "nested/emailCommunicationServices-recipe.bicep",
+    "nested\\emailCommunicationServices-recipe.bicep",
+    "-recipe.bicep"
   ])("does not publish %s", (name) => {
     expect(publishableFiles([...REQUIRED_STAGED_FILES, name])).toEqual([
       ...REQUIRED_STAGED_FILES
