@@ -15,6 +15,7 @@ export default defineConfig({
       "src/server/routes/operations-{control,status}.test.ts",
       "../core/src/setup-{coordinator,github-environment*}.test.ts",
       "src/server/services/environment-operation.test.ts",
+      "src/server/services/radius-environment-workflow-deletion.test.ts",
       "src/server/services/{azure-setup,configure-environment,setup-outcome}.test.ts",
       "src/server/services/azure-setup-orchestration.test.ts",
       "src/server/services/azure-setup-recovery.test.ts",

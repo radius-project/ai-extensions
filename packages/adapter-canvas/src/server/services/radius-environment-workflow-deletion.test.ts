@@ -250,17 +250,109 @@ describe("deleting a Radius environment through its workflow", () => {
     }
   );
 
-  it("looks for the run again before giving up on it", async () => {
-    const found = harness({}, { runs: [null, null, "7"] });
+  it("waits for delayed run visibility without dispatching another deletion", async () => {
+    const found = harness({}, { runs: [null, null, null, "7"] });
     expect(await found.run()).toEqual({ outcome: "deleted" });
-    expect(found.sleeps).toEqual([2000, 4000]);
+    expect(found.sleeps).toEqual([5000, 7500, 11250]);
+    expect(found.calls).toHaveLength(1);
+    const lookups = vi.mocked(found.dependencies.findWorkflowRun).mock.calls;
+    expect(lookups).toHaveLength(4);
+    expect(
+      lookups.every(
+        (args) => JSON.stringify(args) === JSON.stringify(lookups[0])
+      )
+    ).toBe(true);
+    expect(found.dependencies.getRunDetail).toHaveBeenCalledWith(
+      REPO,
+      "7",
+      undefined,
+      expect.objectContaining({ identity: "ambient" })
+    );
+  });
 
+  it("reports an undiscovered run at the existing 30-minute deadline", async () => {
     const lost = harness({}, { runs: [null] });
     expect(await lost.run()).toEqual({
       outcome: "failed",
       detail:
         "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
     });
+    expect(lost.sleeps.reduce((total, ms) => total + ms, 0)).toBe(
+      30 * 60 * 1000
+    );
+    expect(lost.calls).toHaveLength(1);
+    expect(lost.dependencies.getRunDetail).not.toHaveBeenCalled();
+  });
+
+  it("keeps the operation active while discovery is pending, even if a heartbeat fails", async () => {
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("heartbeat failed"))
+      .mockResolvedValue(undefined);
+    const h = harness({}, { runs: [null, null, "7"] });
+
+    expect(await h.run(heartbeat)).toEqual({ outcome: "deleted" });
+    expect(heartbeat).toHaveBeenCalledTimes(2);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("propagates a discovery error without repeating the destructive dispatch", async () => {
+    const h = harness({
+      findWorkflowRun: vi.fn(async () => {
+        throw new Error("run listing unavailable");
+      })
+    });
+
+    await expect(h.run()).rejects.toThrow("run listing unavailable");
+    expect(h.calls).toHaveLength(1);
+    expect(h.dependencies.getRunDetail).not.toHaveBeenCalled();
+    expect(h.sleeps).toEqual([]);
+  });
+
+  it("does not give a late-discovered run a new completion budget", async () => {
+    let clock = 1_000_000;
+    const h = harness({
+      now: () => clock,
+      findWorkflowRun: vi.fn(async () => {
+        clock += 29 * 60 * 1000;
+        return "7";
+      }),
+      sleep: vi.fn(async (milliseconds: number) => {
+        clock += milliseconds;
+      }),
+      getRunDetail: vi.fn(async () => ({
+        status: "in_progress",
+        conclusion: null
+      }))
+    });
+
+    expect(await h.run()).toEqual({
+      outcome: "failed",
+      detail:
+        "The delete-environment workflow did not complete within 30 minutes."
+    });
+    expect(clock).toBe(1_000_000 + 30 * 60 * 1000);
+    expect(h.dependencies.findWorkflowRun).toHaveBeenCalledTimes(1);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("does not start a status read after discovery consumes the remaining budget", async () => {
+    let clock = 1_000_000;
+    const h = harness({
+      now: () => clock,
+      findWorkflowRun: vi.fn(async () => {
+        clock += 30 * 60 * 1000;
+        return "7";
+      })
+    });
+
+    expect(await h.run()).toEqual({
+      outcome: "failed",
+      detail:
+        "The delete-environment workflow did not complete within 30 minutes."
+    });
+    expect(h.dependencies.getRunDetail).not.toHaveBeenCalled();
+    expect(h.sleeps).toEqual([]);
   });
 
   it("polls with backoff and heartbeats until the run completes", async () => {
@@ -317,8 +409,6 @@ describe("deleting a Radius environment through its workflow", () => {
       detail:
         "The delete-environment workflow did not complete within 30 minutes."
     });
-    expect(
-      h.sleeps.reduce((total, ms) => total + ms, 0)
-    ).toBeGreaterThanOrEqual(30 * 60 * 1000);
+    expect(h.sleeps.reduce((total, ms) => total + ms, 0)).toBe(30 * 60 * 1000);
   });
 });
