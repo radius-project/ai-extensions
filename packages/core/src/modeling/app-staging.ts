@@ -310,7 +310,7 @@ export function isPublishableExtraArtifact(name: unknown): boolean {
   return (
     typeof name === "string" &&
     (name === "custom-recipe-pack.bicep" ||
-      /^[a-z0-9-]+-recipe\.bicep$/u.test(name))
+      /^(?:[a-z0-9-]+|[a-z][A-Za-z0-9]*)-recipe\.bicep$/u.test(name))
   );
 }
 
