@@ -4,6 +4,7 @@ import {
 } from "@radius-project/core";
 import {
   getOperationControl,
+  type OperationControlRecord,
   recordAwsAccessEntry,
   recordAwsRole,
   recordAwsRolePolicy,
@@ -75,6 +76,15 @@ export interface AwsSetupJournal<Operation> {
 // Thrown when a write was refused before it was sent, so the journal records
 // it as not applied without reading AWS.
 class WriteNotSent extends Error {}
+
+// The AWS CLI exits 254 when the service answered the request with an error.
+// The journal reads any exit of 128 or more as a killed process, so the
+// answer is passed on with an ordinary failure code.
+function serviceAnswer(result: AwsCommandResult): AwsCommandResult {
+  return result.code === 254 || result.code === "254" ?
+      { ...result, code: 1 }
+    : result;
+}
 
 function succeeded(result: AwsCommandResult): boolean {
   return result.code === 0 || result.code === "0";
@@ -346,7 +356,8 @@ export function createAwsSetupJournal<
   Operation extends AwsSetupJournalOperation
 >(dependencies: AwsSetupJournalDependencies): AwsSetupJournal<Operation> {
   const attemptOf = (operation: Operation): number =>
-    getOperationControl(operation)?.attempts.setup ?? 0;
+    // An operation always has a control record, created on first read.
+    (getOperationControl(operation) as OperationControlRecord).attempts.setup;
 
   async function journaled(
     operation: Operation,
@@ -367,7 +378,7 @@ export function createAwsSetupJournal<
           refused = await sender.guard(args);
           if (refused) throw new WriteNotSent();
         },
-        mutate: () => sender.run(args),
+        mutate: async () => serviceAnswer(await sender.run(args)),
         accept: (result) => result.stdout,
         providerIdOf: (result) =>
           change.kind === "aws_role.create" ?

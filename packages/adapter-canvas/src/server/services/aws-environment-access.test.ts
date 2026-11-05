@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildAwsEnvironmentPermissionPolicy,
   buildGitHubTrustPolicy,
@@ -10,6 +10,7 @@ import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
 import { createAwsEnvironmentAccess } from "./aws-environment-access.js";
+import type { AwsSetupJournal } from "./aws-setup-journal.js";
 import {
   addLegacyStep,
   buildStages,
@@ -148,7 +149,8 @@ function harness(
   // The customer pauses while this AWS command, or the last GitHub read, runs.
   pauseDuring?: string,
   persistError?: Error,
-  environments?: Environments
+  environments?: Environments,
+  journal?: AwsSetupJournal<Operation>
 ) {
   const environmentReads: string[] = [];
   let stopRequested = false;
@@ -269,6 +271,7 @@ function harness(
       }
     },
     stageAuthorizeIdentity: STAGE,
+    ...(journal ? { journal } : {}),
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error)
   });
@@ -3103,3 +3106,379 @@ describe("repairing an environment's trust under the lock", () => {
     expect(await h.access.repair(repairInput)).toMatchObject({ ok: true });
   });
 });
+
+describe("AWS environment access with a setup journal", () => {
+  function journalOf(
+    overrides: Partial<AwsSetupJournal<Operation>> = {}
+  ): AwsSetupJournal<Operation> {
+    return {
+      reconcile: async () => false,
+      write: async () => {
+        throw new Error("unexpected journaled write");
+      },
+      ...overrides
+    };
+  }
+
+  it("settles an interrupted write first, and pauses when reconciliation asks", async () => {
+    let h: ReturnType<typeof harness>;
+    const reconcile = vi.fn(async () => {
+      h.requestStop();
+      return true;
+    });
+    h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      undefined,
+      undefined,
+      journalOf({ reconcile })
+    );
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toEqual({
+      ok: false,
+      stopped: true
+    });
+
+    expect(reconcile).toHaveBeenCalledExactlyOnceWith(operation);
+    expect(h.awsCalls).toEqual([]);
+    expect(h.events).toContainEqual(["setStageState", "op-1", STAGE, "paused"]);
+    expect(h.steps()).toContain(
+      "⏸️ Radius checked the AWS change the interrupted setup was making and paused. Continue setup, or delete it to remove what it created."
+    );
+  });
+
+  it("goes on with setup when a settled write asked for no pause", async () => {
+    const write = vi.fn<AwsSetupJournal<Operation>["write"]>(
+      async (_op, _change, args, sender) =>
+        (await sender.guard(args)) ?? sender.run(args)
+    );
+    const h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      undefined,
+      undefined,
+      journalOf({ reconcile: async () => true, write })
+    );
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+    expect(write.mock.calls.map(([, change]) => change.kind)).toEqual([
+      "aws_role.create",
+      "aws_role_policy.put",
+      "aws_access_entry.create"
+    ]);
+  });
+
+  it("gives the journal the setup's own pause and lock checks", async () => {
+    let h: ReturnType<typeof harness>;
+    const seen: unknown[] = [];
+    const write = vi.fn<AwsSetupJournal<Operation>["write"]>(
+      async (_op, change, args, sender) => {
+        if (change.kind !== "aws_role.create") return sender.run(args);
+        seen.push(await sender.guard(args));
+        seen.push(await sender.read(["iam", "get-role-policy"]));
+        h.requestStop();
+        seen.push(await sender.guard(args));
+        seen.push(await sender.read(["iam", "get-role-policy"]));
+        return sender.run(args);
+      }
+    );
+    h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      undefined,
+      undefined,
+      journalOf({ write })
+    );
+
+    await h.access.setup(operation, input, EXECUTOR);
+
+    expect(seen[0]).toBeNull();
+    expect(seen[1]).toMatchObject({ code: 254, stderr: "NoSuchEntity" });
+    expect(seen[2]).toMatchObject({
+      stderr: "Radius did not run this AWS command because setup was paused."
+    });
+    expect(seen[3]).toEqual(seen[2]);
+    // The lock was checked before the write the guard allowed.
+    expect(
+      h.commands().filter((command) => command === "iam get-policy").length
+    ).toBeGreaterThan(1);
+  });
+});
+
+describe("AWS environment access rollback", () => {
+  const MINE = JSON.stringify({
+    repo: "octo/shop",
+    environment: "dev",
+    action: "setup",
+    operationId: "op-1"
+  });
+  const target = {
+    key: "policy",
+    artifactType: "aws_role_policy" as const,
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    policyName: "radius-deploy-dev-1"
+  };
+  const rollbackScript = (lock: Record<string, Answer>) => ({
+    "--version": ok("aws-cli/2.17.0"),
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-role": ok({
+      Role: {
+        Arn: ROLE_ARN,
+        AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [DEV])
+      }
+    }),
+    "iam delete-role-policy": ok(),
+    "iam delete-policy": ok(),
+    ...lock
+  });
+
+  it("takes a new lock for the rollback and releases it", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      })
+    );
+
+    expect(
+      await h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [target]
+      })
+    ).toEqual({
+      outcomes: [{ key: "policy", outcome: "deleted", detail: null }],
+      warnings: [],
+      released: true
+    });
+
+    const create = h.find("iam create-policy");
+    expect(create?.[create.indexOf("--description") + 1]).toBe(
+      JSON.stringify({
+        repo: "octo/shop",
+        environment: "dev",
+        action: "rollback",
+        operationId: "op-1"
+      })
+    );
+    expect(h.commands().at(-1)).toBe("iam delete-policy");
+  });
+
+  it("takes back the setup's recorded lock instead of waiting on it", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": fail(
+          "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
+        ),
+        "iam get-policy": lockPolicy("LOCK0", { Description: MINE })
+      })
+    );
+
+    expect(
+      await h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [target],
+        adopt: "LOCK0"
+      })
+    ).toMatchObject({ released: true, warnings: [] });
+    expect(h.commands()).toContain("iam delete-role-policy");
+  });
+
+  it("reports a lock another run holds, without waiting or changing anything", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": fail(
+          "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
+        ),
+        "iam get-policy": lockPolicy("LOCK9", {
+          Description: JSON.stringify({
+            repo: "octo/shop",
+            environment: "prod",
+            action: "setup",
+            operationId: "op-2"
+          }),
+          CreateDate: "2026-10-30T11:59:00Z"
+        })
+      })
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target]
+    });
+
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({ key: "policy", outcome: "warning" })
+    ]);
+    expect(result.outcomes[0]?.detail).toContain("is changing IAM role");
+    expect(h.commands()).not.toContain("iam delete-role-policy");
+    expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
+  });
+
+  const entryTarget = {
+    key: "entry",
+    artifactType: "aws_access_entry" as const,
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    cluster: "shop",
+    region: "us-west-2"
+  };
+  const entryScript = (lock: Record<string, Answer>) => ({
+    ...rollbackScript(lock),
+    "iam get-role": ok({
+      Role: { ...JSON.parse(managedRoleFor([DEV])), Arn: ROLE_ARN }
+    }),
+    "eks describe-access-entry": ok({
+      accessEntry: { tags: { "radius-managed": "true" } }
+    }),
+    "eks delete-access-entry": ok(),
+    "iam update-assume-role-policy": ok()
+  });
+
+  it("removes an access entry no other environment of the repository uses", async () => {
+    const h = harness(
+      entryScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      }),
+      defaultSubject,
+      undefined,
+      undefined,
+      { dev: {} }
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [
+        {
+          key: "subject",
+          artifactType: "aws_trust_subject",
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          subject: DEV
+        },
+        entryTarget
+      ]
+    });
+
+    expect(result.outcomes).toEqual([
+      { key: "entry", outcome: "deleted", detail: null },
+      { key: "subject", outcome: "deleted", detail: null }
+    ]);
+    // The repository's environments were listed, so the rule could run.
+    expect(h.environmentReads).toEqual(["dev"]);
+  });
+
+  it("reports a lock it could not release", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1"),
+        "iam delete-policy": fail("AccessDenied: iam:DeletePolicy")
+      })
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target]
+    });
+
+    expect(result.released).toBe(false);
+    expect(result.warnings).toEqual([
+      expect.stringContaining("could not release its lock")
+    ]);
+  });
+
+  it("reports a lock another run took while the rollback held it", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": [lockPolicy("LOCK1"), lockPolicy("LOCK9")]
+      })
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target]
+    });
+
+    expect(result.warnings[0]).toMatch(/another run now holds a new one/);
+    expect(h.commands()).not.toContain("iam delete-role-policy");
+  });
+
+  it("keeps an access entry when GitHub cannot list the other environments", async () => {
+    const h = harness(
+      {
+        ...rollbackScript({
+          "iam create-policy": lockPolicy("LOCK1"),
+          "iam get-policy": lockPolicy("LOCK1")
+        }),
+        "iam get-role": ok({
+          Role: {
+            ...JSON.parse(managedRoleFor([DEV])),
+            Arn: ROLE_ARN
+          }
+        }),
+        "eks describe-access-entry": ok({
+          accessEntry: { tags: { "radius-managed": "true" } }
+        })
+      },
+      {}
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [
+        {
+          key: "entry",
+          artifactType: "aws_access_entry",
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          cluster: "shop",
+          region: "us-west-2"
+        }
+      ]
+    });
+
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({ key: "entry", outcome: "warning" })
+    ]);
+    expect(h.commands()).not.toContain("eks delete-access-entry");
+  });
+});
+
+function managedRoleFor(subjects: string[]): string {
+  return JSON.stringify({
+    AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects),
+    Tags: [
+      { Key: "radius-managed", Value: "true" },
+      { Key: "radius-repository", Value: "octo/shop" }
+    ]
+  });
+}

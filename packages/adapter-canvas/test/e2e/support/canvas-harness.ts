@@ -1740,10 +1740,14 @@ export class CanvasHarness {
    * restored the way a restart restores it. It created its GitHub environment
    * and still records the deploy identity lock it held.
    */
-  async seedInterruptedAwsSetup(lock: {
-    policyArn: string;
-    policyId: string;
-  }): Promise<string> {
+  async seedInterruptedAwsSetup(
+    lock: {
+      policyArn: string;
+      policyId: string;
+    },
+    // Records that the setup created its deploy role and permission policy.
+    { createdRole = false }: { createdRole?: boolean } = {}
+  ): Promise<string> {
     const operationModule: OperationsModule =
       await import("../../../src/operations.js");
     const operation = operationModule.createOperation({
@@ -1782,6 +1786,22 @@ export class CanvasHarness {
       operationModule.STAGE_AUTHORIZE_IDENTITY
     );
     operationModule.setContext(operation, { awsDeployIdentityLock: lock });
+    if (createdRole) {
+      const roleArn =
+        "arn:aws:iam::123456789012:role/radius-deploy-fixture-radius-app";
+      operationModule.recordAwsRole(operation, {
+        state: "created",
+        origin: "this_operation",
+        roleArn,
+        roleName: "radius-deploy-fixture-radius-app",
+        roleId: "AROA1"
+      });
+      operationModule.recordAwsRolePolicy(operation, {
+        roleArn,
+        roleName: "radius-deploy-fixture-radius-app",
+        policyName: "radius-deploy-fixture-environment-1"
+      });
+    }
     operationModule.setExecutionActive(operation, true);
     const restored = operationModule.fromPersistedOperation(
       JSON.parse(

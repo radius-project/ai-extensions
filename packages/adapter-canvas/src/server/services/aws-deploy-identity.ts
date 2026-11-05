@@ -490,9 +490,12 @@ export async function setupAwsDeployIdentity(
   // Radius cannot read stops setup with nothing created.
   let trust: ReturnType<typeof mergeGitHubTrustSubjects> | null = null;
   let existingTrust: PolicyDocument | null = null;
+  // The subjects the role trusted before this setup, which a rollback keeps.
+  let trustedBefore: string[] = [];
   if (!roleMissing) {
     try {
       existingTrust = parsePolicyDocument(role?.AssumeRolePolicyDocument);
+      trustedBefore = acceptedGitHubSubjects(existingTrust, accountId);
       trust = mergeGitHubTrustSubjects(
         existingTrust,
         accountId,
@@ -682,8 +685,6 @@ export async function setupAwsDeployIdentity(
       );
     }
     if (trust.changed) {
-      const trusted =
-        existingTrust ? acceptedGitHubSubjects(existingTrust, accountId) : [];
       const updateTrust = await write(
         {
           kind: "aws_trust.add",
@@ -691,7 +692,7 @@ export async function setupAwsDeployIdentity(
           roleArn,
           roleName,
           subjects: request.subjects.filter(
-            (subject) => !trusted.includes(subject)
+            (subject) => !trustedBefore.includes(subject)
           )
         },
         [
@@ -1439,18 +1440,34 @@ export type AwsSetupRollbackTarget =
       readonly region: string;
     };
 
-export interface AwsSetupRollbackOutcome {
-  readonly key: string;
-  readonly outcome: "deleted" | "not_found" | "skipped" | "warning";
-  readonly detail: string | null;
-}
+// A change Radius kept or could not remove always says why.
+export type AwsSetupRollbackOutcome =
+  | {
+      readonly key: string;
+      readonly outcome: "deleted" | "not_found";
+      readonly detail: null;
+    }
+  | {
+      readonly key: string;
+      readonly outcome: "skipped" | "warning";
+      readonly detail: string;
+    };
 
+function rollbackOutcome(
+  key: string,
+  outcome: "deleted" | "not_found"
+): AwsSetupRollbackOutcome;
+function rollbackOutcome(
+  key: string,
+  outcome: "skipped" | "warning",
+  detail: string
+): AwsSetupRollbackOutcome;
 function rollbackOutcome(
   key: string,
   outcome: AwsSetupRollbackOutcome["outcome"],
   detail: string | null = null
 ): AwsSetupRollbackOutcome {
-  return { key, outcome, detail };
+  return { key, outcome, detail } as AwsSetupRollbackOutcome;
 }
 
 function entryOutcome(
@@ -1488,10 +1505,8 @@ export async function rollbackAwsSetupChanges(
   ports: AwsDeployIdentityRemovalPorts
 ): Promise<AwsSetupRollbackOutcome[]> {
   const { targets } = request;
-  const everyTarget = (
-    outcome: AwsSetupRollbackOutcome["outcome"],
-    detail: string
-  ) => targets.map((target) => rollbackOutcome(target.key, outcome, detail));
+  const everyTarget = (outcome: "skipped" | "warning", detail: string) =>
+    targets.map((target) => rollbackOutcome(target.key, outcome, detail));
   const parsed = parseAwsRoleArn(request.roleArn);
   if (!parsed || parsed.partition !== "aws") {
     return everyTarget(
@@ -1547,8 +1562,13 @@ export async function rollbackAwsSetupChanges(
     return outcomes;
   }
   const roleRecord = parseJson(getRole.stdout);
-  const role =
-    isRecord(roleRecord) && isRecord(roleRecord.Role) ? roleRecord.Role : {};
+  if (!isRecord(roleRecord) || !isRecord(roleRecord.Role)) {
+    return everyTarget(
+      "warning",
+      `IAM did not describe role ${roleName}, so Radius changed nothing.`
+    );
+  }
+  const role = roleRecord.Role;
   if (
     roleTarget?.artifactType === "aws_role" &&
     roleTarget.roleId &&
@@ -1570,7 +1590,7 @@ export async function rollbackAwsSetupChanges(
   } catch (error) {
     return everyTarget(
       "warning",
-      `Could not read the trust policy of IAM role ${roleName} (${error instanceof Error ? error.message : String(error)}). Nothing was changed.`
+      `Could not read the trust policy of IAM role ${roleName} (${String(error)}). Nothing was changed.`
     );
   }
   const subjects = targets.flatMap((target) =>
@@ -1592,7 +1612,6 @@ export async function rollbackAwsSetupChanges(
           {
             ...entry,
             roleName,
-            roleArn: typeof role.Arn === "string" ? role.Arn : entry.roleArn,
             repo: request.repo,
             role,
             accountId,

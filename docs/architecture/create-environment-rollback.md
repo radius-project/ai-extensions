@@ -12,7 +12,8 @@ graph TD
     Preview --> Confirm["Customer confirms rollback"]
     Confirm --> Workflow["Verify and revert workflow artifacts"]
     Workflow -->|blocked| Manual
-    Workflow -->|safe| GitHubEnv["Delete created GitHub environment"]
+    Workflow -->|safe| Aws["Undo recorded AWS changes under the deploy identity lock"]
+    Aws --> GitHubEnv["Delete created GitHub environment"]
     GitHubEnv --> Roles["Delete created role assignments"]
     Roles --> Fic["Delete created federated credentials"]
     Fic --> Sp["Delete created Service Principal"]
@@ -27,6 +28,7 @@ graph TD
 - [`verification-workflow-cancellation.ts`](../../packages/adapter-canvas/src/server/services/verification-workflow-cancellation.ts) proves whether the exact verification run is inactive and cancels it when the customer requests cancellation after stopping an interrupted setup.
 - [`cleanup-commands.ts`](../../packages/adapter-canvas/src/server/services/cleanup-commands.ts) selects the deletion set for first rollback, rollback retry, and Exit setup.
 - [`workflow-provenance.ts`](../../packages/adapter-canvas/src/server/services/workflow-provenance.ts) proves that committed workflow files and setup branches are still exactly what Radius wrote.
+- [`aws-setup-journal.ts`](../../packages/adapter-canvas/src/server/services/aws-setup-journal.ts) journals each AWS change setup makes and records it in the ledger. [`aws-setup-rollback.ts`](../../packages/adapter-canvas/src/server/services/aws-setup-rollback.ts) and `rollbackAwsSetupChanges` in [`aws-deploy-identity.ts`](../../packages/adapter-canvas/src/server/services/aws-deploy-identity.ts) undo them.
 - [`workflow-rollback.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback.ts) safely removes an unmerged setup branch or creates file-revert commits for workflows that reached a repository branch.
 - [`server.ts`](../../packages/adapter-canvas/src/server.ts) executes the ordered cleanup pass, persists each result, invalidates the environment-list cache, and closes the operation.
 
@@ -104,6 +106,22 @@ Rollback rule:
 - Every recorded entry is a credential the attempt created, so Radius deletes it.
 - Radius deletes these credentials before the Service Principal and the App Registration.
 - The stable identity is `name@subject`, not the display label.
+
+### AWS deploy identity changes
+
+AWS setup journals each change before it sends it, and records it only when this setup made it:
+
+- The IAM role, when `create-role` created it, with IAM's role ID.
+- Each GitHub subject the role did not trust before.
+- The environment's inline permission policy, when the role had no policy of that name before.
+- The role's EKS access entry, when `create-access-entry` created it.
+
+Rollback rule:
+
+- Rollback takes the deploy identity lock with action `rollback`. It takes back the setup's own recorded lock rather than waiting on it, and it does not wait for a lock another run holds: those changes report the holder and **Retry deletion** tries again.
+- It removes, in order, the access entry (by environment delete's rule, so one another environment uses stays), the policy, the trust subjects, then the role.
+- It deletes the role only when its role ID still matches, it trusts no other GitHub subject, and it has no other inline or attached policy. It never deletes the GitHub identity provider or a role setup did not create.
+- A change whose answer was lost is settled by reading AWS, never by sending it again. After a restart, an AWS setup then pauses for **Continue setup** or **Delete setup**. Azure setups instead roll back automatically.
 
 ### Azure role assignments
 
@@ -188,6 +206,10 @@ Radius never matches a resource by display text. `cleanupArtifactIdentity` deriv
 | Federated credential | Name and subject                  |
 | Role assignment      | Role and scope                    |
 | GitHub environment   | Repository and environment name   |
+| AWS IAM role         | Role ID and ARN                   |
+| AWS trust subject    | Role ARN and subject              |
+| AWS role policy      | Role ARN and policy name          |
+| AWS access entry     | Region, cluster, and role ARN     |
 | Workflow file        | Branch and path                   |
 
 The stable identity ties the ledger artifact, the cleanup target, and the cleanup result together. Display labels carry friendly names and annotations, which makes them unsafe as matching keys.
@@ -227,11 +249,13 @@ External reconciliation never blocks the user's exit. While workflow or provider
 Radius removes the proven-owned set in this order:
 
 1. Workflow files or the setup branch.
-2. GitHub environment.
-3. Azure role assignments.
-4. Federated credentials.
-5. Service Principal.
-6. App Registration.
+2. GitHub environment variables.
+3. AWS access entry, permission policy, trust subjects, and IAM role.
+4. GitHub environment.
+5. Azure role assignments.
+6. Federated credentials.
+7. Service Principal.
+8. App Registration.
 
 This order runs backward along the dependency chain. Radius removes workflow artifacts before the environment and the identity they use, and it removes assignments and credentials before the identity they name.
 

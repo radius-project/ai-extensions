@@ -1,13 +1,16 @@
 import { readRecordedAwsLock } from "@radius-project/core";
 import {
   cleanupArtifactIdentity,
-  getSetupArtifactLedger,
+  readSetupArtifactLedger,
   recordCleanupDeletion,
   setContext,
   type SetupCleanupArtifactType,
   type SetupCleanupResult
 } from "../../operations.js";
-import type { AwsSetupRollbackTarget } from "./aws-deploy-identity.js";
+import type {
+  AwsSetupRollbackOutcome,
+  AwsSetupRollbackTarget
+} from "./aws-deploy-identity.js";
 import type { AwsEnvironmentAccess } from "./aws-environment-access.js";
 
 // Runs the AWS part of a setup's rollback, retried cleanup, or exit: it turns
@@ -32,11 +35,13 @@ interface SelectedTarget {
   [field: string]: unknown;
 }
 
-type Operation = Record<string, unknown> & {
+interface Operation {
   operationId: string;
-  repo?: unknown;
-  environment?: unknown;
-};
+  repo: string;
+  environment: string;
+  context?: unknown;
+  setupArtifacts?: unknown;
+}
 
 // The ledger entry each selected AWS target names, with what a rollback
 // needs to find it in AWS.
@@ -44,8 +49,7 @@ function rollbackTargets(
   operation: Operation,
   selected: readonly SelectedTarget[]
 ): Array<AwsSetupRollbackTarget & { label: string; identity: string }> {
-  const ledger = getSetupArtifactLedger(operation);
-  if (!ledger) return [];
+  const ledger = readSetupArtifactLedger(operation.setupArtifacts);
   const found: Array<
     AwsSetupRollbackTarget & { label: string; identity: string }
   > = [];
@@ -130,35 +134,36 @@ export async function rollbackAwsSetupArtifacts(
   if (targets.length === 0) return { attempted: false, results, warnings };
   const result = (
     target: (typeof targets)[number],
-    outcome: SetupCleanupResult["outcome"],
-    detail: string | null
+    entry: AwsSetupRollbackOutcome
   ): void => {
     results.push({
       attempt,
       artifactType: target.artifactType as SetupCleanupArtifactType,
       target: target.label,
       identity: target.identity,
-      outcome,
-      detail
+      outcome: entry.outcome,
+      detail: entry.detail
     });
-    if (outcome === "deleted" || outcome === "not_found") {
+    if (entry.detail === null) {
       recordCleanupDeletion(operation, {
         artifactType: target.artifactType,
         identity: target.identity
       });
-      if (outcome === "deleted") steps.push(`✅ Removed ${target.label}.`);
-    } else if (detail) {
-      warnings.push(detail);
-      steps.push(`⚠️ ${detail}`);
+      if (entry.outcome === "deleted") {
+        steps.push(`✅ Removed ${target.label}.`);
+      }
+    } else {
+      warnings.push(entry.detail);
+      steps.push(`⚠️ ${entry.detail}`);
     }
   };
   if (!awsEnabled) {
     for (const target of targets) {
-      result(
-        target,
-        "warning",
-        `AWS environments are turned off, so Radius did not remove ${target.label}.`
-      );
+      result(target, {
+        key: target.key,
+        outcome: "warning",
+        detail: `AWS environments are turned off, so Radius did not remove ${target.label}.`
+      });
     }
     return { attempted: true, results, warnings };
   }
@@ -173,7 +178,7 @@ export async function rollbackAwsSetupArtifacts(
       context.canonicalEnvironment
     ) ?
       context.canonicalEnvironment
-    : String(operation.environment || "");
+    : operation.environment;
   for (const roleArn of new Set(targets.map((target) => target.roleArn))) {
     const forRole = targets.filter((target) => target.roleArn === roleArn);
     const adopt =
@@ -181,7 +186,7 @@ export async function rollbackAwsSetupArtifacts(
         recorded.policyId
       : undefined;
     const rolledBack = await access.rollback({
-      repo: String(operation.repo || ""),
+      repo: operation.repo,
       environment,
       operationId: operation.operationId,
       roleArn,
@@ -199,14 +204,14 @@ export async function rollbackAwsSetupArtifacts(
       const outcome = rolledBack.outcomes.find(
         (entry) => entry.key === target.key
       );
-      if (outcome) result(target, outcome.outcome, outcome.detail);
-      else {
-        result(
-          target,
-          "warning",
-          `Radius did not get a result for ${target.label}, so it may still be there.`
-        );
-      }
+      result(
+        target,
+        outcome ?? {
+          key: target.key,
+          outcome: "warning",
+          detail: `Radius did not get a result for ${target.label}, so it may still be there.`
+        }
+      );
     }
   }
   return { attempted: true, results, warnings };

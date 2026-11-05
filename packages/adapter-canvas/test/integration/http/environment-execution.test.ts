@@ -18,6 +18,8 @@ import {
   reconcileRestoredOperation,
   projectOperationActions,
   recordGitHubEnvironment,
+  recordAwsRole,
+  recordAwsRolePolicy,
   recordCommittedWorkflowFile,
   recordCommitState,
   recordAzureApp,
@@ -35,6 +37,7 @@ import {
   buildStages,
   enterStage,
   setExecutionActive,
+  prepareProviderMutation,
   requestStop,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
@@ -769,6 +772,262 @@ describe("production environment owner HTTP binding", () => {
       }
     }
   );
+
+  it("settles an AWS write a restart interrupted, then pauses for the developer instead of rolling back", async () => {
+    const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "iam get-role": {
+        stdout: JSON.stringify({
+          Role: {
+            Arn: roleArn,
+            RoleId: "AROA1",
+            CreateDate: "2026-10-30T12:00:05Z"
+          }
+        })
+      }
+    });
+    const runtime = awsSetupRuntime();
+    try {
+      await runtime.getOrCreateServer("aws-panel", "environment");
+      const live = createOperation({
+        operationId: "op_aws_crashed",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws",
+        stages: buildStages({ includeIdentity: true })
+      });
+      live.context.githubLogin = "saved-account";
+      live.resumeRequest = {
+        needsAzureCredentials: false,
+        github: { login: "saved-account", credentialSource: "keyring" },
+        environment: {
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop",
+          roleName: "radius-deploy-fixture-app",
+          existingRoleArn: ""
+        }
+      };
+      recordGitHubEnvironment(live, {
+        state: "created",
+        origin: "this_operation",
+        repo: "fixture/app",
+        name: "dev",
+        providerId: "17"
+      });
+      enterStage(live, STAGE_AUTHORIZE_IDENTITY);
+      // The extension stopped after sending create-role, before the answer.
+      prepareProviderMutation(live, {
+        kind: "aws_role.create",
+        target: `attempt-1|${roleArn}`,
+        intent: {
+          requestedAt: "2026-10-30T12:00:00.000Z",
+          accountId: "123456789012",
+          roleArn,
+          roleName: "radius-deploy-fixture-app",
+          subjects: '["repo:fixture/app:environment:dev"]'
+        }
+      });
+      setExecutionActive(live, true);
+      const op = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(live))
+      );
+      expect(op.recoveryState).toBe("provider_reconciliation_pending");
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+      runtime.setupExecution.recoverOperation(op);
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+
+      // Read only: the write is never sent again, and no lock is taken.
+      expect(
+        (await aws.calls()).map((call) => call.split(" ").slice(0, 2).join(" "))
+      ).toEqual(["--version", "sts get-caller-identity", "iam get-role"]);
+      expect(op.state).toBe("cancelled");
+      expect(op.providerRecovery.state).not.toBe("rollback_pending");
+      expect(op.providerRecovery.mutations[0]).toMatchObject({
+        kind: "aws_role.create",
+        status: "confirmed",
+        providerId: "AROA1"
+      });
+      expect(op.setupArtifacts.awsRole).toMatchObject({
+        state: "created",
+        roleId: "AROA1"
+      });
+      expect(
+        projectOperationActions(op).map((action: { id: string }) => action.id)
+      ).toEqual(
+        expect.arrayContaining(["continue-setup", "rollback", "exit-setup"])
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it("rolls back what an AWS setup created, under the lock, then its GitHub environment", async () => {
+    const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.39.0" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": {
+        stdout: JSON.stringify({
+          Role: {
+            Arn: roleArn,
+            RoleId: "AROA1",
+            AssumeRolePolicyDocument: {
+              Version: "2012-10-17",
+              Statement: [
+                {
+                  Effect: "Allow",
+                  Principal: { Service: "ec2.amazonaws.com" },
+                  Action: "sts:AssumeRole"
+                }
+              ]
+            }
+          }
+        })
+      },
+      "iam delete-role-policy": { stdout: "" },
+      "iam list-role-policies": { stdout: '{"PolicyNames":[]}' },
+      "iam list-attached-role-policies": { stdout: '{"AttachedPolicies":[]}' },
+      "iam delete-role": { stdout: "" },
+      "iam delete-policy": { stdout: "" }
+    });
+    const run = vi.fn(async (args: string[]) => {
+      const command = args.join(" ");
+      if (command === "api /repos/fixture/app/environments/dev")
+        return { code: 0, stdout: '{"id":17,"name":"dev"}', stderr: "" };
+      if (command === "api --method DELETE /repos/fixture/app/environments/dev")
+        return { code: 0, stdout: "", stderr: "" };
+      throw new Error(`Unexpected cleanup command: ${command}`);
+    });
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      requiresKeyringSwitch: false,
+      run
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      awsEnabled: true,
+      accountContext: createEnvironmentAccountContext(
+        "aws-rollback",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => executor.login,
+          switchKeyringAccount: async () => {
+            throw new Error("Unexpected keyring switch");
+          },
+          resetIdentityCache: () => {}
+        })
+      )
+    });
+    try {
+      const entry = await runtime.getOrCreateServer(
+        "aws-rollback",
+        "environment"
+      );
+      const op = createOperation({
+        operationId: "op_aws_rollback",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      op.context.githubLogin = executor.login;
+      recordGitHubEnvironment(op, {
+        state: "created",
+        origin: "this_operation",
+        repo: op.repo,
+        name: op.environment,
+        providerId: "17"
+      });
+      recordAwsRole(op, {
+        state: "created",
+        origin: "this_operation",
+        roleArn,
+        roleName: "radius-deploy-fixture-app",
+        roleId: "AROA1"
+      });
+      recordAwsRolePolicy(op, {
+        roleArn,
+        roleName: "radius-deploy-fixture-app",
+        policyName: "radius-deploy-dev-1"
+      });
+      finish(op, "failed");
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+      const status = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}`
+      );
+      const rollback = (await status.json()).operation.actions.find(
+        (action: { id: string }) => action.id === "rollback"
+      );
+      expect(rollback.preview.removes).toEqual([
+        {
+          kind: "aws_role_policy",
+          target: "radius-deploy-dev-1 on IAM role radius-deploy-fixture-app"
+        },
+        { kind: "aws_role", target: "IAM role radius-deploy-fixture-app" },
+        { kind: "github_environment", target: "fixture/app:dev" }
+      ]);
+
+      const response = await fetch(`${entry.baseUrl}${rollback.path}`, {
+        method: "POST",
+        headers: {
+          origin: entry.baseUrl,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+        }
+      });
+      expect(response.status).toBe(202);
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+
+      expect(op.terminal).toMatchObject({ reason: "rollback-complete" });
+      const calls = await aws.calls();
+      expect(
+        calls.map((call) => call.split(" ").slice(0, 2).join(" "))
+      ).toEqual([
+        "--version",
+        "sts get-caller-identity",
+        "iam create-policy",
+        "iam get-policy",
+        "iam get-role",
+        "iam get-policy",
+        "iam delete-role-policy",
+        "iam list-role-policies",
+        "iam list-attached-role-policies",
+        "iam get-policy",
+        "iam delete-role",
+        "iam get-policy",
+        "iam delete-policy"
+      ]);
+      expect(calls[2]).toContain('"action":"rollback"');
+      expect(op.setupArtifacts.awsRole.state).toBe("deleted");
+      expect(op.setupArtifacts.awsRolePolicies[0].state).toBe("deleted");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+      expect(run).toHaveBeenCalledWith(
+        ["api", "--method", "DELETE", "/repos/fixture/app/environments/dev"],
+        expect.anything()
+      );
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("aws-rollback", true);
+      await aws.restore();
+    }
+  });
 
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};
