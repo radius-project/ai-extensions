@@ -871,7 +871,12 @@ it("rejects a managed edge binary before honoring a repository extension or invo
     if (previousRadBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
     else process.env.RADIUS_RAD_BINARY = previousRadBinary;
     vi.resetModules();
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 50,
+      retryDelay: 100
+    });
   }
 }, 10000);
 
