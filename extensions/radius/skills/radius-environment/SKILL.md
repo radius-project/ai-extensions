@@ -104,11 +104,12 @@ The managed Contour Gateway supports HTTP and TLS routes. TCP and UDP routes req
 
 - `AWS_ROLE_ARN` — ARN of the IAM role the runner assumes via OIDC
 - `AWS_REGION` — AWS region (e.g. `us-west-2`)
+- `AWS_ACCOUNT_ID` — the 12-digit account of `AWS_ROLE_ARN`. Verification, deploys, and deletes fail when the role signs in to a different account.
 - `AWS_EKS_CLUSTER_NAME` — name of the EKS cluster the workflow verifies access to
 
 **AWS** — also set from the form for deploys (not read by verification):
 
-- `AWS_ACCOUNT_ID`, `RADIUS_VPC_ID` (the EKS cluster's VPC), `RADIUS_SUBNET_IDS`
+- `RADIUS_VPC_ID` (the EKS cluster's VPC), `RADIUS_SUBNET_IDS`
 
 **AWS**, recorded for environment deletion (not read by any workflow):
 
