@@ -4990,26 +4990,40 @@ test.describe("Radius Canvas in Chromium", () => {
           env: { GH_TOKEN: "fixture-repo-token" },
           stdout: ""
         },
+        // The setup's own lock is there, so the rollback replaces it.
         {
           tool: "aws",
           argsPrefix: ["iam", "create-policy"],
           exitCode: 254,
           stderr:
-            "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation"
+            "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
+          times: 1
+        },
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "create-policy"],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK1" } })
+        },
+        {
+          ...aws(
+            ["iam", "get-policy", "--policy-arn", lockArn, "--output", "json"],
+            {
+              Policy: {
+                PolicyId: "LOCK0",
+                Description: JSON.stringify({
+                  repo: REPOSITORY,
+                  environment: "fixture-environment",
+                  action: "setup",
+                  operationId
+                })
+              }
+            }
+          ),
+          times: 1
         },
         aws(
           ["iam", "get-policy", "--policy-arn", lockArn, "--output", "json"],
-          {
-            Policy: {
-              PolicyId: "LOCK0",
-              Description: JSON.stringify({
-                repo: REPOSITORY,
-                environment: "fixture-environment",
-                action: "setup",
-                operationId
-              })
-            }
-          }
+          { Policy: { PolicyId: "LOCK1" } }
         ),
         aws(["iam", "get-role", "--role-name", roleName, "--output", "json"], {
           Role: {
@@ -5107,6 +5121,8 @@ test.describe("Radius Canvas in Chromium", () => {
         { timeout: 15_000 }
       );
       expect(await awsWrites()).toEqual([
+        "iam create-policy",
+        "iam delete-policy",
         "iam create-policy",
         "iam delete-role-policy",
         "iam delete-role",

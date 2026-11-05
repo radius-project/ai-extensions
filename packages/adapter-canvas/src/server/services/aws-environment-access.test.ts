@@ -3357,12 +3357,19 @@ describe("AWS environment access rollback", () => {
   it("takes back the setup's recorded lock instead of waiting on it", async () => {
     const h = harness(
       rollbackScript({
-        "iam create-policy": fail(
-          "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
-        ),
-        "iam get-policy": lockPolicy("LOCK0", { Description: MINE })
+        "iam create-policy": [
+          fail(
+            "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
+          ),
+          lockPolicy("LOCK1")
+        ],
+        "iam get-policy": [
+          lockPolicy("LOCK0", { Description: MINE }),
+          lockPolicy("LOCK1")
+        ]
       })
     );
+    const recorded: unknown[] = [];
 
     expect(
       await h.access.rollback({
@@ -3371,10 +3378,15 @@ describe("AWS environment access rollback", () => {
         operationId: "op-1",
         roleArn: ROLE_ARN,
         targets: [target],
-        adopt: "LOCK0"
+        adopt: "LOCK0",
+        onLocked: async (lock) => {
+          recorded.push(lock);
+        }
       })
     ).toMatchObject({ released: true, warnings: [] });
     expect(h.commands()).toContain("iam delete-role-policy");
+    // Replaced with a fresh lock, which is the one recorded.
+    expect(recorded).toEqual([expect.objectContaining({ policyId: "LOCK1" })]);
   });
 
   it("reports a lock another run holds, without waiting or changing anything", async () => {
