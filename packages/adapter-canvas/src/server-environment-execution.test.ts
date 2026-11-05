@@ -3545,6 +3545,7 @@ describe("production coordinator scheduling scopes", () => {
       withSelectedAccount: unavailable
     });
     const execution = createEnvironmentOperationExecution({
+      awsEnabled: false,
       awsEnvironmentAccess: { setup: unavailable, release: unavailable },
       executionOwner: owner,
       scope,

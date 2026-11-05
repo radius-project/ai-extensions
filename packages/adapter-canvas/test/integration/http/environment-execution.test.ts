@@ -654,6 +654,122 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it.each([true, false])(
+    "releases a rolled-back AWS setup's lock only while AWS is on (awsEnabled=%s)",
+    async (awsEnabled) => {
+      const lockArn =
+        "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
+      const aws = await fakeAwsOnPath({
+        "--version": { stdout: "aws-cli/2.39.0" },
+        "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+        "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK0"}}' },
+        "iam delete-policy": { stdout: "" }
+      });
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api /repos/fixture/app/environments/dev")
+          return { code: 0, stdout: '{"id":17,"name":"dev"}', stderr: "" };
+        if (
+          command === "api --method DELETE /repos/fixture/app/environments/dev"
+        )
+          return { code: 0, stdout: "", stderr: "" };
+        throw new Error(`Unexpected cleanup command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        awsEnabled,
+        accountContext: createEnvironmentAccountContext(
+          "aws-cleanup",
+          createGitHubAccountCoordinator({
+            createExecutor: async () => executor,
+            getActiveKeyringLogin: async () => executor.login,
+            switchKeyringAccount: async () => {
+              throw new Error("Unexpected keyring switch");
+            },
+            resetIdentityCache: () => {}
+          })
+        )
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "aws-cleanup",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: "op_aws_cleanup",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        op.context.githubLogin = executor.login;
+        setContext(op, {
+          awsDeployIdentityLock: { policyArn: lockArn, policyId: "LOCK0" }
+        });
+        recordGitHubEnvironment(op, {
+          state: "created",
+          origin: "this_operation",
+          repo: op.repo,
+          name: op.environment,
+          providerId: "17"
+        });
+        finish(op, "failed");
+        operations.put(op);
+        vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        expect(response.status).toBe(202);
+        await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+          timeout: 15000
+        });
+
+        expect(op.terminal).toMatchObject({ reason: "rollback-complete" });
+        const labels = op.steps.map((step: { label: string }) => step.label);
+        if (awsEnabled) {
+          expect(await aws.calls()).toEqual([
+            "--version",
+            "sts get-caller-identity --output json",
+            `iam get-policy --policy-arn ${lockArn} --output json`,
+            `iam delete-policy --policy-arn ${lockArn}`
+          ]);
+          expect(op.context.awsDeployIdentityLock).toBeNull();
+        } else {
+          expect(await aws.calls()).toEqual([]);
+          expect(op.context.awsDeployIdentityLock).toEqual({
+            policyArn: lockArn,
+            policyId: "LOCK0"
+          });
+          expect(labels).toContainEqual(
+            expect.stringMatching(
+              /^AWS environments are turned off, so Radius did not release the lock/
+            )
+          );
+        }
+      } finally {
+        owner.shutdown();
+        await runtime.stopServer("aws-cleanup", true);
+        await aws.restore();
+      }
+    }
+  );
+
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {

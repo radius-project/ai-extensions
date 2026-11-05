@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { admitSetupCommand } from "@radius-project/core";
+import {
+  admitSetupCommand,
+  AWS_LOCK_REMOVABLE_AFTER_MS
+} from "@radius-project/core";
 import {
   acceptCommand,
   addStep,
@@ -22,7 +25,9 @@ import {
   getOperationControl,
   finish,
   isProviderRestartDecision,
+  isTerminalState,
   markVerificationRetryAcquisition,
+  mayHaveStartedVerification,
   removableAwsLockWait,
   rollbackRetryAttempt,
   setCommandState,
@@ -469,6 +474,30 @@ async function handleRemoveAwsLock(
     });
     return;
   }
+  // A holder shown as stopped may have resumed since, taking its lock back
+  // with the same policy ID. Unless the lock is old enough to offer removal
+  // anyway, confirm the holder is still stopped before deleting.
+  if (
+    wait.stopped &&
+    wait.holderOperationId &&
+    wait.holderOperationId !== operationId &&
+    !awsLockHeldPastRemovalAge(wait.since)
+  ) {
+    const holder = dependencies.get(wait.holderOperationId);
+    if (!holder || !isTerminalState(holder.state)) {
+      setContext(operation, {
+        awsLockWait: { ...wait, stopped: false, removable: false }
+      });
+      sendJson(context, 409, {
+        error:
+          "The setup that holds this lock is running again, so Radius did not remove it. This run keeps waiting for it.",
+        code: "aws-lock-holder-resumed",
+        operationId,
+        operation: clientView(operation)
+      });
+      return;
+    }
+  }
   let result: Awaited<
     ReturnType<OperationsControlDependencies["removeAwsDeployIdentityLock"]>
   >;
@@ -516,20 +545,13 @@ async function handleRemoveAwsLock(
   });
 }
 
-/**
- * Whether this setup may have dispatched its verification workflow. Any sign of
- * a dispatch counts, so a run Radius might have started is always observed.
- */
-function verificationDispatched(operation: OperationRecord): boolean {
-  const verification = operation.verification;
-  if (typeof verification !== "object" || verification === null) return false;
-  const dispatchedAt =
-    "dispatchedAt" in verification ? Number(verification.dispatchedAt) : 0;
-  const runId =
-    "runId" in verification && verification.runId != null ?
-      String(verification.runId).trim()
-    : "";
-  return dispatchedAt > 0 || runId !== "";
+/** Whether a lock IAM says was created at `since` is old enough to remove. */
+function awsLockHeldPastRemovalAge(since: string): boolean {
+  const created = Date.parse(since);
+  return (
+    Number.isFinite(created) &&
+    Date.now() - created >= AWS_LOCK_REMOVABLE_AFTER_MS
+  );
 }
 
 /**
@@ -616,20 +638,20 @@ async function handleStopOperation(
       });
       return;
     }
-    // Setup stopped before it dispatched verification, so no workflow exists to
-    // observe. Calling its state unknown would refuse every cleanup command.
-    if (!verificationDispatched(operation)) {
-      announceOperationTerminal(operation);
-      sendJson(context, 200, {
-        operationId,
-        code: "operation-stopped",
-        statusUrl: statusUrlFor(operationId),
-        operation: clientView(operation)
-      });
-      return;
-    }
     try {
       assertCurrent();
+      // No workflow run can exist yet, so there is nothing to observe. Calling
+      // its state unknown would refuse every cleanup command.
+      if (!mayHaveStartedVerification(operation)) {
+        announceOperationTerminal(operation);
+        sendJson(context, 200, {
+          operationId,
+          code: "operation-stopped",
+          statusUrl: statusUrlFor(operationId),
+          operation: clientView(operation)
+        });
+        return;
+      }
       let state: "active" | "inactive" | "unknown";
       let readError: unknown;
       try {
@@ -953,11 +975,11 @@ async function closeExitedSetup(request: CommandRequest): Promise<boolean> {
   // The lock is this setup's own, by its recorded policy ID, so leaving the
   // setup releases it even when nothing else is removed. Otherwise every later
   // run that changes the role would wait on a setup that will never finish.
-  await releaseRecordedAwsLock(
-    operation,
-    dependencies.removeAwsDeployIdentityLock,
+  await releaseRecordedAwsLock(operation, {
+    awsEnabled: dependencies.awsEnabled,
+    remove: dependencies.removeAwsDeployIdentityLock,
     errorMessage
-  );
+  });
   const snapshot: unknown = snapshotRetryState(operation);
   const accepted = acceptOperationCommand(operation, {
     kind: EXIT_COMMAND_KIND,

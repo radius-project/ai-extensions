@@ -3,6 +3,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
+  mayHaveStartedVerification,
+  getSetupArtifactLedger,
   applySetupResumePoint,
   setupStepLabel,
   onOperationTerminal,
@@ -8946,5 +8948,102 @@ describe("a stopped AWS setup's deploy identity lock", () => {
     expect(action(op, "remove-aws-lock").description).toBe(
       "This lock is from an earlier attempt that stopped: Another run, which took it at 2026-10-30 11:59 UTC. Remove it so this run can continue."
     );
+  });
+});
+
+describe("mayHaveStartedVerification", () => {
+  const fresh = () => newOp();
+
+  it("is false for a setup with no dispatch, commit, or workflow write", () => {
+    expect(mayHaveStartedVerification(fresh())).toBe(false);
+    expect(mayHaveStartedVerification(null)).toBe(false);
+  });
+
+  it.each([
+    [
+      "a dispatch time",
+      (op) => {
+        op.verification = { dispatchedAt: 1 };
+      }
+    ],
+    [
+      "a run id",
+      (op) => {
+        op.verification = { runId: 42 };
+      }
+    ],
+    [
+      "a commit mode",
+      (op) => {
+        recordCommitState(op, { mode: "default_branch", branch: "main" });
+      }
+    ],
+    [
+      "a committed workflow file",
+      (op) => {
+        getSetupArtifactLedger(op).commit.workflowFiles.push({
+          path: ".github/workflows/radius-verify.yml"
+        });
+      }
+    ],
+    [
+      "a workflow write in flight",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_workflow.put",
+          target: "main:.github/workflows/radius-verify.yml"
+        });
+      }
+    ],
+    [
+      "a dispatch in flight",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_workflow.dispatch",
+          target: "radius-verify.yml"
+        });
+      }
+    ]
+  ])("is true for a setup that records %s", (_label, record) => {
+    const op = fresh();
+    record(op);
+    expect(mayHaveStartedVerification(op)).toBe(true);
+  });
+
+  it.each([
+    [
+      "a blank run id and zero dispatch time",
+      (op) => {
+        op.verification = { dispatchedAt: 0, runId: " " };
+      }
+    ],
+    [
+      "a refused workflow write",
+      (op) => {
+        const mutation = prepareProviderMutation(op, {
+          kind: "github_workflow.put",
+          target: "main:.github/workflows/radius-verify.yml"
+        });
+        settleProviderMutation(
+          op,
+          mutation.mutationId,
+          "not_applied",
+          "HTTP 403"
+        );
+      }
+    ],
+    [
+      "a GitHub environment write only",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_environment.put",
+          target: "contoso/store:dev"
+        });
+      }
+    ]
+  ])("is false for a setup that records only %s", (_label, record) => {
+    const op = fresh();
+    record(op);
+    expect(mayHaveStartedVerification(op)).toBe(false);
   });
 });

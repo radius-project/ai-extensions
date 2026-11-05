@@ -27,7 +27,11 @@ describe("releaseRecordedAwsLock", () => {
     const op = stoppedSetup();
     const remove = vi.fn(async () => ({ ok: true as const, removed: true }));
 
-    await releaseRecordedAwsLock(op, remove, errorMessage);
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: true,
+      remove,
+      errorMessage
+    });
 
     expect(remove).toHaveBeenCalledExactlyOnceWith({
       policyArn: LOCK_ARN,
@@ -45,11 +49,11 @@ describe("releaseRecordedAwsLock", () => {
   it("forgets a lock that was already gone", async () => {
     const op = stoppedSetup();
 
-    await releaseRecordedAwsLock(
-      op,
-      async () => ({ ok: true, removed: false }),
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: true,
+      remove: async () => ({ ok: true, removed: false }),
       errorMessage
-    );
+    });
 
     expect(op.context.awsDeployIdentityLock).toBeNull();
     expect(labels(op)).toEqual([
@@ -63,15 +67,15 @@ describe("releaseRecordedAwsLock", () => {
   it("leaves a newer lock another run took in place", async () => {
     const op = stoppedSetup();
 
-    await releaseRecordedAwsLock(
-      op,
-      async () => ({
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: true,
+      remove: async () => ({
         ok: false,
         code: "aws-lock-changed",
         message: "The lock changed since it was shown."
       }),
       errorMessage
-    );
+    });
 
     expect(op.context.awsDeployIdentityLock).toBeNull();
     expect(labels(op)).toEqual([
@@ -113,7 +117,11 @@ describe("releaseRecordedAwsLock", () => {
     async (_label, remove, reason) => {
       const op = stoppedSetup();
 
-      await releaseRecordedAwsLock(op, remove, errorMessage);
+      await releaseRecordedAwsLock(op, {
+        awsEnabled: true,
+        remove,
+        errorMessage
+      });
 
       expect(op.context.awsDeployIdentityLock).toEqual({
         policyArn: LOCK_ARN,
@@ -142,9 +150,38 @@ describe("releaseRecordedAwsLock", () => {
   ])("does nothing for %s", async (_label, op) => {
     const remove = vi.fn();
 
-    await releaseRecordedAwsLock(op, remove, errorMessage);
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: true,
+      remove,
+      errorMessage
+    });
 
     expect(remove).not.toHaveBeenCalled();
     expect(op.steps).toEqual([]);
+  });
+});
+
+describe("releaseRecordedAwsLock with AWS turned off", () => {
+  it("keeps the lock recorded and names it, running no AWS command", async () => {
+    const op = stoppedSetup();
+    const remove = vi.fn();
+
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: false,
+      remove,
+      errorMessage
+    });
+
+    expect(remove).not.toHaveBeenCalled();
+    expect(op.context.awsDeployIdentityLock).toEqual({
+      policyArn: LOCK_ARN,
+      policyId: "LOCK0"
+    });
+    expect(labels(op)).toEqual([
+      [
+        "warning",
+        `AWS environments are turned off, so Radius did not release the lock this setup holds on IAM role radius-deploy-octo-shop. Other Radius runs that change this role wait for it, and can remove it with Remove lock. ${RECOVERY}`
+      ]
+    ]);
   });
 });

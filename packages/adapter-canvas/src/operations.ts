@@ -983,6 +983,32 @@ export function isProviderRestartDecision(op: any): boolean {
   );
 }
 
+/**
+ * Whether a verification workflow run for this setup may exist.
+ *
+ * A run needs an installed workflow, so a record that never committed one and
+ * never attempted a workflow write or dispatch proves no run started. Anything
+ * short of that proof counts: setup records an automatic push run's identity
+ * only after the commit that triggered it is saved, so a crash in between
+ * leaves a run with no dispatch fields.
+ */
+export function mayHaveStartedVerification(op: any): boolean {
+  const verification = op?.verification;
+  if (verification && typeof verification === "object") {
+    if (Number(verification.dispatchedAt) > 0) return true;
+    if (verification.runId != null && String(verification.runId).trim())
+      return true;
+  }
+  const ledger = readSetupArtifactLedger(op?.setupArtifacts);
+  if (ledger.commit.mode !== "not_started") return true;
+  if (ledger.commit.workflowFiles.length > 0) return true;
+  return readProviderRecovery(op?.providerRecovery).mutations.some(
+    (mutation) =>
+      mutation.kind.startsWith("github_workflow.") &&
+      mutation.status !== "not_applied"
+  );
+}
+
 export function verificationWorkflowState(
   op: any
 ): VerificationWorkflowState | null {

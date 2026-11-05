@@ -17,16 +17,32 @@ import {
  */
 export async function releaseRecordedAwsLock(
   operation: Record<string, unknown>,
-  remove: (lock: {
-    policyArn: string;
-    policyId: string;
-  }) => Promise<AwsLockRemovalResult>,
-  errorMessage: (error: unknown) => string
+  {
+    awsEnabled,
+    remove,
+    errorMessage
+  }: {
+    // The AWS developer switch. While it is off Radius runs no AWS command,
+    // so the lock stays recorded and named.
+    awsEnabled: boolean;
+    remove(lock: {
+      policyArn: string;
+      policyId: string;
+    }): Promise<AwsLockRemovalResult>;
+    errorMessage(error: unknown): string;
+  }
 ): Promise<void> {
   if (operation.provider !== "aws") return;
   const lock = readRecordedAwsLock(operation.context);
   if (!lock) return;
   const role = `IAM role ${lock.roleName}`;
+  if (!awsEnabled) {
+    addLegacyStep(
+      operation,
+      `⚠️ AWS environments are turned off, so Radius did not release the lock this setup holds on ${role}. Other Radius runs that change this role wait for it, and can remove it with Remove lock. ${awsLockRecoveryCommand(lock.policyArn, lock.policyId)}`
+    );
+    return;
+  }
   let result: AwsLockRemovalResult;
   try {
     result = await remove({

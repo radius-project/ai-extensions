@@ -4098,6 +4098,8 @@ function productionEnvironmentDeletionPorts(
 }
 
 export interface EnvironmentOperationExecutionDependencies {
+  // The AWS developer switch. Cleanup runs no AWS command while it is off.
+  awsEnabled: boolean;
   awsEnvironmentAccess: Pick<
     AwsEnvironmentAccess<EnvironmentOperationRecord>,
     "setup" | "release"
@@ -4154,6 +4156,8 @@ export function createEnvironmentOperationExecution(
   const instanceId = dependencies.presentation?.instanceId;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
+  if (typeof dependencies.awsEnabled !== "boolean")
+    throw new Error("Missing request coordinator dependency: awsEnabled");
   if (
     typeof awsEnvironmentAccess?.setup !== "function" ||
     typeof awsEnvironmentAccess.release !== "function"
@@ -4982,11 +4986,11 @@ export function createEnvironmentOperationExecution(
     for (const step of steps) addLegacyStep(op, step);
     // Last, after everything this pass removes: the lock is what tells another
     // run that this setup may still be changing the role.
-    await releaseRecordedAwsLock(
-      op,
-      (lock) => removeAwsDeployIdentityLock(lock, runAwsCli),
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: dependencies.awsEnabled,
+      remove: (lock) => removeAwsDeployIdentityLock(lock, runAwsCli),
       errorMessage
-    );
+    });
     // A deletion this pass issued and could not settle has nobody left to
     // settle it: the record is about to end, and every scheduler that would
     // reread it is gated on a live operation. Leaving it merely unresolved
@@ -5504,6 +5508,7 @@ export function createInstanceRequestCoordinator(
     }
   };
   const execution = createEnvironmentOperationExecution({
+    awsEnabled,
     awsEnvironmentAccess: dependencies.awsEnvironmentAccess,
     executionOwner: dependencies.executionOwner,
     accountContext: dependencies.accountContext,
@@ -6708,6 +6713,7 @@ export function createProductionCanvasServerRuntime(
       configureEnvironment({ data }, instanceId, isCurrentPresentation)
   };
   const setupExecution = createEnvironmentOperationExecution({
+    awsEnabled,
     awsEnvironmentAccess,
     executionOwner,
     scope: executionOwner.attachRuntime(),
