@@ -4,7 +4,7 @@
 - **Date**: 2026-09
 - **Current-state assessment**: 2026-11-05, against `ai-extensions` revision [`0cb4983`](https://github.com/radius-project/ai-extensions/tree/0cb498371950d608d4a6217d1eee5588aa9ff504).
 
-**Implementation status:** Start with [Current implementation and remaining target](#current-implementation-and-remaining-target) and the [migration ownership ledger](./2026-09-github-radius-migration-inventory.md#migration-ownership-ledger). The [source at revision `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) remain a historical example, not the implementation baseline or evidence of completion.
+**Status:** See [current implementation](#current-implementation-and-remaining-target) and the [migration ledger](./2026-09-github-radius-migration-inventory.md#migration-ownership-ledger). The [prototype at `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) are historical references.
 
 ## Overview
 
@@ -16,7 +16,7 @@ GitHub Radius currently creates GitHub environments, coordinates Radius applicat
 
 That coupling makes another frontend expensive to build. A VSCode integration, for example, would have to reproduce the Canvas implementation's decisions about environment setup, command execution, workflow dispatch, progress, and failures, or depend on Canvas being open. Copies of this logic would drift: a deployment fix in Canvas would not necessarily fix the same problem in another frontend.
 
-This proposal complements the [common graph libraries design](./2026-09-common-graph-libraries.md). Shared graph algorithms and browser presentation support additional frontends, but do not replace the application and environment coordination extracted here.
+This proposal complements the [common graph libraries design](./2026-09-common-graph-libraries.md): shared graph algorithms and presentation do not replace application and environment coordination.
 
 ## Terms and definitions
 
@@ -121,26 +121,26 @@ Simply moving these files to a different folder would not be enough. The extract
 
 #### Current implementation and remaining target
 
-At the November 5 assessment revision, shared workflow observation and substantial environment setup policy are implemented and consumed by Canvas. The historical baseline above remains pinned; this section describes subsequent delivery, not a new claim of live-cloud qualification or human acceptance.
+Canvas now consumes shared workflow observation and much of the environment setup policy. Deployment, graph orchestration, authoring and deletion still need extraction.
 
-| Capability                       | Delivered implementation                                                                                                                                                                                                 | Remaining target                                                                                                                                 |
-|----------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-| Workflow observation             | Core/shared own known-run observation, diagnostics, artifact validation, response metadata and bounded read retries; Canvas calls them.                                                                                  | Preserve evidence limitations; deployment monitoring, attempt ownership and repair composition still need extraction.                            |
-| Environment setup                | Core owns admission, provider and publication policy, setup coordination, verification observation and control/resume policy. Runtime-owned execution and registered setup/status/control tools support optional panels. | Make remaining reusable production bindings consumable outside `adapter-canvas`; preserve the documented provider, lifetime and recovery limits. |
-| Deployment and repair            | Existing services reuse shared readers and diagnostics.                                                                                                                                                                  | Deploy/status tools still select a Canvas entry and call local HTTP; extract attempt ownership, dispatch/monitoring and explicit repair policy.  |
-| Graphs, authoring and inspection | Core graph/modeling algorithms and shared execution helpers already exist.                                                                                                                                               | Extract source resolution and orchestration, distinguish absence from unreadable content, and separate agent interactions from reads.            |
-| Deletion                         | Existing Canvas flows retain ownership checks and partial-completion handling.                                                                                                                                           | Extract application/environment deletion coordination and provide confirmed, authorized tool access without a panel.                             |
+| Capability                       | Delivered                                                                                           | Still to extract                                                               |
+|----------------------------------|-----------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| Workflow observation             | Core/shared reads, diagnostics, artifact validation and bounded retries                             | Deployment monitoring, attempt ownership and repair policy                     |
+| Environment setup                | Core setup/verification policy; runtime-owned execution; setup/status/control tools without a panel | Reusable production bindings outside `adapter-canvas`                          |
+| Deployment and repair            | Shared readers and diagnostics                                                                      | Attempt ownership, dispatch, monitoring and tools that do not call Canvas HTTP |
+| Graphs, authoring and inspection | Core algorithms and shared execution helpers                                                        | Source resolution, orchestration and explicit agent interactions               |
+| Deletion                         | Existing Canvas safeguards                                                                          | Shared application/environment teardown and confirmed tool access              |
 
-The [production composition root](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/packages/adapter-canvas/src/extension.ts) registers `radius_setup_environment`, `radius_environment_status` and `radius_environment_control` through [environment tools](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/packages/adapter-canvas/src/runtime/environment-tools.ts). These tools share setup services with the wizard. Setup is **verify-only**: successful verification does not deploy an application, and deployment requires a separate explicit action. This supersedes the original composite verification/deployment assumption and removes deployment-attempt ownership as a prerequisite for environment tools, as recorded in the [assessed implementation plan](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/docs/design/2026-09-github-radius-implementation-plan.md#delivery-strategy).
+The [environment tools](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/packages/adapter-canvas/src/runtime/environment-tools.ts) share setup services with the wizard. Setup is **verify-only**: deployment requires a separate explicit action. The [implementation plan](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/docs/design/2026-09-github-radius-implementation-plan.md#delivery-strategy) therefore removes deployment-attempt ownership as a prerequisite for environment tools.
 
 ```mermaid
 graph TD
-    Tools["Registered environment tools<br/>no panel required"]
-    Canvas["Canvas wizard and presentation"]
-    Bindings["Setup services and runtime ownership<br/>still housed in adapter-canvas"]
-    Core["packages/core<br/>setup policy and workflow evidence"]
-    Shared["packages/adapter-shared<br/>reusable Node execution"]
-    Remaining["Canvas-owned deployment, repair,<br/>graph, authoring and deletion coordination"]
+    Tools["Environment tools"]
+    Canvas["Canvas"]
+    Bindings["adapter-canvas<br/>setup services and runtime owner"]
+    Core["core<br/>shared policy"]
+    Shared["adapter-shared<br/>execution"]
+    Remaining["Canvas-owned coordination<br/>deployment, graphs, authoring, deletion"]
     Tools --> Bindings
     Canvas --> Bindings
     Bindings --> Core
@@ -150,7 +150,7 @@ graph TD
     Remaining --> Shared
 ```
 
-**Panel independence is not complete library independence.** Setup tools no longer require an open panel, but their production composition still imports services and operation contracts from `adapter-canvas`. Another frontend must be able to compose reusable coordination and execution bindings without importing Canvas state, route contracts, SDK handles or a server factory. Keep host-specific account choice, confirmation, workspace authorization, persistence and presentation in frontend bindings; extract reusable policy rather than relocating those host responsibilities into core.
+**No panel does not mean no Canvas dependency.** Setup tools still import `adapter-canvas` services and operation contracts. Another frontend must be able to call the shared implementation without those dependencies. Account choice, confirmation, workspace authorization, persistence and presentation remain host responsibilities.
 
 ### Architecture diagram
 
@@ -285,11 +285,11 @@ Reuse shared helpers for managed `rad` execution, GitHub commands, and deploymen
 
 Preserve the user-facing plugin entry points and authoring skill behavior while their backing coordination moves to the library. Reuse the existing application-definition promotion and deployment paths; this proposal does not introduce a new plugin or require a second frontend to ship.
 
-The assessed `radius-environment` skill already requests setup, status and control through registered tools, with Canvas available only when the user wants the visual wizard. Complete the same separation for deployment and deletion: their tools must call shared coordination rather than select a Canvas server. The frontend decides how to collect input and present results. Preserve existing authorization, trusted host interactions and progress reporting, including explicit confirmation for destructive actions.
+`radius-environment` already uses setup/status/control tools and offers Canvas as an optional wizard. Deployment and deletion must follow: call shared coordination instead of selecting a Canvas server, while retaining trusted confirmation and authorization.
 
 #### Build & packaging
 
-Keep the application/environment coordination APIs workspace-only during this extraction and bundle them through the existing Radius plugin build. This is distinct from the existing public packed graph libraries: the assessed [core manifest](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/packages/core/package.json) exposes packed `/graph` and `/domain` subpaths, and [graph-react](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/packages/graph-react/package.json) supplies reusable browser presentation. Those public contracts do not expose setup or workflow coordination. The Radius plugin remains the released consumer of this coordination; the proposal does not require another separately published product, service or plugin.
+Application/environment coordination stays workspace-only and bundled into the Radius plugin. The public [core `/graph` and `/domain` exports](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/packages/core/package.json) and [graph-react](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/packages/graph-react/package.json) are separate release surfaces; they do not expose this coordination. No new published product is required.
 
 #### Creating Environments and Applications
 
@@ -350,7 +350,7 @@ Separate graph reads and comparison from agent-driven authoring and freshness ch
 
 Ordinary reads and branch comparisons preserve Canvas's workspace-aware source selection: use the authorized workspace, including uncommitted changes, for a source matching its repository and branch; read other sources from GitHub. Resolve each comparison side independently and report its source information. Stage both sides before compiling either. No read should commit or push source to make it available.
 
-The PR-description diff entry point has a distinct target policy: compare explicit committed base/head revisions rather than uncommitted workspace content. This correction remains Stage 4 work; do not describe the current workspace-aware PR tool as already committed-only.
+PR-description diffs should use explicit committed base/head revisions. The current tool still reads the workspace; Stage 4 owns that correction.
 
 Distinguish confirmed absence, an empty definition, and a read failure. At the original baseline, some reads return `null` for both absence and failure; the extraction must correct that ambiguity. Confirmed absence contributes no resources to first-addition/last-removal comparisons. If neither definition exists, authoring is a separate interaction. Unreadable sources must fail visibly, and missing or unreadable workspace content must not fall back to an older remote copy.
 
@@ -366,7 +366,7 @@ Preserve the existing command allow-list and workflow input compatibility. Resol
 
 Keep deployment requests, status observation, and repair policy separately callable. Reading status must not initiate repair. Canvas can explicitly combine observation and repair to preserve its experience, while supplying agent interactions and notifications. Callers invoke the shared coordination directly rather than needing a Canvas server; frontend-specific scheduling and presentation remain outside the library.
 
-Environment setup is verify-only at the assessed revision. Preserve that behavior: verification completion must not dispatch deployment, and environment tools do not require a deployment-attempt owner. A user-requested deployment is a separate operation with its own target, authorization and execution reference. This records the intentional evolution from the original composite-flow assumption; extraction must not restore automatic deployment or introduce a new workflow result schema.
+Preserve verify-only setup. Unlike the original composite-flow assumption, verification completion does not dispatch deployment. Each explicit deployment has its own target, authorization and execution reference.
 
 ### Error handling
 
@@ -393,7 +393,7 @@ Keep retries of status reads separate from retries of deployments. Use bounded b
 
 ## Test plan
 
-The extraction is complete when Canvas uses the library for the migrated capability set and a non-Canvas caller can compose the same use cases with reusable execution bindings and explicit host ports. The shared composition must not require Canvas state, route types, SDK handles, instance IDs or server construction. Import-boundary checks should cover both direct and transitive dependencies, including reusable production bindings, so a helper does not bring Canvas back into the library. Zero-panel execution through services still housed in `adapter-canvas` is intermediate delivery, not sufficient final reuse evidence.
+Completion requires both Canvas adoption and a non-Canvas caller using the same production coordination and execution bindings. That caller supplies host ports, but needs no Canvas state, route types, SDK handles, instance IDs or server factory. Check direct and transitive imports. A test that merely runs Canvas services without a panel is not enough.
 
 Shared tests should assert dependency calls and side effects, not just matching UI messages. Cover environment creation, command construction, workflow dispatch, source selection, unsupported agent interactions, cancellation boundaries, and destructive-action authorization. Graph fixtures should include uncommitted workspace changes on either matching comparison side, GitHub reads for nonmatching sources, first addition, last removal, neither side having a definition, retrieval failures, staging order, and explicit authoring/freshness handoffs. Use controlled GitHub/process/agent dependencies for tests; demonstrate successful integration separately with the existing supported workflows.
 
@@ -401,9 +401,9 @@ Error fixtures should cover rejected and ambiguous dispatches, status API outage
 
 Exercise actual frontend bindings as well as controlled dependencies, especially source selection and authorization.
 
-Test the tool result fields and status values that existing skills depend on, not just the library's internal results. The assessed deployment tool still passes through Canvas's terminal `complete`, although its skill promises `success`, and malformed successful status JSON becomes `pending`. Stage 3c must explicitly correct the tool translation and observation-error handling, without renaming Canvas or resource statuses. The target tool contract continues polling while `in_progress` and stops at `success` or `failed`; do not claim that contract is already implemented.
+Test the tool-facing contract. The deploy tool currently returns Canvas's terminal `complete` where its skill expects `success`, and maps malformed status JSON to `pending`. Stage 3c must correct both without renaming Canvas or resource statuses. The target tool polls while `in_progress` and stops at `success` or `failed`.
 
-Retain the registered environment-tool and Canvas parity evidence already delivered. Verify separately that setup never deploys, read-only observation does not authorize repair or cleanup, and trusted interactions remain required. Add independent composition evidence for remaining setup bindings and deletion tools; no full second frontend is required.
+Retain environment-tool/Canvas parity tests and the verify-only, read-only and trusted-interaction safeguards. Add independent-caller tests for the remaining setup bindings and deletion tools; a full second frontend is not required.
 
 ## Security
 
@@ -417,7 +417,7 @@ Keep GitHub identity and workspace authorization in trusted execution context ra
 
 ## Compatibility
 
-Preserve supported Canvas tool and route contracts, workflow inputs, verify-only setup, and intentionally composed authoring, deployment and repair experiences. Retired internal setup endpoints are historical compatibility records, not APIs to recreate. Keep graph reads and status observation separately callable without silently removing supported composite experiences. Corrections such as distinguishing source read failures from confirmed absence require explicit behavior tests, not an assumption that relocation provides new guarantees.
+Preserve supported Canvas contracts, workflow inputs, verify-only setup and intentionally composed authoring/deployment/repair flows. Do not recreate retired internal setup endpoints. Keep graph reads and status observation independently callable, and test behavior corrections such as distinguishing unreadable sources from confirmed absence.
 
 Document and test necessary behavior corrections separately from mechanical extraction. Neither should introduce a new workflow protocol or imply stronger durable-execution guarantees.
 
@@ -427,13 +427,13 @@ Use the existing workflow run/job outcomes, execution references, and bounded, r
 
 ## Development plan
 
-Continue from the delivered workflow-observation and environment-setup slices, rather than restarting the September inventory or provider extraction. The [current ownership ledger](./2026-09-github-radius-migration-inventory.md#migration-ownership-ledger) distinguishes those implementations from remaining work. Detailed stage and merge sequencing belongs in the implementation plan; this is the remaining capability roadmap.
+Continue from the [delivered observation and setup work](./2026-09-github-radius-migration-inventory.md#migration-ownership-ledger). The remaining roadmap is:
 
-1. **Finish deployment ownership and explicit repair composition.** Extract target resolution, reservation, dispatch and monitoring, then migrate deploy/status tools away from Canvas HTTP. Preserve execution identity and correct the documented tool-status mismatches separately from relocation.
-2. **Extract graph/source orchestration, authoring and inspection.** Reuse existing algorithms and managed execution. Complete typed source reads, staging order, committed PR comparisons and explicit agent interactions without copying policy into another frontend.
-3. **Extract application and environment deletion.** Retain trusted confirmation, provenance, fail-closed admission, safe sequencing and partial-completion/retry behavior. Keep abandonment distinct from deletion.
-4. **Complete reusable bindings and prove independent composition.** Retain environment tooling while separating remaining reusable setup/operation bindings from Canvas contracts. Exercise all in-scope calls through a small non-Canvas caller with explicit host capabilities; a full VSCode or GitHub Copilot CLI integration remains subsequent work.
-5. **Retire compatibility bridges after parity checks.** Remove duplicate implementations and behavior-free forwarders only when their consumer inventory is empty. Intentional Canvas wrappers can remain. Roll back slices only when dependencies and in-flight work remain compatible; never dual-run a mutation.
+1. **Deployment and repair:** Extract attempt ownership, target resolution, reservation, dispatch and monitoring. Remove Canvas HTTP from deploy/status tools; correct tool-status behavior separately.
+2. **Graphs, authoring and inspection:** Extract source orchestration, including typed reads, staging order, committed PR diffs and explicit agent interactions.
+3. **Deletion:** Share application/environment teardown while retaining confirmation, provenance, fail-closed admission and partial-completion/retry behavior. Abandonment remains distinct.
+4. **Independent reuse:** Remove Canvas contracts from reusable setup/operation bindings and exercise all in-scope calls through a small non-Canvas caller.
+5. **Cleanup:** Remove unused compatibility forwarders after parity checks. Keep intentional Canvas wrappers, preserve rollback compatibility, and never dual-run mutations.
 
 ## Open questions
 
