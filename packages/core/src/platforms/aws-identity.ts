@@ -3,7 +3,10 @@
 // permission policy, and the AWS CLI version gate. No I/O: callers run the
 // `aws` CLI and hand the parsed documents in.
 
-import { buildEnvironmentSuffix } from "./oidc-subject.js";
+import {
+  buildEnvironmentSuffix,
+  type OidcSubjectConfig
+} from "./oidc-subject.js";
 
 export const AWS_CLI_MINIMUM_VERSION = "2.15.3";
 export const AWS_CLI_INSTALL_URL =
@@ -508,6 +511,22 @@ export function subjectNamesRepository(subject: string): boolean {
   return (
     subjectClaims(subject)?.some(([key]) => REPOSITORY_CLAIMS.has(key)) ?? false
   );
+}
+
+/**
+ * Why setup and Repair refuse `subjects`, which fail `subjectNamesRepository`,
+ * and how to fix the customization that produced them. Only a customized
+ * subject can leave the repository out, so the fix is always to the claim keys.
+ */
+export function repositoryLessSubjectMessage(
+  subjects: readonly string[],
+  repository: string,
+  subjectConfig: OidcSubjectConfig
+): string {
+  const keys = subjectConfig.includeClaimKeys ?? [];
+  const claims =
+    keys.length > 0 ? `, includes only the claims ${keys.join(", ")}` : "";
+  return `GitHub's OIDC subject for this environment, ${subjects.join(", ")}, does not name the repository, because the OIDC subject customization for ${repository}, set on the repository or its organization${claims}. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry.`;
 }
 
 /**

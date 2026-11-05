@@ -57,7 +57,10 @@ function coordinator(
     async withSelectedAccount(_login, _metadata, work) {
       const result: GitHubAccountLeaseResult<Awaited<ReturnType<typeof work>>> =
         {
-          value: await work(executor),
+          value: await work(executor, {
+            release: async () => {},
+            retake: async () => {}
+          }),
           selectedLogin: executor.login,
           credentialSource: executor.credentialSource,
           switched: restorationState === "restored",
@@ -600,7 +603,10 @@ describe("GitHub account readiness", () => {
       createReadOnlyExecutor: async () => selected,
       async withSelectedAccount(_login, _metadata, work) {
         return {
-          value: await work(selected),
+          value: await work(selected, {
+            release: async () => {},
+            retake: async () => {}
+          }),
           selectedLogin: selected.login,
           credentialSource: selected.credentialSource,
           switched: true,
