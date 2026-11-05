@@ -132,9 +132,9 @@ The canvas uses the AWS CLI's default credentials, and checks that their account
 
 **Name.** The default name is `radius-deploy-<owner>-<repo>`. IAM role names allow at most 64 characters. A longer name keeps its first 57 characters, then adds `-` and the first 6 characters of a SHA-256 hash of `owner/repo`. The hash keeps two long repository names from being shortened to the same role name. The developer can type another name.
 
-**How Radius knows a role is its own.** Radius tags a role it creates with `radius-managed=true` and `radius-repository=<owner>/<repo>`.
+**How Radius knows a role is its own.** Radius tags a role it creates with `radius-managed=true` and `radius-repository=<owner>/<repo>`. It also tags it with `radius-operation=<operationId>`, naming the setup that created it. If Radius restarts before AWS answers `create-role`, the next run records the role as created by that setup only if it carries that setup's tag. A creation time can't prove this, because a role another setup creates later under the same name dates after the request too.
 
-- **No role has the proposed name:** setup creates it with both tags.
+- **No role has the proposed name:** setup creates it with these tags.
 - **A role tagged for this repository has it:** setup reuses it.
 - **A role without the tags has it:** setup stops and changes nothing, because the role belongs to someone else. The developer can pick it on purpose instead.
 
@@ -194,7 +194,7 @@ When either limit is reached, setup stops at that step, naming the limit and quo
 
 ### Access to the EKS cluster
 
-Setup adds an access entry for the deploy identity on the selected cluster, with AWS's `AmazonEKSClusterAdminPolicy`. Setup tags the access entry it creates with `radius-managed=true`, which needs `eks:TagResource`, so delete can tell it from one someone else made.
+Setup adds an access entry for the deploy identity on the selected cluster, with AWS's `AmazonEKSClusterAdminPolicy`. Setup tags the access entry it creates with `radius-managed=true`, which needs `eks:TagResource`, so delete can tell it from one someone else made. It also tags it with `radius-operation=<operationId>`, for the same restart check as the role.
 
 Setup grants cluster access while running as the developer, so the deploy workflow never needs the EKS access entry actions above, and no longer creates the access entry on every run. A new access entry is retried for up to a minute, because a new role takes time to spread through IAM.
 
@@ -235,7 +235,7 @@ Setup runs in three stages: **Authorize deploy identity** makes the AWS changes,
 
 The AWS workflows are committed only when the repository creates its first AWS environment. Until then, the deploy dispatcher keeps its AWS job removed, so a repository that only uses Azure never sees AWS files.
 
-**Setup record.** Setup records each AWS change in the existing setup operation record: role created, subjects added, policy written, access entry created. If a step fails after earlier steps wrote to AWS, the **Setup didn't finish** card lists what was created, and **Roll back** takes the lock and undoes those steps in reverse order. It removes an access entry only by the same rule as delete, so it never removes one that another environment reused. Rollback never deletes the GitHub identity provider, or a role Radius didn't create. If the app restarts during setup, the setup is marked interrupted, and **Retry** runs every step again, skipping what already exists.
+**Setup record.** Setup records each AWS change in the existing setup operation record: role created, subjects added, policy written, access entry created. If a step fails after earlier steps wrote to AWS, the **Setup didn't finish** card lists what was created, and **Roll back** takes the lock and undoes those steps in reverse order. It removes an access entry or a trust subject only by the same rules as delete, so it never removes one that another environment reused. Rollback never deletes the GitHub identity provider, or a role Radius didn't create. If the app restarts during setup, the setup is marked interrupted, and **Retry** runs every step again, skipping what already exists.
 
 ### Deploying
 
