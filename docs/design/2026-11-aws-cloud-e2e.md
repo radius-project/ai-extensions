@@ -59,13 +59,13 @@ A second commit carries the app for the failed deploy: one resource that fails i
 
 Both commits are pinned in `fixture-repository.ts` next to `FIXTURE_BASELINE_SHA`, so a change to either shows up in a code review. A branch, `baselines/aws`, keeps them reachable, because cleanup force-resets `main` and would otherwise leave them unreferenced.
 
-Today a run requires `main` to be at the Azure baseline before it starts. With two baselines:
+Today a run requires `main` to be at the Azure baseline before it starts. With two baselines, a run starts in this order:
 
-- `main` counts as clean at either pinned baseline. Anything else fails the clean-slate check, as today.
-- A run moves `main` to its own baseline when it starts, and its teardown leaves it there.
-- Cleanup still resets a dirty `main` to the Azure baseline, so its reset doesn't depend on which cloud runs next.
+1. Takes the fixture's lease, as today.
+2. Checks `main` and everything else the clean-slate check covers. `main` is clean at either pinned baseline; anything else fails the run and leaves `main` as it is, so the dirty state and any workflows a retry needs stay in place.
+3. Only then moves `main` to its own baseline.
 
-AWS environment names start with `radtest-aws-`. The Azure cleanup matches every `radtest-` environment today, so it changes to skip `radtest-aws-` ones, and the AWS sweep takes only those. Otherwise the Azure sweep would delete an AWS environment's GitHub environment before the AWS sweep could use it to retry.
+Its teardown leaves `main` at its own baseline. Cleanup resets a dirty `main` to the Azure baseline, so its reset doesn't depend on which cloud runs next.
 
 ### How the test signs in to AWS
 
@@ -136,16 +136,26 @@ Each managed service in the pack gets a row in the connection check and a resour
 
 ### Cleanup
 
-`cloud-e2e-cleanup.yml` gets a second cron at 14:23 UTC, two hours before the AWS run, the same gap the 02:23 cleanup leaves before Azure. Each cleanup run sweeps both clouds, so the Azure sweep now also runs at 14:23. That and the `radtest-aws-` skip are the only Azure-side changes; `cloud-e2e.yml` is unchanged. Cleanup also gets an AWS job that runs when the AWS fixture variables are set. For each expired AWS test environment, it follows the same order as the Azure job:
+Sharing the fixture with Azure changes `cloud-e2e-cleanup.yml` in three ways. `cloud-e2e.yml` doesn't change.
+
+**A second schedule.** Cleanup runs at 02:23 and 14:23 UTC, two hours before each cloud's run.
+
+**Every selection belongs to one cloud.** AWS environment names start with `radtest-aws-`. Today the Azure job selects every `radtest-` environment, and also the app deletes, GHCR state packages, and deployment records that go with them. Each of these now takes only its own cloud's environments, so neither job can delete the other's retry inputs. Fallback branches and pull requests can't be tied to one cloud, so the final step below handles them.
+
+**One final step resets the fixture.** Today the Azure job checks for leftovers and resets `main` at its end. That moves to a final job that runs after both clouds' jobs. It checks for leftovers from both clouds, then resets `main` once. If either cloud's job failed, it keeps `main` and its workflows, so the next run can retry.
+
+**Finished runs are reclaimed at any age.** Today cleanup only reclaims state older than 6 hours, in case a run is still using it. With two runs a day, a run that fails late would leave state that's too new for the next cleanup, and that state would block the other cloud's run. A scheduled cleanup now reclaims state of any age when the lease is free, because the concurrency group already keeps runs out while cleanup runs. Manual cleanup keeps the `max_age_hours` input.
+
+For each AWS test environment, the AWS job follows the same order as the Azure job:
 
 1. Asks the product to delete the app, and waits.
 2. Sweeps the environment's leftover RDS and Kubernetes resources.
 3. Checks nothing is left.
 4. Only then removes the environment's trust subject, inline policy, access entry, GitHub environment, and state.
 
-If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs. Cleanup also scales the node groups to zero if a run left them up.
+If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs. The AWS job also scales the node groups to zero if a run left them up.
 
-It deletes a resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with an expired test environment, and in one of the clusters' VPCs. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the roles, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
+It deletes an AWS resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with a test environment, and in one of the clusters' VPCs. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the roles, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
 
 Like the Azure sweep, which also deletes in a subscription shared with Radius, it has no dry run. Its rules are unit-tested against resources shaped like Radius's.
 
@@ -185,8 +195,8 @@ About $160 a month: $73 for each cluster's control plane, about $13 for nodes th
 ## Test plan
 
 - **Unit tests:** the cleanup rules, which never select resources shaped like Radius's. Cleanup keeping retry inputs when a step fails. The connection, snapshot, and 15-minute checks. The stage limits fitting the job timeout.
-- **Workflow tests:** the AWS workflow never runs on pull requests, uses no GitHub environment, has its own cron, shares the concurrency group with `queue: max`, and skips when the AWS variables are unset. Cleanup has both crons. The Azure sweep skips `radtest-aws-` environments.
-- **Fixture tests:** `main` at either pinned baseline is clean and anything else isn't. A run moves `main` to its own baseline. Cleanup resets a dirty `main` to the Azure baseline.
+- **Workflow tests:** the AWS workflow never runs on pull requests, uses no GitHub environment, has its own cron, shares the concurrency group with `queue: max`, and skips when the AWS variables are unset. Cleanup has both crons, and its final job runs after both clouds' jobs.
+- **Fixture and cleanup tests:** `main` at either pinned baseline is clean and anything else isn't. A dirty `main` fails the run before it moves. Each cloud's job selects only its own environments, app deletes, packages, and records. The final job resets `main` only when both clouds' jobs succeeded. Scheduled cleanup reclaims a failed run's state of any age when the lease is free, and never while it's held.
 - **Local run:** the full test in the developer's own AWS account, plus a check that the deploy role's boundary refuses `s3:PutAccountPublicAccessBlock`, IAM, and RDS in `us-west-2`.
 
 ## Alternatives considered
