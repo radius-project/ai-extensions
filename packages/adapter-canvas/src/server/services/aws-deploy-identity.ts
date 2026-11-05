@@ -103,7 +103,45 @@ export interface AwsDeployIdentityRequest {
   subjects: readonly string[];
 }
 
+// One AWS change setup makes and records, so a failed or interrupted setup
+// can list it and a rollback can undo exactly it.
+export type AwsSetupChange =
+  | {
+      readonly kind: "aws_role.create";
+      readonly accountId: string;
+      readonly roleArn: string;
+      readonly roleName: string;
+      // The subjects the new role trusts from the start.
+      readonly subjects: readonly string[];
+    }
+  | {
+      readonly kind: "aws_trust.add";
+      readonly accountId: string;
+      readonly roleArn: string;
+      readonly roleName: string;
+      // Only the subjects the role did not trust before this write.
+      readonly subjects: readonly string[];
+    }
+  | {
+      readonly kind: "aws_role_policy.put";
+      readonly accountId: string;
+      readonly roleArn: string;
+      readonly roleName: string;
+      readonly policyName: string;
+    }
+  | {
+      readonly kind: "aws_access_entry.create";
+      readonly accountId: string;
+      readonly roleArn: string;
+      readonly roleName: string;
+      readonly cluster: string;
+      readonly region: string;
+    };
+
 export interface AwsDeployIdentitySetupPorts extends AwsDeployIdentityPorts {
+  // Run one AWS write that creates something this setup owns. Without it the
+  // write runs through `runAws` and nothing is recorded.
+  write?(change: AwsSetupChange, args: string[]): Promise<AwsCommandResult>;
   recordPolicyIdentity(identity: {
     roleArn: string;
     policyName: string;
@@ -285,6 +323,11 @@ export async function setupAwsDeployIdentity(
   ports: AwsDeployIdentitySetupPorts
 ): Promise<AwsDeployIdentityResult> {
   const created: string[] = [];
+  const write = (
+    change: AwsSetupChange,
+    args: string[]
+  ): Promise<AwsCommandResult> =>
+    ports.write ? ports.write(change, args) : ports.runAws(args);
   const fail = (code: string, message: string): AwsDeployIdentityResult => ({
     ok: false,
     code,
@@ -573,21 +616,30 @@ export async function setupAwsDeployIdentity(
   let roleCreated = false;
   let roleCreatedAt: unknown = role?.CreateDate;
   if (!trust) {
-    const createRole = await ports.runAws([
-      "iam",
-      "create-role",
-      "--role-name",
-      roleName,
-      "--description",
-      `Radius deploy identity for ${request.repo}`,
-      "--assume-role-policy-document",
-      JSON.stringify(buildGitHubTrustPolicy(accountId, request.subjects)),
-      "--tags",
-      `Key=${AWS_MANAGED_TAG},Value=true`,
-      `Key=${AWS_REPOSITORY_TAG},Value=${request.repo}`,
-      "--output",
-      "json"
-    ]);
+    const createRole = await write(
+      {
+        kind: "aws_role.create",
+        accountId,
+        roleArn: awsRoleArn(accountId, roleName),
+        roleName,
+        subjects: request.subjects
+      },
+      [
+        "iam",
+        "create-role",
+        "--role-name",
+        roleName,
+        "--description",
+        `Radius deploy identity for ${request.repo}`,
+        "--assume-role-policy-document",
+        JSON.stringify(buildGitHubTrustPolicy(accountId, request.subjects)),
+        "--tags",
+        `Key=${AWS_MANAGED_TAG},Value=true`,
+        `Key=${AWS_REPOSITORY_TAG},Value=${request.repo}`,
+        "--output",
+        "json"
+      ]
+    );
     if (!succeeded(createRole)) {
       return fail(
         ACCESS_DENIED.test(createRole.stderr) ?
@@ -630,14 +682,27 @@ export async function setupAwsDeployIdentity(
       );
     }
     if (trust.changed) {
-      const updateTrust = await ports.runAws([
-        "iam",
-        "update-assume-role-policy",
-        "--role-name",
-        roleName,
-        "--policy-document",
-        JSON.stringify(trust.policy)
-      ]);
+      const trusted =
+        existingTrust ? acceptedGitHubSubjects(existingTrust, accountId) : [];
+      const updateTrust = await write(
+        {
+          kind: "aws_trust.add",
+          accountId,
+          roleArn,
+          roleName,
+          subjects: request.subjects.filter(
+            (subject) => !trusted.includes(subject)
+          )
+        },
+        [
+          "iam",
+          "update-assume-role-policy",
+          "--role-name",
+          roleName,
+          "--policy-document",
+          JSON.stringify(trust.policy)
+        ]
+      );
       if (!succeeded(updateTrust)) {
         return LIMIT_EXCEEDED.test(updateTrust.stderr) ?
             fail(
@@ -666,9 +731,24 @@ export async function setupAwsDeployIdentity(
   }
 
   await ports.recordPolicyIdentity({ roleArn, policyName });
+  const policyChange: AwsSetupChange = {
+    kind: "aws_role_policy.put",
+    accountId,
+    roleArn,
+    roleName,
+    policyName
+  };
   const attached = await attachEnvironmentPolicy(
     { ...request, roleName, legacy, policyName },
-    ports
+    {
+      ...ports,
+      // Only the environment's own policy is recorded. Restoring a legacy
+      // policy after a failed migration is not a change this setup owns.
+      runAws: (args) =>
+        args[1] === "put-role-policy" && args[5] === policyName ?
+          write(policyChange, args)
+        : ports.runAws(args)
+    }
   );
   if (attached.ok || attached.policyWritten) {
     created.push(`policy ${policyName} on ${roleName}`);
@@ -688,6 +768,14 @@ export async function setupAwsDeployIdentity(
     roleArn,
     ...regionArgs
   ];
+  const entryChange: AwsSetupChange = {
+    kind: "aws_access_entry.create",
+    accountId,
+    roleArn,
+    roleName,
+    cluster,
+    region
+  };
   const createAccessEntry = async (): Promise<AwsCommandResult> => {
     const args = [
       "eks",
@@ -700,7 +788,7 @@ export async function setupAwsDeployIdentity(
       "--tags",
       `${AWS_MANAGED_TAG}=true`
     ];
-    let result = await ports.runAws(args);
+    let result = await write(entryChange, args);
     for (const delay of ACCESS_ENTRY_RETRY_DELAYS_MS) {
       if (succeeded(result) || !PRINCIPAL_NOT_YET_VISIBLE.test(result.stderr)) {
         break;
@@ -709,7 +797,7 @@ export async function setupAwsDeployIdentity(
         `ℹ️ EKS does not see role ${roleName} yet. Retrying in ${delay / 1000}s.`
       );
       await ports.sleep(delay);
-      result = await ports.runAws(args);
+      result = await write(entryChange, args);
     }
     return result;
   };
@@ -1315,6 +1403,331 @@ export async function removeAwsEnvironmentFromRole(
     kept: entry.kind === "kept" ? [...kept, entry.text] : kept,
     warnings: [...shared, ...(entry.kind === "warning" ? [entry.text] : [])]
   };
+}
+
+// One AWS change a setup recorded, as Roll back sees it.
+export type AwsSetupRollbackTarget =
+  | {
+      readonly key: string;
+      readonly artifactType: "aws_role";
+      readonly roleArn: string;
+      readonly roleName: string;
+      // IAM's id for the role setup created. A role with another id under the
+      // same name is not the one setup created.
+      readonly roleId: string | null;
+    }
+  | {
+      readonly key: string;
+      readonly artifactType: "aws_trust_subject";
+      readonly roleArn: string;
+      readonly roleName: string;
+      readonly subject: string;
+    }
+  | {
+      readonly key: string;
+      readonly artifactType: "aws_role_policy";
+      readonly roleArn: string;
+      readonly roleName: string;
+      readonly policyName: string;
+    }
+  | {
+      readonly key: string;
+      readonly artifactType: "aws_access_entry";
+      readonly roleArn: string;
+      readonly roleName: string;
+      readonly cluster: string;
+      readonly region: string;
+    };
+
+export interface AwsSetupRollbackOutcome {
+  readonly key: string;
+  readonly outcome: "deleted" | "not_found" | "skipped" | "warning";
+  readonly detail: string | null;
+}
+
+function rollbackOutcome(
+  key: string,
+  outcome: AwsSetupRollbackOutcome["outcome"],
+  detail: string | null = null
+): AwsSetupRollbackOutcome {
+  return { key, outcome, detail };
+}
+
+function entryOutcome(
+  key: string,
+  entry: AccessEntryOutcome
+): AwsSetupRollbackOutcome {
+  switch (entry.kind) {
+    case "removed":
+      return rollbackOutcome(key, "deleted");
+    case "absent":
+      return rollbackOutcome(key, "not_found");
+    case "kept":
+      return rollbackOutcome(key, "skipped", `Kept ${entry.text}.`);
+    case "warning":
+      return rollbackOutcome(key, "warning", entry.text);
+    case "failed":
+      return rollbackOutcome(key, "warning", entry.message);
+  }
+}
+
+/**
+ * Undo the AWS changes one setup recorded on one role, in reverse order: the
+ * access entry (by the same rule as environment delete), the permission
+ * policy, the trust subjects, then the role. The role goes only when setup
+ * created it, it is still that role, and nothing else trusts or is attached to
+ * it. The account's GitHub identity provider always stays. The lock is taken
+ * after the account check and released by the caller.
+ */
+export async function rollbackAwsSetupChanges(
+  request: {
+    repo: string;
+    roleArn: string;
+    targets: readonly AwsSetupRollbackTarget[];
+  },
+  ports: AwsDeployIdentityRemovalPorts
+): Promise<AwsSetupRollbackOutcome[]> {
+  const { targets } = request;
+  const everyTarget = (
+    outcome: AwsSetupRollbackOutcome["outcome"],
+    detail: string
+  ) => targets.map((target) => rollbackOutcome(target.key, outcome, detail));
+  const parsed = parseAwsRoleArn(request.roleArn);
+  if (!parsed || parsed.partition !== "aws") {
+    return everyTarget(
+      "warning",
+      `"${request.roleArn}" is not a commercial AWS IAM role ARN, so Radius did not change it.`
+    );
+  }
+  const { accountId, roleName } = parsed;
+  const session = await verifyAwsCliSession({ accountId }, ports.runAws);
+  if (!session.ok) return everyTarget("warning", session.message);
+  const locked = await ports.acquireLock({ accountId, roleName });
+  if (!locked.ok) return everyTarget("warning", locked.message);
+
+  const entries = targets.filter(
+    (target) => target.artifactType === "aws_access_entry"
+  );
+  const roleTarget = targets.find(
+    (target) => target.artifactType === "aws_role"
+  );
+  const getRole = await ports.runAws([
+    "iam",
+    "get-role",
+    "--role-name",
+    roleName,
+    "--output",
+    "json"
+  ]);
+  const outcomes: AwsSetupRollbackOutcome[] = [];
+  // An entry whose role is gone, or replaced, grants nothing to anyone.
+  const removeOrphanedEntries = async () => {
+    for (const entry of entries) {
+      outcomes.push(
+        entryOutcome(
+          entry.key,
+          await removeOrphanedAccessEntry({ ...entry, roleName }, ports)
+        )
+      );
+    }
+  };
+  if (!succeeded(getRole)) {
+    if (!NO_SUCH_ENTITY.test(getRole.stderr)) {
+      return everyTarget(
+        "warning",
+        `Could not read IAM role ${roleName} (${detail(getRole)}). Nothing was changed.`
+      );
+    }
+    await removeOrphanedEntries();
+    for (const target of targets) {
+      if (target.artifactType !== "aws_access_entry") {
+        outcomes.push(rollbackOutcome(target.key, "not_found"));
+      }
+    }
+    return outcomes;
+  }
+  const roleRecord = parseJson(getRole.stdout);
+  const role =
+    isRecord(roleRecord) && isRecord(roleRecord.Role) ? roleRecord.Role : {};
+  if (
+    roleTarget?.artifactType === "aws_role" &&
+    roleTarget.roleId &&
+    role.RoleId !== roleTarget.roleId
+  ) {
+    await removeOrphanedEntries();
+    const replaced = `IAM role ${roleName} was deleted and created again after this setup, so Radius left the new role and its policies as they are.`;
+    for (const target of targets) {
+      if (target.artifactType !== "aws_access_entry") {
+        outcomes.push(rollbackOutcome(target.key, "skipped", replaced));
+      }
+    }
+    return outcomes;
+  }
+
+  let policy: PolicyDocument;
+  try {
+    policy = parsePolicyDocument(role.AssumeRolePolicyDocument);
+  } catch (error) {
+    return everyTarget(
+      "warning",
+      `Could not read the trust policy of IAM role ${roleName} (${error instanceof Error ? error.message : String(error)}). Nothing was changed.`
+    );
+  }
+  const subjects = targets.flatMap((target) =>
+    target.artifactType === "aws_trust_subject" ? [target] : []
+  );
+  const removedSubjects: typeof subjects = [];
+  for (const target of subjects) {
+    const removal = removeGitHubTrustSubject(policy, accountId, target.subject);
+    policy = removal.policy;
+    if (removal.removed) removedSubjects.push(target);
+    else outcomes.push(rollbackOutcome(target.key, "not_found"));
+  }
+
+  for (const entry of entries) {
+    outcomes.push(
+      entryOutcome(
+        entry.key,
+        await removeUnusedAccessEntry(
+          {
+            ...entry,
+            roleName,
+            roleArn: typeof role.Arn === "string" ? role.Arn : entry.roleArn,
+            repo: request.repo,
+            role,
+            accountId,
+            remainingTrust: policy
+          },
+          ports
+        )
+      )
+    );
+  }
+
+  let policiesKept = false;
+  for (const target of targets) {
+    if (target.artifactType !== "aws_role_policy") continue;
+    const deletion = await ports.runAws([
+      "iam",
+      "delete-role-policy",
+      "--role-name",
+      roleName,
+      "--policy-name",
+      target.policyName
+    ]);
+    if (succeeded(deletion)) {
+      outcomes.push(rollbackOutcome(target.key, "deleted"));
+    } else if (NO_SUCH_ENTITY.test(deletion.stderr)) {
+      outcomes.push(rollbackOutcome(target.key, "not_found"));
+    } else {
+      policiesKept = true;
+      outcomes.push(
+        rollbackOutcome(
+          target.key,
+          "warning",
+          `Could not delete policy ${target.policyName} from IAM role ${roleName} (${detail(deletion)}).`
+        )
+      );
+    }
+  }
+
+  let trustUpdated = removedSubjects.length === 0;
+  if (removedSubjects.length > 0) {
+    const update = await ports.runAws([
+      "iam",
+      "update-assume-role-policy",
+      "--role-name",
+      roleName,
+      "--policy-document",
+      JSON.stringify(policy)
+    ]);
+    const failure =
+      succeeded(update) ?
+        await awaitTrustVisible(ports, roleName, accountId, policy)
+      : `Could not update the trust policy of IAM role ${roleName} (${detail(update)}).`;
+    trustUpdated = !failure;
+    for (const target of removedSubjects) {
+      outcomes.push(
+        failure ?
+          rollbackOutcome(target.key, "warning", failure)
+        : rollbackOutcome(target.key, "deleted")
+      );
+    }
+  }
+
+  if (roleTarget) {
+    outcomes.push(
+      await deleteCreatedRole(roleTarget.key, roleName, policy, {
+        ...ports,
+        accountId,
+        changesKept: policiesKept || !trustUpdated
+      })
+    );
+  }
+  return outcomes;
+}
+
+// Delete the role setup created, unless anything else still depends on it.
+async function deleteCreatedRole(
+  key: string,
+  roleName: string,
+  trust: PolicyDocument,
+  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws"> & {
+    accountId: string;
+    changesKept: boolean;
+  }
+): Promise<AwsSetupRollbackOutcome> {
+  const keep = (reason: string) =>
+    rollbackOutcome(
+      key,
+      "skipped",
+      `Kept IAM role ${roleName}, because ${reason}. Delete it in the IAM console if nothing needs it.`
+    );
+  if (ports.changesKept) {
+    return keep("Radius could not remove everything this setup added to it");
+  }
+  if (trustedGitHubSubjects(trust, ports.accountId).length > 0) {
+    return keep("it trusts other GitHub environments");
+  }
+  for (const [command, field, noun] of [
+    ["list-role-policies", "PolicyNames", "inline"],
+    ["list-attached-role-policies", "AttachedPolicies", "attached"]
+  ] as const) {
+    const listed = await ports.runAws([
+      "iam",
+      command,
+      "--role-name",
+      roleName,
+      "--output",
+      "json"
+    ]);
+    const record = parseJson(listed.stdout);
+    const items =
+      succeeded(listed) && isRecord(record) && Array.isArray(record[field]) ?
+        record[field]
+      : null;
+    if (items === null) {
+      return keep(
+        `Radius could not list its ${noun} policies (${detail(listed)})`
+      );
+    }
+    if (items.length > 0) return keep(`it has other ${noun} policies`);
+  }
+  const deletion = await ports.runAws([
+    "iam",
+    "delete-role",
+    "--role-name",
+    roleName
+  ]);
+  if (succeeded(deletion)) return rollbackOutcome(key, "deleted");
+  if (NO_SUCH_ENTITY.test(deletion.stderr)) {
+    return rollbackOutcome(key, "not_found");
+  }
+  return rollbackOutcome(
+    key,
+    "warning",
+    `Could not delete IAM role ${roleName} (${detail(deletion)}).`
+  );
 }
 
 export interface AwsTrustRepairRequest {

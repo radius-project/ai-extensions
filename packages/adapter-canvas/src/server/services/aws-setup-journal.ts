@@ -1,0 +1,471 @@
+import {
+  trustedGitHubSubjects,
+  parsePolicyDocument
+} from "@radius-project/core";
+import {
+  getOperationControl,
+  recordAwsAccessEntry,
+  recordAwsRole,
+  recordAwsRolePolicy,
+  recordAwsTrustSubject,
+  settleProviderMutation,
+  unresolvedProviderMutations
+} from "../../operations.js";
+import { verifyAwsCliSession } from "./aws-cli-session.js";
+import type {
+  AwsCommandResult,
+  AwsSetupChange
+} from "./aws-deploy-identity.js";
+import {
+  executeRecoverableMutation,
+  ProviderMutationRecoveryError,
+  type ProviderMutationReconciliation
+} from "./provider-mutation-recovery.js";
+
+// Records each AWS change setup makes in the operation's provider journal and
+// setup ledger. A write is journaled before it is sent, so a run that stops
+// before the answer arrives leaves a record that the next run settles by
+// reading AWS, never by sending the write again.
+
+export const AWS_SETUP_MUTATION_KINDS: readonly AwsSetupChange["kind"][] = [
+  "aws_role.create",
+  "aws_trust.add",
+  "aws_role_policy.put",
+  "aws_access_entry.create"
+];
+
+// A resource IAM or EKS dates within this much before the request is taken as
+// the one the request created. Anything older existed before it.
+const CREATION_CLOCK_SKEW_MS = 60_000;
+
+type Intent = Record<string, string | number | boolean | null>;
+
+export interface AwsSetupJournalOperation {
+  operationId: string;
+}
+
+export interface AwsSetupJournalDependencies {
+  runAws(args: string[]): Promise<AwsCommandResult>;
+  persist(): Promise<void>;
+  now(): number;
+}
+
+export interface AwsSetupWriteSender {
+  // Run a read the way setup runs it, so a pause stops it too.
+  read(args: string[]): Promise<AwsCommandResult>;
+  // A refusal to send this write, such as a pause or a lost lock, or null.
+  guard(args: string[]): Promise<AwsCommandResult | null>;
+  run(args: string[]): Promise<AwsCommandResult>;
+}
+
+export interface AwsSetupJournal<Operation> {
+  /**
+   * Settle every AWS write an earlier run of this operation sent without an
+   * answer. True when one was settled.
+   */
+  reconcile(operation: Operation): Promise<boolean>;
+  write(
+    operation: Operation,
+    change: AwsSetupChange,
+    args: string[],
+    sender: AwsSetupWriteSender
+  ): Promise<AwsCommandResult>;
+}
+
+// Thrown when a write was refused before it was sent, so the journal records
+// it as not applied without reading AWS.
+class WriteNotSent extends Error {}
+
+function succeeded(result: AwsCommandResult): boolean {
+  return result.code === 0 || result.code === "0";
+}
+
+function detail(result: AwsCommandResult): string {
+  return (result.stderr || result.stdout || "").trim() || "no output";
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ?
+      Object.fromEntries(Object.entries(value))
+    : {};
+}
+
+function parse(stdout: string): Record<string, unknown> {
+  try {
+    return record(JSON.parse(stdout || "null"));
+  } catch {
+    return {};
+  }
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+// Scoped to the setup attempt, so a later attempt that has to write the same
+// thing again is a new journal entry rather than a reread of a settled one.
+export function awsSetupChangeTarget(
+  change: AwsSetupChange,
+  attempt: number
+): string {
+  const scope = `attempt-${attempt}`;
+  switch (change.kind) {
+    case "aws_role.create":
+      return `${scope}|${change.roleArn}`;
+    case "aws_trust.add":
+      return `${scope}|${change.roleArn}#trust`;
+    case "aws_role_policy.put":
+      return `${scope}|${change.roleArn}#${change.policyName}`;
+    case "aws_access_entry.create":
+      return `${scope}|${change.region}:${change.cluster}:${change.roleArn}`;
+  }
+}
+
+/** What the journal saves, so a later run can read AWS for this change. */
+export function awsSetupChangeIntent(
+  change: AwsSetupChange,
+  requestedAt: string
+): Intent {
+  const base = {
+    requestedAt,
+    accountId: change.accountId,
+    roleArn: change.roleArn,
+    roleName: change.roleName
+  };
+  switch (change.kind) {
+    case "aws_role.create":
+    case "aws_trust.add":
+      return { ...base, subjects: JSON.stringify(change.subjects) };
+    case "aws_role_policy.put":
+      return { ...base, policyName: change.policyName };
+    case "aws_access_entry.create":
+      return { ...base, cluster: change.cluster, region: change.region };
+  }
+}
+
+function stringList(value: unknown): string[] | null {
+  try {
+    const parsed: unknown = JSON.parse(text(value));
+    return (
+        Array.isArray(parsed) &&
+          parsed.every((entry) => typeof entry === "string" && entry)
+      ) ?
+        parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The change a saved intent describes, or null when it is incomplete. */
+export function awsSetupChangeFromIntent(
+  kind: string,
+  intent: Intent | undefined
+): AwsSetupChange | null {
+  const accountId = text(intent?.accountId);
+  const roleArn = text(intent?.roleArn);
+  const roleName = text(intent?.roleName);
+  if (!accountId || !roleArn || !roleName) return null;
+  const base = { accountId, roleArn, roleName };
+  switch (kind) {
+    case "aws_role.create":
+    case "aws_trust.add": {
+      const subjects = stringList(intent?.subjects);
+      return subjects ? { kind, ...base, subjects } : null;
+    }
+    case "aws_role_policy.put": {
+      const policyName = text(intent?.policyName);
+      return policyName ? { kind, ...base, policyName } : null;
+    }
+    case "aws_access_entry.create": {
+      const cluster = text(intent?.cluster);
+      const region = text(intent?.region);
+      return cluster && region ? { kind, ...base, cluster, region } : null;
+    }
+    default:
+      return null;
+  }
+}
+
+function createdSince(created: unknown, requestedAt: string): boolean {
+  const createdMs = Date.parse(text(created));
+  const requestedMs = Date.parse(requestedAt);
+  return (
+    Number.isFinite(createdMs) &&
+    Number.isFinite(requestedMs) &&
+    createdMs >= requestedMs - CREATION_CLOCK_SKEW_MS
+  );
+}
+
+/**
+ * Read AWS to learn whether `change` happened. A read that fails throws, so
+ * the journal keeps the outcome unknown instead of guessing.
+ */
+export async function reconcileAwsSetupChange(
+  change: AwsSetupChange,
+  requestedAt: string,
+  runAws: (args: string[]) => Promise<AwsCommandResult>
+): Promise<ProviderMutationReconciliation<string>> {
+  // IAM names roles per account, so a read in another account would report
+  // the role as missing.
+  const session = await verifyAwsCliSession(
+    { accountId: change.accountId },
+    runAws
+  );
+  if (!session.ok) throw new Error(session.message);
+  if (change.kind === "aws_access_entry.create") {
+    const read = await runAws([
+      "eks",
+      "describe-access-entry",
+      "--cluster-name",
+      change.cluster,
+      "--principal-arn",
+      change.roleArn,
+      "--region",
+      change.region,
+      "--output",
+      "json"
+    ]);
+    if (!succeeded(read)) {
+      if (/ResourceNotFoundException/.test(read.stderr)) {
+        return { state: "not_applied", evidence: "EKS has no such entry." };
+      }
+      throw new Error(`Could not read the access entry: ${detail(read)}`);
+    }
+    const entry = record(parse(read.stdout).accessEntry);
+    return createdSince(entry.createdAt, requestedAt) ?
+        { state: "applied", value: read.stdout }
+      : {
+          state: "not_applied",
+          evidence: "The access entry existed before this setup asked for it."
+        };
+  }
+  if (change.kind === "aws_role_policy.put") {
+    const read = await runAws([
+      "iam",
+      "get-role-policy",
+      "--role-name",
+      change.roleName,
+      "--policy-name",
+      change.policyName,
+      "--output",
+      "json"
+    ]);
+    if (!succeeded(read)) {
+      if (/NoSuchEntity/.test(read.stderr)) {
+        return { state: "not_applied", evidence: "IAM has no such policy." };
+      }
+      throw new Error(`Could not read the policy: ${detail(read)}`);
+    }
+    return { state: "applied", value: "" };
+  }
+  const read = await runAws([
+    "iam",
+    "get-role",
+    "--role-name",
+    change.roleName,
+    "--output",
+    "json"
+  ]);
+  if (!succeeded(read)) {
+    if (/NoSuchEntity/.test(read.stderr)) {
+      return { state: "not_applied", evidence: "IAM has no such role." };
+    }
+    throw new Error(`Could not read the role: ${detail(read)}`);
+  }
+  const role = record(parse(read.stdout).Role);
+  if (change.kind === "aws_role.create") {
+    return createdSince(role.CreateDate, requestedAt) ?
+        {
+          state: "applied",
+          value: read.stdout,
+          providerId: text(role.RoleId) || null
+        }
+      : {
+          state: "not_applied",
+          evidence: "The role existed before this setup asked for it."
+        };
+  }
+  const trusted = trustedGitHubSubjects(
+    parsePolicyDocument(role.AssumeRolePolicyDocument),
+    change.accountId
+  );
+  return change.subjects.every((subject) => trusted.includes(subject)) ?
+      { state: "applied", value: "" }
+    : {
+        state: "not_applied",
+        evidence: "The role does not trust every subject this setup added."
+      };
+}
+
+/** Add what one confirmed change created to the setup ledger. */
+export function recordAwsSetupChange(
+  operation: object,
+  change: AwsSetupChange,
+  stdout: string
+): void {
+  const { roleArn, roleName } = change;
+  switch (change.kind) {
+    case "aws_role.create": {
+      const role = record(parse(stdout).Role);
+      recordAwsRole(operation, {
+        state: "created",
+        origin: "this_operation",
+        roleArn: text(role.Arn) || roleArn,
+        roleName,
+        roleId: text(role.RoleId) || null
+      });
+      for (const subject of change.subjects) {
+        recordAwsTrustSubject(operation, { roleArn, roleName, subject });
+      }
+      return;
+    }
+    case "aws_trust.add":
+      for (const subject of change.subjects) {
+        recordAwsTrustSubject(operation, { roleArn, roleName, subject });
+      }
+      return;
+    case "aws_role_policy.put":
+      recordAwsRolePolicy(operation, {
+        roleArn,
+        roleName,
+        policyName: change.policyName
+      });
+      return;
+    case "aws_access_entry.create":
+      recordAwsAccessEntry(operation, {
+        roleArn,
+        roleName,
+        cluster: change.cluster,
+        region: change.region
+      });
+  }
+}
+
+export function createAwsSetupJournal<
+  Operation extends AwsSetupJournalOperation
+>(dependencies: AwsSetupJournalDependencies): AwsSetupJournal<Operation> {
+  const attemptOf = (operation: Operation): number =>
+    getOperationControl(operation)?.attempts.setup ?? 0;
+
+  async function journaled(
+    operation: Operation,
+    change: AwsSetupChange,
+    args: string[],
+    sender: AwsSetupWriteSender
+  ): Promise<AwsCommandResult> {
+    const requestedAt = new Date(dependencies.now()).toISOString();
+    let refused: AwsCommandResult | null = null;
+    try {
+      const outcome = await executeRecoverableMutation({
+        operation,
+        kind: change.kind,
+        target: awsSetupChangeTarget(change, attemptOf(operation)),
+        intent: awsSetupChangeIntent(change, requestedAt),
+        persist: dependencies.persist,
+        validateBeforeMutation: async () => {
+          refused = await sender.guard(args);
+          if (refused) throw new WriteNotSent();
+        },
+        mutate: () => sender.run(args),
+        accept: (result) => result.stdout,
+        providerIdOf: (result) =>
+          change.kind === "aws_role.create" ?
+            text(record(parse(result.stdout).Role).RoleId) || null
+          : null,
+        createdByOperation: () => true,
+        acceptedEvidence: () => "AWS accepted the change.",
+        reconcile: () =>
+          reconcileAwsSetupChange(change, requestedAt, dependencies.runAws),
+        onConfirmed: (stdout) => recordAwsSetupChange(operation, change, stdout)
+      });
+      if (outcome.state === "applied") {
+        return { code: 0, stdout: outcome.value, stderr: "" };
+      }
+      return (
+        outcome.result ?? {
+          code: 1,
+          stdout: "",
+          stderr:
+            outcome.diagnostic ||
+            "AWS did not make the change, so Radius stopped."
+        }
+      );
+    } catch (error) {
+      if (error instanceof WriteNotSent && refused) return refused;
+      throw error;
+    }
+  }
+
+  return {
+    async reconcile(operation) {
+      const unresolved = unresolvedProviderMutations(
+        operation,
+        AWS_SETUP_MUTATION_KINDS
+      );
+      for (const mutation of unresolved) {
+        const change = awsSetupChangeFromIntent(mutation.kind, mutation.intent);
+        const requestedAt = text(mutation.intent?.requestedAt);
+        if (!change || !requestedAt) {
+          const guidance = `Radius did not save enough about ${mutation.kind} for ${mutation.target} to check it in AWS. Review the deploy identity in the IAM console, then delete this setup.`;
+          settleProviderMutation(
+            operation,
+            mutation.mutationId,
+            "manual_required",
+            guidance
+          );
+          await dependencies.persist();
+          throw new ProviderMutationRecoveryError(
+            guidance,
+            "provider-mutation-manual-required"
+          );
+        }
+        await executeRecoverableMutation({
+          operation,
+          kind: mutation.kind,
+          target: mutation.target,
+          persist: dependencies.persist,
+          mutate: () => {
+            throw new Error("A reconciled AWS change is never sent again.");
+          },
+          accept: (result) => result.stdout,
+          reconcile: () =>
+            reconcileAwsSetupChange(change, requestedAt, dependencies.runAws),
+          onConfirmed: (stdout) =>
+            recordAwsSetupChange(operation, change, stdout)
+        });
+      }
+      return unresolved.length > 0;
+    },
+
+    async write(operation, change, args, sender) {
+      if (change.kind !== "aws_role_policy.put") {
+        return journaled(operation, change, args, sender);
+      }
+      // `put-role-policy` replaces a policy that already exists, so only one
+      // the role did not have is this setup's to remove.
+      const existing = await sender.read([
+        "iam",
+        "get-role-policy",
+        "--role-name",
+        change.roleName,
+        "--policy-name",
+        change.policyName,
+        "--output",
+        "json"
+      ]);
+      if (succeeded(existing)) {
+        const refused = await sender.guard(args);
+        return refused ?? sender.run(args);
+      }
+      if (!/NoSuchEntity/.test(existing.stderr)) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: `Could not check whether IAM role ${change.roleName} already has policy ${change.policyName}: ${detail(existing)}`
+        };
+      }
+      return journaled(operation, change, args, sender);
+    }
+  };
+}

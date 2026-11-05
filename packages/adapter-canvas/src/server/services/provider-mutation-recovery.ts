@@ -66,6 +66,14 @@ function requireRecoveryRollback(
   ) {
     return;
   }
+  // AWS setup stops instead: the customer decides between Continue setup and
+  // Delete setup. A rollback nobody asked for would delete work a retry could
+  // reuse, and would have to wait in the background for the deploy identity
+  // lock.
+  if (mutation.kind.startsWith("aws_")) {
+    requestStop(operation);
+    return;
+  }
   if (operation.providerRecovery) {
     operation.providerRecovery.state = "rollback_pending";
     operation.providerRecovery.guidance = null;
@@ -210,7 +218,10 @@ const CONCLUSIVE_REJECTION = new RegExp(
     String.raw`added object references already exist|object reference already exists`,
     // Service Management Reference identifiers, matched as the tenant emits them.
     String.raw`serviceManagementReference|serviceTreeNullValueProvided|serviceTreeInvalid`,
-    String.raw`Please run 'az login'|az login --|Please run 'az account set'`
+    String.raw`Please run 'az login'|az login --|Please run 'az account set'`,
+    // AWS CLI service errors name the code AWS returned for a request it saw
+    // and refused. Throttling and service failures are not listed.
+    String.raw`An error occurred \((?:AccessDenied|AccessDeniedException|EntityAlreadyExists|NoSuchEntity|LimitExceeded|MalformedPolicyDocument|InvalidInput|ValidationError|ValidationException|ResourceInUseException|InvalidParameterException|InvalidRequestException|ResourceNotFoundException|ResourceLimitExceededException|UnmodifiableEntity|DeleteConflict)\)`
   ].join("|"),
   "i"
 );

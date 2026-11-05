@@ -1691,6 +1691,16 @@ describe("record shape", () => {
         name: null,
         providerId: null
       },
+      awsRole: {
+        state: "not_started",
+        origin: "unknown",
+        roleArn: null,
+        roleName: null,
+        roleId: null
+      },
+      awsTrustSubjects: [],
+      awsRolePolicies: [],
+      awsAccessEntries: [],
       githubEnvironmentVariables: [],
       commit: {
         mode: "not_started",

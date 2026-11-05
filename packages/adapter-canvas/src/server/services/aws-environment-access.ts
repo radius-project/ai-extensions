@@ -29,12 +29,15 @@ import {
 import {
   removeAwsEnvironmentFromRole,
   repairAwsEnvironmentTrust,
+  rollbackAwsSetupChanges,
   setupAwsDeployIdentity,
   type AwsCommandResult,
   type AwsDeployIdentityPorts,
   type AwsDeployIdentityRemovalResult,
   type AwsEnvironmentListing,
   type AwsLockResult,
+  type AwsSetupRollbackOutcome,
+  type AwsSetupRollbackTarget,
   type AwsTrustRepairResult
 } from "./aws-deploy-identity.js";
 import { parseTrustSubjects } from "./environment-target.js";
@@ -47,6 +50,7 @@ import {
   type AwsLockReleaseResult,
   type AwsLockWait
 } from "./aws-deploy-identity-lock.js";
+import type { AwsSetupJournal } from "./aws-setup-journal.js";
 
 // Connects the AWS deploy identity to an environment operation: it resolves the
 // GitHub OIDC subjects the environment's workflows may present, reports
@@ -83,6 +87,9 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
   };
   // Saves every operation durably.
   store: { persist(): Promise<void> };
+  // Records each AWS change setup makes, so it can be listed and rolled back.
+  // Without it setup records nothing.
+  journal?: AwsSetupJournal<Operation>;
   stageAuthorizeIdentity: string;
   errorMessage(error: unknown): string;
 }
@@ -142,6 +149,24 @@ export interface AwsEnvironmentAccess<Operation> {
       removal: Extract<AwsDeployIdentityRemovalResult, { ok: true }>
     ): Promise<void>;
   }): Promise<AwsEnvironmentRemovalResult>;
+  // Undo the AWS changes a setup recorded on one role, under the deploy
+  // identity lock. Does not wait for a lock another run holds: every target
+  // then reports that, and Retry deletion tries again.
+  rollback(input: {
+    repo: string;
+    environment: string;
+    operationId: string;
+    roleArn: string;
+    targets: readonly AwsSetupRollbackTarget[];
+    // The policy ID of the lock this setup still records, to take back.
+    adopt?: string;
+  }): Promise<{
+    outcomes: AwsSetupRollbackOutcome[];
+    // Sentences about the lock, such as one that could not be released.
+    warnings: string[];
+    // Whether the lock this rollback took is gone.
+    released: boolean;
+  }>;
   // Add back the subjects GitHub presents for this environment's deploys but
   // the role no longer trusts, under the deploy identity lock. Does not wait
   // for a lock another run holds.
@@ -245,7 +270,7 @@ function text(value: unknown): string {
 export function createAwsEnvironmentAccess<Operation>(
   dependencies: AwsEnvironmentAccessDependencies<Operation>
 ): AwsEnvironmentAccess<Operation> {
-  const { operations, stageAuthorizeIdentity: stage } = dependencies;
+  const { operations, stageAuthorizeIdentity: stage, journal } = dependencies;
   // Locks setup took and still holds, until the coordinator releases them.
   const held = new Map<Operation, AwsDeployIdentityLock>();
 
@@ -329,6 +354,8 @@ export function createAwsEnvironmentAccess<Operation>(
       environment: string;
       action: AwsLockAction;
       operationId: string;
+      // The policy ID of a lock this operation recorded, to take back.
+      adopt?: string;
     },
     waiting: ((wait: AwsLockWait, line: string | null) => unknown) | null,
     work: (ports: AwsRoleChangePorts) => Promise<T>
@@ -544,6 +571,19 @@ export function createAwsEnvironmentAccess<Operation>(
   return {
     async setup(operation, input, executor) {
       operations.enterStage(operation, stage);
+      // An earlier run may have sent an AWS write and stopped before the
+      // answer. Settle it from AWS first. During restart reconciliation that
+      // asks for a pause, so the customer chooses Continue or Delete setup.
+      if (
+        (await journal?.reconcile(operation)) &&
+        dependencies.isStopRequested(operation)
+      ) {
+        operations.setStageState(operation, stage, "paused");
+        return paused(
+          operation,
+          "⏸️ Radius checked the AWS change the interrupted setup was making and paused. Continue setup, or delete it to remove what it created."
+        );
+      }
       let repo = text(input.repo);
       const environment = text(input.environment);
       let subjects: string[];
@@ -632,6 +672,28 @@ export function createAwsEnvironmentAccess<Operation>(
       let lockLost: AwsLockLoss | null = null;
       // Writes that ran while this run held the lock, for a lost-lock message.
       const writes: string[] = [];
+      // Why this command must not run now: a pause, or a write this run no
+      // longer holds the lock for. Null when it may run.
+      const guard = async (
+        args: string[]
+      ): Promise<AwsCommandResult | null> => {
+        if (dependencies.isStopRequested(operation)) return PAUSED;
+        if (!current || !isAwsWrite(args)) return null;
+        const lost = await current.verify();
+        if (lost) {
+          lockLost ??= lost;
+          return lockLostResult(lost.reason);
+        }
+        // A pause that arrived during the check still stops this write.
+        return dependencies.isStopRequested(operation) ? PAUSED : null;
+      };
+      const send = async (args: string[]): Promise<AwsCommandResult> => {
+        const result = await dependencies.runAws(args);
+        if (result.code === 0 || result.code === "0") {
+          writes.push(`aws ${args[0]} ${args[1]}`);
+        }
+        return result;
+      };
       const result = await setupAwsDeployIdentity(
         {
           repo,
@@ -650,23 +712,21 @@ export function createAwsEnvironmentAccess<Operation>(
           // so a pause lets the command in flight finish and runs nothing
           // after it. No rollback: what already exists is recorded below.
           runAws: async (args) => {
-            if (dependencies.isStopRequested(operation)) return PAUSED;
-            if (current && isAwsWrite(args)) {
-              const lost = await current.verify();
-              if (lost) {
-                lockLost ??= lost;
-                return lockLostResult(lost.reason);
-              }
-              // A pause that arrived during the check still stops this write.
-              if (dependencies.isStopRequested(operation)) return PAUSED;
-              const result = await dependencies.runAws(args);
-              if (result.code === 0 || result.code === "0") {
-                writes.push(`aws ${args[0]} ${args[1]}`);
-              }
-              return result;
-            }
-            return dependencies.runAws(args);
+            const refused = await guard(args);
+            if (refused) return refused;
+            return isAwsWrite(args) ? send(args) : dependencies.runAws(args);
           },
+          ...(journal ?
+            {
+              write: (change, args) =>
+                journal.write(operation, change, args, {
+                  read: async (read) =>
+                    (await guard(read)) ?? dependencies.runAws(read),
+                  guard,
+                  run: send
+                })
+            }
+          : {}),
           step: (line) => {
             operations.addLegacyStep(operation, line, stage);
           },
@@ -910,6 +970,55 @@ export function createAwsEnvironmentAccess<Operation>(
       return result.ok ?
           { ...result, lockWarning: released.message }
         : { ok: false, message: `${result.message} ${released.message}` };
+    },
+
+    async rollback({
+      repo,
+      environment,
+      operationId,
+      roleArn,
+      targets,
+      adopt
+    }) {
+      const { result, lost, released } = await runUnderLock(
+        {
+          repo,
+          environment,
+          action: "rollback",
+          operationId,
+          ...(adopt ? { adopt } : {})
+        },
+        null,
+        (ports) =>
+          rollbackAwsSetupChanges(
+            { repo, roleArn, targets },
+            {
+              ...ports,
+              // Only the access entry needs this, so a GitHub read that fails
+              // keeps that entry rather than stopping the whole rollback.
+              listOtherEnvironments: async () => {
+                try {
+                  const oidc = await resolveOidc(repo, environment);
+                  return await listOtherAwsEnvironments(
+                    repo,
+                    environment,
+                    oidc
+                  );
+                } catch (error) {
+                  return {
+                    ok: false,
+                    reason: dependencies.errorMessage(error)
+                  };
+                }
+              }
+            }
+          )
+      );
+      return {
+        outcomes: result,
+        warnings: [lost, released.ok ? "" : released.message].filter(Boolean),
+        released: released.ok || released.gone
+      };
     },
 
     async repair({

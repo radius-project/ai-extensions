@@ -157,6 +157,46 @@ export type GitHubEnvironmentVariableArtifact = {
   previousKnown: boolean;
 };
 
+// The AWS deploy identity. `created` only when this setup's create-role call
+// made it; `reused` for a Radius role from an earlier setup or a picked role.
+// `roleId` is IAM's own id, which a role recreated under the same name does
+// not share.
+export type AwsRoleArtifact = {
+  state: SetupArtifactPresence;
+  origin: SetupArtifactOrigin;
+  roleArn: string | null;
+  roleName: string | null;
+  roleId: string | null;
+};
+
+// One GitHub subject this setup added to the role's trust policy. A subject the
+// role already trusted is not recorded, so a rollback never removes it.
+export type AwsTrustSubjectArtifact = {
+  state: "created" | "deleted";
+  roleArn: string;
+  roleName: string;
+  subject: string;
+};
+
+// The environment's inline permission policy, recorded only when the role had
+// no policy of that name before this setup wrote it.
+export type AwsRolePolicyArtifact = {
+  state: "created" | "deleted";
+  roleArn: string;
+  roleName: string;
+  policyName: string;
+};
+
+// The role's EKS access entry on the environment's cluster, recorded only when
+// this setup created it.
+export type AwsAccessEntryArtifact = {
+  state: "created" | "deleted";
+  roleArn: string;
+  roleName: string;
+  cluster: string;
+  region: string;
+};
+
 // `state` keeps a reverted file in the ledger instead of deleting the entry:
 // the record still has to prove this operation crossed the commit point, and a
 // cleanup retry still needs the provenance of the write it is repeating.
@@ -195,6 +235,10 @@ export type SetupCleanupArtifactType =
   | "workflow_file"
   | "github_environment_variable"
   | "github_environment"
+  | "aws_access_entry"
+  | "aws_role_policy"
+  | "aws_trust_subject"
+  | "aws_role"
   | "role_assignment"
   | "federated_credential"
   | "service_principal"
@@ -230,6 +274,10 @@ export type SetupArtifactLedger = {
   federatedCredentials: FederatedCredentialArtifact[];
   roleAssignments: RoleAssignmentArtifact[];
   githubEnvironment: GitHubEnvironmentArtifact;
+  awsRole: AwsRoleArtifact;
+  awsTrustSubjects: AwsTrustSubjectArtifact[];
+  awsRolePolicies: AwsRolePolicyArtifact[];
+  awsAccessEntries: AwsAccessEntryArtifact[];
   githubEnvironmentVariables: GitHubEnvironmentVariableArtifact[];
   commit: SetupArtifactCommitState;
   cleanup: SetupArtifactCleanupState;
@@ -1258,6 +1306,16 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
       name: null,
       providerId: null
     },
+    awsRole: {
+      state: "not_started",
+      origin: "unknown",
+      roleArn: null,
+      roleName: null,
+      roleId: null
+    },
+    awsTrustSubjects: [],
+    awsRolePolicies: [],
+    awsAccessEntries: [],
     githubEnvironmentVariables: [],
     commit: {
       mode: "not_started",
@@ -1332,6 +1390,36 @@ function readRoleAssignmentArtifact(value: any): RoleAssignmentArtifact {
   };
 }
 
+function readAwsRoleState(value: unknown): SetupArtifactPresence {
+  return (
+      value === "created" ||
+        value === "reused" ||
+        value === "deleted" ||
+        value === "not_started"
+    ) ?
+      value
+    : "not_started";
+}
+
+// An AWS list entry with every field a rollback needs, or nothing. One missing
+// its role or target cannot be deleted precisely, so it is dropped rather than
+// guessed at.
+function readAwsList<T>(value: unknown, fields: readonly string[]): T[] {
+  if (!Array.isArray(value)) return [];
+  const entries: T[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const entry: Record<string, string> = {
+      state: raw.state === "deleted" ? "deleted" : "created",
+      roleArn: String(raw.roleArn || "").trim(),
+      roleName: String(raw.roleName || "").trim()
+    };
+    for (const field of fields) entry[field] = String(raw[field] || "").trim();
+    if (Object.values(entry).every(Boolean)) entries.push(entry as T);
+  }
+  return entries;
+}
+
 /**
  * Restore a saved artifact ledger onto the current shape.
  *
@@ -1388,6 +1476,19 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
         source.githubEnvironment && source.githubEnvironment.providerId
       )
     },
+    awsRole: {
+      state: readAwsRoleState(source.awsRole?.state),
+      origin: readArtifactOrigin(source.awsRole?.origin),
+      roleArn: optionalIdentityString(source.awsRole?.roleArn),
+      roleName: optionalIdentityString(source.awsRole?.roleName),
+      roleId: optionalIdentityString(source.awsRole?.roleId)
+    },
+    awsTrustSubjects: readAwsList(source.awsTrustSubjects, ["subject"]),
+    awsRolePolicies: readAwsList(source.awsRolePolicies, ["policyName"]),
+    awsAccessEntries: readAwsList(source.awsAccessEntries, [
+      "cluster",
+      "region"
+    ]),
     githubEnvironmentVariables:
       Array.isArray(source.githubEnvironmentVariables) ?
         source.githubEnvironmentVariables
@@ -2007,6 +2108,68 @@ export function recordGitHubEnvironment(op: any, patch: any): any {
   return op;
 }
 
+export function recordAwsRole(op: any, patch: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger || !patch) return op;
+  ledger.awsRole = reconcileArtifactProvenance(
+    "aws_role",
+    ledger.awsRole,
+    patch
+  );
+  return op;
+}
+
+// Add a created AWS list entry, or revive one a rollback had removed. The same
+// identity is never listed twice.
+function recordAwsListEntry<T extends { state: string }>(
+  list: T[],
+  artifactType: SetupCleanupArtifactType,
+  entry: T
+): void {
+  const identity = cleanupArtifactIdentity(artifactType, entry);
+  const existing = list.find(
+    (item) => cleanupArtifactIdentity(artifactType, item) === identity
+  );
+  if (existing) existing.state = "created";
+  else list.push(entry);
+}
+
+export function recordAwsTrustSubject(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const [record] = readAwsList<AwsTrustSubjectArtifact>([entry], ["subject"]);
+  if (!ledger || !record) return op;
+  recordAwsListEntry(ledger.awsTrustSubjects, "aws_trust_subject", {
+    ...record,
+    state: "created"
+  });
+  return op;
+}
+
+export function recordAwsRolePolicy(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const [record] = readAwsList<AwsRolePolicyArtifact>([entry], ["policyName"]);
+  if (!ledger || !record) return op;
+  recordAwsListEntry(ledger.awsRolePolicies, "aws_role_policy", {
+    ...record,
+    state: "created"
+  });
+  return op;
+}
+
+export function recordAwsAccessEntry(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const [record] = readAwsList<AwsAccessEntryArtifact>(
+    [entry],
+    ["cluster", "region"]
+  );
+  if (!ledger || !record) return op;
+  recordAwsListEntry(ledger.awsAccessEntries, "aws_access_entry", {
+    ...record,
+    state: "created"
+  });
+  return op;
+}
+
 export function recordGitHubEnvironmentVariable(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !entry) return op;
@@ -2222,6 +2385,25 @@ export function recordCleanupDeletion(
         return false;
       ledger.githubEnvironment.state = "deleted";
       return true;
+    case "aws_role":
+      if (ledger.awsRole.state !== "created" || !matches(ledger.awsRole))
+        return false;
+      ledger.awsRole.state = "deleted";
+      return true;
+    case "aws_trust_subject":
+    case "aws_role_policy":
+    case "aws_access_entry": {
+      const list: Array<{ state: string }> =
+        artifactType === "aws_trust_subject" ? ledger.awsTrustSubjects
+        : artifactType === "aws_role_policy" ? ledger.awsRolePolicies
+        : ledger.awsAccessEntries;
+      const entry = list.find(
+        (item) => item.state === "created" && matches(item)
+      );
+      if (!entry) return false;
+      entry.state = "deleted";
+      return true;
+    }
     case "github_environment_variable": {
       const variable = ledger.githubEnvironmentVariables.find(
         (entry) => entry.state === "created" && matches(entry)
@@ -2273,6 +2455,10 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
     ledger.roleAssignments.length > 0 ||
     ledger.githubEnvironment.state === "created" ||
     ledger.githubEnvironment.state === "created_candidate" ||
+    ledger.awsRole.state === "created" ||
+    ledger.awsTrustSubjects.some((entry) => entry.state === "created") ||
+    ledger.awsRolePolicies.some((entry) => entry.state === "created") ||
+    ledger.awsAccessEntries.some((entry) => entry.state === "created") ||
     ledger.githubEnvironmentVariables.some(
       (entry) => entry.state === "created"
     ) ||
@@ -2417,7 +2603,8 @@ const UNPROVEN_SERVICE_PRINCIPAL_ACTION =
 const REUSE_NOUNS: Record<string, string> = {
   azure_app: "App Registration",
   service_principal: "Service Principal",
-  github_environment: "GitHub environment"
+  github_environment: "GitHub environment",
+  aws_role: "IAM role"
 };
 
 const RETAINED_KEEP_ACTION =
@@ -2531,6 +2718,25 @@ export function cleanupArtifactIdentity(
           artifact.environment
         )}:${normalizeIdentityPart(artifact.name)}`
       );
+    // IAM's role id leads, so a role deleted and recreated under the same name
+    // is a different identity to a delete.
+    case "aws_role":
+      return identityLedBy(
+        artifact.roleId,
+        normalizeIdentityPart(artifact.roleArn)
+      );
+    case "aws_trust_subject":
+      return `${normalizeIdentityPart(artifact.roleArn)}#${normalizeIdentityPart(
+        artifact.subject
+      )}`;
+    case "aws_role_policy":
+      return `${normalizeIdentityPart(artifact.roleArn)}#${normalizeIdentityPart(
+        artifact.policyName
+      )}`;
+    case "aws_access_entry":
+      return `${normalizeIdentityPart(artifact.region)}:${normalizeIdentityPart(
+        artifact.cluster
+      )}:${normalizeIdentityPart(artifact.roleArn)}`;
     // Path plus branch, because the same workflow path on a setup branch and on
     // the default branch are two different files with two different provenances.
     case "workflow_file":
@@ -2634,6 +2840,53 @@ const LEDGER_ARTIFACTS: readonly LedgerArtifactRow[] = Object.freeze([
       )
     ],
     unprovenAction: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
+  },
+  {
+    kind: "aws_role",
+    entries: (ledger: any) => [
+      ledgerEntry(
+        "aws_role",
+        ledger.awsRole,
+        `IAM role ${String(ledger.awsRole.roleName || ledger.awsRole.roleArn || "")}`,
+        ledger.awsRole.state
+      )
+    ]
+  },
+  {
+    kind: "aws_trust_subject",
+    entries: (ledger: any) =>
+      ledger.awsTrustSubjects.map((entry: any) =>
+        ledgerEntry(
+          "aws_trust_subject",
+          entry,
+          `${entry.subject} in the trust policy of IAM role ${entry.roleName}`,
+          entry.state
+        )
+      )
+  },
+  {
+    kind: "aws_role_policy",
+    entries: (ledger: any) =>
+      ledger.awsRolePolicies.map((entry: any) =>
+        ledgerEntry(
+          "aws_role_policy",
+          entry,
+          `${entry.policyName} on IAM role ${entry.roleName}`,
+          entry.state
+        )
+      )
+  },
+  {
+    kind: "aws_access_entry",
+    entries: (ledger: any) =>
+      ledger.awsAccessEntries.map((entry: any) =>
+        ledgerEntry(
+          "aws_access_entry",
+          entry,
+          `IAM role ${entry.roleName} on EKS cluster ${entry.cluster} (${entry.region})`,
+          entry.state
+        )
+      )
   },
   {
     kind: "github_environment_variable",
@@ -3501,6 +3754,10 @@ const ROLLBACK_ARTIFACT_ORDER: readonly SetupCleanupArtifactType[] =
   Object.freeze([
     "workflow_file",
     "github_environment_variable",
+    "aws_access_entry",
+    "aws_role_policy",
+    "aws_trust_subject",
+    "aws_role",
     "github_environment",
     "role_assignment",
     "federated_credential",

@@ -1,0 +1,213 @@
+import { readRecordedAwsLock } from "@radius-project/core";
+import {
+  cleanupArtifactIdentity,
+  getSetupArtifactLedger,
+  recordCleanupDeletion,
+  setContext,
+  type SetupCleanupArtifactType,
+  type SetupCleanupResult
+} from "../../operations.js";
+import type { AwsSetupRollbackTarget } from "./aws-deploy-identity.js";
+import type { AwsEnvironmentAccess } from "./aws-environment-access.js";
+
+// Runs the AWS part of a setup's rollback, retried cleanup, or exit: it turns
+// the selected ledger entries into one rollback per role, and their outcomes
+// into cleanup results.
+
+const AWS_ARTIFACT_TYPES: ReadonlySet<string> = new Set([
+  "aws_access_entry",
+  "aws_role_policy",
+  "aws_trust_subject",
+  "aws_role"
+]);
+
+export function isAwsCleanupArtifactType(artifactType: string): boolean {
+  return AWS_ARTIFACT_TYPES.has(artifactType);
+}
+
+// A cleanup target as the cleanup command selected it.
+interface SelectedTarget {
+  artifactType: string;
+  key: string;
+  [field: string]: unknown;
+}
+
+type Operation = Record<string, unknown> & {
+  operationId: string;
+  repo?: unknown;
+  environment?: unknown;
+};
+
+// The ledger entry each selected AWS target names, with what a rollback
+// needs to find it in AWS.
+function rollbackTargets(
+  operation: Operation,
+  selected: readonly SelectedTarget[]
+): Array<AwsSetupRollbackTarget & { label: string; identity: string }> {
+  const ledger = getSetupArtifactLedger(operation);
+  if (!ledger) return [];
+  const found: Array<
+    AwsSetupRollbackTarget & { label: string; identity: string }
+  > = [];
+  for (const target of selected) {
+    const identity = typeof target.identity === "string" ? target.identity : "";
+    const matches = (artifact: unknown) =>
+      cleanupArtifactIdentity(target.artifactType, artifact) === identity;
+    const base = {
+      key: target.key,
+      label: String(target.target || ""),
+      identity
+    };
+    switch (target.artifactType) {
+      case "aws_role": {
+        const role = ledger.awsRole;
+        if (role.state !== "created" || !matches(role) || !role.roleArn) break;
+        found.push({
+          ...base,
+          artifactType: "aws_role",
+          roleArn: role.roleArn,
+          roleName: role.roleName || "",
+          roleId: role.roleId
+        });
+        break;
+      }
+      case "aws_trust_subject": {
+        const entry = ledger.awsTrustSubjects.find(
+          (item) => item.state === "created" && matches(item)
+        );
+        if (entry)
+          found.push({ ...base, ...entry, artifactType: "aws_trust_subject" });
+        break;
+      }
+      case "aws_role_policy": {
+        const entry = ledger.awsRolePolicies.find(
+          (item) => item.state === "created" && matches(item)
+        );
+        if (entry)
+          found.push({ ...base, ...entry, artifactType: "aws_role_policy" });
+        break;
+      }
+      case "aws_access_entry": {
+        const entry = ledger.awsAccessEntries.find(
+          (item) => item.state === "created" && matches(item)
+        );
+        if (entry)
+          found.push({ ...base, ...entry, artifactType: "aws_access_entry" });
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+export async function rollbackAwsSetupArtifacts(
+  operation: Operation,
+  {
+    attempt,
+    awsEnabled,
+    selected,
+    access,
+    steps
+  }: {
+    attempt: number;
+    // The AWS developer switch. While it is off Radius runs no AWS command.
+    awsEnabled: boolean;
+    selected: readonly SelectedTarget[];
+    access: Pick<AwsEnvironmentAccess<unknown>, "rollback">;
+    steps: string[];
+  }
+): Promise<{
+  attempted: boolean;
+  results: SetupCleanupResult[];
+  warnings: string[];
+}> {
+  const targets = rollbackTargets(
+    operation,
+    selected.filter((target) => isAwsCleanupArtifactType(target.artifactType))
+  );
+  const results: SetupCleanupResult[] = [];
+  const warnings: string[] = [];
+  if (targets.length === 0) return { attempted: false, results, warnings };
+  const result = (
+    target: (typeof targets)[number],
+    outcome: SetupCleanupResult["outcome"],
+    detail: string | null
+  ): void => {
+    results.push({
+      attempt,
+      artifactType: target.artifactType as SetupCleanupArtifactType,
+      target: target.label,
+      identity: target.identity,
+      outcome,
+      detail
+    });
+    if (outcome === "deleted" || outcome === "not_found") {
+      recordCleanupDeletion(operation, {
+        artifactType: target.artifactType,
+        identity: target.identity
+      });
+      if (outcome === "deleted") steps.push(`✅ Removed ${target.label}.`);
+    } else if (detail) {
+      warnings.push(detail);
+      steps.push(`⚠️ ${detail}`);
+    }
+  };
+  if (!awsEnabled) {
+    for (const target of targets) {
+      result(
+        target,
+        "warning",
+        `AWS environments are turned off, so Radius did not remove ${target.label}.`
+      );
+    }
+    return { attempted: true, results, warnings };
+  }
+  const context = operation.context;
+  const recorded = readRecordedAwsLock(context);
+  const environment =
+    (
+      typeof context === "object" &&
+      context !== null &&
+      "canonicalEnvironment" in context &&
+      typeof context.canonicalEnvironment === "string" &&
+      context.canonicalEnvironment
+    ) ?
+      context.canonicalEnvironment
+    : String(operation.environment || "");
+  for (const roleArn of new Set(targets.map((target) => target.roleArn))) {
+    const forRole = targets.filter((target) => target.roleArn === roleArn);
+    const adopt =
+      recorded && recorded.roleName === forRole[0]?.roleName ?
+        recorded.policyId
+      : undefined;
+    const rolledBack = await access.rollback({
+      repo: String(operation.repo || ""),
+      environment,
+      operationId: operation.operationId,
+      roleArn,
+      targets: forRole,
+      ...(adopt ? { adopt } : {})
+    });
+    if (adopt && rolledBack.released) {
+      setContext(operation, { awsDeployIdentityLock: null });
+    }
+    for (const line of rolledBack.warnings) {
+      warnings.push(line);
+      steps.push(`⚠️ ${line}`);
+    }
+    for (const target of forRole) {
+      const outcome = rolledBack.outcomes.find(
+        (entry) => entry.key === target.key
+      );
+      if (outcome) result(target, outcome.outcome, outcome.detail);
+      else {
+        result(
+          target,
+          "warning",
+          `Radius did not get a result for ${target.label}, so it may still be there.`
+        );
+      }
+    }
+  }
+  return { attempted: true, results, warnings };
+}

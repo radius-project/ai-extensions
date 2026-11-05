@@ -711,7 +711,8 @@ describe("real server and fake SDK runtime ownership", () => {
         .mockImplementation((command, args, _options, callback) => {
           expect(command).toBe("aws");
           const key = args.slice(0, 2).join(" ");
-          if (key === "iam get-role") {
+          // A new role has no policies yet, so setup records the one it adds.
+          if (key === "iam get-role" || key === "iam get-role-policy") {
             callback(
               Object.assign(new Error("NoSuchEntity"), { code: 254 }),
               "",
@@ -794,6 +795,40 @@ describe("real server and fake SDK runtime ownership", () => {
             "repo:fixture@7/app@42:environment:dev"
           ]);
         }
+        // Every AWS change before the pause is in the ledger, so the
+        // panel lists it and Delete setup can remove it.
+        const ledger = op.setupArtifacts;
+        expect(ledger.awsRole).toMatchObject({
+          state: "created",
+          origin: "this_operation",
+          roleArn
+        });
+        expect(
+          ledger.awsTrustSubjects.map(
+            (entry: { subject: string }) => entry.subject
+          )
+        ).toEqual([
+          "repo:fixture/app:environment:dev",
+          "repo:fixture@7/app@42:environment:dev"
+        ]);
+        expect(ledger.awsRolePolicies).toHaveLength(panel ? 0 : 1);
+        expect(ledger.awsAccessEntries).toHaveLength(panel ? 0 : 1);
+        expect(
+          op.providerRecovery.mutations.map(
+            (mutation: { kind: string; status: string }) => [
+              mutation.kind,
+              mutation.status
+            ]
+          )
+        ).toEqual(
+          panel ?
+            [["aws_role.create", "confirmed"]]
+          : [
+              ["aws_role.create", "confirmed"],
+              ["aws_role_policy.put", "confirmed"],
+              ["aws_access_entry.create", "confirmed"]
+            ]
+        );
         expect(
           run.mock.calls.every(([args]) => !args.includes("--method"))
         ).toBe(true);
