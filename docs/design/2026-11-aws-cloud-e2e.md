@@ -3,7 +3,7 @@
 - **Author**: Karishma Chawla (@kachawla)
 - **Date**: 2026-11
 
-This amends the [Cloud E2E environment lifecycle](./2026-08-cloud-e2e-environment-lifecycle.md) design: the fixture repository gets a second pinned app, and Cloud E2E and its cleanup get a second daily schedule. It also fills in the cloud end-to-end tests in the test plan of the AWS and EKS canvas support design.
+This amends the [Cloud E2E environment lifecycle](./2026-08-cloud-e2e-environment-lifecycle.md) design: the fixture repository gets a second pinned app, the Cloud E2E job runs AWS after Azure, and cleanup handles both clouds. It also fills in the cloud end-to-end tests in the test plan of the AWS and EKS canvas support design.
 
 ## Current state
 
@@ -13,20 +13,20 @@ A fake CLI can't show that AWS accepts the product's calls, that a pod can reach
 
 ## Proposal
 
-Add a daily AWS Cloud E2E run on its own schedule, in the Radius project's AWS test account, on two shared EKS clusters created ahead of time, in regions Radius's own tests don't use. It shares the Azure fixture repository with its own pinned app, and the cleanup workflow gets an AWS sweep that can only touch this test's resources.
+Run AWS in the daily Cloud E2E job right after Azure, in the Radius project's AWS test account, on two shared EKS clusters created ahead of time, in regions Radius's own tests don't use. It shares the Azure fixture repository with its own pinned app, and the cleanup workflow gets an AWS sweep that can only touch this test's resources.
 
 ## Objectives
 
 ### Goals
 
 - The AWS test runs in Cloud E2E once a day and on manual dispatch, and never on pull requests.
+- The AWS test runs on both canvas hosts, the same as Azure: the default harness, and the opt-in GitHub Copilot app host, where the Radius agent also models the fixture's app.
 - A pod can reach every managed service in the `aws-eks` recipe pack, and the check catches nodes that can't.
 - Deleting both environments leaves only the deploy role and the GitHub identity provider.
 - Cleanup removes what a failed run leaves behind, without touching Radius's own test resources.
 
 ### Non-goals
 
-- Running the AWS test in the GitHub Copilot app host: the harness host already proves the cloud calls.
 - Creating or deleting EKS clusters in the test: the canvas only discovers clusters, the same as for AKS.
 - Testing first-time creation of the deploy role in CI: the test role can't create roles in the shared account, so server tests and local runs cover it.
 
@@ -36,13 +36,19 @@ Each day, the AWS job signs in to `radius-test`, uses the canvas to set up two e
 
 ### Where it runs
 
-| What        | Choice                                                           | Why                                                                                                                                                  |
-|-------------|------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| AWS account | `radius-test`, the Radius project's AWS functional-test account  | Azure Cloud E2E already reuses the Radius test subscription. The account already has billing and the GitHub identity provider                        |
-| Regions     | `us-east-2` for the main environment, `us-west-1` for the second | Radius's tests use only `us-west-2`. Neither is `us-east-1`, where IAM and other global services sign their requests                                 |
-| Workflow    | A new workflow, `cloud-e2e-aws.yml`, at 16:23 UTC                | Azure's `cloud-e2e.yml` stays as it is. Both share the `cloud-e2e-shared-cloud-estate` concurrency group with cleanup, so no two of them run at once |
+| What        | Choice                                                           | Why                                                                                                                                          |
+|-------------|------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| AWS account | `radius-test`, the Radius project's AWS functional-test account  | Azure Cloud E2E already reuses the Radius test subscription. The account already has billing and the GitHub identity provider                |
+| Regions     | `us-east-2` for the main environment, `us-west-1` for the second | Radius's tests use only `us-west-2`. Neither is `us-east-1`, where IAM and other global services sign their requests                         |
+| Workflow    | New steps after Azure's in the existing `cloud-e2e.yml` job      | One run tests both clouds one after the other, which also tests the extension switching between them. It's the smallest change to start with |
 
-AWS can't be added to the Azure job, because that job's 340-minute timeout is already close to GitHub's 6-hour limit. A separate workflow, instead of a second cron in `cloud-e2e.yml`, leaves the Azure workflow and its failure alert unchanged, and gives AWS its own run history. Azure runs at 04:23 UTC and ends by 10:03 at the latest, so a 16:23 AWS run normally starts on time. If one runs late, the other waits: both workflows set `queue: max`, so GitHub queues a waiting run instead of cancelling it.
+Azure runs much faster than its limits allow. Of the last 40 `cloud-e2e.yml` runs, the ones that passed took 28 to 35 minutes, and the longest run took 72 minutes. So AWS fits in the same job:
+
+- The AWS steps run after Azure's, even if Azure fails, so one cloud's failure doesn't hide the other's result.
+- They have their own step names, `Run Azure Cloud E2E` and `Run AWS Cloud E2E`. The run summary and the scheduled failure issue name the cloud that failed.
+- The AWS steps run on the same host as Azure. On the app host, the agent models the AWS app too, from source in the AWS baseline.
+
+This changes `cloud-e2e.yml`: the job gets the AWS sign-in, test, and diagnostics steps, its timeout goes from 340 to 360 minutes, and Azure's test time limits come down (see [Time budget](#time-budget)). Moving AWS into its own chained job later is a small change, if time or clarity calls for it.
 
 ### The fixture repository
 
@@ -136,15 +142,11 @@ Each managed service in the pack gets a row in the connection check and a resour
 
 ### Cleanup
 
-Sharing the fixture with Azure changes `cloud-e2e-cleanup.yml` in three ways. `cloud-e2e.yml` doesn't change.
-
-**A second schedule.** Cleanup runs at 02:23 and 14:23 UTC, two hours before each cloud's run.
+Sharing the fixture with Azure changes `cloud-e2e-cleanup.yml` in two ways. Its 02:23 UTC schedule, two hours before the 04:23 run, covers both clouds, and its 6-hour age cutoff still works: even a run that takes the full 360 minutes ends 16 hours before the next cleanup.
 
 **Every selection belongs to one cloud.** AWS environment names start with `radtest-aws-`. Today the Azure job selects every `radtest-` environment, and also the app deletes, GHCR state packages, and deployment records that go with them. Each of these now takes only its own cloud's environments, so neither job can delete the other's retry inputs. Fallback branches and pull requests can't be tied to one cloud, so the final step below handles them.
 
 **One final step resets the fixture.** Today the Azure job checks for leftovers and resets `main` at its end. That moves to a final job that runs after both clouds' jobs. It checks for leftovers from both clouds, then resets `main` once. If either cloud's job failed, it keeps `main` and its workflows, so the next run can retry.
-
-**Finished runs are reclaimed at any age.** Today cleanup only reclaims state older than 6 hours, in case a run is still using it. With two runs a day, a run that fails late would leave state that's too new for the next cleanup, and that state would block the other cloud's run. A scheduled cleanup now reclaims state of any age when the lease is free, because the concurrency group already keeps runs out while cleanup runs. Manual cleanup keeps the `max_age_hours` input.
 
 For each AWS test environment, the AWS job follows the same order as the Azure job:
 
@@ -165,17 +167,24 @@ Radius's daily cleanup job in the same account deletes RDS, S3, and log resource
 
 ### Time budget
 
-The AWS suite has its own stage limits, about 235 minutes in total, under a 270-minute job timeout. Reusing the Azure limits would add up to about 370 minutes, over GitHub's 6-hour limit. The local run sets the limits from measured times.
+Each test stage has a time limit, and the suite's limits must add up to less than the job's timeout, so Playwright stops first and saves its trace. A test in the repo checks this. GitHub allows at most 360 minutes per job, and Azure's limits add up to 274 minutes today (329 on the app host), so they come down to fit both clouds:
+
+| Host     | Azure limits | AWS limits | Setup, teardown, and diagnostics | Job timeout |
+|----------|--------------|------------|----------------------------------|-------------|
+| Harness  | 150          | 180        | 25                               | 360         |
+| App host | 130          | 150        | 40                               | 360         |
+
+Azure's 150 minutes is still twice its longest recent run. The app host's limits are lower because it adds the app start once and a modeling stage per cloud. The local run sets AWS's limits from measured times.
 
 ### Rollout
 
 1. This design is reviewed.
 2. Administrators create the two roles and clusters in `radius-test`, and the `ai-extensions` secrets and variables. No repository or GitHub App install is needed.
-3. The AWS sweep lands first, so the scheduled AWS run never runs without cleanup.
-4. The AWS test lands, after a local run in the developer's own AWS account and a fork of the fixture repository, as the lifecycle design allows.
-5. On `main`, a manual cleanup run, then a manual Cloud E2E run. The daily schedule starts once both pass.
+3. The AWS cleanup lands first, so AWS never runs in the daily job without cleanup.
+4. The AWS steps land in `cloud-e2e.yml`, with Azure's lower limits, after a local run in the developer's own AWS account and a fork of the fixture repository, as the lifecycle design allows.
+5. On `main`, a manual cleanup run, then a manual Cloud E2E run on each host. Until the AWS variables are set, the AWS steps skip and the job runs Azure only.
 
-Until the fixture variable is set, the AWS job and sweep skip and say why, as the lifecycle design does for an unpublished fixture.
+Until the AWS variables are set, the AWS steps and cleanup skip and say why, as the lifecycle design does for an unpublished fixture.
 
 ### Cost
 
@@ -194,9 +203,9 @@ About $160 a month: $73 for each cluster's control plane, about $13 for nodes th
 
 ## Test plan
 
-- **Unit tests:** the cleanup rules, which never select resources shaped like Radius's. Cleanup keeping retry inputs when a step fails. The connection, snapshot, and 15-minute checks. The stage limits fitting the job timeout.
-- **Workflow tests:** the AWS workflow never runs on pull requests, uses no GitHub environment, has its own cron, shares the concurrency group with `queue: max`, and skips when the AWS variables are unset. Cleanup has both crons, and its final job runs after both clouds' jobs.
-- **Fixture and cleanup tests:** `main` at either pinned baseline is clean and anything else isn't. A dirty `main` fails the run before it moves. Each cloud's job selects only its own environments, app deletes, packages, and records. The final job resets `main` only when both clouds' jobs succeeded. Scheduled cleanup reclaims a failed run's state of any age when the lease is free, and never while it's held.
+- **Unit tests:** the cleanup rules, which never select resources shaped like Radius's. Cleanup keeping retry inputs when a step fails. The connection, snapshot, and 15-minute checks.
+- **Workflow tests:** the AWS steps never run on pull requests, use no GitHub environment, run after Azure's even when Azure fails, and skip when the AWS variables are unset. Both suites' limits plus setup fit under the 360-minute job timeout on each host. The failure issue names the failed cloud. Cleanup's final job runs after both clouds' jobs.
+- **Fixture and cleanup tests:** `main` at either pinned baseline is clean and anything else isn't. A dirty `main` fails the run before it moves. Each cloud's job selects only its own environments, app deletes, packages, and records. The final job resets `main` only when both clouds' jobs succeeded.
 - **Local run:** the full test in the developer's own AWS account, plus a check that the deploy role's boundary refuses `s3:PutAccountPublicAccessBlock`, IAM, and RDS in `us-west-2`.
 
 ## Alternatives considered
@@ -204,6 +213,7 @@ About $160 a month: $73 for each cluster's control plane, about $13 for nodes th
 - **A new AWS account only for these tests.** Cleaner, but needs someone with organization rights. Separate regions and a permissions boundary give enough separation.
 - **Running in `us-west-2` with Radius's tests.** Rejected: shared regional quotas and Radius's cleanup region.
 - **A cluster per run.** About $25 a month instead of about $160. Rejected: 30 to 40 more minutes a run, rights to create clusters, VPCs, and roles, and a leaked cluster costs $73 a month until someone finds it.
+- **AWS in its own job, or its own workflow and schedule.** Each would give AWS its own 6-hour limit, result, and runner, and leave Azure's limits alone. Rejected for now: one job is the smallest change, and runs take far less than their limits. Moving AWS into a chained job later is simple.
 - **A separate AWS fixture repository.** It would let the two clouds fail independently. Rejected: another repository and GitHub App install to set up and maintain. The cost of sharing is that a dirty fixture blocks both clouds until cleanup runs, which happens before each cloud's run.
 - **Letting the product create the deploy role in CI.** Rejected in a shared account: the test role could then create a role with any permissions.
 - **Trusting a protected GitHub environment so branches can run the AWS job before merge.** Rejected: a permanent second way to get the CI credential. Local runs cover the test before merge.
