@@ -11,6 +11,9 @@ import {
   type EnvironmentAccountContext
 } from "./runtime/environment-account-context.js";
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
+import { createAwsEnvironmentAccess } from "./server/services/aws-environment-access.js";
+import type { EnvironmentOperationRecord } from "./server/services/environment-operation.js";
+import type { AwsCommandResult } from "./server/services/aws-deploy-identity.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 import { stoppedSetup } from "../test/support/server/operation-fixtures.js";
 import type { SetupServices } from "./server/services/setup-outcome.js";
@@ -52,6 +55,11 @@ import {
   requestStop,
   onOperationTerminal,
   toPersistedOperation,
+  enterStage,
+  setStageState,
+  setContext,
+  shouldStop,
+  STAGE_AUTHORIZE_IDENTITY,
   STAGE_VERIFY
 } from "./operations.js";
 
@@ -145,6 +153,63 @@ function settled(owner: EnvironmentExecutionOwner, instanceId: string) {
     });
   });
 }
+
+// An AWS setup for saved-account, with answers to the gh reads setup makes
+// before AWS setup.
+function awsOperation(operationId: string) {
+  const op = createOperation({
+    operationId,
+    repo: "fixture/app",
+    environment: "dev",
+    provider: "aws"
+  });
+
+  operations.put(op);
+  op.context.githubLogin = "saved-account";
+  op.request = {
+    environment: {
+      accountId: "123456789012",
+      region: "us-west-2",
+      cluster: "shop",
+      roleName: "radius-deploy"
+    }
+  };
+  vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+  vi.spyOn(operations, "report").mockImplementation(() => {});
+
+  const run = vi.fn(async (args: string[]) => {
+    const command = args.join(" ");
+
+    if (command === "api user")
+      return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+
+    if (command === "api repos/fixture/app")
+      return {
+        code: 0,
+        stdout: '{"full_name":"fixture/app","permissions":{"admin":true}}',
+        stderr: ""
+      };
+
+    if (command === "api /repos/fixture/app/environments/dev")
+      return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+
+    if (
+      command ===
+      "api /repos/fixture/app/environments/dev/variables?per_page=100"
+    )
+      return { code: 0, stdout: '{"variables":[]}', stderr: "" };
+    throw new Error(`Unexpected command: ${command}`);
+  });
+
+  return { op, run };
+}
+
+const awsSetupResult = {
+  ok: true as const,
+  roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+  subjects: ["repo:fixture/app:environment:dev"],
+  policyName: "radius-deploy-dev"
+};
 
 afterEach(() => {
   operations.clear();
@@ -1147,6 +1212,358 @@ describe("production coordinator scheduling scopes", () => {
         expect(op.state).not.toBe("succeeded");
       }
       expect(context.getExecutor(op.operationId)).toBeUndefined();
+    }
+  );
+
+  it("lets other accounts switch while AWS setup waits for a held lock", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const { op, run } = awsOperation("op_aws_lock_wait");
+    let activeLogin = "original-account";
+
+    const accounts = createGitHubAccountCoordinator({
+      createExecutor: async (login) =>
+        successfulSelectedGhExecutor({ login, run }),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        activeLogin = login;
+
+        return { ok: true };
+      },
+      resetIdentityCache: () => {}
+    });
+
+    const ok = (stdout = ""): AwsCommandResult => ({
+      code: 0,
+      stdout,
+      stderr: ""
+    });
+
+    const lock = (id: string) =>
+      ok(JSON.stringify({ Policy: { PolicyId: id } }));
+
+    // Another run holds the lock until the first poll ends. A list answers
+    // successive calls in order, repeating its last entry.
+    const answers = new Map(
+      Object.entries({
+        "--version": [ok("aws-cli/2.17.0 Python/3.11 Darwin/23")],
+        "sts get-caller-identity": [
+          ok(JSON.stringify({ Account: "123456789012" }))
+        ],
+        "eks describe-cluster": [
+          ok(
+            JSON.stringify({
+              cluster: {
+                status: "ACTIVE",
+                accessConfig: { authenticationMode: "API" }
+              }
+            })
+          )
+        ],
+        "iam create-policy": [
+          { code: 254, stdout: "", stderr: "EntityAlreadyExists" },
+          lock("LOCK1")
+        ],
+        "iam get-policy": [lock("LOCK0"), lock("LOCK1")],
+        "iam get-role": [{ code: 254, stdout: "", stderr: "NoSuchEntity" }],
+        "iam list-open-id-connect-providers": [
+          ok(JSON.stringify({ OpenIDConnectProviderList: [] }))
+        ],
+        "iam create-open-id-connect-provider": [ok()],
+        "iam create-role": [
+          ok(
+            JSON.stringify({
+              Role: { Arn: "arn:aws:iam::123456789012:role/radius-deploy" }
+            })
+          )
+        ],
+        "iam put-role-policy": [ok()],
+        "eks create-access-entry": [ok()],
+        "eks associate-access-policy": [ok()],
+        "iam delete-policy": [ok()]
+      })
+    );
+
+    const awsCommands: string[] = [];
+    const duringWait: string[] = [];
+
+    const access = createAwsEnvironmentAccess<EnvironmentOperationRecord>({
+      async runAws(args) {
+        const command = args.slice(0, 2).join(" ");
+        awsCommands.push(command);
+        const list = answers.get(command);
+        const answer = list?.[0];
+
+        if (!list || !answer)
+          throw new Error(`unexpected aws ${args.join(" ")}`);
+
+        if (list.length > 1) list.shift();
+
+        return answer;
+      },
+      async runGitHubJson(path) {
+        return path === "/repos/fixture/app" ?
+            {
+              ok: true,
+              status: 200,
+              json: { full_name: "fixture/app", id: 42, owner: { id: 7 } }
+            }
+          : { ok: false, status: 404, json: null };
+      },
+      environments: {
+        listEnvironmentNames: unavailable,
+        readEnvironmentVariables: unavailable
+      },
+      // A readiness check for another account runs while setup waits.
+      async sleep() {
+        duringWait.push(activeLogin);
+
+        const readiness = await accounts.withSelectedAccount(
+          "other-account",
+          { ownerKey: "readiness" },
+          async () => activeLogin,
+          100
+        );
+
+        duringWait.push(readiness.value, activeLogin);
+      },
+      now: () => Date.parse("2026-10-30T12:00:00Z"),
+      isStopRequested: shouldStop,
+      operationId: (target) => target.operationId,
+      operations: {
+        getContext: (target) => target.context ?? {},
+        enterStage,
+        setStageState,
+        addLegacyStep,
+        setContext,
+        touch: () => {}
+      },
+      store: { persist: async () => {} },
+      stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
+      errorMessage: String
+    });
+
+    const configuredAs: string[] = [];
+
+    const handler = coordinator(
+      owner,
+      "panel",
+      undefined,
+      createEnvironmentAccountContext("runtime", accounts),
+      {
+        authorizeAzure: unavailable,
+        configureEnvironment: async () => {
+          configuredAs.push(activeLogin);
+          throw new Error("Configure environment is outside this test.");
+        }
+      },
+      undefined,
+      undefined,
+      access
+    );
+
+    const done = settled(owner, "panel");
+    handler.scheduleEnvironmentOperation(op);
+    await done;
+
+    expect(duringWait).toEqual([
+      "original-account",
+      "other-account",
+      "original-account"
+    ]);
+    expect(awsCommands).toContain("iam create-role");
+    expect(configuredAs).toEqual(["saved-account"]);
+    expect(awsCommands.at(-1)).toBe("iam delete-policy");
+    expect(activeLogin).toBe("original-account");
+  });
+
+  it("does not start AWS setup when shutdown starts while it gives up the lease", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const { op, run } = awsOperation("op_aws_release_shutdown");
+    let activeLogin = "original-account";
+
+    const accounts = createGitHubAccountCoordinator({
+      createExecutor: async (login) =>
+        successfulSelectedGhExecutor({ login, run }),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        // AWS setup's release switches back to the original account.
+        if (login === "original-account") owner.shutdown();
+        activeLogin = login;
+
+        return { ok: true };
+      },
+      resetIdentityCache: () => {}
+    });
+
+    const setup = vi.fn(unavailable);
+
+    const handler = coordinator(
+      owner,
+      "panel",
+      undefined,
+      createEnvironmentAccountContext("runtime", accounts),
+      undefined,
+      undefined,
+      undefined,
+      { setup, release: async () => {} }
+    );
+
+    const done = settled(owner, "panel");
+    handler.scheduleEnvironmentOperation(op);
+    await done;
+
+    expect(setup).not.toHaveBeenCalled();
+    expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
+    expect(activeLogin).toBe("original-account");
+  });
+
+  it("waits for another run to finish with the GitHub account before Configure environment", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const { op, run } = awsOperation("op_aws_lease_wait");
+    let activeLogin = "original-account";
+
+    const accounts = createGitHubAccountCoordinator({
+      createExecutor: async (login) =>
+        successfulSelectedGhExecutor({ login, run }),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        activeLogin = login;
+
+        return { ok: true };
+      },
+      resetIdentityCache: () => {}
+    });
+
+    // A readiness check takes the lease while AWS setup runs, and keeps it
+    // until the test lets it finish.
+    const holding = deferred();
+    const finish = deferred();
+    let readiness: Promise<unknown> = Promise.resolve();
+
+    const setup = vi.fn(async () => {
+      readiness = accounts.withSelectedAccount(
+        "other-account",
+        { ownerKey: "readiness" },
+        async () => {
+          holding.resolve();
+          await finish.promise;
+        },
+        100
+      );
+      await holding.promise;
+
+      return awsSetupResult;
+    });
+
+    const configuredAs: string[] = [];
+
+    const handler = coordinator(
+      owner,
+      "panel",
+      undefined,
+      createEnvironmentAccountContext("runtime", accounts),
+      {
+        authorizeAzure: unavailable,
+        configureEnvironment: async () => {
+          configuredAs.push(activeLogin);
+          throw new Error("Configure environment is outside this test.");
+        }
+      },
+      undefined,
+      undefined,
+      { setup, release: async () => {} }
+    );
+
+    const done = settled(owner, "panel");
+    handler.scheduleEnvironmentOperation(op);
+
+    await vi.waitFor(() =>
+      expect(op.steps.map((step: { label: string }) => step.label)).toContain(
+        "⏳ Waiting for another Radius run to finish with the GitHub CLI account."
+      )
+    );
+    expect(configuredAs).toEqual([]);
+
+    finish.resolve();
+    await Promise.all([readiness, done]);
+
+    expect(configuredAs).toEqual(["saved-account"]);
+    expect(activeLogin).toBe("original-account");
+  });
+
+  // Setup switches to its account, back to the original before AWS setup,
+  // then to its account again.
+  it.each([
+    {
+      edge: "gives up",
+      failedSwitch: 2,
+      setupCalls: 0,
+      message:
+        "Radius stopped because it could not switch the GitHub CLI back to @original-account."
+    },
+    {
+      edge: "takes back",
+      failedSwitch: 3,
+      setupCalls: 1,
+      message: "gh auth switch failed"
+    }
+  ])(
+    "ends as an AWS setup failure when a switch fails as it $edge the lease",
+    async ({ failedSwitch, setupCalls, message }) => {
+      const owner = createEnvironmentExecutionOwner();
+      const { op, run } = awsOperation("op_aws_switch_failure");
+      let activeLogin = "original-account";
+      let switches = 0;
+
+      const accounts = createGitHubAccountCoordinator({
+        createExecutor: async (login) =>
+          successfulSelectedGhExecutor({ login, run }),
+        getActiveKeyringLogin: async () => activeLogin,
+        switchKeyringAccount: async (login) => {
+          switches += 1;
+
+          if (switches === failedSwitch)
+            return { ok: false, error: "gh auth switch failed" };
+
+          activeLogin = login;
+
+          return { ok: true };
+        },
+        resetIdentityCache: () => {}
+      });
+
+      const setup = vi.fn(async () => awsSetupResult);
+      const release = vi.fn(async () => {});
+      const configureEnvironment = vi.fn(unavailable);
+
+      const handler = coordinator(
+        owner,
+        "panel",
+        undefined,
+        createEnvironmentAccountContext("runtime", accounts),
+        { authorizeAzure: unavailable, configureEnvironment },
+        undefined,
+        undefined,
+        { setup, release }
+      );
+
+      const done = settled(owner, "panel");
+      handler.scheduleEnvironmentOperation(op);
+      await done;
+
+      expect(setup).toHaveBeenCalledTimes(setupCalls);
+      expect(configureEnvironment).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+      expect(op.failure, JSON.stringify(run.mock.calls)).toMatchObject({
+        code: "github-account-switch-failed",
+        message: expect.stringContaining(message)
+      });
+      expect(op.stages).toContainEqual(
+        expect.objectContaining({
+          id: STAGE_AUTHORIZE_IDENTITY,
+          state: "failed"
+        })
+      );
     }
   );
 
