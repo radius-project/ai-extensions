@@ -3,7 +3,7 @@
 - **Author**: Karishma Chawla (@kachawla)
 - **Date**: 2026-11
 
-This amends the [Cloud E2E environment lifecycle](./2026-08-cloud-e2e-environment-lifecycle.md) design, and fills in the cloud end-to-end tests in the test plan of the AWS and EKS canvas support design.
+This amends the [Cloud E2E environment lifecycle](./2026-08-cloud-e2e-environment-lifecycle.md) design: the fixture repository gets a second pinned app, and Cloud E2E and its cleanup get a second daily schedule. It also fills in the cloud end-to-end tests in the test plan of the AWS and EKS canvas support design.
 
 ## Current state
 
@@ -13,7 +13,7 @@ A fake CLI can't show that AWS accepts the product's calls, that a pod can reach
 
 ## Proposal
 
-Add an AWS job to the daily Cloud E2E workflow, in the Radius project's AWS test account, on two shared EKS clusters created ahead of time, in regions Radius's own tests don't use. It uses a new fixture repository, and the cleanup workflow gets an AWS sweep that can only touch this test's resources.
+Add a daily AWS Cloud E2E run on its own schedule, in the Radius project's AWS test account, on two shared EKS clusters created ahead of time, in regions Radius's own tests don't use. It shares the Azure fixture repository with its own pinned app, and the cleanup workflow gets an AWS sweep that can only touch this test's resources.
 
 ## Objectives
 
@@ -36,37 +36,45 @@ Each day, the AWS job signs in to `radius-test`, uses the canvas to set up two e
 
 ### Where it runs
 
-| What        | Choice                                                           | Why                                                                                                                                                      |
-|-------------|------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| AWS account | `radius-test`, the Radius project's AWS functional-test account  | Azure Cloud E2E already reuses the Radius test subscription. The account already has billing and the GitHub identity provider                            |
-| Regions     | `us-east-2` for the main environment, `us-west-1` for the second | Radius's tests use only `us-west-2`. Neither is `us-east-1`, where IAM and other global services sign their requests                                     |
-| Workflow    | A second job, `cloud-e2e-aws`, in `cloud-e2e.yml`                | Same schedule and never-on-pull-request rule. The workflow's concurrency group, shared with `cloud-e2e-cleanup.yml`, keeps cleanup out while a test runs |
+| What        | Choice                                                           | Why                                                                                                                                                  |
+|-------------|------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| AWS account | `radius-test`, the Radius project's AWS functional-test account  | Azure Cloud E2E already reuses the Radius test subscription. The account already has billing and the GitHub identity provider                        |
+| Regions     | `us-east-2` for the main environment, `us-west-1` for the second | Radius's tests use only `us-west-2`. Neither is `us-east-1`, where IAM and other global services sign their requests                                 |
+| Workflow    | A new workflow, `cloud-e2e-aws.yml`, at 16:23 UTC                | Azure's `cloud-e2e.yml` stays as it is. Both share the `cloud-e2e-shared-cloud-estate` concurrency group with cleanup, so no two of them run at once |
 
-AWS can't be added to the Azure job, because that job's 340-minute timeout is already close to GitHub's 6-hour limit. The two jobs share no state: different clouds, fixture repositories, and deploy roles.
+AWS can't be added to the Azure job, because that job's 340-minute timeout is already close to GitHub's 6-hour limit. A separate workflow, instead of a second cron in `cloud-e2e.yml`, leaves the Azure workflow and its failure alert unchanged, and gives AWS its own run history. Azure runs at 04:23 UTC and ends by 10:03 at the latest, so a 16:23 AWS run normally starts on time. If one runs late, the other waits: both workflows set `queue: max`, so GitHub queues a waiting run instead of cancelling it.
 
 ### The fixture repository
 
-The fixture repository is the GitHub repository the test runs the canvas against. It holds a ready-made app, and setup commits its workflows there, the same as in a user's repository. Azure uses `radius-project/ai-extensions-fixture`. AWS gets a new private one, `radius-project/ai-extensions-fixture-aws`.
+The fixture repository is the GitHub repository the test runs the canvas against. It holds a ready-made app, and setup commits its workflows there, the same as in a user's repository. AWS reuses Azure's, `radius-project/ai-extensions-fixture`, because setting up a fixture repository and its GitHub App isn't simple, and one repository is one thing to maintain.
 
-A separate repository is needed because the AWS app is different, and sharing one would make AWS wait behind Azure on the repository's lease. The lifecycle design rejected a repository per run because it needs organization-wide rights; a second long-lived one only needs the Cloud E2E GitHub App installed.
-
-Its baseline commit carries a `.radius/` directory produced by the real modeling flow, with two resources:
+The AWS app gets its own baseline commit in that repository, with a `.radius/` directory produced by the real modeling flow, and two resources:
 
 - A `Radius.Data/mySqlDatabases` resource, which the `aws-eks` pack deploys on Amazon RDS.
 - A `Radius.Compute/containers` resource that signs in to the database over TLS and runs `SELECT 1` in a loop, and is ready only after that query succeeds.
 
 The database password is a fixed test value in the private fixture model. The instance is private to the cluster's VPC and lives for less than an hour.
 
-A second pinned commit carries the app for the failed deploy: one resource that fails in Kubernetes before any AWS call, and no AWS resources.
+A second commit carries the app for the failed deploy: one resource that fails in Kubernetes before any AWS call, and no AWS resources.
+
+Both commits are pinned in `fixture-repository.ts` next to `FIXTURE_BASELINE_SHA`, so a change to either shows up in a code review. A branch, `baselines/aws`, keeps them reachable, because cleanup force-resets `main` and would otherwise leave them unreferenced.
+
+Today a run requires `main` to be at the Azure baseline before it starts. With two baselines:
+
+- `main` counts as clean at either pinned baseline. Anything else fails the clean-slate check, as today.
+- A run moves `main` to its own baseline when it starts, and its teardown leaves it there.
+- Cleanup still resets a dirty `main` to the Azure baseline, so its reset doesn't depend on which cloud runs next.
+
+AWS environment names start with `radtest-aws-`. The Azure cleanup matches every `radtest-` environment today, so it changes to skip `radtest-aws-` ones, and the AWS sweep takes only those. Otherwise the Azure sweep would delete an AWS environment's GitHub environment before the AWS sweep could use it to retry.
 
 ### How the test signs in to AWS
 
 The test uses two IAM roles, because it plays two parts: the developer who runs setup in the canvas, and the GitHub workflows that deploy the app.
 
-| Role                                                                  | Who uses it                                                                                | What it stands in for                                                                                         |
-|-----------------------------------------------------------------------|--------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| Test role, `ai-extensions-cloud-e2e`                                  | The Cloud E2E job in this repository, to run setup in the canvas and to check and clean up | The developer's own AWS sign-in                                                                               |
-| Deploy role, `radius-deploy-radius-project-ai-extensions-fixture-aws` | The deploy workflows that setup commits to the fixture repository                          | The role setup creates for each repository in real use, which the AWS canvas design calls the deploy identity |
+| Role                                                              | Who uses it                                                                                | What it stands in for                                                                                         |
+|-------------------------------------------------------------------|--------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| Test role, `ai-extensions-cloud-e2e`                              | The Cloud E2E job in this repository, to run setup in the canvas and to check and clean up | The developer's own AWS sign-in                                                                               |
+| Deploy role, `radius-deploy-radius-project-ai-extensions-fixture` | The deploy workflows that setup commits to the fixture repository                          | The role setup creates for each repository in real use, which the AWS canvas design calls the deploy identity |
 
 An account administrator creates both once.
 
@@ -128,7 +136,7 @@ Each managed service in the pack gets a row in the connection check and a resour
 
 ### Cleanup
 
-`cloud-e2e-cleanup.yml` gets an AWS job that runs when the AWS fixture variables are set. For each expired test environment, it follows the same order as the Azure job:
+`cloud-e2e-cleanup.yml` gets a second cron at 14:23 UTC, two hours before the AWS run, the same gap the 02:23 cleanup leaves before Azure. Each cleanup run sweeps both clouds, so the Azure sweep now also runs at 14:23. That and the `radtest-aws-` skip are the only Azure-side changes; `cloud-e2e.yml` is unchanged. Cleanup also gets an AWS job that runs when the AWS fixture variables are set. For each expired AWS test environment, it follows the same order as the Azure job:
 
 1. Asks the product to delete the app, and waits.
 2. Sweeps the environment's leftover RDS and Kubernetes resources.
@@ -152,9 +160,9 @@ The AWS suite has its own stage limits, about 235 minutes in total, under a 270-
 ### Rollout
 
 1. This design is reviewed.
-2. Administrators create the two roles and clusters in `radius-test`, the AWS fixture repository with the Cloud E2E GitHub App, and the `ai-extensions` secrets and variables.
+2. Administrators create the two roles and clusters in `radius-test`, and the `ai-extensions` secrets and variables. No repository or GitHub App install is needed.
 3. The AWS sweep lands first, so the scheduled AWS run never runs without cleanup.
-4. The AWS test lands, after a local run in the developer's own AWS account and fork of the fixture repository, as the lifecycle design allows.
+4. The AWS test lands, after a local run in the developer's own AWS account and a fork of the fixture repository, as the lifecycle design allows.
 5. On `main`, a manual cleanup run, then a manual Cloud E2E run. The daily schedule starts once both pass.
 
 Until the fixture variable is set, the AWS job and sweep skip and say why, as the lifecycle design does for an unpublished fixture.
@@ -177,7 +185,8 @@ About $160 a month: $73 for each cluster's control plane, about $13 for nodes th
 ## Test plan
 
 - **Unit tests:** the cleanup rules, which never select resources shaped like Radius's. Cleanup keeping retry inputs when a step fails. The connection, snapshot, and 15-minute checks. The stage limits fitting the job timeout.
-- **Workflow tests:** the AWS job never runs on pull requests, uses no GitHub environment, shares the concurrency group, and skips when the fixture variable is unset.
+- **Workflow tests:** the AWS workflow never runs on pull requests, uses no GitHub environment, has its own cron, shares the concurrency group with `queue: max`, and skips when the AWS variables are unset. Cleanup has both crons. The Azure sweep skips `radtest-aws-` environments.
+- **Fixture tests:** `main` at either pinned baseline is clean and anything else isn't. A run moves `main` to its own baseline. Cleanup resets a dirty `main` to the Azure baseline.
 - **Local run:** the full test in the developer's own AWS account, plus a check that the deploy role's boundary refuses `s3:PutAccountPublicAccessBlock`, IAM, and RDS in `us-west-2`.
 
 ## Alternatives considered
@@ -185,6 +194,6 @@ About $160 a month: $73 for each cluster's control plane, about $13 for nodes th
 - **A new AWS account only for these tests.** Cleaner, but needs someone with organization rights. Separate regions and a permissions boundary give enough separation.
 - **Running in `us-west-2` with Radius's tests.** Rejected: shared regional quotas and Radius's cleanup region.
 - **A cluster per run.** About $25 a month instead of about $160. Rejected: 30 to 40 more minutes a run, rights to create clusters, VPCs, and roles, and a leaked cluster costs $73 a month until someone finds it.
-- **Sharing the Azure fixture repository.** Rejected: AWS would wait behind Azure on the lease, and a broken fixture would stop both.
+- **A separate AWS fixture repository.** It would let the two clouds fail independently. Rejected: another repository and GitHub App install to set up and maintain. The cost of sharing is that a dirty fixture blocks both clouds until cleanup runs, which happens before each cloud's run.
 - **Letting the product create the deploy role in CI.** Rejected in a shared account: the test role could then create a role with any permissions.
 - **Trusting a protected GitHub environment so branches can run the AWS job before merge.** Rejected: a permanent second way to get the CI credential. Local runs cover the test before merge.
