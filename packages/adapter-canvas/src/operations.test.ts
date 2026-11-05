@@ -9142,6 +9142,33 @@ describe("the AWS setup ledger", () => {
     });
   });
 
+  it.each([
+    ["Exit setup", false],
+    ["Abandon setup", true]
+  ])("lists every recorded AWS change in %s", (label, abandons) => {
+    const op = awsSetupWithChanges();
+    if (abandons) {
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+    }
+    const action = projectOperationActions(op).find(
+      (entry) => entry.id === "exit-setup"
+    );
+    expect(action.label).toBe(label);
+    const listed = (
+      abandons ?
+        action.preview.manualActionRequired
+      : action.preview.removes).map((entry: { kind: string }) => entry.kind);
+    expect(listed).toEqual(
+      expect.arrayContaining([
+        "aws_access_entry",
+        "aws_role_policy",
+        "aws_trust_subject",
+        "aws_role"
+      ])
+    );
+  });
+
   it("lists a reused role as kept, with why", () => {
     const op = awsSetupWithChanges();
     getSetupArtifactLedger(op).awsRole.state = "reused";
