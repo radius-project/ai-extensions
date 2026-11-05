@@ -216,7 +216,7 @@ The server re-evaluates eligibility when the command arrives. The browser previe
 
 ### Interrupted verification
 
-A Canvas provider restart does not cancel GitHub Actions. Radius first pauses the restored setup and asks whether to continue or stop. Stop records the customer's decision before Radius reads GitHub. If the operation's exact saved run is active, Radius offers workflow cancellation. Destructive rollback stays blocked until a subsequent status read proves the run is inactive.
+A Canvas provider restart does not cancel GitHub Actions. Radius first pauses the restored setup and asks whether to continue or stop. Stop records the customer's decision before Radius reads GitHub. If the operation's exact saved run is active, Radius offers workflow cancellation. Destructive rollback stays blocked until a subsequent status read proves the run is inactive. A setup that stopped before it dispatched verification has no run to read, so rollback and exit are offered right away.
 
 The cancellation boundary is the saved repository and run ID, executed through the GitHub account recorded on the operation. Radius never infers a run from a workflow filename, branch, environment, or recency. Missing identity, unsupported status, and unreadable status fail closed for destructive cleanup rather than risking deletion underneath external work.
 
