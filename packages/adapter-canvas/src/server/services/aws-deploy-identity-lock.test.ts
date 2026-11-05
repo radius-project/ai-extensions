@@ -488,20 +488,35 @@ describe("acquireAwsDeployIdentityLock", () => {
         iam.ports
       );
 
+    // Replaced rather than held again, so its creation time is this run's
+    // and a waiting run does not see it as past the removal age.
     it.each([true, false])(
-      "holds it again without waiting (wait: %s)",
+      "replaces it with a fresh lock without waiting (wait: %s)",
       async (wait) => {
         const iam = fakeIam({
-          "iam create-policy": EXISTS,
-          "iam get-policy": policy("LOCK1", { Description: MINE }),
+          "iam create-policy": [EXISTS, policy("LOCK2")],
+          "iam get-policy": [
+            policy("LOCK1", {
+              Description: MINE,
+              CreateDate: "2026-10-30T11:00:00Z"
+            }),
+            policy("LOCK2")
+          ],
           "iam delete-policy": ok()
         });
         const result = await adopt(iam, wait);
         expect(result).toMatchObject({
           ok: true,
           adopted: true,
-          lock: { policyArn: LOCK_ARN, policyId: "LOCK1" }
+          lock: { policyArn: LOCK_ARN, policyId: "LOCK2" }
         });
+        expect(iam.commands()).toEqual([
+          "iam create-policy",
+          "iam get-policy",
+          "iam delete-policy",
+          "iam create-policy",
+          "iam get-policy"
+        ]);
         expect(iam.sleeps).toEqual([]);
         expect(iam.waits).toEqual([]);
         if (!result.ok) throw new Error("expected the lock");
@@ -510,6 +525,82 @@ describe("acquireAwsDeployIdentityLock", () => {
           "iam get-policy",
           "iam delete-policy"
         ]);
+      }
+    );
+
+    it("takes a fresh lock when its own was removed before it could delete it", async () => {
+      const iam = fakeIam({
+        "iam create-policy": [EXISTS, policy("LOCK2")],
+        "iam get-policy": [
+          policy("LOCK1", { Description: MINE }),
+          policy("LOCK2")
+        ],
+        "iam delete-policy": fail("An error occurred (NoSuchEntity)")
+      });
+      expect(await adopt(iam)).toMatchObject({
+        ok: true,
+        adopted: true,
+        lock: { policyId: "LOCK2" }
+      });
+    });
+
+    it("waits like any run when another takes the lock while it replaces its own", async () => {
+      const iam = fakeIam(
+        {
+          "iam create-policy": EXISTS,
+          "iam get-policy": [
+            policy("LOCK1", { Description: MINE }),
+            policy("LOCK3", { Description: OTHER })
+          ],
+          "iam delete-policy": ok()
+        },
+        1
+      );
+      expect(await adopt(iam)).toEqual({ ok: false, stopped: true });
+      expect(iam.waits[0]).toMatchObject({ policyId: "LOCK3" });
+    });
+
+    it("tries the delete again after a throttled answer", async () => {
+      const iam = fakeIam({
+        "iam create-policy": [EXISTS, policy("LOCK2")],
+        "iam get-policy": [
+          policy("LOCK1", { Description: MINE }),
+          policy("LOCK2")
+        ],
+        "iam delete-policy": [
+          fail("An error occurred (Throttling): Rate exceeded"),
+          ok()
+        ]
+      });
+      expect(await adopt(iam)).toMatchObject({
+        ok: true,
+        lock: { policyId: "LOCK2" }
+      });
+      expect(iam.sleeps).toHaveLength(1);
+    });
+
+    it.each([
+      ["aws-lock-denied", "An error occurred (AccessDenied)"],
+      ["aws-lock-failed", "An error occurred (DeleteConflict)"],
+      ["aws-lock-failed", "An error occurred (ServiceFailure)"]
+    ])(
+      "stops with %s when it cannot delete its own earlier lock",
+      async (code, stderr) => {
+        const iam = fakeIam({
+          "iam create-policy": EXISTS,
+          "iam get-policy": policy("LOCK1", { Description: MINE }),
+          "iam delete-policy": fail(stderr)
+        });
+        const result = await adopt(iam);
+        expect(result).toMatchObject({ ok: false, code });
+        if (result.ok || !("message" in result))
+          throw new Error("expected a failure");
+        expect(result.message).toMatch(
+          new RegExp(
+            `^Radius could not replace the lock this setup holds on IAM role ${ROLE} from its earlier attempt: `
+          )
+        );
+        expect(iam.commands().at(-1)).toBe("iam delete-policy");
       }
     );
 
