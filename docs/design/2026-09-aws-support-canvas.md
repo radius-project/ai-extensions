@@ -168,7 +168,7 @@ Progress runs through the same three stages Azure reports.
 - **`Authorize deploy identity`** prepares the AWS side, naming each check as it passes.
   - The AWS CLI version is detected and confirmed against the 2.15.3 minimum.
   - The account's GitHub identity provider is checked, and created if the account has none.
-  - The subject the role will trust is stated, as `Deploy identity will trust <subject>`. The subject is the same GitHub OIDC claim Azure's federated credential carries — `repo:<owner>/<repo>:environment:<env>` by default, and the immutable or customized form where the repository uses one — so the two clouds trust the identical string.
+  - The subject the role will trust is stated, as `Deploy identity will trust <subject>`. The subject is the same GitHub OIDC claim Azure's federated credential carries — `repo:<owner>/<repo>:environment:<env>` by default, and the immutable or customized form where the repository uses one — so the two clouds trust the identical string. A customized subject that names neither the repository nor its ID, such as one built from only `repository_owner` and `context`, is refused before anything is written to AWS, because every repository with the same claim values presents it. The message names the claim keys and says to add `repo` or `repository_id`.
   - The role is created, or an existing one reused.
   - A deploy permission policy named `radius-deploy-<sanitized-env>-<12-character-hash>` is attached, carrying that environment's region. The hash includes the canonical repository and exact environment name, so picked roles can serve separate repositories without overwriting their policies.
   - The cluster is checked, and the role granted access to it.
