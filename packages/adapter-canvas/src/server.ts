@@ -4512,6 +4512,10 @@ export function createEnvironmentOperationExecution(
                 code: "github-account-switch-failed"
               });
 
+              // Entered before the release, so a failed release fails this
+              // stage.
+              enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+
               try {
                 await lease.release();
               } catch (error) {

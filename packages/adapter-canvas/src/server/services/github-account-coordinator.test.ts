@@ -542,7 +542,8 @@ describe("GitHub account coordinator", () => {
     });
   });
 
-  it("lets another run take the lease while it is given up", async () => {
+  it("lets another run take the lease while it is given up, and waits for it with no timeout", async () => {
+    vi.useFakeTimers();
     const events: string[] = [];
 
     const coordinator = createGitHubAccountCoordinator(
@@ -557,7 +558,7 @@ describe("GitHub account coordinator", () => {
 
     let other: Promise<unknown> = Promise.resolve();
 
-    const result = await coordinator.withSelectedAccount(
+    const run = coordinator.withSelectedAccount(
       "selected",
       { ownerKey: "setup" },
       async (_executor, lease) => {
@@ -580,7 +581,7 @@ describe("GitHub account coordinator", () => {
         await entered;
         await lease.retake(() => {
           events.push("waiting");
-          releaseOther();
+          setTimeout(releaseOther, 60_000);
         });
         events.push("selected work");
 
@@ -588,6 +589,8 @@ describe("GitHub account coordinator", () => {
       }
     );
 
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await run;
     await other;
 
     expect(result).toMatchObject({

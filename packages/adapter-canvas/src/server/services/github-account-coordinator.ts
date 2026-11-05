@@ -46,6 +46,7 @@ export interface GitHubAccountLeaseResult<T> {
 
 // Lets lease work give up the lease while it waits on something with no
 // deadline, and take it back before it needs the selected account again.
+// Call it only from that work, and await each call before the next.
 export interface GitHubAccountLease {
   // Restores the original account and gives up the lease. Does nothing if the
   // lease is already given up.

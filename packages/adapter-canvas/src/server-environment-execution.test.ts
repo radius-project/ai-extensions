@@ -1558,6 +1558,12 @@ describe("production coordinator scheduling scopes", () => {
         code: "github-account-switch-failed",
         message: expect.stringContaining(message)
       });
+      expect(op.stages).toContainEqual(
+        expect.objectContaining({
+          id: STAGE_AUTHORIZE_IDENTITY,
+          state: "failed"
+        })
+      );
     }
   );
 
