@@ -1673,7 +1673,8 @@ describe("POST /api/operations/{id}/exit", () => {
       expect(labels(op)).toContain(
         "🔓 Released the lock this setup held on IAM role radius-deploy-contoso-store (policy ID LOCK0)."
       );
-      expect(out.journal.persistCalls).toBe(1);
+      // The exit is saved first, then the release.
+      expect(out.journal.persistCalls).toBe(2);
       expect(out.journal.scheduled).toEqual([]);
     });
 
@@ -1736,6 +1737,64 @@ describe("POST /api/operations/{id}/exit", () => {
       expect(labels(op).at(-1)).toMatch(
         /^AWS environments are turned off, so Radius did not release the lock this setup holds on IAM role radius-deploy-contoso-store\. /
       );
+    });
+
+    it("keeps the lock when the exit cannot be saved", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+      const remove = vi.fn();
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        persistOperations: () => Promise.reject(new Error("disk full")),
+        removeAwsDeployIdentityLock: remove
+      });
+
+      expect(out.recording.status).toBe(500);
+      expect(out.payload()).toMatchObject({
+        code: "operation-exit-persist-failed"
+      });
+      expect(remove).not.toHaveBeenCalled();
+      expect(recordedLock(op)).toEqual(LOCK);
+    });
+
+    it("keeps the lock when the operation changed before the exit was admitted", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+      const remove = vi.fn();
+      let current: OperationFixture = op;
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        get: () => current,
+        persistOperations: async () => {
+          current = structuredClone(op);
+        },
+        removeAwsDeployIdentityLock: remove
+      });
+
+      expect(out.recording.status).toBe(409);
+      expect(remove).not.toHaveBeenCalled();
+      expect(recordedLock(op)).toEqual(LOCK);
+    });
+
+    it("still reports the exit when the release cannot be saved", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+      const reportOperationDiagnostic = vi.fn();
+      let saves = 0;
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        persistOperations: async () => {
+          saves += 1;
+          if (saves === 2) throw new Error("disk full");
+        },
+        reportOperationDiagnostic,
+        removeAwsDeployIdentityLock: async () => ({ ok: true, removed: true })
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(out.payload()).toMatchObject({ code: "setup-exited" });
+      expect(reportOperationDiagnostic).toHaveBeenCalledExactlyOnceWith({
+        operationId: op.operationId,
+        code: "operation-exit-lock-persist-failed",
+        message: "disk full"
+      });
     });
 
     it("leaves the release to the disposal pass when there is more to remove", async () => {

@@ -972,14 +972,6 @@ async function closeExitedSetup(request: CommandRequest): Promise<boolean> {
   const { context, dependencies, operationId, operation, eligibility } =
     request;
   if ((eligibility.targets?.length ?? 0) > 0) return false;
-  // The lock is this setup's own, by its recorded policy ID, so leaving the
-  // setup releases it even when nothing else is removed. Otherwise every later
-  // run that changes the role would wait on a setup that will never finish.
-  await releaseRecordedAwsLock(operation, {
-    awsEnabled: dependencies.awsEnabled,
-    remove: dependencies.removeAwsDeployIdentityLock,
-    errorMessage
-  });
   const snapshot: unknown = snapshotRetryState(operation);
   const accepted = acceptOperationCommand(operation, {
     kind: EXIT_COMMAND_KIND,
@@ -1013,6 +1005,30 @@ async function closeExitedSetup(request: CommandRequest): Promise<boolean> {
     return true;
   }
   if (await refuseChangedRequest(request)) return true;
+  // The lock is this setup's own, by its recorded policy ID, so leaving the
+  // setup releases it even when nothing else is removed. Otherwise every later
+  // run that changes the role would wait on a setup that will never finish.
+  // It goes only after the exit is saved, so a refused or unsaved exit never
+  // reports an open setup that has lost its lock.
+  if (
+    await releaseRecordedAwsLock(operation, {
+      awsEnabled: dependencies.awsEnabled,
+      remove: dependencies.removeAwsDeployIdentityLock,
+      errorMessage
+    })
+  ) {
+    try {
+      await dependencies.persistOperations();
+    } catch (error) {
+      // The exit is saved. A record that still names a released lock finds it
+      // gone on the next release, so this is reported, not refused.
+      dependencies.reportOperationDiagnostic({
+        operationId,
+        code: "operation-exit-lock-persist-failed",
+        message: errorMessage(error)
+      });
+    }
+  }
   // The listing the picker reads is repo-scoped and cached, so the refresh the
   // browser performs next has to reach GitHub rather than the payload written
   // while this setup was still running.
