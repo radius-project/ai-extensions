@@ -4300,10 +4300,36 @@ function heldAwsLockEntry(op: any): { kind: string; target: string } | null {
   };
 }
 
+/**
+ * How the server will act on a record, as far as its projection needs to say.
+ * Only the deploy identity lock depends on it: while the AWS switch is off,
+ * Radius runs no AWS command, so a destructive action keeps the lock.
+ */
+export interface OperationProjectionOptions {
+  awsEnabled?: boolean;
+}
+
 /** The held lock, if any, as the list a destructive preview removes. */
-function heldAwsLockRemoval(op: any): Array<{ kind: string; target: string }> {
+function heldAwsLockRemoval(
+  op: any,
+  options: OperationProjectionOptions
+): Array<{ kind: string; target: string }> {
   const lock = heldAwsLockEntry(op);
-  return lock ? [lock] : [];
+  return lock && options.awsEnabled !== false ? [lock] : [];
+}
+
+const AWS_OFF_LOCK_ACTION =
+  "AWS environments are turned off, so Radius will not release this lock. Turn them on and delete the setup, or run the command in its step to remove it by hand.";
+
+/** The held lock, if the AWS switch keeps it, as a preview keep. */
+function keptAwsLock(
+  op: any,
+  options: OperationProjectionOptions
+): Array<{ kind: string; target: string; reason: string; action: string }> {
+  const lock = heldAwsLockEntry(op);
+  return lock && options.awsEnabled === false ?
+      [{ ...lock, reason: "retained", action: AWS_OFF_LOCK_ACTION }]
+    : [];
 }
 
 /**
@@ -4313,17 +4339,22 @@ function heldAwsLockRemoval(op: any): Array<{ kind: string; target: string }> {
  * the browser from the inventory groups would let the dialog promise a deletion
  * the server would then refuse to perform.
  */
-function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
+function projectRollbackPreview(
+  op: any,
+  targets: RollbackTarget[],
+  options: OperationProjectionOptions
+): any {
   const summary = projectCleanupSummary(op) || {};
   const removes = [
     ...targets.map((entry) => ({
       kind: entry.artifactType,
       target: entry.target
     })),
-    ...heldAwsLockRemoval(op)
+    ...heldAwsLockRemoval(op, options)
   ];
+  const lockKept = keptAwsLock(op, options);
   const removeKeys = new Set(
-    removes.map((entry) => `${entry.kind}#${entry.target}`)
+    [...removes, ...lockKept].map((entry) => `${entry.kind}#${entry.target}`)
   );
   const keeps = [
     ...(summary.reused || []).map((entry: any) => ({
@@ -4343,7 +4374,8 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
         target: entry.target,
         reason: "retained",
         action: RETAINED_KEEP_ACTION
-      }))
+      })),
+    ...lockKept
   ];
   return {
     removes,
@@ -4358,8 +4390,11 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
   };
 }
 
-function projectAbandonPreview(op: any): any {
-  const preview = projectRollbackPreview(op, []);
+function projectAbandonPreview(
+  op: any,
+  options: OperationProjectionOptions
+): any {
+  const preview = projectRollbackPreview(op, [], options);
   return {
     ...preview,
     manualActionRequired: [
@@ -4650,7 +4685,10 @@ function removeAwsLockAction(op: any, base: string): any | null {
   };
 }
 
-export function projectOperationActions(op: any): any[] {
+export function projectOperationActions(
+  op: any,
+  options: OperationProjectionOptions = {}
+): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
   if (op.kind === OPERATION_KIND_DELETE) {
@@ -4861,14 +4899,14 @@ export function projectOperationActions(op: any): any[] {
       path: `${base}/rollback`,
       pending: false,
       scope: rollback.scope,
-      preview: projectRollbackPreview(op, rollback.targets)
+      preview: projectRollbackPreview(op, rollback.targets, options)
     });
   }
   const cleanup = canRetryCleanup(op);
   if (cleanup.ok) {
     // The retry removes its own unresolved subset, but keeps and manual items
     // are the same whole-record projection a rollback that removes nothing has.
-    const kept = projectRollbackPreview(op, []);
+    const kept = projectRollbackPreview(op, [], options);
     actions.push({
       id: "retry-cleanup",
       kind: "retry_cleanup",
@@ -4890,7 +4928,7 @@ export function projectOperationActions(op: any): any[] {
             kind: entry.artifactType,
             target: entry.target
           })),
-          ...heldAwsLockRemoval(op)
+          ...heldAwsLockRemoval(op, options)
         ],
         keeps: kept.keeps,
         manualActionRequired: kept.manualActionRequired
@@ -4903,7 +4941,11 @@ export function projectOperationActions(op: any): any[] {
     // panel rather than another attempt at the setup, so it never sits beside
     // the forward and destructive choices the command row offers.
     const abandons = exit.abandon === true;
-    const releasesLock = heldAwsLockEntry(op) !== null;
+    const releasesLock = heldAwsLockRemoval(op, options).length > 0;
+    const keepsLock =
+      keptAwsLock(op, options).length > 0 ?
+        " The lock it holds on the deploy identity stays, because AWS environments are turned off."
+      : "";
     const removes = exit.targets.length > 0 || releasesLock;
     actions.push({
       id: "exit-setup",
@@ -4931,20 +4973,20 @@ export function projectOperationActions(op: any): any[] {
       : {}),
       description:
         abandons ?
-          `Radius closes this setup without deleting resources that may still be used by external work.${releasesLock ? " It releases the lock this setup holds on the deploy identity." : ""} You can start Create Environment again, but you may need to remove or reuse the remaining resources manually.`
+          `Radius closes this setup without deleting resources that may still be used by external work.${releasesLock ? " It releases the lock this setup holds on the deploy identity." : keepsLock} You can start Create Environment again, but you may need to remove or reuse the remaining resources manually.`
         : exit.targets.length > 0 ?
-          `Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added.${releasesLock ? " It also releases the lock this setup holds on the deploy identity." : ""} Anything it reused is left alone. This cannot be undone.`
+          `Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added.${releasesLock ? " It also releases the lock this setup holds on the deploy identity." : keepsLock} Anything it reused is left alone. This cannot be undone.`
         : releasesLock ?
           "Radius closes this setup and releases the lock it holds on the deploy identity. Everything else that exists was already here before this attempt, so nothing else is removed."
-        : "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.",
+        : `Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.${keepsLock}`,
       method: "POST",
       path: abandons ? `${base}/exit?mode=abandon` : `${base}/exit`,
       pending: false,
       removesResources: removes,
       preview:
         abandons ?
-          projectAbandonPreview(op)
-        : projectRollbackPreview(op, exit.targets)
+          projectAbandonPreview(op, options)
+        : projectRollbackPreview(op, exit.targets, options)
     });
   }
   return actions;
@@ -6583,7 +6625,10 @@ export function setupInFlight(): boolean {
  * instruction-shaped text) and is stripped here. The panel renders structured
  * fields; evidence travels only on the diagnostic path, fenced.
  */
-export function toClientView(op: any): any {
+export function toClientView(
+  op: any,
+  options: OperationProjectionOptions = {}
+): any {
   if (!op) return null;
   const cleanup = projectCleanupSummary(op);
   const control = op.control || createOperationControl();
@@ -6659,7 +6704,7 @@ export function toClientView(op: any): any {
       code: entry.code,
       recordedAt: entry.recordedAt
     })),
-    actions: projectOperationActions(op),
+    actions: projectOperationActions(op, options),
     guidance: projectActionGuidance(op),
     headline: projectOperationHeadline(op),
     activeCommandKind: activeCommandKind(op),

@@ -242,7 +242,14 @@ const findActiveOperationCommand: (
   operation: OperationRecord,
   kinds: readonly OperationCommandKind[]
 ) => { commandId: string } | null = findActiveCommand;
-const clientView: (operation: OperationRecord) => unknown = toClientView;
+// The view the panel renders. The AWS switch decides whether a destructive
+// action can release the deploy identity lock.
+function clientView(
+  operation: OperationRecord,
+  dependencies: Pick<OperationsControlDependencies, "awsEnabled">
+): unknown {
+  return toClientView(operation, { awsEnabled: dependencies.awsEnabled });
+}
 
 // One resolved control request: the record the decision is taken from, the
 // verdict that allowed it, and the seams it may use.
@@ -391,7 +398,7 @@ function unknownOperation(context: OperationControlContext): void {
 
 function resolveOperation(
   context: OperationControlContext,
-  dependencies: Pick<OperationsControlDependencies, "get">,
+  dependencies: Pick<OperationsControlDependencies, "get" | "awsEnabled">,
   { allowDelete = false }: { allowDelete?: boolean } = {}
 ): {
   operationId: string;
@@ -413,7 +420,7 @@ function resolveOperation(
         "This operation is a deletion and is not controlled through setup controls.",
       code: "operation-not-setup-controllable",
       operationId,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return null;
   }
@@ -458,7 +465,7 @@ async function handleRemoveAwsLock(
         "This run is not waiting for a lock that has been held long enough to remove.",
       code: "aws-lock-not-removable",
       operationId,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return;
   }
@@ -470,7 +477,7 @@ async function handleRemoveAwsLock(
         "The lock changed since it was shown: another run now holds a new one. Nothing was removed.",
       code: "aws-lock-changed",
       operationId,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return;
   }
@@ -493,7 +500,7 @@ async function handleRemoveAwsLock(
           "The setup that holds this lock is running again, so Radius did not remove it. This run keeps waiting for it.",
         code: "aws-lock-holder-resumed",
         operationId,
-        operation: clientView(operation)
+        operation: clientView(operation, dependencies)
       });
       return;
     }
@@ -518,7 +525,7 @@ async function handleRemoveAwsLock(
       error: result.message,
       code: result.code,
       operationId,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return;
   }
@@ -541,7 +548,7 @@ async function handleRemoveAwsLock(
     code: result.removed ? "aws-lock-removed" : "aws-lock-already-removed",
     ...(detail ? { detail } : {}),
     statusUrl: statusUrlFor(operationId),
-    operation: clientView(operation)
+    operation: clientView(operation, dependencies)
   });
 }
 
@@ -648,7 +655,7 @@ async function handleStopOperation(
           operationId,
           code: "operation-stopped",
           statusUrl: statusUrlFor(operationId),
-          operation: clientView(operation)
+          operation: clientView(operation, dependencies)
         });
         return;
       }
@@ -694,7 +701,7 @@ async function handleStopOperation(
           : "operation-stopped",
         ...(readError ? { detail: errorMessage(readError) } : {}),
         statusUrl: statusUrlFor(operationId),
-        operation: clientView(operation)
+        operation: clientView(operation, dependencies)
       });
     } catch (error) {
       if (!(error instanceof WorkflowCancellationRefusal)) throw error;
@@ -721,7 +728,7 @@ async function handleStopOperation(
         "Setup cannot be paused while cleanup is running. Wait for cleanup to finish.",
       code: "operation-cleanup-not-stoppable",
       operationId,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return;
   }
@@ -736,7 +743,7 @@ async function handleStopOperation(
         "This operation already finished, so there is nothing left to pause.",
       code: "operation-already-terminal",
       operationId,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return;
   }
@@ -745,7 +752,7 @@ async function handleStopOperation(
       operationId,
       code: "operation-stopped",
       statusUrl: statusUrlFor(operationId),
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return;
   }
@@ -774,7 +781,7 @@ async function handleStopOperation(
         "operation-stopped"
       : "operation-stop-pending",
     statusUrl: statusUrlFor(operationId),
-    operation: clientView(operation)
+    operation: clientView(operation, dependencies)
   });
 }
 
@@ -791,7 +798,7 @@ async function handleCancelWorkflow(
         "Pause setup before cancelling its exact verification workflow run.",
       code: "workflow-cancel-not-available",
       operationId,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return;
   }
@@ -855,7 +862,7 @@ async function requireMergedSetupPullRequest(
       code: "verification-retry-persist-failed",
       operationId,
       detail: errorMessage(error),
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return false;
   }
@@ -875,7 +882,7 @@ async function requireMergedSetupPullRequest(
       operationId,
       pullRequestUrl,
       detail: merge.detail,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return false;
   }
@@ -887,7 +894,7 @@ async function requireMergedSetupPullRequest(
       code: "verification-retry-pull-request-open",
       operationId,
       pullRequestUrl,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return false;
   }
@@ -902,7 +909,7 @@ async function requireMergedSetupPullRequest(
         "This operation changed while Radius checked the setup pull request. Refresh the operation before retrying.",
       code: "operation-active",
       operationId,
-      operation: clientView(operation)
+      operation: clientView(operation, dependencies)
     });
     return false;
   }
@@ -1039,7 +1046,7 @@ async function closeExitedSetup(request: CommandRequest): Promise<boolean> {
     statusUrl: statusUrlFor(operationId),
     commandId,
     removed: false,
-    operation: clientView(operation)
+    operation: clientView(operation, dependencies)
   });
   return true;
 }
@@ -1293,7 +1300,7 @@ async function runAcceptedCommand(
             error: `Radius could not start the ${spec.workLabel ?? spec.name}, so no work was started and nothing changed. Try again.`,
             code: "operation-command-unscheduled",
             operationId,
-            operation: clientView(operation)
+            operation: clientView(operation, dependencies)
           });
           break;
         case "accepted":
@@ -1302,7 +1309,7 @@ async function runAcceptedCommand(
             statusUrl: statusUrlFor(operationId),
             commandId: outcome.commandId,
             attempt: outcome.attempt,
-            operation: clientView(operation)
+            operation: clientView(operation, dependencies)
           });
       }
     },
@@ -1383,7 +1390,7 @@ async function runControlCommand(
           statusUrl: statusUrlFor(operationId),
           commandId: active.commandId,
           duplicate: true,
-          operation: clientView(operation)
+          operation: clientView(operation, dependencies)
         });
         return;
       }
@@ -1398,7 +1405,7 @@ async function runControlCommand(
         code: eligibility.code,
         operationId,
         ...(eligibility.detail ? { detail: eligibility.detail } : {}),
-        operation: clientView(operation)
+        operation: clientView(operation, dependencies)
       });
       return;
     }

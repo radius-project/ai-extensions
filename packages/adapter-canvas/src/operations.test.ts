@@ -8914,6 +8914,86 @@ describe("a stopped AWS setup's deploy identity lock", () => {
     expect(retry.preview.removes).toContainEqual(LOCK_ENTRY);
   });
 
+  describe("while AWS environments are turned off", () => {
+    const off = (op, id) =>
+      projectOperationActions(op, { awsEnabled: false }).find(
+        (entry) => entry.id === id
+      );
+    const KEPT_LOCK = {
+      ...LOCK_ENTRY,
+      reason: "retained",
+      action:
+        "AWS environments are turned off, so Radius will not release this lock. Turn them on and delete the setup, or run the command in its step to remove it by hand."
+    };
+
+    it("keeps the lock in Delete setup, saying why", () => {
+      const rollback = off(stopped(), "rollback");
+      expect(rollback.preview.removes).toEqual([
+        { kind: "github_environment", target: "contoso/store:dev" }
+      ]);
+      expect(
+        rollback.preview.keeps.filter((entry) => entry.kind === LOCK_ENTRY.kind)
+      ).toEqual([KEPT_LOCK]);
+    });
+
+    it("does not confirm an Exit setup that would only have released the lock", () => {
+      const exit = off(stopped({ environment: "reused" }), "exit-setup");
+      expect(exit).toMatchObject({
+        requiresConfirmation: false,
+        removesResources: false,
+        description:
+          "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed. The lock it holds on the deploy identity stays, because AWS environments are turned off."
+      });
+      expect(exit.preview.keeps).toContainEqual(KEPT_LOCK);
+    });
+
+    it("says the lock stays in an Exit setup that removes resources", () => {
+      expect(off(stopped(), "exit-setup").description).toBe(
+        "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. The lock it holds on the deploy identity stays, because AWS environments are turned off. Anything it reused is left alone. This cannot be undone."
+      );
+    });
+
+    it("says the lock stays when abandoning", () => {
+      const op = stopped();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+      const exit = off(op, "exit-setup");
+      expect(exit.description).toBe(
+        "Radius closes this setup without deleting resources that may still be used by external work. The lock it holds on the deploy identity stays, because AWS environments are turned off. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+      );
+      expect(exit.preview.removes).toEqual([]);
+    });
+
+    it("leaves the lock out of a cleanup retry", () => {
+      const op = stopped();
+      recordCleanupPass(op, "succeeded_with_warnings", [
+        {
+          attempt: 1,
+          artifactType: "github_environment",
+          target: "contoso/store/dev",
+          identity: "contoso/store:dev",
+          outcome: "warning",
+          detail: "GitHub refused the delete."
+        }
+      ]);
+      finish(op, "failed_partial", {
+        failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+      });
+      expect(off(op, "retry-cleanup").preview.removes).not.toContainEqual(
+        LOCK_ENTRY
+      );
+    });
+
+    it("projects the switch through the client view", () => {
+      const view = toClientView(stopped({ environment: "reused" }), {
+        awsEnabled: false
+      });
+      expect(
+        view.actions.find((entry) => entry.id === "exit-setup")
+      ).toMatchObject({ removesResources: false });
+    });
+  });
+
   it("tells a waiting run that a stopped setup's lock can go at once", () => {
     const op = awsSetup({ lock: false });
     setContext(op, {

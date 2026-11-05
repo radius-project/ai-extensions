@@ -1238,6 +1238,46 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it.each([
+    [true, "releases the lock it holds"],
+    [false, "The lock it holds on the deploy identity stays"]
+  ])(
+    "projects the AWS switch (%s) into the status route's exit wording",
+    async (awsEnabled, wording) => {
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: createEnvironmentExecutionOwner(),
+        awsEnabled
+      });
+      try {
+        const entry = await runtime.getOrCreateServer("aws-off", "environment");
+        const op = createOperation({
+          operationId: "op_aws_switch_view",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        setContext(op, {
+          awsDeployIdentityLock: {
+            policyArn:
+              "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app",
+            policyId: "LOCK0"
+          }
+        });
+        finish(op, "failed");
+        operations.put(op);
+        const status = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}`
+        );
+        const exit = (await status.json()).operation.actions.find(
+          (action: { id: string }) => action.id === "exit-setup"
+        );
+        expect(exit.description).toContain(wording);
+      } finally {
+        await runtime.stopServer("aws-off", true);
+      }
+    }
+  );
+
   it("continues a restarted AWS setup from its saved request, taking back its own lock", async () => {
     const lockArn =
       "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";

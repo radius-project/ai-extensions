@@ -5864,7 +5864,7 @@ export function createProductionCanvasServerRuntime(
     canDismissOperation,
     dismissOperation,
     persistOperations: () => operations.persist(),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     errorMessage,
     inputRequiredState: INPUT_REQUIRED_STATE
@@ -5927,7 +5927,7 @@ export function createProductionCanvasServerRuntime(
       latest: (repo) => operations.latest(repo),
       latestAny: () => operations.latestAny(),
       get: (operationId) => operations.get(operationId),
-      toClientView,
+      toClientView: (record: any) => toClientView(record, { awsEnabled }),
       productVersion: resolveGeneratorVersion,
       now: () => Date.now()
     },
@@ -6492,7 +6492,7 @@ export function createProductionCanvasServerRuntime(
     createOperation,
     buildDeleteStages: (options) => buildDeleteStages(options),
     startOperation: (op) => operations.start(op),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     cliExec: (command, args, options, callback) => {
       cliExec(command, args, options, callback);

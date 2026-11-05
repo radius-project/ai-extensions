@@ -107,7 +107,9 @@ export async function cancelOperationWorkflow(
         assertCurrent();
         return response(200, "workflow-status-checked", {
           statusUrl: `/api/operations/${encodeURIComponent(operationId)}`,
-          operation: toClientView(operation)
+          operation: toClientView(operation, {
+            awsEnabled: dependencies.awsEnabled
+          })
         });
       } catch (error) {
         if (error instanceof WorkflowCancellationRefusal) return refusal(error);
@@ -264,7 +266,9 @@ export async function cancelOperationWorkflow(
           "Radius could not confirm cancellation of the verification workflow.",
         detail: errorMessage(failure),
         cancellation: result,
-        operation: toClientView(operation)
+        operation: toClientView(operation, {
+          awsEnabled: dependencies.awsEnabled
+        })
       });
     return response(
       state === "inactive" ? 200 : 202,
@@ -274,7 +278,9 @@ export async function cancelOperationWorkflow(
       {
         cancellation: result,
         statusUrl: `/api/operations/${encodeURIComponent(operationId)}`,
-        operation: toClientView(operation)
+        operation: toClientView(operation, {
+          awsEnabled: dependencies.awsEnabled
+        })
       }
     );
   } finally {

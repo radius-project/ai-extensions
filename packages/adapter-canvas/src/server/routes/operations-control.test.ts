@@ -1797,6 +1797,24 @@ describe("POST /api/operations/{id}/exit", () => {
       });
     });
 
+    it("says in a refusal's view that the lock stays while AWS is turned off", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+
+      const out = await drive(handleContinueOperation, op, "continue", {
+        awsEnabled: false
+      });
+
+      expect(out.recording.status).toBe(409);
+      const exit = out
+        .payload()
+        .operation.actions.find(
+          (action: { id: string }) => action.id === "exit-setup"
+        );
+      expect(exit.description).toContain(
+        "The lock it holds on the deploy identity stays, because AWS environments are turned off."
+      );
+    });
+
     it("leaves the release to the disposal pass when there is more to remove", async () => {
       const op = holdingLock(stoppedSetup());
       recordGitHubEnvironment(op, {
