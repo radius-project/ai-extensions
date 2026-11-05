@@ -14,8 +14,10 @@ import {
   isRepoNotFoundError,
   findWorkflowRun,
   fetchRunLog,
+  ghJson,
   getRunDetail,
   isSelectedGhAuthorizationError,
+  latestWorkflowRunId,
   selectWorkflowRunId
 } from "./deploy.js";
 import * as gh from "./gh.js";
@@ -451,6 +453,128 @@ describe("ambient workflow callback binding", () => {
       ).toBeLessThanOrEqual(30000);
     }
   );
+});
+
+describe("ambient workflow discovery parsing", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("parses trimmed JSON with the requested timeout", async () => {
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (command, args, options, callback) => {
+        expect(command).toBe("gh");
+        expect(args).toEqual(["run", "list"]);
+        expect(options).toEqual({ timeout: 4321 });
+        queueMicrotask(() => callback(null, '  {"status":"queued"} \n', ""));
+        return new ChildProcess();
+      }
+    );
+
+    await expect(ghJson(["run", "list"], null, 4321)).resolves.toEqual({
+      status: "queued"
+    });
+  });
+
+  it.each([
+    {
+      name: "CLI failure",
+      error: new Error("gh unavailable"),
+      stdout: '{"status":"completed"}'
+    },
+    {
+      name: "malformed JSON",
+      error: null,
+      stdout: '{"status":'
+    }
+  ])("returns the caller fallback for $name", async ({ error, stdout }) => {
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (_command, _args, _options, callback) => {
+        queueMicrotask(() => callback(error, stdout, ""));
+        return new ChildProcess();
+      }
+    );
+    const fallback = { status: "unavailable" };
+
+    await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
+  });
+
+  it("finds the greatest numeric run id while ignoring malformed run fields", async () => {
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (_command, _args, _options, callback) => {
+        queueMicrotask(() =>
+          callback(
+            null,
+            JSON.stringify([
+              null,
+              [],
+              "not-a-run",
+              {
+                databaseId: "12",
+                createdAt: 7,
+                status: false,
+                conclusion: false,
+                displayTitle: 9
+              },
+              {
+                databaseId: 4,
+                createdAt: "2026-10-15T12:00:00Z",
+                status: "completed",
+                conclusion: null,
+                displayTitle: "older"
+              },
+              { databaseId: 11, conclusion: "success" },
+              { databaseId: 8 }
+            ]),
+            ""
+          )
+        );
+        return new ChildProcess();
+      }
+    );
+
+    await expect(
+      latestWorkflowRunId("contoso/store", "deploy.yml")
+    ).resolves.toBe(11);
+    expect(gh.cliExec).toHaveBeenCalledWith(
+      "gh",
+      [
+        "run",
+        "list",
+        "--workflow=deploy.yml",
+        "--limit",
+        "20",
+        "--json",
+        "databaseId,createdAt",
+        "--repo",
+        "contoso/store"
+      ],
+      { timeout: 15000 },
+      expect.any(Function)
+    );
+  });
+
+  it("returns no latest run when GitHub returns a valid non-list payload", async () => {
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (_command, _args, _options, callback) => {
+        queueMicrotask(() => callback(null, '{"message":"unexpected"}', ""));
+        return new ChildProcess();
+      }
+    );
+
+    await expect(
+      latestWorkflowRunId("contoso/store", "deploy.yml")
+    ).resolves.toBeNull();
+  });
+
+  it("returns a known run id without reading GitHub", async () => {
+    const cli = vi.spyOn(gh, "cliExec");
+
+    await expect(
+      findWorkflowRun("contoso/store", "deploy.yml", Date.now(), "known-run")
+    ).resolves.toBe("known-run");
+    expect(cli).not.toHaveBeenCalled();
+  });
 });
 
 describe("selected-account workflow discovery", () => {

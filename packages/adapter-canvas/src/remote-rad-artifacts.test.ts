@@ -76,6 +76,33 @@ test("artifact fingerprint changes with config and local extension content", () 
   }
 });
 
+test("artifact fingerprint is stable for absent, invalid, and incomplete artifacts", () => {
+  const dir = fs.mkdtempSync(path.join(process.cwd(), "rad-fingerprint-"));
+  try {
+    const baseline = radArtifactsFingerprint();
+    assert.equal(radArtifactsFingerprint(dir), baseline);
+
+    fs.writeFileSync(path.join(dir, "bicepconfig.json"), "{ invalid");
+    assert.notEqual(radArtifactsFingerprint(dir), baseline);
+
+    fs.writeFileSync(
+      path.join(dir, "bicepconfig.json"),
+      JSON.stringify({
+        extensions: {
+          missing: "./missing.tgz",
+          invalid: "../outside.tgz",
+          nonString: 42,
+          oci: "oci:ghcr.io/acme/extension:v1"
+        }
+      })
+    );
+    const first = radArtifactsFingerprint(dir);
+    assert.equal(first, radArtifactsFingerprint(dir));
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test("stages bicepconfig.json and the referenced custom-types.tgz for a committed branch", async () => {
   const gh = mockGithub(
     { [CONFIG_API]: CONFIG },
@@ -111,6 +138,36 @@ test("returns null when the branch has no committed bicepconfig.json", async () 
     null
   );
   assert.deepEqual(gh.calls.getContentBytes, []);
+});
+
+test("returns null when repository identity is incomplete or config fetch fails", async () => {
+  const failure = {
+    getContent: async () => {
+      throw "network unavailable";
+    },
+    getContentBytes: async () => null
+  };
+  const logs: string[] = [];
+
+  assert.equal(
+    await stageRemoteRadArtifacts(failure, "", "dev", ".radius/app.bicep"),
+    null
+  );
+  assert.equal(
+    await stageRemoteRadArtifacts(failure, "acme/app", "", ".radius/app.bicep"),
+    null
+  );
+  assert.equal(
+    await stageRemoteRadArtifacts(
+      failure,
+      "acme/app",
+      "dev",
+      ".radius/app.bicep",
+      { log: (message) => logs.push(message) }
+    ),
+    null
+  );
+  assert.match(logs[0] || "", /network unavailable/);
 });
 
 test("stages config but copies no artifact for OCI-only extensions", async () => {
@@ -169,6 +226,46 @@ test("skips a missing artifact and logs it", async () => {
     assert.ok(dir);
     assert.equal(fs.existsSync(path.join(dir, "custom-types.tgz")), false);
     assert.ok(logs.some((m) => /not found on dev/.test(m)));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("stages nested artifacts for a root model and contains fetch failures", async () => {
+  const configApi = "/repos/acme/app/contents/bicepconfig.json?ref=dev";
+  const nestedApi = "/repos/acme/app/contents/nested/custom.tgz?ref=dev";
+  const config = JSON.stringify({
+    extensions: {
+      nested: "./nested/custom.tgz",
+      failed: "./failed.tgz",
+      ignored: 1
+    }
+  });
+  const logs: string[] = [];
+  const github = {
+    async getContent(apiPath: string) {
+      return apiPath === configApi ? config : null;
+    },
+    async getContentBytes(apiPath: string) {
+      if (apiPath.endsWith("/failed.tgz?ref=dev"))
+        throw new Error("artifact fetch failed");
+      return apiPath === nestedApi ? Buffer.from("nested") : null;
+    }
+  };
+  const dir = await stageRemoteRadArtifacts(
+    github,
+    "acme/app",
+    "dev",
+    "app.bicep",
+    { log: (message) => logs.push(message) }
+  );
+  try {
+    assert.ok(dir);
+    assert.equal(
+      fs.readFileSync(path.join(dir, "nested", "custom.tgz"), "utf8"),
+      "nested"
+    );
+    assert.ok(logs.some((message) => /artifact fetch failed/.test(message)));
   } finally {
     cleanup(dir);
   }

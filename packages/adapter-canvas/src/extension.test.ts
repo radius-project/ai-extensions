@@ -29,9 +29,7 @@ describe("RU-20: extension.ts is a thin joinSession composition root", () => {
     const bootstrap = source.indexOf(
       "const radiusExtension = await bootstrapRadiusExtension("
     );
-    const signalHandlers = source.indexOf(
-      'for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"])'
-    );
+    const signalHandlers = source.indexOf("configureProcessLifecycle({");
     expect(bootstrap).toBeGreaterThan(-1);
     expect(signalHandlers).toBeGreaterThan(bootstrap);
   });
