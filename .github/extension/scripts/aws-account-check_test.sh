@@ -26,7 +26,16 @@ readonly WORKFLOWS=(
 
 TEST_ROOT="$(mktemp -d)"
 readonly TEST_ROOT
-trap 'rm -rf "${TEST_ROOT}"' EXIT
+COMPLETED=false
+# Bash 3.2 runs an EXIT trap with status 0 after a fatal expansion error, so
+# only a run that reached the end may exit 0.
+cleanup() {
+    rm -rf "${TEST_ROOT}"
+    if [ "${COMPLETED}" != true ]; then
+        exit 1
+    fi
+}
+trap cleanup EXIT
 
 readonly STUB_BIN="${TEST_ROOT}/bin"
 readonly CALLS="${TEST_ROOT}/calls.log"
@@ -205,14 +214,15 @@ test_fails_when_get_caller_identity_returns_no_account() {
 # An empty AWS_ACCOUNT_ID must not pass against an empty STS result, and an
 # unchecked value must never reach a workflow command.
 test_fails_when_aws_account_id_is_not_an_account() {
-    local wf="$1" body="$2" value sts_mode
+    local wf="$1" body="$2" value sts_mode label
     local values=("" "11112222333" "1111222233334" "11112222333a" $'111122223333\n::warning::injected')
     for value in "${values[@]}"; do
         for sts_mode in account empty; do
             run_step "${body}" "${value}" "${sts_mode}" "${value}"
-            expect_failure "${wf}: AWS_ACCOUNT_ID=${value@Q} with ${sts_mode} STS" "AWS_ACCOUNT_ID is not a 12-digit AWS account ID. Set it in this GitHub environment's variables to the account of AWS_ROLE_ARN."
+            label="$(printf '%q' "${value}")"
+            expect_failure "${wf}: AWS_ACCOUNT_ID=${label} with ${sts_mode} STS" "AWS_ACCOUNT_ID is not a 12-digit AWS account ID. Set it in this GitHub environment's variables to the account of AWS_ROLE_ARN."
             if [ -s "${CALLS}" ]; then
-                fail "${wf}: AWS_ACCOUNT_ID=${value@Q} reached aws"
+                fail "${wf}: AWS_ACCOUNT_ID=${label} reached aws"
             fi
             if grep -qF "::warning::injected" "${OUTPUT}"; then
                 fail "${wf}: AWS_ACCOUNT_ID was written into the step log"
@@ -240,4 +250,5 @@ for entry in "${WORKFLOWS[@]}"; do
     test_fails_when_aws_account_id_is_not_an_account "${wf}" "${body}"
 done
 
+COMPLETED=true
 echo "AWS account check tests passed"
