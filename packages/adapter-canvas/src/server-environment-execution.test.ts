@@ -1328,6 +1328,7 @@ describe("production coordinator scheduling scopes", () => {
       },
       now: () => Date.parse("2026-10-30T12:00:00Z"),
       isStopRequested: shouldStop,
+      isStoppedOperation: () => false,
       operationId: (target) => target.operationId,
       operations: {
         getContext: (target) => target.context ?? {},
@@ -3544,6 +3545,7 @@ describe("production coordinator scheduling scopes", () => {
       withSelectedAccount: unavailable
     });
     const execution = createEnvironmentOperationExecution({
+      awsEnabled: false,
       awsEnvironmentAccess: { setup: unavailable, release: unavailable },
       executionOwner: owner,
       scope,

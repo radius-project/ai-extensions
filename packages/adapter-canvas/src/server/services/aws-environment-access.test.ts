@@ -152,6 +152,7 @@ function harness(
 ) {
   const environmentReads: string[] = [];
   let stopRequested = false;
+  const stoppedOperations = new Set<string>();
   const awsCalls: string[][] = [];
   const githubCalls: Array<{
     path: string;
@@ -231,6 +232,7 @@ function harness(
       }
     },
     isStopRequested: () => stopRequested,
+    isStoppedOperation: (operationId) => stoppedOperations.has(operationId),
     operationId: (operation) => operation.id,
     now: () => clock,
     async sleep(milliseconds) {
@@ -296,6 +298,7 @@ function harness(
     commands,
     steps,
     roleRecorded,
+    stoppedOperations,
     requestStop: () => {
       stopRequested = true;
     }
@@ -2049,6 +2052,7 @@ describe("the deploy identity lock during setup", () => {
           holder: "The setup of environment prod in octo/shop",
           holderOperationId: "op-2",
           since: "2026-10-30T11:58:30Z",
+          stopped: false,
           removable: false
         }
       }
@@ -2059,6 +2063,125 @@ describe("the deploy identity lock during setup", () => {
       { awsLockWait: null }
     ]);
   });
+
+  it("takes back the lock this setup recorded in an earlier attempt", async () => {
+    const MINE = JSON.stringify({
+      repo: "octo/shop",
+      environment: "dev",
+      action: "setup",
+      operationId: "op-1"
+    });
+    const h = harness({
+      ...happyPath,
+      "iam create-policy": [EXISTS, lockPolicy("LOCK1")],
+      "iam get-policy": [
+        lockPolicy("LOCK0", { Description: MINE }),
+        lockPolicy("LOCK1")
+      ]
+    });
+    h.contexts.set("op-1", {
+      awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+    });
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+
+    expect(h.steps()).toContain(
+      `🔒 Took back the lock this setup holds on IAM role ${ROLE} from its earlier attempt.`
+    );
+    expect(h.steps().some((text) => String(text).startsWith("⏳"))).toBe(false);
+    // Replaced, so the lock's creation time is this run's.
+    expect(
+      h.commands().filter((command) => command === "iam create-policy")
+    ).toHaveLength(2);
+    expect(h.commands()).toContain("iam delete-policy");
+    await h.access.release(operation);
+    expect(h.commands().at(-1)).toBe("iam delete-policy");
+    expect(h.contexts.get("op-1")).toMatchObject({
+      awsDeployIdentityLock: null
+    });
+  });
+
+  it("does not take back a recorded lock on another role", async () => {
+    const MINE = JSON.stringify({
+      repo: "octo/shop",
+      environment: "dev",
+      action: "setup",
+      operationId: "op-1"
+    });
+    const h = harness({
+      ...happyPath,
+      "iam create-policy": [EXISTS, lockPolicy("LOCK1")],
+      "iam get-policy": [
+        lockPolicy("LOCK0", { Description: MINE }),
+        lockPolicy("LOCK1")
+      ]
+    });
+    h.contexts.set("op-1", {
+      awsDeployIdentityLock: {
+        policyArn: `arn:aws:iam::${ACCOUNT}:policy/radius-lock-other-role`,
+        policyId: "LOCK0"
+      }
+    });
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+    expect(h.steps()).toContain(
+      `🔒 Locked IAM role ${ROLE}, so no other Radius run changes its trust policy until this setup finishes.`
+    );
+  });
+
+  it.each([
+    ["another operation that stopped", OTHER_HOLDER, "op-2"],
+    [
+      "this setup's earlier attempt, unrecorded",
+      JSON.stringify({
+        repo: "octo/shop",
+        environment: "dev",
+        action: "setup",
+        operationId: "op-1"
+      }),
+      null
+    ]
+  ])(
+    "offers Remove lock at once for a lock left by %s",
+    async (_label, description, stopped) => {
+      const h = harness({
+        ...happyPath,
+        "iam create-policy": [EXISTS, lockPolicy("LOCK1")],
+        "iam get-policy": [
+          lockPolicy("LOCK0", {
+            Description: description,
+            CreateDate: "2026-10-30T11:59:00Z"
+          }),
+          lockPolicy("LOCK1")
+        ]
+      });
+      if (stopped) h.stoppedOperations.add(stopped);
+
+      await h.access.setup(operation, input, EXECUTOR);
+
+      const holder =
+        stopped ?
+          "The setup of environment prod in octo/shop (operation op-2)"
+        : "The setup of environment dev in octo/shop (operation op-1)";
+      expect(h.steps()).toContain(
+        `⏳ The lock on IAM role ${ROLE} is from an earlier attempt that stopped: ${holder}, which took it at 2026-10-30 11:59 UTC. Use Remove lock to continue.`
+      );
+      expect(h.events).toContainEqual([
+        "setContext",
+        "op-1",
+        {
+          awsLockWait: expect.objectContaining({
+            stopped: true,
+            removable: true
+          })
+        }
+      ]);
+    }
+  );
 
   it("tells the developer when Remove lock becomes available", async () => {
     const h = harness({
@@ -2609,6 +2732,7 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
           }
         },
         isStopRequested: () => false,
+        isStoppedOperation: () => false,
         operationId: (operation) => operation.id,
         now: () => Date.parse("2026-10-30T12:00:00Z"),
         async sleep() {

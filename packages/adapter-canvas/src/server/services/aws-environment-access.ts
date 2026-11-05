@@ -7,9 +7,11 @@ import {
   type OidcSubjectConfig,
   buildEnvironmentSuffix,
   AWS_PERMISSION_POLICY_NAME_VARIABLE,
+  awsLockPolicyArn,
   awsRoleArn,
   isAwsEnvironmentPolicyName,
   formatAwsLockTime,
+  readRecordedAwsLock,
   type AwsLockAction
 } from "@radius-project/core";
 import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
@@ -65,6 +67,9 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
   now(): number;
   // Whether the customer asked to pause this operation.
   isStopRequested(operation: Operation): boolean;
+  // Whether `operationId` names an operation in this store that has stopped,
+  // so a lock it holds is left from an earlier attempt.
+  isStoppedOperation(operationId: string): boolean;
   operationId(operation: Operation): string;
   operations: {
     getContext(operation: Operation): Record<string, unknown>;
@@ -211,6 +216,16 @@ function lockHolder(wait: AwsLockWait): string {
     : wait.holder;
 }
 
+// The progress line for one lock another run holds.
+function lockWaitLine(roleName: string, wait: AwsLockWait): string {
+  if (wait.stopped) {
+    return `⏳ The lock on IAM role ${roleName} is from an earlier attempt that stopped: ${lockHolder(wait)}, which took it at ${formatAwsLockTime(wait.since)}. Use Remove lock to continue.`;
+  }
+  return wait.removable ?
+      `⏳ The lock on IAM role ${roleName} is 10 or more minutes old. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}. If that run has stopped, use Remove lock.`
+    : `⏳ Waiting for the lock on IAM role ${roleName}. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}.`;
+}
+
 // What a lost lock means for this run. Before any write nothing changed; after
 // one, the changes it made may since have been changed again by the run that
 // took the lock.
@@ -245,12 +260,14 @@ export function createAwsEnvironmentAccess<Operation>(
       environment: string;
       action: AwsLockAction;
       operationId: string;
+      // The policy ID of the lock this operation recorded earlier.
+      adopt?: string;
     },
     shouldStop: () => boolean,
     // Null: do not wait for another run's lock; refuse, naming the holder.
     waiting: ((wait: AwsLockWait, line: string | null) => Promise<void>) | null
   ): Promise<
-    | { ok: true; lock: AwsDeployIdentityLock }
+    | { ok: true; lock: AwsDeployIdentityLock; adopted?: true }
     | { ok: false; code: string; message: string }
   > {
     const announced = new Set<string>();
@@ -264,24 +281,27 @@ export function createAwsEnvironmentAccess<Operation>(
           action: request.action,
           operationId: request.operationId
         },
-        wait: waiting !== null
+        wait: waiting !== null,
+        ...(request.adopt ? { adopt: request.adopt } : {})
       },
       {
         runAws: dependencies.runAws,
         sleep: dependencies.sleep,
         now: dependencies.now,
         shouldStop,
+        // A lock naming this operation that it cannot take back was left by
+        // an earlier attempt of it, which therefore stopped.
+        isStoppedOperation: (operationId) =>
+          operationId === request.operationId ||
+          dependencies.isStoppedOperation(operationId),
         waiting: async (wait) => {
-          const key = `${wait.policyId}:${wait.removable}`;
+          const key = `${wait.policyId}:${wait.stopped}:${wait.removable}`;
           let line: string | null = null;
           if (!announced.has(key)) {
             announced.add(key);
             // Not a warning: the wait is normal, and a warning step would
             // outlive it and mark a setup that then succeeds as warned.
-            line =
-              wait.removable ?
-                `⏳ The lock on IAM role ${request.roleName} is 10 or more minutes old. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}. If that run has stopped, use Remove lock.`
-              : `⏳ Waiting for the lock on IAM role ${request.roleName}. ${lockHolder(wait)} has held it since ${formatAwsLockTime(wait.since)}.`;
+            line = lockWaitLine(request.roleName, wait);
           }
           await waiting?.(wait, line);
         }
@@ -676,6 +696,9 @@ export function createAwsEnvironmentAccess<Operation>(
           },
           sleep: dependencies.sleep,
           acquireLock: async ({ roleName }): Promise<AwsLockResult> => {
+            const recorded = readRecordedAwsLock(
+              operations.getContext(operation)
+            );
             const taken = await lock(
               {
                 accountId,
@@ -683,7 +706,12 @@ export function createAwsEnvironmentAccess<Operation>(
                 repo,
                 environment,
                 action: "setup",
-                operationId: dependencies.operationId(operation)
+                operationId: dependencies.operationId(operation),
+                ...((
+                  recorded?.policyArn === awsLockPolicyArn(accountId, roleName)
+                ) ?
+                  { adopt: recorded.policyId }
+                : {})
               },
               () => dependencies.isStopRequested(operation),
               async (wait, line) => {
@@ -707,7 +735,9 @@ export function createAwsEnvironmentAccess<Operation>(
             });
             operations.addLegacyStep(
               operation,
-              `🔒 Locked IAM role ${roleName}, so no other Radius run changes its trust policy until this setup finishes.`,
+              taken.adopted ?
+                `🔒 Took back the lock this setup holds on IAM role ${roleName} from its earlier attempt.`
+              : `🔒 Locked IAM role ${roleName}, so no other Radius run changes its trust policy until this setup finishes.`,
               stage
             );
             // Saved before the first write, so a record left by a stopped

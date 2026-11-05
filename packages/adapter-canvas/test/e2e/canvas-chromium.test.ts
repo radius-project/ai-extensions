@@ -4938,6 +4938,148 @@ test.describe("Radius Canvas in Chromium", () => {
       await expectNoWcagViolations(page);
     });
 
+    test("offers Remove lock at once for a lock left by a stopped setup @safety", async ({
+      page,
+      canvas
+    }) => {
+      const lockArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-radius-deploy-fixture-app`;
+      const operationId = await canvas.seedAwsLockWait(
+        { policyArn: lockArn, policyId: "LOCK0" },
+        { since: new Date().toISOString(), stopped: true }
+      );
+      await page.goto(
+        `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+      );
+
+      const removeLock = page.getByRole("button", { name: "Remove lock" });
+      await expect(removeLock).toBeVisible();
+      await expect(removeLock).toHaveAccessibleDescription(
+        /^This lock is from an earlier attempt that stopped: The setup of environment prod in fixture\/app \(operation op_chromium_aws_lock_holder\), which took it at \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\. Remove it so this run can continue\.$/
+      );
+      await expectNoWcagViolations(page);
+    });
+
+    test("lists a restarted AWS setup's deploy identity lock and releases it when the setup is deleted, by keyboard @safety", async ({
+      page,
+      canvas
+    }) => {
+      const roleName = "radius-deploy-fixture-radius-app";
+      const lockArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-${roleName}`;
+      const lockEntry = `Lock on IAM role ${roleName} (policy ID LOCK0)`;
+      const operationId = await canvas.seedInterruptedAwsSetup({
+        policyArn: lockArn,
+        policyId: "LOCK0"
+      });
+      const environmentPath = `/repos/${REPOSITORY}/environments/fixture-environment`;
+      const scenario = defaultFakeCliScenario();
+      scenario.commands.push(
+        {
+          tool: "gh",
+          args: ["api", environmentPath],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: JSON.stringify({ id: 123, name: "fixture-environment" })
+        },
+        {
+          tool: "gh",
+          args: ["api", "--method", "DELETE", environmentPath],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: ""
+        },
+        {
+          tool: "aws",
+          args: [
+            "iam",
+            "get-policy",
+            "--policy-arn",
+            lockArn,
+            "--output",
+            "json"
+          ],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK0" } })
+        },
+        {
+          tool: "aws",
+          args: ["iam", "delete-policy", "--policy-arn", lockArn],
+          stdout: ""
+        }
+      );
+      await canvas.setScenario(scenario);
+      const deletedLock = async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "aws" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify(["iam", "delete-policy", "--policy-arn", lockArn])
+        );
+      await page.goto(
+        `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+      );
+
+      await expect(page.locator("#env-progress-title")).toContainText(
+        "Environment setup was interrupted"
+      );
+      await expect(
+        page.getByRole("button", { name: "Continue setup" })
+      ).toBeVisible();
+      await page.locator("#env-progress-details > summary").click();
+      const inventory = page.locator("#env-progress-state");
+      await expect(inventory).toContainText("What exists right now");
+      await expect(inventory).toContainText(lockEntry);
+
+      const pause = page.getByRole("button", { name: "Pause setup" });
+      await pause.focus();
+      await page.keyboard.press("Enter");
+      const deleteSetup = page.getByRole("button", { name: "Delete setup" });
+      await expect(deleteSetup).toBeVisible();
+      await deleteSetup.focus();
+      await page.keyboard.press("Enter");
+
+      const dialog = page.locator("#env-rollback-modal");
+      await expect(dialog).toBeVisible();
+      await expect(dialog.locator("#env-rollback-remove")).toContainText(
+        lockEntry
+      );
+      await expect(
+        dialog.locator("#env-rollback-keep-block")
+      ).not.toContainText(lockEntry);
+      await expectNoWcagViolations(page);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      expect(await deletedLock()).toBe(false);
+
+      await deleteSetup.focus();
+      await page.keyboard.press("Enter");
+      await expect(dialog).toBeVisible();
+      const confirmDelete = dialog.getByRole("button", {
+        name: "Delete setup"
+      });
+      await confirmDelete.focus();
+      await page.keyboard.press("Enter");
+
+      await expect.poll(deletedLock).toBe(true);
+      await expect(page.locator("#env-progress-title")).toHaveText(
+        "Setup deleted",
+        { timeout: 15_000 }
+      );
+      await expect
+        .poll(async () => {
+          const record = await canvas.operationRecord(operationId);
+          const context = record.context as Record<string, unknown>;
+          const terminal = record.terminal as Record<string, unknown> | null;
+          return {
+            state: record.state,
+            reason: terminal?.reason ?? null,
+            lock: context.awsDeployIdentityLock
+          };
+        })
+        .toEqual({
+          state: "cancelled",
+          reason: "rollback-complete",
+          lock: null
+        });
+      await expectNoWcagViolations(page);
+    });
+
     test("pauses an AWS setup during the deploy identity lock wait and continues from Authorize deploy identity by keyboard @safety", async ({
       page,
       canvas
@@ -5020,6 +5162,10 @@ test.describe("Radius Canvas in Chromium", () => {
           ),
         now: () => Date.now(),
         isStopRequested: ops.shouldStop,
+        isStoppedOperation: (operationId: string) => {
+          const holder = ops.operations.get(operationId);
+          return Boolean(holder) && ops.isTerminalState(holder.state);
+        },
         operationId: (operation) => operation.operationId,
         operations: {
           getContext: (operation) => operation.context ?? {},

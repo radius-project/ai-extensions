@@ -3803,6 +3803,16 @@ describe("previewResourceLabel", () => {
     ).toBe(expected);
   });
 
+  it("names a deploy identity lock by its own target", () => {
+    expect(
+      previewResourceLabel({
+        kind: "aws_deploy_identity_lock",
+        target: "Lock on IAM role radius-deploy (policy ID LOCK0)",
+        action: ""
+      })
+    ).toBe("Lock on IAM role radius-deploy (policy ID LOCK0)");
+  });
+
   it("degrades an unfamiliar kind to a generic noun rather than leaking it", () => {
     expect(
       previewResourceLabel({ kind: "aks_cluster", target: "dev", action: "" })

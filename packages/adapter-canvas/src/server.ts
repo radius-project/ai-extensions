@@ -121,6 +121,7 @@ import {
   type AwsEnvironmentAccess
 } from "./server/services/aws-environment-access.js";
 import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identity-lock.js";
+import { releaseRecordedAwsLock } from "./server/services/aws-recorded-lock.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
@@ -4097,6 +4098,8 @@ function productionEnvironmentDeletionPorts(
 }
 
 export interface EnvironmentOperationExecutionDependencies {
+  // The AWS developer switch. Cleanup runs no AWS command while it is off.
+  awsEnabled: boolean;
   awsEnvironmentAccess: Pick<
     AwsEnvironmentAccess<EnvironmentOperationRecord>,
     "setup" | "release"
@@ -4153,6 +4156,8 @@ export function createEnvironmentOperationExecution(
   const instanceId = dependencies.presentation?.instanceId;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
+  if (typeof dependencies.awsEnabled !== "boolean")
+    throw new Error("Missing request coordinator dependency: awsEnabled");
   if (
     typeof awsEnvironmentAccess?.setup !== "function" ||
     typeof awsEnvironmentAccess.release !== "function"
@@ -4979,6 +4984,13 @@ export function createEnvironmentOperationExecution(
     if (azureCleanup.state === "interrupted" || isStopped()) return;
 
     for (const step of steps) addLegacyStep(op, step);
+    // Last, after everything this pass removes: the lock is what tells another
+    // run that this setup may still be changing the role.
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: dependencies.awsEnabled,
+      remove: (lock) => removeAwsDeployIdentityLock(lock, runAwsCli),
+      errorMessage
+    });
     // A deletion this pass issued and could not settle has nobody left to
     // settle it: the record is about to end, and every scheduler that would
     // reread it is gated on a live operation. Leaving it merely unresolved
@@ -5496,6 +5508,7 @@ export function createInstanceRequestCoordinator(
     }
   };
   const execution = createEnvironmentOperationExecution({
+    awsEnabled,
     awsEnvironmentAccess: dependencies.awsEnvironmentAccess,
     executionOwner: dependencies.executionOwner,
     accountContext: dependencies.accountContext,
@@ -5713,6 +5726,10 @@ export function createProductionCanvasServerRuntime(
       sleep: sleepMs,
       now: () => Date.now(),
       isStopRequested: shouldStop,
+      isStoppedOperation: (operationId) => {
+        const holder = operations.get(operationId);
+        return Boolean(holder) && isTerminalState(holder.state);
+      },
       operationId: (operation) => operation.operationId,
       operations: {
         getContext: (operation) => operation.context ?? {},
@@ -5724,7 +5741,9 @@ export function createProductionCanvasServerRuntime(
           touchOperation(operation);
         }
       },
-      store: operations,
+      // Read through the live binding: the extension configures the
+      // file-backed registry after this runtime is created.
+      store: { persist: () => operations.persist() },
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage
     });
@@ -5847,7 +5866,7 @@ export function createProductionCanvasServerRuntime(
     canDismissOperation,
     dismissOperation,
     persistOperations: () => operations.persist(),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     errorMessage,
     inputRequiredState: INPUT_REQUIRED_STATE
@@ -5910,7 +5929,7 @@ export function createProductionCanvasServerRuntime(
       latest: (repo) => operations.latest(repo),
       latestAny: () => operations.latestAny(),
       get: (operationId) => operations.get(operationId),
-      toClientView,
+      toClientView: (record: any) => toClientView(record, { awsEnabled }),
       productVersion: resolveGeneratorVersion,
       now: () => Date.now()
     },
@@ -6475,7 +6494,7 @@ export function createProductionCanvasServerRuntime(
     createOperation,
     buildDeleteStages: (options) => buildDeleteStages(options),
     startOperation: (op) => operations.start(op),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     cliExec: (command, args, options, callback) => {
       cliExecPort(command, args, options, callback);
@@ -6698,6 +6717,7 @@ export function createProductionCanvasServerRuntime(
       configureEnvironment({ data }, instanceId, isCurrentPresentation)
   };
   const setupExecution = createEnvironmentOperationExecution({
+    awsEnabled,
     awsEnvironmentAccess,
     executionOwner,
     scope: executionOwner.attachRuntime(),

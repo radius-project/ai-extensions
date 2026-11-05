@@ -25,7 +25,7 @@
 //      `failure.evidence`, fenced, and never in a label.
 
 import { createHash, randomUUID } from "node:crypto";
-import { formatAwsLockTime } from "@radius-project/core";
+import { formatAwsLockTime, readRecordedAwsLock } from "@radius-project/core";
 import {
   disabledOperationStore,
   PERSISTED_OPERATIONS_VERSION,
@@ -980,6 +980,32 @@ export function isProviderRestartDecision(op: any): boolean {
   return (
     op?.state === "action_required" &&
     op?.terminal?.reason === PROVIDER_RESTART_DECISION_REASON
+  );
+}
+
+/**
+ * Whether a verification workflow run for this setup may exist.
+ *
+ * A run needs an installed workflow, so a record that never committed one and
+ * never attempted a workflow write or dispatch proves no run started. Anything
+ * short of that proof counts: setup records an automatic push run's identity
+ * only after the commit that triggered it is saved, so a crash in between
+ * leaves a run with no dispatch fields.
+ */
+export function mayHaveStartedVerification(op: any): boolean {
+  const verification = op?.verification;
+  if (verification && typeof verification === "object") {
+    if (Number(verification.dispatchedAt) > 0) return true;
+    if (verification.runId != null && String(verification.runId).trim())
+      return true;
+  }
+  const ledger = readSetupArtifactLedger(op?.setupArtifacts);
+  if (ledger.commit.mode !== "not_started") return true;
+  if (ledger.commit.workflowFiles.length > 0) return true;
+  return readProviderRecovery(op?.providerRecovery).mutations.some(
+    (mutation) =>
+      mutation.kind.startsWith("github_workflow.") &&
+      mutation.status !== "not_applied"
   );
 }
 
@@ -2759,7 +2785,8 @@ export function projectCleanupSummary(op: any): any {
   if (
     !reportableState &&
     cleanupState === "not_started" &&
-    !hasTrackedSetupArtifacts(ledger)
+    !hasTrackedSetupArtifacts(ledger) &&
+    !heldAwsLockEntry(op)
   )
     return null;
 
@@ -3027,6 +3054,9 @@ function projectPartialState(
     if (entry.keepAlways || reusableOnRetry) retainedGroup.push(item);
     else created.push(item);
   }
+  // A continuation takes the lock back, so it groups with what it reuses.
+  const lock = heldAwsLockEntry(op);
+  if (lock) (reusableOnRetry ? retainedGroup : created).push(lock);
 
   return {
     created,
@@ -4252,6 +4282,56 @@ function projectContinuationPreview(op: any, resumeFrom: any): any {
   };
 }
 
+const AWS_LOCK_ARTIFACT_KIND = "aws_deploy_identity_lock";
+
+/**
+ * The deploy identity lock a stopped AWS setup still holds, as an inventory
+ * entry. It is not a ledger resource: it only orders Radius runs, so it is
+ * listed while this setup holds it, released when the customer deletes or
+ * leaves the setup, and taken back when they continue it.
+ */
+function heldAwsLockEntry(op: any): { kind: string; target: string } | null {
+  if (op?.provider !== "aws" || !isTerminalState(op.state)) return null;
+  const lock = readRecordedAwsLock(op.context);
+  if (!lock) return null;
+  return {
+    kind: AWS_LOCK_ARTIFACT_KIND,
+    target: `Lock on IAM role ${lock.roleName} (policy ID ${lock.policyId})`
+  };
+}
+
+/**
+ * How the server will act on a record, as far as its projection needs to say.
+ * Only the deploy identity lock depends on it: while the AWS switch is off,
+ * Radius runs no AWS command, so a destructive action keeps the lock.
+ */
+export interface OperationProjectionOptions {
+  awsEnabled?: boolean;
+}
+
+/** The held lock, if any, as the list a destructive preview removes. */
+function heldAwsLockRemoval(
+  op: any,
+  options: OperationProjectionOptions
+): Array<{ kind: string; target: string }> {
+  const lock = heldAwsLockEntry(op);
+  return lock && options.awsEnabled !== false ? [lock] : [];
+}
+
+const AWS_OFF_LOCK_ACTION =
+  "AWS environments are turned off, so Radius will not release this lock. Turn them on and delete the setup, or run the command in its step to remove it by hand.";
+
+/** The held lock, if the AWS switch keeps it, as a preview keep. */
+function keptAwsLock(
+  op: any,
+  options: OperationProjectionOptions
+): Array<{ kind: string; target: string; reason: string; action: string }> {
+  const lock = heldAwsLockEntry(op);
+  return lock && options.awsEnabled === false ?
+      [{ ...lock, reason: "retained", action: AWS_OFF_LOCK_ACTION }]
+    : [];
+}
+
 /**
  * What a rollback will remove, keep, and leave for the customer.
  *
@@ -4259,14 +4339,22 @@ function projectContinuationPreview(op: any, resumeFrom: any): any {
  * the browser from the inventory groups would let the dialog promise a deletion
  * the server would then refuse to perform.
  */
-function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
+function projectRollbackPreview(
+  op: any,
+  targets: RollbackTarget[],
+  options: OperationProjectionOptions
+): any {
   const summary = projectCleanupSummary(op) || {};
-  const removes = targets.map((entry) => ({
-    kind: entry.artifactType,
-    target: entry.target
-  }));
+  const removes = [
+    ...targets.map((entry) => ({
+      kind: entry.artifactType,
+      target: entry.target
+    })),
+    ...heldAwsLockRemoval(op, options)
+  ];
+  const lockKept = keptAwsLock(op, options);
   const removeKeys = new Set(
-    removes.map((entry) => `${entry.kind}#${entry.target}`)
+    [...removes, ...lockKept].map((entry) => `${entry.kind}#${entry.target}`)
   );
   const keeps = [
     ...(summary.reused || []).map((entry: any) => ({
@@ -4286,7 +4374,8 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
         target: entry.target,
         reason: "retained",
         action: RETAINED_KEEP_ACTION
-      }))
+      })),
+    ...lockKept
   ];
   return {
     removes,
@@ -4301,8 +4390,11 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
   };
 }
 
-function projectAbandonPreview(op: any): any {
-  const preview = projectRollbackPreview(op, []);
+function projectAbandonPreview(
+  op: any,
+  options: OperationProjectionOptions
+): any {
+  const preview = projectRollbackPreview(op, [], options);
   return {
     ...preview,
     manualActionRequired: [
@@ -4538,6 +4630,7 @@ export function removableAwsLockWait(op: any): {
   holder: string;
   holderOperationId: string;
   since: string;
+  stopped: boolean;
 } | null {
   const wait = op?.context?.awsLockWait;
   if (
@@ -4561,7 +4654,8 @@ export function removableAwsLockWait(op: any): {
     holder:
       typeof wait.holder === "string" && wait.holder ?
         wait.holder
-      : "Another run"
+      : "Another run",
+    stopped: wait.stopped === true
   };
 }
 
@@ -4580,7 +4674,10 @@ function removeAwsLockAction(op: any, base: string): any | null {
     confirmTitle: "Remove the lock on the deploy identity?",
     confirmLabel: "Remove lock",
     cancelLabel: "Keep waiting",
-    description: `${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""} has held the lock since ${formatAwsLockTime(wait.since)}. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
+    description:
+      wait.stopped ?
+        `This lock is from an earlier attempt that stopped: ${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""}, which took it at ${formatAwsLockTime(wait.since)}. Remove it so this run can continue.`
+      : `${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""} has held the lock since ${formatAwsLockTime(wait.since)}. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
     method: "POST",
     // Names the lock shown, so a confirmation that outlives it is refused.
     path: `${base}/aws-lock/remove?policyId=${encodeURIComponent(wait.policyId)}`,
@@ -4588,7 +4685,10 @@ function removeAwsLockAction(op: any, base: string): any | null {
   };
 }
 
-export function projectOperationActions(op: any): any[] {
+export function projectOperationActions(
+  op: any,
+  options: OperationProjectionOptions = {}
+): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
   if (op.kind === OPERATION_KIND_DELETE) {
@@ -4799,14 +4899,14 @@ export function projectOperationActions(op: any): any[] {
       path: `${base}/rollback`,
       pending: false,
       scope: rollback.scope,
-      preview: projectRollbackPreview(op, rollback.targets)
+      preview: projectRollbackPreview(op, rollback.targets, options)
     });
   }
   const cleanup = canRetryCleanup(op);
   if (cleanup.ok) {
     // The retry removes its own unresolved subset, but keeps and manual items
     // are the same whole-record projection a rollback that removes nothing has.
-    const kept = projectRollbackPreview(op, []);
+    const kept = projectRollbackPreview(op, [], options);
     actions.push({
       id: "retry-cleanup",
       kind: "retry_cleanup",
@@ -4823,10 +4923,13 @@ export function projectOperationActions(op: any): any[] {
       path: `${base}/retry/cleanup`,
       pending: false,
       preview: {
-        removes: cleanup.targets.map((entry: any) => ({
-          kind: entry.artifactType,
-          target: entry.target
-        })),
+        removes: [
+          ...cleanup.targets.map((entry: any) => ({
+            kind: entry.artifactType,
+            target: entry.target
+          })),
+          ...heldAwsLockRemoval(op, options)
+        ],
         keeps: kept.keeps,
         manualActionRequired: kept.manualActionRequired
       }
@@ -4838,7 +4941,12 @@ export function projectOperationActions(op: any): any[] {
     // panel rather than another attempt at the setup, so it never sits beside
     // the forward and destructive choices the command row offers.
     const abandons = exit.abandon === true;
-    const removes = exit.targets.length > 0;
+    const releasesLock = heldAwsLockRemoval(op, options).length > 0;
+    const keepsLock =
+      keptAwsLock(op, options).length > 0 ?
+        " The lock it holds on the deploy identity stays, because AWS environments are turned off."
+      : "";
+    const removes = exit.targets.length > 0 || releasesLock;
     actions.push({
       id: "exit-setup",
       kind: EXIT_COMMAND_KIND,
@@ -4865,18 +4973,20 @@ export function projectOperationActions(op: any): any[] {
       : {}),
       description:
         abandons ?
-          "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
-        : removes ?
-          "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. Anything it reused is left alone. This cannot be undone."
-        : "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.",
+          `Radius closes this setup without deleting resources that may still be used by external work.${releasesLock ? " It releases the lock this setup holds on the deploy identity." : keepsLock} You can start Create Environment again, but you may need to remove or reuse the remaining resources manually.`
+        : exit.targets.length > 0 ?
+          `Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added.${releasesLock ? " It also releases the lock this setup holds on the deploy identity." : keepsLock} Anything it reused is left alone. This cannot be undone.`
+        : releasesLock ?
+          "Radius closes this setup and releases the lock it holds on the deploy identity. Everything else that exists was already here before this attempt, so nothing else is removed."
+        : `Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.${keepsLock}`,
       method: "POST",
       path: abandons ? `${base}/exit?mode=abandon` : `${base}/exit`,
       pending: false,
       removesResources: removes,
       preview:
         abandons ?
-          projectAbandonPreview(op)
-        : projectRollbackPreview(op, exit.targets)
+          projectAbandonPreview(op, options)
+        : projectRollbackPreview(op, exit.targets, options)
     });
   }
   return actions;
@@ -6515,7 +6625,10 @@ export function setupInFlight(): boolean {
  * instruction-shaped text) and is stripped here. The panel renders structured
  * fields; evidence travels only on the diagnostic path, fenced.
  */
-export function toClientView(op: any): any {
+export function toClientView(
+  op: any,
+  options: OperationProjectionOptions = {}
+): any {
   if (!op) return null;
   const cleanup = projectCleanupSummary(op);
   const control = op.control || createOperationControl();
@@ -6591,7 +6704,7 @@ export function toClientView(op: any): any {
       code: entry.code,
       recordedAt: entry.recordedAt
     })),
-    actions: projectOperationActions(op),
+    actions: projectOperationActions(op, options),
     guidance: projectActionGuidance(op),
     headline: projectOperationHeadline(op),
     activeCommandKind: activeCommandKind(op),

@@ -1059,6 +1059,8 @@ function stepSpec(step: OperationStageOrStep): ElementSpec {
  * always kept so the entry stays identifiable.
  */
 export function previewResourceLabel(entry: OperationPreviewEntry): string {
+  // The lock's target already says what it is: "Lock on IAM role …".
+  if (entry.kind === "aws_deploy_identity_lock") return entry.target;
   const labels: Readonly<Record<string, string>> = {
     azure_app: "App Registration",
     service_principal: "Service Principal",

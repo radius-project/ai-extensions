@@ -1736,13 +1736,76 @@ export class CanvasHarness {
   }
 
   /**
-   * A live AWS setup waiting for a deploy identity lock another run has held
-   * long enough for Remove lock to be offered.
+   * An AWS setup the extension stopped during Authorize deploy identity,
+   * restored the way a restart restores it. It created its GitHub environment
+   * and still records the deploy identity lock it held.
    */
-  async seedAwsLockWait(lock: {
+  async seedInterruptedAwsSetup(lock: {
     policyArn: string;
     policyId: string;
   }): Promise<string> {
+    const operationModule: OperationsModule =
+      await import("../../../src/operations.js");
+    const operation = operationModule.createOperation({
+      operationId: "op_chromium_interrupted_aws_setup",
+      provider: "aws",
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      stages: operationModule.buildStages({ includeIdentity: true }),
+      journey: { origin: "environments" }
+    });
+    operation.context = { githubLogin: "repo-user" };
+    operation.resumeRequest = {
+      needsAzureCredentials: false,
+      github: { login: "repo-user", credentialSource: "keyring" },
+      environment: {
+        repo: REPOSITORY,
+        environment: "fixture-environment",
+        provider: "aws",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "fixture-cluster",
+        roleName: "radius-deploy-fixture-radius-app",
+        existingRoleArn: "",
+        vpcId: "vpc-0f1e",
+        subnetIds: "subnet-a,subnet-b"
+      }
+    };
+    operationModule.recordGitHubEnvironment(operation, {
+      state: "created",
+      repo: REPOSITORY,
+      name: "fixture-environment",
+      providerId: "123"
+    });
+    operationModule.enterStage(
+      operation,
+      operationModule.STAGE_AUTHORIZE_IDENTITY
+    );
+    operationModule.setContext(operation, { awsDeployIdentityLock: lock });
+    operationModule.setExecutionActive(operation, true);
+    const restored = operationModule.fromPersistedOperation(
+      JSON.parse(
+        JSON.stringify(operationModule.toPersistedOperation(operation))
+      )
+    );
+    operationModule.reconcileRestoredOperation(restored);
+    operationModule.operations.put(restored);
+    await operationModule.operations.persist();
+    this.seededOperationIds.add(restored.operationId);
+    return restored.operationId;
+  }
+
+  /**
+   * A live AWS setup waiting for a deploy identity lock another run has held
+   * long enough for Remove lock to be offered.
+   */
+  async seedAwsLockWait(
+    lock: {
+      policyArn: string;
+      policyId: string;
+    },
+    wait: { since?: string; stopped?: boolean } = {}
+  ): Promise<string> {
     const operationModule: OperationsModule =
       await import("../../../src/operations.js");
     const operation = operationModule.createOperation({
@@ -1763,7 +1826,8 @@ export class CanvasHarness {
         ...lock,
         holder: "The setup of environment prod in fixture/app",
         holderOperationId: "op_chromium_aws_lock_holder",
-        since: "2026-10-30T11:00:00Z",
+        since: wait.since ?? "2026-10-30T11:00:00Z",
+        stopped: wait.stopped ?? false,
         removable: true
       }
     });

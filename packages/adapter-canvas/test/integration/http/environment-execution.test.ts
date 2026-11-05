@@ -32,6 +32,10 @@ import {
   STAGE_DELETE_RADIUS_ENV,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_VERIFY,
+  buildStages,
+  enterStage,
+  setExecutionActive,
+  requestStop,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
 import {
@@ -650,6 +654,122 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it.each([true, false])(
+    "releases a rolled-back AWS setup's lock only while AWS is on (awsEnabled=%s)",
+    async (awsEnabled) => {
+      const lockArn =
+        "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
+      const aws = await fakeAwsOnPath({
+        "--version": { stdout: "aws-cli/2.39.0" },
+        "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+        "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK0"}}' },
+        "iam delete-policy": { stdout: "" }
+      });
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api /repos/fixture/app/environments/dev")
+          return { code: 0, stdout: '{"id":17,"name":"dev"}', stderr: "" };
+        if (
+          command === "api --method DELETE /repos/fixture/app/environments/dev"
+        )
+          return { code: 0, stdout: "", stderr: "" };
+        throw new Error(`Unexpected cleanup command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        awsEnabled,
+        accountContext: createEnvironmentAccountContext(
+          "aws-cleanup",
+          createGitHubAccountCoordinator({
+            createExecutor: async () => executor,
+            getActiveKeyringLogin: async () => executor.login,
+            switchKeyringAccount: async () => {
+              throw new Error("Unexpected keyring switch");
+            },
+            resetIdentityCache: () => {}
+          })
+        )
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "aws-cleanup",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: "op_aws_cleanup",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        op.context.githubLogin = executor.login;
+        setContext(op, {
+          awsDeployIdentityLock: { policyArn: lockArn, policyId: "LOCK0" }
+        });
+        recordGitHubEnvironment(op, {
+          state: "created",
+          origin: "this_operation",
+          repo: op.repo,
+          name: op.environment,
+          providerId: "17"
+        });
+        finish(op, "failed");
+        operations.put(op);
+        vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        expect(response.status).toBe(202);
+        await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+          timeout: 15000
+        });
+
+        expect(op.terminal).toMatchObject({ reason: "rollback-complete" });
+        const labels = op.steps.map((step: { label: string }) => step.label);
+        if (awsEnabled) {
+          expect(await aws.calls()).toEqual([
+            "--version",
+            "sts get-caller-identity --output json",
+            `iam get-policy --policy-arn ${lockArn} --output json`,
+            `iam delete-policy --policy-arn ${lockArn}`
+          ]);
+          expect(op.context.awsDeployIdentityLock).toBeNull();
+        } else {
+          expect(await aws.calls()).toEqual([]);
+          expect(op.context.awsDeployIdentityLock).toEqual({
+            policyArn: lockArn,
+            policyId: "LOCK0"
+          });
+          expect(labels).toContainEqual(
+            expect.stringMatching(
+              /^AWS environments are turned off, so Radius did not release the lock/
+            )
+          );
+        }
+      } finally {
+        owner.shutdown();
+        await runtime.stopServer("aws-cleanup", true);
+        await aws.restore();
+      }
+    }
+  );
+
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
@@ -1078,6 +1198,292 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it("saves the AWS lock to the operation store configured after the runtime, before reading the role", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout:
+          '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+      },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": {
+        stderr: "An error occurred (AccessDenied) when calling GetRole",
+        code: 254
+      },
+      "iam delete-policy": { stdout: "" }
+    });
+    // Created first, as extension.ts does at module load.
+    const runtime = awsSetupRuntime();
+    const lockSaves: string[][] = [];
+    await configureOperationStore({
+      load: async () => null,
+      save: async (envelope) => {
+        const held = JSON.stringify(envelope.operations).includes(
+          '"policyId":"LOCK1"'
+        );
+        if (held) lockSaves.push(await aws.calls());
+      }
+    });
+    try {
+      await runAwsSetup(runtime, "op_aws_saved_lock");
+      expect(lockSaves.length).toBeGreaterThan(0);
+      expect(lockSaves[0]).not.toContainEqual(
+        expect.stringMatching(/^iam get-role /)
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it.each([
+    [true, "releases the lock it holds"],
+    [false, "The lock it holds on the deploy identity stays"]
+  ])(
+    "projects the AWS switch (%s) into the status route's exit wording",
+    async (awsEnabled, wording) => {
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: createEnvironmentExecutionOwner(),
+        awsEnabled
+      });
+      try {
+        const entry = await runtime.getOrCreateServer("aws-off", "environment");
+        const op = createOperation({
+          operationId: "op_aws_switch_view",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        setContext(op, {
+          awsDeployIdentityLock: {
+            policyArn:
+              "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app",
+            policyId: "LOCK0"
+          }
+        });
+        finish(op, "failed");
+        operations.put(op);
+        const status = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}`
+        );
+        const exit = (await status.json()).operation.actions.find(
+          (action: { id: string }) => action.id === "exit-setup"
+        );
+        expect(exit.description).toContain(wording);
+      } finally {
+        await runtime.stopServer("aws-off", true);
+      }
+    }
+  );
+
+  it("continues a restarted AWS setup from its saved request, taking back its own lock", async () => {
+    const lockArn =
+      "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
+    const mine = JSON.stringify({
+      repo: "fixture/app",
+      environment: "dev",
+      action: "setup",
+      operationId: "op_aws_restarted"
+    });
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout:
+          '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+      },
+      // Its own earlier lock is there, so it is replaced with a fresh one.
+      "iam create-policy": [
+        {
+          stderr:
+            "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
+          code: 254
+        },
+        { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' }
+      ],
+      "iam get-policy": [
+        {
+          stdout: JSON.stringify({
+            Policy: { PolicyId: "LOCK0", Description: mine }
+          })
+        },
+        { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' }
+      ],
+      "iam get-role": {
+        stderr: "An error occurred (AccessDenied) when calling GetRole",
+        code: 254
+      },
+      "iam delete-policy": { stdout: "" }
+    });
+    const runtime = awsSetupRuntime();
+    try {
+      const entry = await runtime.getOrCreateServer("aws-panel", "environment");
+      const live = createOperation({
+        operationId: "op_aws_restarted",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws",
+        stages: buildStages({ includeIdentity: true })
+      });
+      live.context.githubLogin = "saved-account";
+      live.resumeRequest = {
+        needsAzureCredentials: false,
+        github: { login: "saved-account", credentialSource: "keyring" },
+        environment: {
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop",
+          roleName: "radius-deploy-fixture-app",
+          existingRoleArn: ""
+        }
+      };
+      enterStage(live, STAGE_AUTHORIZE_IDENTITY);
+      setContext(live, {
+        awsDeployIdentityLock: { policyArn: lockArn, policyId: "LOCK0" }
+      });
+      setExecutionActive(live, true);
+      const op = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(live))
+      );
+      operations.put(op);
+      const status = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}`
+      );
+      expect(status.status).toBe(200);
+      const view = (await status.json()).operation;
+      expect(view.cleanup.retainedArtifacts).toContainEqual({
+        kind: "aws_deploy_identity_lock",
+        target: "Lock on IAM role radius-deploy-fixture-app (policy ID LOCK0)"
+      });
+      const cont = view.actions.find(
+        (action: { id: string }) => action.id === "continue-setup"
+      );
+      expect(cont).toMatchObject({
+        path: `/api/operations/${op.operationId}/continue`
+      });
+
+      const response = await fetch(`${entry.baseUrl}${cont.path}`, {
+        method: "POST",
+        headers: {
+          origin: entry.baseUrl,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": String(entry.state.browserMutationNonce),
+          "content-type": "application/json"
+        },
+        body: "{}"
+      });
+      expect(response.status).toBe(202);
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+      // Released after Authorize ends, which is after the record ends. The
+      // first delete replaced the earlier lock; the second is the release.
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await aws.calls()).filter(
+              (call) => call === `iam delete-policy --policy-arn ${lockArn}`
+            )
+          ).toHaveLength(2),
+        { timeout: 15000 }
+      );
+
+      const calls = await aws.calls();
+      expect(calls.filter((call) => call.startsWith("iam "))).toEqual([
+        expect.stringMatching(/^iam create-policy /),
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        `iam delete-policy --policy-arn ${lockArn}`,
+        expect.stringMatching(/^iam create-policy /),
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        "iam get-role --role-name radius-deploy-fixture-app --output json",
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        `iam delete-policy --policy-arn ${lockArn}`
+      ]);
+      expect(op.failure.code).toBe("aws-role-unreadable");
+      expect(op.steps.map((step: { label: string }) => step.label)).toContain(
+        "🔒 Took back the lock this setup holds on IAM role radius-deploy-fixture-app from its earlier attempt."
+      );
+      expect(op.context.awsDeployIdentityLock).toBeNull();
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it.each([
+    ["a stopped setup in this store", true],
+    ["a run this store does not know", false]
+  ])(
+    "tells a waiting AWS setup whether its lock holder is %s",
+    async (_label, known) => {
+      const holder = createOperation({
+        operationId: "op_aws_holder",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      finish(holder, "cancelled");
+      if (known) operations.put(holder);
+      const aws = await fakeAwsOnPath({
+        "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+        "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+        "eks describe-cluster": {
+          stdout:
+            '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+        },
+        "iam create-policy": {
+          stderr:
+            "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
+          code: 254
+        },
+        "iam get-policy": {
+          stdout: JSON.stringify({
+            Policy: {
+              PolicyId: "LOCK0",
+              CreateDate: new Date().toISOString(),
+              Description: JSON.stringify({
+                repo: "fixture/app",
+                environment: "dev",
+                action: "setup",
+                operationId: "op_aws_holder"
+              })
+            }
+          })
+        }
+      });
+      const runtime = awsSetupRuntime();
+      try {
+        const op = await startAwsSetup(runtime, "op_aws_waiting");
+        await vi.waitFor(
+          () =>
+            expect(op.context.awsLockWait).toMatchObject({
+              holderOperationId: "op_aws_holder",
+              stopped: known,
+              removable: known
+            }),
+          { timeout: 15000 }
+        );
+        requestStop(op);
+        await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+          timeout: 15000
+        });
+        expect(
+          (await aws.calls()).filter((call) =>
+            /^iam (put|update|delete|attach)/.test(call)
+          )
+        ).toEqual([]);
+      } finally {
+        await runtime.stopServer("aws-panel", true);
+        await aws.restore();
+      }
+    }
+  );
+
   it("removes exactly the AWS lock a waiting run was shown, through the AWS CLI on PATH", async () => {
     const aws = await fakeAwsOnPath({
       "--version": { stdout: "aws-cli/2.39.0" },
@@ -1503,9 +1909,12 @@ interface FakeAwsAnswer {
 
 /**
  * Put a fake `aws` first on PATH. It logs every call and answers by its first
- * two words; anything else is refused, so setup stops rather than writes.
+ * two words; anything else is refused, so setup stops rather than writes. A
+ * list answers successive calls in order, repeating its last entry.
  */
-async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
+async function fakeAwsOnPath(
+  answers: Record<string, FakeAwsAnswer | FakeAwsAnswer[]>
+) {
   const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
   const log = path.join(fakeBin, "calls.log");
   // Created up front, so a run that never calls `aws` reads as no calls.
@@ -1513,14 +1922,35 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
   const originalPath = process.env.PATH;
   const originalPathExt = process.env.PATHEXT;
   const originalLog = process.env.FAKE_AWS_LOG;
-  const shCases = Object.entries(answers).map(([command, answer]) =>
-    [
+  const shAnswer = (answer: FakeAwsAnswer, indent: string) => [
+    ...(answer.stdout ? [`${indent}printf '%s\\n' '${answer.stdout}'`] : []),
+    ...(answer.stderr ?
+      [`${indent}printf '%s\\n' '${answer.stderr}' >&2`]
+    : []),
+    `${indent}exit ${answer.code ?? 0}`
+  ];
+  const shCases = Object.entries(answers).map(([command, answer]) => {
+    if (!Array.isArray(answer)) {
+      return [
+        `  ${JSON.stringify(command)})`,
+        ...shAnswer(answer, "    "),
+        "    ;;"
+      ].join("\n");
+    }
+    // The log already holds this call, so the count is its 1-based turn.
+    return [
       `  ${JSON.stringify(command)})`,
-      ...(answer.stdout ? [`    printf '%s\\n' '${answer.stdout}'`] : []),
-      ...(answer.stderr ? [`    printf '%s\\n' '${answer.stderr}' >&2`] : []),
-      `    exit ${answer.code ?? 0} ;;`
-    ].join("\n")
-  );
+      `    n=$(grep -c -e "^${command}" "$FAKE_AWS_LOG")`,
+      "    case $n in",
+      ...answer.flatMap((entry, index) => [
+        index === answer.length - 1 ? "      *)" : `      ${index + 1})`,
+        ...shAnswer(entry, "        "),
+        "        ;;"
+      ]),
+      "    esac",
+      "    ;;"
+    ].join("\n");
+  });
   await fs.writeFile(
     path.join(fakeBin, "aws"),
     [
@@ -1546,7 +1976,15 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
       `const answers = ${JSON.stringify(answers)};`,
       "const args = process.argv.slice(2);",
       'fs.appendFileSync(process.env.FAKE_AWS_LOG, `${args.join(" ")}\\n`);',
-      'const answer = answers[args.slice(0, 2).join(" ")];',
+      'const key = args.slice(0, 2).join(" ");',
+      "const listed = answers[key];",
+      "const turn = fs",
+      '  .readFileSync(process.env.FAKE_AWS_LOG, "utf8")',
+      "  .split(/\\r?\\n/)",
+      "  .filter((line) => line.startsWith(key)).length;",
+      "const answer = Array.isArray(listed)",
+      "  ? listed[Math.min(turn, listed.length) - 1]",
+      "  : listed;",
       "if (answer) {",
       "  if (answer.stdout) console.log(answer.stdout);",
       "  if (answer.stderr) console.error(answer.stderr);",
@@ -1650,6 +2088,17 @@ async function runAwsSetup(
   runtime: ReturnType<typeof awsSetupRuntime>,
   operationId: string
 ) {
+  const op = await startAwsSetup(runtime, operationId);
+  // The setup outlives the request, so wait for the operation to finish.
+  await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), { timeout: 15000 });
+  return op;
+}
+
+// Schedule a saved AWS setup through the server without waiting for it.
+async function startAwsSetup(
+  runtime: ReturnType<typeof awsSetupRuntime>,
+  operationId: string
+) {
   const entry = await runtime.getOrCreateServer("aws-panel", "environment");
   const op = createOperation({
     operationId,
@@ -1697,7 +2146,5 @@ async function runAwsSetup(
     }
   );
   expect(response.status).toBe(202);
-  // The setup outlives the request, so wait for the operation to finish.
-  await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), { timeout: 15000 });
   return op;
 }

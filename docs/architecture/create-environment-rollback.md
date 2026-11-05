@@ -35,7 +35,7 @@ graph TD
 Rollback and Delete Environment have different starting assumptions.
 
 | Concern             | Create Environment rollback                          | Delete Environment in PR #398                                        |
-|---------------------|------------------------------------------------------|----------------------------------------------------------------------|
+| ------------------- | ---------------------------------------------------- | -------------------------------------------------------------------- |
 | Starting state      | Environment creation is incomplete or stopped        | Environment was created and appears in the environment list          |
 | Completion boundary | Credential verification has not succeeded            | Environment is an established resource                               |
 | Source of truth     | Creation operation's artifact ledger                 | Live target plus immutable credential-consumer provenance            |
@@ -182,7 +182,7 @@ Radius keeps results across cleanup attempts. A retry targets only unresolved wa
 Radius never matches a resource by display text. `cleanupArtifactIdentity` derives stable identities:
 
 | Artifact             | Stable identity                   |
-|----------------------|-----------------------------------|
+| -------------------- | --------------------------------- |
 | App Registration     | App ID                            |
 | Service Principal    | App ID, falling back to object ID |
 | Federated credential | Name and subject                  |
@@ -216,7 +216,7 @@ The server re-evaluates eligibility when the command arrives. The browser previe
 
 ### Interrupted verification
 
-A Canvas provider restart does not cancel GitHub Actions. Radius first pauses the restored setup and asks whether to continue or stop. Stop records the customer's decision before Radius reads GitHub. If the operation's exact saved run is active, Radius offers workflow cancellation. Destructive rollback stays blocked until a subsequent status read proves the run is inactive.
+A Canvas provider restart does not cancel GitHub Actions. Radius first pauses the restored setup and asks whether to continue or stop. Stop records the customer's decision before Radius reads GitHub. If the operation's exact saved run is active, Radius offers workflow cancellation. Destructive rollback stays blocked until a subsequent status read proves the run is inactive. A setup that stopped before it wrote or committed a workflow, and never dispatched one, has no run to read, so rollback and exit are offered right away. Once a workflow write was attempted, a push-triggered run may exist without a saved run ID, so the state stays unknown.
 
 The cancellation boundary is the saved repository and run ID, executed through the GitHub account recorded on the operation. Radius never infers a run from a workflow filename, branch, environment, or recency. Missing identity, unsupported status, and unreadable status fail closed for destructive cleanup rather than risking deletion underneath external work.
 
@@ -466,7 +466,7 @@ Results from earlier attempts stay in the ledger, so the final report separates 
 ## Failure modes
 
 | Failure                                            | Behavior                                                                        |
-|----------------------------------------------------|---------------------------------------------------------------------------------|
+| -------------------------------------------------- | ------------------------------------------------------------------------------- |
 | Missing workflow provenance                        | Refuse post-commit rollback                                                     |
 | Selected GitHub account unavailable                | Treat repository as unreadable; leave workflows and dependent resources         |
 | Repository-hidden GitHub 404                       | Treat repository as unreadable, not as proof that a workflow is absent          |
