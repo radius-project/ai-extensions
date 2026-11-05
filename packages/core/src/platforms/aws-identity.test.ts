@@ -36,6 +36,7 @@ import {
   parseAwsLockHolder,
   parseAwsRoleArn,
   parsePolicyDocument,
+  readRecordedAwsLock,
   radiusRoleRepository,
   namesOneEnvironment,
   namesRepositoryEnvironment,
@@ -1367,5 +1368,60 @@ describe("restrictedGitHubSubjects", () => {
     ]
   ])("does not count a subject when the policy has %s", (_label, entry) => {
     expect(restricted(entry)).toEqual([]);
+  });
+});
+
+describe("readRecordedAwsLock", () => {
+  const ARN = "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-shop";
+
+  it("reads the lock and the role it protects", () => {
+    expect(
+      readRecordedAwsLock({
+        awsDeployIdentityLock: { policyArn: ARN, policyId: "LOCK0" }
+      })
+    ).toEqual({
+      policyArn: ARN,
+      policyId: "LOCK0",
+      roleName: "radius-deploy-shop"
+    });
+  });
+
+  it.each([
+    ["no context", undefined],
+    ["a non-object context", "context"],
+    ["no lock", {}],
+    ["a released lock", { awsDeployIdentityLock: null }],
+    ["a non-object", { awsDeployIdentityLock: "LOCK0" }],
+    ["no ARN", { awsDeployIdentityLock: { policyId: "LOCK0" } }],
+    [
+      "a numeric ARN",
+      { awsDeployIdentityLock: { policyArn: 1, policyId: "x" } }
+    ],
+    [
+      "an ARN that is not a lock",
+      {
+        awsDeployIdentityLock: {
+          policyArn: "arn:aws:iam::123456789012:policy/radius-deploy-shop",
+          policyId: "LOCK0"
+        }
+      }
+    ],
+    [
+      "a lock ARN with no role",
+      {
+        awsDeployIdentityLock: {
+          policyArn: "arn:aws:iam::123456789012:policy/radius-lock-",
+          policyId: "LOCK0"
+        }
+      }
+    ],
+    ["no ID", { awsDeployIdentityLock: { policyArn: ARN } }],
+    [
+      "an empty ID",
+      { awsDeployIdentityLock: { policyArn: ARN, policyId: "" } }
+    ],
+    ["a numeric ID", { awsDeployIdentityLock: { policyArn: ARN, policyId: 7 } }]
+  ])("reads nothing from %s", (_label, context) => {
+    expect(readRecordedAwsLock(context)).toBeNull();
   });
 });

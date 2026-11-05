@@ -20,7 +20,12 @@ import { verifyAwsCliSession } from "./aws-cli-session.js";
 // a sleeping laptop, could resume after a takeover and send a write it had
 // already prepared, and nothing in IAM would refuse it. So once the lock is 10
 // minutes old the waiting run offers **Remove lock**, and a person confirms
-// the holder stopped.
+// the holder stopped. When the holder is an operation this extension knows has
+// stopped, Remove lock is offered at once, still for a person to confirm.
+//
+// The one lock a run takes back by itself is its own: an operation that
+// recorded its lock's policy ID and finds that same lock naming it holds it
+// again, since IAM never reuses a policy ID.
 //
 // Each holder records its lock's policy ID, which IAM makes new on every
 // create, and checks it before every write and before releasing. That catches
@@ -52,7 +57,10 @@ export interface AwsLockWait {
   readonly holderOperationId: string;
   // When IAM created the lock, as IAM reported it.
   readonly since: string;
-  // Whether the lock is old enough to offer Remove lock.
+  // Whether the holder is a Radius operation that has stopped, so the lock is
+  // left from an earlier attempt rather than held by a running one.
+  readonly stopped: boolean;
+  // Whether to offer Remove lock: the holder stopped, or the lock is old.
   readonly removable: boolean;
 }
 
@@ -63,6 +71,8 @@ export interface AwsLockPorts {
   now(): number;
   // Whether the caller asked to stop waiting.
   shouldStop(): boolean;
+  // Whether `operationId` names a Radius operation known to have stopped.
+  isStoppedOperation(operationId: string): boolean;
   // Called on every poll while another run holds the lock.
   waiting(wait: AwsLockWait): void | Promise<void>;
 }
@@ -96,7 +106,12 @@ export type AwsLockReleaseResult =
     };
 
 export type AwsLockAcquireResult =
-  | { readonly ok: true; readonly lock: AwsDeployIdentityLock }
+  | {
+      readonly ok: true;
+      readonly lock: AwsDeployIdentityLock;
+      // Set when the lock was this operation's recorded lock, held again.
+      readonly adopted?: true;
+    }
   | { readonly ok: false; readonly code: string; readonly message: string }
   | { readonly ok: false; readonly stopped: true }
   // Only without waiting: another run holds the lock. `holder` is null when
@@ -345,6 +360,10 @@ export async function acquireAwsDeployIdentityLock(
     roleName: string;
     holder: AwsLockHolder;
     wait?: boolean;
+    // The policy ID of a lock this operation took in an earlier attempt and
+    // recorded. If the lock still has that ID and names this operation, it is
+    // this operation's lock, so it is held again instead of waited for.
+    adopt?: string;
   },
   ports: AwsLockPorts
 ): Promise<AwsLockAcquireResult> {
@@ -483,13 +502,36 @@ export async function acquireAwsDeployIdentityLock(
       firstSeen.set(policyId, seen);
       const heldFrom = isNaN(created) ? seen : created;
       const holder = parseAwsLockHolder(policy?.Description);
+      const holderOperationId = holder?.operationId ?? "";
+      if (
+        request.adopt &&
+        policyId === request.adopt &&
+        holderOperationId !== "" &&
+        holderOperationId === request.holder.operationId
+      ) {
+        return {
+          ok: true,
+          lock: heldLock(
+            policyArn,
+            policyId,
+            roleName,
+            request.holder.action,
+            ports
+          ),
+          adopted: true
+        };
+      }
+      const stopped =
+        holderOperationId !== "" && ports.isStoppedOperation(holderOperationId);
       const current: AwsLockWait = {
         policyArn,
         policyId,
         holder: awsLockHolderLabel(holder),
-        holderOperationId: holder?.operationId ?? "",
+        holderOperationId,
         since,
-        removable: ports.now() - heldFrom >= AWS_LOCK_REMOVABLE_AFTER_MS
+        stopped,
+        removable:
+          stopped || ports.now() - heldFrom >= AWS_LOCK_REMOVABLE_AFTER_MS
       };
       if (!wait) return { ok: false, busy: true, holder: current };
       await ports.waiting(current);

@@ -121,6 +121,7 @@ import {
   type AwsEnvironmentAccess
 } from "./server/services/aws-environment-access.js";
 import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identity-lock.js";
+import { releaseRecordedAwsLock } from "./server/services/aws-recorded-lock.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
@@ -4979,6 +4980,13 @@ export function createEnvironmentOperationExecution(
     if (azureCleanup.state === "interrupted" || isStopped()) return;
 
     for (const step of steps) addLegacyStep(op, step);
+    // Last, after everything this pass removes: the lock is what tells another
+    // run that this setup may still be changing the role.
+    await releaseRecordedAwsLock(
+      op,
+      (lock) => removeAwsDeployIdentityLock(lock, runAwsCli),
+      errorMessage
+    );
     // A deletion this pass issued and could not settle has nobody left to
     // settle it: the record is about to end, and every scheduler that would
     // reread it is gated on a live operation. Leaving it merely unresolved
@@ -5711,6 +5719,10 @@ export function createProductionCanvasServerRuntime(
       sleep: sleepMs,
       now: () => Date.now(),
       isStopRequested: shouldStop,
+      isStoppedOperation: (operationId) => {
+        const holder = operations.get(operationId);
+        return Boolean(holder) && isTerminalState(holder.state);
+      },
       operationId: (operation) => operation.operationId,
       operations: {
         getContext: (operation) => operation.context ?? {},

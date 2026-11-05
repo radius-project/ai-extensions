@@ -270,10 +270,10 @@ export async function runSetupCoordinator(
   // checks which environments use a cluster could not see this one, and could
   // remove the cluster access this setup just granted.
   //
-  // A resume with `outstanding` work skips the deploy identity step, so it
-  // takes no lock and runs the rest of setup without one. That resume path
-  // belongs to #1096.
-  const awsLocked = target.provider === "aws" && !outstanding;
+  // A resume with `outstanding` work runs it too: Configure environment still
+  // writes the variables a delete reads, so it needs the lock, and the role may
+  // have changed while setup was stopped. Each AWS step skips what exists.
+  const awsLocked = target.provider === "aws";
   try {
     if (awsLocked) {
       const aws = await ports.authorizeAws({
@@ -318,20 +318,6 @@ export async function runSetupCoordinator(
         setupResult.clientId
       : undefined;
     const liveContext = ports.operation().context;
-    if (!awsPolicyName && typeof liveContext?.awsPolicyName === "string") {
-      awsPolicyName = liveContext.awsPolicyName;
-    }
-    if (!awsRoleArn && typeof liveContext?.awsRoleArn === "string") {
-      awsRoleArn = liveContext.awsRoleArn;
-    }
-    if (
-      awsTrustSubjects.length === 0 &&
-      Array.isArray(liveContext?.awsTrustSubjects)
-    ) {
-      awsTrustSubjects = liveContext.awsTrustSubjects.filter(
-        (subject): subject is string => typeof subject === "string"
-      );
-    }
     const environmentResult = await invoke(() =>
       ports.configureEnvironment({
         ...environmentRequest,

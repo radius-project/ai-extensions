@@ -257,6 +257,18 @@ export function createSetupStartService(dependencies: SetupStartDependencies) {
             resumeReason: data.resumeReason || null
           }
         };
+      } else {
+        // `request` is not saved, so this is what a continuation after a
+        // restart reads. Without it an interrupted AWS setup cannot continue.
+        // It holds only identifiers setup also writes to GitHub variables.
+        op.resumeRequest = {
+          needsAzureCredentials: false,
+          github: {
+            login: selection.login,
+            credentialSource: selection.credentialSource
+          },
+          environment: structuredClone(environmentRequest)
+        };
       }
       const started = dependencies.startOperation(op);
       if (!started.ok) {

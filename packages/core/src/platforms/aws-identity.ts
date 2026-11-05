@@ -1057,6 +1057,46 @@ export function awsLockPolicyArn(accountId: string, roleName: string): string {
   return `arn:aws:iam::${accountId}:policy/${buildAwsLockPolicyName(roleName)}`;
 }
 
+/** A lock an operation recorded when it took it. */
+export interface RecordedAwsLock {
+  readonly policyArn: string;
+  readonly policyId: string;
+  // The role the lock protects, read from the lock's name.
+  readonly roleName: string;
+}
+
+const LOCK_POLICY_ARN = /^arn:aws:iam::\d{12}:policy\/radius-lock-(.+)$/;
+
+/**
+ * The lock an operation's context records in `awsDeployIdentityLock`, or null
+ * when it records none or the record is not a lock policy and its ID.
+ */
+export function readRecordedAwsLock(context: unknown): RecordedAwsLock | null {
+  if (typeof context !== "object" || context === null) return null;
+  const lock =
+    "awsDeployIdentityLock" in context ?
+      context.awsDeployIdentityLock
+    : undefined;
+  if (
+    typeof lock !== "object" ||
+    lock === null ||
+    !("policyArn" in lock) ||
+    typeof lock.policyArn !== "string" ||
+    !("policyId" in lock) ||
+    typeof lock.policyId !== "string" ||
+    !lock.policyId
+  ) {
+    return null;
+  }
+  const match = LOCK_POLICY_ARN.exec(lock.policyArn);
+  if (!match?.[1]) return null;
+  return {
+    policyArn: lock.policyArn,
+    policyId: lock.policyId,
+    roleName: match[1]
+  };
+}
+
 /**
  * The lock policy's document. It is never attached, and even if it were, it
  * only denies passing the lock policy itself as a role, which matches nothing.

@@ -59,7 +59,8 @@ const RECOVERY = `Check that "aws iam get-policy --policy-arn ${LOCK_ARN} --quer
 // command the scenario did not script throws.
 function fakeIam(
   script: Record<string, AwsCommandResult | AwsCommandResult[]>,
-  stopAfterSleeps = Infinity
+  stopAfterSleeps = Infinity,
+  stoppedOperations: readonly string[] = []
 ) {
   const calls: string[][] = [];
   const waits: AwsLockWait[] = [];
@@ -88,6 +89,8 @@ function fakeIam(
       runAws,
       now: () => clock,
       shouldStop: () => sleeps.length >= stopAfterSleeps,
+      isStoppedOperation: (operationId: string) =>
+        stoppedOperations.includes(operationId),
       async sleep(milliseconds: number) {
         sleeps.push(milliseconds);
         clock += milliseconds;
@@ -405,6 +408,7 @@ describe("acquireAwsDeployIdentityLock", () => {
       holder: "The setup of environment prod in octo/shop",
       holderOperationId: "op-2",
       since: "2026-10-30T11:58:00Z",
+      stopped: false,
       removable: false
     });
   });
@@ -427,6 +431,112 @@ describe("acquireAwsDeployIdentityLock", () => {
       expect(iam.waits[0]?.removable).toBe(removable);
     }
   );
+
+  it.each([
+    ["has stopped", ["op-2"], true],
+    ["is still running", [], false]
+  ])(
+    "offers removal at once only when the holder %s",
+    async (_label, stoppedOperations, stopped) => {
+      const iam = fakeIam(
+        {
+          "iam create-policy": EXISTS,
+          "iam get-policy": policy("LOCK1", {
+            Description: OTHER,
+            CreateDate: "2026-10-30T11:59:00Z"
+          })
+        },
+        1,
+        stoppedOperations
+      );
+      expect(await acquire(iam)).toEqual({ ok: false, stopped: true });
+      expect(iam.waits[0]).toMatchObject({
+        holderOperationId: "op-2",
+        stopped,
+        removable: stopped
+      });
+    }
+  );
+
+  it("never calls a lock that names no operation stopped", async () => {
+    const iam = fakeIam(
+      {
+        "iam create-policy": EXISTS,
+        "iam get-policy": policy("LOCK1", {
+          CreateDate: "2026-10-30T11:59:00Z"
+        })
+      },
+      1,
+      [""]
+    );
+    await acquire(iam);
+    expect(iam.waits[0]).toMatchObject({ stopped: false, removable: false });
+  });
+
+  describe("taking back this operation's recorded lock", () => {
+    const MINE =
+      '{"repo":"octo/shop","environment":"dev","action":"setup","operationId":"op-1"}';
+    const adopt = (iam: ReturnType<typeof fakeIam>, wait = true) =>
+      acquireAwsDeployIdentityLock(
+        {
+          accountId: ACCOUNT,
+          roleName: ROLE,
+          holder: HOLDER,
+          wait,
+          adopt: "LOCK1"
+        },
+        iam.ports
+      );
+
+    it.each([true, false])(
+      "holds it again without waiting (wait: %s)",
+      async (wait) => {
+        const iam = fakeIam({
+          "iam create-policy": EXISTS,
+          "iam get-policy": policy("LOCK1", { Description: MINE }),
+          "iam delete-policy": ok()
+        });
+        const result = await adopt(iam, wait);
+        expect(result).toMatchObject({
+          ok: true,
+          adopted: true,
+          lock: { policyArn: LOCK_ARN, policyId: "LOCK1" }
+        });
+        expect(iam.sleeps).toEqual([]);
+        expect(iam.waits).toEqual([]);
+        if (!result.ok) throw new Error("expected the lock");
+        expect(await result.lock.release()).toEqual({ ok: true });
+        expect(iam.commands().slice(-2)).toEqual([
+          "iam get-policy",
+          "iam delete-policy"
+        ]);
+      }
+    );
+
+    it.each([
+      ["has a different policy ID", policy("LOCK9", { Description: MINE })],
+      ["names another operation", policy("LOCK1", { Description: OTHER })],
+      ["names no operation", policy("LOCK1")]
+    ])("waits for a lock that %s", async (_label, held) => {
+      const iam = fakeIam(
+        { "iam create-policy": EXISTS, "iam get-policy": held },
+        1
+      );
+      expect(await adopt(iam)).toEqual({ ok: false, stopped: true });
+      expect(iam.waits).toHaveLength(1);
+    });
+
+    it("creates a new lock when the recorded one is gone", async () => {
+      const iam = fakeIam({
+        "iam create-policy": policy("LOCK2"),
+        "iam get-policy": policy("LOCK2")
+      });
+      expect(await adopt(iam)).toEqual({
+        ok: true,
+        lock: expect.objectContaining({ policyId: "LOCK2" })
+      });
+    });
+  });
 
   it("times a lock with no creation date from when this run first saw it", async () => {
     const polls = 600000 / AWS_LOCK_POLL_MS;
@@ -545,6 +655,7 @@ describe("acquireAwsDeployIdentityLock without waiting", () => {
         holder: "The setup of environment prod in octo/shop",
         holderOperationId: "op-2",
         since: "2026-10-30T11:00:00Z",
+        stopped: false,
         removable: true
       }
     });

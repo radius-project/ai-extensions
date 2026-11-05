@@ -25,7 +25,7 @@
 //      `failure.evidence`, fenced, and never in a label.
 
 import { createHash, randomUUID } from "node:crypto";
-import { formatAwsLockTime } from "@radius-project/core";
+import { formatAwsLockTime, readRecordedAwsLock } from "@radius-project/core";
 import {
   disabledOperationStore,
   PERSISTED_OPERATIONS_VERSION,
@@ -2759,7 +2759,8 @@ export function projectCleanupSummary(op: any): any {
   if (
     !reportableState &&
     cleanupState === "not_started" &&
-    !hasTrackedSetupArtifacts(ledger)
+    !hasTrackedSetupArtifacts(ledger) &&
+    !heldAwsLockEntry(op)
   )
     return null;
 
@@ -3027,6 +3028,9 @@ function projectPartialState(
     if (entry.keepAlways || reusableOnRetry) retainedGroup.push(item);
     else created.push(item);
   }
+  // A continuation takes the lock back, so it groups with what it reuses.
+  const lock = heldAwsLockEntry(op);
+  if (lock) (reusableOnRetry ? retainedGroup : created).push(lock);
 
   return {
     created,
@@ -4252,6 +4256,30 @@ function projectContinuationPreview(op: any, resumeFrom: any): any {
   };
 }
 
+const AWS_LOCK_ARTIFACT_KIND = "aws_deploy_identity_lock";
+
+/**
+ * The deploy identity lock a stopped AWS setup still holds, as an inventory
+ * entry. It is not a ledger resource: it only orders Radius runs, so it is
+ * listed while this setup holds it, released when the customer deletes or
+ * leaves the setup, and taken back when they continue it.
+ */
+function heldAwsLockEntry(op: any): { kind: string; target: string } | null {
+  if (op?.provider !== "aws" || !isTerminalState(op.state)) return null;
+  const lock = readRecordedAwsLock(op.context);
+  if (!lock) return null;
+  return {
+    kind: AWS_LOCK_ARTIFACT_KIND,
+    target: `Lock on IAM role ${lock.roleName} (policy ID ${lock.policyId})`
+  };
+}
+
+/** The held lock, if any, as the list a destructive preview removes. */
+function heldAwsLockRemoval(op: any): Array<{ kind: string; target: string }> {
+  const lock = heldAwsLockEntry(op);
+  return lock ? [lock] : [];
+}
+
 /**
  * What a rollback will remove, keep, and leave for the customer.
  *
@@ -4261,10 +4289,13 @@ function projectContinuationPreview(op: any, resumeFrom: any): any {
  */
 function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
   const summary = projectCleanupSummary(op) || {};
-  const removes = targets.map((entry) => ({
-    kind: entry.artifactType,
-    target: entry.target
-  }));
+  const removes = [
+    ...targets.map((entry) => ({
+      kind: entry.artifactType,
+      target: entry.target
+    })),
+    ...heldAwsLockRemoval(op)
+  ];
   const removeKeys = new Set(
     removes.map((entry) => `${entry.kind}#${entry.target}`)
   );
@@ -4538,6 +4569,7 @@ export function removableAwsLockWait(op: any): {
   holder: string;
   holderOperationId: string;
   since: string;
+  stopped: boolean;
 } | null {
   const wait = op?.context?.awsLockWait;
   if (
@@ -4561,7 +4593,8 @@ export function removableAwsLockWait(op: any): {
     holder:
       typeof wait.holder === "string" && wait.holder ?
         wait.holder
-      : "Another run"
+      : "Another run",
+    stopped: wait.stopped === true
   };
 }
 
@@ -4580,7 +4613,10 @@ function removeAwsLockAction(op: any, base: string): any | null {
     confirmTitle: "Remove the lock on the deploy identity?",
     confirmLabel: "Remove lock",
     cancelLabel: "Keep waiting",
-    description: `${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""} has held the lock since ${formatAwsLockTime(wait.since)}. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
+    description:
+      wait.stopped ?
+        `This lock is from an earlier attempt that stopped: ${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""}, which took it at ${formatAwsLockTime(wait.since)}. Remove it so this run can continue.`
+      : `${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""} has held the lock since ${formatAwsLockTime(wait.since)}. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
     method: "POST",
     // Names the lock shown, so a confirmation that outlives it is refused.
     path: `${base}/aws-lock/remove?policyId=${encodeURIComponent(wait.policyId)}`,
@@ -4823,10 +4859,13 @@ export function projectOperationActions(op: any): any[] {
       path: `${base}/retry/cleanup`,
       pending: false,
       preview: {
-        removes: cleanup.targets.map((entry: any) => ({
-          kind: entry.artifactType,
-          target: entry.target
-        })),
+        removes: [
+          ...cleanup.targets.map((entry: any) => ({
+            kind: entry.artifactType,
+            target: entry.target
+          })),
+          ...heldAwsLockRemoval(op)
+        ],
         keeps: kept.keeps,
         manualActionRequired: kept.manualActionRequired
       }
@@ -4838,7 +4877,8 @@ export function projectOperationActions(op: any): any[] {
     // panel rather than another attempt at the setup, so it never sits beside
     // the forward and destructive choices the command row offers.
     const abandons = exit.abandon === true;
-    const removes = exit.targets.length > 0;
+    const releasesLock = heldAwsLockEntry(op) !== null;
+    const removes = exit.targets.length > 0 || releasesLock;
     actions.push({
       id: "exit-setup",
       kind: EXIT_COMMAND_KIND,
@@ -4865,9 +4905,11 @@ export function projectOperationActions(op: any): any[] {
       : {}),
       description:
         abandons ?
-          "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
-        : removes ?
-          "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. Anything it reused is left alone. This cannot be undone."
+          `Radius closes this setup without deleting resources that may still be used by external work.${releasesLock ? " It releases the lock this setup holds on the deploy identity." : ""} You can start Create Environment again, but you may need to remove or reuse the remaining resources manually.`
+        : exit.targets.length > 0 ?
+          `Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added.${releasesLock ? " It also releases the lock this setup holds on the deploy identity." : ""} Anything it reused is left alone. This cannot be undone.`
+        : releasesLock ?
+          "Radius closes this setup and releases the lock it holds on the deploy identity. Everything else that exists was already here before this attempt, so nothing else is removed."
         : "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.",
       method: "POST",
       path: abandons ? `${base}/exit?mode=abandon` : `${base}/exit`,

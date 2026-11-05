@@ -45,6 +45,7 @@ import { errorMessage } from "../../runtime/util.js";
 import type { OperationRecord } from "../routes/operations-status.js";
 import type { EnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import { cancelOperationWorkflow } from "./operation-workflow-cancellation.js";
+import { releaseRecordedAwsLock } from "./aws-recorded-lock.js";
 import {
   captureWorkflowCancellationTarget,
   WorkflowCancellationRefusal,
@@ -516,6 +517,22 @@ async function handleRemoveAwsLock(
 }
 
 /**
+ * Whether this setup may have dispatched its verification workflow. Any sign of
+ * a dispatch counts, so a run Radius might have started is always observed.
+ */
+function verificationDispatched(operation: OperationRecord): boolean {
+  const verification = operation.verification;
+  if (typeof verification !== "object" || verification === null) return false;
+  const dispatchedAt =
+    "dispatchedAt" in verification ? Number(verification.dispatchedAt) : 0;
+  const runId =
+    "runId" in verification && verification.runId != null ?
+      String(verification.runId).trim()
+    : "";
+  return dispatchedAt > 0 || runId !== "";
+}
+
+/**
  * Record a customer stop request.
  *
  * An operation parked on a prompt has nothing in flight, so it cancels at once;
@@ -596,6 +613,18 @@ async function handleStopOperation(
         code: "operation-stop-persist-failed",
         operationId,
         detail: errorMessage(error)
+      });
+      return;
+    }
+    // Setup stopped before it dispatched verification, so no workflow exists to
+    // observe. Calling its state unknown would refuse every cleanup command.
+    if (!verificationDispatched(operation)) {
+      announceOperationTerminal(operation);
+      sendJson(context, 200, {
+        operationId,
+        code: "operation-stopped",
+        statusUrl: statusUrlFor(operationId),
+        operation: clientView(operation)
       });
       return;
     }
@@ -921,6 +950,14 @@ async function closeExitedSetup(request: CommandRequest): Promise<boolean> {
   const { context, dependencies, operationId, operation, eligibility } =
     request;
   if ((eligibility.targets?.length ?? 0) > 0) return false;
+  // The lock is this setup's own, by its recorded policy ID, so leaving the
+  // setup releases it even when nothing else is removed. Otherwise every later
+  // run that changes the role would wait on a setup that will never finish.
+  await releaseRecordedAwsLock(
+    operation,
+    dependencies.removeAwsDeployIdentityLock,
+    errorMessage
+  );
   const snapshot: unknown = snapshotRetryState(operation);
   const accepted = acceptOperationCommand(operation, {
     kind: EXIT_COMMAND_KIND,

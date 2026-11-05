@@ -13,6 +13,7 @@ import {
   finish,
   pauseForProviderRestart,
   onOperationTerminal,
+  STAGE_AUTHORIZE_IDENTITY,
   STAGE_VERIFY,
   verificationWorkflowState
 } from "../../operations.js";
@@ -383,6 +384,43 @@ describe("direct operation control service", () => {
     expect(dependencies.persistOperations).toHaveBeenCalledTimes(2);
     expect(operation.journey?.notifiedAt).toBeFalsy();
   });
+
+  it.each([
+    ["no verification record", undefined],
+    ["a record without a dispatch", { workflow: "radius-verify.yml" }],
+    ["a zero dispatch time", { dispatchedAt: 0, runId: " " }]
+  ])(
+    "pauses a restarted setup that never dispatched verification without inspecting a workflow: %s",
+    async (_label, verification) => {
+      const operation = newOperation();
+      operation.context = { githubLogin: "alice" };
+      enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+      if (verification) operation.verification = verification;
+      pauseForProviderRestart(operation);
+      const inspect = vi.fn();
+      const { dependencies } = fixture({
+        get: () => operation,
+        inspectVerificationWorkflow: inspect
+      });
+      const announce = vi.fn();
+      onOperationTerminal(announce);
+
+      expect(
+        await createOperationsControlService(dependencies)({
+          operationId: operation.operationId,
+          command: "stop"
+        })
+      ).toMatchObject({
+        status: 200,
+        body: { code: "operation-stopped" }
+      });
+      expect(inspect).not.toHaveBeenCalled();
+      expect(operation.state).toBe("cancelled");
+      expect(verificationWorkflowState(operation)).toBeNull();
+      expect(dependencies.persistOperations).toHaveBeenCalledTimes(1);
+      expect(announce).toHaveBeenCalledOnce();
+    }
+  );
 
   it("rejects a replacement login during final admission persistence without restoring the old account", async () => {
     const operation = mergeHandoff();

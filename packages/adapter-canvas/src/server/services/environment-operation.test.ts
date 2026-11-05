@@ -1461,6 +1461,7 @@ describe("runEnvironmentOperationWorkflow", () => {
         },
         now: () => NOW,
         isStopRequested: shouldStop,
+        isStoppedOperation: () => false,
         operationId: (target) => target.operationId,
         operations: {
           getContext: (target) => target.context ?? {},
@@ -1658,6 +1659,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       sleep: async () => {},
       now: () => NOW,
       isStopRequested: () => false,
+      isStoppedOperation: () => false,
       operationId: (target) => target.operationId,
       operations: {
         getContext: (target) => target.context ?? {},
