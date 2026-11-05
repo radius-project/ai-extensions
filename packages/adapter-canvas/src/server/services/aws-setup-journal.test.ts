@@ -316,6 +316,19 @@ describe("recordAwsSetupChange", () => {
     expect(op.setupArtifacts.awsTrustSubjects).toHaveLength(1);
   });
 
+  it("records the role under the ARN its trust subjects use", () => {
+    const op = operation();
+    recordAwsSetupChange(
+      op,
+      CHANGES["aws_role.create"],
+      JSON.stringify({
+        Role: { Arn: "arn:aws:iam::123456789012:role/other", RoleId: "AROA1" }
+      })
+    );
+    expect(op.setupArtifacts.awsRole.roleArn).toBe(ROLE_ARN);
+    expect(op.setupArtifacts.awsTrustSubjects[0]?.roleArn).toBe(ROLE_ARN);
+  });
+
   it.each(["not json", ""])(
     "records a role CLI output %j did not describe by its request",
     (stdout) => {

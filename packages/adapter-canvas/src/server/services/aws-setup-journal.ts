@@ -321,7 +321,9 @@ export function recordAwsSetupChange(
       recordAwsRole(operation, {
         state: "created",
         origin: "this_operation",
-        roleArn: text(role.Arn) || roleArn,
+        // The ARN the trust subjects below use, so a rollback finds them all
+        // under one role.
+        roleArn,
         roleName,
         roleId: text(role.RoleId) || null
       });
