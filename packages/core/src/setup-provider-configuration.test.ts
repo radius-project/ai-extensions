@@ -51,7 +51,12 @@ const awsWrites = [
     "AWS_TRUST_SUBJECTS",
     '["repo:o/r:environment:dev","repository_owner_id:1:x"]'
   ],
-  ["AWS_PERMISSION_POLICY_NAME", awsInput.policyName]
+  ["AWS_PERMISSION_POLICY_NAME", awsInput.policyName],
+  ["AWS_APP_ROLE_PATH", "/radius/apps/dev-111111111111/"],
+  [
+    "AWS_APP_BOUNDARY_ARN",
+    "arn:aws:iam::1:policy/radius/apps/dev-111111111111/radius-app-dev-111111111111"
+  ]
 ];
 const start = ["event", { kind: "configuration-started" }];
 

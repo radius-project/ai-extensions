@@ -539,7 +539,9 @@ const RADIUS_SUPPORTING_OUTPUT_KINDS: Record<string, boolean> = {
   privatednszones: true,
   userassignedidentities: true,
   // AWS recipes declare these before the resource they support, such as an
-  // RDS instance's subnet and parameter groups.
+  // RDS instance's subnet and parameter groups, or a container's Pod Identity
+  // association.
+  podidentityassociation: true,
   dbsubnetgroup: true,
   dbparametergroup: true,
   dbclusterparametergroup: true,

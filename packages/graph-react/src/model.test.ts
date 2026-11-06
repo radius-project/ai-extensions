@@ -588,6 +588,20 @@ describe("radiusSelectResolvedResource", () => {
     expect(chosen).toBe(primary);
   });
 
+  it("selects an AWS container's Deployment over its Pod Identity association and role", () => {
+    const deployment = { type: "apps/Deployment" };
+    const chosen = radiusSelectResolvedResource({
+      outputResources: [
+        { type: "AWS.EKS/PodIdentityAssociation" },
+        { type: "AWS.IAM/Role" },
+        deployment,
+        { type: "core/Service" },
+        { type: "core/ServiceAccount" }
+      ]
+    });
+    expect(chosen).toBe(deployment);
+  });
+
   it("keeps the first candidate when ranks tie", () => {
     const first = { type: "apps/Deployment" };
     const chosen = radiusSelectResolvedResource({

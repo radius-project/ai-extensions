@@ -1276,6 +1276,8 @@ describe("registered environment tools with production runtime services", () => 
               '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}',
               ""
             );
+          else if (key === "eks describe-addon")
+            callback(null, '{"addon":{"status":"ACTIVE"}}', "");
           else if (key === "iam create-policy" || key === "iam get-policy")
             callback(null, '{"Policy":{"PolicyId":"LOCK1"}}', "");
           else if (key === "iam delete-policy") callback(null, "", "");

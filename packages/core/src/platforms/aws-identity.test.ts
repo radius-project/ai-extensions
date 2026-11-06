@@ -8,6 +8,8 @@ import {
   awsLockPolicyArn,
   awsRoleArn,
   awsRoleTags,
+  buildAwsAppBoundaryPolicy,
+  buildAwsAppIdentity,
   buildAwsDeployRoleName,
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
@@ -82,6 +84,9 @@ describe("immutable environment repository ownership", () => {
 });
 
 const ACCOUNT = "123456789012";
+const sha256 = (value: string): string =>
+  createHash("sha256").update(value).digest("hex");
+const APP = buildAwsAppIdentity(ACCOUNT, "radius-deploy-dev-0123456789ab");
 const GITHUB = "token.actions.githubusercontent.com";
 const DEV = "repo:octo/shop:environment:dev";
 const PROD = "repo:octo/shop:environment:prod";
@@ -787,17 +792,23 @@ describe("trust policy", () => {
 
 describe("permissions and provenance", () => {
   it.each(["us-east-2", "ap-southeast-7"])(
-    "fits 17 regional grants without account-email access in %s",
+    "fits 6 environment grants without account-email access in %s",
     (region) => {
-      const policy = buildAwsEnvironmentPermissionPolicy(region);
-      expect(JSON.stringify(policy).length * 17).toBeLessThanOrEqual(10240);
+      const policy = buildAwsEnvironmentPermissionPolicy(
+        region,
+        buildAwsAppIdentity(
+          ACCOUNT,
+          buildAwsEnvironmentPolicyName("octo/shop", "production-eu", sha256)
+        )
+      );
+      expect(JSON.stringify(policy).length * 6).toBeLessThanOrEqual(10240);
       expect(JSON.stringify(policy)).not.toContain("account:GetPrimaryEmail");
     }
   );
 
   it("compact exclusions omit only access administration, preserving the EKS read APIs", () => {
-    const patterns =
-      buildAwsEnvironmentPermissionPolicy("us-east-2").Statement[0].NotAction;
+    const patterns = buildAwsEnvironmentPermissionPolicy("us-east-2", APP)
+      .Statement[0].NotAction;
     if (!Array.isArray(patterns)) throw new Error("Missing exclusions");
     const excluded = (action: string) =>
       patterns.some(
@@ -854,7 +865,7 @@ describe("permissions and provenance", () => {
   });
 
   it("limits the power-user grant to the environment's region and never grants IAM", () => {
-    const policy = buildAwsEnvironmentPermissionPolicy("us-west-2");
+    const policy = buildAwsEnvironmentPermissionPolicy("us-west-2", APP);
     expect(policy.Statement[0]).toMatchObject({
       NotAction: [
         "iam:*",
@@ -869,7 +880,7 @@ describe("permissions and provenance", () => {
   });
 
   it("allows only recipe service-linked-role creation and never adds a deny", () => {
-    const policy = buildAwsEnvironmentPermissionPolicy("us-east-2");
+    const policy = buildAwsEnvironmentPermissionPolicy("us-east-2", APP);
     expect(
       policy.Statement.every((statement) => statement.Effect === "Allow")
     ).toBe(true);
@@ -889,6 +900,74 @@ describe("permissions and provenance", () => {
             "elasticache.amazonaws.com",
             "opensearchservice.amazonaws.com"
           ]
+        }
+      }
+    });
+  });
+
+  it("names an environment's app roles and boundary after its policy", () => {
+    expect(APP).toEqual({
+      accountId: ACCOUNT,
+      rolePath: "/radius/apps/dev-0123456789ab/",
+      boundaryName: "radius-app-dev-0123456789ab",
+      boundaryArn: `arn:aws:iam::${ACCOUNT}:policy/radius/apps/dev-0123456789ab/radius-app-dev-0123456789ab`
+    });
+    const longest = buildAwsAppIdentity(
+      ACCOUNT,
+      buildAwsEnvironmentPolicyName("octo/shop", "e".repeat(200), sha256)
+    );
+    expect(longest.boundaryName.length).toBeLessThanOrEqual(128);
+  });
+
+  it("lets the deploy role manage only its environment's app roles, with the boundary", () => {
+    const roles = `arn:aws:iam::${ACCOUNT}:role/radius/apps/dev-0123456789ab/*`;
+    const policy = buildAwsEnvironmentPermissionPolicy("us-east-2", APP);
+    expect(policy.Statement.slice(3)).toEqual([
+      expect.objectContaining({
+        Action: [
+          "iam:CreateRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:PutRolePermissionsBoundary"
+        ],
+        Resource: roles,
+        Condition: {
+          StringEquals: { "iam:PermissionsBoundary": APP.boundaryArn }
+        }
+      }),
+      expect.objectContaining({ Resource: roles }),
+      expect.objectContaining({
+        Action: "iam:PassRole",
+        Resource: roles,
+        Condition: {
+          StringEquals: { "iam:PassedToService": "pods.eks.amazonaws.com" }
+        }
+      }),
+      {
+        Effect: "Allow",
+        Action: "iam:GetRole",
+        Resource: `arn:aws:iam::${ACCOUNT}:role/radius-app-*`
+      }
+    ]);
+    const text = JSON.stringify(policy);
+    for (const action of [
+      "iam:AttachRolePolicy",
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:CreatePolicyVersion"
+    ])
+      expect(text).not.toContain(action);
+  });
+
+  it("caps app roles at the deploy role's regional grant plus Bedrock inference profiles", () => {
+    const boundary = buildAwsAppBoundaryPolicy(ACCOUNT, "us-west-2");
+    expect(boundary.Statement[0]).toEqual(
+      buildAwsEnvironmentPermissionPolicy("us-west-2", APP).Statement[0]
+    );
+    expect(boundary.Statement[1]).toMatchObject({
+      Resource: "arn:aws:bedrock:*::foundation-model/*",
+      Condition: {
+        ArnLike: {
+          "bedrock:InferenceProfileArn": `arn:aws:bedrock:us-west-2:${ACCOUNT}:inference-profile/*`
         }
       }
     });

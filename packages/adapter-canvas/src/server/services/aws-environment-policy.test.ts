@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAwsAppIdentity,
   buildGitHubTrustPolicy,
   buildAwsEnvironmentPermissionPolicy
 } from "@radius-project/core";
@@ -24,7 +25,10 @@ const request = {
 const role = {
   AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [SUBJECT])
 };
-const document = buildAwsEnvironmentPermissionPolicy("us-east-2");
+const document = buildAwsEnvironmentPermissionPolicy(
+  "us-east-2",
+  buildAwsAppIdentity(ACCOUNT, "radius-deploy-dev-0123456789ab")
+);
 document.Statement.push({
   Effect: "Allow",
   Action: "iam:DeleteServiceLinkedRole",

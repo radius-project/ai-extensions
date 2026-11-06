@@ -27,7 +27,7 @@ export function awsRoleHelpText(
   region: string
 ): string {
   const env = environment || "this";
-  return `Created in your AWS account, trusted over OIDC by repo:${repo} for the ${env} environment, and granted PowerUserAccess limited to resources in ${region || "the profile's region"}. Setup also grants the role cluster-admin access on the target EKS cluster.`;
+  return `Created in your AWS account, trusted over OIDC by repo:${repo} for the ${env} environment, and granted PowerUserAccess limited to resources in ${region || "the profile's region"}. Setup also grants the role cluster-admin access on the target EKS cluster. It can also create, change, and delete IAM roles for this environment's apps, capped by a permissions boundary, and pass them to EKS Pod Identity.`;
 }
 
 /** The repositories a role's GitHub subjects already name. */

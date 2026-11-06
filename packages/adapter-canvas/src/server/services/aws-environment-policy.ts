@@ -1,4 +1,5 @@
 import {
+  buildAwsAppIdentity,
   buildAwsEnvironmentPermissionPolicy,
   buildLegacyAwsEnvironmentPolicyName,
   isAwsEnvironmentPolicyName,
@@ -101,6 +102,7 @@ export async function attachEnvironmentPolicy(
     repo: string;
     environment: string;
     roleName: string;
+    accountId: string;
     region: string;
     policyName?: string;
     legacy: LegacyPolicy;
@@ -133,7 +135,10 @@ export async function attachEnvironmentPolicy(
       "--policy-name",
       name
     ]);
-  const document = buildAwsEnvironmentPermissionPolicy(input.region);
+  const document = buildAwsEnvironmentPermissionPolicy(
+    input.region,
+    buildAwsAppIdentity(input.accountId, policyName)
+  );
   let written = await put(policyName, document);
   let legacyRemoved = false;
   // At the aggregate quota, two copies cannot coexist. Remove only the proven
@@ -178,7 +183,7 @@ export async function attachEnvironmentPolicy(
         : "aws-role-policy-failed",
       message:
         /LimitExceeded/.test(written.stderr) ?
-          `IAM role ${roleName} has reached the 10,240-character inline-policy limit, which cannot be raised. These policies fit about 17 environments when no other inline policies use the space. Delete an unused environment or choose another role. AWS reported: ${detail(written)}`
+          `IAM role ${roleName} has reached the 10,240-character inline-policy limit, which cannot be raised. These policies fit about 6 environments when no other inline policies use the space. Delete an unused environment or choose another role. AWS reported: ${detail(written)}`
         : `Failed to attach the deploy permission policy: ${detail(written)}`
     };
   }

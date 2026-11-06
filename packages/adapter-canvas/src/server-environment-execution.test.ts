@@ -1259,6 +1259,9 @@ describe("production coordinator scheduling scopes", () => {
             })
           )
         ],
+        "eks describe-addon": [
+          ok(JSON.stringify({ addon: { status: "ACTIVE" } }))
+        ],
         "iam create-policy": [
           { code: 254, stdout: "", stderr: "EntityAlreadyExists" },
           lock("LOCK1")

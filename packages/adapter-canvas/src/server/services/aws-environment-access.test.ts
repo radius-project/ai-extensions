@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAwsAppIdentity,
   buildAwsEnvironmentPermissionPolicy,
   buildGitHubTrustPolicy,
   parsePolicyDocument,
@@ -20,6 +21,7 @@ import {
 } from "../../operations.js";
 
 const ACCOUNT = "123456789012";
+const APP = buildAwsAppIdentity(ACCOUNT, "radius-deploy-dev-0123456789ab");
 const ROLE = "radius-deploy-octo-shop";
 const ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role/${ROLE}`;
 const DEV = "repo:octo/shop:environment:dev";
@@ -54,7 +56,9 @@ const lockFree: Record<string, Answer> = {
   }),
   "iam create-policy": lockPolicy("LOCK1"),
   "iam get-policy": lockPolicy("LOCK1"),
-  "iam delete-policy": ok()
+  "iam delete-policy": ok(),
+  "iam list-entities-for-policy": fail("NoSuchEntity"),
+  "iam list-roles": ok({ Roles: [] })
 };
 
 const happyPath: Record<string, Answer> = {
@@ -64,6 +68,7 @@ const happyPath: Record<string, Answer> = {
   "eks describe-cluster": ok({
     cluster: { status: "ACTIVE", accessConfig: { authenticationMode: "API" } }
   }),
+  "eks describe-addon": ok({ addon: { status: "ACTIVE" } }),
   "iam get-role": fail("An error occurred (NoSuchEntity) when calling GetRole"),
   "iam list-open-id-connect-providers": ok({ OpenIDConnectProviderList: [] }),
   "iam create-open-id-connect-provider": ok(),
@@ -334,7 +339,7 @@ describe("AWS environment access setup", () => {
       }),
       "iam get-role-policy": ok({
         PolicyName: "radius-deploy-dev",
-        PolicyDocument: buildAwsEnvironmentPermissionPolicy("us-west-2")
+        PolicyDocument: buildAwsEnvironmentPermissionPolicy("us-west-2", APP)
       }),
       "iam list-role-policies": ok({ PolicyNames: ["radius-deploy-dev"] })
     };
@@ -801,7 +806,7 @@ describe("AWS environment access setup", () => {
         }),
         "iam get-role-policy": ok({
           PolicyName: "radius-deploy-dev",
-          PolicyDocument: buildAwsEnvironmentPermissionPolicy("us-west-2")
+          PolicyDocument: buildAwsEnvironmentPermissionPolicy("us-west-2", APP)
         }),
         "iam list-open-id-connect-providers": ok({
           OpenIDConnectProviderList: [
@@ -867,7 +872,7 @@ describe("AWS environment access setup", () => {
     expect(h.events).toContainEqual([
       "step",
       operation.id,
-      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, policy radius-deploy-dev-f5fb7acf8f59 on ${ROLE}.`,
+      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, permissions boundary radius-app-dev-f5fb7acf8f59, policy radius-deploy-dev-f5fb7acf8f59 on ${ROLE}.`,
       STAGE
     ]);
     expect(h.events.at(-1)).toEqual(["persist"]);
@@ -1141,7 +1146,7 @@ describe("AWS environment access setup", () => {
 
     expect(result.ok).toBe(false);
     expect("error" in result && result.error).toContain(
-      `Created before setup stopped: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}. Remove them in the AWS console if you will not retry.`
+      `Created before setup stopped: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, permissions boundary radius-app-dev-f5fb7acf8f59. Remove them in the AWS console if you will not retry.`
     );
     expect(h.roleRecorded()).toBe(false);
   });
@@ -1788,10 +1793,11 @@ describe("the deploy identity lock during setup", () => {
       ok: true
     });
 
-    expect(h.commands().slice(0, 4)).toEqual([
+    expect(h.commands().slice(0, 5)).toEqual([
       "--version",
       "sts get-caller-identity",
       "eks describe-cluster",
+      "eks describe-addon",
       "iam create-policy"
     ]);
     expect(h.commands()).not.toContain("iam delete-policy");
@@ -1836,15 +1842,17 @@ describe("the deploy identity lock during setup", () => {
     const h = harness(happyPath);
     await h.access.setup(operation, input, EXECUTOR);
     const commands = h.commands();
+    // The lock is the first create-policy, and the boundary the last.
     const writes = [
       "iam create-open-id-connect-provider",
       "iam create-role",
+      "iam create-policy",
       "iam put-role-policy",
       "eks create-access-entry",
       "eks associate-access-policy"
     ];
     for (const write of writes) {
-      expect(commands[commands.indexOf(write) - 1]).toBe("iam get-policy");
+      expect(commands[commands.lastIndexOf(write) - 1]).toBe("iam get-policy");
     }
     // One read confirms the new lock, then one before each write.
     expect(commands.filter((c) => c === "iam get-policy")).toHaveLength(
@@ -2093,7 +2101,11 @@ describe("the deploy identity lock during setup", () => {
     expect(h.steps().some((text) => String(text).startsWith("⏳"))).toBe(false);
     // Replaced, so the lock's creation time is this run's.
     expect(
-      h.commands().filter((command) => command === "iam create-policy")
+      h.awsCalls.filter(
+        (args) =>
+          args[1] === "create-policy" &&
+          args[args.indexOf("--policy-name") + 1] === `radius-lock-${ROLE}`
+      )
     ).toHaveLength(2);
     expect(h.commands()).toContain("iam delete-policy");
     await h.access.release(operation);
@@ -2365,6 +2377,8 @@ describe("the deploy identity lock during removal", () => {
       "iam update-assume-role-policy",
       // IAM shows the write before the lock can be handed on.
       "iam get-role",
+      "iam list-roles",
+      "iam list-entities-for-policy",
       "iam get-policy",
       "iam delete-policy"
     ]);
@@ -2552,7 +2566,7 @@ describe("the deploy identity lock during removal", () => {
       expect(seen).toEqual([
         [
           [`trust subject ${DEV}`, "policy radius-deploy-dev-f5fb7acf8f59"],
-          ["iam get-role", "iam get-policy"]
+          ["iam list-entities-for-policy", "iam get-policy"]
         ]
       ]);
       expect(h.commands().slice(-2)).toEqual([
@@ -2698,6 +2712,7 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
         role = { trust: JSON.parse(value("--policy-document")) };
         return ok();
       case "iam put-role-policy":
+      case "eks describe-addon":
       case "eks associate-access-policy":
         return ok();
       case "eks create-access-entry":
