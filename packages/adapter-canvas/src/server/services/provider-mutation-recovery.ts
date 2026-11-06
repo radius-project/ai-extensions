@@ -47,6 +47,7 @@ import { ProviderMutationRecoveryError } from "@radius-project/core";
 export { ProviderMutationRecoveryError } from "@radius-project/core";
 
 type RecoveringOperation = {
+  provider?: string;
   recoveryState?: string | null;
   providerRecovery?: { state?: string; guidance?: string | null };
 };
@@ -69,8 +70,10 @@ function requireRecoveryRollback(
   // AWS setup stops instead: the customer decides between Continue setup and
   // Delete setup. A rollback nobody asked for would delete work a retry could
   // reuse, and would have to wait in the background for the deploy identity
-  // lock.
-  if (mutation.kind.startsWith("aws_")) {
+  // lock. Decided by the setup, not by the write that settled: a GitHub write
+  // left by Configure environment settles the same way, and a rollback then
+  // would remove the role and access entry too.
+  if (operation.provider === "aws") {
     requestStop(operation);
     return;
   }

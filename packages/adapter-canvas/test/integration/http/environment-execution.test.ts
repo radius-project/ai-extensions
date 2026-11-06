@@ -39,8 +39,12 @@ import {
   setExecutionActive,
   prepareProviderMutation,
   requestStop,
+  shouldStop,
+  stopAtBoundary,
+  STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
+import { executeRecoverableMutation } from "../../../src/server/services/provider-mutation-recovery.js";
 import {
   disabledOperationStore,
   parseOperationsEnvelope,
@@ -769,6 +773,112 @@ describe("production environment owner HTTP binding", () => {
         owner.shutdown();
         await runtime.stopServer("aws-cleanup", true);
         await aws.restore();
+      }
+    }
+  );
+
+  it.each([
+    ["an AWS setup", "aws", false],
+    ["an Azure setup", "azure", true]
+  ])(
+    "after a restart settles a GitHub write, pauses %s only when it is AWS",
+    async (_label, provider, rollsBack) => {
+      const roleArn =
+        "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+      const target =
+        "fixture/app:<default>:.github/workflows/radius-verify-credentials.yml";
+      const runs: Array<string | undefined> = [];
+      const owner = createEnvironmentExecutionOwner();
+      // Configure environment's part of a resumed run: it settles the write
+      // the crash left, then stops at the next boundary if asked to. The
+      // cleanup a rollback would schedule comes here too, with its command.
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        awsEnabled: true,
+        environmentOperationRunner: async (operationId, commandId) => {
+          runs.push(commandId);
+          if (commandId) return;
+          const op = operations.get(operationId);
+          await executeRecoverableMutation({
+            operation: op,
+            kind: "github_workflow.put",
+            target,
+            persist: async () => {},
+            mutate: async () => {
+              throw new Error("A settled write is never sent again.");
+            },
+            accept: (result) => result,
+            // GitHub answered 404: the request never reached it.
+            reconcile: async () => ({
+              state: "not_applied",
+              evidence: "GitHub has no such file."
+            })
+          });
+          if (shouldStop(op)) stopAtBoundary(op, "before-workflow-commit");
+        }
+      });
+      try {
+        await runtime.getOrCreateServer("restart", "environment");
+        const live = createOperation({
+          operationId: `op_restart_${provider}`,
+          repo: "fixture/app",
+          environment: "dev",
+          provider,
+          stages: buildStages({ includeIdentity: true })
+        });
+        recordAwsRole(live, {
+          state: "created",
+          origin: "this_operation",
+          roleArn,
+          roleName: "radius-deploy-fixture-app",
+          roleId: "AROA1"
+        });
+        live.resumeRequest = {
+          needsAzureCredentials: false,
+          environment: { provider, roleName: "radius-deploy-fixture-app" }
+        };
+        enterStage(live, STAGE_CONFIGURE_ENVIRONMENT);
+        // The extension stopped after sending the workflow write.
+        prepareProviderMutation(live, { kind: "github_workflow.put", target });
+        setExecutionActive(live, true);
+        const op = reconcileRestoredOperation(
+          fromPersistedOperation(toPersistedOperation(live))
+        );
+        expect(op.recoveryState).toBe("provider_reconciliation_pending");
+        operations.put(op);
+        vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+        runtime.setupExecution.recoverOperation(op);
+        if (rollsBack) {
+          // The Azure rule this keeps: settled, then rolled back on its own.
+          await vi.waitFor(
+            () =>
+              expect(runs).toEqual([
+                undefined,
+                expect.stringMatching(/:rollback:/)
+              ]),
+            { timeout: 15000 }
+          );
+          expect(op.providerRecovery.state).toBe("rollback_pending");
+          return;
+        }
+        await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+          timeout: 15000
+        });
+        await vi.waitFor(() =>
+          expect(owner.hasActiveEnvironmentTasks("restart")).toBe(false)
+        );
+        expect(op.state).toBe("cancelled");
+        expect(op.providerRecovery.state).not.toBe("rollback_pending");
+        // No rollback was scheduled, so the role is still there to reuse.
+        expect(runs).toEqual([undefined]);
+        expect(op.setupArtifacts.awsRole.state).toBe("created");
+        expect(
+          projectOperationActions(op).map((action: { id: string }) => action.id)
+        ).toEqual(expect.arrayContaining(["continue-setup", "rollback"]));
+      } finally {
+        owner.shutdown();
+        await runtime.stopServer("restart", true);
       }
     }
   );
