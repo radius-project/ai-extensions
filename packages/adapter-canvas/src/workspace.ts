@@ -3,6 +3,16 @@
 // checkout for generated app model files on the active branch.
 
 import { execFile } from "node:child_process";
+import {
+  safeWorkspacePath,
+  readWorkspaceFile,
+  runWorkspaceGit as runGitResult
+} from "@radius-project/adapter-shared";
+export {
+  toSafeRepoRelPath,
+  readWorkspaceFile,
+  uncommittedGeneratedPaths
+} from "@radius-project/adapter-shared";
 import { createHash } from "node:crypto";
 import { createReadStream, promises as fs } from "node:fs";
 import os from "node:os";
@@ -49,37 +59,6 @@ function runGit(
       { timeout: 5000, encoding: "utf8" },
       (err, stdout) => {
         resolve(err ? "" : stdout.trim());
-      }
-    );
-  });
-}
-
-// runGit collapses "git failed" and "git printed nothing" into the same empty
-// string, which is fine for a value read but not for a question whose honest
-// answer can be "nothing". This variant keeps the two apart.
-function runGitResult(
-  workspacePath: string | null | undefined,
-  args: readonly string[],
-  trimOutput = true,
-  maxBuffer = 1024 * 1024
-): Promise<{ ok: boolean; stdout: string }> {
-  return new Promise((resolve) => {
-    if (!workspacePath) {
-      resolve({ ok: false, stdout: "" });
-      return;
-    }
-    execFile(
-      "git",
-      ["-C", workspacePath, ...args],
-      { timeout: 5000, encoding: "utf8", maxBuffer },
-      (err, stdout) => {
-        resolve({
-          ok: !err,
-          stdout:
-            err ? ""
-            : trimOutput ? stdout.trim()
-            : stdout
-        });
       }
     );
   });
@@ -419,27 +398,6 @@ export function defaultBranchForState(
   return state?.contextBranch || state?.workspaceBranch || "main";
 }
 
-// Validate and normalize a repo-relative path that arrived from the webview
-// before it is used to open a file in the editor canvas. Returns a forward-slash,
-// repo-relative path, or throws on anything that is not safely repo-relative.
-// OS-independent by design (pure string checks, no process.platform): it rejects
-// Windows drive ("C:\\x", "C:/x", "C:x") and UNC ("\\\\srv", "//srv") forms plus
-// parent traversal ("..") and NUL on EVERY platform, and neutralizes leading
-// slashes to repo-root-relative. A path with no ".." always resolves inside the
-// repo root, so a Windows-style absolute path is rejected even on macOS/Linux.
-export function toSafeRepoRelPath(input: unknown): string {
-  const raw = String(input == null ? "" : input);
-  if (!raw || raw.indexOf("\0") !== -1) throw new Error("invalid path");
-  if (/^[A-Za-z]:/.test(raw) || /^[\\/]{2}/.test(raw)) {
-    throw new Error("absolute path not allowed");
-  }
-  const rel = raw.replace(/\\/g, "/").replace(/^\/+/, "");
-  if (!rel || rel.split("/").some((seg) => seg === "..")) {
-    throw new Error("invalid path");
-  }
-  return rel;
-}
-
 // Whether a caller-supplied path denotes the worktree or something inside it.
 //
 // Used to decide whether a worktree listing is evidence about the target a
@@ -464,35 +422,6 @@ export function isWorkspacePath(
     return resolved === root || resolved.startsWith(root + path.sep);
   } catch {
     return false;
-  }
-}
-
-function safeWorkspacePath(
-  workspacePath: string | null | undefined,
-  repoPath: string | null | undefined
-): string {
-  if (!workspacePath || !repoPath) return "";
-  const normalizedRel = repoPath.replace(/\\/g, "/").replace(/^\/+/, "");
-  const resolvedRoot = path.resolve(workspacePath);
-  const resolved = path.resolve(resolvedRoot, normalizedRel);
-  if (
-    resolved !== resolvedRoot &&
-    !resolved.startsWith(resolvedRoot + path.sep)
-  ) {
-    throw new Error(`Path escapes workspace: ${repoPath}`);
-  }
-  return resolved;
-}
-
-export async function readWorkspaceFile(
-  workspacePath: string | null | undefined,
-  repoPath: string | null | undefined
-): Promise<string | null> {
-  try {
-    const filePath = safeWorkspacePath(workspacePath, repoPath);
-    return await fs.readFile(filePath, "utf8");
-  } catch {
-    return null;
   }
 }
 
@@ -810,40 +739,6 @@ export async function workspaceSourceRevision(
     throw new Error("The workspace commit changed while source was read.");
   }
   return `workspace:${hash.digest("hex")}`;
-}
-
-/**
- * Which generator-owned paths have changes that are not committed yet — staged,
- * unstaged, or untracked.
- *
- * Returns allowlisted tokens from `GENERATED_MODEL_PATHS`, never raw git output,
- * so the result can be handed straight to the `git-push-branch` remediation.
- * Resolves to an empty list when there is no workspace, no git, or nothing
- * pending; callers treat that as "a plain push publishes everything it needs".
- */
-export async function uncommittedGeneratedPaths(
-  workspacePath: string | null | undefined
-): Promise<readonly string[]> {
-  const pending: string[] = [];
-  for (const generated of GENERATED_PATHS) {
-    // Asked one path at a time on purpose. Porcelain lines are `XY <path>` with
-    // a significant leading space for an unstaged change, and `runGitResult`
-    // trims, so parsing a combined listing by column silently loses the first
-    // entry's path prefix. A per-path question needs no parsing at all: any
-    // output means that root has something uncommitted.
-    //
-    // `git status` also tolerates a pathspec matching nothing, unlike `git add`,
-    // so an absent member of the allowlist is simply empty rather than an error.
-    const result = await runGitResult(workspacePath, [
-      "status",
-      "--porcelain",
-      "-uall",
-      "--",
-      generated
-    ]);
-    if (result.ok && result.stdout) pending.push(generated);
-  }
-  return pending;
 }
 
 // Whether application source changed between `sinceCommit` and the current

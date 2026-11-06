@@ -56,6 +56,9 @@ export const VERIFICATION_WORKFLOW_CONTENT_SHA256 = createHash("sha256")
 type ServerModule = typeof import("../../../src/server.js");
 type HarnessServerRuntime = ServerModule &
   ReturnType<ServerModule["createProductionCanvasServerRuntime"]> & {
+    deploymentRuntime: ReturnType<
+      ServerModule["createProductionDeploymentRuntime"]
+    >;
     setEnvironmentOperationRunner(
       runner: EnvironmentOperationRunner | null
     ): void;
@@ -1374,6 +1377,8 @@ export class CanvasHarness {
     );
     const originalFetch = globalThis.fetch;
     let serverModule: HarnessServerRuntime | undefined;
+    let deploymentRuntime:
+      HarnessServerRuntime["deploymentRuntime"] | undefined;
     let ghModule: GhModule | undefined;
     let sharedModule: SharedModule | undefined;
     let entry: CanvasServerEntry | undefined;
@@ -1459,6 +1464,10 @@ export class CanvasHarness {
       const accountContext = createProductionGitHubAccountContext();
       const { createTestCanvasServerRuntime } =
         await import("../../support/server/production-runtime.js");
+      deploymentRuntime = production.createProductionDeploymentRuntime({
+        awsEnabled: options.awsEnabled ?? false
+      });
+      deploymentRuntime.subscribeDispatch(production.invalidateDeployListCache);
       let environmentOperationRunner: EnvironmentOperationRunner | undefined;
       serverModule = {
         ...production,
@@ -1466,10 +1475,14 @@ export class CanvasHarness {
           executionOwner: createEnvironmentExecutionOwner(),
           accountContext,
           awsEnabled: options.awsEnabled ?? false,
+          deploymentRuntime,
           get environmentOperationRunner() {
             return environmentOperationRunner;
           }
         }),
+        deploymentRuntime,
+        setDeployRepairHandoff: deploymentRuntime.setDeployRepairHandoff,
+        setDeployFailureNotice: deploymentRuntime.setDeployFailureNotice,
         setEnvironmentOperationRunner: (runner) => {
           environmentOperationRunner = runner ?? undefined;
         }
@@ -1580,7 +1593,8 @@ export class CanvasHarness {
                   cleanupServerModule
                 )
             : undefined,
-          resetState: () => {
+          resetState: async () => {
+            await deploymentRuntime?.owner.shutdown(2000);
             cleanupServerModule?.resetListingCaches();
             ghModule?.resetGhIdentityCache();
             if (sharedModule)
@@ -1987,25 +2001,27 @@ export class CanvasHarness {
     await captureCleanupError(errors, () => closePage(this.page));
     const stop = () =>
       stopHarnessServer(this.entry, this.instanceId, this.serverModule);
-    if (this.repairHandoffRegistered) {
-      const lease = this.entry.state.deploymentMutation;
-      // The detached monitor releases its lease in finally. Shutdown revokes
-      // its scope, but credentials and the host port must outlive that release.
-      await stopAndDrainHarnessDeployment(
-        stop,
-        async () => {
+    const lease = this.entry.state.deploymentMutation;
+    await stopAndDrainHarnessDeployment(
+      stop,
+      async () => {
+        const drained =
+          await this.serverModule.deploymentRuntime.owner.shutdown(2000);
+        if (!drained.complete)
+          throw new Error(
+            `Deployment tasks did not drain: ${drained.pending.join(", ")}`
+          );
+        if (this.repairHandoffRegistered) {
           await expect
             .poll(() => harnessDeploymentSettled(this.entry.state, lease), {
               timeout: 5_000
             })
             .toBe(true);
-        },
-        () => this.setDeployRepairHandoff(null),
-        errors
-      );
-    } else {
-      await captureCleanupError(errors, stop);
-    }
+        }
+      },
+      () => this.serverModule.setDeployRepairHandoff(null),
+      errors
+    );
     // Drain any identity probe this test started before restoring the
     // environment: a probe that settled after the next test reset the cache
     // would publish this test's identity into that test's page.

@@ -9,8 +9,11 @@ import {
   type DeployOutcomeRequest,
   type DeployOutcomeStatusReader,
   type DeployGraphRead
-} from "./deploy-outcome.js";
-import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+} from "./deployment-outcome.js";
+import type {
+  DeploymentResource as CanvasGraphResource,
+  DeploymentState as CanvasState
+} from "@radius-project/core";
 import {
   createWorkflowArtifactReader,
   createWorkflowReadSession,
@@ -19,7 +22,7 @@ import {
 import {
   MAX_DEPLOY_MESSAGE_LENGTH,
   settleDeployStatuses
-} from "../../deploy-artifacts.js";
+} from "@radius-project/core";
 
 afterEach(() => vi.useRealTimers());
 

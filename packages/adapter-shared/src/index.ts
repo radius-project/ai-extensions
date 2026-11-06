@@ -84,3 +84,110 @@ export {
 export * as ghcrBootstrap from "./ghcr-bootstrap.js";
 
 export * from "./setup-workflow-content.js";
+export * from "./deployment-command-bindings.js";
+export * from "./deployment-lookup.js";
+export {
+  toSafeRepoRelPath,
+  safeWorkspacePath,
+  readWorkspaceFile,
+  runWorkspaceGit,
+  uncommittedGeneratedPaths
+} from "./deployment-workspace.js";
+export { createDeploymentObservationBindings } from "./deployment-observation-bindings.js";
+export {
+  createDeploymentRepository,
+  type DeploymentFileResult
+} from "./deployment-repository.js";
+export {
+  createDeploymentWorkflows,
+  type DeploymentWorkflowPorts
+} from "./deployment-workflows.js";
+export {
+  createDeploymentTemplates,
+  type DeploymentTemplatePorts
+} from "./deployment-templates.js";
+export {
+  createDeploymentFileReader,
+  createDeploymentStatusReader,
+  type DeploymentFilePorts
+} from "./deployment-bindings.js";
+export {
+  createDeploymentRuntime,
+  type DeploymentRuntime,
+  type DeploymentRuntimePorts,
+  type DeploymentStartResult,
+  type DeploymentStartContext,
+  type DeploymentStartInput,
+  type DeploymentWorkspace
+} from "./runtime-deployment.js";
+
+export {
+  createDeployDispatchService,
+  buildFederatedCredentialListArgs,
+  type DeployDispatchInstanceEntry,
+  type DeployCommandResult,
+  type DeployCommandOptions,
+  type DeployDispatchDependencies,
+  type DeployDispatchRequest,
+  type DeployDispatchOutcome,
+  type DeployDispatchService
+} from "./deployment-dispatch.js";
+export {
+  createDeployMonitorService,
+  type DeploymentObservationScope,
+  type DeploymentGraphRecovery,
+  type DeployMonitorInstanceEntry,
+  type DeployRunDetail,
+  type DeployMonitorStatusReader,
+  type DeployResourceStatus,
+  type DeployStatusChange,
+  type DeployMonitorDependencies,
+  type DeployMonitorRequest,
+  type DeployMonitorService,
+  type DeployObservationService
+} from "./deployment-monitor.js";
+export {
+  createDeployOutcomeService,
+  type DeployOutcomeInstanceEntry,
+  type DeployRunStep,
+  type DeployGraphRead,
+  type DeployOutcomeStatusReader,
+  type DeployOutcomeDependencies,
+  type DeployOutcomeRequest,
+  type DeployOutcomeService
+} from "./deployment-outcome.js";
+export {
+  createDeploymentRepairCoordinator,
+  type DeploymentDeliveryIdentity,
+  type DeploymentFailureNotice,
+  type DeploymentRepairHandoff,
+  type DeploymentRepairDependencies,
+  type DeploymentRepairRequest,
+  type DeploymentDeliveryResult,
+  type DeploymentRepairCoordinator
+} from "./deployment-repair.js";
+export { assertDeployDependencies } from "./deployment-service-dependencies.js";
+
+export {
+  createWorkflowObservationScope,
+  type WorkflowObservationScope
+} from "./workflow-observation-scope.js";
+
+export {
+  createDeploymentOwner,
+  type DeploymentTarget,
+  type DeploymentReservation,
+  type DeploymentInvocation,
+  type DeploymentOwnerPorts,
+  type DeploymentLookup,
+  type DeploymentOwner
+} from "./deployment-owner.js";
+export { autogenValue, resolveDeployParams } from "./deployment-parameters.js";
+export type {
+  DeploymentObservationExecutor,
+  DeploymentSelectedWorkflowExecutor
+} from "./deployment-observation-bindings.js";
+export {
+  createProductionDeploymentRuntime,
+  type ProductionDeploymentPorts
+} from "./production-deployment.js";
