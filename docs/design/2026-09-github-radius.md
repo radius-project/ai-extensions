@@ -3,6 +3,7 @@
 - **Author**: Nell Shamrell-Harrington (@nellshamrell)
 - **Date**: 2026-09
 - **Current-state assessment**: 2026-11-05, against `ai-extensions` revision [`0cb4983`](https://github.com/radius-project/ai-extensions/tree/0cb498371950d608d4a6217d1eee5588aa9ff504).
+- **Stage 3 implementation**: This branch includes shared deployment and direct tools, with [local qualification](./2026-09-github-radius-migration-inventory.md#deployment-admission-and-dispatch). This does not imply merge or real-host qualification.
 
 **Status:** See [current implementation](#current-implementation-and-remaining-target) and the [migration ledger](./2026-09-github-radius-migration-inventory.md#migration-ownership-ledger). The [prototype at `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) are historical references.
 
@@ -121,28 +122,34 @@ Simply moving these files to a different folder would not be enough. The extract
 
 #### Current implementation and remaining target
 
-Canvas now consumes shared workflow observation and much of the environment setup policy. Deployment, graph orchestration, authoring and deletion still need extraction.
+Canvas now consumes shared workflow observation, deployment and much of the environment setup policy. Independent setup bindings, graph orchestration, authoring and deletion still need extraction.
 
-| Capability                       | Delivered                                                                                           | Still to extract                                                               |
-|----------------------------------|-----------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| Workflow observation             | Core/shared reads, diagnostics, artifact validation and bounded retries                             | Deployment monitoring, attempt ownership and repair policy                     |
-| Environment setup                | Core setup/verification policy; runtime-owned execution; setup/status/control tools without a panel | Reusable production bindings outside `adapter-canvas`                          |
-| Deployment and repair            | Shared readers and diagnostics                                                                      | Attempt ownership, dispatch, monitoring and tools that do not call Canvas HTTP |
-| Graphs, authoring and inspection | Core algorithms and shared execution helpers                                                        | Source resolution, orchestration and explicit agent interactions               |
-| Deletion                         | Existing Canvas safeguards                                                                          | Shared application/environment teardown and confirmed tool access              |
+| Capability                       | Delivered                                                                                            | Still to extract                                                        |
+|----------------------------------|------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
+| Workflow observation             | Core/shared reads, diagnostics, artifact validation, bounded retries and deployment monitoring       | Evidence unavailable in existing producer contracts                     |
+| Environment setup                | Core setup/verification policy; runtime-owned execution; setup/status/control tools without a panel  | Reusable production bindings outside `adapter-canvas`                   |
+| Deployment and repair            | Shared production runtime, attempt ownership, dispatch, monitoring, explicit repair and direct tools | Implemented and locally qualified; hosted CI and review remain separate |
+| Graphs, authoring and inspection | Core algorithms and shared execution helpers                                                         | Source resolution, orchestration and explicit agent interactions        |
+| Deletion                         | Existing Canvas safeguards                                                                           | Shared application/environment teardown and confirmed tool access       |
 
 The [environment tools](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/packages/adapter-canvas/src/runtime/environment-tools.ts) share setup services with the wizard. Setup is **verify-only**: deployment requires a separate explicit action. The [implementation plan](https://github.com/radius-project/ai-extensions/blob/0cb498371950d608d4a6217d1eee5588aa9ff504/docs/design/2026-09-github-radius-implementation-plan.md#delivery-strategy) therefore removes deployment-attempt ownership as a prerequisite for environment tools.
 
 ```mermaid
 graph TD
     Tools["Environment tools"]
+    DeployTools["Deploy/status tools"]
     Canvas["Canvas"]
     Bindings["adapter-canvas<br/>setup services and runtime owner"]
+    Deployment["adapter-shared<br/>deployment runtime and owner"]
     Core["core<br/>shared policy"]
     Shared["adapter-shared<br/>execution"]
-    Remaining["Canvas-owned coordination<br/>deployment, graphs, authoring, deletion"]
+    Remaining["Canvas-owned coordination<br/>graphs, authoring, deletion"]
     Tools --> Bindings
     Canvas --> Bindings
+    DeployTools --> Deployment
+    Canvas --> Deployment
+    Deployment --> Core
+    Deployment --> Shared
     Bindings --> Core
     Bindings --> Shared
     Canvas --> Remaining
@@ -150,7 +157,7 @@ graph TD
     Remaining --> Shared
 ```
 
-**No panel does not mean no Canvas dependency.** Setup tools still import `adapter-canvas` services and operation contracts. Another frontend must be able to call the shared implementation without those dependencies. Account choice, confirmation, workspace authorization, persistence and presentation remain host responsibilities.
+**No panel does not mean no Canvas dependency.** Setup tools still import `adapter-canvas` services and operation contracts. Another frontend must be able to call that implementation without those dependencies. Deployment already uses the independent [shared production factory](../../packages/adapter-shared/src/production-deployment.ts); Canvas supplies credentials, execution and delivery through host ports. Account choice, confirmation, workspace authorization, persistence and presentation remain host responsibilities.
 
 ### Architecture diagram
 

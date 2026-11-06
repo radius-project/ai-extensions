@@ -1,15 +1,5 @@
-import {
-  observeWorkflowRun,
-  type WorkflowRunDetail
-} from "@radius-project/core";
-import {
-  readWorkflowRun,
-  readWorkflowLog,
-  selectedWorkflowJson,
-  type WorkflowExecution,
-  type WorkflowRunReadOptions,
-  type WorkflowReadRequest
-} from "@radius-project/adapter-shared";
+import { createDeploymentObservationBindings } from "@radius-project/adapter-shared";
+export { selectWorkflowRunId } from "@radius-project/core";
 export {
   SelectedGhAuthorizationError,
   isSelectedGhAuthorizationError,
@@ -32,14 +22,24 @@ export type { DeployCloudAuthDriftInput } from "@radius-project/core";
 // workflow artifacts instead — see ./deploy-artifacts.ts.
 // Reads GitHub via the gh CLI; portal links come from ./infra.ts.
 
-import { cliExec } from "./gh.js";
-import type { SelectedGhExecutor } from "./gh.js";
+import { cliExec, redactGhCredentials } from "./gh.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
   type GhCommandPresentation
 } from "./gh-command-display.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
+
+export const {
+  ghJson,
+  latestWorkflowRunId,
+  findWorkflowRun,
+  getRunDetail,
+  fetchRunLog
+} = createDeploymentObservationBindings({
+  execute: (...args) => cliExec(...args),
+  redactDiagnostic: redactGhCredentials
+});
 
 type DeployStatus = "pending" | "in_progress" | "success" | "failed";
 
@@ -67,14 +67,6 @@ export interface DeployedResource {
   deployStatus?: DeployStatus;
 }
 
-interface WorkflowRun {
-  databaseId?: number;
-  createdAt?: string;
-  status?: string;
-  conclusion?: string | null;
-  displayTitle?: string;
-}
-
 interface RepoPermissions {
   admin?: boolean;
   maintain?: boolean;
@@ -88,214 +80,6 @@ interface RepoAccessInput {
   login?: string;
   readFailed?: boolean;
   permissions?: RepoPermissions | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function stringField(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function parseWorkflowRun(value: unknown): WorkflowRun | null {
-  if (!isRecord(value)) return null;
-  return {
-    databaseId:
-      typeof value.databaseId === "number" ? value.databaseId : undefined,
-    createdAt: stringField(value.createdAt),
-    status: stringField(value.status),
-    conclusion:
-      typeof value.conclusion === "string" || value.conclusion === null ?
-        value.conclusion
-      : undefined,
-    displayTitle: stringField(value.displayTitle)
-  };
-}
-
-export function ghJson(
-  args: string[],
-  fallback: unknown = null,
-  timeout = 15000
-): Promise<unknown> {
-  return new Promise((resolve) => {
-    cliExec("gh", args, { timeout }, (err, stdout) => {
-      if (err) {
-        resolve(fallback);
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout.trim()));
-      } catch {
-        resolve(fallback);
-      }
-    });
-  });
-}
-
-// Coerce a run id (which state may carry as a string) to a finite number for
-// the monotonic-id comparison, or null when it is absent or not numeric.
-function numericRunId(
-  value: number | string | null | undefined
-): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-// Returns the id of the newest existing run for a workflow, so a dispatcher can
-// capture a baseline immediately before it starts a run and later identify the
-// run it created as the first one whose id exceeds that baseline. Run ids are
-// monotonically increasing on GitHub, which makes this immune to the clock skew
-// that a created-at time window has to tolerate.
-export async function latestWorkflowRunId(
-  repo: string,
-  workflowFile: string
-): Promise<number | null> {
-  const runs = await ghJson(
-    [
-      "run",
-      "list",
-      "--workflow=" + workflowFile,
-      "--limit",
-      "20",
-      "--json",
-      "databaseId,createdAt",
-      "--repo",
-      repo
-    ],
-    []
-  );
-  if (!Array.isArray(runs)) return null;
-  let max: number | null = null;
-  for (const value of runs) {
-    const r = parseWorkflowRun(value);
-    if (r?.databaseId === undefined) continue;
-    if (max === null || r.databaseId > max) max = r.databaseId;
-  }
-  return max;
-}
-
-export async function findWorkflowRun(
-  repo: string,
-  workflowFile: string,
-  sinceMs: number,
-  knownId?: number | string | null,
-  executor?: SelectedGhExecutor,
-  afterRunId?: number | string | null,
-  correlationId?: string | null
-): Promise<number | string | null> {
-  if (knownId) return knownId;
-  const fields =
-    correlationId ?
-      "databaseId,status,createdAt,displayTitle"
-    : "databaseId,status,createdAt";
-  const args = [
-    "run",
-    "list",
-    "--workflow=" + workflowFile,
-    "--limit",
-    "5",
-    "--json",
-    fields,
-    "--repo",
-    repo
-  ];
-  const selectedRead =
-    executor ? await selectedWorkflowJson(executor, repo, args) : null;
-  const runs =
-    selectedRead ?
-      selectedRead.state === "value" ?
-        selectedRead.value
-      : []
-    : await ghJson(args, []);
-  return selectWorkflowRunId(runs, sinceMs, correlationId, afterRunId);
-}
-
-/**
- * Pick the database id of the workflow run this caller dispatched from a
- * `gh run list` payload. Runs are newest-first; accept the first created within
- * ~60s before dispatch (clock-skew tolerance) so stale prior runs are ignored.
- * When a correlation id is supplied the run's display title must also contain it
- * (the dispatcher echoes it via `run-name:`), so a concurrent or manual deletion
- * of a different environment is never mistaken for this one.
- */
-export function selectWorkflowRunId(
-  runs: unknown,
-  sinceMs: number,
-  correlationId?: string | null,
-  afterRunId?: number | string | null
-): number | string | null {
-  if (!Array.isArray(runs)) return null;
-  // Prefer a monotonic run-id baseline when the caller captured one just before
-  // dispatch: accept the smallest run id that exceeds it, which is the first run
-  // created after the baseline rather than a later overlapping dispatch. This is
-  // what keeps a redeploy's "view run" link pointing at its newly started run
-  // instead of the last one.
-  const baseline = numericRunId(afterRunId);
-  if (baseline !== null) {
-    let firstRunId: number | null = null;
-    for (const value of runs) {
-      const r = parseWorkflowRun(value);
-      if (r?.databaseId === undefined) continue;
-      if (
-        r.databaseId > baseline &&
-        (firstRunId === null || r.databaseId < firstRunId)
-      ) {
-        firstRunId = r.databaseId;
-      }
-    }
-    return firstRunId;
-  }
-  // No baseline (e.g. it could not be captured): fall back to a created-at
-  // window, accepting the newest run created within ~60s before dispatch (clock
-  // skew tolerance) to avoid picking up clearly stale prior runs.
-  const cutoff = (sinceMs || 0) - 60000;
-  for (const value of runs) {
-    const r = parseWorkflowRun(value);
-    if (!r) continue;
-    const created = Date.parse(r.createdAt || "") || 0;
-    if (created < cutoff || r.databaseId === undefined) continue;
-    if (correlationId && !(r.displayTitle || "").includes(correlationId)) {
-      continue;
-    }
-    return r.databaseId;
-  }
-  return null;
-}
-
-export function getRunDetail(
-  repo: string,
-  runId: number | string,
-  executor?: SelectedGhExecutor,
-  request?: WorkflowReadRequest,
-  options?: WorkflowRunReadOptions
-): Promise<WorkflowRunDetail | null> {
-  return observeWorkflowRun(
-    { repo, runId },
-    {
-      readRun: (targetRepo, targetRunId) =>
-        readWorkflowRun(
-          workflowExecution(executor),
-          targetRepo,
-          targetRunId,
-          request,
-          options
-        )
-    }
-  );
-}
-
-export function fetchRunLog(
-  repo: string,
-  runId: number | string,
-  executor?: SelectedGhExecutor,
-  request?: WorkflowReadRequest
-): Promise<string | null> {
-  return readWorkflowLog(workflowExecution(executor), repo, runId, request);
 }
 
 // Detects the Azure Login (azure/login) "No subscriptions found" failure that
@@ -400,20 +184,4 @@ export function explainRepoAccessForEnvSetup(
 export function isRepoNotFoundError(errText?: string | null): boolean {
   if (!errText) return false;
   return /\bHTTP 404\b/i.test(errText) || /\bnot found\b/i.test(errText);
-}
-
-function workflowExecution(executor?: SelectedGhExecutor): WorkflowExecution {
-  return executor ?
-      { mode: "selected", executor, prepare: () => executor.verifyIdentity() }
-    : {
-        mode: "ambient",
-        run: (args, options) =>
-          new Promise((resolve) => {
-            // Resolve CLI callback failures as nonzero results rather than rejecting,
-            // preserving ambient readers' null/status-fallback behavior.
-            cliExec("gh", args, options, (error, stdout, stderr) => {
-              resolve({ code: error ? (error.code ?? 1) : 0, stdout, stderr });
-            });
-          })
-      };
 }

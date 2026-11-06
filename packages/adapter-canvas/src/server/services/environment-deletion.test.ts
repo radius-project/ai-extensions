@@ -1091,7 +1091,7 @@ describe("runEnvironmentDeletion — AWS", () => {
 describe("runEnvironmentDeletion — best-effort warnings", () => {
   it("fails closed and stops before cleanup when the radius env delete fails", async () => {
     const op = makeOp({ provider: "aws", includeAzureCleanup: false });
-    const ports = makePorts({
+    const { log: _log, ...ports } = makePorts({
       deleteRadiusEnvironment: vi.fn(async () => ({
         outcome: "failed" as const,
         detail: "workflow failed"
