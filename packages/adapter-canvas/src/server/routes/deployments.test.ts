@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { captureDeployedApplicationState } from "../services/deployed-view-state.js";
 import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
@@ -141,6 +142,10 @@ function dependencies(
       throw new Error("runGh not stubbed");
     },
     readProcessEnv: () => ({}),
+    captureDeletedDeployment: captureDeployedApplicationState,
+    logError: () => {
+      throw new Error("logError not stubbed");
+    },
     // Timers run inline so the dispatch retry delays cost nothing; the lease
     // callback is captured rather than fired, matching a real pending timer.
     setTimer: (callback, ms) => {
@@ -1536,6 +1541,149 @@ describe("deployments routes (SU-06)", () => {
     function deleteContext(body = BODY) {
       return context("POST", "/api/delete-deployment", body);
     }
+
+    it.each<{
+      name: string;
+      overrides: Partial<DeploymentsDependencies>;
+      status: number;
+      force?: boolean;
+    }>([
+      {
+        name: "unavailable remote state",
+        status: 503,
+        overrides: {
+          resolveEnvDeployment: async () => {
+            throw new Error("unavailable");
+          }
+        }
+      },
+      {
+        name: "force precondition refusal",
+        status: 409,
+        force: true,
+        overrides: {}
+      },
+      {
+        name: "workflow synchronization failure",
+        status: 400,
+        overrides: {
+          ensureWorkflowsCurrent: async () => {
+            throw new Error("sync failed");
+          }
+        }
+      },
+      {
+        name: "rejected dispatch",
+        status: 400,
+        overrides: {
+          runGh: async () => ({ code: 1, stdout: "", stderr: "rejected" })
+        }
+      },
+      {
+        name: "ambiguous dispatch timeout",
+        status: 400,
+        overrides: {
+          runGh: async () => ({
+            code: 1,
+            stdout: "",
+            stderr: "timeout",
+            timedOut: true
+          })
+        }
+      }
+    ])(
+      "preserves captured evidence after $name",
+      async ({ overrides, status, force }) => {
+        const invalidate = vi.fn();
+        const capture = vi.fn(() => invalidate);
+        const release = vi.fn();
+        const { recording, context: ctx } = deleteContext(
+          JSON.stringify({
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist",
+            force
+          })
+        );
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            ...overrides,
+            captureDeletedDeployment: capture,
+            releaseDeploymentMutation: release
+          })
+        );
+        expect(recording.status).toBe(status);
+        expect(capture).toHaveBeenCalledOnce();
+        expect(invalidate).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledOnce();
+      }
+    );
+
+    it.each(["missing", "throwing"] as const)(
+      "retains accepted dispatch and its lease after %s run discovery",
+      async (discovery) => {
+        const invalidate = vi.fn();
+        const capture = vi.fn(() => invalidate);
+        const release = vi.fn();
+        const logError = vi.fn();
+        const dispatch = vi.fn(async () => ({
+          code: 0,
+          stdout: "",
+          stderr: ""
+        }));
+        let expire: (() => void) | undefined;
+        const { recording, context: ctx } = deleteContext();
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            captureDeletedDeployment: capture,
+            readProcessEnv: () => ({ GH_TOKEN: "fixture-only-value" }),
+            releaseDeploymentMutation: release,
+            runGh: dispatch,
+            logError,
+            setTimer(callback) {
+              expire = callback;
+              return {};
+            },
+            findWorkflowRun: async () => {
+              expect(invalidate).toHaveBeenCalledOnce();
+              expect(expire).toBeTypeOf("function");
+              if (discovery === "throwing")
+                throw new Error(
+                  "Authorization: Bearer fixture-only-value\n" +
+                    "x".repeat(3000)
+                );
+              return null;
+            }
+          })
+        );
+        expect(recording.status).toBe(200);
+        expect(JSON.parse(recording.body)).toEqual({
+          success: true,
+          runUrl: "",
+          forced: false
+        });
+        expect(capture).toHaveBeenCalledWith(
+          {},
+          {
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist"
+          }
+        );
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(release).not.toHaveBeenCalled();
+        if (discovery === "throwing") {
+          expect(logError).toHaveBeenCalledOnce();
+          const diagnostic = logError.mock.calls[0][0];
+          expect(diagnostic).not.toContain("fixture-only-value");
+          expect(diagnostic.length).toBeLessThan(2100);
+        } else expect(logError).not.toHaveBeenCalled();
+        expire?.();
+        expect(release).toHaveBeenCalledOnce();
+      }
+    );
 
     it("refuses a request missing or malformed repo, environment or application", async () => {
       for (const body of [

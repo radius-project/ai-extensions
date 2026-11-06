@@ -29,12 +29,16 @@ export type DeploymentLookup<State> =
 const RESERVATION_MS = 30 * 60 * 1000;
 
 function key(target: Pick<DeploymentTarget, "repo" | "environment">): string {
-  return JSON.stringify([target.repo.toLowerCase(), target.environment]);
+  return JSON.stringify([
+    target.repo.toLowerCase(),
+    target.environment.toLowerCase()
+  ]);
 }
 
 function sameTarget(left: DeploymentTarget, right: DeploymentTarget): boolean {
   return (
-    key(left) === key(right) &&
+    left.repo.toLowerCase() === right.repo.toLowerCase() &&
+    left.environment === right.environment &&
     left.branch === right.branch &&
     left.provider === right.provider &&
     left.appFile === right.appFile
@@ -54,11 +58,15 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
   >();
   const claims = new Map<DeploymentInvocation<State>, Set<string>>();
   const issuedIds = new Set<string>();
+  const invalidated = new WeakSet<DeploymentInvocation<State>>();
   let generation = 0;
   let stopped = false;
 
   function isCurrent(invocation: DeploymentInvocation<State>): boolean {
-    return attempts.get(invocation.attemptId) === invocation;
+    return (
+      attempts.get(invocation.attemptId) === invocation &&
+      !invalidated.has(invocation)
+    );
   }
 
   function isActive(invocation: DeploymentInvocation<State>): boolean {
@@ -167,7 +175,7 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     } else if (input.observationId !== undefined) {
       invocation = observations.get(input.observationId);
     } else {
-      const current = [...attempts.values()];
+      const current = [...attempts.values()].filter(isCurrent);
       if (current.length !== 1)
         return { kind: current.length ? "ambiguous" : "missing" };
       return { kind: "found", invocation: current[0] };
@@ -178,7 +186,11 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
   }
 
   function retire(invocation: DeploymentInvocation<State>): boolean {
-    if (!isCurrent(invocation) || isActive(invocation)) return false;
+    if (
+      attempts.get(invocation.attemptId) !== invocation ||
+      isActive(invocation)
+    )
+      return false;
     controllers.get(invocation)?.abort();
     controllers.delete(invocation);
     observations.delete(invocation.observationId);
@@ -188,12 +200,24 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     return true;
   }
 
+  function invalidate(invocation: DeploymentInvocation<State>): boolean {
+    if (!isCurrent(invocation)) return false;
+    invalidated.add(invocation);
+    observations.delete(invocation.observationId);
+    subscribers.delete(invocation);
+    claims.delete(invocation);
+    controllers.get(invocation)?.abort();
+    // Keep active tasks in the target map until settlement, even past lease expiry.
+    retire(invocation);
+    return true;
+  }
+
   function lookupTarget(
     target: Pick<DeploymentTarget, "repo" | "environment">
   ): DeploymentLookup<State> {
     const targetKey = key(target);
     for (const invocation of attempts.values()) {
-      if (key(invocation.target) === targetKey)
+      if (key(invocation.target) === targetKey && isCurrent(invocation))
         return { kind: "found", invocation };
     }
     return { kind: "missing" };
@@ -218,7 +242,10 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     pending.add(promise);
     const settled = promise.finally(() => {
       pending.delete(promise);
-      if (!pending.size) tasks.delete(invocation);
+      if (!pending.size) {
+        tasks.delete(invocation);
+        if (invalidated.has(invocation)) retire(invocation);
+      }
       publish(invocation);
     });
     return settled;
@@ -305,6 +332,7 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     reserve,
     release,
     retire,
+    invalidate,
     run,
     trackAdmission,
     subscribe,

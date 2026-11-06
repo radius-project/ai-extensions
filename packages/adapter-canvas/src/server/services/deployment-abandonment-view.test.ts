@@ -56,7 +56,7 @@ const request = {
   instanceId: "different-view",
   payload: {
     repo: " ACME/app ",
-    environment: " production ",
+    environment: " PRODUCTION ",
     application: "app"
   }
 };

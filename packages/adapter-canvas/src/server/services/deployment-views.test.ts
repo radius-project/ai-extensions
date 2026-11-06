@@ -232,7 +232,7 @@ describe("detachable deployment projections", () => {
       envName: "Staging"
     };
     h.views.refresh("wrong", wrongCase);
-    expect(wrongCase.deployAttempt).toBeUndefined();
+    expect(wrongCase.deployAttempt?.id).toBe(selected.attemptId);
   });
 
   it("reconnects a replacement ordinary attempt without selecting an unrelated target", () => {
@@ -282,5 +282,129 @@ describe("detachable deployment projections", () => {
     h.views.release({}, a);
     h.views.release({}, a);
     expect(h.views.reserve({}, input)).not.toBeNull();
+  });
+
+  it("deletion clears every matching projection without suppressing a later deployment", () => {
+    const h = harness();
+    const first = h.begin({
+      deployStatus: "complete",
+      deployAppName: "Widgets",
+      deployedGraph: [{ name: "old" }],
+      deployRunId: 42
+    });
+    const other = h.begin(
+      { deployStatus: "complete", deployAppName: "Widgets" },
+      "acme/other"
+    );
+    const a: CanvasState = { contextRepo: h.target.repo };
+    const b: CanvasState = { contextRepo: h.target.repo };
+    const c: CanvasState = { contextRepo: "acme/other" };
+    h.views.attach("a", a, first);
+    h.views.attach("b", b, first);
+    h.views.attach("c", c, other);
+    const invalidate = h.views.captureDeletion(a, {
+      repo: "ACME/widgets",
+      environment: "PRODUCTION",
+      application: " widgets "
+    });
+    invalidate();
+    invalidate();
+    for (const [id, state] of [
+      ["a", a],
+      ["b", b]
+    ] as const) {
+      h.views.refresh(id, state);
+      expect(state.deployedGraph).toBeUndefined();
+      expect(state.deployRunId).toBeUndefined();
+      expect(state.deployStatus).toBeUndefined();
+    }
+    expect(c.deployStatus).toBe("complete");
+    const next = h.begin({
+      deployStatus: "in_progress",
+      deployAppName: "widgets"
+    });
+    h.views.attach("third", {}, next);
+    for (const [id, state] of [
+      ["a", a],
+      ["b", b]
+    ] as const) {
+      h.views.refresh(id, state);
+      expect(state.deployAttempt?.id).toBe(next.attemptId);
+      expect(state.deployStatus).toBe("in_progress");
+    }
+  });
+
+  it.each([undefined, "", " ", "different"])(
+    "preserves owner evidence without a matching known application: %j",
+    (deployAppName) => {
+      const h = harness();
+      const invocation = h.begin({ deployStatus: "complete", deployAppName });
+      const state: CanvasState = { contextRepo: h.target.repo };
+      h.views.attach("panel", state, invocation);
+      h.views.captureDeletion(state, { ...h.target, application: "widgets" })();
+      expect(h.runtime.owner.isCurrent(invocation)).toBe(true);
+      expect(state.deployStatus).toBe("complete");
+    }
+  );
+
+  it.each([false, true])(
+    "protects a replacement invocation (repair: %s)",
+    (repair) => {
+      const h = harness();
+      const first = h.begin({
+        deployStatus: "complete",
+        deployAppName: "widgets"
+      });
+      const state: CanvasState = {};
+      h.views.attach("panel", state, first);
+      const invalidate = h.views.captureDeletion(state, {
+        ...h.target,
+        application: "widgets"
+      });
+      const next = h.begin(
+        { deployStatus: "in_progress", deployAppName: "widgets" },
+        h.target.repo,
+        repair ? first.attemptId : undefined
+      );
+      h.views.refresh("panel", state);
+      invalidate();
+      expect(h.runtime.owner.isCurrent(next)).toBe(true);
+      expect(state.deployAttempt?.id).toBe(next.attemptId);
+      expect(state.deployStatus).toBe("in_progress");
+    }
+  );
+
+  it("invalidates delivery that starts after capture without reviving cleared or explicitly reset views", async () => {
+    const h = harness();
+    const first = h.begin({ deployStatus: "failed", deployAppName: "widgets" });
+    const state: CanvasState = { contextRepo: h.target.repo };
+    const reset: CanvasState = { contextRepo: h.target.repo };
+    h.views.attach("panel", state, first);
+    h.views.attach("reset", reset, first);
+    const invalidate = h.views.captureDeletion(state, {
+      ...h.target,
+      application: "widgets"
+    });
+    const done = createDeferred<void>();
+    const entered = createDeferred<void>();
+    const work = h.runtime.owner.run(first, () => {
+      entered.resolve();
+      return done.promise;
+    });
+    await entered.promise;
+    h.views.reset(reset, first.attemptId);
+    invalidate();
+    expect(h.runtime.owner.hasActiveWork()).toBe(true);
+    first.state.deployStatus = "complete";
+    h.runtime.owner.publish(first);
+    h.views.refresh("panel", state);
+    expect(state.deployStatus).toBeUndefined();
+    done.resolve();
+    await work;
+    h.begin({ deployStatus: "in_progress" });
+    h.views.refresh("panel", state);
+    h.views.refresh("reset", reset);
+    expect(state.deployStatus).toBe("in_progress");
+    expect(reset.deployStatus).toBeUndefined();
   });
 });

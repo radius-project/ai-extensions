@@ -48,6 +48,98 @@ function deferred() {
 afterEach(() => vi.useRealTimers());
 
 describe("runtime deployment ownership", () => {
+  it.each(["success", "failure"] as const)(
+    "invalidates observable evidence while retaining issued work through %s",
+    async (outcome) => {
+      const { owner, begin, advance } = fixture();
+      const { invocation, reservation } = begin();
+      owner.release(reservation);
+      const done = deferred();
+      const entered = deferred();
+      const subscriber = vi.fn();
+      owner.subscribe(invocation, subscriber);
+      const work = owner.run(invocation, () => {
+        entered.resolve();
+        return done.promise;
+      });
+      await entered.promise;
+      expect(owner.retire(invocation)).toBe(false);
+      expect(owner.invalidate(invocation)).toBe(true);
+      expect(owner.invalidate(invocation)).toBe(false);
+      expect(invocation.signal.aborted).toBe(true);
+      expect(owner.lookup()).toEqual({ kind: "missing" });
+      expect(owner.lookupTarget(target)).toEqual({ kind: "missing" });
+      expect(owner.lookup({ attemptId: invocation.attemptId }).kind).toBe(
+        "missing"
+      );
+      expect(
+        owner.lookup({ observationId: invocation.observationId }).kind
+      ).toBe("missing");
+      expect(owner.claim(invocation, "retry")).toBe(false);
+      await expect(owner.run(invocation, async () => {})).rejects.toThrow(
+        "no longer active"
+      );
+      advance(31 * 60 * 1000);
+      expect(
+        owner.reserve({ ...target, environment: "DEV" }, "delete")
+      ).toBeNull();
+      expect(owner.hasActiveWork()).toBe(true);
+      owner.publish(invocation);
+      expect(subscriber).not.toHaveBeenCalled();
+      if (outcome === "failure") {
+        const rejected = expect(work).rejects.toThrow("delivery failed");
+        done.reject(new Error("delivery failed"));
+        await rejected;
+      } else {
+        done.resolve();
+        await work;
+      }
+      expect(owner.hasActiveWork()).toBe(false);
+      const next = begin();
+      expect(owner.invalidate(invocation)).toBe(false);
+      expect(owner.lookup()).toEqual({
+        kind: "found",
+        invocation: next.invocation
+      });
+      expect(subscriber).not.toHaveBeenCalled();
+    }
+  );
+
+  it("drains hidden work and excludes it from unbound status selection", async () => {
+    const { owner, begin } = fixture();
+    const { invocation } = begin();
+    const done = deferred();
+    const entered = deferred();
+    const work = owner.run(invocation, () => {
+      entered.resolve();
+      return done.promise;
+    });
+    await entered.promise;
+    owner.invalidate(invocation);
+    const other = begin({ ...target, environment: "staging" }).invocation;
+    expect(owner.lookup()).toEqual({ kind: "found", invocation: other });
+    begin({ ...target, repo: "fixture/other" });
+    expect(owner.lookup()).toEqual({ kind: "ambiguous" });
+    expect(await owner.shutdown(0)).toEqual({
+      complete: false,
+      pending: [invocation.observationId]
+    });
+    done.resolve();
+    await work;
+    expect(await owner.shutdown(0)).toEqual({ complete: true, pending: [] });
+  });
+
+  it("fences work invalidated before execution", async () => {
+    const { owner, begin } = fixture();
+    const { invocation } = begin();
+    const callback = vi.fn(async () => {});
+    const work = owner.run(invocation, callback);
+    owner.invalidate(invocation);
+    await expect(work).rejects.toThrow("stopped before execution");
+    expect(callback).not.toHaveBeenCalled();
+    expect(owner.hasActiveWork()).toBe(false);
+  });
+
   it("distinguishes no attempt from an admitted pending attempt", () => {
     const { owner, begin } = fixture();
     expect(owner.lookup()).toEqual({ kind: "missing" });
@@ -89,7 +181,7 @@ describe("runtime deployment ownership", () => {
   it("reattaches by exact target without selecting another environment or a retired attempt", () => {
     const { owner, begin } = fixture();
     const first = begin();
-    const other = begin({ ...target, environment: "DEV" });
+    const other = begin({ ...target, environment: "staging" });
     expect(
       owner.lookupTarget({ repo: "FIXTURE/APP", environment: "dev" })
     ).toEqual({
@@ -98,6 +190,12 @@ describe("runtime deployment ownership", () => {
     });
     expect(
       owner.lookupTarget({ repo: "fixture/app", environment: "DEV" })
+    ).toEqual({
+      kind: "found",
+      invocation: first.invocation
+    });
+    expect(
+      owner.lookupTarget({ repo: "fixture/app", environment: "staging" })
     ).toEqual({
       kind: "found",
       invocation: other.invocation
@@ -126,9 +224,41 @@ describe("runtime deployment ownership", () => {
     expect(owner.reserve(target, "abandon")).toBeNull();
     expect(
       owner.reserve({ ...target, environment: "DEV" }, "deploy")
-    ).not.toBeNull();
+    ).toBeNull();
     owner.release(reservation);
     expect(owner.reserve(target, "delete")).not.toBeNull();
+  });
+
+  it.each(["deploy", "delete", "abandon"] as const)(
+    "excludes every mutation while %s owns a differently cased target",
+    (kind) => {
+      const { owner } = fixture();
+      const reserved = owner.reserve(target, kind);
+      expect(reserved?.target).toEqual(target);
+      for (const next of ["deploy", "delete", "abandon"] as const)
+        expect(
+          owner.reserve({ repo: "FIXTURE/APP", environment: "DEV" }, next)
+        ).toBeNull();
+    }
+  );
+
+  it("preserves environment spelling and refuses case-only repair retargeting at the owner boundary", () => {
+    const { owner, begin } = fixture();
+    const first = begin();
+    owner.release(first.reservation);
+    const variant = { ...target, environment: "DEV" };
+    const reservation = owner.reserve(variant, "deploy");
+    if (!reservation) throw new Error("Missing reservation");
+    expect(() =>
+      owner.begin(
+        variant,
+        { status: "pending" },
+        reservation,
+        first.invocation.attemptId
+      )
+    ).toThrow("The repair target changed.");
+    expect(first.invocation.target.environment).toBe("dev");
+    expect(reservation.target.environment).toBe("DEV");
   });
 
   it.each(["repo", "environment"] as const)("rejects missing %s", (field) => {
@@ -142,7 +272,10 @@ describe("runtime deployment ownership", () => {
     const { owner, begin, advance } = fixture();
     const { reservation } = begin();
     advance(30 * 60 * 1000);
-    const replacement = owner.reserve(target, "delete");
+    const replacement = owner.reserve(
+      { ...target, environment: "DEV" },
+      "delete"
+    );
     expect(replacement).not.toBeNull();
     owner.release(reservation);
     expect(owner.reserve(target, "abandon")).toBeNull();

@@ -9,7 +9,8 @@ import type {
   DeleteConflictRequest
 } from "../services/delete-conflict.js";
 import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
-import { discardDeployedApplicationState } from "../services/deployed-view-state.js";
+import type { DeletedDeploymentIdentity } from "../services/deployed-view-state.js";
+import { redactGhCredentials } from "../../gh.js";
 import { DELETE_FAILED_STATUS } from "../services/delete-conflict.js";
 import { DELETE_APP_DISPATCHER_FILE } from "../../infra.js";
 import {
@@ -115,6 +116,11 @@ export interface DeploymentsDependencies {
   // error payload rather than as a definitive empty listing.
   ghOrThrow(args: string[]): Promise<string>;
   resetDeploymentViewState(state: CanvasState, attemptId: unknown): void;
+  captureDeletedDeployment(
+    state: CanvasState,
+    target: DeletedDeploymentIdentity & { repo: string }
+  ): () => void;
+  logError(message: string): void;
   deployListCache: DeployListCache;
   deployListTtlMs: number;
   // Destructive-dispatch seams. Every one is a specific named function rather
@@ -575,6 +581,10 @@ export async function handleDeleteDeployment(
       });
       return;
     }
+    const invalidateDeletedDeployment = dependencies.captureDeletedDeployment(
+      entry.state,
+      { repo, environment, application }
+    );
 
     // Backstop the UI with GitHub's persisted state too. This covers a
     // deployment started from another canvas instance or browser session.
@@ -814,16 +824,6 @@ export async function handleDeleteDeployment(
       return;
     }
 
-    // Best-effort: resolve the dispatched run's URL so the client can link to it
-    // in GitHub.
-    let runUrl = "";
-    const runId = await dependencies.findWorkflowRun(
-      repo,
-      DELETE_APP_DISPATCHER_FILE,
-      dispatchedAt,
-      null
-    );
-    if (runId) runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
     // A workflow run can become discoverable before it creates its GitHub
     // deployment record. Retain a short lease in either case to close that
     // publication gap; after it expires, resolveEnvDeployment is the durable
@@ -836,12 +836,26 @@ export async function handleDeleteDeployment(
     // A delete is now in flight, so the cached listing is stale — drop it so the
     // next poll reflects the "Deleting…" state immediately.
     dependencies.deployListCache.delete(repo);
-    // The delete run removes the deploy-status artifact for exactly this
-    // environment and application, which is what stops other sessions rendering
-    // the deleted deployment. This session also holds its own copy of that
-    // deploy, so retire it here or the Deployed view keeps showing "Last
-    // deployment" from state no artifact read can override.
-    discardDeployedApplicationState(entry.state, { environment, application });
+    invalidateDeletedDeployment();
+    let runUrl = "";
+    try {
+      const runId = await dependencies.findWorkflowRun(
+        repo,
+        DELETE_APP_DISPATCHER_FILE,
+        dispatchedAt,
+        null
+      );
+      if (runId)
+        runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
+    } catch (error) {
+      dependencies.logError(
+        "[radius delete] Dispatch accepted; run URL unavailable: " +
+          redactGhCredentials(
+            errorMessage(error),
+            dependencies.readProcessEnv()
+          ).slice(0, 2000)
+      );
+    }
     respond(200, { success: true, runUrl, forced: force });
   } catch (e) {
     releaseReservation();

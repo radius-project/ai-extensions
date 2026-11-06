@@ -10,7 +10,7 @@
   },
   "packages": {
     "adapter-canvas": {
-      "statements": 97.84,
+      "statements": 97.85,
       "branches": 96.23,
       "functions": 95.42,
       "lines": 98.06
