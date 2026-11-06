@@ -1,5 +1,6 @@
 import {
   AWS_TRUST_SUBJECTS_VARIABLE,
+  namesOneEnvironment,
   namesRepositoryEnvironment,
   repositoryLessSubjectMessage,
   subjectNamesRepository,
@@ -14,10 +15,12 @@ import {
   readRecordedAwsLock,
   type AwsLockAction
 } from "@radius-project/core";
-import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
+import {
+  awsEnvironmentPolicyName,
+  defaultAwsDeployRoleName
+} from "../../aws-deploy-role-name.js";
 import {
   resolveOidcSubject,
-  parseServedReposFromSubjects,
   type GitHubJsonResponse,
   type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
@@ -585,6 +588,9 @@ export function createAwsEnvironmentAccess<Operation>(
       const existingRoleArn = text(input.existingRoleArn);
       let policyName: string | undefined;
       let reconcileLegacyPolicy = false;
+      // The name selects the app-role namespace, so only GitHub's repository
+      // identity decides it, never a saved value.
+      const expectedPolicyName = awsEnvironmentPolicyName(repo, environment);
       try {
         policyName = await savedPolicyName(
           repo,
@@ -606,7 +612,7 @@ export function createAwsEnvironmentAccess<Operation>(
               (existingRoleArn || awsRoleArn(accountId, roleName)) ||
             !("policyName" in recovery) ||
             typeof recovery.policyName !== "string" ||
-            !isAwsEnvironmentPolicyName(recovery.policyName, environment) ||
+            recovery.policyName !== expectedPolicyName ||
             (policyName !== undefined && policyName !== recovery.policyName)
           ) {
             throw new Error(
@@ -615,6 +621,11 @@ export function createAwsEnvironmentAccess<Operation>(
           }
           reconcileLegacyPolicy = policyName === undefined;
           policyName = recovery.policyName;
+        }
+        if (policyName !== undefined && policyName !== expectedPolicyName) {
+          throw new Error(
+            `The saved AWS_PERMISSION_POLICY_NAME "${policyName}" does not match repository ${repo} and environment ${environment}, which use "${expectedPolicyName}". Nothing was changed. If this repository was renamed, the saved name may be its namespace from before the rename. Review that namespace's inline policy on the deploy role and the app roles and permissions boundary under its path, and migrate or remove what you confirm is this environment's before you change the variable. Otherwise, correct the AWS_PERMISSION_POLICY_NAME variable of GitHub environment ${environment} to "${expectedPolicyName}", then retry.`
+          );
         }
       } catch (error) {
         if (dependencies.isStopRequested(operation))
@@ -852,40 +863,40 @@ export function createAwsEnvironmentAccess<Operation>(
       waiting,
       whileLocked
     }) {
-      // The recorded list covers a repository renamed since setup. The
-      // current subjects cover what Repair added after an OIDC subject
+      // The recorded list covers what setup trusted before an OIDC subject
+      // change. The current subjects cover what Repair added after that
       // change, which the recorded list doesn't name. The removal keeps any
       // that other environments or repositories may present too. A GitHub
       // read failure throws, so the delete stops with the GitHub environment
       // kept.
       const oidc = await resolveOidc(repo, environment);
+      // AWS_TRUST_SUBJECTS is editable, so it could name another repository's
+      // subject for this environment, which removal would strip from a shared
+      // role.
+      const foreign = trustSubjects.filter(
+        (subject) =>
+          namesOneEnvironment(subject, environment) &&
+          !namesRepositoryEnvironment(subject, oidc)
+      );
+      if (foreign.length > 0) {
+        return {
+          ok: false,
+          message: `The saved ${AWS_TRUST_SUBJECTS_VARIABLE} of GitHub environment ${environment} has ${foreign.join(", ")}, which doesn't name repository ${oidc.fullName}. Radius won't change trust for another repository's subjects, so it changed nothing. If they are this repository's name before a rename, remove them from the trust policy of deploy role ${roleArn} by hand. Then remove them from ${AWS_TRUST_SUBJECTS_VARIABLE} and retry.`
+        };
+      }
       const subjects = [
         ...new Set([
           ...trustSubjects,
           ...oidc.federatedCredentials.map((credential) => credential.subject)
         ])
       ];
-      // Recorded subjects retain the pre-rename repository for older grants.
-      const policyRepositories = new Set(
-        parseServedReposFromSubjects(
-          trustSubjects.length > 0 ? trustSubjects : subjects
-        ).map((name) => name.toLowerCase())
-      );
-      if (policyRepositories.size > 1) {
-        return {
-          ok: false,
-          message:
-            "Recorded AWS trust subjects name multiple repositories, so Radius did not change the deploy identity. Review the environment's saved AWS configuration before retrying."
-        };
-      }
-      const policyRepository = [...policyRepositories][0] ?? oidc.fullName;
       const { result, lost, released } = await runUnderLock(
         { repo, environment, action: "delete", operationId },
         waiting ?? (() => undefined),
         async (ports) => {
           const removal = await removeAwsEnvironmentFromRole(
             {
-              repo: policyRepository,
+              repo: oidc.fullName,
               roleArn,
               environment,
               subjects,

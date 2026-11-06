@@ -1112,7 +1112,7 @@ describe("deleteEnvironmentMessage", () => {
         config: { cluster: "eks-1" }
       })
     ).toBe(
-      "This deletes the GitHub environment \"dev\" and removes the Radius environment from eks-1. It removes this environment's trust subjects and its repository-scoped permission policy from the deploy IAM role, and the role's access entry on eks-1 when nothing else can use it. The role itself and the account's GitHub identity provider are kept, because other environments or repositories may use them. Applications already deployed to it must be deleted first."
+      "This deletes the GitHub environment \"dev\" and removes the Radius environment from eks-1. It removes this environment's trust subjects and its repository-scoped permission policy from the deploy IAM role, and the role's access entry on eks-1 when nothing else can use it. It also deletes the IAM roles Radius created for this environment's apps, and their permissions boundary. The deploy role itself and the account's GitHub identity provider are kept, because other environments or repositories may use them. Applications already deployed to it must be deleted first."
     );
   });
 

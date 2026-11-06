@@ -1,3 +1,5 @@
+import { buildAwsAppIdentity } from "./platforms/aws-identity.js";
+
 export const AWS_TRUST_SUBJECTS_VARIABLE = "AWS_TRUST_SUBJECTS";
 export const AWS_PERMISSION_POLICY_NAME_VARIABLE = "AWS_PERMISSION_POLICY_NAME";
 
@@ -176,6 +178,11 @@ export async function applySetupProviderConfiguration(
       AWS_PERMISSION_POLICY_NAME_VARIABLE,
       data.policyName
     );
+    // Setup made this boundary and granted the deploy role these app roles,
+    // so the containers recipe can give each container its own role.
+    const app = buildAwsAppIdentity(accountId, data.policyName);
+    await ports.setEnvironmentVariable("AWS_APP_ROLE_PATH", app.rolePath);
+    await ports.setEnvironmentVariable("AWS_APP_BOUNDARY_ARN", app.boundaryArn);
   }
   if (!status.credentialsComplete) {
     ports.report({ kind: "credentials-missing", provider: "aws" });

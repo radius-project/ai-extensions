@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAwsAppIdentity,
   buildGitHubTrustPolicy,
   buildAwsEnvironmentPermissionPolicy
 } from "@radius-project/core";
@@ -7,7 +8,6 @@ import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
 import {
   attachEnvironmentPolicy,
   readLegacyEnvironmentPolicy,
-  resolveEnvironmentPolicyForRemoval,
   resolveEnvironmentPolicyForSetup
 } from "./aws-environment-policy.js";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
@@ -24,7 +24,10 @@ const request = {
 const role = {
   AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [SUBJECT])
 };
-const document = buildAwsEnvironmentPermissionPolicy("us-east-2");
+const document = buildAwsEnvironmentPermissionPolicy(
+  "us-east-2",
+  buildAwsAppIdentity(ACCOUNT, "radius-deploy-dev-0123456789ab")
+);
 document.Statement.push({
   Effect: "Allow",
   Action: "iam:DeleteServiceLinkedRole",
@@ -198,17 +201,6 @@ describe("migration at the inline-policy quota", () => {
 });
 
 describe("recorded policy identity", () => {
-  it("uses the saved name after a repository rename without recomputing its hash", async () => {
-    const ports = runner();
-    expect(
-      await resolveEnvironmentPolicyForRemoval(
-        { ...request, repo: "new/name", policyName },
-        ports
-      )
-    ).toEqual({ ok: true, policyName });
-    expect(ports.calls).toEqual([]);
-  });
-
   describe("unrecorded setup policies", () => {
     const setup = {
       ...request,
@@ -320,57 +312,5 @@ describe("recorded policy identity", () => {
         ).toMatchObject({ ok: false });
       }
     );
-  });
-  it.each(["", "unrelated", awsEnvironmentPolicyName("octo/shop", "prod")])(
-    "rejects an invalid recorded name %s",
-    async (name) => {
-      expect(
-        await resolveEnvironmentPolicyForRemoval(
-          { ...request, policyName: name },
-          runner()
-        )
-      ).toMatchObject({ ok: false });
-    }
-  );
-  it("confirms a fallback name against IAM for environments without a saved name", async () => {
-    expect(
-      await resolveEnvironmentPolicyForRemoval(
-        request,
-        runner(ok({ PolicyNames: [policyName] }))
-      )
-    ).toEqual({ ok: true, policyName });
-  });
-  it("does not report success when the old input slug produced an unknown hash", async () => {
-    expect(
-      await resolveEnvironmentPolicyForRemoval(
-        request,
-        runner(
-          ok({ PolicyNames: [awsEnvironmentPolicyName("old/alias", "dev")] })
-        )
-      )
-    ).toMatchObject({
-      ok: false,
-      message: expect.stringContaining("did not guess")
-    });
-  });
-  it("leaves other environments alone when this grant is already absent", async () => {
-    expect(
-      await resolveEnvironmentPolicyForRemoval(
-        request,
-        runner(
-          ok({ PolicyNames: [awsEnvironmentPolicyName("octo/shop", "prod")] })
-        )
-      )
-    ).toEqual({ ok: true, policyName: null });
-  });
-  it.each([
-    fail("AccessDenied"),
-    ok("invalid"),
-    ok({}),
-    ok({ PolicyNames: [42] })
-  ])("refuses an unreadable fallback inventory", async (answer) => {
-    expect(
-      await resolveEnvironmentPolicyForRemoval(request, runner(answer))
-    ).toMatchObject({ ok: false });
   });
 });

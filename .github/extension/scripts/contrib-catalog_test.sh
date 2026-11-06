@@ -71,7 +71,7 @@ test_pins_the_aws_pack() {
     write_catalog Radius.Compute Radius.Security
     pin "${pack}" AWS || fail "the AWS pack was not pinned: $(cat "${TEST_ROOT}/stderr")"
     assert_no_latest_kube_recipe "${pack}"
-    assert_pinned "${pack}" containers "${COMPUTE_REF}"
+    assert_pinned "${pack}" persistentvolumes "${COMPUTE_REF}"
     assert_pinned "${pack}" routes "${COMPUTE_REF}"
     assert_pinned "${pack}" secrets "${SECURITY_REF}"
     # aws-eks recipes are pinned to the pack's commit by the AWS workflow.

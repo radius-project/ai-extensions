@@ -1275,6 +1275,9 @@ describe("the async delete route through its background runner", () => {
       },
       "iam update-assume-role-policy": "",
       "iam delete-role-policy": "",
+      "iam list-roles": { Roles: [] },
+      "iam list-entities-for-policy": { PolicyRoles: [] },
+      "iam list-policy-versions": { Versions: [] },
       "eks describe-access-entry": {
         accessEntry: { tags: { "radius-managed": "true" } }
       },
@@ -1442,8 +1445,10 @@ describe("the async delete route through its background runner", () => {
     expect(order.indexOf("github delete-environment")).toBeGreaterThan(
       order.indexOf("eks delete-access-entry")
     );
+    // The last policy deletion releases the lock; earlier ones remove the
+    // environment's app boundary.
     expect(order.indexOf("github delete-environment")).toBeLessThan(
-      order.indexOf("iam delete-policy")
+      order.lastIndexOf("iam delete-policy")
     );
   });
 });

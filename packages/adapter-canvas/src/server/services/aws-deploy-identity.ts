@@ -7,6 +7,7 @@ import {
   GITHUB_OIDC_PROVIDER_URL,
   GITHUB_OIDC_THUMBPRINT,
   buildGitHubTrustPolicy,
+  buildAwsAppIdentity,
   buildLegacyAwsEnvironmentPolicyName,
   AWS_CLI_MINIMUM_VERSION,
   awsRoleArn,
@@ -33,10 +34,10 @@ import {
   type PolicyDocument
 } from "@radius-project/core";
 import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
+import { ensureAppBoundary, removeAppRoles } from "./aws-app-boundary.js";
 import {
   attachEnvironmentPolicy,
   readLegacyEnvironmentPolicy,
-  resolveEnvironmentPolicyForRemoval,
   resolveEnvironmentPolicyForSetup
 } from "./aws-environment-policy.js";
 import {
@@ -167,6 +168,49 @@ function clusterStatus(stdout: string): string {
   return typeof status === "string" ? status : "";
 }
 
+// Apps get AWS credentials through EKS Pod Identity, which needs its agent on
+// the cluster. EKS Auto Mode runs the agent; other clusters need the add-on.
+// Setup only warns, because the deploy identity works without it.
+async function podIdentityAgentStep(
+  cluster: string,
+  describeOutput: string,
+  regionArgs: readonly string[],
+  ports: Pick<AwsDeployIdentityPorts, "runAws">
+): Promise<string> {
+  const output = parseJson(describeOutput);
+  const compute =
+    (
+      isRecord(output) &&
+      isRecord(output.cluster) &&
+      isRecord(output.cluster.computeConfig)
+    ) ?
+      output.cluster.computeConfig
+    : {};
+  if (compute.enabled === true) {
+    return `✅ Cluster ${cluster} runs the EKS Pod Identity Agent (EKS Auto Mode).`;
+  }
+  const addon = await ports.runAws([
+    "eks",
+    "describe-addon",
+    "--cluster-name",
+    cluster,
+    "--addon-name",
+    "eks-pod-identity-agent",
+    ...regionArgs,
+    "--output",
+    "json"
+  ]);
+  if (succeeded(addon)) {
+    return `✅ Cluster ${cluster} has the EKS Pod Identity Agent add-on.`;
+  }
+  const install = `aws eks create-addon --cluster-name ${cluster} --addon-name eks-pod-identity-agent ${regionArgs.join(" ")}`;
+  const problem =
+    /ResourceNotFound/.test(addon.stderr) ?
+      `Cluster ${cluster} doesn't have the EKS Pod Identity Agent add-on`
+    : `Could not check cluster ${cluster} for the EKS Pod Identity Agent add-on (${detail(addon)})`;
+  return `⚠️ ${problem}. Apps that connect to AWS services need it to get credentials. To install it, run: ${install}`;
+}
+
 const ACCESS_DENIED = /AccessDenied|UnauthorizedOperation|not authorized/i;
 const NO_SUCH_ENTITY = /NoSuchEntity/;
 const RESOURCE_IN_USE = /ResourceInUseException/;
@@ -292,13 +336,17 @@ export async function setupAwsDeployIdentity(
     created: [...created]
   });
   const { accountId, region, cluster } = request;
+  const expectedPolicyName = awsEnvironmentPolicyName(
+    request.repo,
+    request.environment
+  );
   if (
     request.policyName !== undefined &&
-    !isAwsEnvironmentPolicyName(request.policyName, request.environment)
+    request.policyName !== expectedPolicyName
   ) {
     return fail(
       "aws-policy-name-invalid",
-      "The recorded AWS permission policy name is invalid for this environment. Nothing was changed."
+      policyNameMismatch(request, expectedPolicyName)
     );
   }
   const regionArgs = ["--region", region];
@@ -365,6 +413,9 @@ export async function setupAwsDeployIdentity(
   }
   ports.step(
     `✅ Cluster ${cluster} accepts access entries (${authenticationMode}).`
+  );
+  ports.step(
+    await podIdentityAgentStep(cluster, describe.stdout, regionArgs, ports)
   );
 
   // Resolve which role this is before writing anything, so a same-named role
@@ -462,9 +513,7 @@ export async function setupAwsDeployIdentity(
       );
     }
   }
-  let policyName =
-    request.policyName ??
-    awsEnvironmentPolicyName(request.repo, request.environment);
+  let policyName = expectedPolicyName;
   if (existingTrust && request.policyName === undefined) {
     const resolved = await resolveEnvironmentPolicyForSetup(
       {
@@ -666,6 +715,12 @@ export async function setupAwsDeployIdentity(
   }
 
   await ports.recordPolicyIdentity({ roleArn, policyName });
+  const boundary = await ensureAppBoundary({ ...request, policyName }, ports);
+  if (!boundary.ok) return fail(boundary.code, boundary.message);
+  if (boundary.created) created.push(`permissions boundary ${boundary.name}`);
+  ports.step(
+    `✅ ${boundary.created ? "Created" : "Updated"} permissions boundary ${boundary.name}, which caps the roles Radius creates for this environment's apps.`
+  );
   const attached = await attachEnvironmentPolicy(
     { ...request, roleName, legacy, policyName },
     ports
@@ -833,7 +888,34 @@ async function signedInAccountProblem(
   return null;
 }
 
+// The name selects the IAM path whose app roles removal deletes, so only the
+// name built from GitHub's repository identity is accepted.
+function policyNameMismatch(
+  request: { repo: string; environment: string; policyName?: string },
+  expected: string
+): string {
+  return `The saved AWS_PERMISSION_POLICY_NAME "${request.policyName ?? ""}" does not match repository ${request.repo} and environment ${request.environment}, which use "${expected}". Nothing was changed. If this repository was renamed, the saved name may be its namespace from before the rename. Review that namespace's inline policy on the deploy role and the app roles and permissions boundary under its path, and migrate or remove what you confirm is this environment's before you change the variable. Otherwise, correct the AWS_PERMISSION_POLICY_NAME variable of GitHub environment ${request.environment} to "${expected}", then retry.`;
+}
+
+// The saved name is an editable GitHub variable and may be another
+// repository's, so its namespace is offered for cleanup only once the user
+// confirms it is this environment's.
+function removalPolicyNameMismatch(
+  request: { repo: string; environment: string; policyName: string },
+  role: { accountId: string; roleName: string },
+  expected: string
+): string {
+  const saved = request.policyName;
+  if (!isAwsEnvironmentPolicyName(saved, request.environment)) {
+    return `The saved AWS_PERMISSION_POLICY_NAME "${saved}" is not valid for environment ${request.environment}. Nothing was changed. Correct it to "${expected}", then retry.`;
+  }
+  const app = buildAwsAppIdentity(role.accountId, saved);
+  return `The saved AWS_PERMISSION_POLICY_NAME "${saved}" does not match repository ${request.repo} and environment ${request.environment}, which use "${expected}". Radius can't confirm the saved name belongs to this repository, so it changed nothing. If this repository was renamed and you confirm the saved name was built from its former name, you may remove inline policy ${saved} from IAM role ${role.roleName}, the IAM roles under path ${app.rolePath}, and permissions boundary ${app.boundaryArn} by hand. If it might belong to another repository, leave those resources alone. Then set AWS_PERMISSION_POLICY_NAME to "${expected}" and retry.`;
+}
+
 export interface AwsDeployIdentityRemovalRequest {
+  // The repository's full name as GitHub resolves it, never saved metadata,
+  // because it selects the app-role namespace that removal deletes.
   repo: string;
   roleArn: string;
   environment: string;
@@ -1087,6 +1169,9 @@ async function removeOrphanedAccessEntry(
   return deleteAccessEntry(target, ports);
 }
 
+const APP_ROLES_LABEL =
+  "the IAM roles and permissions boundary for this environment's apps";
+
 function stoppedPartWay(
   failure: string,
   removed: readonly string[],
@@ -1105,7 +1190,8 @@ function stoppedPartWay(
 /**
  * Remove what one environment added to the shared role: its trust subjects,
  * its permission policy, and its cluster's access entry when nothing else uses
- * it. The role and the account's GitHub identity provider always stay, because
+ * it. Also delete the IAM roles its apps got, and their permissions boundary.
+ * The role and the account's GitHub identity provider always stay, because
  * other environments, repositories, or services may use them. The lock is
  * taken after the account check and released by the caller.
  */
@@ -1125,6 +1211,20 @@ export async function removeAwsEnvironmentFromRole(
     return {
       ok: false,
       message: `IAM role ${request.roleArn} is outside the commercial AWS partition, so Radius did not change it.`
+    };
+  }
+  const policyName = awsEnvironmentPolicyName(
+    request.repo,
+    request.environment
+  );
+  if (request.policyName !== undefined && request.policyName !== policyName) {
+    return {
+      ok: false,
+      message: removalPolicyNameMismatch(
+        { ...request, policyName: request.policyName },
+        { accountId, roleName },
+        policyName
+      )
     };
   }
   // IAM addresses the role by name in whichever account the CLI is signed in
@@ -1149,19 +1249,25 @@ export async function removeAwsEnvironmentFromRole(
   };
   if (!succeeded(getRole)) {
     if (NO_SUCH_ENTITY.test(getRole.stderr)) {
+      const removed: string[] = [];
+      const warnings = [
+        `IAM role ${roleName} was already gone, so there was nothing to remove from it.`
+      ];
+      const apps = await removeAppRoles({ accountId, policyName }, ports);
+      removed.push(...apps.removed);
+      if (!apps.ok) {
+        return stoppedPartWay(apps.message, removed, [APP_ROLES_LABEL]);
+      }
+      if (apps.warning) warnings.push(apps.warning);
       const orphan = await removeOrphanedAccessEntry(entryTarget, ports);
       if (orphan.kind === "failed") {
-        return stoppedPartWay(orphan.message, [], [entryLabel(entryTarget)]);
+        return stoppedPartWay(orphan.message, removed, [
+          entryLabel(entryTarget)
+        ]);
       }
-      return {
-        ok: true,
-        removed: orphan.kind === "removed" ? [orphan.text] : [],
-        kept: [],
-        warnings: [
-          `IAM role ${roleName} was already gone, so there was nothing to remove from it.`,
-          ...(orphan.kind === "warning" ? [orphan.text] : [])
-        ]
-      };
+      if (orphan.kind === "removed") removed.push(orphan.text);
+      if (orphan.kind === "warning") warnings.push(orphan.text);
+      return { ok: true, removed, kept: [], warnings };
     }
     return {
       ok: false,
@@ -1185,9 +1291,6 @@ export async function removeAwsEnvironmentFromRole(
       message: `IAM returned ${typeof role.Arn === "string" ? role.Arn : "no role ARN"} for ${request.roleArn}, so Radius did not change it.`
     };
   }
-  const policyName =
-    request.policyName ??
-    buildLegacyAwsEnvironmentPolicyName(request.environment);
   const policyLabel = `policy ${policyName}`;
   // Only a subject that names a repository and this environment is this
   // environment's alone. Any other, such as `repository_id:<id>` from a custom
@@ -1233,11 +1336,6 @@ export async function removeAwsEnvironmentFromRole(
         ports
       );
   if (!legacy.ok) return { ok: false, message: legacy.message };
-  const resolved = await resolveEnvironmentPolicyForRemoval(
-    { ...request, roleName },
-    ports
-  );
-  if (!resolved.ok) return resolved;
   const removedPolicies: string[] = [];
   const failed = (message: string): AwsDeployIdentityRemovalResult => ({
     ok: false,
@@ -1248,20 +1346,20 @@ export async function removeAwsEnvironmentFromRole(
   });
   // Keep the ownership evidence in trust until every policy removal succeeds.
   // A retry can then identify a picked role's remaining legacy policy.
-  for (const policyName of [resolved.policyName, legacy.name]) {
-    if (!policyName) continue;
+  for (const name of [policyName, legacy.name]) {
+    if (!name) continue;
     const deletion = await ports.runAws([
       "iam",
       "delete-role-policy",
       "--role-name",
       roleName,
       "--policy-name",
-      policyName
+      name
     ]);
-    if (succeeded(deletion)) removedPolicies.push(`policy ${policyName}`);
+    if (succeeded(deletion)) removedPolicies.push(`policy ${name}`);
     else if (!NO_SUCH_ENTITY.test(deletion.stderr)) {
       return failed(
-        `Failed to delete policy ${policyName} from ${roleName}: ${detail(deletion)}. Trust subjects were retained so deletion can be retried.`
+        `Failed to delete policy ${name} from ${roleName}: ${detail(deletion)}. Trust subjects were retained so deletion can be retried.`
       );
     }
   }
@@ -1291,6 +1389,15 @@ export async function removeAwsEnvironmentFromRole(
     }
   }
   removed.push(...removedPolicies);
+  const warnings = [...shared];
+  // The name comes from the repository and environment, not from the inline
+  // policy, so a retry after the policy is gone still finds these roles.
+  const apps = await removeAppRoles({ accountId, policyName }, ports);
+  removed.push(...apps.removed);
+  if (!apps.ok) {
+    return stoppedPartWay(apps.message, removed, [APP_ROLES_LABEL]);
+  }
+  if (apps.warning) warnings.push(apps.warning);
   const kept = [
     `IAM role ${roleName}`,
     "the account's GitHub identity provider"
@@ -1313,7 +1420,7 @@ export async function removeAwsEnvironmentFromRole(
     ok: true,
     removed: entry.kind === "removed" ? [...removed, entry.text] : removed,
     kept: entry.kind === "kept" ? [...kept, entry.text] : kept,
-    warnings: [...shared, ...(entry.kind === "warning" ? [entry.text] : [])]
+    warnings: [...warnings, ...(entry.kind === "warning" ? [entry.text] : [])]
   };
 }
 

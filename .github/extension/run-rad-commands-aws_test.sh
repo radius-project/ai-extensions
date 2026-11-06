@@ -188,8 +188,8 @@ test_deploys_the_pinned_pack_with_its_parameters() {
     if grep -q "kube-recipes/[a-z]*:latest" "${work}/.radius/radius-recipe-pack.bicep"; then
         fail "a Kubernetes recipe was left on its mutable latest tag"
     fi
-    grep -qF "kube-recipes/containers:pinned0123" "${work}/.radius/radius-recipe-pack.bicep" ||
-        fail "the containers recipe was not pinned"
+    grep -qF "source: 'ghcr.io/radius-project/aws-eks-recipes/containers:${PACK_REF}'" "${work}/.radius/radius-recipe-pack.bicep" ||
+        fail "the containers recipe was not pinned to the pack's commit"
     grep -qF "source: 'ghcr.io/radius-project/aws-eks-recipes/mysqldatabases:${PACK_REF}'" "${work}/.radius/radius-recipe-pack.bicep" ||
         fail "the MySQL recipe was not pinned to the pack's commit"
     if grep -q "aws-eks-recipes/[a-z]*:latest" "${work}/.radius/radius-recipe-pack.bicep"; then

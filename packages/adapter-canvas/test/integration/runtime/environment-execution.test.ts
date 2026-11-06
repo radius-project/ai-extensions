@@ -694,6 +694,7 @@ describe("real server and fake SDK runtime ownership", () => {
             accessConfig: { authenticationMode: "API" }
           }
         },
+        "eks describe-addon": { addon: { status: "ACTIVE" } },
         "iam list-open-id-connect-providers": { OpenIDConnectProviderList: [] },
         "iam create-open-id-connect-provider": {},
         "iam create-role": { Role: { Arn: roleArn } },

@@ -1,4 +1,5 @@
 import {
+  buildAwsAppIdentity,
   buildAwsEnvironmentPermissionPolicy,
   buildLegacyAwsEnvironmentPolicyName,
   isAwsEnvironmentPolicyName,
@@ -101,6 +102,7 @@ export async function attachEnvironmentPolicy(
     repo: string;
     environment: string;
     roleName: string;
+    accountId: string;
     region: string;
     policyName?: string;
     legacy: LegacyPolicy;
@@ -133,7 +135,10 @@ export async function attachEnvironmentPolicy(
       "--policy-name",
       name
     ]);
-  const document = buildAwsEnvironmentPermissionPolicy(input.region);
+  const document = buildAwsEnvironmentPermissionPolicy(
+    input.region,
+    buildAwsAppIdentity(input.accountId, policyName)
+  );
   let written = await put(policyName, document);
   let legacyRemoved = false;
   // At the aggregate quota, two copies cannot coexist. Remove only the proven
@@ -178,7 +183,7 @@ export async function attachEnvironmentPolicy(
         : "aws-role-policy-failed",
       message:
         /LimitExceeded/.test(written.stderr) ?
-          `IAM role ${roleName} has reached the 10,240-character inline-policy limit, which cannot be raised. These policies fit about 17 environments when no other inline policies use the space. Delete an unused environment or choose another role. AWS reported: ${detail(written)}`
+          `IAM role ${roleName} has reached the 10,240-character inline-policy limit, which cannot be raised. These policies fit about 6 environments when no other inline policies use the space. Delete an unused environment or choose another role. AWS reported: ${detail(written)}`
         : `Failed to attach the deploy permission policy: ${detail(written)}`
     };
   }
@@ -194,43 +199,6 @@ export async function attachEnvironmentPolicy(
     }
   }
   return { ok: true, policyName };
-}
-
-export async function resolveEnvironmentPolicyForRemoval(
-  input: {
-    repo: string;
-    environment: string;
-    roleName: string;
-    policyName?: string;
-  },
-  ports: PolicyPorts
-): Promise<{ ok: true; policyName: string | null } | Failure> {
-  if (input.policyName !== undefined) {
-    return isAwsEnvironmentPolicyName(input.policyName, input.environment) ?
-        { ok: true, policyName: input.policyName }
-      : {
-          ok: false,
-          message:
-            "The recorded AWS permission policy name is invalid for this environment. Review its saved AWS configuration before deletion."
-        };
-  }
-  const inventory = await readPolicyNames(input.roleName, ports);
-  if (!inventory.ok) return inventory;
-  const expected = awsEnvironmentPolicyName(input.repo, input.environment);
-  if (inventory.names.includes(expected))
-    return { ok: true, policyName: expected };
-  if (
-    inventory.names.some((name) =>
-      isAwsEnvironmentPolicyName(name, input.environment)
-    )
-  ) {
-    return {
-      ok: false,
-      message:
-        "The environment has no recorded AWS permission policy name, and the role has a matching environment policy under another repository hash. Radius did not guess or report it removed. Repair the saved AWS configuration before deletion."
-    };
-  }
-  return { ok: true, policyName: null };
 }
 
 export async function resolveEnvironmentPolicyForSetup(
