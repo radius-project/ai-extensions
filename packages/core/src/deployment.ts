@@ -1,5 +1,7 @@
 /** Deployment data shared by runtime owners and frontend projections. */
 export type DeploymentErrorKind =
+  | "model-preflight-failed"
+  | "workflow-preflight-failed"
   | "branch-not-pushed"
   | "run-unconfirmed"
   | "oidc-subject-missing"

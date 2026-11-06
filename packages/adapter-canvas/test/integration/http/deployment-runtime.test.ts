@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChildProcess } from "node:child_process";
 import { createWorkflowObservationScope } from "@radius-project/adapter-shared";
 import type {
   DeployMonitorRequest,
@@ -16,7 +17,7 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
-function harness() {
+function harness(abandonment = false) {
   const finished = createDeferred<void>();
   const sendRepair = vi.fn(async () => {});
   let terminal: "success" | "failed" = "success";
@@ -48,8 +49,40 @@ function harness() {
       reportDiagnostic: () => {}
     }
   });
-  const cli = vi.fn(() => {
-    throw new Error("Unexpected external command");
+  const cli = vi.fn<
+    NonNullable<Parameters<typeof createTestCanvasServerRuntime>[0]["cliExec"]>
+  >((_command, args, _options, callback) => {
+    if (!abandonment) throw new Error("Unexpected external command");
+    const endpoint = args.find((arg) => arg.startsWith("/repos/"));
+    let output: string;
+    if (
+      endpoint ===
+      "/repos/acme/widgets/environments/production/variables?per_page=100"
+    )
+      output = "";
+    else if (
+      endpoint ===
+      "/repos/acme/widgets/deployments?per_page=100&environment=production"
+    )
+      output = "failed-delete";
+    else if (
+      endpoint ===
+      "/repos/acme/widgets/deployments/failed-delete/statuses?per_page=1"
+    )
+      output = "failure\thttps://github.com/acme/widgets/actions/runs/31\t";
+    else if (endpoint === "/repos/acme/widgets/actions/runs/31")
+      output = ".github/workflows/delete-application.yml\tcompleted\tfailure";
+    else if (
+      endpoint === "/repos/acme/widgets/deployments/failed-delete/statuses" &&
+      args.includes("POST")
+    )
+      output = "";
+    else
+      throw new Error(
+        `Unexpected abandonment command: ${JSON.stringify(args)}`
+      );
+    callback(null, output, "");
+    return new ChildProcess();
   });
   const server = createTestCanvasServerRuntime({
     executionOwner: createEnvironmentExecutionOwner(),
@@ -70,6 +103,9 @@ function harness() {
     sendRepair,
     cli,
     resolveDeployment,
+    request() {
+      return request;
+    },
     fail() {
       terminal = "failed";
     },
@@ -106,6 +142,69 @@ const target = {
 };
 
 describe("shared deployment runtime through production Canvas HTTP", () => {
+  it("carries the selected model from Canvas into the shared execution request", async () => {
+    const h = harness();
+    const entry = await h.server.getOrCreateServer("panel", "deploying");
+    const response = await post(entry, "/api/deploy", {
+      ...target,
+      appFile: "models/custom.bicep"
+    });
+    expect(response.status).toBe(200);
+    await response.json();
+    expect(h.request()?.appFile).toBe("models/custom.bicep");
+  });
+
+  it("preserves another application's handles and both attached panels after abandonment", async () => {
+    const h = harness(true);
+    h.fail();
+    const first = await h.server.getOrCreateServer("first", "deploying");
+    await (await post(first, "/api/deploy", target)).json();
+    const selected = h.deployment.owner.lookup();
+    if (selected.kind !== "found") throw new Error("Missing invocation");
+    selected.invocation.state.deployAppName = "widgets";
+    h.finished.resolve();
+    await vi.waitFor(() =>
+      expect(h.deployment.owner.hasActiveWork()).toBe(false)
+    );
+    const second = await h.server.getOrCreateServer("second", "deploying");
+    for (const entry of [first, second])
+      await (await fetch(`${entry.baseUrl}/api/deploy-status`)).json();
+    const response = await post(second, "/api/abandon-deployment", {
+      ...target,
+      application: "another-app"
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: "abandoned" });
+    expect(
+      h.deployment.owner.lookup({ attemptId: selected.invocation.attemptId })
+        .kind
+    ).toBe("found");
+    expect(
+      h.deployment.owner.lookup({
+        observationId: selected.invocation.observationId
+      }).kind
+    ).toBe("found");
+    for (const entry of [first, second]) {
+      const status = await (
+        await fetch(`${entry.baseUrl}/api/deploy-status`)
+      ).json();
+      expect(status).toMatchObject({
+        status: "failed",
+        attempt: { id: selected.invocation.attemptId }
+      });
+    }
+    const matching = await post(second, "/api/abandon-deployment", target);
+    expect(matching.status).toBe(200);
+    await matching.json();
+    expect(
+      h.deployment.owner.lookup({
+        observationId: selected.invocation.observationId
+      }).kind
+    ).toBe("missing");
+    expect(first.state.deployAttempt).toBeUndefined();
+    expect(second.state.deployAttempt).toBeUndefined();
+  });
+
   it("survives close, reattaches on reopen, and keeps active reset independent of target locks", async () => {
     const h = harness();
     const entry = await h.server.getOrCreateServer("panel", "deploying");

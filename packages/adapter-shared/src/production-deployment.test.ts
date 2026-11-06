@@ -29,6 +29,7 @@ function fixture(
     dispatch?: "success" | "failure" | "timeout";
     azure?: boolean;
     variableResponse?: string;
+    models?: Readonly<Record<string, string>>;
   } = {}
 ) {
   const calls: string[][] = [];
@@ -36,6 +37,7 @@ function fixture(
   const azureCalls: Array<{ args: string[]; timeout?: number }> = [];
   let id = 0;
   let runId = 10;
+  const runEnvironments = new Map<number, string>();
   const generated = generateDeployWorkflow(
     "dev",
     ".radius/app.bicep",
@@ -54,6 +56,9 @@ function fixture(
   ) => {
     calls.push(args);
     const endpoint = args[1];
+    const requestedRunId = Number(
+      endpoint.match(/\/actions\/runs\/(\d+)/)?.[1] ?? runId
+    );
     let stdout: string;
     if (options.azure && command === "az") {
       azureCalls.push({ args, timeout: _options.timeout });
@@ -61,11 +66,19 @@ function fixture(
     } else if (args[0] === "repo" && args[1] === "view") {
       stdout = options.defaultBranch ?? "main";
     } else if (
-      endpoint === "/repos/owner/app/environments/dev/variables?per_page=100"
+      ["dev", "prod"].some(
+        (environment) =>
+          endpoint ===
+          `/repos/owner/app/environments/${environment}/variables?per_page=100`
+      )
     ) {
       stdout = "";
     } else if (
-      endpoint === "/repos/owner/app/deployments?per_page=100&environment=dev"
+      ["dev", "prod"].some(
+        (environment) =>
+          endpoint ===
+          `/repos/owner/app/deployments?per_page=100&environment=${environment}`
+      )
     ) {
       if (options.lookupFailure) {
         callback(new Error("deployment lookup unavailable"), "", "");
@@ -88,6 +101,11 @@ function fixture(
       args[1] === "run"
     ) {
       runId++;
+      const environment = args
+        .find((arg) => arg.startsWith("environment="))
+        ?.slice("environment=".length);
+      if (!environment) throw new Error("Missing workflow environment");
+      runEnvironments.set(runId, environment);
       if (options.dispatch === "timeout") {
         callback(
           Object.assign(new Error("timed out"), {
@@ -118,8 +136,8 @@ function fixture(
         JSON.stringify({
           schemaVersion: 1,
           application: "modeled-app",
-          environment: "dev",
-          runId,
+          environment: runEnvironments.get(Number(args[2])),
+          runId: Number(args[2]),
           sequence: 1,
           resources: []
         })
@@ -136,7 +154,11 @@ function fixture(
       stdout = "";
     } else if (
       options.dispatch &&
-      endpoint === "/repos/owner/app/environments/dev/variables/AZURE_CLIENT_ID"
+      ["dev", "prod"].some(
+        (environment) =>
+          endpoint ===
+          `/repos/owner/app/environments/${environment}/variables/AZURE_CLIENT_ID`
+      )
     ) {
       stdout =
         options.variableResponse ??
@@ -164,11 +186,23 @@ function fixture(
       return {};
     } else if (
       options.dispatch &&
-      endpoint.includes("/contents/.radius/app.bicep")
+      endpoint.includes("/contents/") &&
+      endpoint.split("?")[0].endsWith(".bicep")
     ) {
-      stdout = Buffer.from(
-        "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'modeled-app'\n}"
-      ).toString("base64");
+      const path = endpoint.split("/contents/")[1].split("?")[0];
+      const source =
+        options.models ?
+          options.models[path]
+        : "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'modeled-app'\n}";
+      if (source === undefined) {
+        callback(
+          Object.assign(new Error("HTTP 404"), { code: 1 }),
+          "",
+          "HTTP 404"
+        );
+        return {};
+      }
+      stdout = Buffer.from(source).toString("base64");
     } else if (
       options.dispatch &&
       endpoint.includes("/contents/") &&
@@ -186,7 +220,7 @@ function fixture(
         );
     } else if (
       options.dispatch &&
-      endpoint.includes(`/actions/runs/${runId}/jobs?`)
+      endpoint.includes(`/actions/runs/${requestedRunId}/jobs?`)
     ) {
       stdout = http({
         total_count: 1,
@@ -205,10 +239,10 @@ function fixture(
       });
     } else if (
       options.dispatch &&
-      endpoint.endsWith(`/actions/runs/${runId}`)
+      endpoint.endsWith(`/actions/runs/${requestedRunId}`)
     ) {
       stdout = http({
-        id: runId,
+        id: requestedRunId,
         status: "completed",
         conclusion: options.dispatch
       });
@@ -217,9 +251,9 @@ function fixture(
         total_count: 1,
         artifacts: [
           {
-            id: runId,
-            name: "radius-deploy-status-dev-modeled-app",
-            workflow_run: { id: runId }
+            id: requestedRunId,
+            name: `radius-deploy-status-${runEnvironments.get(requestedRunId)}-modeled-app`,
+            workflow_run: { id: requestedRunId }
           }
         ]
       });
@@ -261,6 +295,129 @@ function fixture(
 }
 
 describe("shared production deployment composition", () => {
+  it("keeps per-run model inputs separate during concurrent environment deployments", async () => {
+    const model =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'modeled-app'\n}";
+    const h = fixture({
+      dispatch: "success",
+      models: {
+        "models/dev.bicep": model,
+        "models/prod.bicep": model
+      }
+    });
+    const results = await Promise.all(
+      ["dev", "prod"].map((environment) =>
+        h.runtime.start({
+          repo: "owner/app",
+          branch: "topic",
+          environment,
+          appFile: `models/${environment}.bicep`
+        })
+      )
+    );
+    expect(results.every((result) => result.ok)).toBe(true);
+    await vi.waitFor(() => expect(h.runtime.owner.hasActiveWork()).toBe(false));
+    const runs = h.calls.filter((args) => args[0] === "workflow");
+    expect(runs).toHaveLength(2);
+    for (const environment of ["dev", "prod"]) {
+      const run = runs.find((args) =>
+        args.includes(`environment=${environment}`)
+      );
+      expect(run).toContain(`app_file=models/${environment}.bicep`);
+      expect(run?.find((arg) => arg.startsWith("rad_commands="))).toContain(
+        `deploy models/${environment}.bicep`
+      );
+    }
+  });
+
+  it("keeps an unidentifiable custom application unknown through status polling", async () => {
+    const h = fixture({
+      dispatch: "success",
+      models: {
+        "models/unknown.bicep":
+          "param appName string\nresource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: appName\n}",
+        ".radius/app.bicep":
+          "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'wrong-app'\n}"
+      }
+    });
+    const result = await h.runtime.start({
+      repo: "owner/app",
+      branch: "topic",
+      environment: "dev",
+      appFile: "models/unknown.bicep"
+    });
+    if (!result.ok) throw new Error(result.error);
+    await vi.waitFor(() => expect(h.runtime.owner.hasActiveWork()).toBe(false));
+    expect(result.invocation.state.deployAppName).toBe("");
+    expect(
+      h.calls.some((args) => args[1]?.includes("/contents/.radius/app.bicep"))
+    ).toBe(false);
+  });
+
+  it.each(["models/custom.bicep", "app.bicep"])(
+    "dispatches only the admitted %s even when a different default exists",
+    async (appFile) => {
+      const h = fixture({
+        dispatch: "success",
+        models: {
+          ".radius/app.bicep":
+            "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'wrong-app'\n}",
+          [appFile]:
+            "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'modeled-app'\n}"
+        }
+      });
+      const result = await h.runtime.start({
+        repo: "owner/app",
+        branch: "topic",
+        environment: "dev",
+        appFile
+      });
+      if (!result.ok) throw new Error(result.error);
+      await vi.waitFor(() =>
+        expect(h.calls.some((args) => args[0] === "workflow")).toBe(true)
+      );
+      expect(result.invocation.state.deployAppName).toBe("modeled-app");
+      const dispatch = h.calls.find((args) => args[0] === "workflow");
+      expect(dispatch).toContain(`app_file=${appFile}`);
+      expect(
+        dispatch?.find((arg) => arg.startsWith("rad_commands="))
+      ).toContain(`deploy ${appFile}`);
+      expect(
+        h.calls.some((args) => args[1]?.includes("/contents/.radius/app.bicep"))
+      ).toBe(false);
+      await vi.waitFor(() =>
+        expect(h.runtime.owner.hasActiveWork()).toBe(false)
+      );
+    }
+  );
+
+  it("refuses a missing admitted model rather than deploying the default", async () => {
+    const h = fixture({
+      dispatch: "success",
+      models: {
+        ".radius/app.bicep":
+          "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'wrong-app'\n}"
+      }
+    });
+    const result = await h.runtime.start({
+      repo: "owner/app",
+      branch: "topic",
+      environment: "dev",
+      appFile: "models/missing.bicep"
+    });
+    if (!result.ok) throw new Error(result.error);
+    await vi.waitFor(() => expect(h.runtime.owner.hasActiveWork()).toBe(false));
+    expect(result.invocation.state).toMatchObject({
+      deployStatus: "failed",
+      deployErrorKind: "model-preflight-failed"
+    });
+    expect(
+      h.calls.some((args) => args[0] === "workflow" || args[0] === "secret")
+    ).toBe(false);
+    expect(h.sendRepair).not.toHaveBeenCalled();
+    expect(h.sendNotice).not.toHaveBeenCalled();
+  });
+
   it("constructs without commands or a Canvas dependency and validates host ports", async () => {
     const { runtime, ports, calls } = fixture();
     expect(calls).toEqual([]);
@@ -350,14 +507,19 @@ describe("shared production deployment composition", () => {
 
   it("dispatches and observes success through the same concrete bindings without Canvas", async () => {
     const { runtime, calls, directories, diagnostics } = fixture({
-      dispatch: "success"
+      dispatch: "success",
+      models: {
+        "models/repeat.bicep":
+          "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'modeled-app'\n}"
+      }
     });
     const events = vi.fn();
     const unsubscribe = runtime.subscribeDispatch(events);
     const result = await runtime.start({
       repo: "owner/app",
       branch: "topic",
-      environment: "dev"
+      environment: "dev",
+      appFile: "models/repeat.bicep"
     });
     if (!result.ok) throw new Error(result.error);
     await vi.waitFor(() => expect(runtime.owner.hasActiveWork()).toBe(false));
@@ -382,20 +544,37 @@ describe("shared production deployment composition", () => {
     if (!repeated.ok) throw new Error(repeated.error);
     await vi.waitFor(() => expect(runtime.owner.hasActiveWork()).toBe(false));
     expect(repeated.invocation.state.deployStatus).toBe("complete");
+    expect(repeated.invocation.target.appFile).toBe("models/repeat.bicep");
+    expect(calls.filter((args) => args[0] === "workflow")).toHaveLength(2);
+    expect(
+      calls
+        .filter((args) => args[0] === "workflow")
+        .every((args) => args.includes("app_file=models/repeat.bicep"))
+    ).toBe(true);
     expect(events).toHaveBeenCalledTimes(1);
   });
 
   it("keeps confirmed failure repair authority separate from observation", async () => {
-    const { runtime, sendRepair } = fixture({ dispatch: "failure" });
+    const { runtime, sendRepair, calls } = fixture({
+      dispatch: "failure",
+      models: {
+        "models/repair.bicep":
+          "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'modeled-app'\n}"
+      }
+    });
     const result = await runtime.start({
       repo: "owner/app",
       branch: "topic",
-      environment: "dev"
+      environment: "dev",
+      appFile: "models/repair.bicep"
     });
     if (!result.ok) throw new Error(result.error);
     await vi.waitFor(() => expect(runtime.owner.hasActiveWork()).toBe(false));
     expect(result.invocation.state.deployStatus).toBe("failed");
     expect(sendRepair).toHaveBeenCalledTimes(1);
+    expect(sendRepair).toHaveBeenCalledWith(
+      expect.objectContaining({ appFile: "models/repair.bicep" })
+    );
     expect(
       await runtime.start({ attemptId: result.invocation.observationId })
     ).toMatchObject({ ok: false, status: 409 });
@@ -415,6 +594,13 @@ describe("shared production deployment composition", () => {
       deployRunId: 12
     });
     expect(sendRepair).toHaveBeenCalledTimes(1);
+    expect(repaired.invocation.target.appFile).toBe("models/repair.bicep");
+    expect(calls.filter((args) => args[0] === "workflow")).toHaveLength(2);
+    expect(
+      calls
+        .filter((args) => args[0] === "workflow")
+        .every((args) => args.includes("app_file=models/repair.bicep"))
+    ).toBe(true);
   });
 
   it("uses the bounded Azure preflight binding before dispatch", async () => {

@@ -190,6 +190,7 @@ describe("P0-A Radius runtime registration contract", () => {
       selected.state = { deployAttempt: { id: "selected-attempt" } };
       const observed = createUnconfirmedMonitor("future_conclusion");
       await observed.monitor.run({
+        appFile: ".radius/app.bicep",
         entry: selected,
         repo: "org/app",
         branch: "feature",

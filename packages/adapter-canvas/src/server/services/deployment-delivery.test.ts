@@ -9,7 +9,11 @@ const notice = {
   deployRunUrl: "https://github.com/acme/app/actions/runs/42",
   instanceId: ""
 };
-const repair = { ...notice, attemptId: "attempt:one" };
+const repair = {
+  ...notice,
+  attemptId: "attempt:one",
+  appFile: "models/custom.bicep"
+};
 
 describe("runtime-owned deployment delivery", () => {
   it("fails explicitly before handlers are registered or after they are removed", () => {

@@ -749,6 +749,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         ];
         const observed = createUnconfirmedMonitor(conclusion);
         await observed.monitor.run({
+          appFile: ".radius/app.bicep",
           entry: { state: harness.state },
           repo: "org/app",
           branch: "feature",
@@ -877,6 +878,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       // No observation scope on this fixture: the injected sleep holds the real
       // monitor while the HTTP consumer reads its in-progress state.
       const operation = monitor.run({
+        appFile: ".radius/app.bicep",
         entry: { state: harness.state },
         repo: "org/app",
         branch: "feature",
@@ -2640,6 +2642,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         );
       };
       const dispatch = createDeployDispatchService({
+        verifyAppFileInput: async () => {},
         deployWorkflowFile: "run-rad-commands.yml",
         deployWorkflowFiles: [
           "run-rad-commands.yml",
@@ -2670,7 +2673,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         runGitHubJson: unexpected,
         readProcessEnv: () => ({}),
         ghCredentialSource: () => "keyring",
-        fetchFileForSelection: () => Promise.resolve(null),
+        fetchFileForSelection: () => Promise.resolve("model source"),
         appParams: () => [],
         resolveDeployParams: () => ({}),
         partitionParams: () => ({ public: {}, secret: {} }),
@@ -2918,6 +2921,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   function oidcRefusalHarness(subjects: string[]) {
     const workflowDispatches: string[][] = [];
     const dispatch = createDeployDispatchService({
+      verifyAppFileInput: async () => {},
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [
         "run-rad-commands.yml",

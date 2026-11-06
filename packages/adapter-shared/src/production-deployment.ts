@@ -39,7 +39,7 @@ import {
 } from "./deployment-bindings.js";
 import {
   readWorkspaceFile,
-  toSafeRepoRelPath,
+  normalizeDeploymentAppFile,
   uncommittedGeneratedPaths
 } from "./deployment-workspace.js";
 import { resolveDeployParams } from "./deployment-parameters.js";
@@ -122,7 +122,7 @@ export function createProductionDeploymentRuntime(
     id: ports.id,
     reportError: (error) =>
       ports.reportDiagnostic(ports.redactDiagnostic(errorMessage(error))),
-    normalizeAppFile: toSafeRepoRelPath,
+    normalizeAppFile: normalizeDeploymentAppFile,
     resolveDefaultBranch: async (repo) => {
       const branch = await repository.ghOrThrow([
         "repo",
@@ -193,6 +193,7 @@ export function createProductionDeploymentRuntime(
           uncommittedGeneratedPaths(workspace?.workspacePath),
         ensureDeployWorkflowsOnBranch: workflows.ensureOnBranch,
         ensureWorkflowsCurrent: workflows.ensureCurrent,
+        verifyAppFileInput: workflows.verifyAppFileInput,
         latestWorkflowRunId: reads.latestWorkflowRunId,
         classifyDeployDispatchFailure,
         invalidateDeployListCache: notifyDispatch,
@@ -214,10 +215,7 @@ export function createProductionDeploymentRuntime(
           reads.getRunDetail(repo, runId, undefined, request, {
             includeProtection: true
           }),
-        createStatusReader: createDeploymentStatusReader(
-          observation,
-          lookup.resolveRepoAppName
-        ),
+        createStatusReader: createDeploymentStatusReader(observation),
         buildDeployStatusMap,
         buildDeployMessageMap,
         applyDeployMessages,

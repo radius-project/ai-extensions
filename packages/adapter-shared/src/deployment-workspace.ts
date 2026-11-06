@@ -3,6 +3,25 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { GENERATED_MODEL_PATHS } from "@radius-project/core";
 
+export function normalizeDeploymentAppFile(input: string): string {
+  if (/^[\\/]/.test(input)) throw new Error("absolute path not allowed");
+  if (/[\\/]$/.test(input)) throw new Error("model path must name a file");
+  const relative = toSafeRepoRelPath(input)
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".")
+    .join("/");
+  if (
+    !/^[A-Za-z0-9._/-]+$/.test(relative) ||
+    relative.startsWith("-") ||
+    !/\.bicep$/i.test(relative)
+  ) {
+    throw new Error(
+      "Deployment model paths must end in .bicep and use only ASCII letters, digits, '.', '_', '-', and '/'; spaces and leading '-' are not supported."
+    );
+  }
+  return relative;
+}
+
 export function toSafeRepoRelPath(input: unknown): string {
   const raw = String(input == null ? "" : input);
   if (!raw || raw.indexOf("\0") !== -1) throw new Error("invalid path");

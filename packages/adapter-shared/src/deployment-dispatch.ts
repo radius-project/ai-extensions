@@ -120,6 +120,7 @@ export interface DeployDispatchDependencies {
     only: string[],
     workingBranch: string
   ): Promise<{ created: readonly string[]; updated: readonly string[] }>;
+  verifyAppFileInput(repo: string, branch: string): Promise<void>;
   // Suspends for `ms` so a dispatch can wait out GitHub's workflow
   // registration delay (#767: a just-authored/updated workflow file 404s on
   // `gh workflow run` for a short window after it is committed, because
@@ -147,6 +148,7 @@ export interface DeployDispatchDependencies {
 }
 
 export interface DeployDispatchRequest {
+  appFile: string;
   entry: DeployDispatchInstanceEntry;
   repo: string;
   branch: string;
@@ -184,6 +186,7 @@ export interface DeployDispatchService {
 }
 
 const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
+  "verifyAppFileInput",
   "getBranchHeadSha",
   "getDefaultBranch",
   "runGh",
@@ -398,84 +401,38 @@ export function createDeployDispatchService(
     return null;
   };
 
-  // Recompute the rad commands from the CURRENT app.bicep at dispatch time
-  // (rather than relying on the RADIUS_RAD_COMMANDS variable captured when the
-  // environment was created) so the deploy always reflects the latest bicep.
-  // `rad app graph` is appended so the deployed application graph is rendered
-  // as part of the run.
-  const appendRadCommands = async (
+  const prepareRadCommands = async (
     request: DeployDispatchRequest,
     environment: string,
     dispatchArgs: string[]
-  ): Promise<string | null> => {
-    const { entry, repo, branch, log } = request;
-    let secretError: string | null = null;
-    try {
-      let bicepPath = ".radius/app.bicep";
-      let bicepSource = await dependencies.fetchFileForSelection(
-        entry,
-        repo,
-        branch,
-        ".radius/app.bicep"
-      );
-      assertDispatchCurrent(request);
-      if (!bicepSource) {
-        bicepSource = await dependencies.fetchFileForSelection(
-          entry,
-          repo,
-          branch,
-          "app.bicep"
-        );
-        assertDispatchCurrent(request);
-        if (bicepSource) bicepPath = "app.bicep";
-      }
-      if (!bicepSource) {
-        log(
-          "⚠ Could not read app.bicep at dispatch; falling back to the environment's RADIUS_RAD_COMMANDS / default deploy."
-        );
-        return null;
-      }
-      const parsed = dependencies.appParams(bicepSource);
-      const resolved = dependencies.resolveDeployParams(parsed);
-      const { public: publicParams, secret: secretParams } =
-        dependencies.partitionParams(parsed, resolved);
-      // Capture the app name so the deploy-status reader can prefer an artifact
-      // belonging to this application. It is a tiebreaker between artifacts in
-      // the same environment, never a lookup key and never a hard filter, so an
-      // unresolved name costs nothing.
-      entry.state.deployAppName =
-        dependencies.extractAppName(bicepSource) ||
-        entry.state.deployAppName ||
-        "";
-      if (Object.keys(secretParams).length > 0) {
-        secretError = await provisionSecretParams(
-          repo,
-          environment,
-          secretParams,
-          log,
-          () => assertDispatchCurrent(request)
-        );
-      }
-      const deployCmd = dependencies.buildDeployRadCommand(
-        bicepPath,
-        environment,
-        publicParams
-      );
-      const appName = dependencies.extractAppName(bicepSource);
-      const commands = [deployCmd];
-      if (appName) commands.push(dependencies.buildAppGraphRadCommand(appName));
-      dispatchArgs.push("-f", "rad_commands=" + JSON.stringify(commands));
-      log("Deploying with rad commands: " + commands.join("  |  "));
-      return secretError;
-    } catch (e) {
-      assertDispatchCurrent(request);
-      log(
-        "⚠ Could not compute rad commands from bicep (" +
-          dependencies.errorMessage(e) +
-          "); falling back to the environment default."
-      );
-      return secretError;
-    }
+  ): Promise<Record<string, string>> => {
+    const { entry, repo, branch, appFile, log } = request;
+    entry.state.deployAppName = "";
+    const bicepSource = await dependencies.fetchFileForSelection(
+      entry,
+      repo,
+      branch,
+      appFile
+    );
+    assertDispatchCurrent(request);
+    if (!bicepSource?.trim())
+      throw new Error("The selected model is missing or empty.");
+    const parsed = dependencies.appParams(bicepSource);
+    const resolved = dependencies.resolveDeployParams(parsed);
+    const { public: publicParams, secret: secretParams } =
+      dependencies.partitionParams(parsed, resolved);
+    const appName = dependencies.extractAppName(bicepSource);
+    entry.state.deployAppName = appName;
+    const deployCmd = dependencies.buildDeployRadCommand(
+      appFile,
+      environment,
+      publicParams
+    );
+    const commands = [deployCmd];
+    if (appName) commands.push(dependencies.buildAppGraphRadCommand(appName));
+    dispatchArgs.push("-f", "rad_commands=" + JSON.stringify(commands));
+    log("Deploying with rad commands: " + commands.join("  |  "));
+    return secretParams;
   };
 
   // Fail fast (with clear, actionable guidance) when the selected branch has
@@ -930,21 +887,31 @@ export function createDeployDispatchService(
         deployRef,
         "-f",
         "environment=" + envForDeploy,
+        "-f",
+        "app_file=" + request.appFile,
         "--repo",
         repo
       ];
-      const deploySecretError = await appendRadCommands(
-        request,
-        envForDeploy,
-        dispatchArgs
-      );
-      assertDispatchCurrent(request);
-      // A required secret param could not be provisioned, so starting the run
-      // would only produce a guaranteed `rad deploy` failure. Surface the
-      // reason and stop before dispatching.
-      if (deploySecretError) {
-        entry.state.deployError = deploySecretError;
+      const failPreflight = (kind: DeployErrorKind, message: string) => {
+        entry.state.deployError = redactCredentials(message);
+        entry.state.deployErrorKind = kind;
         entry.state.deployStatus = "failed";
+        log("❌ " + entry.state.deployError);
+      };
+      let secretParams: Record<string, string>;
+      try {
+        secretParams = await prepareRadCommands(
+          request,
+          envForDeploy,
+          dispatchArgs
+        );
+        assertDispatchCurrent(request);
+      } catch (error) {
+        assertDispatchCurrent(request);
+        failPreflight(
+          "model-preflight-failed",
+          `Could not prepare selected model "${request.appFile}": ${dependencies.errorMessage(error)} No workflow was dispatched.`
+        );
         return { dispatched: false };
       }
 
@@ -979,14 +946,51 @@ export function createDeployDispatchService(
       // executes a drifted copy. Syncs the deploy files on both the default
       // branch and the branch being deployed, which a --ref dispatch checks out.
       assertDispatchCurrent(request);
-      const sync = await dependencies.ensureWorkflowsCurrent(
-        repo,
-        envForDeploy,
-        provider,
-        [...dependencies.deployWorkflowFiles],
-        deployRef
-      );
-      assertDispatchCurrent(request);
+      let sync: Awaited<
+        ReturnType<DeployDispatchDependencies["ensureWorkflowsCurrent"]>
+      >;
+      try {
+        sync = await dependencies.ensureWorkflowsCurrent(
+          repo,
+          envForDeploy,
+          provider,
+          [...dependencies.deployWorkflowFiles],
+          deployRef
+        );
+        assertDispatchCurrent(request);
+        await dependencies.verifyAppFileInput(repo, deployRef);
+        assertDispatchCurrent(request);
+      } catch (error) {
+        assertDispatchCurrent(request);
+        failPreflight(
+          "workflow-preflight-failed",
+          `Could not verify deployment workflows on "${deployRef}": ${dependencies.errorMessage(error)} No workflow was dispatched.`
+        );
+        return { dispatched: false };
+      }
+      if (Object.keys(secretParams).length > 0) {
+        try {
+          const secretError = await provisionSecretParams(
+            repo,
+            envForDeploy,
+            secretParams,
+            log,
+            () => assertDispatchCurrent(request)
+          );
+          assertDispatchCurrent(request);
+          if (secretError) {
+            failPreflight("model-preflight-failed", secretError);
+            return { dispatched: false };
+          }
+        } catch (error) {
+          assertDispatchCurrent(request);
+          failPreflight(
+            "model-preflight-failed",
+            `Could not provision parameters for "${request.appFile}": ${dependencies.errorMessage(error)}`
+          );
+          return { dispatched: false };
+        }
+      }
       // Either publisher can write the dispatcher before GitHub registers it
       // (#767). Keep successful writes even if a later provider write fails.
       const justCreatedDispatcher =

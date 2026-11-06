@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { parse } from "yaml";
 import { DEPLOY_AWS_FILE, DEPLOY_DISPATCHER_FILE } from "@radius-project/core";
 import {
   createDeploymentWorkflows,
@@ -49,6 +51,183 @@ function fixture(includeAws = false) {
 }
 
 describe("deployment workflow production bindings", () => {
+  it.each([false, true])(
+    "verifies the real generated templates after competing environment synchronization (AWS %s)",
+    async (aws) => {
+      const h = fixture(aws);
+      h.ports.readRepositoryFile.mockImplementation(async (_repo, path) => ({
+        content: await readFile(
+          new URL(`../../../${path}`, import.meta.url),
+          "utf8"
+        )
+      }));
+      await Promise.all(
+        ["dev", "prod"].map((environment) =>
+          h.workflows.ensureCurrent(
+            "owner/app",
+            environment,
+            "azure",
+            h.workflows.files,
+            "topic"
+          )
+        )
+      );
+      await expect(
+        h.workflows.verifyAppFileInput("owner/app", "topic")
+      ).resolves.toBeUndefined();
+      for (const file of h.workflows.files) {
+        const source = h.files.get(`topic:.github/workflows/${file}`);
+        if (!source) throw new Error(`Missing generated workflow: ${file}`);
+        const workflow: unknown = parse(source);
+        const trigger =
+          file === DEPLOY_DISPATCHER_FILE ? "workflow_dispatch" : (
+            "workflow_call"
+          );
+        expect(workflow).toMatchObject({
+          on: {
+            [trigger]: {
+              inputs: {
+                app_file: {
+                  type: "string",
+                  required: false,
+                  default: ""
+                }
+              }
+            }
+          }
+        });
+        if (file !== DEPLOY_DISPATCHER_FILE)
+          expect(workflow).toMatchObject({
+            env: { APP_FILE: "${{ inputs.app_file || '.radius/app.bicep' }}" }
+          });
+      }
+    }
+  );
+
+  it.each([true, false])(
+    "requires readback capability when workflow writes are declined (existing capability %s)",
+    async (capable) => {
+      const h = fixture();
+      await h.workflows.ensureCurrent(
+        "owner/app",
+        "dev",
+        "azure",
+        h.workflows.files,
+        "topic"
+      );
+      if (!capable) {
+        const key = `topic:.github/workflows/${DEPLOY_DISPATCHER_FILE}`;
+        h.files.set(
+          key,
+          h.files.get(key)?.replace("app_file:", "old_input:") ?? ""
+        );
+      }
+      h.ports.commitFile.mockResolvedValue(false);
+      await h.workflows.ensureCurrent(
+        "owner/app",
+        "prod",
+        "azure",
+        h.workflows.files,
+        "topic"
+      );
+      const verified = h.workflows.verifyAppFileInput("owner/app", "topic");
+      if (capable) await expect(verified).resolves.toBeUndefined();
+      else await expect(verified).rejects.toThrow();
+    }
+  );
+
+  it.each([false, true])(
+    "verifies every enabled provider on the selected branch (AWS %s)",
+    async (aws) => {
+      const h = fixture(aws);
+      await h.workflows.ensureCurrent(
+        "owner/app",
+        "dev",
+        "azure",
+        h.workflows.files,
+        "topic"
+      );
+      await expect(
+        h.workflows.verifyAppFileInput("owner/app", "topic")
+      ).resolves.toBeUndefined();
+      h.ports.commitFile.mockClear();
+      await h.workflows.verifyAppFileInput("owner/app", "topic");
+      expect(h.ports.commitFile).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ["missing", "provider"],
+    ["malformed", "provider"],
+    ["non-object", "provider"],
+    ["missing schema", "dispatcher"],
+    ["no steps", "provider"],
+    ["schema", "dispatcher"],
+    ["schema", "provider"],
+    ["forwarding", "dispatcher"],
+    ["routing", "dispatcher"],
+    ["effective", "provider"],
+    ["runner", "provider"],
+    ["job override", "provider"],
+    ["step override", "provider"],
+    ["no runner", "provider"]
+  ])("refuses %s in the selected %s contract", async (failure, kind) => {
+    const h = fixture();
+    await h.workflows.ensureCurrent(
+      "owner/app",
+      "dev",
+      "azure",
+      h.workflows.files,
+      "topic"
+    );
+    const file = h.workflows.files[kind === "dispatcher" ? 0 : 1];
+    const key = `topic:.github/workflows/${file}`;
+    const source = h.files.get(key);
+    if (!source) throw new Error("Fixture was not synchronized");
+    const replacements: Record<string, string> = {
+      missing: "",
+      malformed: "[",
+      "non-object": "[]",
+      "missing schema": source.replace("app_file:", "old_input:"),
+      "no steps": source.slice(0, source.indexOf("    steps:")),
+      schema: source.replace("type: string", "type: number"),
+      forwarding: source.replace("${{ inputs.app_file }}", "default.bicep"),
+      routing: source.replace(
+        "./.github/workflows/run-rad-commands-azure.yml",
+        "./.github/workflows/other.yml"
+      ),
+      effective: source.replace(
+        "${{ inputs.app_file || '.radius/app.bicep' }}",
+        ".radius/app.bicep"
+      ),
+      runner: source.replace("${{ env.APP_FILE }}", ".radius/app.bicep"),
+      "job override": source.replace(
+        "    runs-on:",
+        "    env:\n      APP_FILE: wrong.bicep\n    runs-on:"
+      ),
+      "step override": source.replace(
+        "        with:",
+        "        env:\n          APP_FILE: wrong.bicep\n        with:"
+      ),
+      "no runner": source.replace(
+        "/actions/run-rad-commands@",
+        "/actions/other@"
+      )
+    };
+    h.files.set(key, replacements[failure]);
+    await expect(
+      h.workflows.verifyAppFileInput("owner/app", "topic")
+    ).rejects.toThrow();
+  });
+
+  it("propagates input-contract read failure", async () => {
+    const h = fixture();
+    h.ports.readFile.mockRejectedValue(new Error("unreadable"));
+    await expect(
+      h.workflows.verifyAppFileInput("owner/app", "topic")
+    ).rejects.toThrow("unreadable");
+  });
+
   it("does not republish existing workflows", async () => {
     const { ports, workflows } = fixture();
     const written = vi.fn();

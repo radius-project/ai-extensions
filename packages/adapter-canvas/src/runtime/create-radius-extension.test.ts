@@ -678,6 +678,7 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     const session = createFakeSession();
     ext.attachSession(session);
     await capturedHostCallbacks.deployRepairHandoff!({
+      appFile: "models/custom.bicep",
       repo: "acme/widgets",
       branch: "main",
       error: "BCP037",
@@ -690,6 +691,8 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       .calls[0][0] as { prompt: string; displayPrompt: string };
     expect(sent.prompt).toContain("BCP037");
     expect(sent.prompt).toContain("attempt-A");
+    expect(sent.prompt).toContain("Repair `models/custom.bicep` in place");
+    expect(sent.prompt).not.toContain(".radius/app.bicep");
     expect(sent.displayPrompt).toBe(
       deployRepairHandoffDisplayPrompt("acme/widgets", "main")
     );

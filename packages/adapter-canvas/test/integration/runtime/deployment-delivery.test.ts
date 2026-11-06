@@ -53,7 +53,8 @@ describe("deployment delivery through registered SDK handlers", () => {
         const result = await runtime.start({
           repo: "acme/app",
           environment: "production",
-          branch: "feature"
+          branch: "feature",
+          appFile: "models/custom.bicep"
         });
         if (!result.ok) throw new Error(result.error);
         await vi.waitFor(() =>
@@ -67,6 +68,7 @@ describe("deployment delivery through registered SDK handlers", () => {
           kind === "repair" ?
             deployRepairHandoffMessage("acme/app", "feature", {
               ...evidence,
+              appFile: "models/custom.bicep",
               attemptId: result.invocation.attemptId
             })
           : deployFailureNoticeMessage("acme/app", "feature", evidence)
@@ -89,7 +91,8 @@ describe("deployment delivery through registered SDK handlers", () => {
       const result = await runtime.start({
         repo: "acme/app",
         environment: "production",
-        branch: "feature"
+        branch: "feature",
+        appFile: "models/custom.bicep"
       });
       if (!result.ok) throw new Error(result.error);
       await vi.runAllTimersAsync();

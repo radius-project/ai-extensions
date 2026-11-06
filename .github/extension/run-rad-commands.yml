@@ -21,6 +21,11 @@ on:
         description: 'Container image passed only when the application template declares the image parameter'
         required: false
         default: ''
+      app_file:
+        description: 'Repository-relative application model path; empty uses the generated default'
+        type: string
+        required: false
+        default: ''
       rad_commands:
         # The Repo Radius dispatch contract. A single rad CLI command string, or a
         # JSON-encoded array of command strings run in order, with the `rad` prefix
@@ -79,6 +84,7 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       image: ${{ inputs.image }}
       rad_commands: ${{ inputs.rad_commands }}
+      app_file: ${{ inputs.app_file }}
     secrets: inherit
 
   aws:
@@ -90,4 +96,5 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       image: ${{ inputs.image }}
       rad_commands: ${{ inputs.rad_commands }}
+      app_file: ${{ inputs.app_file }}
     secrets: inherit

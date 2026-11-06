@@ -129,6 +129,7 @@ export interface DeployMonitorDependencies {
 }
 
 export interface DeployMonitorRequest {
+  appFile: string;
   entry: DeployMonitorInstanceEntry;
   repo: string;
   branch: string;
@@ -294,6 +295,7 @@ export function createDeployMonitorService(
           branch,
           provider,
           requestedEnvironment: request.requestedEnvironment,
+          appFile: request.appFile,
           log,
           isCurrent: () =>
             !entry.observation?.stopped && request.isCurrent?.() !== false

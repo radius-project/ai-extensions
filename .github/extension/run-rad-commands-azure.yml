@@ -28,6 +28,11 @@ on:
         type: string
         required: false
         default: ''
+      app_file:
+        description: 'Repository-relative application model path; empty uses the generated default'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   id-token: write
@@ -40,7 +45,7 @@ concurrency:
 
 env:
   ENVIRONMENT: ${{ inputs.environment }}
-  APP_FILE: '{{APP_FILE}}'
+  APP_FILE: ${{ inputs.app_file || '{{APP_FILE}}' }}
   APP_IMAGE: ${{ inputs.image || github.sha || 'latest' }}
   # Target-cluster architecture-aware container image builds. Rendered by the
   # Radius extension: TARGET_CLUSTER_ARCH_MODE -> ${{ vars.RADIUS_BUILD_ARCH_MODE

@@ -118,6 +118,7 @@ function request(overrides: Partial<DeployMonitorRequest> = {}): {
     logs,
     state,
     request: {
+      appFile: ".radius/app.bicep",
       entry: { state },
       repo: "acme/widgets",
       branch: "feat",
@@ -1986,6 +1987,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     };
 
     const dispatch = createDeployDispatchService({
+      verifyAppFileInput: async () => {},
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [
         "run-rad-commands.yml",

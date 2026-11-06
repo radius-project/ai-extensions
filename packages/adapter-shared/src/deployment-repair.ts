@@ -22,6 +22,7 @@ export interface DeploymentFailureNotice {
 
 export interface DeploymentRepairHandoff extends DeploymentFailureNotice {
   attemptId: string;
+  appFile: string;
 }
 
 export interface DeploymentRepairDependencies {
@@ -38,6 +39,7 @@ export interface DeploymentRepairDependencies {
 }
 
 export interface DeploymentRepairRequest extends DeploymentDeliveryIdentity {
+  appFile: string;
   state: DeploymentState;
   repo: string;
   branch: string;
@@ -107,7 +109,7 @@ export function createDeploymentRepairCoordinator(
         instanceId: request.instanceId || ""
       };
       if (delivery.kind === "repair") {
-        await delivery.send({ ...notice, attemptId });
+        await delivery.send({ ...notice, attemptId, appFile: request.appFile });
       } else {
         await delivery.send(notice);
       }
