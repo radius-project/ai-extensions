@@ -5754,6 +5754,8 @@ export function createProductionCanvasServerRuntime(
     reserveDeploymentMutation: (state, reservation) =>
       deploymentViews.reserve(state, reservation),
     releaseDeploymentMutation: deploymentViews.release,
+    captureDeletedDeployment: deploymentViews.captureDeletion,
+    logError: console.error,
     deploymentStatusBlocksMutation,
     localDeploymentBlocksMutation: () => false,
     ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, awsEnabled),

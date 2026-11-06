@@ -79,6 +79,8 @@ export default defineConfig({
       "src/runtime/deployment-tools.test.ts",
       "src/runtime/production-deployment.test.ts",
       "src/server/services/deploy-request.test.ts",
+      "src/server/services/{deployment-views,deployment-abandonment-view,deployed-view-state}.test.ts",
+      "src/server/routes/deployments.test.ts",
       "test/integration/runtime/runtime-contracts.test.ts",
       "test/integration/runtime/plugin-update.test.ts",
       "src/server/services/github-environment-variable-rollback.test.ts",

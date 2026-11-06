@@ -6,6 +6,45 @@ export interface DeletedDeploymentIdentity {
   application: string;
 }
 
+export function captureDeployedApplicationState(
+  state: CanvasState,
+  target: DeletedDeploymentIdentity & { repo: string }
+): () => void {
+  const captured = { ...state };
+  const repository = (value: CanvasState) =>
+    firstNamed(
+      value.deployAttempt?.targetRepo,
+      value.deployingRepo,
+      value.deployedGraphRepo,
+      value.contextRepo,
+      value.workspaceRepo
+    );
+  const keys = [
+    "deployAttempt",
+    "deployGeneration",
+    "deployRunId",
+    "deployRunUrl",
+    "deployStatus",
+    "deployedGraph",
+    "deployedGraphRepo",
+    "deployingResources",
+    "deployAppName",
+    "deployEnvName",
+    "envName"
+  ] as const;
+  const matches =
+    repository(captured).toLowerCase() === target.repo.toLowerCase() &&
+    matchesDeployedApplicationState(captured, target);
+  return () => {
+    if (
+      matches &&
+      repository(state) === repository(captured) &&
+      keys.every((key) => state[key] === captured[key])
+    )
+      discardDeployedApplicationState(state, target);
+  };
+}
+
 // Radius environment and application names are matched case-insensitively
 // everywhere the canvas compares a selection to session state, so this uses the
 // same rule rather than a second, stricter one.
@@ -55,6 +94,20 @@ export function discardDeployedApplicationState(
   state: CanvasState,
   target: DeletedDeploymentIdentity
 ): boolean {
+  if (!matchesDeployedApplicationState(state, target)) return false;
+  state.deployedGraph = null;
+  state.deployedGraphRepo = undefined;
+  // Per-resource statuses and a complete attempt can each render a successful graph.
+  state.deployingResources = null;
+  state.deployStatus = "";
+  state.deployRunId = null;
+  return true;
+}
+
+export function matchesDeployedApplicationState(
+  state: Pick<CanvasState, "deployEnvName" | "envName" | "deployAppName">,
+  target: DeletedDeploymentIdentity
+): boolean {
   if (!target.environment.trim() || !target.application.trim()) return false;
   const sessionEnvironment = firstNamed(state.deployEnvName, state.envName);
   const sessionApplication = firstNamed(state.deployAppName);
@@ -65,13 +118,5 @@ export function discardDeployedApplicationState(
   ) {
     return false;
   }
-  state.deployedGraph = null;
-  state.deployedGraphRepo = undefined;
-  // Per-resource statuses seed the Deployed view even when no graph was
-  // published, and a `complete` status alone settles every node green, so both
-  // have to go with the graph.
-  state.deployingResources = null;
-  state.deployStatus = "";
-  state.deployRunId = null;
   return true;
 }

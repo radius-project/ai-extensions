@@ -96,8 +96,8 @@ function retireMatchingDeployAttempt(
   const attempt = state.deployAttempt;
   if (
     !attempt ||
-    attempt.targetRepo !== repo ||
-    attempt.environment !== environment
+    attempt.targetRepo?.toLowerCase() !== repo.toLowerCase() ||
+    attempt.environment?.toLowerCase() !== environment.toLowerCase()
   ) {
     return;
   }

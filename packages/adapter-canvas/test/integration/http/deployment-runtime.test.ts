@@ -147,7 +147,10 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
       "/api/delete-deployment",
       "/api/abandon-deployment"
     ]) {
-      const blocked = await post(other, route, target);
+      const blocked = await post(other, route, {
+        ...target,
+        environment: "PRODUCTION"
+      });
       expect(blocked.status, route).toBe(409);
       await blocked.json();
     }

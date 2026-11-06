@@ -214,6 +214,8 @@ The [deployment owner](../../packages/adapter-shared/src/deployment-owner.ts) bi
 
 Canvas subscribes to the owner rather than owning execution. Closing or resetting an active panel detaches that view; reopening attaches without dispatching again. Terminal reset and successful guarded abandonment may retire only the exact settled record. No-argument deploy reuses unambiguous runtime context; missing or ambiguous targets require explicit inputs.
 
+The review fixes make repository/environment exclusion case-insensitive without changing execution spelling or repair-target matching. Accepted deletion invalidates the captured application's handles and views before run discovery, while active delivery remains tracked until settlement. It does not suppress later deployments in those panels. Unknown application identity and replaced legacy projections are preserved. Failed run discovery after confirmed dispatch returns an accepted response without a URL and retains the deletion lease. These lifecycle corrections do not extract deletion itself; that remains Stage 6.
+
 Keepalive, reload deferral and the existing 2,000 ms shutdown drain consult owner activity, including no-panel admission. Shutdown stops local admission, polling and delivery retries, and reports incomplete cleanup. It does not cancel remote workflows, undo writes or add restart recovery.
 
 Environment setup remains verify-only and does not depend on deployment ownership.

@@ -256,6 +256,10 @@ function start(
       },
       deployListCache: cache,
       deployListTtlMs: 15000,
+      captureDeletedDeployment: views.captureDeletion,
+      logError: (message) => {
+        throw new Error(message);
+      },
       // The destructive route's collaborators, wired to a permissive happy path
       // so the HIT exercises real HTTP rather than re-proving refusal logic the
       // unit tests already cover.
@@ -565,7 +569,10 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
                         {
                           name: "deploy",
                           steps: [
-                            { name: "Run rad commands", conclusion: "failure" }
+                            {
+                              name: "Run rad commands",
+                              conclusion: "failure"
+                            }
                           ]
                         }
                       ]
@@ -2010,6 +2017,10 @@ interface DeployHarness {
 function startDeploy(
   monitorOverride?: DeployMonitorService,
   callbacks: {
+    deletion?: Pick<
+      DeploymentsDependencies,
+      "runGh" | "findWorkflowRun" | "logError" | "setTimer"
+    >;
     delivery?: Pick<
       DeploymentRuntimePorts["delivery"],
       "sendRepair" | "sendNotice"
@@ -2133,11 +2144,15 @@ function startDeploy(
       resolveEnvDeployment: () => Promise.resolve(null),
       ghOrThrow: () => Promise.resolve(""),
       resetDeploymentViewState: views.reset,
+      captureDeletedDeployment: views.captureDeletion,
+      logError: (message) => {
+        throw new Error(message);
+      },
       deployListCache: new Map<string, DeployListCacheEntry>(),
       deployListTtlMs: 15000,
       activeDeploymentMutation: () => undefined,
-      reserveDeploymentMutation: () => null,
-      releaseDeploymentMutation: () => {},
+      reserveDeploymentMutation: views.reserve,
+      releaseDeploymentMutation: views.release,
       deploymentStatusBlocksMutation: () => false,
       localDeploymentBlocksMutation: () => false,
       ensureWorkflowsCurrent: () =>
@@ -2161,7 +2176,8 @@ function startDeploy(
         repair: () => {
           throw new Error("the deploy harness must not repair AWS trust");
         }
-      }
+      },
+      ...callbacks.deletion
     })
   );
 
@@ -2448,6 +2464,163 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
 });
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
+  it.each(["missing", "throwing"] as const)(
+    "invalidates a completed tool deployment at delete acceptance, before %s run discovery, and allows fresh tool attachment",
+    async (discovery) => {
+      const findingRun = createDeferred<void>();
+      const finishDiscovery = createDeferred<void>();
+      let expire: (() => void) | undefined;
+      const dispatch = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+      const logError = vi.fn();
+      const h = startDeploy(
+        {
+          async run({ entry }) {
+            entry.state.deployStatus = "complete";
+            entry.state.deployAppName = "widgets";
+            entry.state.deployRunId = 42;
+            entry.state.deployedGraph = [
+              { id: "web", name: "web", type: "Radius.Compute/containers" }
+            ];
+          }
+        },
+        {
+          deletion: {
+            runGh: dispatch,
+            logError,
+            setTimer(callback) {
+              expire = callback;
+              return {};
+            },
+            async findWorkflowRun() {
+              findingRun.resolve();
+              await finishDiscovery.promise;
+              if (discovery === "throwing")
+                throw new Error("Run lookup unavailable");
+              return null;
+            }
+          }
+        }
+      );
+      const sdk = await createRuntimeSdkHarness({}, (deps) => {
+        deps.deployment = h.runtime;
+      });
+      try {
+        const deploy = sdk.extension.tools.find(
+          ({ name }) => name === "radius_deploy"
+        );
+        const status = sdk.extension.tools.find(
+          ({ name }) => name === "radius_deploy_status"
+        );
+        if (!deploy || !status) throw new Error("Deployment tools missing");
+        const target = {
+          repo: "acme/widgets",
+          branch: "feature",
+          environment: "production"
+        };
+        await deploy.handler(target);
+        await vi.waitFor(() =>
+          expect(h.runtime.owner.hasActiveWork()).toBe(false)
+        );
+        const selected = h.runtime.owner.lookup();
+        if (selected.kind !== "found") throw new Error("No tool deployment");
+        const first = selected.invocation;
+        const a = await container!.getOrCreate("panel-a");
+        const b = await container!.getOrCreate("panel-b");
+        for (const entry of [a, b]) {
+          entry.state.contextRepo = target.repo;
+          entry.state.envName = target.environment;
+          expect(
+            await (await fetch(`${entry.baseUrl}/api/deploy-status`)).json()
+          ).toMatchObject({
+            status: "complete",
+            attempt: { id: first.attemptId }
+          });
+        }
+        const deletion = post(
+          a.baseUrl,
+          "/api/delete-deployment",
+          JSON.stringify({
+            ...target,
+            environment: "PRODUCTION",
+            application: "widgets"
+          })
+        );
+        await findingRun.promise;
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(dispatch.mock.calls[0]).toEqual([
+          expect.arrayContaining(["environment=PRODUCTION"])
+        ]);
+        expect(
+          await status.handler({ observationId: first.observationId })
+        ).toContain("No matching");
+        expect(await status.handler({ attemptId: first.attemptId })).toContain(
+          "No matching"
+        );
+        expect(await deploy.handler({ attemptId: first.attemptId })).toContain(
+          "no longer current"
+        );
+        expect(await deploy.handler(target)).toContain("in progress");
+        for (const entry of [a, b]) {
+          await (
+            await fetch(
+              `${entry.baseUrl}/api/list-deployments?repo=acme/widgets`
+            )
+          ).json();
+          for (let poll = 0; poll < 2; poll++) {
+            const payload = await (
+              await fetch(`${entry.baseUrl}/api/deploy-status`)
+            ).json();
+            expect(payload.status).toBe("pending");
+            expect(payload.deployedGraph).toBeNull();
+            expect(entry.state.deployRunId).toBeUndefined();
+          }
+        }
+        finishDiscovery.resolve();
+        const response = await deletion;
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          success: true,
+          runUrl: "",
+          forced: false
+        });
+        expect(logError).toHaveBeenCalledTimes(
+          discovery === "throwing" ? 1 : 0
+        );
+        const blocked = await post(
+          b.baseUrl,
+          "/api/delete-deployment",
+          JSON.stringify({
+            ...target,
+            application: "widgets"
+          })
+        );
+        expect(blocked.status).toBe(409);
+        expect(dispatch).toHaveBeenCalledOnce();
+        expire?.();
+        await deploy.handler(target);
+        await vi.waitFor(() =>
+          expect(h.runtime.owner.hasActiveWork()).toBe(false)
+        );
+        const next = h.runtime.owner.lookup();
+        if (next.kind !== "found") throw new Error("Missing fresh deployment");
+        expect(next.invocation.attemptId).not.toBe(first.attemptId);
+        for (const entry of [a, b]) {
+          const payload = await (
+            await fetch(`${entry.baseUrl}/api/deploy-status`)
+          ).json();
+          expect(payload.attempt.id).toBe(next.invocation.attemptId);
+          expect(payload.status).toBe("complete");
+        }
+        expect(
+          await status.handler({ observationId: first.observationId })
+        ).toContain("No matching");
+      } finally {
+        finishDiscovery.resolve();
+        await sdk.extension.shutdown("test");
+      }
+    }
+  );
+
   it.each([
     { change: "created", exhausted: false },
     { change: "updated", exhausted: false },

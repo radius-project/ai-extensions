@@ -5,6 +5,11 @@ import type {
 } from "@radius-project/adapter-shared";
 import type { DeploymentState, DeploymentTarget } from "@radius-project/core";
 import type { CanvasState } from "../../shared.js";
+import {
+  captureDeployedApplicationState,
+  matchesDeployedApplicationState,
+  type DeletedDeploymentIdentity
+} from "./deployed-view-state.js";
 
 type Invocation = DeploymentInvocation<DeploymentState>;
 
@@ -123,7 +128,8 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
         repo.toLowerCase() !== selected.invocation.target.repo.toLowerCase()) ||
       (!previous &&
         environment &&
-        environment !== selected.invocation.target.environment)
+        environment.toLowerCase() !==
+          selected.invocation.target.environment.toLowerCase())
     ) {
       detach(instanceId);
       for (const key of PROJECTION_KEYS) delete state[key];
@@ -175,12 +181,44 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
     return true;
   }
 
+  function captureDeletion(
+    state: CanvasState,
+    target: DeletedDeploymentIdentity & { repo: string }
+  ): () => void {
+    const selected = runtime.owner.lookupTarget(target);
+    if (
+      selected.kind !== "found" ||
+      !matchesDeployedApplicationState(
+        {
+          deployEnvName: selected.invocation.target.environment,
+          deployAppName: selected.invocation.state.deployAppName
+        },
+        target
+      )
+    )
+      return captureDeployedApplicationState(state, target);
+    const invocation = selected.invocation;
+    return () => {
+      if (!runtime.owner.invalidate(invocation)) return;
+      for (const [id, view] of views) {
+        if (view.invocation !== invocation) continue;
+        detach(id);
+        for (const key of PROJECTION_KEYS) delete view.state[key];
+        delete view.state.deployResult;
+      }
+      for (const [id, reference] of remembered) {
+        if (reference.attemptId === invocation.attemptId) remembered.delete(id);
+      }
+    };
+  }
+
   return {
     attach,
     detach,
     refresh,
     reset,
     retire,
+    captureDeletion,
     reserve(
       _state: CanvasState,
       input: Pick<DeploymentViewReservation, "repo" | "environment" | "kind">

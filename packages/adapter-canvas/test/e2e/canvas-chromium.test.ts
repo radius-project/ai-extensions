@@ -681,7 +681,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await seed(canvas);
   });
 
-  test("production deploy outcome masks host-known credentials through repair publication @safety", async ({
+  test("production deploy outcome masks credentials and accepted deletion cannot resurrect it @safety", async ({
     page,
     canvas
   }, testInfo) => {
@@ -1092,6 +1092,92 @@ test.describe("Radius Canvas in Chromium", () => {
           call.args.join(" ") === `run view ${runId} --log --repo ${REPOSITORY}`
       )
     ).toBe(true);
+
+    scenario.commands.unshift(
+      command(
+        [
+          "api",
+          `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`,
+          "--jq",
+          ".[].id"
+        ],
+        "dep-1\n"
+      ),
+      command(
+        [
+          "workflow",
+          "run",
+          "delete-application.yml",
+          "-f",
+          `environment=${environment}`,
+          "-f",
+          "application=radius-app",
+          "--repo",
+          REPOSITORY
+        ],
+        ""
+      ),
+      command(
+        [
+          "run",
+          "list",
+          "--workflow=delete-application.yml",
+          "--limit",
+          "5",
+          "--json",
+          "databaseId,status,createdAt",
+          "--repo",
+          REPOSITORY
+        ],
+        JSON.stringify([
+          {
+            databaseId: 103,
+            status: "queued",
+            createdAt: new Date().toISOString()
+          }
+        ])
+      )
+    );
+    await canvas.setScenario(scenario);
+    await page.request.get(
+      `${canvas.baseUrl}/api/list-deployments?repo=${REPOSITORY}&fresh=1`
+    );
+    await gotoCanvas(page, canvas, "deploying");
+    await page.getByRole("button", { name: "Delete Deployment" }).click();
+    await page
+      .getByRole("button", { name: "I want to delete this deployment" })
+      .click();
+    await page
+      .getByRole("button", { name: /have read and understand/i })
+      .click();
+    await page.locator("#del-confirm-input").fill(`radius-app/${environment}`);
+    const accepted = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/delete-deployment") &&
+        response.request().method() === "POST"
+    );
+    await page.locator("#del-confirm-btn").click();
+    const deleted = await accepted;
+    expect(deleted.status(), await deleted.text()).toBe(200);
+    expect(await deleted.json()).toMatchObject({ success: true });
+    for (let poll = 0; poll < 3; poll++) {
+      const current = await (
+        await page.request.get(`${canvas.baseUrl}/api/deploy-status`)
+      ).json();
+      expect(current.status).toBe("pending");
+      expect(current.attempt).toBeNull();
+      expect(current.deployedGraph).toBeNull();
+      expect(current.deployRunUrl).toBeNull();
+    }
+    await gotoCanvas(page, canvas, "deploying");
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.locator("body")).not.toContainText(
+      "binding-regression-witness"
+    );
+    expect(canvas.entry.state.deployRunId).toBeUndefined();
+    expect((await canvas.cliCalls()).filter((call) => !call.matched)).toEqual(
+      []
+    );
   });
 
   for (const fixture of pageStateCases()) {

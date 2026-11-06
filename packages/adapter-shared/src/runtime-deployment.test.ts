@@ -199,6 +199,49 @@ describe("panel-independent deployment runtime", () => {
     expect(sendNotice).toHaveBeenCalledOnce();
   });
 
+  it.each(["waiting", "delivering"] as const)(
+    "fences invalidated repair retries while %s without dropping issued work",
+    async (phase) => {
+      vi.useFakeTimers();
+      const finish = held();
+      let attempts = 0;
+      const sendRepair = vi.fn(async () => {
+        if (++attempts > 1) await finish.promise;
+        throw new Error("delivery unavailable");
+      });
+      const { runtime } = fixture(
+        {
+          delivery: {
+            sendRepair,
+            redactDiagnostic: (value) => value,
+            reportDiagnostic: vi.fn()
+          }
+        },
+        async ({ entry }) => {
+          entry.state.deployStatus = "failed";
+        }
+      );
+      const started = await runtime.start(target);
+      if (!started.ok) throw new Error(started.error);
+      await vi.advanceTimersByTimeAsync(0);
+      if (phase === "delivering") await vi.advanceTimersByTimeAsync(2000);
+      const published = vi.fn();
+      runtime.owner.subscribe(started.invocation, published);
+      expect(runtime.owner.invalidate(started.invocation)).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.owner.lookup()).toEqual({ kind: "missing" });
+      expect(runtime.owner.hasActiveWork()).toBe(phase === "delivering");
+      if (phase === "delivering")
+        expect(runtime.owner.reserve(target, "delete")).toBeNull();
+      finish.resolve();
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(runtime.owner.hasActiveWork()).toBe(false);
+      expect(sendRepair).toHaveBeenCalledTimes(phase === "delivering" ? 2 : 1);
+      expect(published).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
   it("publishes pending, retryable and delivered repair state to attached views", async () => {
     vi.useFakeTimers();
     const finishMonitor = held();

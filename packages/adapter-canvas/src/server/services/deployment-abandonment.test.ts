@@ -284,8 +284,8 @@ describe("createDeploymentAbandonmentService", () => {
     const state = {
       deployAttempt: {
         id: "attempt-dev",
-        targetRepo: PAYLOAD.repo,
-        environment: PAYLOAD.environment
+        targetRepo: PAYLOAD.repo.toUpperCase(),
+        environment: PAYLOAD.environment.toUpperCase()
       },
       deployResult: { error: "failed" },
       deployStatus: "failed",
