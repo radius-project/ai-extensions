@@ -6,10 +6,11 @@ import {
   type GitHubRepositoryIdentity,
   type OidcSubjectConfig,
   buildEnvironmentSuffix,
-  AWS_PERMISSION_POLICY_NAME_VARIABLE,
   awsLockPolicyArn,
   awsRoleArn,
-  isAwsEnvironmentPolicyName,
+  immutableEnvironmentRepository,
+  namesOneEnvironment,
+  subjectRepositoryName,
   formatAwsLockTime,
   readRecordedAwsLock,
   type AwsLockAction
@@ -17,7 +18,6 @@ import {
 import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
 import {
   resolveOidcSubject,
-  parseServedReposFromSubjects,
   type GitHubJsonResponse,
   type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
@@ -37,7 +37,7 @@ import {
   type AwsLockResult,
   type AwsTrustRepairResult
 } from "./aws-deploy-identity.js";
-import { parseTrustSubjects } from "./environment-target.js";
+import { parseTrustSubjects, readTrustSubjects } from "./environment-target.js";
 import {
   acquireAwsDeployIdentityLock,
   isAwsWrite,
@@ -92,7 +92,6 @@ export type AwsEnvironmentSetupResult =
       ok: true;
       roleArn: string;
       subjects: readonly string[];
-      policyName: string;
     }
   | { ok: false; status: number; error: string; code: string }
   // A pause was requested. Every AWS change made before it is recorded on the
@@ -119,8 +118,9 @@ export interface AwsEnvironmentAccess<Operation> {
   // both are done. Never throws; a lock left behind is reported as a step.
   release(operation: Operation): Promise<void>;
   // Remove what one environment added to the shared deploy role, under the
-  // deploy identity lock. It removes `trustSubjects`, the subjects setup
-  // recorded, and the subjects GitHub resolves for the environment now.
+  // deploy identity lock. It removes the subjects GitHub resolves for the
+  // environment now, and those in `trustSubjects`, the subjects setup
+  // recorded, that still name this repository.
   remove(input: {
     repo: string;
     environment: string;
@@ -129,7 +129,6 @@ export interface AwsEnvironmentAccess<Operation> {
     // The environment's cluster. Empty when it did not record one.
     region: string;
     cluster: string;
-    policyName?: string;
     operationId?: string;
     // Called on every poll while another run holds the lock, with a progress
     // line when there is something new to say.
@@ -149,7 +148,6 @@ export interface AwsEnvironmentAccess<Operation> {
     repo: string;
     environment: string;
     roleArn: string;
-    policyName?: string;
     // Run once the lock is held, before any write: null when the environment
     // still names `roleArn`, otherwise why Repair must stop.
     confirmTarget(): Promise<{ code: string; message: string } | null>;
@@ -240,6 +238,16 @@ function lockLostMessage(
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function union(...lists: readonly (readonly string[])[]): string[] {
+  return [...new Set(lists.flat())];
+}
+
+function isStringList(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
 }
 
 export function createAwsEnvironmentAccess<Operation>(
@@ -429,6 +437,30 @@ export function createAwsEnvironmentAccess<Operation>(
     };
   }
 
+  // Whether `subject`, which names one repository and `environment`, names
+  // this repository, now or under an earlier name. GitHub redirects an earlier
+  // name to the repository until another repository takes the name. A GitHub
+  // read failure throws, so delete stops with the GitHub environment kept.
+  async function namesThisRepository(
+    subject: string,
+    environment: string,
+    repository: GitHubRepositoryIdentity
+  ): Promise<boolean> {
+    if (namesRepositoryEnvironment(subject, repository)) return true;
+    const immutable = immutableEnvironmentRepository(subject, environment);
+    if (immutable) return immutable.repoId === repository.repoId;
+    const name = subjectRepositoryName(subject);
+    if (!name) return false;
+    const response = await dependencies.runGitHubJson(`/repos/${name}`);
+    if (response.status === 404) return false;
+    if (!response.ok) {
+      throw new Error(
+        `Could not read repository ${name} from GitHub (${response.stderr || `HTTP ${response.status ?? "unknown"}`}), so Radius couldn't tell whether trust subject ${subject} is this repository's. Nothing was changed.`
+      );
+    }
+    return response.json?.id === repository.repoId;
+  }
+
   // The repository's AWS environments other than `environment`. Any read that
   // fails, or an environment Radius manages whose cluster can't be read, makes
   // the answer unknown, because that environment may use the same cluster.
@@ -472,17 +504,20 @@ export function createAwsEnvironmentAccess<Operation>(
     return { ok: false, stopped: true };
   }
 
-  async function savedPolicyName(
+  // The trust subjects the environment's completed setup saved for `roleArn`.
+  // A GitHub variable any admin of the repository can edit, so a subject in it
+  // doesn't prove whose it is.
+  async function savedTrustSubjects(
     repo: string,
     environment: string,
     roleArn: string,
     executor?: SelectedGhExecutor
-  ): Promise<string | undefined> {
+  ): Promise<string[]> {
     const response = await dependencies.runGitHubJson(
       `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`,
       executor
     );
-    if (response.status === 404) return undefined;
+    if (response.status === 404) return [];
     const data: unknown = response.json;
     if (
       !response.ok ||
@@ -492,7 +527,7 @@ export function createAwsEnvironmentAccess<Operation>(
       !Array.isArray(data.variables)
     ) {
       throw new Error(
-        "Could not read the environment's saved AWS policy identity. Nothing was changed."
+        "Could not read the environment's saved AWS configuration. Nothing was changed."
       );
     }
     const values = new Map<string, string>();
@@ -512,17 +547,21 @@ export function createAwsEnvironmentAccess<Operation>(
       }
       values.set(variable.name, variable.value);
     }
-    const name = values.get(AWS_PERMISSION_POLICY_NAME_VARIABLE);
-    if (name === undefined) return undefined;
-    if (
-      values.get("AWS_ROLE_ARN") !== roleArn ||
-      !isAwsEnvironmentPolicyName(name, environment)
-    ) {
+    const subjects = values.get(AWS_TRUST_SUBJECTS_VARIABLE);
+    // A list setup can't read would be replaced, losing the subjects earlier
+    // setups added under a repository name used before a rename.
+    const trustSubjects =
+      values.get("AWS_ROLE_ARN") === roleArn && subjects !== undefined ?
+        readTrustSubjects(subjects)
+      : [];
+    if (trustSubjects === null) {
       throw new Error(
-        "The saved AWS permission policy does not match this environment and selected role. Repair its saved configuration before setup. Nothing was changed."
+        `The environment's ${AWS_TRUST_SUBJECTS_VARIABLE} variable is not a JSON list of trust subjects. Correct or delete it, then retry. Nothing was changed.`
       );
     }
-    return name;
+    return trustSubjects.filter((subject) =>
+      namesOneEnvironment(subject, environment)
+    );
   }
 
   function pausedLine(created: readonly string[]): string {
@@ -583,46 +622,34 @@ export function createAwsEnvironmentAccess<Operation>(
       const accountId = text(input.accountId);
       const roleName = text(input.roleName) || defaultAwsDeployRoleName(repo);
       const existingRoleArn = text(input.existingRoleArn);
-      let policyName: string | undefined;
-      let reconcileLegacyPolicy = false;
+      let saved: string[];
+      // The subjects earlier attempts of this setup added, or were about to
+      // add, to the role's trust. A rename between attempts changes the
+      // subjects setup presents, so only this record still lists the earlier
+      // ones. The role, environment, and repository ID can't change.
+      let attempted: readonly string[];
       try {
-        policyName = await savedPolicyName(
+        saved = await savedTrustSubjects(
           repo,
           environment,
           existingRoleArn || awsRoleArn(accountId, roleName),
           executor
         );
-        const recovery = operations.getContext(operation).awsPolicyIdentity;
-        if (recovery !== undefined) {
-          if (
-            typeof recovery !== "object" ||
-            recovery === null ||
-            !("repoId" in recovery) ||
-            recovery.repoId !== repoId ||
-            !("environment" in recovery) ||
-            recovery.environment !== environment ||
-            !("roleArn" in recovery) ||
-            recovery.roleArn !==
-              (existingRoleArn || awsRoleArn(accountId, roleName)) ||
-            !("policyName" in recovery) ||
-            typeof recovery.policyName !== "string" ||
-            !isAwsEnvironmentPolicyName(recovery.policyName, environment) ||
-            (policyName !== undefined && policyName !== recovery.policyName)
-          ) {
-            throw new Error(
-              "The recorded partial AWS policy identity does not match this setup. Reconcile its grant before retrying. Nothing was changed."
-            );
-          }
-          reconcileLegacyPolicy = policyName === undefined;
-          policyName = recovery.policyName;
+        const recorded =
+          operations.getContext(operation).awsAttemptedTrustSubjects;
+        if (recorded !== undefined && !isStringList(recorded)) {
+          throw new Error(
+            "This setup's record of the trust subjects its earlier attempts added is damaged. Start a new setup. Nothing was changed."
+          );
         }
+        attempted = recorded ?? [];
       } catch (error) {
         if (dependencies.isStopRequested(operation))
           return pausedBeforeReady(operation, []);
         return {
           ok: false,
           status: 400,
-          code: "aws-policy-name-unresolved",
+          code: "aws-saved-configuration-unreadable",
           error: dependencies.errorMessage(error)
         };
       }
@@ -639,10 +666,9 @@ export function createAwsEnvironmentAccess<Operation>(
           accountId,
           region: text(input.region),
           cluster: text(input.cluster),
+          repoId,
           roleName,
           existingRoleArn,
-          policyName,
-          reconcileLegacyPolicy,
           subjects
         },
         {
@@ -670,29 +696,12 @@ export function createAwsEnvironmentAccess<Operation>(
           step: (line) => {
             operations.addLegacyStep(operation, line, stage);
           },
-          recordPolicyIdentity: async (identity) => {
+          recordTrustSubjects: async (added) => {
+            attempted = union(attempted, added);
             operations.setContext(operation, {
-              awsPolicyIdentity: { repoId, environment, ...identity }
+              awsAttemptedTrustSubjects: attempted
             });
             await dependencies.store.persist();
-          },
-          isRecordedForeignPolicy: async (candidate) => {
-            if (candidate.repoId !== undefined)
-              return candidate.repoId !== repoId;
-            const identity = await resolveIdentity(
-              candidate.repo,
-              environment,
-              executor
-            );
-            return (
-              identity.repoId !== repoId &&
-              (await savedPolicyName(
-                identity.repo,
-                environment,
-                candidate.roleArn,
-                executor
-              )) === candidate.policyName
-            );
           },
           sleep: dependencies.sleep,
           acquireLock: async ({ roleName }): Promise<AwsLockResult> => {
@@ -747,6 +756,11 @@ export function createAwsEnvironmentAccess<Operation>(
           }
         }
       );
+      // Every subject delete has to remove from the role for this
+      // environment: what a completed setup or an earlier attempt added,
+      // which may name the repository before a rename, and what it presents
+      // now.
+      const trustSubjects = union(saved, attempted, subjects);
       if (lockLost) {
         await dependencies.store.persist();
         const created = "created" in result ? result.created : [];
@@ -764,19 +778,11 @@ export function createAwsEnvironmentAccess<Operation>(
         if (result.ok) {
           operations.setContext(operation, {
             awsRoleArn: result.roleArn,
-            awsTrustSubjects: subjects,
-            awsPolicyName: result.policyName
+            awsTrustSubjects: trustSubjects
           });
           return paused(
             operation,
             `⏸️ Paused after AWS setup finished. ${result.roleArn} is ready for this environment.`
-          );
-        }
-        if (writes.includes("aws iam delete-role-policy")) {
-          operations.setStageState(operation, stage, "paused");
-          return paused(
-            operation,
-            `Paused after AWS policy changes. ${result.message}`
           );
         }
         return pausedBeforeReady(operation, result.created);
@@ -795,16 +801,10 @@ export function createAwsEnvironmentAccess<Operation>(
       }
       operations.setContext(operation, {
         awsRoleArn: result.roleArn,
-        awsTrustSubjects: subjects,
-        awsPolicyName: result.policyName
+        awsTrustSubjects: trustSubjects
       });
       await dependencies.store.persist();
-      return {
-        ok: true,
-        roleArn: result.roleArn,
-        subjects,
-        policyName: result.policyName
-      };
+      return { ok: true, roleArn: result.roleArn, subjects: trustSubjects };
     },
 
     async release(operation) {
@@ -847,51 +847,62 @@ export function createAwsEnvironmentAccess<Operation>(
       trustSubjects = [],
       region,
       cluster,
-      policyName,
       operationId = "",
       waiting,
       whileLocked
     }) {
-      // The recorded list covers a repository renamed since setup. The
-      // current subjects cover what Repair added after an OIDC subject
-      // change, which the recorded list doesn't name. The removal keeps any
-      // that other environments or repositories may present too. A GitHub
-      // read failure throws, so the delete stops with the GitHub environment
-      // kept.
       const oidc = await resolveOidc(repo, environment);
-      const subjects = [
-        ...new Set([
-          ...trustSubjects,
-          ...oidc.federatedCredentials.map((credential) => credential.subject)
-        ])
-      ];
-      // Recorded subjects retain the pre-rename repository for older grants.
-      const policyRepositories = new Set(
-        parseServedReposFromSubjects(
-          trustSubjects.length > 0 ? trustSubjects : subjects
-        ).map((name) => name.toLowerCase())
-      );
-      if (policyRepositories.size > 1) {
-        return {
-          ok: false,
-          message:
-            "Recorded AWS trust subjects name multiple repositories, so Radius did not change the deploy identity. Review the environment's saved AWS configuration before retrying."
-        };
+      // AWS_TRUST_SUBJECTS is a GitHub variable any admin of the repository
+      // can edit. A saved subject only this environment presents is removed
+      // only when it names this repository, which covers a rename since
+      // setup. The removal itself keeps, and reports, a subject other
+      // environments or repositories present too.
+      const saved: string[] = [];
+      const unproven: string[] = [];
+      for (const subject of trustSubjects) {
+        if (
+          !namesOneEnvironment(subject, environment) ||
+          (await namesThisRepository(subject, environment, oidc))
+        ) {
+          saved.push(subject);
+        } else {
+          unproven.push(subject);
+        }
       }
-      const policyRepository = [...policyRepositories][0] ?? oidc.fullName;
+      const kept = unproven.map(
+        (subject) =>
+          `Kept trust subject ${subject}, because GitHub doesn't tie it to this repository, so another repository may present it. If nothing needs it, remove it from the role's trust policy by hand.`
+      );
+      // The current subjects cover what Repair added after an OIDC subject
+      // change, which the saved list doesn't name.
+      const subjects = union(
+        saved,
+        oidc.federatedCredentials.map((credential) => credential.subject)
+      );
+      // The name a Radius-created role is tagged with, which setup refuses
+      // to change after a rename.
+      const savedRepositories = new Set(
+        saved.flatMap(
+          (subject) => subjectRepositoryName(subject)?.toLowerCase() ?? []
+        )
+      );
+      const policyRepository =
+        savedRepositories.size === 1 ?
+          [...savedRepositories][0]
+        : oidc.fullName;
       const { result, lost, released } = await runUnderLock(
         { repo, environment, action: "delete", operationId },
         waiting ?? (() => undefined),
         async (ports) => {
-          const removal = await removeAwsEnvironmentFromRole(
+          const removed = await removeAwsEnvironmentFromRole(
             {
               repo: policyRepository,
+              repoId: oidc.repoId,
               roleArn,
               environment,
               subjects,
               region,
-              cluster,
-              policyName
+              cluster
             },
             {
               ...ports,
@@ -899,6 +910,10 @@ export function createAwsEnvironmentAccess<Operation>(
                 listOtherAwsEnvironments(repo, environment, oidc)
             }
           );
+          const removal =
+            removed.ok ?
+              { ...removed, warnings: [...kept, ...removed.warnings] }
+            : removed;
           if (removal.ok && whileLocked && (await ports.stillLocked())) {
             await whileLocked(removal);
           }
@@ -912,13 +927,7 @@ export function createAwsEnvironmentAccess<Operation>(
         : { ok: false, message: `${result.message} ${released.message}` };
     },
 
-    async repair({
-      repo,
-      environment: requested,
-      roleArn,
-      policyName,
-      confirmTarget
-    }) {
+    async repair({ repo, environment: requested, roleArn, confirmTarget }) {
       // GitHub finds an environment by name in any casing, but its tokens
       // carry the stored spelling, so the subjects are built from that.
       const lookup = await dependencies.runGitHubJson(
@@ -935,7 +944,7 @@ export function createAwsEnvironmentAccess<Operation>(
       const environment = stored;
       // Always from GitHub: AWS_TRUST_SUBJECTS is editable by anyone with
       // admin on the repository, so it cannot decide what Repair trusts.
-      const { subjects, subjectConfig } = await resolveIdentity(
+      const { repoId, subjects, subjectConfig } = await resolveIdentity(
         repo,
         environment
       );
@@ -944,7 +953,7 @@ export function createAwsEnvironmentAccess<Operation>(
         null,
         (ports) =>
           repairAwsEnvironmentTrust(
-            { repo, environment, roleArn, subjects, subjectConfig, policyName },
+            { repo, repoId, environment, roleArn, subjects, subjectConfig },
             {
               ...ports,
               // A delete can run between the first read of the environment and

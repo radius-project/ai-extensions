@@ -207,8 +207,7 @@ function awsOperation(operationId: string) {
 const awsSetupResult = {
   ok: true as const,
   roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
-  subjects: ["repo:fixture/app:environment:dev"],
-  policyName: "radius-deploy-dev"
+  subjects: ["repo:fixture/app:environment:dev"]
 };
 
 afterEach(() => {

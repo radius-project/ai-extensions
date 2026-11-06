@@ -236,7 +236,6 @@ export async function handleDeleteEnvironment(
       trustSubjects?: string[];
       region?: string;
       cluster?: string;
-      policyName?: string;
     };
     try {
       target = await dependencies.discoverEnvironmentTarget(repo, envName);
@@ -305,10 +304,7 @@ export async function handleDeleteEnvironment(
           roleArn: target.roleArn || "",
           trustSubjects: target.trustSubjects,
           region: target.region || "",
-          cluster: target.cluster || "",
-          ...(target.policyName !== undefined ?
-            { policyName: target.policyName }
-          : {})
+          cluster: target.cluster || ""
         }
       : {})
     };

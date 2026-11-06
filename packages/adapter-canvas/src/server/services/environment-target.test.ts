@@ -173,17 +173,4 @@ describe("reading the environment a deletion targets", () => {
       createEnvironmentTargetReader(run)("octo/shop", "dev")
     ).rejects.toThrow("HTTP 403");
   });
-
-  it.each(["radius-deploy-dev-111111111111", ""])(
-    "preserves the recorded policy name %j without deriving it from the current repository",
-    async (policyName) => {
-      const run = vi.fn(
-        async () =>
-          `AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/picked\nAWS_PERMISSION_POLICY_NAME\t${policyName}`
-      );
-      expect(
-        await createEnvironmentTargetReader(run)("renamed/repo", "dev")
-      ).toMatchObject({ provider: "aws", policyName });
-    }
-  );
 });
