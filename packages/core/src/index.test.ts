@@ -207,6 +207,7 @@ const EXPECTED_FUNCTIONS = [
   "configMapClusterMessage",
   "buildAwsLockPolicyName",
   "awsLockPolicyArn",
+  "readRecordedAwsLock",
   "buildAwsLockPolicyDocument",
   "describeAwsLockHolder",
   "parseAwsLockHolder",

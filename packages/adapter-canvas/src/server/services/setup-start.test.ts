@@ -169,6 +169,38 @@ describe("shared setup admission", () => {
       expect(h.deps.persistOperations).not.toHaveBeenCalled();
     }
   );
+  it("saves the AWS request a continuation reads after a restart", async () => {
+    const h = harness();
+    const data = {
+      ...aws,
+      existingRoleArn: "arn:aws:iam::123456789012:role/existing",
+      namespace: "shop",
+      profileName: "fixture-profile",
+      origin: "deploy"
+    };
+    expect((await h.start({ data, claimAccount: h.claimAccount })).status).toBe(
+      202
+    );
+    const saved = h.registry.latest(aws.repo);
+    expect(saved.resumeRequest).toEqual({
+      needsAzureCredentials: false,
+      github: { login: "octocat", credentialSource: "keyring" },
+      environment: saved.request.environment
+    });
+    expect(saved.resumeRequest.environment).toMatchObject({
+      accountId: aws.accountId,
+      region: aws.region,
+      cluster: aws.cluster,
+      roleName: aws.roleName,
+      existingRoleArn: data.existingRoleArn,
+      vpcId: aws.vpcId,
+      subnetIds: aws.subnetIds,
+      namespace: "shop",
+      profileName: "fixture-profile",
+      origin: "deploy"
+    });
+    expect(saved.resumeRequest.environment).not.toBe(saved.request.environment);
+  });
   it("preserves optional environment configuration and journey provenance for continuation", async () => {
     const h = harness();
     const extra = {

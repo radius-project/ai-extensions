@@ -1363,6 +1363,142 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.posts).toEqual([]);
   });
 
+  describe("an AWS failure while a restart settles an earlier write", () => {
+    function restartedAwsSetup() {
+      const op = operation();
+      op.provider = "aws";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: {
+          environment: "production",
+          roleName: "radius-deploy-octo-app",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks-1"
+        }
+      };
+      setCanonicalEnvironment(op, "Production");
+      recordGitHubEnvironment(op, {
+        state: "reused",
+        origin: "pre_existing",
+        repo: "octo/app",
+        name: "Production",
+        providerId: "environment-1"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_workflow.put",
+        target: "octo/app:main:.github/workflows/radius-verify-credentials.yml"
+      });
+      return { op, mutation };
+    }
+    const failedAws = (code: string) => ({
+      setupAwsDeployIdentity: async () => ({
+        ok: false as const,
+        status: 400,
+        code,
+        error: "The AWS CLI profile is not set up. Run aws configure."
+      })
+    });
+    const SIGN_IN_STEP =
+      "step:⚠️ Radius could not sign in to AWS to check the interrupted setup. The AWS CLI profile is not set up. Run aws configure. Sign in again, and Radius continues on its own.";
+
+    it.each([
+      "aws-cli-login-required",
+      "aws-verification-failed",
+      "aws-identity-invalid",
+      "aws-account-mismatch",
+      "aws-cli-unsupported"
+    ])(
+      "keeps reconciling after %s without charging the GitHub write",
+      async (code) => {
+        const { op, mutation } = restartedAwsSetup();
+        const test = dependencies(op, {
+          ...failedAws(code),
+          addLegacyStep: (target, text) => {
+            test.events.push(`step:${text}`);
+            addLegacyStep(target, text);
+          }
+        });
+
+        // A second try reads the same failure and does not repeat the step.
+        for (const _attempt of [1, 2]) {
+          await expect(
+            runEnvironmentOperationWorkflow(
+              op,
+              successfulSelectedGhExecutor(),
+              test.dependencies
+            )
+          ).rejects.toMatchObject({
+            code: "provider-mutation-outcome-unknown",
+            message: "The AWS CLI profile is not set up. Run aws configure."
+          });
+        }
+
+        expect(
+          test.events.filter((event) => event === SIGN_IN_STEP)
+        ).toHaveLength(1);
+        const live = unresolvedProviderMutations(op).find(
+          (entry) => entry.mutationId === mutation.mutationId
+        );
+        expect(live).toMatchObject({ status: "prepared" });
+        expect(live?.reconcileAttempts ?? 0).toBe(0);
+        expect(test.failures).toEqual([]);
+        expect(test.posts).toEqual([]);
+        expect(
+          test.events.filter((event) => event === "release-aws")
+        ).toHaveLength(2);
+      }
+    );
+
+    it("still charges an AWS failure that signing in would not fix", async () => {
+      const { op, mutation } = restartedAwsSetup();
+      const test = dependencies(op, failedAws("aws-role-unreadable"));
+
+      await expect(
+        runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor(),
+          test.dependencies
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+
+      expect(
+        unresolvedProviderMutations(op).find(
+          (entry) => entry.mutationId === mutation.mutationId
+        )
+      ).toMatchObject({
+        reconcileAttempts: 1,
+        evidence:
+          "Provider state could not be read: The AWS CLI profile is not set up. Run aws configure."
+      });
+      expect(test.events).not.toContain(SIGN_IN_STEP);
+    });
+
+    it("finalizes a sign-in failure as usual when nothing is unsettled", async () => {
+      const op = operation();
+      op.provider = "aws";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: { environment: "production", roleName: "fixture" }
+      };
+      const test = dependencies(op, failedAws("aws-cli-login-required"));
+
+      expect(
+        await runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor({
+            run: async () =>
+              command({ stdout: JSON.stringify({ name: "Production" }) })
+          }),
+          test.dependencies
+        )
+      ).toEqual({ shouldMonitor: false });
+      expect(test.failures).toEqual([
+        expect.objectContaining({ code: "aws-cli-login-required" })
+      ]);
+    });
+  });
+
   it.each(["lock wait", "failed policy read"])(
     "keeps authorization paused during %s, including after Continue",
     async (pauseAt) => {
@@ -1461,6 +1597,7 @@ describe("runEnvironmentOperationWorkflow", () => {
         },
         now: () => NOW,
         isStopRequested: shouldStop,
+        isStoppedOperation: () => false,
         operationId: (target) => target.operationId,
         operations: {
           getContext: (target) => target.context ?? {},
@@ -1658,6 +1795,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       sleep: async () => {},
       now: () => NOW,
       isStopRequested: () => false,
+      isStoppedOperation: () => false,
       operationId: (target) => target.operationId,
       operations: {
         getContext: (target) => target.context ?? {},
