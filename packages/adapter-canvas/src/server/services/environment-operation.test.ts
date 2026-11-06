@@ -1538,6 +1538,9 @@ describe("runEnvironmentOperationWorkflow", () => {
             }
           })
         }),
+        "eks describe-addon": command({
+          stdout: JSON.stringify({ addon: { status: "ACTIVE" } })
+        }),
         // Another run holds the lock for the whole test.
         "iam create-policy": command({
           code: 254,
@@ -1733,6 +1736,7 @@ describe("runEnvironmentOperationWorkflow", () => {
           accessConfig: { authenticationMode: "API" }
         }
       },
+      "eks describe-addon": { addon: { status: "ACTIVE" } },
       "iam create-policy": { Policy: { PolicyId: "LOCK1" } },
       "iam get-policy": { Policy: { PolicyId: "LOCK1" } },
       "iam delete-policy": "",
@@ -1833,6 +1837,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       "--version",
       "sts get-caller-identity",
       "eks describe-cluster",
+      "eks describe-addon",
       "iam create-policy",
       "iam get-policy",
       "iam get-role",

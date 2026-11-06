@@ -854,33 +854,155 @@ const GLOBAL_POWER_USER_ACTIONS = [
   "organizations:DescribeOrganization"
 ];
 
+function regionalStatement(region: string): PolicyStatement {
+  return {
+    Effect: "Allow",
+    NotAction: [
+      "iam:*",
+      "organizations:*",
+      "account:*",
+      // Exclude the five access-administration actions, not the read APIs.
+      "eks:*teAccessEntry",
+      "eks:*AccessPolicy"
+    ],
+    Resource: "*",
+    Condition: { StringEquals: { "aws:RequestedRegion": region } }
+  };
+}
+
+const APP_ROLE_PREFIX = "radius-app-";
+
 /**
- * The environment's permission policy: the statements of AWS's
- * `PowerUserAccess` managed policy, with the broad grant limited to the
- * environment's region. It is written per environment, so a role shared by
- * environments in two regions can act in exactly those two, and deleting one
- * environment removes only that environment's grant. Other policies on a
- * picked role can grant additional access; this policy must not deny them.
+ * Where one environment's app roles live, and the permissions boundary that
+ * caps them. The aws-eks containers recipe creates a role per container under
+ * `rolePath`, with `boundaryArn` as its boundary.
  */
-export function buildAwsEnvironmentPermissionPolicy(
+export interface AwsAppIdentity {
+  readonly accountId: string;
+  readonly rolePath: string;
+  readonly boundaryName: string;
+  readonly boundaryArn: string;
+}
+
+/**
+ * Names the app identity after the environment's permission policy, which is
+ * already unique to the repository and environment and is recorded at setup.
+ */
+export function buildAwsAppIdentity(
+  accountId: string,
+  policyName: string
+): AwsAppIdentity {
+  const key = policyName.replace(/^radius-deploy-/, "");
+  const rolePath = `/radius/apps/${key}/`;
+  const boundaryName = `${APP_ROLE_PREFIX}${key}`;
+  return {
+    accountId,
+    rolePath,
+    boundaryName,
+    boundaryArn: `arn:aws:iam::${accountId}:policy${rolePath}${boundaryName}`
+  };
+}
+
+/**
+ * The most an app role can do: what the deploy role can do in the region,
+ * plus Bedrock models reached through the region's inference profiles, which
+ * run in other regions.
+ */
+export function buildAwsAppBoundaryPolicy(
+  accountId: string,
   region: string
 ): PolicyDocument {
   return {
     Version: "2012-10-17",
     Statement: [
+      regionalStatement(region),
       {
         Effect: "Allow",
-        NotAction: [
-          "iam:*",
-          "organizations:*",
-          "account:*",
-          // Exclude the five access-administration actions, not the read APIs.
-          "eks:*teAccessEntry",
-          "eks:*AccessPolicy"
+        Action: [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream"
         ],
-        Resource: "*",
-        Condition: { StringEquals: { "aws:RequestedRegion": region } }
-      },
+        Resource: "arn:aws:bedrock:*::foundation-model/*",
+        Condition: {
+          ArnLike: {
+            "bedrock:InferenceProfileArn": `arn:aws:bedrock:${region}:${accountId}:inference-profile/*`
+          }
+        }
+      }
+    ]
+  };
+}
+
+// Lets the deploy role manage its environment's app roles. A role it creates
+// or changes must carry the environment's boundary, and it can't remove the
+// boundary or attach managed policies.
+function appRoleStatements(app: AwsAppIdentity): PolicyStatement[] {
+  const roles = `arn:aws:iam::${app.accountId}:role${app.rolePath}*`;
+  return [
+    {
+      Effect: "Allow",
+      Action: [
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      Resource: roles,
+      Condition: {
+        StringEquals: { "iam:PermissionsBoundary": app.boundaryArn }
+      }
+    },
+    {
+      Effect: "Allow",
+      Action: [
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:DeleteRole"
+      ],
+      Resource: roles
+    },
+    {
+      Effect: "Allow",
+      Action: "iam:PassRole",
+      Resource: roles,
+      Condition: {
+        StringEquals: { "iam:PassedToService": "pods.eks.amazonaws.com" }
+      }
+    },
+    // Before it creates a role, Cloud Control checks that the role doesn't
+    // exist yet, and IAM checks that call against an ARN without the path.
+    {
+      Effect: "Allow",
+      Action: "iam:GetRole",
+      Resource: `arn:aws:iam::${app.accountId}:role/${APP_ROLE_PREFIX}*`
+    }
+  ];
+}
+
+/**
+ * The environment's permission policy: the statements of AWS's
+ * `PowerUserAccess` managed policy, with the broad grant limited to the
+ * environment's region, plus management of the environment's app roles. It is
+ * written per environment, so a role shared by environments in two regions
+ * can act in exactly those two, and deleting one environment removes only
+ * that environment's grant. Other policies on a picked role can grant
+ * additional access; this policy must not deny them.
+ */
+export function buildAwsEnvironmentPermissionPolicy(
+  region: string,
+  app: AwsAppIdentity
+): PolicyDocument {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      regionalStatement(region),
       {
         Effect: "Allow",
         Action: [...GLOBAL_POWER_USER_ACTIONS],
@@ -899,7 +1021,8 @@ export function buildAwsEnvironmentPermissionPolicy(
             ]
           }
         }
-      }
+      },
+      ...appRoleStatements(app)
     ]
   };
 }

@@ -287,6 +287,8 @@ jobs:
           AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_EKS_CLUSTER_NAME: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+          AWS_APP_ROLE_PATH: ${{ vars.AWS_APP_ROLE_PATH }}
+          AWS_APP_BOUNDARY_ARN: ${{ vars.AWS_APP_BOUNDARY_ARN }}
           RADIUS_SUBNET_IDS: ${{ vars.RADIUS_SUBNET_IDS }}
           # The aws-eks recipe pack is not in defaults.yaml yet. The extension
           # fills this URL and commit from the one it pins (AWS_EKS_RECIPE_PACK
@@ -414,6 +416,22 @@ jobs:
             --parameters containerImagesRegistry="$BUILD_REGISTRY"
             --parameters containerImagesRegistrySecretName="$REGISTRY_SECRET_NAME"
           )
+          # Environment setup records where the containers recipe creates each
+          # container's IAM role and the boundary that caps it. An environment
+          # set up before that has neither, and its containers get no AWS role.
+          if [ -n "$AWS_APP_ROLE_PATH" ] || [ -n "$AWS_APP_BOUNDARY_ARN" ]; then
+            APP_KEY="${AWS_APP_ROLE_PATH#/radius/apps/}"
+            APP_KEY="${APP_KEY%/}"
+            if ! [[ "$AWS_APP_ROLE_PATH" =~ ^/radius/apps/[A-Za-z0-9+=,.@_-]+/$ ]] ||
+              [ "$AWS_APP_BOUNDARY_ARN" != "arn:aws:iam::${AWS_ACCOUNT_ID}:policy${AWS_APP_ROLE_PATH}radius-app-${APP_KEY}" ]; then
+              echo "ERROR: AWS_APP_ROLE_PATH and AWS_APP_BOUNDARY_ARN must be the values environment setup recorded. Run the environment setup again." >&2
+              exit 1
+            fi
+            PACK_PARAMETERS+=(
+              --parameters appRolePath="$AWS_APP_ROLE_PATH"
+              --parameters appPermissionsBoundaryArn="$AWS_APP_BOUNDARY_ARN"
+            )
+          fi
 
           rad deploy "$RECIPE_PACK_BICEP" \
             --environment "$ENVIRONMENT" \

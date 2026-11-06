@@ -84,7 +84,7 @@ const flush = async () => {
 describe("AWS deploy identity helpers", () => {
   it("states the trust, region, and cluster access in the help text", () => {
     expect(awsRoleHelpText("octo/shop", "dev", "us-west-2")).toBe(
-      "Created in your AWS account, trusted over OIDC by repo:octo/shop for the dev environment, and granted PowerUserAccess limited to resources in us-west-2. Setup also grants the role cluster-admin access on the target EKS cluster."
+      "Created in your AWS account, trusted over OIDC by repo:octo/shop for the dev environment, and granted PowerUserAccess limited to resources in us-west-2. Setup also grants the role cluster-admin access on the target EKS cluster. It can also create, change, and delete IAM roles for this environment's apps, capped by a permissions boundary, and pass them to EKS Pod Identity."
     );
     expect(awsRoleHelpText("octo/shop", "", "")).toContain(
       "for the this environment"

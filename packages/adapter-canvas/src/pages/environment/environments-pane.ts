@@ -398,7 +398,7 @@ export function environmentsPaneMarkup(
         <input type="hidden" id="aws-selected-role-arn" value="" />
         <div class="rad-field__help"><span id="aws-role-help">Created in your AWS account, trusted over OIDC by <code>repo:${escapeHtml(
           ctxRepo
-        )}</code> for this environment, and granted PowerUserAccess limited to resources in the profile's region. Setup also grants the role cluster-admin access on the target EKS cluster.</span> If one already exists, you may
+        )}</code> for this environment, and granted PowerUserAccess limited to resources in the profile's region. Setup also grants the role cluster-admin access on the target EKS cluster. It can also create, change, and delete IAM roles for this environment's apps, capped by a permissions boundary, and pass them to EKS Pod Identity.</span> If one already exists, you may
          <a href="#" id="aws-use-existing-role-link">use an existing role…</a>
         </div>
         <div id="aws-selected-role-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>

@@ -156,6 +156,8 @@ const EXPECTED_FUNCTIONS = [
   "mergeGitHubTrustSubject",
   "removeGitHubTrustSubject",
   "buildAwsEnvironmentPermissionPolicy",
+  "buildAwsAppIdentity",
+  "buildAwsAppBoundaryPolicy",
   "awsRoleTags",
   "radiusRoleRepository",
   "isRadiusManagedRole",
