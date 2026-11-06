@@ -5,12 +5,15 @@ import {
   type DeployCommandOptions,
   type DeployCommandResult,
   type DeployDispatchDependencies
-} from "./deploy-dispatch.js";
-import type { BicepParam } from "../../bicep.js";
-import type { CanvasState } from "../../shared.js";
-import type { GitHubJsonResponse, GitHubJsonRunner } from "../../azure-oidc.js";
-import { requireCurrentAwsWorkflows } from "./aws-workflow-compatibility.js";
-import { createEnvironmentProviderReader } from "./environment-target.js";
+} from "./deployment-dispatch.js";
+import type {
+  DeploymentBicepParameter as BicepParam,
+  DeploymentState as CanvasState
+} from "@radius-project/core";
+import type {
+  GitHubJsonResponse,
+  GitHubJsonRunner
+} from "@radius-project/core/platforms";
 
 const OK: DeployCommandResult = { code: 0, stdout: "", stderr: "" };
 
@@ -223,21 +226,34 @@ const PUBLIC_PARAM: BicepParam = {
 };
 
 describe("deploy dispatch construction", () => {
+  it("uses installation guidance when no usable GitHub CLI command can be shown", async () => {
+    const f = request();
+    await createDeployDispatchService(
+      dependencies({
+        ghCommandPresentation: {
+          kind: "unavailable",
+          shell: "posix",
+          installationNote: "Install GitHub CLI on your terminal PATH."
+        },
+        runGh: async () => ({
+          code: 1,
+          stdout: "",
+          stderr: "missing workflow scope"
+        })
+      })
+    ).prepareAndDispatch(f.input);
+    expect(f.state.deployError).toContain(
+      "Install GitHub CLI on your terminal PATH."
+    );
+    expect(f.state.deployError).not.toContain("Run `");
+  });
+
   it.each(["aws", "azure", ""])(
-    "does not dispatch stale AWS templates with provider hint %j",
+    "propagates AWS workflow verification refusal with provider hint %j",
     async (hint) => {
       const { input } = request();
       input.provider = hint;
       const gh = recordingGh();
-      const readProvider = createEnvironmentProviderReader(
-        async (command, args) => {
-          expect(command).toBe("gh");
-          expect(args[1]).toBe(
-            "/repos/acme/widgets/environments/production/variables?per_page=100"
-          );
-          return "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deploy\nAWS_REGION\tus-west-2";
-        }
-      );
       const service = createDeployDispatchService(
         dependencies({
           ...gh,
@@ -259,19 +275,22 @@ describe("deploy dispatch construction", () => {
             files,
             workingBranch
           ) => {
-            await requireCurrentAwsWorkflows(
-              { provider, files, workingBranch },
-              {
-                environmentProvider: () => readProvider(repo, environment),
-                defaultBranch: async () => "main",
-                templates: async () => ({
-                  "run-rad-commands-aws.yml": "current"
-                }),
-                readFile: async () => "old create-access-entry workflow",
-                errorMessage: String
-              }
+            expect({
+              repo,
+              environment,
+              provider,
+              files,
+              workingBranch
+            }).toEqual({
+              repo: "acme/widgets",
+              environment: "production",
+              provider: hint,
+              files: ["run-rad-commands.yml", "run-rad-commands-aws.yml"],
+              workingBranch: "feat"
+            });
+            throw new Error(
+              "AWS workflows are not confirmed current; the branch is protected."
             );
-            return { created: [], updated: [] };
           }
         })
       );

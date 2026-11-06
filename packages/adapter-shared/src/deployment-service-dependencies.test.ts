@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import { assertDeployDependencies } from "./deployment-service-dependencies.js";
 
 describe("deploy service dependency validation", () => {
   it("accepts a set where every required seam is callable", () => {

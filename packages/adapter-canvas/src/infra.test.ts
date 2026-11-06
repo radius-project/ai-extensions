@@ -91,7 +91,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-vi.mock("./gh.js", () => ({
+vi.mock("./gh.js", async () => ({
+  redactGhCredentials: (await import("@radius-project/core")).redactCredentials,
   // Answers `gh api .../contents/<path>?ref=<branch> --jq .sha` from the
   // committed files, the way the branch publisher checks for a workflow.
   cliExec: (

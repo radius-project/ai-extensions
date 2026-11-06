@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ClassifiedProvider } from "../../provider-classification.js";
+import type { WorkflowEnvironmentProvider as ClassifiedProvider } from "./aws-workflow-compatibility.js";
 import { requireCurrentAwsWorkflows } from "./aws-workflow-compatibility.js";
 
 const file = "run-rad-commands-aws.yml";
