@@ -7,6 +7,7 @@
 // file belong to the environments/deploying page and credentials modules, not
 // here, and are intentionally not reproduced.
 
+import { isEksClusterName } from "@radius-project/core/platforms";
 import { remediationView } from "@radius-project/core/remediations";
 import {
   discoverStatusText,
@@ -16,9 +17,18 @@ import {
 import { remediationReference } from "../../remediation-reference.js";
 import { createCommandAction } from "../command-action.js";
 import {
+  AWS_CLUSTER_SELECT_ID,
+  AWS_NAMESPACE_NOTE_ID,
+  awsClusterPresentation,
+  awsMissingClusterNoteLine,
+  awsNamespaceFallbackNote,
   initializeAwsInfrastructure,
   parseAwsClusterInfo,
-  parseAwsSubnetInfo
+  parseAwsSubnetInfo,
+  parseAwsVpcInfo,
+  readAwsErrorKinds,
+  type AwsClusterInfo,
+  type AwsClusterNoteLine
 } from "./aws-infrastructure.js";
 import { beginEntry } from "../lifecycle.js";
 import { isRecord, readArray, readString, readStringArray } from "../json.js";
@@ -37,11 +47,7 @@ export const LIST_APP_REGISTRATIONS_ENDPOINT =
   "/api/list-azure-app-registrations";
 export const APP_SERVES_REPOS_ENDPOINT = "/api/azure-app-serves-repos";
 export const SERVES_LABEL_CONCURRENCY = 6;
-export const DEFAULT_NAMESPACES: readonly string[] = [
-  "default",
-  "kube-system",
-  "radius-system"
-];
+export const DEFAULT_NAMESPACES: readonly string[] = ["default"];
 
 export const COMBO_PAIRS: readonly (readonly [string, string])[] = [
   ["azure-namespace-select", "azure-namespace-custom"],
@@ -52,6 +58,14 @@ export interface DiscoveryOption {
   readonly id: string;
   readonly name: string;
   readonly resourceGroup?: string;
+  // Listed but not selectable, such as an EKS cluster Radius can't use.
+  readonly disabled?: boolean;
+}
+
+export interface DiscoverResourcesOptions {
+  // Hold the AWS cluster, namespace, and subnets on screen across this
+  // discovery, as Refresh does, instead of showing the defaults.
+  readonly keepSelection?: boolean;
 }
 
 export interface AppRegistrationCandidate {
@@ -87,7 +101,8 @@ export interface DiscoveryPanelHandle {
   discoverResources(
     provider: "azure" | "aws",
     subscriptionId: string,
-    tenantId: string
+    tenantId: string,
+    options?: DiscoverResourcesOptions
   ): Promise<void>;
   findAzureClusterResourceGroup(clusterId: string): string;
   setPendingInfraSelection(
@@ -95,7 +110,12 @@ export interface DiscoveryPanelHandle {
     provider: "azure" | "aws"
   ): void;
   currentInfraSelection(provider: "azure" | "aws"): EnvironmentInfrastructure;
-  // The AWS subnet or cluster problem that keeps Create Environment disabled.
+  // Hold the selection across a subtab switch, so the next discovery restores
+  // it. An AWS selection that no discovery has restored yet stays held for the
+  // account and region it belongs to. Otherwise the selection on screen is held.
+  preserveInfraSelection(provider: "azure" | "aws"): void;
+  // The AWS subnet, cluster, or namespace-read problem that keeps Create
+  // Environment disabled.
   awsInfrastructureError(): string;
   teardown(): void;
 }
@@ -103,6 +123,14 @@ export interface DiscoveryPanelHandle {
 export interface DiscoveryPanelOptions {
   readonly mutationNonce: string;
   readonly onInfrastructureChange?: () => void;
+}
+
+// A saved or refreshed AWS selection. Discovery keeps it until a response can
+// restore it, so a failed discovery doesn't lose it. `scope` is the account and
+// region it belongs to, or null until a discovery claims it.
+interface HeldAwsSelection {
+  config: EnvironmentInfrastructure;
+  scope: string | null;
 }
 
 const MISSING_MUTATION_NONCE_REASON =
@@ -179,9 +207,9 @@ export function parseDiscoveryOptions(
 
 // Case-insensitive sort by display name so discovered resource lists render in
 // a predictable order in the dropdowns.
-export function sortDiscoveryOptions(
-  options: readonly DiscoveryOption[]
-): DiscoveryOption[] {
+export function sortDiscoveryOptions<T extends DiscoveryOption>(
+  options: readonly T[]
+): T[] {
   return [...options].sort((left, right) => {
     const leftName = left.name.toLowerCase();
     const rightName = right.name.toLowerCase();
@@ -206,22 +234,26 @@ function readArrayOrDefault(
   return Array.isArray(member) ? member : [...fallback];
 }
 
-function toDiscoveryData(payload: unknown): DiscoveryData {
-  if (!isRecord(payload)) return {};
-  const errorsRaw = payload.errors;
-  const errors: Record<string, string> = {};
-  if (isRecord(errorsRaw)) {
-    for (const [key, value] of Object.entries(errorsRaw)) {
-      if (typeof value === "string") errors[key] = value;
+function readStringRecord(value: unknown): Record<string, string> {
+  const record: Record<string, string> = {};
+  if (isRecord(value)) {
+    for (const [key, entry] of Object.entries(value)) {
+      if (typeof entry === "string") record[key] = entry;
     }
   }
+  return record;
+}
+
+function toDiscoveryData(payload: unknown): DiscoveryData {
+  if (!isRecord(payload)) return {};
   return {
     clusters: readArray(payload, "clusters"),
     resourceGroups: readArray(payload, "resourceGroups"),
     vpcs: readArray(payload, "vpcs"),
     subnets: readArray(payload, "subnets"),
     error: optionalString(payload, "error"),
-    errors
+    errors: readStringRecord(payload.errors),
+    errorKinds: readAwsErrorKinds(payload.errorKinds)
   };
 }
 
@@ -230,13 +262,14 @@ function renderSelectOptions(
   select: DomSelectElement,
   items: readonly DiscoveryOption[],
   placeholder: string,
-  allowCustom = true
+  allowCustom = true,
+  emptyLabel = "No resources found"
 ): void {
   const optionElements: DomOptionElement[] = [];
   if (items.length === 0) {
     const empty = context.dom.createOption({
       value: "",
-      label: "No resources found",
+      label: emptyLabel,
       selected: true
     });
     empty.setAttribute("disabled", "true");
@@ -250,9 +283,12 @@ function renderSelectOptions(
     placeholderOption.setAttribute("disabled", "true");
     optionElements.push(placeholderOption);
     for (const item of items) {
-      optionElements.push(
-        context.dom.createOption({ value: item.id, label: item.name })
-      );
+      const option = context.dom.createOption({
+        value: item.id,
+        label: item.name
+      });
+      if (item.disabled === true) option.setAttribute("disabled", "true");
+      optionElements.push(option);
     }
   }
   if (allowCustom) {
@@ -271,11 +307,19 @@ function renderSelect(
   selectId: string,
   items: readonly DiscoveryOption[],
   placeholder: string,
-  allowCustom = true
+  allowCustom = true,
+  emptyLabel?: string
 ): void {
   const select = context.dom.selectById(selectId);
   if (!select) return;
-  renderSelectOptions(context, select, items, placeholder, allowCustom);
+  renderSelectOptions(
+    context,
+    select,
+    items,
+    placeholder,
+    allowCustom,
+    emptyLabel
+  );
 }
 
 function renderSelectLoading(
@@ -301,11 +345,44 @@ function selectOfferedValue(
   const select = context.dom.selectById(selectId);
   if (!select) return false;
   for (const option of Array.from(select.options)) {
-    if (option.value !== value) continue;
+    if (option.value !== value || option.disabled === true) continue;
     select.value = value;
     return true;
   }
   return false;
+}
+
+function renderAwsClusterNote(
+  context: BrowserContext,
+  lines: readonly AwsClusterNoteLine[]
+): void {
+  const note = context.dom.byId("aws-cluster-note");
+  if (!note) return;
+  note.replaceChildren();
+  for (const line of lines) {
+    const row = context.dom.createElement("div");
+    const text = context.dom.createElement("span");
+    text.textContent = line.text;
+    row.appendChild(text);
+    if (line.command !== undefined) {
+      const command = context.dom.createElement("code");
+      command.setAttribute(
+        "style",
+        "display:block; margin:2px 0 4px; user-select:all; overflow-wrap:anywhere;"
+      );
+      command.textContent = line.command;
+      row.appendChild(command);
+    }
+    note.appendChild(row);
+  }
+  note.hidden = lines.length === 0;
+}
+
+function renderAwsNamespaceNote(context: BrowserContext, text: string): void {
+  const note = context.dom.byId(AWS_NAMESPACE_NOTE_ID);
+  if (!note) return;
+  note.textContent = text;
+  note.hidden = text === "";
 }
 
 // Populate the AKS cluster dropdown from a (possibly RG-filtered) list, keeping
@@ -639,14 +716,29 @@ export function initializeDiscoveryPanel(
     aws: { subscriptionId: "", tenantId: "" }
   };
   const accountDiscovered = { azure: false, aws: false };
-  const remediationHost = context.dom.byId("azure-discover-remediation");
-  let remediationAction: CommandActionHandle | null = null;
-  const renderAzureRemediation = (payload: unknown): void => {
-    remediationAction?.dispose();
-    remediationAction = null;
-    if (!remediationHost) return;
-    remediationHost.replaceChildren();
-    remediationHost.hidden = true;
+  // Each provider has its own sign-in host and action, so one provider's
+  // discovery never hides or replaces the other's button.
+  const remediations: Record<
+    "azure" | "aws",
+    { host: DomElement | null; action: CommandActionHandle | null }
+  > = {
+    azure: {
+      host: context.dom.byId("azure-discover-remediation"),
+      action: null
+    },
+    aws: { host: context.dom.byId("aws-discover-remediation"), action: null }
+  };
+  const renderDiscoverRemediation = (
+    provider: "azure" | "aws",
+    payload: unknown
+  ): void => {
+    const slot = remediations[provider];
+    slot.action?.dispose();
+    slot.action = null;
+    const host = slot.host;
+    if (!host) return;
+    host.replaceChildren();
+    host.hidden = true;
     if (!isRecord(payload)) return;
     const reference = remediationReference(payload["remediation"]);
     if (!reference) return;
@@ -659,23 +751,23 @@ export function initializeDiscoveryPanel(
           unsupportedReason: MISSING_MUTATION_NONCE_REASON
         }
       : remediation;
-    remediationHost.hidden = false;
-    remediationAction = createCommandAction(context, {
-      host: remediationHost,
+    host.hidden = false;
+    slot.action = createCommandAction(context, {
+      host,
       remediation: guardedRemediation,
       mutationNonce: options.mutationNonce,
-      idPrefix: "azure-discover-login"
+      idPrefix: `${provider}-discover-login`
     });
   };
-  // A pending selection belongs to the provider whose form asked for it.
-  // Azure and AWS discovery can be outstanding at the same time, so the
-  // provider is recorded alongside the config and only a matching response is
-  // allowed to consume it — otherwise whichever request happened to settle
-  // first would swallow the other provider's saved values.
-  let pendingInfrastructure: {
-    provider: "azure" | "aws";
-    config: EnvironmentInfrastructure;
-  } | null = null;
+  // A saved Azure selection that the next Azure response restores once.
+  let pendingAzureInfrastructure: EnvironmentInfrastructure | null = null;
+  let heldAwsSelection: HeldAwsSelection | null = null;
+  // Only the newest AWS namespace request may change the namespace list. An
+  // AWS discovery also bumps it, because that discovery lists namespaces too.
+  let awsNamespaceToken = 0;
+  // The token of the namespace read that a cluster pick started. Create stays
+  // blocked while it matches awsNamespaceToken.
+  let awsNamespaceReadToken: number | null = null;
   // A saved namespace survives one extra discovery round trip: the first,
   // untargeted request cannot list namespaces, so the restored value has to be
   // reapplied once the follow-up request returns the cluster's real list.
@@ -950,15 +1042,17 @@ export function initializeDiscoveryPanel(
   const discoverResources = async (
     provider: "azure" | "aws",
     subscriptionId: string,
-    tenantId: string
+    tenantId: string,
+    discoverOptions: DiscoverResourcesOptions = {}
   ): Promise<void> => {
     const refreshButton = context.dom.inputById(
       provider === "azure" ? "azure-refresh-btn" : "aws-refresh-btn"
     );
-    const namespaceSelect =
-      provider === "azure" ?
-        context.dom.selectById("azure-namespace-select")
-      : null;
+    // The newest full discovery owns the namespace list. It also takes over
+    // from an AWS cluster pick whose namespace read it drops.
+    const namespaceSelect = context.dom.selectById(
+      provider === "azure" ? "azure-namespace-select" : "aws-namespace-select"
+    );
     const request = discoveryRequests[provider];
     const previousAccount = discoveryAccounts[provider];
     const accountChanged =
@@ -967,14 +1061,25 @@ export function initializeDiscoveryPanel(
         previousAccount.tenantId !== tenantId);
     discoveryAccounts[provider] = { subscriptionId, tenantId };
     accountDiscovered[provider] = true;
-    const hasPendingSelection = pendingInfrastructure?.provider === provider;
+    const hasPendingSelection = pendingAzureInfrastructure !== null;
     const deploymentResourceGroup =
       provider === "azure" && !accountChanged && !hasPendingSelection ?
         (context.dom.selectById("azure-rg-select")?.value ?? "")
       : "";
+    if (provider === "aws") {
+      claimAwsSelection(
+        `${subscriptionId}\u0000${tenantId}`,
+        discoverOptions.keepSelection === true && !accountChanged
+      );
+    }
+    // An AWS discovery sends the held cluster, so the server lists that
+    // cluster's namespaces. With none, it lists those of the only usable one.
+    const heldAwsCluster = heldAwsSelection?.config.cluster ?? "";
     const cluster =
-      provider === "azure" && !accountChanged && !hasPendingSelection ?
-        selectedAzureClusterId()
+      provider === "aws" ?
+        isEksClusterName(heldAwsCluster) ? heldAwsCluster
+        : ""
+      : !accountChanged && !hasPendingSelection ? selectedAzureClusterId()
       : "";
     const discoveredClusterResourceGroup =
       provider === "azure" ? findAzureClusterResourceGroup(cluster) : "";
@@ -987,7 +1092,7 @@ export function initializeDiscoveryPanel(
       tenantId,
       provider === "azure" ? deploymentResourceGroup : "",
       clusterResourceGroup,
-      provider === "azure" ? cluster : ""
+      cluster
     ].join("\u0000");
     if (request.identity === identity) {
       // The very same lookup is already running. Re-assert the disabled state
@@ -1016,7 +1121,7 @@ export function initializeDiscoveryPanel(
       provider === "azure" ? "azure-discover-status" : "aws-discover-status"
     );
     if (statusEl) statusEl.textContent = "Discovering resources…";
-    if (provider === "azure") renderAzureRemediation(null);
+    renderDiscoverRemediation(provider, null);
     // The cluster, VPC, and subnets on screen belong to the previous lookup,
     // possibly in another account or region. Clear them so Create stays
     // blocked until this lookup succeeds, and stays blocked if it fails.
@@ -1024,12 +1129,15 @@ export function initializeDiscoveryPanel(
       awsClusterInfo = [];
       renderSelect(
         context,
-        "aws-cluster-select",
+        AWS_CLUSTER_SELECT_ID,
         [],
-        "Discovering EKS clusters…",
-        false
+        "",
+        false,
+        "Discovering EKS clusters…"
       );
-      renderSelect(context, "aws-vpc-select", [], "Discovering VPCs…", false);
+      renderAwsClusterNote(context, []);
+      renderAwsNamespaceNote(context, "");
+      awsNamespaceToken += 1;
       awsInfrastructure.reset();
     }
     const payload: Record<string, string> = { provider };
@@ -1055,8 +1163,8 @@ export function initializeDiscoveryPanel(
       const raw = await response.json();
       if (isStale()) return;
       const data = toDiscoveryData(raw);
+      renderDiscoverRemediation(provider, raw);
       if (provider === "azure") {
-        renderAzureRemediation(raw);
         if (statusEl) statusEl.textContent = discoverStatusText(data, "azure");
         azureClusters = sortDiscoveryOptions(
           parseDiscoveryOptions(readArray(raw, "clusters"))
@@ -1102,76 +1210,44 @@ export function initializeDiscoveryPanel(
           selectOfferedValue(context, "azure-namespace-select", "default");
         }
         wireAzureInfraFilter();
-      } else {
-        if (statusEl) statusEl.textContent = discoverStatusText(data, "aws");
-        awsClusterInfo = parseAwsClusterInfo(readArray(raw, "clusters"));
-        const awsClusters = sortDiscoveryOptions(
-          parseDiscoveryOptions(readArray(raw, "clusters")).map((option) =>
-            (
-              awsClusterInfo.some(
-                (cluster) => cluster.id === option.id && !cluster.usable
-              )
-            ) ?
-              {
-                ...option,
-                name: `${option.name} (CONFIG_MAP authentication, cannot be used)`
-              }
-            : option
-          )
-        );
-        renderSelect(
-          context,
-          "aws-cluster-select",
-          awsClusters,
-          "Select EKS cluster…",
-          false
-        );
-        if (awsClusters.length === 1) {
-          selectOfferedValue(context, "aws-cluster-select", awsClusters[0].id);
+        const restoredNamespace = applyPendingAzureInfrastructure();
+        if (cluster === "" && selectedAzureClusterId() !== "") {
+          pendingAzureNamespace = restoredNamespace;
+          void rediscoverAzureNamespaces();
         }
-        renderSelect(
-          context,
-          "aws-namespace-select",
-          sortDiscoveryOptions(
-            parseDiscoveryOptions(
-              readArrayOrDefault(raw, "namespaces", DEFAULT_NAMESPACES)
-            )
-          ),
-          "Select namespace…"
-        );
-        selectOfferedValue(context, "aws-namespace-select", "default");
-        renderSelect(
-          context,
-          "aws-vpc-select",
-          parseDiscoveryOptions(readArray(raw, "vpcs")),
-          "Select VPC…",
-          false
-        );
-        awsInfrastructure.setDiscovered(
-          awsClusterInfo,
-          parseAwsSubnetInfo(readArray(raw, "subnets"))
-        );
-      }
-      const restoredNamespace = applyPendingInfrastructure(provider);
-      if (
-        provider === "azure" &&
-        cluster === "" &&
-        selectedAzureClusterId() !== ""
-      ) {
-        pendingAzureNamespace = restoredNamespace;
-        void rediscoverAzureNamespaces();
+      } else {
+        if (statusEl) {
+          statusEl.textContent = discoverStatusText(data, "aws", tenantId);
+        }
+        showAwsDiscovery(raw, data, tenantId);
       }
     } catch (error) {
       if (isStale()) return;
       if (statusEl)
         statusEl.textContent = `Discovery error: ${errorMessageOf(error)}`;
+      renderDiscoverRemediation(provider, null);
       if (provider === "azure") {
-        renderAzureRemediation(null);
         renderSelect(
           context,
           "azure-namespace-select",
           [],
           "Select namespace…"
+        );
+      } else {
+        // The held selection stays for the next discovery in this account.
+        renderSelect(
+          context,
+          AWS_CLUSTER_SELECT_ID,
+          [],
+          "",
+          false,
+          "Clusters unavailable"
+        );
+        renderSelect(context, "aws-namespace-select", [], "Select namespace…");
+        restoreInfrastructureValue(
+          "aws-namespace-select",
+          "aws-namespace-custom",
+          heldAwsSelection?.config.namespace ?? ""
         );
       }
     } finally {
@@ -1215,54 +1291,305 @@ export function initializeDiscoveryPanel(
     custom.style.display = "";
   };
 
-  const applyPendingInfrastructure = (provider: "azure" | "aws"): string => {
-    const pending = pendingInfrastructure;
-    if (!pending || pending.provider !== provider) return "";
-    const config = pending.config;
-    pendingInfrastructure = null;
-    if (provider === "azure") {
-      selectOfferedValue(
-        context,
-        "azure-rg-select",
-        config.resourceGroup ?? ""
-      );
-      const resourceGroup =
-        context.dom.selectById("azure-rg-select")?.value ?? "";
-      // The cluster list is filtered by the resource group the cluster lives
-      // in, not the application's. Those are separate values, and filtering on
-      // the application's would leave the environment's own cluster out of the
-      // picker whenever the two differ. An environment stored before the
-      // cluster's resource group was recorded has none, so it falls back to the
-      // application's and behaves exactly as it did before.
-      const clusterResourceGroup = config.clusterResourceGroup || resourceGroup;
-      renderClustersForResourceGroup(
-        clusterResourceGroup,
-        config.cluster ?? ""
-      );
-      restoreAzureClusterValue(config.cluster ?? "", clusterResourceGroup);
-      restoreInfrastructureValue(
-        "azure-namespace-select",
-        "azure-namespace-custom",
-        config.namespace ?? ""
-      );
-      return config.namespace ?? "";
+  const applyPendingAzureInfrastructure = (): string => {
+    const config = pendingAzureInfrastructure;
+    if (!config) return "";
+    pendingAzureInfrastructure = null;
+    selectOfferedValue(context, "azure-rg-select", config.resourceGroup ?? "");
+    const resourceGroup =
+      context.dom.selectById("azure-rg-select")?.value ?? "";
+    // The cluster list is filtered by the resource group the cluster lives
+    // in, not the application's. Those are separate values, and filtering on
+    // the application's would leave the environment's own cluster out of the
+    // picker whenever the two differ. An environment stored before the
+    // cluster's resource group was recorded has none, so it falls back to the
+    // application's and behaves exactly as it did before.
+    const clusterResourceGroup = config.clusterResourceGroup || resourceGroup;
+    renderClustersForResourceGroup(clusterResourceGroup, config.cluster ?? "");
+    restoreAzureClusterValue(config.cluster ?? "", clusterResourceGroup);
+    restoreInfrastructureValue(
+      "azure-namespace-select",
+      "azure-namespace-custom",
+      config.namespace ?? ""
+    );
+    return config.namespace ?? "";
+  };
+
+  const currentAwsSelection = (): EnvironmentInfrastructure => ({
+    cluster: context.dom.selectById(AWS_CLUSTER_SELECT_ID)?.value ?? "",
+    namespace: comboValue("aws-namespace-select", "aws-namespace-custom"),
+    vpcId: awsInfrastructure.vpcId(),
+    subnetIds: awsInfrastructure.selectedSubnetIds().join(",")
+  });
+
+  // Runs as an AWS discovery starts. A held selection from another account or
+  // region is dropped, and an unclaimed one is tied to this account and region.
+  // Refresh holds the selection on screen when a cluster is selected.
+  const claimAwsSelection = (
+    accountScope: string,
+    keepSelection: boolean
+  ): void => {
+    if (heldAwsSelection !== null) {
+      if (heldAwsSelection.scope === null) {
+        heldAwsSelection.scope = accountScope;
+      } else if (heldAwsSelection.scope !== accountScope) {
+        heldAwsSelection = null;
+      }
+      return;
     }
-    // An empty saved value leaves what discovery selected in place.
-    if (config.cluster) {
-      selectOfferedValue(context, "aws-cluster-select", config.cluster);
+    const current = currentAwsSelection();
+    if (keepSelection && current.cluster !== "") {
+      heldAwsSelection = { config: current, scope: accountScope };
     }
+  };
+
+  const onlyUsableAwsCluster = (): string => {
+    const usable = awsClusterInfo.filter((item) => item.usable);
+    return usable.length === 1 ? usable[0].id : "";
+  };
+
+  // Render the cluster options from awsClusterInfo, with a disabled option for
+  // each unusable cluster. Returns the note line of each one.
+  const renderAwsClusterSelect = (
+    region: string,
+    clusterListFailed: boolean
+  ): AwsClusterNoteLine[] => {
+    const options = sortDiscoveryOptions(
+      awsClusterInfo.map((info: AwsClusterInfo) => {
+        const presentation = awsClusterPresentation(info, region);
+        return {
+          id: info.id,
+          name: presentation.label,
+          disabled: !info.usable,
+          note: presentation.note
+        };
+      })
+    );
+    renderSelect(
+      context,
+      AWS_CLUSTER_SELECT_ID,
+      options,
+      "Select a cluster",
+      false,
+      clusterListFailed ? "Clusters unavailable" : "No EKS clusters"
+    );
+    return options.flatMap((option) => (option.note ? [option.note] : []));
+  };
+
+  // Show an AWS discovery response: the cluster options and note, the
+  // namespaces, and either the defaults or the held selection.
+  const showAwsDiscovery = (
+    raw: unknown,
+    data: DiscoveryData,
+    region: string
+  ): void => {
+    const kinds = data.errorKinds ?? {};
+    const errors = data.errors ?? {};
+    const clusterListFailed =
+      data.error !== undefined ||
+      kinds.clusters !== undefined ||
+      errors.clusters !== undefined;
+    awsClusterInfo =
+      clusterListFailed ? [] : parseAwsClusterInfo(readArray(raw, "clusters"));
+    const noteLines = renderAwsClusterSelect(region, clusterListFailed);
+    awsInfrastructure.setDiscovered({
+      clusters: awsClusterInfo,
+      subnets: parseAwsSubnetInfo(readArray(raw, "subnets")),
+      vpcs: parseAwsVpcInfo(readArray(raw, "vpcs")),
+      subnetsErrorKind: kinds.subnets ?? "",
+      routeTablesErrorKind: kinds.routeTables ?? "",
+      vpcsErrorKind: kinds.vpcs ?? ""
+    });
+    const held = heldAwsSelection;
+    if (held === null) {
+      awsInfrastructure.showCluster(onlyUsableAwsCluster(), "defaults");
+      renderAwsClusterNote(context, noteLines);
+      showAwsNamespaces(raw, data);
+      return;
+    }
+    const heldCluster = held.config.cluster ?? "";
+    if (clusterListFailed) {
+      awsInfrastructure.showCluster("", "defaults");
+    } else if (heldCluster === "") {
+      heldAwsSelection = null;
+      awsInfrastructure.showCluster(onlyUsableAwsCluster(), "defaults");
+    } else if (
+      !awsClusterInfo.some((item) => item.id === heldCluster && item.usable)
+    ) {
+      const heldInfo = awsClusterInfo.find((item) => item.id === heldCluster);
+      // A cluster that AWS didn't describe may still be usable, so its
+      // selection stays held for the next discovery.
+      if (heldInfo?.unusableReason !== "not-described") {
+        heldAwsSelection = null;
+      }
+      awsInfrastructure.showCluster("", "defaults");
+      if (heldInfo === undefined) {
+        noteLines.push(awsMissingClusterNoteLine(heldCluster, region));
+      }
+    } else if (kinds.subnets !== undefined) {
+      // Without the subnet list, no saved subnet can be checked or named as
+      // removed, so the subnets stay held for the next discovery.
+      awsInfrastructure.showCluster(heldCluster, "defaults");
+    } else {
+      heldAwsSelection = null;
+      awsInfrastructure.showCluster(
+        heldCluster,
+        (held.config.subnetIds ?? "").split(",")
+      );
+    }
+    renderAwsClusterNote(context, noteLines);
+    showAwsNamespaces(raw, data);
     restoreInfrastructureValue(
       "aws-namespace-select",
       "aws-namespace-custom",
-      config.namespace ?? ""
+      held.config.namespace ?? ""
     );
-    const savedSubnets = (config.subnetIds ?? "")
-      .split(",")
-      .filter((id) => id !== "");
-    if (config.vpcId || savedSubnets.length > 0) {
-      awsInfrastructure.restore(config.vpcId ?? "", savedSubnets);
+  };
+
+  // Show the namespaces in a response for the cluster on screen, with
+  // "default" selected. The server lists them only for a usable cluster. When
+  // it can't, the list has only "default", and a note says so.
+  const showAwsNamespaces = (raw: unknown, data: DiscoveryData): void => {
+    const cluster = context.dom.selectById(AWS_CLUSTER_SELECT_ID)?.value ?? "";
+    renderSelect(
+      context,
+      "aws-namespace-select",
+      sortDiscoveryOptions(
+        parseDiscoveryOptions(
+          readArrayOrDefault(raw, "namespaces", DEFAULT_NAMESPACES)
+        )
+      ),
+      "Select namespace…"
+    );
+    selectOfferedValue(context, "aws-namespace-select", "default");
+    // Setting the value doesn't fire the select's change handler, so hide a
+    // custom name typed for the previous list here.
+    const custom = context.dom.inputById("aws-namespace-custom");
+    if (custom) custom.style.display = "none";
+    const listed =
+      data.errors?.namespaces === undefined &&
+      data.errorKinds?.namespaces === undefined &&
+      parseAwsClusterInfo(readArray(raw, "clusters")).some(
+        (item) => item.id === cluster && item.usable
+      );
+    renderAwsNamespaceNote(
+      context,
+      cluster === "" || listed ? "" : awsNamespaceFallbackNote(cluster)
+    );
+  };
+
+  // A cluster the developer picks gets its own namespaces. Only the namespace
+  // list changes, unless the response marks that cluster unusable. Then the
+  // cluster is disabled and cleared, as a full discovery would do.
+  const rediscoverAwsNamespaces = async (cluster: string): Promise<void> => {
+    const token = ++awsNamespaceToken;
+    const namespaceSelect = context.dom.selectById("aws-namespace-select");
+    renderAwsNamespaceNote(context, "");
+    let raw: unknown = null;
+    if (isEksClusterName(cluster)) {
+      if (namespaceSelect) {
+        renderSelectLoading(
+          context,
+          namespaceSelect,
+          "Discovering namespaces…"
+        );
+      }
+      awsNamespaceReadToken = token;
+      options.onInfrastructureChange?.();
+      const account = discoveryAccounts.aws;
+      try {
+        const response = await context.net.fetch(DISCOVER_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: "aws",
+            accountId: account.subscriptionId,
+            region: account.tenantId,
+            cluster
+          })
+        });
+        raw = await response.json();
+      } catch {
+        // A failed request shows default and the note.
+      }
+      if (
+        !scope.active ||
+        awsNamespaceToken !== token ||
+        context.dom.selectById(AWS_CLUSTER_SELECT_ID)?.value !== cluster
+      ) {
+        return;
+      }
+      const reported = parseAwsClusterInfo(readArray(raw, "clusters")).find(
+        (item) => item.id === cluster
+      );
+      if (reported !== undefined && !reported.usable) {
+        awsClusterInfo = awsClusterInfo.map((item) =>
+          item.id === cluster ? reported : item
+        );
+        const noteLines = renderAwsClusterSelect(account.tenantId, false);
+        awsInfrastructure.showCluster("", "defaults");
+        renderAwsClusterNote(context, noteLines);
+      }
     }
-    return "";
+    if (namespaceSelect) namespaceSelect.disabled = false;
+    showAwsNamespaces(raw, toDiscoveryData(raw));
+    if (awsNamespaceReadToken === token) {
+      awsNamespaceReadToken = null;
+      options.onInfrastructureChange?.();
+    }
+  };
+
+  // A cluster the developer picks replaces the held one. A namespace the
+  // developer picks replaces the held namespace.
+  const awsClusterSelect = context.dom.selectById(AWS_CLUSTER_SELECT_ID);
+  if (awsClusterSelect) {
+    scope.on(awsClusterSelect, "change", () => {
+      heldAwsSelection = null;
+      void rediscoverAwsNamespaces(awsClusterSelect.value);
+    });
+  }
+  for (const elementId of ["aws-namespace-select", "aws-namespace-custom"]) {
+    const element = context.dom.byId(elementId);
+    if (!element) continue;
+    scope.on(element, "change", () => {
+      if (heldAwsSelection === null) return;
+      heldAwsSelection.config = {
+        ...heldAwsSelection.config,
+        namespace: comboValue("aws-namespace-select", "aws-namespace-custom")
+      };
+    });
+  }
+
+  const currentInfraSelection = (
+    provider: "azure" | "aws"
+  ): EnvironmentInfrastructure =>
+    provider === "aws" ?
+      currentAwsSelection()
+    : {
+        resourceGroup: context.dom.selectById("azure-rg-select")?.value ?? "",
+        cluster: selectedAzureClusterId(),
+        namespace: comboValue(
+          "azure-namespace-select",
+          "azure-namespace-custom"
+        )
+      };
+
+  const holdInfraSelection = (
+    provider: "azure" | "aws",
+    aws: HeldAwsSelection | null,
+    azure: EnvironmentInfrastructure | null
+  ): void => {
+    pendingAzureNamespace = "";
+    pendingAzureInfrastructure = azure;
+    heldAwsSelection = aws;
+    const request = discoveryRequests[provider];
+    if ((aws !== null || azure !== null) && request.identity !== null) {
+      // Editing another environment changes what the pending response should
+      // restore, even when the account and currently rendered target match.
+      // Supersede that response so the new selection starts target-free.
+      request.token += 1;
+      request.identity = null;
+    }
   };
 
   return {
@@ -1272,49 +1599,60 @@ export function initializeDiscoveryPanel(
     discoverResources,
     findAzureClusterResourceGroup,
     setPendingInfraSelection(config, provider) {
-      pendingAzureNamespace = "";
-      pendingInfrastructure = config ? { provider, config } : null;
-      const request = discoveryRequests[provider];
-      if (config && request.identity !== null) {
-        // Editing another environment changes what the pending response should
-        // restore, even when the account and currently rendered target match.
-        // Supersede that response so the new selection starts target-free.
-        request.token += 1;
-        request.identity = null;
-      }
+      // One form owns the selection, so a selection for one provider drops the
+      // other's.
+      holdInfraSelection(
+        provider,
+        provider === "aws" && config ? { config, scope: null } : null,
+        provider === "azure" ? config : null
+      );
     },
-    currentInfraSelection(provider) {
-      return provider === "aws" ?
-          {
-            cluster: context.dom.selectById("aws-cluster-select")?.value ?? "",
-            namespace: comboValue(
-              "aws-namespace-select",
-              "aws-namespace-custom"
-            ),
-            vpcId: context.dom.selectById("aws-vpc-select")?.value ?? "",
-            subnetIds: awsInfrastructure.selectedSubnetIds().join(",")
-          }
-        : {
-            resourceGroup:
-              context.dom.selectById("azure-rg-select")?.value ?? "",
-            cluster: selectedAzureClusterId(),
-            namespace: comboValue(
-              "azure-namespace-select",
-              "azure-namespace-custom"
-            )
-          };
+    currentInfraSelection,
+    preserveInfraSelection(provider) {
+      if (provider === "azure") {
+        holdInfraSelection("azure", null, currentInfraSelection("azure"));
+        return;
+      }
+      const account = discoveryAccounts.aws;
+      holdInfraSelection(
+        "aws",
+        heldAwsSelection ?? {
+          config: currentAwsSelection(),
+          scope:
+            accountDiscovered.aws ?
+              `${account.subscriptionId}\u0000${account.tenantId}`
+            : null
+        },
+        null
+      );
     },
     awsInfrastructureError() {
-      const cluster = context.dom.selectById("aws-cluster-select")?.value ?? "";
-      if (awsClusterInfo.some((item) => item.id === cluster && !item.usable)) {
-        return `Cluster ${cluster} uses CONFIG_MAP authentication, which does not support access entries, so Radius cannot grant the deploy role access to it.`;
+      // The select can't pick a disabled cluster, so this guards only a
+      // selection made by code.
+      const cluster =
+        context.dom.selectById(AWS_CLUSTER_SELECT_ID)?.value ?? "";
+      const info = awsClusterInfo.find((item) => item.id === cluster);
+      const line =
+        info ?
+          awsClusterPresentation(info, discoveryAccounts.aws.tenantId).note
+        : null;
+      if (line) {
+        return line.command === undefined ?
+            line.text
+          : `${line.text} ${line.command}`;
       }
-      return awsInfrastructure.validationError();
+      const infrastructureError = awsInfrastructure.validationError();
+      if (infrastructureError !== "") return infrastructureError;
+      return awsNamespaceReadToken === awsNamespaceToken ?
+          "Wait for the namespace list to load."
+        : "";
     },
     teardown() {
-      remediationAction?.dispose();
-      remediationAction = null;
-      if (remediationHost) remediationHost.hidden = true;
+      for (const slot of Object.values(remediations)) {
+        slot.action?.dispose();
+        slot.action = null;
+        if (slot.host) slot.host.hidden = true;
+      }
       scope.teardown();
     }
   };

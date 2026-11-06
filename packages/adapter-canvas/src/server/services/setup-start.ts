@@ -3,6 +3,7 @@ import {
   isAwsAccountId,
   isAwsRegion,
   isAwsRoleName,
+  isAwsSetupNetworkInput,
   parseAwsRoleArn
 } from "@radius-project/core";
 import type {
@@ -125,6 +126,16 @@ export function createSetupStartService(dependencies: SetupStartDependencies) {
         code: "invalid-aws-operation-input"
       });
     }
+    if (
+      provider === "aws" &&
+      !isAwsSetupNetworkInput(data.vpcId, data.subnetIds)
+    ) {
+      return result(400, {
+        error:
+          "AWS setup requires a VPC ID such as vpc-0123abcd and at least two different subnet IDs such as subnet-0123abcd, separated by commas.",
+        code: "invalid-aws-network-input"
+      });
+    }
     const startConflict = dependencies.startConflict(repo);
     if (startConflict) {
       return result(409, setupStartConflictResponse(repo, startConflict));
@@ -245,6 +256,18 @@ export function createSetupStartService(dependencies: SetupStartDependencies) {
             resumeBranch: data.resumeBranch || null,
             resumeReason: data.resumeReason || null
           }
+        };
+      } else {
+        // `request` is not saved, so this is what a continuation after a
+        // restart reads. Without it an interrupted AWS setup cannot continue.
+        // It holds only identifiers setup also writes to GitHub variables.
+        op.resumeRequest = {
+          needsAzureCredentials: false,
+          github: {
+            login: selection.login,
+            credentialSource: selection.credentialSource
+          },
+          environment: structuredClone(environmentRequest)
         };
       }
       const started = dependencies.startOperation(op);

@@ -12,7 +12,7 @@ The `radius` plugin is available in the [`github/awesome-copilot`](https://githu
 
 The Radius canvas runs only in the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app). Open the app, select **Customize** in the side menu, and then select **Plugins**. Search for `radius` and install the plugin.
 
-Restart your Copilot session after installing so the skills and canvas become available. Use the plugin's three-dot menu to update or uninstall it.
+Restart your Copilot session after installing so the skills and canvas become available. When the canvas extension starts in a new session, Radius can ask for approval to update its plugin to the latest version available from its existing marketplace. It installs an update only if you approve. After any answer, including approval, decline, or cancellation, Radius waits 7 days before asking again for that marketplace. Start a new session to load installed changes; active sessions keep their current code. See [update approval](./plugins/radius/README.md#update-approval) for exclusions and how to turn off or reset the request. You can still use the plugin's three-dot menu to update or uninstall it.
 
 The Radius Canvas UI itself is only available via the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app). That being said, the Radius plugin bundles other AI tools that may be used independently of the Canvas. See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin bundles and how to use it.
 

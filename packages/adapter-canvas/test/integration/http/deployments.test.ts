@@ -176,7 +176,9 @@ function start(
     tenantId: "",
     repoId: 0,
     roleArn: "",
-    trustSubjects: []
+    trustSubjects: [],
+    region: "",
+    cluster: ""
   };
   const trustRepairs: unknown[] = [];
   let trustRepairResult: AwsEnvironmentRepairResult = {
@@ -2192,7 +2194,9 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
       tenantId: "",
       repoId: 0,
       roleArn: ROLE_ARN,
-      trustSubjects: ["repo:octo/todo:environment:dev"]
+      trustSubjects: ["repo:octo/todo:environment:dev"],
+      region: "",
+      cluster: ""
     });
     harness.setTrustRepairResult({
       ok: true,
@@ -2251,7 +2255,9 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
       tenantId: "",
       repoId: 0,
       roleArn: ROLE_ARN,
-      trustSubjects: []
+      trustSubjects: [],
+      region: "",
+      cluster: ""
     });
     const entry = await container!.getOrCreate("panel-a");
 
@@ -2313,7 +2319,9 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
       tenantId: "tenant",
       repoId: 1,
       roleArn: "",
-      trustSubjects: []
+      trustSubjects: [],
+      region: "",
+      cluster: ""
     });
     const entry = await container!.getOrCreate("panel-a");
 

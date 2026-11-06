@@ -35,6 +35,7 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import type { FakeBrowser } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
+import type { DiscoverResourcesOptions } from "./discovery.js";
 import { COMMAND_RUN_LABEL } from "../command-action.js";
 
 const HOSTILE = "<img src=x onerror=alert(1)>'\"&";
@@ -202,6 +203,7 @@ function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
     provider: string;
     subscriptionId: string;
     tenantId: string;
+    options?: DiscoverResourcesOptions;
   }>;
 } {
   const profileChanges: Array<CredentialProfile | null> = [];
@@ -209,6 +211,7 @@ function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
     provider: string;
     subscriptionId: string;
     tenantId: string;
+    options?: DiscoverResourcesOptions;
   }> = [];
   const deps: CredentialProfilesPanelDeps = {
     repo: "octo/cat",
@@ -217,8 +220,8 @@ function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
     environmentName: () => "dev",
     onProfileChange: (profile) => profileChanges.push(profile),
     onReadinessChange: () => {},
-    discoverResources: (provider, subscriptionId, tenantId) =>
-      discoverCalls.push({ provider, subscriptionId, tenantId }),
+    discoverResources: (provider, subscriptionId, tenantId, options) =>
+      discoverCalls.push({ provider, subscriptionId, tenantId, options }),
     ...overrides
   };
   return { deps, profileChanges, discoverCalls };
@@ -1442,6 +1445,8 @@ describe("profile selection", () => {
     expect(discoverCalls).toEqual([
       { provider: "azure", subscriptionId: "sub-1", tenantId: "tenant-1" }
     ]);
+    // Azure Refresh doesn't hold the selection.
+    expect(discoverCalls[0].options).toBeUndefined();
 
     page.awsRefreshBtn.dispatch("click");
     // Selected profile is azure, so the AWS refresh button re-discovers azure too:
@@ -1463,7 +1468,12 @@ describe("profile selection", () => {
     // AWS discovery is scoped by the profile's account and region, carried in
     // the same two positions Azure uses for its subscription and tenant.
     expect(discoverCalls).toEqual([
-      { provider: "aws", subscriptionId: "123456789012", tenantId: "us-east-1" }
+      {
+        provider: "aws",
+        subscriptionId: "123456789012",
+        tenantId: "us-east-1",
+        options: { keepSelection: true }
+      }
     ]);
   });
 

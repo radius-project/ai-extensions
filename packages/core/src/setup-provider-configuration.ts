@@ -1,4 +1,5 @@
 export const AWS_TRUST_SUBJECTS_VARIABLE = "AWS_TRUST_SUBJECTS";
+export const AWS_PERMISSION_POLICY_NAME_VARIABLE = "AWS_PERMISSION_POLICY_NAME";
 
 export interface SetupProviderConfigurationInput {
   clientId?: string;
@@ -16,6 +17,7 @@ export interface SetupProviderConfigurationInput {
   subnetIds?: string;
   // AWS only: the GitHub OIDC subjects setup added to the role's trust.
   trustSubjects?: readonly string[];
+  policyName?: string;
 }
 
 export interface SetupProviderCredentialPorts {
@@ -167,6 +169,12 @@ export async function applySetupProviderConfiguration(
     await ports.setEnvironmentVariable(
       AWS_TRUST_SUBJECTS_VARIABLE,
       JSON.stringify(data.trustSubjects)
+    );
+  }
+  if (data.policyName) {
+    await ports.setEnvironmentVariable(
+      AWS_PERMISSION_POLICY_NAME_VARIABLE,
+      data.policyName
     );
   }
   if (!status.credentialsComplete) {

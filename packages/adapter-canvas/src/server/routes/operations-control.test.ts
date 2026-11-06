@@ -1642,6 +1642,198 @@ describe("POST /api/operations/{id}/exit", () => {
     expect(out.journal.invalidatedListings).toEqual(["contoso/store"]);
   });
 
+  describe("a stopped AWS setup that still holds its deploy identity lock", () => {
+    const LOCK = {
+      policyArn:
+        "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-contoso-store",
+      policyId: "LOCK0"
+    };
+    const holdingLock = (op: OperationFixture) => {
+      op.provider = "aws";
+      setContext(op, { awsDeployIdentityLock: { ...LOCK } });
+      return op;
+    };
+    const labels = (op: OperationFixture) =>
+      (op.steps as Array<{ label: string }>).map((step) => step.label);
+    const recordedLock = (op: OperationFixture) =>
+      (op.context as { awsDeployIdentityLock?: unknown }).awsDeployIdentityLock;
+
+    it("releases exactly that lock when exiting with nothing else to remove", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+      const remove = vi.fn(async () => ({ ok: true as const, removed: true }));
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        removeAwsDeployIdentityLock: remove
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(out.payload()).toMatchObject({ code: "setup-exited" });
+      expect(remove).toHaveBeenCalledExactlyOnceWith(LOCK);
+      expect(recordedLock(op)).toBeNull();
+      expect(labels(op)).toContain(
+        "🔓 Released the lock this setup held on IAM role radius-deploy-contoso-store (policy ID LOCK0)."
+      );
+      // The exit is saved first, then the release.
+      expect(out.journal.persistCalls).toBe(2);
+      expect(out.journal.scheduled).toEqual([]);
+    });
+
+    it("releases it when abandoning a setup whose resources stay", async () => {
+      const op = holdingLock(stoppedSetup());
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: "contoso/store",
+        name: "dev"
+      });
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+      const remove = vi.fn(async () => ({ ok: true as const, removed: true }));
+
+      const out = await drive(handleExitOperation, op, "exit?mode=abandon", {
+        removeAwsDeployIdentityLock: remove
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(remove).toHaveBeenCalledExactlyOnceWith(LOCK);
+      expect(recordedLock(op)).toBeNull();
+      expect(op.control.commands).toEqual([
+        expect.objectContaining({ outcome: ABANDON_COMMAND_OUTCOME })
+      ]);
+      expect(out.journal.scheduled).toEqual([]);
+    });
+
+    it("still closes the setup, naming the lock, when it cannot be released", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        removeAwsDeployIdentityLock: async () => ({
+          ok: false,
+          code: "aws-lock-denied",
+          message: "Radius could not remove the lock: AccessDenied"
+        })
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(out.payload()).toMatchObject({ code: "setup-exited" });
+      expect(recordedLock(op)).toEqual(LOCK);
+      expect(labels(op).at(-1)).toMatch(
+        /^Radius did not release the lock this setup holds on IAM role radius-deploy-contoso-store\. Radius could not remove the lock: AccessDenied\. /
+      );
+    });
+
+    it("keeps the lock and runs no AWS command while AWS is turned off", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+      const remove = vi.fn();
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        awsEnabled: false,
+        removeAwsDeployIdentityLock: remove
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(out.payload()).toMatchObject({ code: "setup-exited" });
+      expect(remove).not.toHaveBeenCalled();
+      expect(recordedLock(op)).toEqual(LOCK);
+      expect(labels(op).at(-1)).toMatch(
+        /^AWS environments are turned off, so Radius did not release the lock this setup holds on IAM role radius-deploy-contoso-store\. /
+      );
+    });
+
+    it("keeps the lock when the exit cannot be saved", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+      const remove = vi.fn();
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        persistOperations: () => Promise.reject(new Error("disk full")),
+        removeAwsDeployIdentityLock: remove
+      });
+
+      expect(out.recording.status).toBe(500);
+      expect(out.payload()).toMatchObject({
+        code: "operation-exit-persist-failed"
+      });
+      expect(remove).not.toHaveBeenCalled();
+      expect(recordedLock(op)).toEqual(LOCK);
+    });
+
+    it("keeps the lock when the operation changed before the exit was admitted", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+      const remove = vi.fn();
+      let current: OperationFixture = op;
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        get: () => current,
+        persistOperations: async () => {
+          current = structuredClone(op);
+        },
+        removeAwsDeployIdentityLock: remove
+      });
+
+      expect(out.recording.status).toBe(409);
+      expect(remove).not.toHaveBeenCalled();
+      expect(recordedLock(op)).toEqual(LOCK);
+    });
+
+    it("still reports the exit when the release cannot be saved", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+      const reportOperationDiagnostic = vi.fn();
+      let saves = 0;
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        persistOperations: async () => {
+          saves += 1;
+          if (saves === 2) throw new Error("disk full");
+        },
+        reportOperationDiagnostic,
+        removeAwsDeployIdentityLock: async () => ({ ok: true, removed: true })
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(out.payload()).toMatchObject({ code: "setup-exited" });
+      expect(reportOperationDiagnostic).toHaveBeenCalledExactlyOnceWith({
+        operationId: op.operationId,
+        code: "operation-exit-lock-persist-failed",
+        message: "disk full"
+      });
+    });
+
+    it("says in a refusal's view that the lock stays while AWS is turned off", async () => {
+      const op = holdingLock(reusedOnlyFailure());
+
+      const out = await drive(handleContinueOperation, op, "continue", {
+        awsEnabled: false
+      });
+
+      expect(out.recording.status).toBe(409);
+      const exit = out
+        .payload()
+        .operation.actions.find(
+          (action: { id: string }) => action.id === "exit-setup"
+        );
+      expect(exit.description).toContain(
+        "The lock it holds on the deploy identity stays, because AWS environments are turned off."
+      );
+    });
+
+    it("leaves the release to the disposal pass when there is more to remove", async () => {
+      const op = holdingLock(stoppedSetup());
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: "contoso/store",
+        name: "dev"
+      });
+      const remove = vi.fn();
+
+      const out = await drive(handleExitOperation, op, "exit", {
+        removeAwsDeployIdentityLock: remove
+      });
+
+      expect(out.recording.status).toBe(202);
+      expect(remove).not.toHaveBeenCalled();
+      expect(recordedLock(op)).toEqual(LOCK);
+    });
+  });
+
   it("schedules the disposal when the ledger proves this attempt created something", async () => {
     const op = stoppedSetup();
     recordGitHubEnvironment(op, {
@@ -2065,6 +2257,101 @@ describe("handleRemoveAwsLock", () => {
     setContext(op, { awsLockWait: { ...LOCK, removable } });
     return op;
   };
+
+  describe("a lock whose holder was shown as stopped", () => {
+    const stoppedWait = (since: string): OperationFixture => {
+      const op = newOperation();
+      setContext(op, {
+        awsLockWait: {
+          ...LOCK,
+          since,
+          holderOperationId: "op_holder",
+          stopped: true,
+          removable: true
+        }
+      });
+      return op;
+    };
+    const holder = (state: "cancelled" | "running"): OperationFixture => {
+      const op = newOperation();
+      op.operationId = "op_holder";
+      if (state === "cancelled") finish(op, "cancelled");
+      return op;
+    };
+    const lookup =
+      (waiter: OperationFixture, held: OperationFixture | null) =>
+      (operationId: string) =>
+        operationId === waiter.operationId ? waiter
+        : operationId === "op_holder" ? held
+        : null;
+
+    it.each([
+      ["is running again", () => holder("running")],
+      ["is no longer in the store", () => null]
+    ])("keeps a recent lock when its holder %s", async (_label, held) => {
+      const op = stoppedWait(new Date().toISOString());
+      const remove = vi.fn();
+
+      const out = await drive(
+        handleRemoveAwsLock,
+        op,
+        "aws-lock/remove?policyId=LOCK0",
+        { get: lookup(op, held()), removeAwsDeployIdentityLock: remove }
+      );
+
+      expect(out.recording.status).toBe(409);
+      expect(out.payload()).toMatchObject({
+        code: "aws-lock-holder-resumed"
+      });
+      expect(remove).not.toHaveBeenCalled();
+      expect(
+        (op.context as { awsLockWait?: unknown }).awsLockWait
+      ).toMatchObject({ stopped: false, removable: false });
+      expect(out.journal.persistCalls).toBe(0);
+    });
+
+    it.each([
+      ["a holder that is still stopped", new Date().toISOString(), "cancelled"],
+      ["an old lock whose holder resumed", "2026-10-30T11:00:00Z", "running"]
+    ] as const)("removes %s", async (_label, since, state) => {
+      const op = stoppedWait(since);
+      const remove = vi.fn(async () => ({ ok: true as const, removed: true }));
+
+      const out = await drive(
+        handleRemoveAwsLock,
+        op,
+        "aws-lock/remove?policyId=LOCK0",
+        { get: lookup(op, holder(state)), removeAwsDeployIdentityLock: remove }
+      );
+
+      expect(out.recording.status).toBe(200);
+      expect(remove).toHaveBeenCalledExactlyOnceWith({
+        policyArn: LOCK.policyArn,
+        policyId: LOCK.policyId
+      });
+    });
+
+    it("removes a lock this run itself left, without looking it up", async () => {
+      const op = stoppedWait(new Date().toISOString());
+      setContext(op, {
+        awsLockWait: {
+          ...(op.context as { awsLockWait: object }).awsLockWait,
+          holderOperationId: op.operationId
+        }
+      });
+      const remove = vi.fn(async () => ({ ok: true as const, removed: true }));
+
+      const out = await drive(
+        handleRemoveAwsLock,
+        op,
+        "aws-lock/remove?policyId=LOCK0",
+        { get: lookup(op, null), removeAwsDeployIdentityLock: remove }
+      );
+
+      expect(out.recording.status).toBe(200);
+      expect(remove).toHaveBeenCalledOnce();
+    });
+  });
 
   it("removes the lock the run waits for and records it on the run", async () => {
     const op = waiting();

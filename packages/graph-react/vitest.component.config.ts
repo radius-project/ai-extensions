@@ -6,6 +6,7 @@ export default defineConfig({
     name: "graph-react-component",
     include: ["src/**/*.browser.test.ts"],
     testTimeout: 10_000,
+    setupFiles: ["./test/browser-setup.ts"],
     browser: {
       enabled: true,
       provider: playwright(),

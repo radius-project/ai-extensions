@@ -179,6 +179,30 @@ describe("run-remediation real-loopback HIT", () => {
     expect(harness.sent[0].prompt).not.toContain("evil.example");
   });
 
+  it("runs the AWS sign-in that discovery offers, with its discovery follow-up", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      { id: "aws-cli-login", params: { nextStep: "refresh-discovery" } },
+      browserHeaders(entry.baseUrl)
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      command: string;
+      message: string;
+    };
+    expect(payload.command).toBe("aws sso login");
+    expect(payload.message).toContain(
+      "return to the Radius canvas and refresh resource discovery"
+    );
+    expect(harness.sent[0].displayPrompt).toBe(
+      "Signing in to AWS CLI so the Radius canvas can refresh AWS resource discovery."
+    );
+  });
+
   it("refuses a high-impact command until it is confirmed, then runs it", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");

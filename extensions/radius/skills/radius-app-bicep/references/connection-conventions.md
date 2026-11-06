@@ -129,7 +129,11 @@ Keep a connection alongside native variables when the source consumes generic va
 
 ## Container-to-container (service-to-service) addressing
 
-A `connections` entry to another container is for relationship metadata/projection; it does **not** supply the URL one service uses to call another. When a container makes an HTTP/gRPC call to a peer `Radius.Compute/containers` resource, compose the host by referencing the peer's read-only **`hosts`** output (a map of container name to its in-cluster Service DNS name, published by the containers recipe) over in-cluster DNS:
+A `connections` entry to another container is for relationship metadata/projection; it does **not** supply the URL one service uses to call another.
+
+First check for [fixed peer hostnames](runtime-contract.md#fixed-peer-hostnames) in the selected image's active config or compiled code. Neither a connection nor a `hosts` reference rewrites such a literal. Prove that the process consumes an override, or that the exact selected Recipe creates the required DNS name. Stop and report an unresolved mismatch before publishing; do not assume the resource name supplies a short-name alias.
+
+For a configurable HTTP/gRPC address of a peer `Radius.Compute/containers` resource, compose the host by referencing the peer's read-only **`hosts`** output (a map of container name to its in-cluster Service DNS name, published by the containers recipe) over in-cluster DNS:
 
 ```bicep
 env: {
@@ -140,7 +144,7 @@ env: {
 }
 ```
 
-- Host is an entry of the peer's `properties.hosts` output, addressed with **indexed access** (e.g. `orderingApi.properties.hosts['ordering']`, where `ordering` is the peer's key in its own `containers` map), never a literal built from the resource `name` or `<resource-name>-<containerKey>`. Use indexed (`['...']`) rather than dot access so keys containing hyphens or other non-identifier characters resolve. The containers recipe populates `hosts` with each port-exposing container's actual Service FQDN, so this reference is stable, predictable, and creates a deploy-time dependency edge.
+- A configurable host is an entry of the peer's `properties.hosts` output, addressed with **indexed access** (e.g. `orderingApi.properties.hosts['ordering']`, where `ordering` is the peer's key in its own `containers` map), never a literal built from the resource `name` or `<resource-name>-<containerKey>`. Use indexed (`['...']`) rather than dot access so keys containing hyphens or other non-identifier characters resolve. The containers recipe populates `hosts` with each port-exposing container's actual Service FQDN, so this reference is stable, predictable, and creates a deploy-time dependency edge.
 - `hosts` is read-only — reference it, never set it. It has one entry per port-exposing container, so a multi-container peer publishes all of its Service hosts.
 - Do not create a dependency cycle: because each `hosts` reference adds a deploy-time dependency edge, two containers that both reference each other's `hosts` form a circular dependency that fails to deploy. Break it by resolving one direction through `hosts` and the other via the peer's Service DNS name as a plain string literal (`<peer-resource-name>-<containerKey>.<namespace>`). This cycle break is the deliberate exception to the no-literal rule above. Report the cycle rather than emitting mutual references or adding a route for internal traffic.
 - Port is the peer container's published `containerPort` number from source.

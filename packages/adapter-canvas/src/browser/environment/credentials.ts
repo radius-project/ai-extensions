@@ -486,9 +486,29 @@ export function initializeCredentialsPane(
   let credPackagesVerified = false;
   let formContext: "standalone" | "wizard" = "standalone";
   let active = true;
+  let saving = false;
 
   const updateSaveState = (): void => {
-    saveCredBtn.disabled = !(credVerified !== null && credPackagesVerified);
+    saveCredBtn.disabled =
+      saving || !(credVerified !== null && credPackagesVerified);
+  };
+
+  const setSaving = (pending: boolean): void => {
+    saving = pending;
+    for (const control of [
+      credNameInput,
+      credProviderSelect,
+      azTenantId,
+      azSubId,
+      awsAccountId,
+      awsRegion,
+      btnVerifyAzure,
+      btnVerifyAws
+    ]) {
+      control.disabled = pending;
+    }
+    saveCredBtn.textContent = pending ? "Saving…" : saveLabel();
+    updateSaveState();
   };
 
   const applyProvider = (provider: string): void => {
@@ -523,6 +543,11 @@ export function initializeCredentialsPane(
   const resetVerification = (): void => {
     formToken += 1;
     credVerified = null;
+    btnVerifyAws.disabled = false;
+    btnVerifyAws.textContent = "Verify Credentials";
+    btnVerifyAzure.disabled = false;
+    btnVerifyAzure.textContent = "Verify Credentials";
+    envVerifyModal.style.display = "none";
     mountCommandAction(credVerifyAction, null, "cred-verify");
     credVerifyStatus.style.display = "none";
     credVerifyStatus.innerHTML = "";
@@ -656,6 +681,7 @@ export function initializeCredentialsPane(
 
   const showLanding = (): void => {
     formToken += 1;
+    setSaving(false);
     credForm.style.display = "none";
     credLanding.style.display = "";
     loadCredentialTable();
@@ -680,6 +706,7 @@ export function initializeCredentialsPane(
     // showLanding does for the standalone form; otherwise a save that resolves
     // after Cancel still passes the token check and reports a created profile.
     formToken += 1;
+    setSaving(false);
     wizardFormHost.style.display = "none";
     wizardStepCard.style.display = "";
     moveFormTo(credForm);
@@ -690,6 +717,7 @@ export function initializeCredentialsPane(
 
   const showCredentialsForm = (mode: "standalone" | "wizard"): void => {
     formContext = mode;
+    setSaving(false);
     credSuccessBanner.style.display = "none";
     credFormTitle.textContent = "Create Credential Profile";
     saveCredBtn.textContent = saveLabel();
@@ -833,6 +861,10 @@ export function initializeCredentialsPane(
     resetVerification();
   });
 
+  for (const input of [awsAccountId, awsRegion]) {
+    scope.on(input, "input", () => resetVerification());
+  }
+
   scope.on(newCredBtn, "click", () => showCredentialsForm("standalone"));
   scope.on(cancelCredBtn, "click", () => {
     if (formContext === "wizard") {
@@ -934,7 +966,10 @@ export function initializeCredentialsPane(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ accountId, region })
       })
-      .then((response) => response.json())
+      .then((response) => {
+        if (!response.ok) throw new Error("AWS CLI verification failed.");
+        return response.json();
+      })
       .then(
         (payload) => {
           if (!active || token !== formToken) return;
@@ -950,11 +985,19 @@ export function initializeCredentialsPane(
             return;
           }
           const returnedAccountId = readString(payload, "accountId");
-          if (returnedAccountId) awsAccountId.value = returnedAccountId;
+          if (
+            !readBoolean(payload, "success") ||
+            returnedAccountId !== accountId
+          ) {
+            verifyError(
+              "The AWS CLI did not confirm this account. Verify your credentials again."
+            );
+            return;
+          }
           markVerified({
             provider: "aws",
             user: readString(payload, "user") || readString(payload, "arn"),
-            accountId: returnedAccountId || accountId,
+            accountId: returnedAccountId,
             region
           });
         },
@@ -995,8 +1038,7 @@ export function initializeCredentialsPane(
     }
     const token = formToken;
     const wizard = formContext === "wizard";
-    saveCredBtn.disabled = true;
-    saveCredBtn.textContent = "Saving…";
+    setSaving(true);
     void context.net
       .fetch(CREDENTIAL_SAVE_PATH, {
         method: "POST",
@@ -1007,8 +1049,7 @@ export function initializeCredentialsPane(
       .then(
         (payload) => {
           if (!active || token !== formToken) return;
-          saveCredBtn.disabled = false;
-          saveCredBtn.textContent = saveLabel();
+          setSaving(false);
           const error = readString(payload, "error");
           if (error !== "") {
             options.decisions.notify(`Could not save profile: ${error}`);
@@ -1024,8 +1065,7 @@ export function initializeCredentialsPane(
         },
         () => {
           if (!active || token !== formToken) return;
-          saveCredBtn.disabled = false;
-          saveCredBtn.textContent = saveLabel();
+          setSaving(false);
           options.decisions.notify(
             "Could not save the credential profile. Please try again."
           );

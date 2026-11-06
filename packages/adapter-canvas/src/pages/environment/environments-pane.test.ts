@@ -45,6 +45,7 @@ describe("environmentsPaneMarkup", () => {
     for (const id of [
       "aws-cluster-custom",
       "aws-vpc-custom",
+      "aws-vpc-select",
       "aws-subnets-select",
       "aws-subnets-custom"
     ]) {
@@ -54,10 +55,13 @@ describe("environmentsPaneMarkup", () => {
       '<span id="aws-subnets-label" style="display:block; font-weight:600; font-size:12px; color:var(--rad-text-tertiary); margin:0 0 4px;">Subnets</span>'
     );
     expect(html).toMatch(
-      /<div id="aws-subnets-list" role="group" aria-labelledby="aws-subnets-label" aria-describedby="aws-subnets-note aws-subnets-error"/
+      /<div id="aws-subnets-list" role="group" aria-labelledby="aws-subnets-label" aria-describedby="aws-restore-note aws-subnets-note aws-subnets-error"/
+    );
+    expect(html).toMatch(
+      /<div id="aws-restore-note" class="status info" role="status" hidden[^>]*><\/div>\s*<div id="aws-subnets-list"/
     );
     expect(html).toContain(
-      '<div class="rad-field__help" id="aws-subnets-note">Two availability zones are required. Public subnets are reachable from the internet.</div>'
+      '<div class="rad-field__help" id="aws-subnets-note">Two availability zones are required. Local Zone, Wavelength Zone, and Outpost subnets can\'t be selected.</div>'
     );
     expect(html).toContain(
       '<div id="aws-subnets-error" class="status error" role="alert" hidden></div>'
@@ -67,6 +71,29 @@ describe("environmentsPaneMarkup", () => {
     );
     expect(html).toContain(
       "Managed data services need subnets in at least two availability zones."
+    );
+  });
+
+  it("shows the cluster VPC as text and describes the cluster select with its note", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      '<select id="aws-cluster-select" aria-describedby="aws-cluster-note">'
+    );
+    expect(html).toContain(
+      '<div id="aws-cluster-note" class="rad-field__help" hidden></div>'
+    );
+    expect(html).toMatch(/<span id="aws-vpc-label"[^>]*>VPC<\/span>/);
+    expect(html).toMatch(
+      /<output id="aws-vpc-value" aria-labelledby="aws-vpc-label" aria-describedby="aws-vpc-note"[^>]*>Select a cluster to see its VPC\.<\/output>/
+    );
+    expect(html).toContain(
+      '<div id="aws-vpc-note" class="status info" role="status" hidden></div>'
+    );
+  });
+
+  it("renders a hidden note for the AWS namespace list", () => {
+    expect(environmentsPaneMarkup(baseOptions)).toContain(
+      '<div id="aws-namespace-note" class="status info" role="status" hidden></div>'
     );
   });
 
@@ -462,6 +489,12 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
         '<div id="azure-discover-remediation" hidden></div>'
       );
     });
+
+    it("provides a separate host beside AWS discovery status and refresh", () => {
+      expect(html).toMatch(
+        /id="aws-refresh-btn"[^>]*>↻ Refresh<\/button>\s*<div id="aws-discover-remediation" hidden><\/div>/
+      );
+    });
   });
 
   it("renders a guidance list for a path Radius cannot offer", () => {
@@ -543,21 +576,26 @@ describe("namespace constraint guidance", () => {
   );
 
   // The constraint has to reach a screen reader on the control it constrains,
-  // not just sit next to it visually.
+  // not just sit next to it visually. The AWS fields also name the note that
+  // says when the list shows common names.
   it.each([
-    ["azure-namespace-select", "azure-namespace-help"],
-    ["azure-namespace-custom", "azure-namespace-help"],
-    ["aws-namespace-select", "aws-namespace-help"],
-    ["aws-namespace-custom", "aws-namespace-help"]
-  ])("describes %s by the constraint text", (control, help) => {
+    ["azure-namespace-select", "azure-namespace-help azure-namespace-error"],
+    ["azure-namespace-custom", "azure-namespace-help azure-namespace-error"],
+    [
+      "aws-namespace-select",
+      "aws-namespace-help aws-namespace-note aws-namespace-error"
+    ],
+    [
+      "aws-namespace-custom",
+      "aws-namespace-help aws-namespace-note aws-namespace-error"
+    ]
+  ])("describes %s by the constraint text", (control, describedBy) => {
     const html = environmentsPaneMarkup(baseOptions);
     const tag =
       new RegExp(`<(?:select|input) id="${control}"[^>]*>`).exec(html)?.[0] ??
       "";
     expect(tag, `${control} should be rendered`).not.toBe("");
-    expect(tag).toContain(
-      `aria-describedby="${help} ${control.replace(/-(?:select|custom)$/u, "-error")}"`
-    );
+    expect(tag).toContain(`aria-describedby="${describedBy}"`);
   });
 
   it.each(["azure", "aws"])(

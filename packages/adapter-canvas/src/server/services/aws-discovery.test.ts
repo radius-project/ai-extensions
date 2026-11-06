@@ -35,28 +35,66 @@ function fakes(answers: Record<string, Answer>) {
   return { calls, dependencies, removed: () => removed };
 }
 
+function cluster(
+  vpcId: string,
+  status = "ACTIVE",
+  authenticationMode = "API"
+): string {
+  return JSON.stringify({
+    cluster: {
+      status,
+      resourcesVpcConfig: { vpcId },
+      accessConfig: { authenticationMode }
+    }
+  });
+}
+
+const SESSION_ENDED =
+  "Error when retrieving token from sso: Token has expired and refresh failed";
 const network = {
   "aws ec2 describe-vpcs": JSON.stringify({
     Vpcs: [{ VpcId: "vpc-1", Tags: [{ Key: "Name", Value: "main" }] }]
   }),
   "aws ec2 describe-subnets": JSON.stringify({
     Subnets: [
-      { SubnetId: "subnet-a", VpcId: "vpc-1", AvailabilityZone: "us-west-2a" }
+      { SubnetId: "subnet-a", VpcId: "vpc-1", AvailabilityZone: "us-west-2a" },
+      {
+        SubnetId: "subnet-l",
+        VpcId: "vpc-1",
+        AvailabilityZone: "us-west-2-lax-1a"
+      }
     ]
   }),
-  "aws ec2 describe-route-tables": JSON.stringify({ RouteTables: [] })
+  "aws ec2 describe-route-tables": JSON.stringify({
+    RouteTables: [
+      {
+        VpcId: "vpc-1",
+        Associations: [{ Main: true }],
+        Routes: [{ GatewayId: "local", State: "active" }]
+      }
+    ]
+  }),
+  "aws ec2 describe-availability-zones": JSON.stringify({
+    AvailabilityZones: [
+      { ZoneName: "us-west-2a", ZoneType: "availability-zone" },
+      { ZoneName: "us-west-2-lax-1a", ZoneType: "local-zone" }
+    ]
+  })
+};
+const SUBNET_A = {
+  id: "subnet-a",
+  name: "",
+  vpcId: "vpc-1",
+  availabilityZone: "us-west-2a",
+  routing: "private",
+  zoneKind: "standard"
 };
 
 describe("discoverAwsResources", () => {
   it("scopes every query to the profile's region and reads the single cluster's namespaces", async () => {
     const { calls, dependencies, removed } = fakes({
       "aws eks list-clusters": JSON.stringify(["shop"]),
-      "aws eks describe-cluster --name shop": JSON.stringify({
-        cluster: {
-          resourcesVpcConfig: { vpcId: "vpc-1" },
-          accessConfig: { authenticationMode: "API" }
-        }
-      }),
+      "aws eks describe-cluster --name shop": cluster("vpc-1"),
       "aws eks update-kubeconfig": "",
       "kubectl --kubeconfig": "default shop-dev",
       ...network
@@ -72,6 +110,7 @@ describe("discoverAwsResources", () => {
           name: "shop",
           vpcId: "vpc-1",
           authenticationMode: "API",
+          status: "ACTIVE",
           usable: true
         }
       ],
@@ -79,12 +118,14 @@ describe("discoverAwsResources", () => {
       namespaces: ["default", "shop-dev"],
       vpcs: [{ id: "vpc-1", name: "main (vpc-1)" }],
       subnets: [
+        SUBNET_A,
         {
-          id: "subnet-a",
+          id: "subnet-l",
           name: "",
           vpcId: "vpc-1",
-          availabilityZone: "us-west-2a",
-          public: false
+          availabilityZone: "us-west-2-lax-1a",
+          routing: "private",
+          zoneKind: "local-zone"
         }
       ]
     });
@@ -96,49 +137,257 @@ describe("discoverAwsResources", () => {
     expect(removed()).toBe(1);
   });
 
-  it("keeps default namespaces and reports each facet that fails", async () => {
-    const { dependencies } = fakes({
-      "aws eks list-clusters": new Error("AccessDeniedException"),
-      "aws ec2 describe-vpcs": new Error("UnauthorizedOperation"),
-      "aws ec2 describe-subnets": new Error("UnauthorizedOperation"),
-      "aws ec2 describe-route-tables": "{}"
+  it("makes no EC2 call when the region has no clusters", async () => {
+    const { calls, dependencies } = fakes({
+      "aws eks list-clusters": "[]"
+    });
+    const result = await discoverAwsResources(
+      { region: "us-east-1" },
+      dependencies
+    );
+    expect(result).toEqual({
+      clusters: [],
+      resourceGroups: [],
+      namespaces: ["default"],
+      vpcs: [],
+      subnets: []
+    });
+    expect(calls).toEqual([
+      "aws eks list-clusters --query clusters --region us-east-1 --output json"
+    ]);
+  });
+
+  it("reads only the usable clusters' VPCs and their subnets", async () => {
+    const { calls, dependencies } = fakes({
+      "aws eks list-clusters": JSON.stringify(["a", "b", "legacy", 3]),
+      "aws eks describe-cluster --name a": cluster("vpc-1"),
+      "aws eks describe-cluster --name b": cluster("vpc-2", "UPDATING"),
+      "aws eks describe-cluster --name legacy": cluster(
+        "vpc-3",
+        "ACTIVE",
+        "CONFIG_MAP"
+      ),
+      ...network
     });
     const result = await discoverAwsResources(
       { region: "us-west-2" },
       dependencies
     );
-    expect(result.clusters).toEqual([]);
-    expect(result.namespaces).toEqual([
-      "default",
-      "kube-system",
-      "radius-system"
+    expect(result.clusters.map((item) => [item.name, item.usable])).toEqual([
+      ["a", true],
+      ["b", true],
+      ["legacy", false]
     ]);
-    expect(result.errors).toEqual({
-      clusters: "AccessDeniedException",
-      vpcs: "UnauthorizedOperation",
-      subnets: "UnauthorizedOperation"
-    });
+    expect(calls.filter((line) => line.startsWith("aws ec2 "))).toEqual([
+      "aws ec2 describe-vpcs --vpc-ids vpc-1 vpc-2 --region us-west-2 --output json",
+      "aws ec2 describe-subnets --filters Name=vpc-id,Values=vpc-1,vpc-2 --region us-west-2 --output json",
+      "aws ec2 describe-route-tables --filters Name=vpc-id,Values=vpc-1,vpc-2 --region us-west-2 --output json",
+      "aws ec2 describe-availability-zones --region us-west-2 --output json"
+    ]);
+    // Two usable clusters: the browser picks one, so no namespace read runs.
+    expect(calls.some((line) => line.includes("update-kubeconfig"))).toBe(
+      false
+    );
   });
 
-  it("still offers a cluster it cannot describe, and reports namespace failures", async () => {
-    const { dependencies, removed } = fakes({
-      "aws eks list-clusters": JSON.stringify(["a", "b", 3]),
-      "aws eks describe-cluster": new Error("throttled"),
-      "aws eks update-kubeconfig": new Error("no access"),
+  it("reads namespaces for a requested cluster that is usable", async () => {
+    const { calls, dependencies } = fakes({
+      "aws eks list-clusters": JSON.stringify(["a", "b"]),
+      "aws eks describe-cluster --name a": cluster("vpc-1"),
+      "aws eks describe-cluster --name b": cluster("vpc-1"),
+      "aws eks update-kubeconfig --name b": "",
+      "kubectl --kubeconfig": "default b-dev",
       ...network
     });
     const result = await discoverAwsResources(
-      { region: "us-west-2", cluster: "a" },
+      { region: "us-west-2", cluster: "b" },
       dependencies
     );
-    expect(result.clusters.map((cluster) => cluster.id)).toEqual(["a", "b"]);
-    expect(result.clusters[0]).toMatchObject({ usable: true });
+    expect(result.namespaces).toEqual(["default", "b-dev"]);
+    expect(calls.filter((line) => line.includes("--vpc-ids"))).toEqual([
+      "aws ec2 describe-vpcs --vpc-ids vpc-1 --region us-west-2 --output json"
+    ]);
+  });
+
+  it("marks a cluster it cannot describe as not described, with the error kind", async () => {
+    const { calls, dependencies } = fakes({
+      "aws eks list-clusters": JSON.stringify(["locked", "shop"]),
+      "aws eks describe-cluster --name locked": new Error(
+        "An error occurred (AccessDeniedException) when calling the DescribeCluster operation"
+      ),
+      "aws eks describe-cluster --name shop": cluster(
+        "vpc-1",
+        "DELETING",
+        "CONFIG_MAP"
+      )
+    });
+    const result = await discoverAwsResources(
+      { region: "us-west-2", cluster: "locked" },
+      dependencies
+    );
+    expect(result.clusters).toEqual([
+      {
+        id: "locked",
+        name: "locked",
+        vpcId: "",
+        authenticationMode: "",
+        status: "",
+        usable: false,
+        unusableReason: "not-described",
+        describeErrorKind: "denied"
+      },
+      {
+        id: "shop",
+        name: "shop",
+        vpcId: "vpc-1",
+        authenticationMode: "CONFIG_MAP",
+        status: "DELETING",
+        usable: false,
+        unusableReason: "status"
+      }
+    ]);
+    expect(result.remediation).toBeUndefined();
+    // No usable cluster: no EC2 read, and no namespace read for the
+    // requested cluster that is not usable.
+    expect(calls.map((line) => line.split(" ").slice(0, 3).join(" "))).toEqual([
+      "aws eks list-clusters",
+      "aws eks describe-cluster",
+      "aws eks describe-cluster"
+    ]);
+  });
+
+  it("keeps listing subnets when the route-table, VPC, and zone reads fail", async () => {
+    const { dependencies } = fakes({
+      "aws eks list-clusters": JSON.stringify(["shop"]),
+      "aws eks describe-cluster --name shop": cluster("vpc-1"),
+      "aws eks update-kubeconfig": "",
+      "kubectl --kubeconfig": "",
+      "aws ec2 describe-vpcs": new Error(
+        "An error occurred (UnauthorizedOperation) when calling the DescribeVpcs operation"
+      ),
+      "aws ec2 describe-subnets": network["aws ec2 describe-subnets"],
+      "aws ec2 describe-route-tables": new Error(
+        "An error occurred (UnauthorizedOperation) when calling the DescribeRouteTables operation"
+      ),
+      "aws ec2 describe-availability-zones": new Error("Read timeout")
+    });
+    const result = await discoverAwsResources(
+      { region: "us-west-2" },
+      dependencies
+    );
+    expect(result.vpcs).toEqual([]);
+    expect(result.subnets).toEqual([
+      { ...SUBNET_A, routing: "unknown" },
+      {
+        id: "subnet-l",
+        name: "",
+        vpcId: "vpc-1",
+        availabilityZone: "us-west-2-lax-1a",
+        routing: "unknown",
+        zoneKind: "local-zone"
+      }
+    ]);
+    expect(result.errorKinds).toEqual({
+      vpcs: "denied",
+      routeTables: "denied",
+      zones: "other"
+    });
+    expect(Object.keys(result.errors || {})).toEqual([
+      "vpcs",
+      "routeTables",
+      "zones"
+    ]);
+    expect(result.remediation).toBeUndefined();
+  });
+
+  it("reports a subnet failure and still reads namespaces", async () => {
+    const { dependencies } = fakes({
+      "aws eks list-clusters": JSON.stringify(["shop"]),
+      "aws eks describe-cluster --name shop": cluster("vpc-1"),
+      "aws eks update-kubeconfig": new Error("no access"),
+      ...network,
+      "aws ec2 describe-subnets": new Error(SESSION_ENDED)
+    });
+    const result = await discoverAwsResources(
+      { region: "us-west-2" },
+      dependencies
+    );
+    expect(result.subnets).toEqual([]);
+    expect(result.vpcs).toEqual([{ id: "vpc-1", name: "main (vpc-1)" }]);
+    expect(result.errorKinds).toEqual({
+      subnets: "credentials",
+      namespaces: "other"
+    });
     expect(result.errors?.namespaces).toBe("no access");
-    expect(removed()).toBe(1);
+    expect(result.remediation).toMatchObject({
+      id: "aws-cli-login",
+      params: { nextStep: "refresh-discovery" }
+    });
+  });
+
+  it("offers sign-in and makes no other call when the cluster list needs a session", async () => {
+    const { calls, dependencies } = fakes({
+      "aws eks list-clusters": new Error(
+        'Unable to locate credentials. You can configure credentials by running "aws configure".'
+      )
+    });
+    const result = await discoverAwsResources(
+      { region: "us-west-2" },
+      dependencies
+    );
+    expect(calls).toHaveLength(1);
+    expect(result.errorKinds).toEqual({ clusters: "credentials" });
+    expect(result.remediation).toMatchObject({
+      id: "aws-cli-login",
+      params: { nextStep: "refresh-discovery" }
+    });
+  });
+
+  it("offers sign-in when the session ends while describing a cluster", async () => {
+    const { dependencies } = fakes({
+      "aws eks list-clusters": JSON.stringify(["shop"]),
+      "aws eks describe-cluster --name shop": new Error(SESSION_ENDED)
+    });
+    const result = await discoverAwsResources(
+      { region: "us-west-2" },
+      dependencies
+    );
+    expect(result.errorKinds).toBeUndefined();
+    expect(result.clusters[0]).toMatchObject({
+      unusableReason: "not-described",
+      describeErrorKind: "credentials"
+    });
+    expect(result.remediation).toMatchObject({
+      id: "aws-cli-login",
+      params: { nextStep: "refresh-discovery" }
+    });
+  });
+
+  it.each([
+    [
+      "rejected",
+      "An error occurred (UnrecognizedClientException) when calling the ListClusters operation: The security token included in the request is invalid."
+    ],
+    [
+      "other",
+      "Error when retrieving credentials from custom-process: Token has expired"
+    ]
+  ])("offers no sign-in for a %s cluster-list error", async (kind, message) => {
+    const { dependencies } = fakes({
+      "aws eks list-clusters": new Error(message)
+    });
+    const result = await discoverAwsResources(
+      { region: "af-south-1" },
+      dependencies
+    );
+    expect(result.errorKinds).toEqual({ clusters: kind });
+    expect(result.errors).toEqual({ clusters: message });
+    expect(result.remediation).toBeUndefined();
   });
 
   it.each([
     [{ region: "" }, 'Invalid AWS region ""'],
+    [{}, 'Invalid AWS region ""'],
     [{ region: "us-west-2", cluster: "bad name!" }, "Invalid EKS cluster name."]
   ])(
     "rejects invalid input %j before running anything",
@@ -149,29 +398,70 @@ describe("discoverAwsResources", () => {
       expect(calls).toEqual([]);
     }
   );
+});
 
-  it("marks CONFIG_MAP and unconfigured clusters unusable", () => {
-    expect(parseAwsCluster("c", { cluster: {} })).toEqual({
+describe("parseAwsCluster", () => {
+  it.each([
+    ["ACTIVE", "API", true, undefined],
+    ["UPDATING", "API_AND_CONFIG_MAP", true, undefined],
+    ["ACTIVE", "CONFIG_MAP", false, "config-map"],
+    ["CREATING", "API", false, "status"],
+    // A status reason outranks a CONFIG_MAP reason.
+    ["DELETING", "CONFIG_MAP", false, "status"]
+  ])(
+    "a %s cluster with %s authentication: usable %s, reason %s",
+    (status, mode, usable, reason) => {
+      const item = parseAwsCluster(
+        "c",
+        JSON.parse(cluster("vpc-1", status, mode))
+      );
+      expect(item.usable).toBe(usable);
+      expect(item.unusableReason).toBe(reason);
+      expect(item.status).toBe(status);
+    }
+  );
+
+  it.each([
+    ["no answer", null],
+    ["no cluster", {}],
+    ["no status", { cluster: { accessConfig: { authenticationMode: "API" } } }]
+  ])("treats an answer with %s as not described", (_label, output) => {
+    expect(parseAwsCluster("c", output)).toEqual({
+      id: "c",
+      name: "c",
+      vpcId: "",
+      authenticationMode: "",
+      status: "",
+      usable: false,
+      unusableReason: "not-described",
+      describeErrorKind: "other"
+    });
+  });
+
+  it("defaults a described cluster without an access config to CONFIG_MAP", () => {
+    expect(parseAwsCluster("c", { cluster: { status: "ACTIVE" } })).toEqual({
       id: "c",
       name: "c",
       vpcId: "",
       authenticationMode: "CONFIG_MAP",
-      usable: false
+      status: "ACTIVE",
+      usable: false,
+      unusableReason: "config-map"
     });
-    expect(parseAwsCluster("c", null).usable).toBe(false);
   });
 });
 
 describe("discoverAwsResources edge cases", () => {
-  it("treats empty CLI output as nothing found and keeps the default namespaces", async () => {
+  it("treats empty CLI output as nothing found and keeps the default namespace", async () => {
     const { dependencies } = fakes({
       "aws eks list-clusters": JSON.stringify(["shop"]),
-      "aws eks describe-cluster --name shop": "",
+      "aws eks describe-cluster --name shop": cluster("vpc-1"),
       "aws eks update-kubeconfig": "",
       "kubectl --kubeconfig": "",
       "aws ec2 describe-vpcs": "",
       "aws ec2 describe-subnets": "",
-      "aws ec2 describe-route-tables": ""
+      "aws ec2 describe-route-tables": "",
+      "aws ec2 describe-availability-zones": ""
     });
     const result = await discoverAwsResources(
       { region: "us-west-2" },
@@ -179,29 +469,80 @@ describe("discoverAwsResources edge cases", () => {
     );
     expect(result.vpcs).toEqual([]);
     expect(result.subnets).toEqual([]);
-    expect(result.namespaces).toEqual([
-      "default",
-      "kube-system",
-      "radius-system"
-    ]);
+    expect(result.namespaces).toEqual(["default"]);
+    expect(result.errors).toBeUndefined();
+  });
+
+  it("treats a cluster list that is not an array as no clusters", async () => {
+    const { calls, dependencies } = fakes({
+      "aws eks list-clusters": ""
+    });
+    const result = await discoverAwsResources(
+      { region: "us-west-2" },
+      dependencies
+    );
+    expect(result.clusters).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("skips the network reads when the usable cluster reports no VPC", async () => {
+    const { calls, dependencies } = fakes({
+      "aws eks list-clusters": JSON.stringify(["shop"]),
+      "aws eks describe-cluster --name shop": JSON.stringify({
+        cluster: {
+          status: "ACTIVE",
+          accessConfig: { authenticationMode: "API" }
+        }
+      }),
+      "aws eks update-kubeconfig": "",
+      "kubectl --kubeconfig": "default"
+    });
+    const result = await discoverAwsResources(
+      { region: "us-west-2" },
+      dependencies
+    );
+    expect(result.namespaces).toEqual(["default"]);
+    expect(calls.some((line) => line.startsWith("aws ec2 "))).toBe(false);
   });
 
   it("reports a failure that is not an Error by its text", async () => {
-    const { dependencies } = fakes({
-      "aws ec2 describe-vpcs": "{}",
-      "aws ec2 describe-subnets": "{}",
-      "aws ec2 describe-route-tables": "{}"
-    });
-    const runCli = dependencies.runCli;
-    dependencies.runCli = async (command, args, options) => {
-      if (args[0] === "eks") throw "aws exited with 255";
-      return runCli(command, args, options);
+    const { dependencies } = fakes({});
+    dependencies.runCli = async () => {
+      throw "aws exited with 255";
     };
     const result = await discoverAwsResources(
       { region: "us-west-2" },
       dependencies
     );
     expect(result.errors).toEqual({ clusters: "aws exited with 255" });
+    expect(result.errorKinds).toEqual({ clusters: "other" });
+  });
+
+  it("classifies a describe failure that is not an Error by its text", async () => {
+    const { dependencies } = fakes({
+      "aws eks list-clusters": JSON.stringify(["shop"])
+    });
+    const runCli = dependencies.runCli;
+    dependencies.runCli = async (command, args, options) => {
+      if (args[1] === "describe-cluster") throw "ExpiredToken";
+      return runCli(command, args, options);
+    };
+    const result = await discoverAwsResources(
+      { region: "us-west-2" },
+      dependencies
+    );
+    expect(result.clusters[0].describeErrorKind).toBe("credentials");
+  });
+
+  it("cuts long error text to 800 characters", async () => {
+    const { dependencies } = fakes({
+      "aws eks list-clusters": new Error("x".repeat(900))
+    });
+    const result = await discoverAwsResources(
+      { region: "us-west-2" },
+      dependencies
+    );
+    expect(result.errors?.clusters).toHaveLength(800);
   });
 });
 

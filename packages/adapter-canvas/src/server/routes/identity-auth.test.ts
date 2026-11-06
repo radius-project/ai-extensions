@@ -81,6 +81,7 @@ const SUBSCRIPTION_NAME = "Fixture Subscription";
 const SWITCH_KEY = `az account set --subscription ${SUBSCRIPTION}`;
 const ACCOUNT_SHOW_KEY = "az account show -o json";
 const AWS_IDENTITY_KEY = "aws sts get-caller-identity --output json";
+const AWS_VERSION_KEY = "aws --version";
 const SWITCH_FAILURE = "no such subscription";
 const NO_SESSION_ERROR = "Please run az login";
 const CLI_MISSING_ERROR = "spawn az ENOENT";
@@ -134,7 +135,10 @@ function commandLine(command: string, args: string[]): string {
 const DEFAULT_COMMANDS: Record<string, string | Error> = {
   [SWITCH_KEY]: "",
   [ACCOUNT_SHOW_KEY]: JSON.stringify(AZ_ACCOUNT),
-  [AWS_IDENTITY_KEY]: JSON.stringify(AWS_IDENTITY)
+  [AWS_VERSION_KEY]: "aws-cli/2.15.3 Python/3.11.6",
+  [AWS_IDENTITY_KEY]: JSON.stringify(AWS_IDENTITY),
+  [`${AWS_IDENTITY_KEY} --region eu-west-1`]: JSON.stringify(AWS_IDENTITY),
+  [`${AWS_IDENTITY_KEY} --region us-west-2`]: JSON.stringify(AWS_IDENTITY)
 };
 
 // One independent set of fakes plus the mutable state they read and write.
@@ -216,6 +220,16 @@ function fakes(
       }
       if (scripted instanceof Error) return Promise.reject(scripted);
       return Promise.resolve(scripted);
+    },
+    runAws: async (args) => {
+      const line = commandLine("aws", args);
+      calls.log.push(`runAws(${line})`);
+      const scripted = commands[line];
+      if (scripted === undefined)
+        throw new Error(`unscripted command vector: ${line}`);
+      return scripted instanceof Error ?
+          { code: 1, stdout: "", stderr: scripted.message }
+        : { code: 0, stdout: scripted, stderr: "" };
     },
     // Deliberately distinct from the inline `e instanceof Error ? e.message :
     // String(e || "")` the legacy branches use in three places, so a handler
@@ -617,7 +631,8 @@ describe("identity-auth routes (SU-08)", () => {
       region: "eu-west-1"
     });
     expect(calls.log).toEqual([
-      "runCommand(aws sts get-caller-identity --output json|15000)"
+      "runAws(aws --version)",
+      "runAws(aws sts get-caller-identity --output json --region eu-west-1)"
     ]);
   });
 
@@ -633,7 +648,7 @@ describe("identity-auth routes (SU-08)", () => {
     expect(recording.status).toBe(200);
     expect(JSON.parse(recording.body)).toEqual({
       error:
-        "Your AWS CLI session is signed in to account 000011112222, but this profile is for account 999988887777. Sign in to account 999988887777, or change the Account ID, then verify again.",
+        "Your AWS CLI session is signed in to account 000011112222, but the requested account is 999988887777. Nothing was changed. Sign in to account 999988887777, or correct the account ID, then retry.",
       code: "aws-account-mismatch",
       sessionAccountId: "000011112222",
       accountId: "999988887777"
@@ -654,12 +669,11 @@ describe("identity-auth routes (SU-08)", () => {
       deps
     );
     expect(JSON.parse(recording.body)).toMatchObject({
-      code: "aws-account-mismatch",
-      sessionAccountId: ""
+      code: "aws-identity-invalid"
     });
   });
 
-  it("reports the session account when no account was submitted", async () => {
+  it("rejects a missing account before running the CLI", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       commands: {
@@ -672,39 +686,135 @@ describe("identity-auth routes (SU-08)", () => {
       handleVerifyAwsLogin,
       deps
     );
-    expect(JSON.parse(recording.body)).toEqual({
-      success: true,
-      accountId: "",
-      arn: "",
-      user: "",
-      region: ""
+    expect(JSON.parse(recording.body)).toMatchObject({
+      code: "aws-input-invalid"
     });
+    expect(calls.log).toEqual([]);
   });
 
-  it("reports a missing aws session with the fixed message", async () => {
+  it("offers sign-in for missing AWS credentials", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       commands: {
-        [AWS_IDENTITY_KEY]: new Error(AWS_CLI_MISSING_ERROR)
+        [AWS_IDENTITY_KEY]: new Error("Unable to locate credentials")
       }
     });
     const recording = await run(
       "/api/verify-aws-login",
-      "{}",
+      '{"accountId":"000011112222"}',
       handleVerifyAwsLogin,
       deps
     );
-    // The underlying CLI error is deliberately swallowed here.
     expect(recording.status).toBe(200);
     expect(JSON.parse(recording.body)).toEqual({
+      code: "aws-cli-login-required",
       error:
-        'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.',
+        'No active AWS CLI session. Sign in with "aws sso login", or refresh your configured credential provider, then verify again.',
       remediation: remediationView("aws-cli-login", {})
     });
-    expect(recording.body).not.toContain("ENOENT");
   });
 
-  it("answers a malformed body with 200 and the injected formatter", async () => {
+  it.each([
+    new Error(AWS_CLI_MISSING_ERROR),
+    new Error("AWS CLI timed out"),
+    "aws-cli/2.15.2 Python/3.11",
+    "unrecognized version output"
+  ])("blocks an unusable CLI before STS: %s", async (output) => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      commands: { [AWS_VERSION_KEY]: output }
+    });
+    const recording = await run(
+      "/api/verify-aws-login",
+      '{"accountId":"000011112222"}',
+      handleVerifyAwsLogin,
+      deps
+    );
+    expect(JSON.parse(recording.body)).toMatchObject({
+      code: "aws-cli-unsupported",
+      error: expect.stringContaining("2.15.3")
+    });
+    expect(recording.body).toContain("getting-started-install.html");
+    expect(calls.log).toEqual(["runAws(aws --version)"]);
+  });
+
+  it.each([
+    "AccessDenied: not authorized",
+    "Could not connect to the endpoint URL",
+    "The command timed out",
+    "invalid JSON response"
+  ])(
+    "does not mistake an AWS failure for missing login: %s",
+    async (detail) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        commands: { [AWS_IDENTITY_KEY]: new Error(detail) }
+      });
+      const recording = await run(
+        "/api/verify-aws-login",
+        '{"accountId":"000011112222"}',
+        handleVerifyAwsLogin,
+        deps
+      );
+      expect(JSON.parse(recording.body)).toMatchObject({
+        code: "aws-verification-failed"
+      });
+      expect(recording.body).not.toContain(detail);
+    }
+  );
+
+  it.each(["SSOTokenLoadError", "Error loading SSO Token: missing"])(
+    "offers the existing login action for SSO credentials: %s",
+    async (detail) => {
+      const { deps } = fakes(
+        { log: [] },
+        { commands: { [AWS_IDENTITY_KEY]: new Error(detail) } }
+      );
+      const recording = await run(
+        "/api/verify-aws-login",
+        '{"accountId":"000011112222"}',
+        handleVerifyAwsLogin,
+        deps
+      );
+      expect(JSON.parse(recording.body)).toMatchObject({
+        code: "aws-cli-login-required",
+        remediation: remediationView("aws-cli-login", {})
+      });
+    }
+  );
+
+  it.each(["null", "[]", '{"accountId":123}', '{"region":false}'])(
+    "rejects malformed AWS input before commands: %s",
+    async (body) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls);
+      const recording = await run(
+        "/api/verify-aws-login",
+        body,
+        handleVerifyAwsLogin,
+        deps
+      );
+      expect(JSON.parse(recording.body)).toHaveProperty("error");
+      expect(calls.log).toEqual([]);
+    }
+  );
+
+  it("rejects an invalid account ID before commands", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls);
+    const recording = await run(
+      "/api/verify-aws-login",
+      '{"accountId":"123"}',
+      handleVerifyAwsLogin,
+      deps
+    );
+    expect(JSON.parse(recording.body)).toMatchObject({
+      code: "aws-account-invalid"
+    });
+    expect(calls.log).toEqual([]);
+  });
+
+  it("reports malformed input without claiming the CLI ran", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls);
     const recording = await run(
@@ -713,9 +823,10 @@ describe("identity-auth routes (SU-08)", () => {
       handleVerifyAwsLogin,
       deps
     );
-    expect(recording.status).toBe(200);
-    expect(
-      String((JSON.parse(recording.body) as { error: string }).error)
-    ).toContain("AWS CLI verification failed: formatted:");
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toMatchObject({
+      code: "aws-input-invalid"
+    });
+    expect(calls.log).toEqual([]);
   });
 });

@@ -3,6 +3,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
+  recordAwsRole,
+  recordAwsTrustSubject,
+  recordAwsRolePolicy,
+  recordAwsAccessEntry,
+  mayHaveStartedVerification,
+  getSetupArtifactLedger,
+  announceOperationTerminal,
   applySetupResumePoint,
   setupStepLabel,
   onOperationTerminal,
@@ -47,6 +54,7 @@ import {
   reconcileRestoredOperation,
   fromPersistedOperation,
   sanitizeResumeTarget,
+  setContext,
   setCanonicalEnvironment,
   setCloudContext,
   setStageState,
@@ -76,6 +84,7 @@ import {
   settleProviderMutation,
   unresolvedProviderMutations,
   providerMutationRecord,
+  providerMutationsByKind,
   providerRecoveryManualGuidance,
   recordProviderMutationDiagnostics,
   terminalizeProviderManualRequired,
@@ -90,9 +99,10 @@ import {
   projectNextTransition,
   projectOperationActions,
   removableAwsLockWait,
-  setContext,
   projectOperationHeadline,
   pauseForProviderRestart,
+  isProviderRestartDecision,
+  verificationWorkflowState,
   pendingWorkflowCommits,
   provenOwnedCleanupTargets,
   readOperationControl,
@@ -100,6 +110,7 @@ import {
   recordAttemptOutcome,
   reconcileOperationLifecycle,
   rollbackRetryAttempt,
+  planSetupContinuation,
   setCommandState,
   setVerificationWorkflowState,
   rollbackArtifactIdentity,
@@ -117,7 +128,15 @@ import {
   hasSurvivingCreatedArtifacts,
   isSetupExited,
   hasPendingVerificationAcquisition,
+  hasReachedSetupCommitPoint,
   markVerificationRetryAcquisition,
+  ensureVerificationRetryAcquisitionDeadline,
+  markVerificationRetryPrecondition,
+  hasVerificationProvenance,
+  setupPullRequestUrl,
+  formatGitHubEnvironmentLabel,
+  cleanupTargetKey,
+  cleanupArtifactIdentity,
   setupExitState,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
@@ -304,6 +323,532 @@ describe("provider mutation recovery journal", () => {
       failure: {
         code: "provider-reconciliation-manual-required"
       }
+    });
+  });
+
+  describe("final public transition and recovery boundaries", () => {
+    afterEach(() => onOperationTerminal(null));
+
+    it("uses safe provider-recovery fallbacks for incomplete journal data", () => {
+      const op = newOp();
+      const mutation = prepareProviderMutation(op, {
+        kind: "azure.app.create",
+        target: "radius-dev"
+      });
+
+      expect(mutation).not.toHaveProperty("intent");
+      op.providerRecovery = {
+        state: "manual_required",
+        guidance: null,
+        mutations: []
+      };
+      expect(providerRecoveryManualGuidance(op)).toContain(
+        "could not prove the identity"
+      );
+
+      op.providerRecovery = {
+        state: "unrecoverable_legacy",
+        guidance: null,
+        mutations: []
+      };
+      expect(legacyRecoveryQuarantine(op)).toContain("older version of Radius");
+    });
+
+    it("terminalizes malformed recovery records without requiring stage arrays", () => {
+      const op = newOp();
+      delete op.stages;
+
+      terminalizeProviderManualRequired(op, "Review the provider resource.");
+
+      expect(op).toMatchObject({
+        state: "failed_partial",
+        recoveryState: "manual_required",
+        failure: { message: "Review the provider resource." }
+      });
+
+      const legacy = newOp();
+      legacy.restoredSchemaVersion = 4;
+      legacy.stages[0].state = "running";
+      legacy.stages[1].state = "pending";
+      expect(quarantineUnrecoverableLegacy(legacy)).toBe(true);
+      expect(legacy.stages.map((stage) => stage.state)).toEqual([
+        "failed",
+        "skipped",
+        "skipped"
+      ]);
+    });
+
+    it("dismisses completed operations", () => {
+      const succeeded = newOp();
+      finishSucceeded(succeeded);
+      expect(canDismissOperation(succeeded)).toBe(true);
+    });
+
+    it("rejects malformed resume targets and repairs a missing artifact ledger", () => {
+      expect(sanitizeResumeTarget({ page: 42 })).toBeNull();
+
+      const op = newOp();
+      delete op.setupArtifacts;
+      recordAzureApp(op, { state: "created", appId: "app-1" });
+
+      expect(op.setupArtifacts.azureApp).toMatchObject({
+        state: "created",
+        appId: "app-1"
+      });
+    });
+
+    it("accepts and clears Azure app continuation state through prompt recovery", () => {
+      const op = newOp();
+      const continuation = validAzureAppCreateContinuation(op.operationId);
+
+      expect(setAzureAppCreateContinuation(null, continuation)).toBeNull();
+      expect(setAzureAppCreateContinuation(op, continuation)).toEqual(
+        continuation
+      );
+      op.state = "input_required";
+      op.inputRequired = structuredClone(continuation.prompt);
+      resumeAfterInput(op);
+      expect(op.azureAppCreateContinuation).toBeDefined();
+
+      expect(setAzureAppCreateContinuation(op, { invalid: true })).toBeNull();
+      expect(op).not.toHaveProperty("azureAppCreateContinuation");
+    });
+
+    it("normalizes empty context and provenance patches without inventing data", () => {
+      const op = newOp({ environment: "" });
+      setCanonicalEnvironment(op, "canonical");
+      setCloudContext(op, "azure", null);
+
+      expect(op.context).toMatchObject({
+        requestedEnvironment: "",
+        canonicalEnvironment: "canonical",
+        cloud: { kind: "azure" }
+      });
+
+      expect(
+        reconcileArtifactProvenance("azure_app", null, null)
+      ).toMatchObject({
+        state: undefined,
+        origin: "unknown"
+      });
+      expect(
+        reconcileArtifactProvenance(
+          "azure_app",
+          { state: "created", origin: "this_operation", appId: "old" },
+          { state: "reused", appId: "new", displayName: undefined }
+        )
+      ).toMatchObject({
+        state: "reused",
+        origin: "unknown",
+        appId: "new"
+      });
+    });
+
+    it("normalizes sparse variable and commit records through public writers", () => {
+      const op = newOp();
+      recordGitHubEnvironmentVariable(op, {});
+      expect(op.setupArtifacts.githubEnvironmentVariables).toEqual([]);
+
+      recordCommitState(null, { branch: "main" });
+      recordCommitState(op, { branch: "main" });
+      recordCommittedWorkflowFile(op, {
+        ...provenWorkflowFile(),
+        branch: null
+      });
+      recordCommitState(op, { branch: "trunk" });
+
+      expect(op.setupArtifacts.commit.workflowFiles[0].branch).toBe("trunk");
+      expect(recordCleanupState(null, { state: "running" })).toBeNull();
+    });
+
+    it("uses identity and label fallbacks for malformed cleanup artifacts", () => {
+      expect(cleanupArtifactIdentity("azure_app", null)).toBe("");
+      expect(cleanupArtifactIdentity("unsupported", { id: "resource" })).toBe(
+        ""
+      );
+
+      const op = newOp();
+      op.state = "failed_partial";
+      op.setupArtifacts.federatedCredentials.push({
+        name: "",
+        subject: "",
+        providerId: null
+      });
+      op.setupArtifacts.roleAssignments.push({
+        assignmentId: null,
+        role: "",
+        scope: "",
+        principalObjectId: null
+      });
+      op.setupArtifacts.cleanup = {
+        state: "succeeded_with_warnings",
+        ownerAssignment: "assigned",
+        attempts: 1,
+        results: [
+          {
+            attempt: 1,
+            artifactType: "",
+            outcome: "not_found",
+            target: "already gone"
+          },
+          {
+            attempt: 1,
+            artifactType: "azure_app",
+            outcome: "warning",
+            target: "",
+            detail: ""
+          }
+        ]
+      };
+
+      expect(projectCleanupSummary(op).results).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ target: "already gone" }),
+          expect.objectContaining({ target: "", detail: null })
+        ])
+      );
+    });
+
+    it("classifies unknown retry verdicts and malformed ownership evidence safely", () => {
+      expect(
+        classifyVerificationRetry({
+          state: "action_required",
+          terminal: { reason: "unknown" }
+        })
+      ).toBeNull();
+      expect(
+        classifyVerificationRetry({
+          state: "failed_partial",
+          failure: { code: "unknown" }
+        })
+      ).toBeNull();
+
+      const ledger = readSetupArtifactLedger({
+        cleanup: {
+          results: [{ outcome: "skipped", detail: "" }]
+        }
+      });
+      expect(ambiguousSetupOwnership(ledger)).toContain(
+        "could not be identified"
+      );
+    });
+
+    it("falls back to safe continuation stages for malformed records", () => {
+      const missing = applySetupResumePoint(null, "unknown");
+      expect(missing).toMatchObject({
+        resumeFrom: "azure_app",
+        stage: STAGE_CONFIGURE_ENVIRONMENT
+      });
+
+      const op = newOp();
+      op.stages = "invalid";
+      expect(applySetupResumePoint(op, "verification")).toMatchObject({
+        stage: STAGE_CONFIGURE_ENVIRONMENT,
+        runEnvironment: true
+      });
+      expect(op.resumeFrom).toBe("verification");
+    });
+
+    it("projects retry and cancellation transitions through the public view", () => {
+      const retry = newOp();
+      retry.resumeFrom = "workflow_commit";
+      acceptCommand(retry, {
+        kind: "retry_setup",
+        attempt: 1,
+        target: "workflow_commit"
+      });
+      expect(projectOperationHeadline(retry)).toMatchObject({
+        code: "retrying-setup"
+      });
+      expect(projectNextTransition(retry)).toMatchObject({
+        code: "retrying-setup"
+      });
+
+      const cleanup = newOp();
+      acceptCommand(cleanup, {
+        kind: "retry_cleanup",
+        attempt: 1,
+        target: "artifacts"
+      });
+      expect(projectNextTransition(cleanup)).toMatchObject({
+        code: "retrying-rollback"
+      });
+    });
+
+    it("projects delete and workflow-cancellation fallback behavior", () => {
+      const deletion = newDeleteOp();
+      deletion.currentStage = "missing";
+      finish(deletion, "failed_partial");
+      expect(projectOperationHeadline(deletion)).toMatchObject({
+        code: "deletion-incomplete",
+        message: expect.stringContaining("an unfinished deletion stage")
+      });
+
+      const cancelled = newOp();
+      cancelled.context.githubLogin = "octocat";
+      cancelled.verification = { runId: "42", workflowState: "active" };
+      finish(cancelled, "cancelled");
+      expect(
+        projectOperationActions(cancelled).find(
+          (action) => action.kind === "cancel_workflow"
+        )
+      ).toMatchObject({
+        label: "Cancel workflow",
+        requiresConfirmation: true
+      });
+
+      setVerificationWorkflowState(cancelled, "cancelling");
+      expect(
+        projectOperationActions(cancelled).find(
+          (action) => action.kind === "cancel_workflow"
+        )
+      ).toMatchObject({
+        label: "Check workflow status",
+        requiresConfirmation: false
+      });
+    });
+
+    it("announces only eligible terminal records and honors deferred delivery", () => {
+      expect(announceOperationTerminal(null)).toBe(false);
+      expect(announceOperationTerminal(newOp())).toBe(false);
+
+      const op = newOp();
+      finish(op, "failed", { announce: false });
+      const seen = [];
+      onOperationTerminal((record) => seen.push(record.state));
+
+      expect(announceOperationTerminal(op)).toBe(true);
+      expect(announceOperationTerminal(op)).toBe(false);
+      expect(seen).toEqual(["failed"]);
+    });
+
+    it("finishes sparse records and preserves explicit command outcomes", () => {
+      expect(finish(null, "failed")).toBeNull();
+
+      const op = newOp();
+      const accepted = acceptCommand(op, {
+        kind: "continue_setup",
+        attempt: 1,
+        target: "environment"
+      });
+      setCommandState(
+        op,
+        accepted.command.commandId,
+        "running",
+        "executor-owned"
+      );
+      delete op.control;
+      op.control = {
+        ...createOperationControl(),
+        commands: [accepted.command]
+      };
+      finish(op, "failed", { announce: false });
+
+      expect(op.control.commands[0]).toMatchObject({
+        state: "finished",
+        outcome: "executor-owned"
+      });
+    });
+
+    it("uses cancellation and command identity fallbacks for empty input", () => {
+      expect(requestStop(null)).toBe(false);
+
+      const op = newOp();
+      requestStop(op);
+      stopAtBoundary(op, "");
+      expect(op.control.stop.boundary).toBe("unknown");
+
+      expect(
+        buildCommandId({
+          operationId: "",
+          kind: "",
+          attempt: -1,
+          target: ""
+        })
+      ).toBe("::0:operation");
+      expect(
+        acceptCommand(newOp(), {
+          kind: "continue_setup",
+          attempt: -1,
+          target: ""
+        }).command
+      ).toMatchObject({ attempt: 0, target: "operation" });
+      expect(
+        recordAttemptOutcome(newOp(), {
+          kind: "invalid",
+          state: ""
+        })
+      ).toBeNull();
+    });
+
+    it("snapshots and summarizes malformed optional operation state", () => {
+      const sparse = {
+        ...newOp(),
+        terminal: null,
+        stages: undefined,
+        lastActivityAt: undefined
+      };
+      const snapshot = snapshotRetryState(sparse);
+      expect(snapshot).toMatchObject({
+        terminal: null,
+        stages: [],
+        lastActivityAt: null
+      });
+
+      const input = newOp();
+      input.state = "input_required";
+      input.inputRequired = null;
+      expect(summarize(input)).toContain("needs information");
+
+      const warnings = newOp();
+      addStep(warnings, { label: "warning", warning: {} });
+      addStep(warnings, { label: "warning", warning: {} });
+      finishSucceeded(warnings);
+      expect(summarize(warnings)).toContain("2 warnings");
+
+      const action = newOp();
+      finish(action, "action_required");
+      expect(summarize(action)).toContain("needs one more step");
+    });
+
+    it("uses activity fallbacks when stale records omit optional timestamps", () => {
+      const input = newOp();
+      input.state = "input_required";
+      input.inputRequired = {};
+      input.lastActivityAt = "2020-01-01T00:00:00.000Z";
+      expect(isStale(input, Date.parse("2020-01-01T02:00:00.000Z"))).toBe(true);
+
+      const running = newOp({
+        startedAt: "2020-01-01T00:00:00.000Z"
+      });
+      running.lastActivityAt = null;
+      expect(isStale(running, Date.parse("2020-01-01T01:00:00.000Z"))).toBe(
+        true
+      );
+    });
+
+    it("persists only valid delete recovery scalars and normalizes failures", () => {
+      const op = newDeleteOp({
+        repo: 42,
+        environment: null,
+        provider: "azure",
+        clientId: "",
+        tenantId: undefined,
+        repoId: Number.NaN,
+        credentialConsumerRetirementReady: true
+      });
+      op.failure = {
+        code: null,
+        stage: 42,
+        stepSeq: "invalid",
+        message: null,
+        classification: null
+      };
+
+      const persisted = toPersistedOperation(op);
+
+      expect(persisted.deleteRecovery).toEqual({
+        provider: "azure",
+        clientId: "",
+        credentialConsumerRetirementReady: true
+      });
+      expect(persisted.failure).toEqual({
+        code: "",
+        stage: "42",
+        stepSeq: null,
+        message: "",
+        classification: ""
+      });
+
+      op.request = {};
+      expect(toPersistedOperation(op).deleteRecovery).toBeUndefined();
+    });
+
+    it("upgrades old delete stages and numeric verification run identities", () => {
+      const op = newDeleteOp();
+      const persisted = toPersistedOperation(op);
+      persisted.schemaVersion = 6;
+      persisted.stages = persisted.stages.filter(
+        (stage) => stage.id !== STAGE_DELETE_STATE_PACKAGE
+      );
+      persisted.verification = { runId: 42 };
+
+      const restored = fromPersistedOperation(persisted);
+
+      expect(restored.verification.runId).toBe("42");
+      expect(restored.stages.map((stage) => stage.id)).toContain(
+        STAGE_DELETE_STATE_PACKAGE
+      );
+      expect(restored.requiresDurableRewrite).toBe(true);
+    });
+
+    it("reconciles sparse records without fabricating provider work", () => {
+      expect(reconcileRestoredOperation(null)).toBeNull();
+
+      const deletion = newDeleteOp();
+      deletion.stages[0].state = "running";
+      delete deletion.request;
+      delete deletion.deleteRecovery;
+      reconcileRestoredOperation(deletion);
+
+      expect(deletion).toMatchObject({
+        state: "failed_partial",
+        recoveryState: "interrupted",
+        failure: { code: "operation-interrupted" }
+      });
+      expect(deletion.stages[0].state).toBe("failed");
+    });
+
+    it("hydrates empty and invalid stores through diagnostic fallbacks", async () => {
+      const empty = createRegistry({
+        store: {
+          async load() {
+            return null;
+          },
+          async save() {}
+        }
+      });
+      await expect(empty.hydrate()).resolves.toEqual([]);
+
+      const diagnostics = [];
+      let saved;
+      const invalid = createRegistry({
+        store: {
+          async load() {
+            return { schemaVersion: 1, operations: [null] };
+          },
+          async save(value) {
+            saved = value;
+          },
+          report(value) {
+            diagnostics.push(value);
+          }
+        }
+      });
+      await expect(invalid.hydrate()).resolves.toEqual([]);
+      expect(diagnostics[0]).toMatchObject({
+        code: "operation-store-invalid-record",
+        message: expect.stringContaining("index 0")
+      });
+      expect(saved.operations).toEqual([]);
+    });
+
+    it("projects malformed client-view optionals without exposing evidence", () => {
+      const op = newOp();
+      delete op.control;
+      op.verification = { dispatchedAt: "not-a-number" };
+      op.failure = {
+        code: "failed",
+        message: "safe",
+        evidence: "private diagnostic"
+      };
+
+      const view = toClientView(op);
+
+      expect(view.kind).toBe(OPERATION_KIND_CREATE);
+      expect(view.verification.dispatchedAt).toBeNull();
+      expect(view.command).toBeNull();
+      expect(view.failure).not.toHaveProperty("evidence");
     });
   });
 
@@ -1689,6 +2234,16 @@ describe("record shape", () => {
         name: null,
         providerId: null
       },
+      awsRole: {
+        state: "not_started",
+        origin: "unknown",
+        roleArn: null,
+        roleName: null,
+        roleId: null
+      },
+      awsTrustSubjects: [],
+      awsRolePolicies: [],
+      awsAccessEntries: [],
       githubEnvironmentVariables: [],
       commit: {
         mode: "not_started",
@@ -3806,7 +4361,7 @@ describe("startup reconciliation", () => {
     expect(toPersistedOperation(create).deleteRecovery).toBeUndefined();
   });
 
-  it("persists the AWS role and an exact trust subject list for delete recovery", () => {
+  it("persists the AWS role, cluster, exact policy name and trust subjects for delete recovery", () => {
     const subjects = [
       "repo:contoso/store:environment:dev",
       "repo:contoso@1/store@2:environment:dev"
@@ -3814,12 +4369,22 @@ describe("startup reconciliation", () => {
     const del = newDeleteOp({
       provider: "aws",
       roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
-      trustSubjects: subjects
+      policyName: "radius-deploy-dev-111111111111",
+      trustSubjects: subjects,
+      region: "us-west-2",
+      cluster: "store"
     });
     expect(toPersistedOperation(del).deleteRecovery).toMatchObject({
       roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
-      trustSubjects: subjects
+      policyName: "radius-deploy-dev-111111111111",
+      trustSubjects: subjects,
+      region: "us-west-2",
+      cluster: "store"
     });
+    expect(
+      toPersistedOperation(newDeleteOp({ region: 1, cluster: null }))
+        .deleteRecovery
+    ).not.toHaveProperty("cluster");
     for (const damaged of [[], [""], ["repo:x", 7], "repo:x"]) {
       expect(
         toPersistedOperation(newDeleteOp({ trustSubjects: damaged }))
@@ -8591,6 +9156,1504 @@ describe("a finished cleanup verdict across a later interruption", () => {
   });
 });
 
+describe("persisted operation normalization boundaries", () => {
+  it("fails closed when provider diagnostics or outcomes do not name a journal entry", () => {
+    const op = newOp();
+
+    expect(
+      recordProviderMutationDiagnostics(op, "missing", {
+        initial: "diagnostic",
+        final: "final"
+      })
+    ).toBe(false);
+    expect(settleProviderMutation(op, "missing", "confirmed")).toBe(false);
+    expect(settleProviderMutation(op, "missing", "not-a-status")).toBe(false);
+  });
+
+  it("preserves rollback recovery while settling a provider mutation", () => {
+    const op = newOp();
+    const mutation = prepareProviderMutation(op, {
+      kind: "azure.app.delete",
+      target: "app-1"
+    });
+    op.providerRecovery.state = "rollback_pending";
+    op.providerRecovery.guidance = "old guidance";
+
+    expect(
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "confirmed",
+        " deleted ",
+        " app-1 ",
+        true
+      )
+    ).toBe(true);
+    expect(op.providerRecovery).toMatchObject({
+      state: "rollback_pending",
+      guidance: null,
+      mutations: [
+        {
+          status: "confirmed",
+          evidence: "deleted",
+          providerId: "app-1",
+          createdByOperation: true
+        }
+      ]
+    });
+  });
+
+  it("keeps recovery active until every prepared provider mutation is settled", () => {
+    const op = newOp();
+    const first = prepareProviderMutation(op, {
+      kind: "azure.app.create",
+      target: "app-1"
+    });
+    const second = prepareProviderMutation(op, {
+      kind: "github.environment.create",
+      target: "contoso/store:dev"
+    });
+
+    settleProviderMutation(op, first.mutationId, "confirmed");
+    expect(op.providerRecovery.state).toBe("reconciling");
+
+    settleProviderMutation(
+      op,
+      second.mutationId,
+      "manual_required",
+      "Review the environment."
+    );
+    expect(op.providerRecovery).toMatchObject({
+      state: "manual_required",
+      guidance: "Review the environment."
+    });
+  });
+
+  it("reuses mutation identity and keeps quarantined recovery states intact", () => {
+    const op = newOp();
+    op.providerRecovery = {
+      state: "unrecoverable_legacy",
+      guidance: "Review legacy resources.",
+      mutations: []
+    };
+    const first = prepareProviderMutation(op, {
+      kind: "azure.app.create",
+      target: "app-1"
+    });
+    const duplicate = prepareProviderMutation(op, {
+      kind: "azure.app.create",
+      target: "app-1"
+    });
+
+    expect(duplicate.mutationId).toBe(first.mutationId);
+    expect(op.providerRecovery.mutations).toHaveLength(1);
+    expect(op.providerRecovery).toMatchObject({
+      state: "unrecoverable_legacy",
+      guidance: "Review legacy resources."
+    });
+    expect(
+      providerMutationRecord(null, "azure.app.create", "app-1")
+    ).toBeNull();
+    expect(providerMutationRecord(op, "other", "missing")).toBeNull();
+    expect(unresolvedProviderMutations(op, [])).toEqual([]);
+
+    expect(
+      recordProviderMutationDiagnostics(op, first.mutationId, {
+        initial: "prepared",
+        final: ""
+      })
+    ).toBe(true);
+
+    const rollback = newOp();
+    rollback.providerRecovery = {
+      state: "rollback_pending",
+      guidance: "Delete proven resources.",
+      mutations: []
+    };
+    prepareProviderMutation(rollback, {
+      kind: "azure.app.delete",
+      target: "app-1"
+    });
+    expect(rollback.providerRecovery.state).toBe("rollback_pending");
+  });
+
+  it("retains manual recovery when the final non-manual mutation settles", () => {
+    const op = newOp();
+    const manual = prepareProviderMutation(op, {
+      kind: "azure.app.create",
+      target: "app-1"
+    });
+    const confirmed = prepareProviderMutation(op, {
+      kind: "github.environment.create",
+      target: "contoso/store:dev"
+    });
+
+    settleProviderMutation(
+      op,
+      manual.mutationId,
+      "manual_required",
+      "Review the app."
+    );
+    settleProviderMutation(op, confirmed.mutationId, "confirmed");
+
+    expect(op.providerRecovery.state).toBe("manual_required");
+  });
+
+  it("keeps only complete provider mutations and normalizes their optional evidence", () => {
+    const persisted = toPersistedOperation(newOp());
+    persisted.providerRecovery = {
+      state: "not-a-state",
+      guidance: "",
+      mutations: [
+        null,
+        {},
+        { mutationId: "missing-kind" },
+        { mutationId: "missing-target", kind: "azure.app.create" },
+        {
+          mutationId: "invalid-status",
+          kind: "azure.app.create",
+          target: "app",
+          status: "done"
+        },
+        {
+          mutationId: "rich",
+          kind: "azure.app.create",
+          target: "app",
+          status: "confirmed",
+          preparedAt: null,
+          updatedAt: "",
+          providerIdempotencyKey: "provider-key",
+          providerId: 1234,
+          createdByOperation: true,
+          intent: {
+            name: "radius-app",
+            retries: 2,
+            enabled: true,
+            optional: null,
+            nested: { ignored: true },
+            "": "ignored"
+          },
+          reconcileAttempts: "2.9",
+          initialDiagnostic: " initial ",
+          finalDiagnostic: " final ",
+          evidence: "created"
+        }
+      ]
+    };
+
+    const restored = fromPersistedOperation(persisted);
+
+    expect(restored.providerRecovery).toMatchObject({
+      state: "idle",
+      guidance: null,
+      mutations: [
+        {
+          mutationId: "rich",
+          providerIdempotencyKey: "provider-key",
+          providerId: "1234",
+          createdByOperation: true,
+          intent: {
+            name: "radius-app",
+            retries: 2,
+            enabled: true,
+            optional: null
+          },
+          reconcileAttempts: 2,
+          initialDiagnostic: "initial",
+          finalDiagnostic: "final",
+          evidence: "created"
+        }
+      ]
+    });
+    expect(restored.providerRecovery.mutations[0].preparedAt).toBeTruthy();
+    expect(restored.providerRecovery.mutations[0].updatedAt).toBeTruthy();
+    expect(providerMutationsByKind(restored, "azure.app.create")).toHaveLength(
+      1
+    );
+    expect(providerMutationsByKind(restored, "other")).toEqual([]);
+  });
+
+  it.each([
+    ["missing provider key", { providerIdempotencyKey: null }],
+    ["empty provider key", { providerIdempotencyKey: "" }],
+    ["missing ownership", { createdByOperation: "yes" }],
+    ["missing intent", { intent: null }],
+    ["zero reconcile attempts", { reconcileAttempts: 0 }],
+    ["invalid diagnostics", { initialDiagnostic: 42, finalDiagnostic: " " }],
+    ["missing evidence", { evidence: 42 }]
+  ])("defaults optional mutation data for %s", (_label, patch) => {
+    const persisted = toPersistedOperation(newOp());
+    persisted.providerRecovery = {
+      state: "manual_required",
+      guidance: "Review the provider.",
+      mutations: [
+        {
+          mutationId: "minimal",
+          kind: "github.environment.create",
+          target: "contoso/store:dev",
+          status: "manual_required",
+          preparedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+          ...patch
+        }
+      ]
+    };
+
+    const mutation =
+      fromPersistedOperation(persisted).providerRecovery.mutations[0];
+
+    expect(mutation).toMatchObject({
+      mutationId: "minimal",
+      providerIdempotencyKey: null,
+      providerId: null,
+      evidence: null
+    });
+  });
+
+  it.each([
+    ["primitive", "invalid"],
+    ["arrays instead of collections", { commands: {}, outcomes: {} }],
+    [
+      "invalid stop and attempts",
+      { stop: "requested", attempts: "once", commands: [], outcomes: [] }
+    ]
+  ])("restores safe control defaults from %s", (_label, saved) => {
+    expect(readOperationControl(saved)).toEqual(createOperationControl());
+  });
+
+  it("normalizes command and outcome scalar fields without trusting invalid counters", () => {
+    const control = readOperationControl({
+      stop: {
+        requestedAt: "",
+        acknowledgedAt: 42,
+        boundary: "safe-boundary"
+      },
+      attempts: {
+        setup: 2.9,
+        verification: -1,
+        cleanup: Number.POSITIVE_INFINITY,
+        deletion: "3"
+      },
+      commands: [
+        {
+          kind: "continue_setup",
+          commandId: "command-1",
+          state: "finished",
+          attempt: -4,
+          target: "",
+          acceptedAt: null,
+          completedAt: "2026-01-01T00:00:00.000Z",
+          outcome: 42
+        }
+      ],
+      outcomes: [
+        null,
+        {
+          kind: "cleanup",
+          attempt: "4.8",
+          state: "failed_partial",
+          code: "",
+          recordedAt: null
+        }
+      ]
+    });
+
+    expect(control).toMatchObject({
+      stop: {
+        requestedAt: null,
+        acknowledgedAt: null,
+        boundary: "safe-boundary"
+      },
+      attempts: { setup: 2, verification: 0, cleanup: 0, deletion: 3 },
+      commands: [
+        {
+          attempt: 0,
+          target: "operation",
+          completedAt: "2026-01-01T00:00:00.000Z",
+          outcome: null
+        }
+      ],
+      outcomes: [
+        {
+          kind: "cleanup",
+          attempt: 4,
+          code: null
+        }
+      ]
+    });
+    expect(control.commands[0].acceptedAt).toBeTruthy();
+    expect(control.outcomes[0].recordedAt).toBeTruthy();
+  });
+});
+
+describe("artifact ledger normalization boundaries", () => {
+  it("normalizes complete legacy collections without inventing ownership proof", () => {
+    const hash = "a".repeat(64);
+    const ledger = readSetupArtifactLedger({
+      azureApp: { state: "created", origin: "invalid", displayName: "app" },
+      servicePrincipal: {
+        state: "created",
+        origin: "this_operation",
+        objectId: "sp-1"
+      },
+      federatedCredentials: [
+        null,
+        { name: 42, subject: false, providerId: " credential-1 " }
+      ],
+      roleAssignments: [
+        null,
+        {
+          assignmentId: 17,
+          role: "Contributor",
+          scope: "/subscriptions/sub",
+          principalObjectId: ""
+        }
+      ],
+      githubEnvironment: {
+        state: "created",
+        origin: "preexisting",
+        repo: "contoso/store",
+        name: "dev",
+        providerId: 123
+      },
+      githubEnvironmentVariables: [
+        null,
+        {
+          repo: "contoso/store",
+          environment: "dev",
+          environmentProviderId: "env-1",
+          name: "AZURE_CLIENT_ID",
+          valueSha256: hash,
+          state: "deleted",
+          previousKnown: true,
+          previousValue: null
+        }
+      ],
+      commit: {
+        headSha: 123,
+        workflowFiles: [
+          {
+            path: ".github/workflows/verify.yml",
+            branch: 17,
+            mode: "something-else",
+            state: "something-else",
+            previousBlobSha: "previous"
+          }
+        ]
+      },
+      cleanup: { attempts: 2 }
+    });
+
+    expect(ledger.azureApp.origin).toBe("unknown");
+    expect(ledger.servicePrincipal.origin).toBe("this_operation");
+    expect(ledger.federatedCredentials).toEqual([
+      { name: "", subject: "", providerId: null },
+      { name: "42", subject: "", providerId: "credential-1" }
+    ]);
+    expect(ledger.roleAssignments).toEqual([
+      {
+        assignmentId: null,
+        role: "",
+        scope: "",
+        principalObjectId: null
+      },
+      {
+        assignmentId: "17",
+        role: "Contributor",
+        scope: "/subscriptions/sub",
+        principalObjectId: null
+      }
+    ]);
+    expect(ledger.githubEnvironment.providerId).toBe("123");
+    expect(ledger.githubEnvironmentVariables).toEqual([
+      expect.objectContaining({
+        state: "deleted",
+        previousKnown: true,
+        previousValue: null
+      })
+    ]);
+    expect(ledger.commit).toMatchObject({
+      headSha: "123",
+      workflowFiles: [
+        {
+          branch: "17",
+          mode: "default_branch",
+          state: "committed",
+          previousBlobKnown: true
+        }
+      ]
+    });
+    expect(ledger.cleanup.attempts).toBe(2);
+  });
+
+  it.each([
+    ["missing repository", { repo: "" }],
+    ["missing environment", { environment: "" }],
+    ["missing name", { name: "" }],
+    ["invalid digest", { valueSha256: "not-a-digest" }]
+  ])("drops a GitHub variable with %s", (_label, patch) => {
+    const ledger = readSetupArtifactLedger({
+      githubEnvironmentVariables: [
+        {
+          repo: "contoso/store",
+          environment: "dev",
+          environmentProviderId: "env-1",
+          name: "AZURE_CLIENT_ID",
+          valueSha256: "b".repeat(64),
+          previousKnown: true,
+          previousValue: "old",
+          ...patch
+        }
+      ]
+    });
+
+    expect(ledger.githubEnvironmentVariables).toEqual([]);
+  });
+
+  it.each([
+    ["credentials", { federatedCredentials: {} }, "federatedCredentials"],
+    ["roles", { roleAssignments: {} }, "roleAssignments"],
+    [
+      "variables",
+      { githubEnvironmentVariables: {} },
+      "githubEnvironmentVariables"
+    ]
+  ])("defaults a non-array %s collection", (_label, saved, field) => {
+    expect(readSetupArtifactLedger(saved)[field]).toEqual([]);
+  });
+});
+
+describe("setup continuation planning", () => {
+  function continuationOp({
+    identity = true,
+    verification = null
+  }: {
+    identity?: boolean;
+    verification?: any;
+  } = {}) {
+    const op = newOp();
+    op.stages = buildStages({ includeIdentity: identity });
+    op.verification = verification;
+    return op;
+  }
+
+  it.each([
+    [
+      "invalid resume point",
+      continuationOp(),
+      "not-a-step",
+      "azure_app",
+      STAGE_AUTHORIZE_IDENTITY,
+      true,
+      true
+    ],
+    [
+      "identity work",
+      continuationOp(),
+      "service_principal",
+      "service_principal",
+      STAGE_AUTHORIZE_IDENTITY,
+      true,
+      true
+    ],
+    [
+      "pre-existing credentials",
+      continuationOp({ identity: false }),
+      "azure_app",
+      "azure_app",
+      STAGE_CONFIGURE_ENVIRONMENT,
+      false,
+      true
+    ],
+    [
+      "verification without a run",
+      continuationOp(),
+      "verification",
+      "verification",
+      STAGE_CONFIGURE_ENVIRONMENT,
+      false,
+      true
+    ],
+    [
+      "verification with incomplete run identity",
+      continuationOp({
+        verification: {
+          dispatchedAt: 1,
+          workflow: ".github/workflows/verify.yml",
+          ref: ""
+        }
+      }),
+      "verification",
+      "verification",
+      STAGE_CONFIGURE_ENVIRONMENT,
+      false,
+      true
+    ],
+    [
+      "verification monitor",
+      continuationOp({
+        verification: {
+          dispatchedAt: 1,
+          workflow: ".github/workflows/verify.yml",
+          ref: "refs/heads/main"
+        }
+      }),
+      "verification",
+      "verification",
+      STAGE_VERIFY,
+      false,
+      false
+    ]
+  ])(
+    "plans %s through the public continuation seam",
+    (_label, op, requested, resumeFrom, stage, runIdentity, runEnvironment) => {
+      expect(planSetupContinuation(op, requested)).toEqual({
+        resumeFrom,
+        stage,
+        runIdentity,
+        runEnvironment
+      });
+    }
+  );
+
+  it("repositions stage state around the selected continuation point", () => {
+    const op = continuationOp({
+      verification: {
+        dispatchedAt: 1,
+        workflow: ".github/workflows/verify.yml",
+        ref: "refs/heads/main"
+      }
+    });
+    op.stages.forEach((stage) => {
+      stage.state = "failed";
+    });
+
+    expect(applySetupResumePoint(op, "verification")).toMatchObject({
+      stage: STAGE_VERIFY,
+      runEnvironment: false
+    });
+    expect(op.stages.map((stage) => stage.state)).toEqual([
+      "succeeded",
+      "succeeded",
+      "running"
+    ]);
+    expect(op.resumeFrom).toBe("verification");
+  });
+
+  it("returns a safe plan when no operation or matching stage is available", () => {
+    expect(applySetupResumePoint(null, "verification")).toMatchObject({
+      stage: STAGE_CONFIGURE_ENVIRONMENT,
+      runEnvironment: true
+    });
+
+    const op = continuationOp({ identity: false });
+    op.stages = [{ id: "custom", label: "Custom", state: "failed" }];
+    expect(applySetupResumePoint(op, "azure_app")).toMatchObject({
+      stage: "custom"
+    });
+    expect(op.stages[0].state).toBe("running");
+  });
+});
+
+describe("cleanup deletion selection boundaries", () => {
+  function cleanupCandidate(artifactType) {
+    const op = stoppedWithCreatedResources();
+    recordGitHubEnvironmentVariable(op, {
+      repo: "contoso/store",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256: "c".repeat(64),
+      previousKnown: false
+    });
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    return {
+      op,
+      target: provenOwnedCleanupTargets(op).find(
+        (entry) => entry.artifactType === artifactType
+      )
+    };
+  }
+
+  it.each([
+    "azure_app",
+    "service_principal",
+    "github_environment",
+    "github_environment_variable",
+    "federated_credential",
+    "role_assignment",
+    "workflow_file"
+  ])("refuses to remove a different %s identity", (artifactType) => {
+    const { op, target } = cleanupCandidate(artifactType);
+
+    expect(target).toBeTruthy();
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType,
+        identity: `different:${target.identity}`
+      })
+    ).toBe(false);
+    expect(
+      provenOwnedCleanupTargets(op).some(
+        (entry) =>
+          entry.artifactType === artifactType &&
+          entry.identity === target.identity
+      )
+    ).toBe(true);
+  });
+
+  it.each([
+    ["azure_app", (op) => (op.setupArtifacts.azureApp.state = "reused")],
+    [
+      "service_principal",
+      (op) => (op.setupArtifacts.servicePrincipal.state = "reused")
+    ],
+    [
+      "github_environment",
+      (op) => (op.setupArtifacts.githubEnvironment.state = "reused")
+    ],
+    [
+      "github_environment_variable",
+      (op) =>
+        (op.setupArtifacts.githubEnvironmentVariables[0].state = "deleted")
+    ],
+    [
+      "federated_credential",
+      (op) => (op.setupArtifacts.federatedCredentials = [])
+    ],
+    ["role_assignment", (op) => (op.setupArtifacts.roleAssignments = [])],
+    [
+      "workflow_file",
+      (op) => (op.setupArtifacts.commit.workflowFiles[0].state = "removed")
+    ]
+  ])("does not remove an already absent %s", (artifactType, makeAbsent) => {
+    const { op, target } = cleanupCandidate(artifactType);
+    makeAbsent(op);
+
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType,
+        identity: target.identity
+      })
+    ).toBe(false);
+  });
+
+  it("fails closed for a missing operation or unknown artifact type", () => {
+    expect(
+      recordCleanupDeletion(null, {
+        artifactType: "azure_app",
+        identity: "app-1"
+      })
+    ).toBe(false);
+    expect(
+      recordCleanupDeletion(newOp(), {
+        artifactType: "unknown",
+        identity: "resource"
+      })
+    ).toBe(false);
+  });
+});
+
+describe("retry snapshot restoration boundaries", () => {
+  it("removes transient fields that did not exist in the saved retry snapshot", () => {
+    const op = newOp();
+    delete op.resumeFrom;
+    delete op.inputRequired;
+    delete op.verification;
+    delete op.setupArtifacts;
+    delete op.journey;
+    const snapshot = snapshotRetryState(op);
+
+    op.resumeFrom = "verification";
+    op.inputRequired = { code: "choose-app" };
+    op.verification = { runId: "123" };
+    op.setupArtifacts = { cleanup: { state: "running" } };
+
+    rollbackRetryAttempt(op, snapshot);
+
+    expect(op).not.toHaveProperty("resumeFrom");
+    expect(op).not.toHaveProperty("inputRequired");
+    expect(op).not.toHaveProperty("verification");
+    expect(op.setupArtifacts.cleanup.state).toBe("running");
+  });
+
+  it("restores every customer-visible retry field from an isolated snapshot", () => {
+    const op = newOp();
+    op.resumeFrom = "verification";
+    op.inputRequired = { code: "choose-app", metadata: { count: 2 } };
+    op.verification = { runId: "123", workflowState: "active" };
+    op.executionActive = true;
+    op.journey.notifiedAt = "2026-01-01T00:00:00.000Z";
+    op.setupArtifacts.cleanup = {
+      state: "failed",
+      ownerAssignment: "assigned",
+      attempts: 2,
+      results: []
+    };
+    const snapshot = snapshotRetryState(op);
+
+    op.resumeFrom = "azure_app";
+    op.inputRequired = { code: "changed", metadata: { count: 99 } };
+    op.verification.runId = "changed";
+    op.executionActive = false;
+    op.journey.notifiedAt = null;
+    op.setupArtifacts.cleanup.state = "running";
+
+    rollbackRetryAttempt(op, snapshot);
+
+    expect(op).toMatchObject({
+      resumeFrom: "verification",
+      inputRequired: { metadata: { count: 2 } },
+      verification: { runId: "123", workflowState: "active" },
+      executionActive: true,
+      journey: { notifiedAt: "2026-01-01T00:00:00.000Z" },
+      setupArtifacts: { cleanup: { state: "failed", attempts: 2 } }
+    });
+  });
+
+  describe("verification workflow control boundaries", () => {
+    it("returns no workflow state when verification is absent", () => {
+      expect(verificationWorkflowState(null)).toBeNull();
+      expect(verificationWorkflowState({})).toBeNull();
+    });
+
+    it.each([
+      ["active", "active"],
+      ["inactive", "inactive"],
+      ["cancelling", "cancelling"],
+      ["unknown", "unknown"],
+      ["unsupported", null],
+      [null, null]
+    ])("projects workflow state %s", (workflowState, expected) => {
+      expect(
+        verificationWorkflowState({ verification: { workflowState } })
+      ).toBe(expected);
+    });
+
+    it("sets workflow state on both new and existing verification records", () => {
+      expect(setVerificationWorkflowState(null, "active")).toBeNull();
+
+      const fresh = newOp();
+      setVerificationWorkflowState(fresh, "active");
+      expect(fresh.verification).toEqual({ workflowState: "active" });
+
+      const existing = newOp();
+      existing.verification = { runId: "123" };
+      setVerificationWorkflowState(existing, "cancelling");
+      expect(existing.verification).toEqual({
+        runId: "123",
+        workflowState: "cancelling"
+      });
+    });
+
+    it.each([
+      ["missing operation", null],
+      ["already terminal", { state: "failed" }]
+    ])("does not pause %s", (_label, candidate) => {
+      const op = candidate ? { ...newOp(), ...candidate } : candidate;
+      expect(pauseForProviderRestart(op)).toBe(op);
+    });
+
+    it("pauses verification and marks an already dispatched run unknown", () => {
+      const op = newOp();
+      enterStage(op, STAGE_VERIFY);
+      op.verification = { dispatchedAt: "123", workflowState: "active" };
+
+      pauseForProviderRestart(op);
+
+      expect(isProviderRestartDecision(op)).toBe(true);
+      expect(op).toMatchObject({
+        state: "action_required",
+        executionActive: false,
+        terminal: {
+          reason: "provider-restart-decision",
+          interruptedStage: STAGE_VERIFY
+        },
+        verification: { workflowState: "unknown" },
+        recoveryState: "provider_restart_decision"
+      });
+    });
+
+    it("pauses outside verification without inventing a workflow state", () => {
+      const op = newOp();
+      op.currentStage = null;
+      op.verification = { dispatchedAt: "not-a-number" };
+
+      pauseForProviderRestart(op);
+
+      expect(op.terminal.interruptedStage).toBeNull();
+      expect(op.verification).not.toHaveProperty("workflowState");
+    });
+
+    it("preserves an existing stop acknowledgement while ending restart recovery", () => {
+      const op = newOp();
+      pauseForProviderRestart(op);
+      op.control.stop = {
+        requestedAt: "2026-01-01T00:00:00.000Z",
+        acknowledgedAt: "2026-01-01T00:00:01.000Z",
+        boundary: "existing"
+      };
+      op.stages[0].state = "running";
+      op.stages[1].state = "pending";
+
+      expect(stopProviderRestartDecision(op)).toBe(true);
+      expect(op.control.stop).toEqual({
+        requestedAt: "2026-01-01T00:00:00.000Z",
+        acknowledgedAt: "2026-01-01T00:00:01.000Z",
+        boundary: "existing"
+      });
+      expect(op.stages.map((stage) => stage.state)).toEqual([
+        "warning",
+        "pending",
+        "pending"
+      ]);
+      expect(stopProviderRestartDecision(newOp())).toBe(false);
+    });
+
+    it("stops a minimal restart decision without requiring stage history", () => {
+      const op = {
+        state: "action_required",
+        terminal: { reason: "provider-restart-decision" }
+      };
+
+      expect(stopProviderRestartDecision(op)).toBe(true);
+      expect(op).toMatchObject({
+        state: "cancelled",
+        stopRequested: true,
+        recoveryState: "stopped"
+      });
+    });
+
+    it("refuses dismissal for missing and active operations", () => {
+      expect(canDismissOperation(null)).toBe(false);
+      expect(canDismissOperation(newOp())).toBe(false);
+    });
+  });
+
+  describe("artifact recording input boundaries", () => {
+    it("ignores incomplete federated credentials and upgrades only a matching record", () => {
+      const op = newOp();
+
+      expect(recordCreatedFederatedCredential(null, {})).toBeNull();
+      expect(recordCreatedFederatedCredential(op, null)).toBe(op);
+      recordCreatedFederatedCredential(op, { name: "", subject: "subject" });
+      recordCreatedFederatedCredential(op, { name: "name", subject: "" });
+      expect(op.setupArtifacts.federatedCredentials).toEqual([]);
+
+      recordCreatedFederatedCredential(op, {
+        name: "radius-dev",
+        subject: "repo:contoso/store:environment:dev"
+      });
+      recordCreatedFederatedCredential(op, {
+        name: "radius-dev",
+        subject: "repo:contoso/store:environment:dev",
+        providerId: null
+      });
+      recordCreatedFederatedCredential(op, {
+        name: "radius-dev",
+        subject: "repo:contoso/store:environment:dev",
+        providerId: "credential-1"
+      });
+
+      expect(op.setupArtifacts.federatedCredentials).toEqual([
+        {
+          name: "radius-dev",
+          subject: "repo:contoso/store:environment:dev",
+          providerId: "credential-1"
+        }
+      ]);
+    });
+
+    it("deduplicates role assignments only when their provider identities are compatible", () => {
+      const op = newOp();
+
+      expect(recordCreatedRoleAssignment(null, {})).toBeNull();
+      expect(recordCreatedRoleAssignment(op, null)).toBe(op);
+      recordCreatedRoleAssignment(op, {
+        role: "",
+        scope: "/subscriptions/sub"
+      });
+      recordCreatedRoleAssignment(op, { role: "Contributor", scope: "" });
+      expect(op.setupArtifacts.roleAssignments).toEqual([]);
+
+      recordCreatedRoleAssignment(op, {
+        assignmentId: "assignment-1",
+        role: "Contributor",
+        scope: "/subscriptions/sub",
+        principalObjectId: "principal-1"
+      });
+      recordCreatedRoleAssignment(op, {
+        assignmentId: "assignment-1",
+        role: "Contributor",
+        scope: "/subscriptions/sub",
+        principalObjectId: "principal-1"
+      });
+      recordCreatedRoleAssignment(op, {
+        assignmentId: "assignment-2",
+        role: "Contributor",
+        scope: "/subscriptions/sub",
+        principalObjectId: "principal-1"
+      });
+
+      expect(op.setupArtifacts.roleAssignments).toHaveLength(2);
+    });
+
+    it("preserves a GitHub variable predecessor across repeated observations", () => {
+      const op = newOp();
+      const base = {
+        repo: "contoso/store",
+        environment: "dev",
+        environmentProviderId: "env-1",
+        name: "AZURE_CLIENT_ID",
+        valueSha256: "d".repeat(64)
+      };
+
+      expect(recordGitHubEnvironmentVariable(null, base)).toBeNull();
+      expect(recordGitHubEnvironmentVariable(op, null)).toBe(op);
+      recordGitHubEnvironmentVariable(op, {
+        ...base,
+        previousKnown: true,
+        previousValue: 42
+      });
+      expect(op.setupArtifacts.githubEnvironmentVariables[0]).toMatchObject({
+        previousKnown: false,
+        previousValue: null
+      });
+
+      op.setupArtifacts.githubEnvironmentVariables = [];
+      recordGitHubEnvironmentVariable(op, {
+        ...base,
+        previousKnown: true,
+        previousValue: "old"
+      });
+      recordGitHubEnvironmentVariable(op, {
+        ...base,
+        valueSha256: "e".repeat(64),
+        previousKnown: false
+      });
+
+      expect(op.setupArtifacts.githubEnvironmentVariables[0]).toMatchObject({
+        valueSha256: "e".repeat(64),
+        previousKnown: true,
+        previousValue: "old"
+      });
+    });
+  });
+
+  describe("verification acquisition timing boundaries", () => {
+    it("ignores acquisition requests without an operation", () => {
+      expect(
+        markVerificationRetryAcquisition(null, "command", "classification")
+      ).toBeNull();
+      expect(hasReachedSetupCommitPoint(null)).toBe(false);
+    });
+
+    it("reuses a matching provisional deadline and replaces every other deadline", () => {
+      const op = newOp();
+      op.verification = {
+        acquisitionDeadline: 123,
+        acquisitionProvisional: true,
+        acquisitionProvisionalToken: "token"
+      };
+
+      markVerificationRetryAcquisition(op, "command-1", "", "token");
+      expect(op.verification).toMatchObject({
+        acquisitionDeadline: 123,
+        acquisitionPending: true,
+        retryCommandId: "command-1",
+        retryClassification: null
+      });
+      expect(op.verification).not.toHaveProperty("acquisitionProvisional");
+
+      op.verification.acquisitionDeadline = 0;
+      const renewed = ensureVerificationRetryAcquisitionDeadline(op);
+      expect(renewed).toBeGreaterThan(0);
+      expect(ensureVerificationRetryAcquisitionDeadline(op)).toBe(renewed);
+      expect(ensureVerificationRetryAcquisitionDeadline(null)).toBe(0);
+      expect(markVerificationRetryPrecondition(null, "token")).toBe(0);
+    });
+
+    it("forces a new deadline when the provisional token does not match", () => {
+      const op = newOp();
+      op.verification = {
+        acquisitionDeadline: 1,
+        acquisitionProvisional: true,
+        acquisitionProvisionalToken: "old-token"
+      };
+
+      markVerificationRetryAcquisition(
+        op,
+        "command-2",
+        "verification-failed",
+        "new-token"
+      );
+
+      expect(op.verification.acquisitionDeadline).toBeGreaterThan(1);
+      expect(op.verification.retryClassification).toBe("verification-failed");
+    });
+  });
+
+  describe("tracked artifact summary boundaries", () => {
+    function quietOperation() {
+      const op = newOp();
+      op.state = "running";
+      op.setupArtifacts.cleanup.state = "not_started";
+      return op;
+    }
+
+    it("omits a summary for an active operation with no tracked artifacts", () => {
+      expect(projectCleanupSummary(quietOperation())).toBeNull();
+      expect(projectCleanupSummary(null)).toBeNull();
+    });
+
+    it.each([
+      ["Azure app", (op) => (op.setupArtifacts.azureApp.state = "created")],
+      [
+        "service principal",
+        (op) => (op.setupArtifacts.servicePrincipal.state = "created")
+      ],
+      [
+        "candidate service principal",
+        (op) => (op.setupArtifacts.servicePrincipal.state = "created_candidate")
+      ],
+      [
+        "federated credential",
+        (op) =>
+          op.setupArtifacts.federatedCredentials.push({
+            name: "credential",
+            subject: "subject",
+            providerId: null
+          })
+      ],
+      [
+        "role assignment",
+        (op) =>
+          op.setupArtifacts.roleAssignments.push({
+            assignmentId: null,
+            role: "Contributor",
+            scope: "/subscriptions/sub",
+            principalObjectId: null
+          })
+      ],
+      [
+        "GitHub environment",
+        (op) => (op.setupArtifacts.githubEnvironment.state = "created")
+      ],
+      [
+        "candidate GitHub environment",
+        (op) =>
+          (op.setupArtifacts.githubEnvironment.state = "created_candidate")
+      ],
+      [
+        "GitHub variable",
+        (op) =>
+          op.setupArtifacts.githubEnvironmentVariables.push({
+            state: "created",
+            repo: "contoso/store",
+            environment: "dev",
+            environmentProviderId: "env-1",
+            name: "AZURE_CLIENT_ID",
+            valueSha256: "f".repeat(64),
+            previousValue: null,
+            previousKnown: false
+          })
+      ],
+      [
+        "workflow file",
+        (op) =>
+          op.setupArtifacts.commit.workflowFiles.push(provenWorkflowFile())
+      ]
+    ])("reports an active operation that tracks a %s", (_label, arrange) => {
+      const op = quietOperation();
+      arrange(op);
+
+      expect(projectCleanupSummary(op)).not.toBeNull();
+    });
+
+    it.each([
+      [null, "GitHub environment"],
+      [{ repo: "contoso/store" }, "contoso/store"],
+      [{ name: "dev" }, "dev"],
+      [{ repo: "contoso/store", name: "dev" }, "contoso/store:dev"]
+    ])("formats GitHub environment identity %#", (environment, expected) => {
+      expect(formatGitHubEnvironmentLabel(environment)).toBe(expected);
+    });
+
+    it.each([
+      [null, "#"],
+      [{ artifactType: "azure_app" }, "azure_app#"],
+      [
+        { artifactType: "azure_app", identity: " App-1 ", target: "ignored" },
+        "azure_app#app-1"
+      ],
+      [
+        { artifactType: "azure_app", identity: "", target: " App-2 " },
+        "azure_app#app-2"
+      ]
+    ])("builds stable cleanup keys %#", (entry, expected) => {
+      expect(cleanupTargetKey(entry)).toBe(expected);
+    });
+
+    it("projects sparse artifact labels without claiming missing identity", () => {
+      const op = quietOperation();
+      op.state = "failed_partial";
+      op.setupArtifacts.servicePrincipal = {
+        state: "created",
+        origin: "this_operation",
+        appId: null,
+        objectId: "sp-1"
+      };
+      op.setupArtifacts.commit.workflowFiles = [
+        {
+          ...provenWorkflowFile(),
+          path: "",
+          branch: null
+        }
+      ];
+      op.setupArtifacts.githubEnvironmentVariables = [
+        {
+          state: "created",
+          repo: "",
+          environment: "",
+          environmentProviderId: "env-1",
+          name: "",
+          valueSha256: "f".repeat(64),
+          previousValue: null,
+          previousKnown: false
+        }
+      ];
+
+      const summary = projectCleanupSummary(op);
+
+      expect(summary.retainedArtifacts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "service_principal",
+            target: "Service Principal for App Registration"
+          })
+        ])
+      );
+    });
+
+    it("uses only the current cleanup attempt and normalizes sparse results", () => {
+      const op = quietOperation();
+      op.state = "failed_partial";
+      op.setupArtifacts.cleanup = {
+        state: "failed",
+        ownerAssignment: "assigned",
+        attempts: 2,
+        results: [
+          null,
+          {
+            attempt: 1,
+            artifactType: "azure_app",
+            outcome: "deleted",
+            target: "old"
+          },
+          {
+            attempt: 2,
+            artifactType: "azure_app",
+            outcome: "warning",
+            target: null,
+            detail: ""
+          },
+          {
+            attempt: 2,
+            artifactType: "service_principal",
+            outcome: "not_found",
+            target: "Service Principal"
+          }
+        ]
+      };
+
+      const summary = projectCleanupSummary(op);
+
+      expect(summary.results).toEqual([
+        {
+          artifactType: "azure_app",
+          outcome: "warning",
+          target: "",
+          detail: null
+        },
+        {
+          artifactType: "service_principal",
+          outcome: "not_found",
+          target: "Service Principal",
+          detail: null
+        }
+      ]);
+    });
+
+    it.each([
+      null,
+      { attempts: 0, results: [] },
+      { attempts: 1, results: "invalid" }
+    ])("treats malformed cleanup history %# as empty", (cleanup) => {
+      const op = quietOperation();
+      op.state = "failed_partial";
+      op.setupArtifacts.cleanup = cleanup;
+
+      const summary = projectCleanupSummary(op);
+
+      expect(summary.results).toEqual([]);
+    });
+  });
+
+  describe("verification provenance boundaries", () => {
+    function verifiedOperation() {
+      const op = newOp();
+      op.provider = "azure";
+      op.context.githubLogin = "alice";
+      op.verification = {
+        workflow: ".github/workflows/verify.yml",
+        ref: "refs/heads/main",
+        environment: "dev"
+      };
+      op.setupArtifacts.commit.mode = "default_branch";
+      op.setupArtifacts.azureApp.appId = "app-1";
+      return op;
+    }
+
+    it.each([
+      ["repository", (op) => (op.repo = "")],
+      ["environment", (op) => (op.environment = "")],
+      ["GitHub login type", (op) => (op.context.githubLogin = 42)],
+      ["GitHub login value", (op) => (op.context.githubLogin = " ")],
+      ["workflow type", (op) => (op.verification.workflow = 42)],
+      ["workflow value", (op) => (op.verification.workflow = "")],
+      ["ref type", (op) => (op.verification.ref = 42)],
+      ["ref value", (op) => (op.verification.ref = "")],
+      [
+        "verification environment type",
+        (op) => (op.verification.environment = 42)
+      ],
+      [
+        "verification environment value",
+        (op) => (op.verification.environment = "")
+      ],
+      [
+        "commit point",
+        (op) => {
+          op.setupArtifacts.commit.mode = "not_started";
+          op.setupArtifacts.commit.workflowFiles = [];
+        }
+      ],
+      [
+        "Azure identity",
+        (op) => {
+          op.setupArtifacts.azureApp.appId = null;
+          op.setupArtifacts.servicePrincipal.appId = null;
+        }
+      ]
+    ])("rejects missing %s provenance", (_label, removeProof) => {
+      const op = verifiedOperation();
+      removeProof(op);
+      expect(hasVerificationProvenance(op)).toBe(false);
+    });
+
+    it("accepts workflow-file and provider-specific cloud provenance", () => {
+      const azure = verifiedOperation();
+      azure.setupArtifacts.commit.mode = "not_started";
+      azure.setupArtifacts.commit.workflowFiles = [provenWorkflowFile()];
+      azure.setupArtifacts.azureApp.appId = null;
+      azure.setupArtifacts.servicePrincipal.appId = "sp-app";
+      expect(hasVerificationProvenance(azure)).toBe(true);
+
+      const aws = verifiedOperation();
+      aws.provider = "aws";
+      aws.context.cloud = { kind: "aws", region: "us-west-2" };
+      aws.setupArtifacts.azureApp.appId = null;
+      expect(hasVerificationProvenance(aws)).toBe(true);
+
+      delete aws.context.cloud;
+      expect(hasVerificationProvenance(aws)).toBe(false);
+    });
+
+    it("prefers a terminal pull request URL and falls back to the ledger", () => {
+      const op = newOp();
+      op.setupArtifacts.commit.pullRequestUrl = "https://example.test/ledger";
+      expect(setupPullRequestUrl(op)).toBe("https://example.test/ledger");
+
+      op.terminal = { pullRequestUrl: "https://example.test/terminal" };
+      expect(setupPullRequestUrl(op)).toBe("https://example.test/terminal");
+
+      op.terminal.pullRequestUrl = 42;
+      op.setupArtifacts.commit.pullRequestUrl = 42;
+      expect(setupPullRequestUrl(op)).toBeNull();
+    });
+  });
+
+  describe("operation state helper boundaries", () => {
+    it("leaves a record unchanged when a requested stage does not exist", () => {
+      const op = newOp();
+      op.stages[0].state = "failed";
+      op.stages[1].state = "warning";
+      const before = op.stages.map((stage) => stage.state);
+
+      expect(enterStage(null, STAGE_VERIFY)).toBeNull();
+      enterStage(op, "missing-stage");
+
+      expect(op.currentStage).toBeNull();
+      expect(op.stages.map((stage) => stage.state)).toEqual([
+        ...before.slice(0, 2),
+        "succeeded"
+      ]);
+      expect(setStageState(null, STAGE_VERIFY, "failed")).toBeNull();
+      expect(setStageState(op, "missing-stage", "failed")).toBe(op);
+    });
+
+    it("uses safe prompt defaults and ignores terminal prompt requests", () => {
+      const op = newOp();
+
+      requireInput(op);
+
+      expect(op.inputRequired).toMatchObject({
+        code: "input-required",
+        message: "",
+        checkpoint: "input-required",
+        metadata: null
+      });
+      finish(op, "failed");
+      const prompt = op.inputRequired;
+      expect(requireInput(op, { code: "ignored" })).toBe(op);
+      expect(op.inputRequired).toBe(prompt);
+      expect(requireInput(null, { code: "ignored" })).toBeNull();
+    });
+
+    it.each([
+      ["non-string checkpoint", { checkpoint: 42 }],
+      ["empty checkpoint", { checkpoint: "" }],
+      ["primitive metadata", { metadata: "invalid" }],
+      ["array metadata", { metadata: ["allowed", "object"] }]
+    ])("normalizes %s at the prompt boundary", (_label, input) => {
+      const op = newOp();
+
+      requireInput(op, { code: "choose-app", ...input });
+
+      expect(op.inputRequired.checkpoint).toBe("choose-app");
+      expect(op.inputRequired.metadata).toEqual(
+        Array.isArray(input.metadata) ? input.metadata : null
+      );
+    });
+
+    it("normalizes step fields and warning details through the public recorder", () => {
+      const op = newOp();
+
+      expect(addStep(null, { label: "ignored" })).toBeNull();
+      const step = addStep(op, {
+        stage: "",
+        kind: "not-a-kind",
+        label: null,
+        state: "not-a-state",
+        warning: {}
+      });
+
+      expect(step).toMatchObject({
+        stage: null,
+        kind: "observation",
+        label: "",
+        state: "warning",
+        warning: {
+          code: "unknown",
+          message: "",
+          impact: "",
+          remediationCommand: "",
+          blocksFutureStep: ""
+        }
+      });
+    });
+
+    it.each([
+      ["⏭️ Skipped", "skipped", "observation"],
+      ["ℹ️ Informational", "succeeded", "observation"],
+      ["plain text", "succeeded", "observation"],
+      [null, "succeeded", "observation"]
+    ])("maps legacy step %s to structured behavior", (text, state, kind) => {
+      expect(addLegacyStep(newOp(), text)).toMatchObject({ state, kind });
+    });
+
+    it("filters empty cloud context fields and rejects incomplete updates", () => {
+      const op = newOp();
+
+      expect(setContext(null, { login: "alice" })).toBeNull();
+      expect(setContext(op, null)).toBe(op);
+      expect(setCloudContext(null, "azure", {})).toBeNull();
+      expect(setCloudContext(op, "", {})).toBe(op);
+      setCloudContext(op, "azure", {
+        subscriptionId: "sub-1",
+        tenantId: "",
+        clientId: null,
+        location: undefined,
+        retries: 0
+      });
+
+      expect(op.context.cloud).toEqual({
+        kind: "azure",
+        subscriptionId: "sub-1",
+        retries: 0
+      });
+    });
+
+    it("does not reactivate or touch terminal operations", () => {
+      const op = newOp();
+      finish(op, "failed");
+      const lastActivityAt = op.lastActivityAt;
+
+      expect(setExecutionActive(null, true)).toBeNull();
+      setExecutionActive(op, true);
+      touchOperation(op, "2030-01-01T00:00:00.000Z");
+
+      expect(op.executionActive).toBeUndefined();
+      expect(op.lastActivityAt).toBe(lastActivityAt);
+      expect(touchOperation(null)).toBeNull();
+    });
+
+    it("updates only structured request environments with a canonical name", () => {
+      const op = newOp();
+      op.context.requestedEnvironment = "requested-dev";
+      op.request = { environment: { environment: "old" } };
+      op.resumeRequest = { environment: { environment: "old-resume" } };
+
+      expect(setCanonicalEnvironment(null, "canonical")).toBeNull();
+      expect(setCanonicalEnvironment(op, null)).toBe(op);
+      expect(setCanonicalEnvironment(op, "   ")).toBe(op);
+      setCanonicalEnvironment(op, " canonical-dev ");
+
+      expect(op.context).toMatchObject({
+        requestedEnvironment: "requested-dev",
+        canonicalEnvironment: "canonical-dev"
+      });
+      expect(op.request.environment.environment).toBe("canonical-dev");
+      expect(op.resumeRequest.environment.environment).toBe("canonical-dev");
+    });
+
+    it.each([
+      ["missing request", undefined],
+      ["primitive request", "invalid"],
+      ["missing environment", {}],
+      ["primitive environment", { environment: "invalid" }],
+      ["empty environment", { environment: {} }]
+    ])("ignores a %s while canonicalizing", (_label, request) => {
+      const op = newOp();
+      op.request = request;
+      op.resumeRequest = request;
+
+      setCanonicalEnvironment(op, "canonical-dev");
+
+      expect(op.context.canonicalEnvironment).toBe("canonical-dev");
+    });
+
+    it("uses the original operation environment when no requested name was recorded", () => {
+      const op = newOp();
+      delete op.context.requestedEnvironment;
+
+      setCanonicalEnvironment(op, "canonical-dev");
+
+      expect(op.context.requestedEnvironment).toBe("dev");
+    });
+  });
+});
+
 describe("Remove lock for an AWS deploy identity lock", () => {
   const LOCK = {
     policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
@@ -8684,7 +10747,8 @@ describe("Remove lock for an AWS deploy identity lock", () => {
       policyId: LOCK.policyId,
       holder: "Another run",
       holderOperationId: "",
-      since: ""
+      since: "",
+      stopped: false
     });
     expect(
       projectOperationActions(
@@ -8697,3 +10761,886 @@ describe("Remove lock for an AWS deploy identity lock", () => {
     ).toMatch(/^Another run has held the lock since an unknown time\. /);
   });
 });
+
+describe("a stopped AWS setup's deploy identity lock", () => {
+  const LOCK_ARN =
+    "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-contoso-store";
+  const LOCK_ENTRY = {
+    kind: "aws_deploy_identity_lock",
+    target: "Lock on IAM role radius-deploy-contoso-store (policy ID LOCK0)"
+  };
+  const AWS_REQUEST = {
+    needsAzureCredentials: false,
+    github: { login: "octocat", credentialSource: "keyring" },
+    environment: {
+      repo: "contoso/store",
+      environment: "dev",
+      provider: "aws",
+      accountId: "123456789012",
+      region: "us-west-2",
+      cluster: "shop",
+      roleName: "radius-deploy-contoso-store",
+      existingRoleArn: "",
+      vpcId: "vpc-1",
+      subnetIds: "subnet-a,subnet-b"
+    }
+  };
+
+  function awsSetup({
+    environment = "created",
+    lock = true
+  }: { environment?: string; lock?: boolean } = {}) {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    op.context.githubLogin = "octocat";
+    op.resumeRequest = structuredClone(AWS_REQUEST);
+    ledgerEnvironment(op, environment);
+    enterStage(op, STAGE_AUTHORIZE_IDENTITY);
+    if (lock) {
+      setContext(op, {
+        awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+      });
+    }
+    return op;
+  }
+
+  function stopped(options?: { environment?: string; lock?: boolean }) {
+    const op = awsSetup(options);
+    requestStop(op);
+    stopAtBoundary(op, "after_environment");
+    return op;
+  }
+
+  const action = (op, id) =>
+    projectOperationActions(op).find((entry) => entry.id === id);
+
+  it("can continue an AWS setup interrupted by a restart, and lists its lock", () => {
+    const live = awsSetup();
+    setExecutionActive(live, true);
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(live))
+    );
+
+    expect(restored.request).toBeUndefined();
+    expect(restored.state).toBe("action_required");
+    expect(canContinueSetup(restored)).toMatchObject({
+      ok: true,
+      resumeFrom: "aws_deploy_identity"
+    });
+    expect(projectCleanupSummary(restored).retainedArtifacts).toContainEqual(
+      LOCK_ENTRY
+    );
+  });
+
+  it("lists the lock with what a continuation reuses", () => {
+    const summary = projectCleanupSummary(stopped());
+    expect(summary.retainedArtifacts).toContainEqual(LOCK_ENTRY);
+    expect(summary.created).not.toContainEqual(LOCK_ENTRY);
+  });
+
+  it("lists the lock as still present when the setup cannot continue", () => {
+    const op = stopped();
+    delete op.resumeRequest;
+    const summary = projectCleanupSummary(op);
+    expect(summary.created).toContainEqual(LOCK_ENTRY);
+    expect(summary.retainedArtifacts).not.toContainEqual(LOCK_ENTRY);
+  });
+
+  it("reports a held lock even when the ledger tracks nothing", () => {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    setContext(op, {
+      awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+    });
+    finish(op, "action_required", { terminal: { reason: "fixture" } });
+    expect(projectCleanupSummary(op).created).toEqual([LOCK_ENTRY]);
+  });
+
+  it.each([
+    ["a running setup, which still holds it", () => awsSetup()],
+    ["a released lock", () => stopped({ lock: false })],
+    [
+      "an Azure setup",
+      () => {
+        const op = stopped();
+        op.provider = "azure";
+        return op;
+      }
+    ]
+  ])("does not list a lock for %s", (_label, build) => {
+    const summary = projectCleanupSummary(build());
+    expect([
+      ...(summary?.created ?? []),
+      ...(summary?.retainedArtifacts ?? [])
+    ]).not.toContainEqual(LOCK_ENTRY);
+  });
+
+  it("releases the lock with Delete setup, and keeps nothing for it", () => {
+    const rollback = action(stopped(), "rollback");
+    expect(rollback.preview.removes).toEqual([
+      { kind: "github_environment", target: "contoso/store:dev" },
+      LOCK_ENTRY
+    ]);
+    expect(rollback.preview.keeps).not.toContainEqual(
+      expect.objectContaining({ kind: LOCK_ENTRY.kind })
+    );
+  });
+
+  it("confirms an Exit setup that only releases the lock", () => {
+    const exit = action(stopped({ environment: "reused" }), "exit-setup");
+    expect(exit).toMatchObject({
+      label: "Exit setup",
+      requiresConfirmation: true,
+      confirmTitle: "Exit setup and remove what Radius created?",
+      removesResources: true,
+      description:
+        "Radius closes this setup and releases the lock it holds on the deploy identity. Everything else that exists was already here before this attempt, so nothing else is removed."
+    });
+    expect(exit.preview.removes).toEqual([LOCK_ENTRY]);
+  });
+
+  it("names the lock in an Exit setup that also removes resources", () => {
+    const exit = action(stopped(), "exit-setup");
+    expect(exit.description).toBe(
+      "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. It also releases the lock this setup holds on the deploy identity. Anything it reused is left alone. This cannot be undone."
+    );
+    expect(exit.preview.removes).toContainEqual(LOCK_ENTRY);
+  });
+
+  it("releases the lock when abandoning a setup whose resources stay", () => {
+    const op = stopped();
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials-aws.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "42"
+    };
+    setVerificationWorkflowState(op, "active");
+    const exit = action(op, "exit-setup");
+    expect(exit.label).toBe("Abandon setup");
+    expect(exit.description).toBe(
+      "Radius closes this setup without deleting resources that may still be used by external work. It releases the lock this setup holds on the deploy identity. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+    );
+    expect(exit.preview.removes).toEqual([LOCK_ENTRY]);
+  });
+
+  it("keeps the existing copy when there is no lock to release", () => {
+    const exit = action(
+      stopped({ environment: "reused", lock: false }),
+      "exit-setup"
+    );
+    expect(exit).toMatchObject({
+      requiresConfirmation: false,
+      removesResources: false,
+      description:
+        "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed."
+    });
+  });
+
+  it("names the lock in a cleanup retry", () => {
+    const op = stopped();
+    recordCleanupPass(op, "succeeded_with_warnings", [
+      {
+        attempt: 1,
+        artifactType: "github_environment",
+        target: "contoso/store/dev",
+        identity: "contoso/store:dev",
+        outcome: "warning",
+        detail: "GitHub refused the delete."
+      }
+    ]);
+    finish(op, "failed_partial", {
+      failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+    });
+    const retry = action(op, "retry-cleanup");
+    expect(retry.preview.removes).toContainEqual(LOCK_ENTRY);
+  });
+
+  describe("while AWS environments are turned off", () => {
+    const off = (op, id) =>
+      projectOperationActions(op, { awsEnabled: false }).find(
+        (entry) => entry.id === id
+      );
+    const KEPT_LOCK = {
+      ...LOCK_ENTRY,
+      reason: "retained",
+      action:
+        "AWS environments are turned off, so Radius will not release this lock. Turn them on and delete the setup, or run the command in its step to remove it by hand."
+    };
+
+    it("keeps the lock in Delete setup, saying why", () => {
+      const rollback = off(stopped(), "rollback");
+      expect(rollback.preview.removes).toEqual([
+        { kind: "github_environment", target: "contoso/store:dev" }
+      ]);
+      expect(
+        rollback.preview.keeps.filter((entry) => entry.kind === LOCK_ENTRY.kind)
+      ).toEqual([KEPT_LOCK]);
+    });
+
+    it("does not confirm an Exit setup that would only have released the lock", () => {
+      const exit = off(stopped({ environment: "reused" }), "exit-setup");
+      expect(exit).toMatchObject({
+        requiresConfirmation: false,
+        removesResources: false,
+        description:
+          "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed. The lock it holds on the deploy identity stays, because AWS environments are turned off."
+      });
+      expect(exit.preview.keeps).toContainEqual(KEPT_LOCK);
+    });
+
+    it("says the lock stays in an Exit setup that removes resources", () => {
+      expect(off(stopped(), "exit-setup").description).toBe(
+        "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. The lock it holds on the deploy identity stays, because AWS environments are turned off. Anything it reused is left alone. This cannot be undone."
+      );
+    });
+
+    it("says the lock stays when abandoning", () => {
+      const op = stopped();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+      const exit = off(op, "exit-setup");
+      expect(exit.description).toBe(
+        "Radius closes this setup without deleting resources that may still be used by external work. The lock it holds on the deploy identity stays, because AWS environments are turned off. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+      );
+      expect(exit.preview.removes).toEqual([]);
+    });
+
+    it("leaves the lock out of a cleanup retry", () => {
+      const op = stopped();
+      recordCleanupPass(op, "succeeded_with_warnings", [
+        {
+          attempt: 1,
+          artifactType: "github_environment",
+          target: "contoso/store/dev",
+          identity: "contoso/store:dev",
+          outcome: "warning",
+          detail: "GitHub refused the delete."
+        }
+      ]);
+      finish(op, "failed_partial", {
+        failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+      });
+      expect(off(op, "retry-cleanup").preview.removes).not.toContainEqual(
+        LOCK_ENTRY
+      );
+    });
+
+    it("projects the switch through the client view", () => {
+      const view = toClientView(stopped({ environment: "reused" }), {
+        awsEnabled: false
+      });
+      expect(
+        view.actions.find((entry) => entry.id === "exit-setup")
+      ).toMatchObject({ removesResources: false });
+    });
+  });
+
+  it("tells a waiting run that a stopped setup's lock can go at once", () => {
+    const op = awsSetup({ lock: false });
+    setContext(op, {
+      awsLockWait: {
+        policyArn: LOCK_ARN,
+        policyId: "LOCK9",
+        holder: "The setup of environment dev in contoso/store",
+        holderOperationId: "op-earlier",
+        since: "2026-10-30T11:59:00Z",
+        stopped: true,
+        removable: true
+      }
+    });
+    expect(removableAwsLockWait(op)).toMatchObject({ stopped: true });
+    expect(action(op, "remove-aws-lock").description).toBe(
+      "This lock is from an earlier attempt that stopped: The setup of environment dev in contoso/store (operation op-earlier), which took it at 2026-10-30 11:59 UTC. Remove it so this run can continue."
+    );
+  });
+
+  it("names a stopped holder without an operation plainly", () => {
+    const op = awsSetup({ lock: false });
+    setContext(op, {
+      awsLockWait: {
+        policyArn: LOCK_ARN,
+        policyId: "LOCK9",
+        holder: "Another run",
+        since: "2026-10-30T11:59:00Z",
+        stopped: true,
+        removable: true
+      }
+    });
+    expect(action(op, "remove-aws-lock").description).toBe(
+      "This lock is from an earlier attempt that stopped: Another run, which took it at 2026-10-30 11:59 UTC. Remove it so this run can continue."
+    );
+  });
+});
+
+describe("mayHaveStartedVerification", () => {
+  const fresh = () => newOp();
+
+  it("is false for a setup with no dispatch, commit, or workflow write", () => {
+    expect(mayHaveStartedVerification(fresh())).toBe(false);
+    expect(mayHaveStartedVerification(null)).toBe(false);
+  });
+
+  it.each([
+    [
+      "a dispatch time",
+      (op) => {
+        op.verification = { dispatchedAt: 1 };
+      }
+    ],
+    [
+      "a run id",
+      (op) => {
+        op.verification = { runId: 42 };
+      }
+    ],
+    [
+      "a commit mode",
+      (op) => {
+        recordCommitState(op, { mode: "default_branch", branch: "main" });
+      }
+    ],
+    [
+      "a committed workflow file",
+      (op) => {
+        getSetupArtifactLedger(op).commit.workflowFiles.push({
+          path: ".github/workflows/radius-verify.yml"
+        });
+      }
+    ],
+    [
+      "a workflow write in flight",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_workflow.put",
+          target: "main:.github/workflows/radius-verify.yml"
+        });
+      }
+    ],
+    [
+      "a dispatch in flight",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_workflow.dispatch",
+          target: "radius-verify.yml"
+        });
+      }
+    ]
+  ])("is true for a setup that records %s", (_label, record) => {
+    const op = fresh();
+    record(op);
+    expect(mayHaveStartedVerification(op)).toBe(true);
+  });
+
+  it.each([
+    [
+      "a blank run id and zero dispatch time",
+      (op) => {
+        op.verification = { dispatchedAt: 0, runId: " " };
+      }
+    ],
+    [
+      "a refused workflow write",
+      (op) => {
+        const mutation = prepareProviderMutation(op, {
+          kind: "github_workflow.put",
+          target: "main:.github/workflows/radius-verify.yml"
+        });
+        settleProviderMutation(
+          op,
+          mutation.mutationId,
+          "not_applied",
+          "HTTP 403"
+        );
+      }
+    ],
+    [
+      "a GitHub environment write only",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_environment.put",
+          target: "contoso/store:dev"
+        });
+      }
+    ]
+  ])("is false for a setup that records only %s", (_label, record) => {
+    const op = fresh();
+    record(op);
+    expect(mayHaveStartedVerification(op)).toBe(false);
+  });
+});
+
+describe("the AWS setup ledger", () => {
+  const ROLE_ARN = "arn:aws:iam::123456789012:role/radius-deploy-contoso-store";
+  const ROLE = "radius-deploy-contoso-store";
+  const SUBJECT = "repo:contoso/store:environment:dev";
+
+  function awsSetupWithChanges() {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    op.context.githubLogin = "octocat";
+    op.resumeRequest = {
+      needsAzureCredentials: false,
+      environment: { provider: "aws" }
+    };
+    ledgerEnvironment(op, "created", { providerId: "17" });
+    recordAwsRole(op, {
+      state: "created",
+      origin: "this_operation",
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      roleId: "AROA1"
+    });
+    recordAwsTrustSubject(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      subject: SUBJECT
+    });
+    recordAwsRolePolicy(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      policyName: "radius-deploy-dev-1"
+    });
+    recordAwsAccessEntry(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      cluster: "shop",
+      region: "us-west-2"
+    });
+    requestStop(op);
+    stopAtBoundary(op, "after-aws-deploy-identity");
+    return op;
+  }
+
+  it("removes AWS changes in reverse order, before the GitHub environment", () => {
+    expect(
+      provenOwnedCleanupTargets(awsSetupWithChanges()).map((target) => [
+        target.artifactType,
+        target.target
+      ])
+    ).toEqual([
+      ["aws_access_entry", `IAM role ${ROLE} on EKS cluster shop (us-west-2)`],
+      ["aws_role_policy", `radius-deploy-dev-1 on IAM role ${ROLE}`],
+      [
+        "aws_trust_subject",
+        `${SUBJECT} in the trust policy of IAM role ${ROLE}`
+      ],
+      ["aws_role", `IAM role ${ROLE}`],
+      ["github_environment", "contoso/store:dev"]
+    ]);
+  });
+
+  it("offers Delete setup for a setup that only changed AWS", () => {
+    const op = awsSetupWithChanges();
+    getSetupArtifactLedger(op).githubEnvironment.state = "reused";
+    expect(canStartRollback(op)).toMatchObject({
+      ok: true,
+      targets: expect.arrayContaining([
+        expect.objectContaining({ artifactType: "aws_role" })
+      ])
+    });
+    expect(projectCleanupSummary(op).retainedArtifacts).toContainEqual({
+      kind: "aws_role",
+      target: `IAM role ${ROLE}`
+    });
+  });
+
+  it.each([
+    ["Exit setup", false],
+    ["Abandon setup", true]
+  ])("lists every recorded AWS change in %s", (label, abandons) => {
+    const op = awsSetupWithChanges();
+    if (abandons) {
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+    }
+    const action = projectOperationActions(op).find(
+      (entry) => entry.id === "exit-setup"
+    );
+    expect(action.label).toBe(label);
+    const listed = (
+      abandons ?
+        action.preview.manualActionRequired
+      : action.preview.removes).map((entry: { kind: string }) => entry.kind);
+    expect(listed).toEqual(
+      expect.arrayContaining([
+        "aws_access_entry",
+        "aws_role_policy",
+        "aws_trust_subject",
+        "aws_role"
+      ])
+    );
+  });
+
+  describe("what Delete setup says it removes", () => {
+    const preview = (op, options = {}) =>
+      projectOperationActions(op, options).find(
+        (action) => action.id === "rollback"
+      ).preview;
+    const keys = (entries) => entries.map((e) => `${e.kind}#${e.target}`);
+    const CONDITIONAL = [
+      {
+        kind: "aws_access_entry",
+        target: `IAM role ${ROLE} on EKS cluster shop (us-west-2), if nothing else uses it`
+      },
+      {
+        kind: "aws_role",
+        target: `IAM role ${ROLE}, if nothing else uses it`
+      }
+    ];
+
+    // Another environment on the cluster can share the role and entry, and
+    // only AWS and GitHub can tell. So the rows say what the rule is.
+    it("names the role and access entry as removed only if nothing else uses them", () => {
+      const removes = preview(awsSetupWithChanges()).removes;
+      expect(removes).toEqual(expect.arrayContaining(CONDITIONAL));
+      expect(removes).toContainEqual({
+        kind: "aws_role_policy",
+        target: `radius-deploy-dev-1 on IAM role ${ROLE}`
+      });
+    });
+
+    it("keeps every AWS change, saying why, while AWS is turned off", () => {
+      const { removes, keeps } = preview(awsSetupWithChanges(), {
+        awsEnabled: false
+      });
+      expect(removes.map((entry) => entry.kind)).toEqual([
+        "github_environment"
+      ]);
+      expect(
+        keeps
+          .filter((entry) => entry.kind.startsWith("aws_"))
+          .map((entry) => [entry.kind, entry.action])
+      ).toEqual(
+        [
+          "aws_access_entry",
+          "aws_role_policy",
+          "aws_trust_subject",
+          "aws_role"
+        ].map((kind) => [
+          kind,
+          "AWS environments are turned off, so Radius will not change this in AWS. Turn them on, then delete the setup again."
+        ])
+      );
+    });
+
+    it("keeps a trust subject other environments may present", () => {
+      const op = awsSetupWithChanges();
+      const shared = "repository_owner_id:11:repository_id:22";
+      recordAwsTrustSubject(op, {
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        subject: shared
+      });
+      const { removes, keeps } = preview(op);
+      const label = `${shared} in the trust policy of IAM role ${ROLE}`;
+      expect(keys(removes)).not.toContain(`aws_trust_subject#${label}`);
+      expect(keeps).toContainEqual({
+        kind: "aws_trust_subject",
+        target: label,
+        reason: "retained",
+        action:
+          "This subject doesn't name one repository and this environment, so other environments may present it too. Radius keeps it."
+      });
+    });
+
+    it.each([
+      ["Delete setup", "rollback", {}],
+      ["Delete setup with AWS off", "rollback", { awsEnabled: false }],
+      ["Retry deletion", "retry-cleanup", {}]
+    ])("lists no item in two places in %s", (_label, id, options) => {
+      const op = awsSetupWithChanges();
+      if (id === "retry-cleanup") {
+        const targets = provenOwnedCleanupTargets(op);
+        warnedCleanup(
+          op,
+          targets.map((target) => ({
+            artifactType: target.artifactType,
+            target: target.target,
+            identity: target.identity,
+            outcome: "warning",
+            detail: "Radius did not get a result."
+          }))
+        );
+        finish(op, "failed_partial", {
+          failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+        });
+      }
+      const action = projectOperationActions(op, options).find(
+        (entry) => entry.id === id
+      );
+      const { removes, keeps, manualActionRequired } = action.preview;
+      // Compared by row before any "if nothing else uses it" suffix.
+      const base = (entries) =>
+        keys(entries).map((key) =>
+          key.replace(/, if nothing else uses it$/, "")
+        );
+      const all = [
+        ...base(removes),
+        ...base(keeps),
+        ...base(manualActionRequired)
+      ];
+      expect(all.length).toBeGreaterThan(0);
+      expect(new Set(all).size).toBe(all.length);
+    });
+  });
+
+  it("lists a reused role as kept, with why", () => {
+    const op = awsSetupWithChanges();
+    getSetupArtifactLedger(op).awsRole.state = "reused";
+    getSetupArtifactLedger(op).awsRole.origin = "radius_earlier_setup";
+    const rollback = projectOperationActions(op).find(
+      (action) => action.id === "rollback"
+    );
+    expect(rollback.preview.removes).not.toContainEqual(
+      expect.objectContaining({ kind: "aws_role" })
+    );
+    expect(rollback.preview.keeps).toContainEqual(
+      expect.objectContaining({
+        kind: "aws_role",
+        reason: "reused",
+        action: expect.stringContaining("this IAM role")
+      })
+    );
+  });
+
+  it.each([
+    ["aws_role", (op) => op.setupArtifacts.awsRole.state],
+    ["aws_trust_subject", (op) => op.setupArtifacts.awsTrustSubjects[0].state],
+    ["aws_role_policy", (op) => op.setupArtifacts.awsRolePolicies[0].state],
+    ["aws_access_entry", (op) => op.setupArtifacts.awsAccessEntries[0].state]
+  ])("marks a removed %s deleted, only by its identity", (kind, state) => {
+    const op = awsSetupWithChanges();
+    const [target] = provenOwnedCleanupTargets(op).filter(
+      (entry) => entry.artifactType === kind
+    );
+    expect(
+      recordCleanupDeletion(op, { artifactType: kind, identity: "other" })
+    ).toBe(false);
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType: kind,
+        identity: target.identity
+      })
+    ).toBe(true);
+    expect(state(op)).toBe("deleted");
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType: kind,
+        identity: target.identity
+      })
+    ).toBe(false);
+    expect(
+      provenOwnedCleanupTargets(op).some((entry) => entry.artifactType === kind)
+    ).toBe(false);
+  });
+
+  it("leads the role's identity with IAM's role id", () => {
+    expect(
+      cleanupArtifactIdentity("aws_role", {
+        roleArn: ROLE_ARN,
+        roleId: "AROA1"
+      })
+    ).toBe(`aroa1|${ROLE_ARN.toLowerCase()}`);
+    expect(cleanupArtifactIdentity("aws_role", { roleArn: ROLE_ARN })).toBe(
+      ROLE_ARN.toLowerCase()
+    );
+  });
+
+  it("records one entry per identity and revives a removed one with its new role id", () => {
+    const op = awsSetupWithChanges();
+    const ledger = getSetupArtifactLedger(op);
+    ledger.awsTrustSubjects[0].state = "deleted";
+    recordAwsTrustSubject(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      roleId: "AROA2",
+      subject: SUBJECT
+    });
+    expect(ledger.awsTrustSubjects).toEqual([
+      {
+        state: "created",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA2",
+        subject: SUBJECT
+      }
+    ]);
+  });
+
+  it.each([
+    ["a trust subject", recordAwsTrustSubject, { roleArn: ROLE_ARN }],
+    ["a policy", recordAwsRolePolicy, { roleArn: ROLE_ARN, roleName: ROLE }],
+    [
+      "an access entry",
+      recordAwsAccessEntry,
+      { roleArn: ROLE_ARN, roleName: ROLE, cluster: "shop" }
+    ]
+  ])("ignores %s it cannot target precisely", (_label, record, entry) => {
+    const op = newOp();
+    record(op, entry);
+    record(op, null);
+    expect(hasTrackedSetupArtifactsForTest(op)).toBe(false);
+  });
+
+  it("restores a saved AWS ledger and drops entries it cannot use", () => {
+    const restored = readSetupArtifactLedger({
+      awsRole: {
+        state: "bogus",
+        origin: "nowhere",
+        roleArn: ROLE_ARN,
+        roleName: " ",
+        roleId: 7
+      },
+      awsTrustSubjects: [
+        {
+          state: "deleted",
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          roleId: "AROA1",
+          subject: "s"
+        },
+        { roleArn: ROLE_ARN, roleName: ROLE },
+        null,
+        "text"
+      ],
+      awsRolePolicies: "not a list",
+      awsAccessEntries: [
+        {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          cluster: "shop",
+          region: "us-west-2"
+        }
+      ]
+    });
+    expect(restored.awsRole).toEqual({
+      state: "not_started",
+      origin: "unknown",
+      roleArn: ROLE_ARN,
+      roleName: null,
+      roleId: "7"
+    });
+    expect(restored.awsTrustSubjects).toEqual([
+      {
+        state: "deleted",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        subject: "s"
+      }
+    ]);
+    expect(restored.awsRolePolicies).toEqual([]);
+    expect(restored.awsAccessEntries).toEqual([
+      {
+        state: "created",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        // Kept without one, so a rollback can refuse it.
+        roleId: null,
+        cluster: "shop",
+        region: "us-west-2"
+      }
+    ]);
+    expect(
+      readSetupArtifactLedger({ awsRole: { state: "reused" } }).awsRole
+    ).toMatchObject({ state: "reused" });
+  });
+
+  it("ignores a role record with nothing to record", () => {
+    expect(recordAwsRole(null, { state: "created" })).toBeNull();
+    const op = newOp();
+    recordAwsRole(op, null);
+    expect(op.setupArtifacts.awsRole.state).toBe("not_started");
+  });
+
+  it("drops a saved entry with no role", () => {
+    expect(
+      readSetupArtifactLedger({
+        awsTrustSubjects: [{ roleName: ROLE, subject: SUBJECT }]
+      }).awsTrustSubjects
+    ).toEqual([]);
+  });
+
+  it.each([
+    [
+      "a created role",
+      (op) =>
+        recordAwsRole(op, {
+          state: "created",
+          roleArn: ROLE_ARN,
+          roleName: ROLE
+        })
+    ],
+    [
+      "an added trust subject",
+      (op) =>
+        recordAwsTrustSubject(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          subject: SUBJECT
+        })
+    ],
+    [
+      "a written policy",
+      (op) =>
+        recordAwsRolePolicy(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          policyName: "p"
+        })
+    ],
+    [
+      "a created access entry",
+      (op) =>
+        recordAwsAccessEntry(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          cluster: "shop",
+          region: "us-west-2"
+        })
+    ]
+  ])("reports what exists while setup runs, for %s alone", (_label, record) => {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev"
+    });
+    expect(projectCleanupSummary(op)).toBeNull();
+    record(op);
+    expect(projectCleanupSummary(op)).not.toBeNull();
+  });
+
+  it("keeps the AWS ledger through a save and restore", () => {
+    const op = awsSetupWithChanges();
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.setupArtifacts.awsAccessEntries).toEqual(
+      op.setupArtifacts.awsAccessEntries
+    );
+    expect(restored.setupArtifacts.awsRole).toEqual(op.setupArtifacts.awsRole);
+  });
+});
+
+function hasTrackedSetupArtifactsForTest(op) {
+  const ledger = getSetupArtifactLedger(op);
+  return (
+    ledger.awsTrustSubjects.length +
+      ledger.awsRolePolicies.length +
+      ledger.awsAccessEntries.length >
+    0
+  );
+}

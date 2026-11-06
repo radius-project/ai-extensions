@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     include: [
       "src/deploy-artifacts.test.ts",
+      "src/promote-app-model.test.ts",
+      "../core/src/modeling/app-staging.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
       "../core/src/workflow-read-policy.test.ts",
       "../core/src/setup-{admission,boundary,provider-configuration}.test.ts",
@@ -13,6 +15,7 @@ export default defineConfig({
       "src/server/routes/operations-{control,status}.test.ts",
       "../core/src/setup-{coordinator,github-environment*}.test.ts",
       "src/server/services/environment-operation.test.ts",
+      "src/server/services/radius-environment-workflow-deletion.test.ts",
       "src/server/services/{azure-setup,configure-environment,setup-outcome}.test.ts",
       "src/server/services/azure-setup-orchestration.test.ts",
       "src/server/services/azure-setup-recovery.test.ts",
@@ -49,6 +52,8 @@ export default defineConfig({
       "src/server/create-canvas-server.test.ts",
       "src/runtime/environment-execution-owner.test.ts",
       "src/runtime/create-radius-extension.test.ts",
+      "src/runtime/plugin-update.test.ts",
+      "src/runtime/plugin-update-preferences.test.ts",
       "src/runtime/setup-execution.test.ts",
       "src/runtime/environment-tools.test.ts",
       "src/runtime/deployment-account.test.ts",
@@ -64,6 +69,7 @@ export default defineConfig({
       "src/server/services/workflow-observation-scope.test.ts",
       "src/server/services/deploy-{monitor,outcome,request}.test.ts",
       "test/integration/runtime/runtime-contracts.test.ts",
+      "test/integration/runtime/plugin-update.test.ts",
       "src/server/services/github-environment-variable-rollback.test.ts",
       "src/browser/{heartbeat,lifecycle,repositories}.test.ts",
       "src/browser/environment/**/*.test.ts",
