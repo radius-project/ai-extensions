@@ -1059,6 +1059,9 @@ function stepSpec(step: OperationStageOrStep): ElementSpec {
  * always kept so the entry stays identifiable.
  */
 export function previewResourceLabel(entry: OperationPreviewEntry): string {
+  // AWS targets already say what they are, such as "Lock on IAM role …" or
+  // "IAM role … on EKS cluster …".
+  if (entry.kind.startsWith("aws_")) return entry.target;
   const labels: Readonly<Record<string, string>> = {
     azure_app: "App Registration",
     service_principal: "Service Principal",

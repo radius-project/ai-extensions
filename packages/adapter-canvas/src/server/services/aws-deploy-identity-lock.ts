@@ -20,7 +20,12 @@ import { verifyAwsCliSession } from "./aws-cli-session.js";
 // a sleeping laptop, could resume after a takeover and send a write it had
 // already prepared, and nothing in IAM would refuse it. So once the lock is 10
 // minutes old the waiting run offers **Remove lock**, and a person confirms
-// the holder stopped.
+// the holder stopped. When the holder is an operation this extension knows has
+// stopped, Remove lock is offered at once, still for a person to confirm.
+//
+// The one lock a run takes back by itself is its own: an operation that
+// recorded its lock's policy ID and finds that same lock naming it holds it
+// again, since IAM never reuses a policy ID.
 //
 // Each holder records its lock's policy ID, which IAM makes new on every
 // create, and checks it before every write and before releasing. That catches
@@ -52,7 +57,10 @@ export interface AwsLockWait {
   readonly holderOperationId: string;
   // When IAM created the lock, as IAM reported it.
   readonly since: string;
-  // Whether the lock is old enough to offer Remove lock.
+  // Whether the holder is a Radius operation that has stopped, so the lock is
+  // left from an earlier attempt rather than held by a running one.
+  readonly stopped: boolean;
+  // Whether to offer Remove lock: the holder stopped, or the lock is old.
   readonly removable: boolean;
 }
 
@@ -63,6 +71,8 @@ export interface AwsLockPorts {
   now(): number;
   // Whether the caller asked to stop waiting.
   shouldStop(): boolean;
+  // Whether `operationId` names a Radius operation known to have stopped.
+  isStoppedOperation(operationId: string): boolean;
   // Called on every poll while another run holds the lock.
   waiting(wait: AwsLockWait): void | Promise<void>;
 }
@@ -96,7 +106,12 @@ export type AwsLockReleaseResult =
     };
 
 export type AwsLockAcquireResult =
-  | { readonly ok: true; readonly lock: AwsDeployIdentityLock }
+  | {
+      readonly ok: true;
+      readonly lock: AwsDeployIdentityLock;
+      // Set when the lock was this operation's recorded lock, held again.
+      readonly adopted?: true;
+    }
   | { readonly ok: false; readonly code: string; readonly message: string }
   | { readonly ok: false; readonly stopped: true }
   // Only without waiting: another run holds the lock. `holder` is null when
@@ -345,6 +360,12 @@ export async function acquireAwsDeployIdentityLock(
     roleName: string;
     holder: AwsLockHolder;
     wait?: boolean;
+    // The policy ID of a lock this operation took in an earlier attempt and
+    // recorded. If the lock still has that ID and names this operation, it is
+    // this operation's lock, so it is replaced instead of waited for. The new
+    // lock's creation time is when this run took it, which is what waiting
+    // runs measure the 10-minute removal age from.
+    adopt?: string;
   },
   ports: AwsLockPorts
 ): Promise<AwsLockAcquireResult> {
@@ -360,6 +381,8 @@ export async function acquireAwsDeployIdentityLock(
   // Failures a retry can fix, in a row. A wait can last many minutes, so one
   // throttled or timed-out call must not end the run.
   let transient = 0;
+  // Set once this run deleted its own earlier lock to take a fresh one.
+  let replaced = false;
   const backOff = async (result: AwsCommandResult) => {
     transient += 1;
     if (!wait) {
@@ -419,7 +442,8 @@ export async function acquireAwsDeployIdentityLock(
           roleName,
           request.holder.action,
           ports
-        )
+        ),
+        ...(replaced ? { adopted: true as const } : {})
       };
     }
     if (ACCESS_DENIED.test(create.stderr)) {
@@ -483,13 +507,47 @@ export async function acquireAwsDeployIdentityLock(
       firstSeen.set(policyId, seen);
       const heldFrom = isNaN(created) ? seen : created;
       const holder = parseAwsLockHolder(policy?.Description);
+      const holderOperationId = holder?.operationId ?? "";
+      if (
+        !replaced &&
+        request.adopt &&
+        policyId === request.adopt &&
+        holderOperationId !== "" &&
+        holderOperationId === request.holder.operationId
+      ) {
+        // Held again as is, it would keep the earlier attempt's creation
+        // time, and a waiting run could be offered Remove lock while this
+        // run changes the role. So it is deleted and taken again.
+        const remove = await runRetrying(ports, [
+          "iam",
+          "delete-policy",
+          "--policy-arn",
+          policyArn
+        ]);
+        if (!succeeded(remove) && !NO_SUCH_ENTITY.test(remove.stderr)) {
+          return {
+            ok: false,
+            code:
+              ACCESS_DENIED.test(remove.stderr) ? "aws-lock-denied" : (
+                "aws-lock-failed"
+              ),
+            message: `Radius could not replace the lock this setup holds on IAM role ${roleName} from its earlier attempt: ${detail(remove)}. Nothing else was changed. ${awsLockRecoveryCommand(policyArn, policyId)}`
+          };
+        }
+        replaced = true;
+        continue;
+      }
+      const stopped =
+        holderOperationId !== "" && ports.isStoppedOperation(holderOperationId);
       const current: AwsLockWait = {
         policyArn,
         policyId,
         holder: awsLockHolderLabel(holder),
-        holderOperationId: holder?.operationId ?? "",
+        holderOperationId,
         since,
-        removable: ports.now() - heldFrom >= AWS_LOCK_REMOVABLE_AFTER_MS
+        stopped,
+        removable:
+          stopped || ports.now() - heldFrom >= AWS_LOCK_REMOVABLE_AFTER_MS
       };
       if (!wait) return { ok: false, busy: true, holder: current };
       await ports.waiting(current);

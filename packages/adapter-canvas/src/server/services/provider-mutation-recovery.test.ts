@@ -1842,3 +1842,35 @@ describe("providerMutationWillWrite", () => {
     ).toBe(expected);
   });
 });
+
+describe("classifyProviderMutationFailure for AWS CLI errors", () => {
+  it.each([
+    "AccessDenied",
+    "EntityAlreadyExists",
+    "NoSuchEntity",
+    "LimitExceeded",
+    "MalformedPolicyDocument",
+    "ResourceInUseException",
+    "InvalidParameterException",
+    "ResourceNotFoundException",
+    "DeleteConflict"
+  ])("reads an AWS %s answer as a refusal", (code) => {
+    expect(
+      classifyProviderMutationFailure({
+        code: 1,
+        stdout: "",
+        stderr: `An error occurred (${code}) when calling the CreateRole operation: refused`
+      })
+    ).toBe("not_applied");
+  });
+
+  it.each([
+    "An error occurred (Throttling) when calling the CreateRole operation: Rate exceeded",
+    "An error occurred (ServiceFailure) when calling the CreateRole operation",
+    "Could not connect to the endpoint URL"
+  ])("keeps %s unknown", (stderr) => {
+    expect(
+      classifyProviderMutationFailure({ code: 1, stdout: "", stderr })
+    ).toBe("outcome_unknown");
+  });
+});

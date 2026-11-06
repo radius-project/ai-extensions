@@ -1343,6 +1343,7 @@ describe("the async delete route through its background runner", () => {
       sleep: async () => {},
       now: () => Date.parse("2026-11-03T12:00:00Z"),
       isStopRequested: () => false,
+      isStoppedOperation: () => false,
       operationId: () => "",
       operations: {
         getContext: () => ({}),

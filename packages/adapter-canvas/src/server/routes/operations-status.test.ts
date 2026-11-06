@@ -1465,7 +1465,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     expect(capture.built).toEqual([{ includeIdentity: false }]);
   });
 
-  it("does not attach a resumeRequest on the aws path", async () => {
+  it("attaches the AWS request a continuation needs after a restart", async () => {
     const capture = emptyCapture();
     const op = newOperationRecord();
     await runCreate(
@@ -1476,7 +1476,11 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       }),
       happyPathCreate(capture, op)
     );
-    expect(op.resumeRequest).toBeUndefined();
+    expect(op.resumeRequest).toEqual({
+      needsAzureCredentials: false,
+      github: (op.request as { github: unknown }).github,
+      environment: (op.request as { environment: unknown }).environment
+    });
     // AWS needs no azure credentials, but its deploy role is authorized during
     // setup, so the identity stage is included.
     expect(capture.built).toEqual([{ includeIdentity: true }]);

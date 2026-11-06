@@ -977,6 +977,7 @@ export async function createCloudFixture(
           "Refusing to assert an empty role-assignment inventory."
         );
       let missing = [...expected];
+      let observedInventory = false;
       await pollForValue({
         ports,
         timeoutMs: assertionTimeoutMs,
@@ -988,6 +989,7 @@ export async function createCloudFixture(
             remainingMs,
             ports.now
           );
+          observedInventory = true;
           missing = expected.filter(
             (wanted) =>
               !current.some(
@@ -1003,7 +1005,9 @@ export async function createCloudFixture(
         },
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the exact role assignments observed during creation to survive; ` +
-          `missing ${missing.map((assignment) => assignment.id).join(", ")}.`
+          (observedInventory ?
+            `missing ${missing.map((assignment) => assignment.id).join(", ")} in the last completed scope inventory.`
+          : `no complete scope inventory was returned; unconfirmed ${missing.map((assignment) => assignment.id).join(", ")}.`)
       });
     },
 
@@ -2355,6 +2359,9 @@ async function listRoleAssignmentRecords(
         "list",
         "--scope",
         scope,
+        // Only principal IDs are used; name resolution adds an unrelated Graph read.
+        "--fill-principal-name",
+        "false",
         "--query",
         "[].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}",
         "-o",

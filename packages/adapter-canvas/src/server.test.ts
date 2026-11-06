@@ -6552,6 +6552,9 @@ describe("environment deletion session reporting coordinator", () => {
           },
           release: async () => {
             throw new Error("unexpected AWS lock release");
+          },
+          rollback: async () => {
+            throw new Error("unexpected AWS rollback");
           }
         },
         executionOwner,

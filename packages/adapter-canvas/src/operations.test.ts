@@ -3,6 +3,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
+  recordAwsRole,
+  recordAwsTrustSubject,
+  recordAwsRolePolicy,
+  recordAwsAccessEntry,
+  mayHaveStartedVerification,
+  getSetupArtifactLedger,
   announceOperationTerminal,
   applySetupResumePoint,
   setupStepLabel,
@@ -2228,6 +2234,16 @@ describe("record shape", () => {
         name: null,
         providerId: null
       },
+      awsRole: {
+        state: "not_started",
+        origin: "unknown",
+        roleArn: null,
+        roleName: null,
+        roleId: null
+      },
+      awsTrustSubjects: [],
+      awsRolePolicies: [],
+      awsAccessEntries: [],
       githubEnvironmentVariables: [],
       commit: {
         mode: "not_started",
@@ -10731,7 +10747,8 @@ describe("Remove lock for an AWS deploy identity lock", () => {
       policyId: LOCK.policyId,
       holder: "Another run",
       holderOperationId: "",
-      since: ""
+      since: "",
+      stopped: false
     });
     expect(
       projectOperationActions(
@@ -10744,3 +10761,886 @@ describe("Remove lock for an AWS deploy identity lock", () => {
     ).toMatch(/^Another run has held the lock since an unknown time\. /);
   });
 });
+
+describe("a stopped AWS setup's deploy identity lock", () => {
+  const LOCK_ARN =
+    "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-contoso-store";
+  const LOCK_ENTRY = {
+    kind: "aws_deploy_identity_lock",
+    target: "Lock on IAM role radius-deploy-contoso-store (policy ID LOCK0)"
+  };
+  const AWS_REQUEST = {
+    needsAzureCredentials: false,
+    github: { login: "octocat", credentialSource: "keyring" },
+    environment: {
+      repo: "contoso/store",
+      environment: "dev",
+      provider: "aws",
+      accountId: "123456789012",
+      region: "us-west-2",
+      cluster: "shop",
+      roleName: "radius-deploy-contoso-store",
+      existingRoleArn: "",
+      vpcId: "vpc-1",
+      subnetIds: "subnet-a,subnet-b"
+    }
+  };
+
+  function awsSetup({
+    environment = "created",
+    lock = true
+  }: { environment?: string; lock?: boolean } = {}) {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    op.context.githubLogin = "octocat";
+    op.resumeRequest = structuredClone(AWS_REQUEST);
+    ledgerEnvironment(op, environment);
+    enterStage(op, STAGE_AUTHORIZE_IDENTITY);
+    if (lock) {
+      setContext(op, {
+        awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+      });
+    }
+    return op;
+  }
+
+  function stopped(options?: { environment?: string; lock?: boolean }) {
+    const op = awsSetup(options);
+    requestStop(op);
+    stopAtBoundary(op, "after_environment");
+    return op;
+  }
+
+  const action = (op, id) =>
+    projectOperationActions(op).find((entry) => entry.id === id);
+
+  it("can continue an AWS setup interrupted by a restart, and lists its lock", () => {
+    const live = awsSetup();
+    setExecutionActive(live, true);
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(live))
+    );
+
+    expect(restored.request).toBeUndefined();
+    expect(restored.state).toBe("action_required");
+    expect(canContinueSetup(restored)).toMatchObject({
+      ok: true,
+      resumeFrom: "aws_deploy_identity"
+    });
+    expect(projectCleanupSummary(restored).retainedArtifacts).toContainEqual(
+      LOCK_ENTRY
+    );
+  });
+
+  it("lists the lock with what a continuation reuses", () => {
+    const summary = projectCleanupSummary(stopped());
+    expect(summary.retainedArtifacts).toContainEqual(LOCK_ENTRY);
+    expect(summary.created).not.toContainEqual(LOCK_ENTRY);
+  });
+
+  it("lists the lock as still present when the setup cannot continue", () => {
+    const op = stopped();
+    delete op.resumeRequest;
+    const summary = projectCleanupSummary(op);
+    expect(summary.created).toContainEqual(LOCK_ENTRY);
+    expect(summary.retainedArtifacts).not.toContainEqual(LOCK_ENTRY);
+  });
+
+  it("reports a held lock even when the ledger tracks nothing", () => {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    setContext(op, {
+      awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+    });
+    finish(op, "action_required", { terminal: { reason: "fixture" } });
+    expect(projectCleanupSummary(op).created).toEqual([LOCK_ENTRY]);
+  });
+
+  it.each([
+    ["a running setup, which still holds it", () => awsSetup()],
+    ["a released lock", () => stopped({ lock: false })],
+    [
+      "an Azure setup",
+      () => {
+        const op = stopped();
+        op.provider = "azure";
+        return op;
+      }
+    ]
+  ])("does not list a lock for %s", (_label, build) => {
+    const summary = projectCleanupSummary(build());
+    expect([
+      ...(summary?.created ?? []),
+      ...(summary?.retainedArtifacts ?? [])
+    ]).not.toContainEqual(LOCK_ENTRY);
+  });
+
+  it("releases the lock with Delete setup, and keeps nothing for it", () => {
+    const rollback = action(stopped(), "rollback");
+    expect(rollback.preview.removes).toEqual([
+      { kind: "github_environment", target: "contoso/store:dev" },
+      LOCK_ENTRY
+    ]);
+    expect(rollback.preview.keeps).not.toContainEqual(
+      expect.objectContaining({ kind: LOCK_ENTRY.kind })
+    );
+  });
+
+  it("confirms an Exit setup that only releases the lock", () => {
+    const exit = action(stopped({ environment: "reused" }), "exit-setup");
+    expect(exit).toMatchObject({
+      label: "Exit setup",
+      requiresConfirmation: true,
+      confirmTitle: "Exit setup and remove what Radius created?",
+      removesResources: true,
+      description:
+        "Radius closes this setup and releases the lock it holds on the deploy identity. Everything else that exists was already here before this attempt, so nothing else is removed."
+    });
+    expect(exit.preview.removes).toEqual([LOCK_ENTRY]);
+  });
+
+  it("names the lock in an Exit setup that also removes resources", () => {
+    const exit = action(stopped(), "exit-setup");
+    expect(exit.description).toBe(
+      "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. It also releases the lock this setup holds on the deploy identity. Anything it reused is left alone. This cannot be undone."
+    );
+    expect(exit.preview.removes).toContainEqual(LOCK_ENTRY);
+  });
+
+  it("releases the lock when abandoning a setup whose resources stay", () => {
+    const op = stopped();
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials-aws.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "42"
+    };
+    setVerificationWorkflowState(op, "active");
+    const exit = action(op, "exit-setup");
+    expect(exit.label).toBe("Abandon setup");
+    expect(exit.description).toBe(
+      "Radius closes this setup without deleting resources that may still be used by external work. It releases the lock this setup holds on the deploy identity. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+    );
+    expect(exit.preview.removes).toEqual([LOCK_ENTRY]);
+  });
+
+  it("keeps the existing copy when there is no lock to release", () => {
+    const exit = action(
+      stopped({ environment: "reused", lock: false }),
+      "exit-setup"
+    );
+    expect(exit).toMatchObject({
+      requiresConfirmation: false,
+      removesResources: false,
+      description:
+        "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed."
+    });
+  });
+
+  it("names the lock in a cleanup retry", () => {
+    const op = stopped();
+    recordCleanupPass(op, "succeeded_with_warnings", [
+      {
+        attempt: 1,
+        artifactType: "github_environment",
+        target: "contoso/store/dev",
+        identity: "contoso/store:dev",
+        outcome: "warning",
+        detail: "GitHub refused the delete."
+      }
+    ]);
+    finish(op, "failed_partial", {
+      failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+    });
+    const retry = action(op, "retry-cleanup");
+    expect(retry.preview.removes).toContainEqual(LOCK_ENTRY);
+  });
+
+  describe("while AWS environments are turned off", () => {
+    const off = (op, id) =>
+      projectOperationActions(op, { awsEnabled: false }).find(
+        (entry) => entry.id === id
+      );
+    const KEPT_LOCK = {
+      ...LOCK_ENTRY,
+      reason: "retained",
+      action:
+        "AWS environments are turned off, so Radius will not release this lock. Turn them on and delete the setup, or run the command in its step to remove it by hand."
+    };
+
+    it("keeps the lock in Delete setup, saying why", () => {
+      const rollback = off(stopped(), "rollback");
+      expect(rollback.preview.removes).toEqual([
+        { kind: "github_environment", target: "contoso/store:dev" }
+      ]);
+      expect(
+        rollback.preview.keeps.filter((entry) => entry.kind === LOCK_ENTRY.kind)
+      ).toEqual([KEPT_LOCK]);
+    });
+
+    it("does not confirm an Exit setup that would only have released the lock", () => {
+      const exit = off(stopped({ environment: "reused" }), "exit-setup");
+      expect(exit).toMatchObject({
+        requiresConfirmation: false,
+        removesResources: false,
+        description:
+          "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed. The lock it holds on the deploy identity stays, because AWS environments are turned off."
+      });
+      expect(exit.preview.keeps).toContainEqual(KEPT_LOCK);
+    });
+
+    it("says the lock stays in an Exit setup that removes resources", () => {
+      expect(off(stopped(), "exit-setup").description).toBe(
+        "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. The lock it holds on the deploy identity stays, because AWS environments are turned off. Anything it reused is left alone. This cannot be undone."
+      );
+    });
+
+    it("says the lock stays when abandoning", () => {
+      const op = stopped();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+      const exit = off(op, "exit-setup");
+      expect(exit.description).toBe(
+        "Radius closes this setup without deleting resources that may still be used by external work. The lock it holds on the deploy identity stays, because AWS environments are turned off. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+      );
+      expect(exit.preview.removes).toEqual([]);
+    });
+
+    it("leaves the lock out of a cleanup retry", () => {
+      const op = stopped();
+      recordCleanupPass(op, "succeeded_with_warnings", [
+        {
+          attempt: 1,
+          artifactType: "github_environment",
+          target: "contoso/store/dev",
+          identity: "contoso/store:dev",
+          outcome: "warning",
+          detail: "GitHub refused the delete."
+        }
+      ]);
+      finish(op, "failed_partial", {
+        failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+      });
+      expect(off(op, "retry-cleanup").preview.removes).not.toContainEqual(
+        LOCK_ENTRY
+      );
+    });
+
+    it("projects the switch through the client view", () => {
+      const view = toClientView(stopped({ environment: "reused" }), {
+        awsEnabled: false
+      });
+      expect(
+        view.actions.find((entry) => entry.id === "exit-setup")
+      ).toMatchObject({ removesResources: false });
+    });
+  });
+
+  it("tells a waiting run that a stopped setup's lock can go at once", () => {
+    const op = awsSetup({ lock: false });
+    setContext(op, {
+      awsLockWait: {
+        policyArn: LOCK_ARN,
+        policyId: "LOCK9",
+        holder: "The setup of environment dev in contoso/store",
+        holderOperationId: "op-earlier",
+        since: "2026-10-30T11:59:00Z",
+        stopped: true,
+        removable: true
+      }
+    });
+    expect(removableAwsLockWait(op)).toMatchObject({ stopped: true });
+    expect(action(op, "remove-aws-lock").description).toBe(
+      "This lock is from an earlier attempt that stopped: The setup of environment dev in contoso/store (operation op-earlier), which took it at 2026-10-30 11:59 UTC. Remove it so this run can continue."
+    );
+  });
+
+  it("names a stopped holder without an operation plainly", () => {
+    const op = awsSetup({ lock: false });
+    setContext(op, {
+      awsLockWait: {
+        policyArn: LOCK_ARN,
+        policyId: "LOCK9",
+        holder: "Another run",
+        since: "2026-10-30T11:59:00Z",
+        stopped: true,
+        removable: true
+      }
+    });
+    expect(action(op, "remove-aws-lock").description).toBe(
+      "This lock is from an earlier attempt that stopped: Another run, which took it at 2026-10-30 11:59 UTC. Remove it so this run can continue."
+    );
+  });
+});
+
+describe("mayHaveStartedVerification", () => {
+  const fresh = () => newOp();
+
+  it("is false for a setup with no dispatch, commit, or workflow write", () => {
+    expect(mayHaveStartedVerification(fresh())).toBe(false);
+    expect(mayHaveStartedVerification(null)).toBe(false);
+  });
+
+  it.each([
+    [
+      "a dispatch time",
+      (op) => {
+        op.verification = { dispatchedAt: 1 };
+      }
+    ],
+    [
+      "a run id",
+      (op) => {
+        op.verification = { runId: 42 };
+      }
+    ],
+    [
+      "a commit mode",
+      (op) => {
+        recordCommitState(op, { mode: "default_branch", branch: "main" });
+      }
+    ],
+    [
+      "a committed workflow file",
+      (op) => {
+        getSetupArtifactLedger(op).commit.workflowFiles.push({
+          path: ".github/workflows/radius-verify.yml"
+        });
+      }
+    ],
+    [
+      "a workflow write in flight",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_workflow.put",
+          target: "main:.github/workflows/radius-verify.yml"
+        });
+      }
+    ],
+    [
+      "a dispatch in flight",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_workflow.dispatch",
+          target: "radius-verify.yml"
+        });
+      }
+    ]
+  ])("is true for a setup that records %s", (_label, record) => {
+    const op = fresh();
+    record(op);
+    expect(mayHaveStartedVerification(op)).toBe(true);
+  });
+
+  it.each([
+    [
+      "a blank run id and zero dispatch time",
+      (op) => {
+        op.verification = { dispatchedAt: 0, runId: " " };
+      }
+    ],
+    [
+      "a refused workflow write",
+      (op) => {
+        const mutation = prepareProviderMutation(op, {
+          kind: "github_workflow.put",
+          target: "main:.github/workflows/radius-verify.yml"
+        });
+        settleProviderMutation(
+          op,
+          mutation.mutationId,
+          "not_applied",
+          "HTTP 403"
+        );
+      }
+    ],
+    [
+      "a GitHub environment write only",
+      (op) => {
+        prepareProviderMutation(op, {
+          kind: "github_environment.put",
+          target: "contoso/store:dev"
+        });
+      }
+    ]
+  ])("is false for a setup that records only %s", (_label, record) => {
+    const op = fresh();
+    record(op);
+    expect(mayHaveStartedVerification(op)).toBe(false);
+  });
+});
+
+describe("the AWS setup ledger", () => {
+  const ROLE_ARN = "arn:aws:iam::123456789012:role/radius-deploy-contoso-store";
+  const ROLE = "radius-deploy-contoso-store";
+  const SUBJECT = "repo:contoso/store:environment:dev";
+
+  function awsSetupWithChanges() {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    op.context.githubLogin = "octocat";
+    op.resumeRequest = {
+      needsAzureCredentials: false,
+      environment: { provider: "aws" }
+    };
+    ledgerEnvironment(op, "created", { providerId: "17" });
+    recordAwsRole(op, {
+      state: "created",
+      origin: "this_operation",
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      roleId: "AROA1"
+    });
+    recordAwsTrustSubject(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      subject: SUBJECT
+    });
+    recordAwsRolePolicy(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      policyName: "radius-deploy-dev-1"
+    });
+    recordAwsAccessEntry(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      cluster: "shop",
+      region: "us-west-2"
+    });
+    requestStop(op);
+    stopAtBoundary(op, "after-aws-deploy-identity");
+    return op;
+  }
+
+  it("removes AWS changes in reverse order, before the GitHub environment", () => {
+    expect(
+      provenOwnedCleanupTargets(awsSetupWithChanges()).map((target) => [
+        target.artifactType,
+        target.target
+      ])
+    ).toEqual([
+      ["aws_access_entry", `IAM role ${ROLE} on EKS cluster shop (us-west-2)`],
+      ["aws_role_policy", `radius-deploy-dev-1 on IAM role ${ROLE}`],
+      [
+        "aws_trust_subject",
+        `${SUBJECT} in the trust policy of IAM role ${ROLE}`
+      ],
+      ["aws_role", `IAM role ${ROLE}`],
+      ["github_environment", "contoso/store:dev"]
+    ]);
+  });
+
+  it("offers Delete setup for a setup that only changed AWS", () => {
+    const op = awsSetupWithChanges();
+    getSetupArtifactLedger(op).githubEnvironment.state = "reused";
+    expect(canStartRollback(op)).toMatchObject({
+      ok: true,
+      targets: expect.arrayContaining([
+        expect.objectContaining({ artifactType: "aws_role" })
+      ])
+    });
+    expect(projectCleanupSummary(op).retainedArtifacts).toContainEqual({
+      kind: "aws_role",
+      target: `IAM role ${ROLE}`
+    });
+  });
+
+  it.each([
+    ["Exit setup", false],
+    ["Abandon setup", true]
+  ])("lists every recorded AWS change in %s", (label, abandons) => {
+    const op = awsSetupWithChanges();
+    if (abandons) {
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+    }
+    const action = projectOperationActions(op).find(
+      (entry) => entry.id === "exit-setup"
+    );
+    expect(action.label).toBe(label);
+    const listed = (
+      abandons ?
+        action.preview.manualActionRequired
+      : action.preview.removes).map((entry: { kind: string }) => entry.kind);
+    expect(listed).toEqual(
+      expect.arrayContaining([
+        "aws_access_entry",
+        "aws_role_policy",
+        "aws_trust_subject",
+        "aws_role"
+      ])
+    );
+  });
+
+  describe("what Delete setup says it removes", () => {
+    const preview = (op, options = {}) =>
+      projectOperationActions(op, options).find(
+        (action) => action.id === "rollback"
+      ).preview;
+    const keys = (entries) => entries.map((e) => `${e.kind}#${e.target}`);
+    const CONDITIONAL = [
+      {
+        kind: "aws_access_entry",
+        target: `IAM role ${ROLE} on EKS cluster shop (us-west-2), if nothing else uses it`
+      },
+      {
+        kind: "aws_role",
+        target: `IAM role ${ROLE}, if nothing else uses it`
+      }
+    ];
+
+    // Another environment on the cluster can share the role and entry, and
+    // only AWS and GitHub can tell. So the rows say what the rule is.
+    it("names the role and access entry as removed only if nothing else uses them", () => {
+      const removes = preview(awsSetupWithChanges()).removes;
+      expect(removes).toEqual(expect.arrayContaining(CONDITIONAL));
+      expect(removes).toContainEqual({
+        kind: "aws_role_policy",
+        target: `radius-deploy-dev-1 on IAM role ${ROLE}`
+      });
+    });
+
+    it("keeps every AWS change, saying why, while AWS is turned off", () => {
+      const { removes, keeps } = preview(awsSetupWithChanges(), {
+        awsEnabled: false
+      });
+      expect(removes.map((entry) => entry.kind)).toEqual([
+        "github_environment"
+      ]);
+      expect(
+        keeps
+          .filter((entry) => entry.kind.startsWith("aws_"))
+          .map((entry) => [entry.kind, entry.action])
+      ).toEqual(
+        [
+          "aws_access_entry",
+          "aws_role_policy",
+          "aws_trust_subject",
+          "aws_role"
+        ].map((kind) => [
+          kind,
+          "AWS environments are turned off, so Radius will not change this in AWS. Turn them on, then delete the setup again."
+        ])
+      );
+    });
+
+    it("keeps a trust subject other environments may present", () => {
+      const op = awsSetupWithChanges();
+      const shared = "repository_owner_id:11:repository_id:22";
+      recordAwsTrustSubject(op, {
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        subject: shared
+      });
+      const { removes, keeps } = preview(op);
+      const label = `${shared} in the trust policy of IAM role ${ROLE}`;
+      expect(keys(removes)).not.toContain(`aws_trust_subject#${label}`);
+      expect(keeps).toContainEqual({
+        kind: "aws_trust_subject",
+        target: label,
+        reason: "retained",
+        action:
+          "This subject doesn't name one repository and this environment, so other environments may present it too. Radius keeps it."
+      });
+    });
+
+    it.each([
+      ["Delete setup", "rollback", {}],
+      ["Delete setup with AWS off", "rollback", { awsEnabled: false }],
+      ["Retry deletion", "retry-cleanup", {}]
+    ])("lists no item in two places in %s", (_label, id, options) => {
+      const op = awsSetupWithChanges();
+      if (id === "retry-cleanup") {
+        const targets = provenOwnedCleanupTargets(op);
+        warnedCleanup(
+          op,
+          targets.map((target) => ({
+            artifactType: target.artifactType,
+            target: target.target,
+            identity: target.identity,
+            outcome: "warning",
+            detail: "Radius did not get a result."
+          }))
+        );
+        finish(op, "failed_partial", {
+          failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+        });
+      }
+      const action = projectOperationActions(op, options).find(
+        (entry) => entry.id === id
+      );
+      const { removes, keeps, manualActionRequired } = action.preview;
+      // Compared by row before any "if nothing else uses it" suffix.
+      const base = (entries) =>
+        keys(entries).map((key) =>
+          key.replace(/, if nothing else uses it$/, "")
+        );
+      const all = [
+        ...base(removes),
+        ...base(keeps),
+        ...base(manualActionRequired)
+      ];
+      expect(all.length).toBeGreaterThan(0);
+      expect(new Set(all).size).toBe(all.length);
+    });
+  });
+
+  it("lists a reused role as kept, with why", () => {
+    const op = awsSetupWithChanges();
+    getSetupArtifactLedger(op).awsRole.state = "reused";
+    getSetupArtifactLedger(op).awsRole.origin = "radius_earlier_setup";
+    const rollback = projectOperationActions(op).find(
+      (action) => action.id === "rollback"
+    );
+    expect(rollback.preview.removes).not.toContainEqual(
+      expect.objectContaining({ kind: "aws_role" })
+    );
+    expect(rollback.preview.keeps).toContainEqual(
+      expect.objectContaining({
+        kind: "aws_role",
+        reason: "reused",
+        action: expect.stringContaining("this IAM role")
+      })
+    );
+  });
+
+  it.each([
+    ["aws_role", (op) => op.setupArtifacts.awsRole.state],
+    ["aws_trust_subject", (op) => op.setupArtifacts.awsTrustSubjects[0].state],
+    ["aws_role_policy", (op) => op.setupArtifacts.awsRolePolicies[0].state],
+    ["aws_access_entry", (op) => op.setupArtifacts.awsAccessEntries[0].state]
+  ])("marks a removed %s deleted, only by its identity", (kind, state) => {
+    const op = awsSetupWithChanges();
+    const [target] = provenOwnedCleanupTargets(op).filter(
+      (entry) => entry.artifactType === kind
+    );
+    expect(
+      recordCleanupDeletion(op, { artifactType: kind, identity: "other" })
+    ).toBe(false);
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType: kind,
+        identity: target.identity
+      })
+    ).toBe(true);
+    expect(state(op)).toBe("deleted");
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType: kind,
+        identity: target.identity
+      })
+    ).toBe(false);
+    expect(
+      provenOwnedCleanupTargets(op).some((entry) => entry.artifactType === kind)
+    ).toBe(false);
+  });
+
+  it("leads the role's identity with IAM's role id", () => {
+    expect(
+      cleanupArtifactIdentity("aws_role", {
+        roleArn: ROLE_ARN,
+        roleId: "AROA1"
+      })
+    ).toBe(`aroa1|${ROLE_ARN.toLowerCase()}`);
+    expect(cleanupArtifactIdentity("aws_role", { roleArn: ROLE_ARN })).toBe(
+      ROLE_ARN.toLowerCase()
+    );
+  });
+
+  it("records one entry per identity and revives a removed one with its new role id", () => {
+    const op = awsSetupWithChanges();
+    const ledger = getSetupArtifactLedger(op);
+    ledger.awsTrustSubjects[0].state = "deleted";
+    recordAwsTrustSubject(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      roleId: "AROA2",
+      subject: SUBJECT
+    });
+    expect(ledger.awsTrustSubjects).toEqual([
+      {
+        state: "created",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA2",
+        subject: SUBJECT
+      }
+    ]);
+  });
+
+  it.each([
+    ["a trust subject", recordAwsTrustSubject, { roleArn: ROLE_ARN }],
+    ["a policy", recordAwsRolePolicy, { roleArn: ROLE_ARN, roleName: ROLE }],
+    [
+      "an access entry",
+      recordAwsAccessEntry,
+      { roleArn: ROLE_ARN, roleName: ROLE, cluster: "shop" }
+    ]
+  ])("ignores %s it cannot target precisely", (_label, record, entry) => {
+    const op = newOp();
+    record(op, entry);
+    record(op, null);
+    expect(hasTrackedSetupArtifactsForTest(op)).toBe(false);
+  });
+
+  it("restores a saved AWS ledger and drops entries it cannot use", () => {
+    const restored = readSetupArtifactLedger({
+      awsRole: {
+        state: "bogus",
+        origin: "nowhere",
+        roleArn: ROLE_ARN,
+        roleName: " ",
+        roleId: 7
+      },
+      awsTrustSubjects: [
+        {
+          state: "deleted",
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          roleId: "AROA1",
+          subject: "s"
+        },
+        { roleArn: ROLE_ARN, roleName: ROLE },
+        null,
+        "text"
+      ],
+      awsRolePolicies: "not a list",
+      awsAccessEntries: [
+        {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          cluster: "shop",
+          region: "us-west-2"
+        }
+      ]
+    });
+    expect(restored.awsRole).toEqual({
+      state: "not_started",
+      origin: "unknown",
+      roleArn: ROLE_ARN,
+      roleName: null,
+      roleId: "7"
+    });
+    expect(restored.awsTrustSubjects).toEqual([
+      {
+        state: "deleted",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        subject: "s"
+      }
+    ]);
+    expect(restored.awsRolePolicies).toEqual([]);
+    expect(restored.awsAccessEntries).toEqual([
+      {
+        state: "created",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        // Kept without one, so a rollback can refuse it.
+        roleId: null,
+        cluster: "shop",
+        region: "us-west-2"
+      }
+    ]);
+    expect(
+      readSetupArtifactLedger({ awsRole: { state: "reused" } }).awsRole
+    ).toMatchObject({ state: "reused" });
+  });
+
+  it("ignores a role record with nothing to record", () => {
+    expect(recordAwsRole(null, { state: "created" })).toBeNull();
+    const op = newOp();
+    recordAwsRole(op, null);
+    expect(op.setupArtifacts.awsRole.state).toBe("not_started");
+  });
+
+  it("drops a saved entry with no role", () => {
+    expect(
+      readSetupArtifactLedger({
+        awsTrustSubjects: [{ roleName: ROLE, subject: SUBJECT }]
+      }).awsTrustSubjects
+    ).toEqual([]);
+  });
+
+  it.each([
+    [
+      "a created role",
+      (op) =>
+        recordAwsRole(op, {
+          state: "created",
+          roleArn: ROLE_ARN,
+          roleName: ROLE
+        })
+    ],
+    [
+      "an added trust subject",
+      (op) =>
+        recordAwsTrustSubject(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          subject: SUBJECT
+        })
+    ],
+    [
+      "a written policy",
+      (op) =>
+        recordAwsRolePolicy(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          policyName: "p"
+        })
+    ],
+    [
+      "a created access entry",
+      (op) =>
+        recordAwsAccessEntry(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          cluster: "shop",
+          region: "us-west-2"
+        })
+    ]
+  ])("reports what exists while setup runs, for %s alone", (_label, record) => {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev"
+    });
+    expect(projectCleanupSummary(op)).toBeNull();
+    record(op);
+    expect(projectCleanupSummary(op)).not.toBeNull();
+  });
+
+  it("keeps the AWS ledger through a save and restore", () => {
+    const op = awsSetupWithChanges();
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.setupArtifacts.awsAccessEntries).toEqual(
+      op.setupArtifacts.awsAccessEntries
+    );
+    expect(restored.setupArtifacts.awsRole).toEqual(op.setupArtifacts.awsRole);
+  });
+});
+
+function hasTrackedSetupArtifactsForTest(op) {
+  const ledger = getSetupArtifactLedger(op);
+  return (
+    ledger.awsTrustSubjects.length +
+      ledger.awsRolePolicies.length +
+      ledger.awsAccessEntries.length >
+    0
+  );
+}

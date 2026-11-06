@@ -18,6 +18,7 @@ import {
   CREDENTIAL_STORE_PATH,
   E2E_TMP_ROOT,
   fakeCliArgsMatch,
+  fakeCliCommandAvailable,
   FAKE_CLI_TOOLS,
   PLACEHOLDER_SECRET,
   planHarnessProcess,
@@ -212,6 +213,17 @@ describe("fakeCliArgsMatch", () => {
     );
     expect(fakeCliArgsMatch({}, [])).toBe(true);
     expect(fakeCliArgsMatch({}, ["version"])).toBe(false);
+  });
+});
+
+describe("fakeCliCommandAvailable", () => {
+  it("answers every call without a limit", () => {
+    expect(fakeCliCommandAvailable({}, 100)).toBe(true);
+  });
+
+  it("answers only as many calls as its limit", () => {
+    expect(fakeCliCommandAvailable({ times: 1 }, 0)).toBe(true);
+    expect(fakeCliCommandAvailable({ times: 1 }, 1)).toBe(false);
   });
 });
 

@@ -2119,6 +2119,91 @@ describe("createCloudFixture", () => {
   });
 
   describe("assertRoleAssignmentsExist", () => {
+    it.each(["creation", "survival"])(
+      "checks %s without resolving unused principal names",
+      async (phase) => {
+        const expected = requiredRoleAssignments();
+        const { fixture, fake } = await createHarness([
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: (args) => {
+              const nameFlag = args.indexOf("--fill-principal-name");
+              expect(args.slice(nameFlag, nameFlag + 2)).toEqual([
+                "--fill-principal-name",
+                "false"
+              ]);
+              const scope = args[args.indexOf("--scope") + 1];
+              return {
+                stdout: JSON.stringify(
+                  expected.filter((assignment) => assignment.scope === scope)
+                )
+              };
+            }
+          }
+        ]);
+
+        if (phase === "creation")
+          await expect(
+            fixture.assertRoleAssignmentExists("sp-1")
+          ).resolves.toEqual(expected);
+        else
+          await expect(
+            fixture.assertRoleAssignmentsExist(expected)
+          ).resolves.toBeUndefined();
+        expect(
+          fake.commands.calls.filter(
+            (call) => call.args.slice(0, 3).join(" ") === "role assignment list"
+          )
+        ).toHaveLength(2);
+      }
+    );
+
+    it.each(["first", "second"])(
+      "reports unconfirmed assignments when the %s scope lookup times out",
+      async (scope) => {
+        let now = NOW;
+        const { fixture } = await createHarness(
+          [
+            ...(scope === "second" ?
+              [
+                {
+                  tool: "az" as const,
+                  match: [...ROLE_LIST, "--scope", SCOPE],
+                  respond: {
+                    stdout: JSON.stringify([
+                      roleAssignment(),
+                      locksRoleAssignment()
+                    ])
+                  }
+                }
+              ]
+            : []),
+            {
+              tool: "az",
+              match: ROLE_LIST,
+              respond: () => {
+                now = new Date(NOW.getTime() + 2_000);
+                return { code: 1, timedOut: true };
+              }
+            }
+          ],
+          { readNow: () => now },
+          { assertionTimeoutMs: 2_000 }
+        );
+
+        const outcome = fixture.assertRoleAssignmentsExist(
+          requiredRoleAssignments()
+        );
+        await expect(outcome).rejects.toThrow(
+          /no complete scope inventory was returned; unconfirmed/
+        );
+        await expect(outcome).rejects.toMatchObject({
+          cause: { timedOut: true }
+        });
+      }
+    );
+
     it("requires every captured assignment identity, role, and scope", async () => {
       const expected = [
         roleAssignment(),

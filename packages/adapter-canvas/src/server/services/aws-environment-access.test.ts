@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildAwsEnvironmentPermissionPolicy,
   buildGitHubTrustPolicy,
@@ -10,6 +10,10 @@ import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
 import { createAwsEnvironmentAccess } from "./aws-environment-access.js";
+import {
+  AwsSessionUnavailableError,
+  type AwsSetupJournal
+} from "./aws-setup-journal.js";
 import {
   addLegacyStep,
   buildStages,
@@ -148,10 +152,12 @@ function harness(
   // The customer pauses while this AWS command, or the last GitHub read, runs.
   pauseDuring?: string,
   persistError?: Error,
-  environments?: Environments
+  environments?: Environments,
+  journal?: AwsSetupJournal<Operation>
 ) {
   const environmentReads: string[] = [];
   let stopRequested = false;
+  const stoppedOperations = new Set<string>();
   const awsCalls: string[][] = [];
   const githubCalls: Array<{
     path: string;
@@ -231,6 +237,7 @@ function harness(
       }
     },
     isStopRequested: () => stopRequested,
+    isStoppedOperation: (operationId) => stoppedOperations.has(operationId),
     operationId: (operation) => operation.id,
     now: () => clock,
     async sleep(milliseconds) {
@@ -267,6 +274,7 @@ function harness(
       }
     },
     stageAuthorizeIdentity: STAGE,
+    ...(journal ? { journal } : {}),
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error)
   });
@@ -296,6 +304,7 @@ function harness(
     commands,
     steps,
     roleRecorded,
+    stoppedOperations,
     requestStop: () => {
       stopRequested = true;
     }
@@ -918,9 +927,14 @@ describe("AWS environment access setup", () => {
           executor: EXECUTOR
         }
       ]);
-      // No role name was given, so the repository's default role is created.
+      // No role name was given, so the repository's default role is created,
+      // tagged with this operation.
       expect(h.find("iam create-role")).toEqual(
-        expect.arrayContaining(["--role-name", ROLE])
+        expect.arrayContaining([
+          "--role-name",
+          ROLE,
+          "Key=radius-operation,Value=op-1"
+        ])
       );
       const createRole = h.find("iam create-role") ?? [];
       const trust = parsePolicyDocument(
@@ -2049,6 +2063,7 @@ describe("the deploy identity lock during setup", () => {
           holder: "The setup of environment prod in octo/shop",
           holderOperationId: "op-2",
           since: "2026-10-30T11:58:30Z",
+          stopped: false,
           removable: false
         }
       }
@@ -2059,6 +2074,125 @@ describe("the deploy identity lock during setup", () => {
       { awsLockWait: null }
     ]);
   });
+
+  it("takes back the lock this setup recorded in an earlier attempt", async () => {
+    const MINE = JSON.stringify({
+      repo: "octo/shop",
+      environment: "dev",
+      action: "setup",
+      operationId: "op-1"
+    });
+    const h = harness({
+      ...happyPath,
+      "iam create-policy": [EXISTS, lockPolicy("LOCK1")],
+      "iam get-policy": [
+        lockPolicy("LOCK0", { Description: MINE }),
+        lockPolicy("LOCK1")
+      ]
+    });
+    h.contexts.set("op-1", {
+      awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+    });
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+
+    expect(h.steps()).toContain(
+      `🔒 Took back the lock this setup holds on IAM role ${ROLE} from its earlier attempt.`
+    );
+    expect(h.steps().some((text) => String(text).startsWith("⏳"))).toBe(false);
+    // Replaced, so the lock's creation time is this run's.
+    expect(
+      h.commands().filter((command) => command === "iam create-policy")
+    ).toHaveLength(2);
+    expect(h.commands()).toContain("iam delete-policy");
+    await h.access.release(operation);
+    expect(h.commands().at(-1)).toBe("iam delete-policy");
+    expect(h.contexts.get("op-1")).toMatchObject({
+      awsDeployIdentityLock: null
+    });
+  });
+
+  it("does not take back a recorded lock on another role", async () => {
+    const MINE = JSON.stringify({
+      repo: "octo/shop",
+      environment: "dev",
+      action: "setup",
+      operationId: "op-1"
+    });
+    const h = harness({
+      ...happyPath,
+      "iam create-policy": [EXISTS, lockPolicy("LOCK1")],
+      "iam get-policy": [
+        lockPolicy("LOCK0", { Description: MINE }),
+        lockPolicy("LOCK1")
+      ]
+    });
+    h.contexts.set("op-1", {
+      awsDeployIdentityLock: {
+        policyArn: `arn:aws:iam::${ACCOUNT}:policy/radius-lock-other-role`,
+        policyId: "LOCK0"
+      }
+    });
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+    expect(h.steps()).toContain(
+      `🔒 Locked IAM role ${ROLE}, so no other Radius run changes its trust policy until this setup finishes.`
+    );
+  });
+
+  it.each([
+    ["another operation that stopped", OTHER_HOLDER, "op-2"],
+    [
+      "this setup's earlier attempt, unrecorded",
+      JSON.stringify({
+        repo: "octo/shop",
+        environment: "dev",
+        action: "setup",
+        operationId: "op-1"
+      }),
+      null
+    ]
+  ])(
+    "offers Remove lock at once for a lock left by %s",
+    async (_label, description, stopped) => {
+      const h = harness({
+        ...happyPath,
+        "iam create-policy": [EXISTS, lockPolicy("LOCK1")],
+        "iam get-policy": [
+          lockPolicy("LOCK0", {
+            Description: description,
+            CreateDate: "2026-10-30T11:59:00Z"
+          }),
+          lockPolicy("LOCK1")
+        ]
+      });
+      if (stopped) h.stoppedOperations.add(stopped);
+
+      await h.access.setup(operation, input, EXECUTOR);
+
+      const holder =
+        stopped ?
+          "The setup of environment prod in octo/shop (operation op-2)"
+        : "The setup of environment dev in octo/shop (operation op-1)";
+      expect(h.steps()).toContain(
+        `⏳ The lock on IAM role ${ROLE} is from an earlier attempt that stopped: ${holder}, which took it at 2026-10-30 11:59 UTC. Use Remove lock to continue.`
+      );
+      expect(h.events).toContainEqual([
+        "setContext",
+        "op-1",
+        {
+          awsLockWait: expect.objectContaining({
+            stopped: true,
+            removable: true
+          })
+        }
+      ]);
+    }
+  );
 
   it("tells the developer when Remove lock becomes available", async () => {
     const h = harness({
@@ -2609,6 +2743,7 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
           }
         },
         isStopRequested: () => false,
+        isStoppedOperation: () => false,
         operationId: (operation) => operation.id,
         now: () => Date.parse("2026-10-30T12:00:00Z"),
         async sleep() {
@@ -2984,3 +3119,602 @@ describe("repairing an environment's trust under the lock", () => {
     expect(await h.access.repair(repairInput)).toMatchObject({ ok: true });
   });
 });
+
+describe("AWS environment access with a setup journal", () => {
+  function journalOf(
+    overrides: Partial<AwsSetupJournal<Operation>> = {}
+  ): AwsSetupJournal<Operation> {
+    return {
+      reconcile: async () => false,
+      write: async () => {
+        throw new Error("unexpected journaled write");
+      },
+      ...overrides
+    };
+  }
+
+  it("settles an interrupted write first, and pauses when reconciliation asks", async () => {
+    let h: ReturnType<typeof harness>;
+    const reconcile = vi.fn(async () => {
+      h.requestStop();
+      return true;
+    });
+    h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      undefined,
+      undefined,
+      journalOf({ reconcile })
+    );
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toEqual({
+      ok: false,
+      stopped: true
+    });
+
+    expect(reconcile).toHaveBeenCalledExactlyOnceWith(operation);
+    expect(h.awsCalls).toEqual([]);
+    expect(h.events).toContainEqual(["setStageState", "op-1", STAGE, "paused"]);
+    expect(h.steps()).toContain(
+      "⏸️ Radius checked the AWS change the interrupted setup was making and paused. Continue setup, or delete it to remove what it created."
+    );
+  });
+
+  it.each([
+    ["while it settles an earlier write", "reconcile"],
+    ["while it settles a write it just sent", "write"]
+  ])(
+    "reports an AWS session that fails %s with the session's own code",
+    async (_label, where) => {
+      const expired = new AwsSessionUnavailableError(
+        "aws-cli-login-required",
+        "Your AWS CLI session has expired. Sign in again."
+      );
+      const h = harness(
+        happyPath,
+        defaultSubject,
+        undefined,
+        undefined,
+        undefined,
+        journalOf(
+          where === "reconcile" ?
+            {
+              reconcile: async () => {
+                throw expired;
+              }
+            }
+          : {
+              write: async () => {
+                throw expired;
+              }
+            }
+        )
+      );
+
+      expect(await h.access.setup(operation, input, EXECUTOR)).toEqual({
+        ok: false,
+        status: 400,
+        error: "Your AWS CLI session has expired. Sign in again.",
+        code: "aws-cli-login-required"
+      });
+    }
+  );
+
+  it("passes on any other journal error", async () => {
+    const h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      undefined,
+      undefined,
+      journalOf({
+        reconcile: async () => {
+          throw new Error("store offline");
+        }
+      })
+    );
+    await expect(h.access.setup(operation, input, EXECUTOR)).rejects.toThrow(
+      "store offline"
+    );
+  });
+
+  it("goes on with setup when a settled write asked for no pause", async () => {
+    const write = vi.fn<AwsSetupJournal<Operation>["write"]>(
+      async (_op, _change, args, sender) =>
+        (await sender.guard(args)) ?? sender.run(args)
+    );
+    const h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      undefined,
+      undefined,
+      journalOf({ reconcile: async () => true, write })
+    );
+
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+    expect(write.mock.calls.map(([, change]) => change.kind)).toEqual([
+      "aws_role.create",
+      "aws_role_policy.put",
+      "aws_access_entry.create"
+    ]);
+  });
+
+  it("gives the journal the setup's own pause and lock checks", async () => {
+    let h: ReturnType<typeof harness>;
+    const seen: unknown[] = [];
+    const write = vi.fn<AwsSetupJournal<Operation>["write"]>(
+      async (_op, change, args, sender) => {
+        if (change.kind !== "aws_role.create") return sender.run(args);
+        seen.push(await sender.guard(args));
+        seen.push(await sender.read(["iam", "get-role-policy"]));
+        h.requestStop();
+        seen.push(await sender.guard(args));
+        seen.push(await sender.read(["iam", "get-role-policy"]));
+        return sender.run(args);
+      }
+    );
+    h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      undefined,
+      undefined,
+      journalOf({ write })
+    );
+
+    await h.access.setup(operation, input, EXECUTOR);
+
+    expect(seen[0]).toBeNull();
+    expect(seen[1]).toMatchObject({ code: 254, stderr: "NoSuchEntity" });
+    expect(seen[2]).toMatchObject({
+      stderr: "Radius did not run this AWS command because setup was paused."
+    });
+    expect(seen[3]).toEqual(seen[2]);
+    // The lock was checked before the write the guard allowed.
+    expect(
+      h.commands().filter((command) => command === "iam get-policy").length
+    ).toBeGreaterThan(1);
+  });
+});
+
+describe("AWS environment access rollback", () => {
+  const MINE = JSON.stringify({
+    repo: "octo/shop",
+    environment: "dev",
+    action: "setup",
+    operationId: "op-1"
+  });
+  const target = {
+    key: "policy",
+    artifactType: "aws_role_policy" as const,
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    roleId: "AROA1",
+    policyName: "radius-deploy-dev-1"
+  };
+  const rollbackScript = (lock: Record<string, Answer>) => ({
+    "--version": ok("aws-cli/2.17.0"),
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-role": ok({
+      Role: {
+        Arn: ROLE_ARN,
+        RoleId: "AROA1",
+        AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [DEV])
+      }
+    }),
+    "iam delete-role-policy": ok(),
+    "iam delete-policy": ok(),
+    ...lock
+  });
+
+  it("takes a new lock for the rollback and releases it", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      })
+    );
+
+    expect(
+      await h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [target]
+      })
+    ).toEqual({
+      outcomes: [{ key: "policy", outcome: "deleted", detail: null }],
+      warnings: [],
+      released: true
+    });
+
+    const create = h.find("iam create-policy");
+    expect(create?.[create.indexOf("--description") + 1]).toBe(
+      JSON.stringify({
+        repo: "octo/shop",
+        environment: "dev",
+        action: "rollback",
+        operationId: "op-1"
+      })
+    );
+    expect(h.commands().at(-1)).toBe("iam delete-policy");
+  });
+
+  it("hands over the lock it takes before changing anything", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      })
+    );
+    const seen: Array<[unknown, string[]]> = [];
+
+    await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target],
+      onLocked: async (lock) => {
+        seen.push([lock, h.commands()]);
+      }
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.[0]).toEqual({
+      policyArn: `arn:aws:iam::${ACCOUNT}:policy/radius-lock-${ROLE}`,
+      policyId: "LOCK1"
+    });
+    expect(seen[0]?.[1]).not.toContain("iam delete-role-policy");
+  });
+
+  it("sends nothing once the execution has ended", async () => {
+    const h = harness(rollbackScript({}));
+    await expect(
+      h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [target],
+        isStopped: () => true
+      })
+    ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+    expect(h.commands()).toEqual([]);
+  });
+
+  it.each([
+    ["before the lock", "sts get-caller-identity"],
+    ["while it holds the lock", "iam get-role"]
+  ])(
+    "stops %s once the execution ends, and still releases the lock",
+    async (_label, last) => {
+      const h = harness(
+        rollbackScript({
+          "iam create-policy": lockPolicy("LOCK1"),
+          "iam get-policy": lockPolicy("LOCK1")
+        })
+      );
+      await expect(
+        h.access.rollback({
+          repo: "octo/shop",
+          environment: "dev",
+          operationId: "op-1",
+          roleArn: ROLE_ARN,
+          targets: [target],
+          isStopped: () => h.commands().includes(last)
+        })
+      ).resolves.toMatchObject({ interrupted: true, outcomes: [] });
+      expect(h.commands()).not.toContain("iam delete-role-policy");
+      expect(h.commands().includes("iam create-policy")).toBe(
+        h.commands().at(-1) === "iam delete-policy"
+      );
+    }
+  );
+
+  // The lock check before a write is itself an AWS read. A stop that lands
+  // during it must still keep the write from being sent.
+  it("sends no write when the execution ends while the lock is checked", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      })
+    );
+    const lockReads = () =>
+      h.commands().filter((command) => command === "iam get-policy").length;
+
+    expect(
+      await h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [target],
+        // Ends when the check before delete-role-policy starts.
+        isStopped: () => lockReads() >= 2
+      })
+    ).toMatchObject({ interrupted: true, outcomes: [], released: true });
+    expect(h.commands()).not.toContain("iam delete-role-policy");
+    expect(h.commands().at(-1)).toBe("iam delete-policy");
+  });
+
+  it.each([
+    ["released", ok(), true, []],
+    [
+      "kept when its release fails",
+      fail("An error occurred (AccessDenied) when calling DeletePolicy"),
+      false,
+      [expect.stringContaining("not allowed iam:DeletePolicy")]
+    ]
+  ])(
+    "returns what finished on a role when the execution ends part way, with the lock %s",
+    async (_label, release, released, warnings) => {
+      const h = harness(
+        rollbackScript({
+          "iam create-policy": lockPolicy("LOCK1"),
+          "iam get-policy": lockPolicy("LOCK1"),
+          "iam delete-policy": release
+        })
+      );
+
+      expect(
+        await h.access.rollback({
+          repo: "octo/shop",
+          environment: "dev",
+          operationId: "op-1",
+          roleArn: ROLE_ARN,
+          targets: [
+            target,
+            { ...target, key: "policy2", policyName: "radius-deploy-dev-2" }
+          ],
+          // Ends once the first policy is deleted.
+          isStopped: () => h.commands().includes("iam delete-role-policy")
+        })
+      ).toEqual({
+        outcomes: [{ key: "policy", outcome: "deleted", detail: null }],
+        warnings,
+        released,
+        interrupted: true
+      });
+      expect(
+        h.commands().filter((command) => command === "iam delete-role-policy")
+      ).toHaveLength(1);
+    }
+  );
+
+  it("takes back the setup's recorded lock instead of waiting on it", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": [
+          fail(
+            "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
+          ),
+          lockPolicy("LOCK1")
+        ],
+        "iam get-policy": [
+          lockPolicy("LOCK0", { Description: MINE }),
+          lockPolicy("LOCK1")
+        ]
+      })
+    );
+    const recorded: unknown[] = [];
+
+    expect(
+      await h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [target],
+        adopt: "LOCK0",
+        onLocked: async (lock) => {
+          recorded.push(lock);
+        }
+      })
+    ).toMatchObject({ released: true, warnings: [] });
+    expect(h.commands()).toContain("iam delete-role-policy");
+    // Replaced with a fresh lock, which is the one recorded.
+    expect(recorded).toEqual([expect.objectContaining({ policyId: "LOCK1" })]);
+  });
+
+  it("reports a lock another run holds, without waiting or changing anything", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": fail(
+          "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
+        ),
+        "iam get-policy": lockPolicy("LOCK9", {
+          Description: JSON.stringify({
+            repo: "octo/shop",
+            environment: "prod",
+            action: "setup",
+            operationId: "op-2"
+          }),
+          CreateDate: "2026-10-30T11:59:00Z"
+        })
+      })
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target]
+    });
+
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({ key: "policy", outcome: "warning" })
+    ]);
+    expect(result.outcomes[0]?.detail).toContain("is changing IAM role");
+    expect(h.commands()).not.toContain("iam delete-role-policy");
+    expect(h.events.filter(([kind]) => kind === "sleep")).toEqual([]);
+  });
+
+  const entryTarget = {
+    key: "entry",
+    artifactType: "aws_access_entry" as const,
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    roleId: "AROA1",
+    cluster: "shop",
+    region: "us-west-2"
+  };
+  const entryScript = (lock: Record<string, Answer>) => ({
+    ...rollbackScript(lock),
+    "iam get-role": ok({
+      Role: {
+        ...JSON.parse(managedRoleFor([DEV])),
+        Arn: ROLE_ARN,
+        RoleId: "AROA1"
+      }
+    }),
+    "eks describe-access-entry": ok({
+      accessEntry: { tags: { "radius-managed": "true" } }
+    }),
+    "eks delete-access-entry": ok(),
+    "iam update-assume-role-policy": ok()
+  });
+
+  it("removes an access entry no other environment of the repository uses", async () => {
+    const h = harness(
+      entryScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      }),
+      defaultSubject,
+      undefined,
+      undefined,
+      { dev: {} }
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [
+        {
+          key: "subject",
+          artifactType: "aws_trust_subject",
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          roleId: "AROA1",
+          subject: DEV
+        },
+        entryTarget
+      ]
+    });
+
+    expect(result.outcomes).toEqual([
+      { key: "entry", outcome: "deleted", detail: null },
+      { key: "subject", outcome: "deleted", detail: null }
+    ]);
+    // The repository's environments were listed, so the rule could run.
+    expect(h.environmentReads).toEqual(["dev"]);
+  });
+
+  it("reports a lock it could not release", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1"),
+        "iam delete-policy": fail("AccessDenied: iam:DeletePolicy")
+      })
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target]
+    });
+
+    expect(result.released).toBe(false);
+    expect(result.warnings).toEqual([
+      expect.stringContaining("could not release its lock")
+    ]);
+  });
+
+  it("reports a lock another run took while the rollback held it", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": [lockPolicy("LOCK1"), lockPolicy("LOCK9")]
+      })
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target]
+    });
+
+    expect(result.warnings[0]).toMatch(/another run now holds a new one/);
+    expect(h.commands()).not.toContain("iam delete-role-policy");
+  });
+
+  it("keeps an access entry when GitHub cannot list the other environments", async () => {
+    const h = harness(
+      {
+        ...rollbackScript({
+          "iam create-policy": lockPolicy("LOCK1"),
+          "iam get-policy": lockPolicy("LOCK1")
+        }),
+        "iam get-role": ok({
+          Role: {
+            ...JSON.parse(managedRoleFor([DEV])),
+            Arn: ROLE_ARN,
+            RoleId: "AROA1"
+          }
+        }),
+        "eks describe-access-entry": ok({
+          accessEntry: { tags: { "radius-managed": "true" } }
+        })
+      },
+      {}
+    );
+
+    const result = await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [
+        {
+          key: "entry",
+          artifactType: "aws_access_entry",
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          roleId: "AROA1",
+          cluster: "shop",
+          region: "us-west-2"
+        }
+      ]
+    });
+
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({ key: "entry", outcome: "warning" })
+    ]);
+    expect(h.commands()).not.toContain("eks delete-access-entry");
+  });
+});
+
+function managedRoleFor(subjects: string[]): string {
+  return JSON.stringify({
+    AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects),
+    Tags: [
+      { Key: "radius-managed", Value: "true" },
+      { Key: "radius-repository", Value: "octo/shop" }
+    ]
+  });
+}

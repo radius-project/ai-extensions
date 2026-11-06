@@ -36,6 +36,7 @@ export interface EnvironmentOperationRecord {
   endedAt?: unknown;
   currentStage?: string | null;
   context?: Record<string, unknown>;
+  steps?: ReadonlyArray<{ readonly label?: unknown }>;
   request?: unknown;
   resumeRequest?: unknown;
   setupArtifacts: {
@@ -148,6 +149,43 @@ function record(value: unknown): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value));
 }
 
+// AWS CLI session failures: the person signs in again, or fixes the CLI, and
+// the same request then works. None says anything about a GitHub write.
+const AWS_SESSION_FAILURES: ReadonlySet<string> = new Set([
+  "aws-cli-login-required",
+  "aws-verification-failed",
+  "aws-identity-invalid",
+  "aws-account-mismatch",
+  "aws-cli-unsupported"
+]);
+
+/**
+ * Keep reconciling a restarted setup whose AWS sign-in failed.
+ *
+ * Every AWS resume authorizes first, so after a restart a sign-in failure can
+ * come before the writes the earlier run left unsettled are read. Charged to
+ * one of them, it would use up that write's retries and end the setup. It is
+ * reported once instead, and the throw leaves those writes unsettled, so the
+ * runtime tries again until the person signs in.
+ */
+async function waitForAwsSignIn(
+  operation: EnvironmentOperationRecord,
+  dependencies: EnvironmentOperationWorkflowDependencies,
+  error: unknown
+): Promise<never> {
+  const message = String(record(error).message || "AWS sign-in failed.");
+  // Saved without its "⚠️ " prefix, which is how a later try finds it.
+  const step = `Radius could not sign in to AWS to check the interrupted setup. ${message} Sign in again, and Radius continues on its own.`;
+  if (!operation.steps?.some((entry) => entry.label === step)) {
+    dependencies.addLegacyStep(operation, `⚠️ ${step}`);
+    await dependencies.persistProviderMutation();
+  }
+  throw new ProviderMutationRecoveryError(
+    message,
+    "provider-mutation-outcome-unknown"
+  );
+}
+
 async function failResolution(
   operation: EnvironmentOperationRecord,
   executor: SelectedGhExecutor,
@@ -157,11 +195,16 @@ async function failResolution(
   assertSetupExecutionActive(dependencies.isStopped);
   const unresolvedMutation = unresolvedProviderMutations(operation)[0];
   if (unresolvedMutation) {
+    // A stage failure is a plain record, which would read as
+    // "[object Object]" in the saved evidence.
+    const message = record(error).message;
     return recordProviderReconciliationFailure(
       operation,
       unresolvedMutation,
       dependencies.persistProviderMutation,
-      error
+      !(error instanceof Error) && typeof message === "string" && message ?
+        new Error(message)
+      : error
     );
   }
   const ensureError =
@@ -324,6 +367,14 @@ export function createSetupCoordinatorPorts(
     },
     checkpoint: () => dependencies.persistEnvironmentResolution(operation),
     finalizeFailure: async (failure) => {
+      if (
+        failure.kind === "aws-authorization" &&
+        AWS_SESSION_FAILURES.has(String(record(failure.error).code)) &&
+        unresolvedProviderMutations(operation).length > 0
+      ) {
+        assertSetupExecutionActive(dependencies.isStopped);
+        await waitForAwsSignIn(operation, dependencies, failure.error);
+      }
       await failResolution(
         operation,
         executor,
