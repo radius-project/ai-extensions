@@ -14,6 +14,7 @@ import {
   awsSetupChangeFromIntent,
   awsSetupChangeIntent,
   awsSetupChangeTarget,
+  AwsSessionUnavailableError,
   createAwsSetupJournal,
   reconcileAwsSetupChange,
   recordAwsSetupChange
@@ -54,6 +55,7 @@ const CHANGES: Record<AwsSetupChange["kind"], AwsSetupChange> = {
     accountId: ACCOUNT,
     roleArn: ROLE_ARN,
     roleName: ROLE,
+    roleId: "AROA1",
     subjects: SUBJECTS
   },
   "aws_role_policy.put": {
@@ -61,6 +63,7 @@ const CHANGES: Record<AwsSetupChange["kind"], AwsSetupChange> = {
     accountId: ACCOUNT,
     roleArn: ROLE_ARN,
     roleName: ROLE,
+    roleId: "AROA1",
     policyName: "radius-deploy-dev-1"
   },
   "aws_access_entry.create": {
@@ -68,6 +71,7 @@ const CHANGES: Record<AwsSetupChange["kind"], AwsSetupChange> = {
     accountId: ACCOUNT,
     roleArn: ROLE_ARN,
     roleName: ROLE,
+    roleId: "AROA1",
     cluster: "shop",
     region: "us-west-2"
   }
@@ -346,7 +350,45 @@ describe("recordAwsSetupChange", () => {
       roleName: ROLE,
       roleId: "AROA1"
     });
-    expect(op.setupArtifacts.awsTrustSubjects).toHaveLength(1);
+    // The subjects it was created with name the same role.
+    expect(op.setupArtifacts.awsTrustSubjects).toEqual([
+      expect.objectContaining({ roleId: "AROA1" })
+    ]);
+  });
+
+  it.each([
+    ["aws_trust.add", "awsTrustSubjects"],
+    ["aws_role_policy.put", "awsRolePolicies"],
+    ["aws_access_entry.create", "awsAccessEntries"]
+  ] as const)("records the role id %s was made on", (kind, list) => {
+    const op = operation();
+    recordAwsSetupChange(op, CHANGES[kind], "");
+    expect(op.setupArtifacts[list]).toEqual([
+      expect.objectContaining({ roleId: "AROA1" })
+    ]);
+  });
+
+  it("keeps a saved role id through the intent", () => {
+    for (const kind of [
+      "aws_trust.add",
+      "aws_role_policy.put",
+      "aws_access_entry.create"
+    ] as const) {
+      expect(
+        awsSetupChangeFromIntent(
+          kind,
+          awsSetupChangeIntent(CHANGES[kind], REQUESTED)
+        )
+      ).toEqual(CHANGES[kind]);
+    }
+    expect(
+      awsSetupChangeFromIntent("aws_role_policy.put", {
+        accountId: ACCOUNT,
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        policyName: "p"
+      })
+    ).toMatchObject({ roleId: null });
   });
 
   it("records the role under the ARN its trust subjects use", () => {
@@ -756,6 +798,50 @@ describe("createAwsSetupJournal", () => {
         ProviderMutationRecoveryError
       );
       expect(op.providerRecovery.mutations[0].status).toBe("outcome_unknown");
+    });
+
+    // An expired sign-in says nothing about the write, so it is not counted
+    // against it: the setup waits for the person to sign in again.
+    it("passes on an AWS session failure without counting an attempt", async () => {
+      const { journal: j, aws } = journal({
+        "--version": ok("aws-cli/2.17.0 Python/3.11 Linux/6"),
+        "sts get-caller-identity": fail(
+          "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: The security token included in the request is expired"
+        )
+      });
+      const op = interrupted("aws_role.create");
+
+      for (const _attempt of [1, 2, 3]) {
+        await expect(j.reconcile(op)).rejects.toMatchObject({
+          name: "AwsSessionUnavailableError",
+          code: expect.stringMatching(/^aws-/)
+        });
+      }
+
+      const [mutation] = op.providerRecovery.mutations;
+      expect(mutation.status).toBe("prepared");
+      expect(mutation.reconcileAttempts ?? 0).toBe(0);
+      expect(aws.calls).not.toContain("iam get-role");
+    });
+
+    it("passes on an AWS session failure while settling a write it sent", async () => {
+      const { journal: j } = journal({
+        "--version": ok("aws-cli/2.17.0 Python/3.11 Linux/6"),
+        "sts get-caller-identity": fail(
+          "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation"
+        )
+      });
+      const op = operation();
+
+      await expect(
+        j.write(
+          op,
+          CHANGES["aws_role.create"],
+          ARGS,
+          sender({ code: 1, stdout: "", stderr: "", timedOut: true })
+        )
+      ).rejects.toBeInstanceOf(AwsSessionUnavailableError);
+      expect(op.providerRecovery.mutations[0].reconcileAttempts ?? 0).toBe(0);
     });
 
     it("leaves a requested stop alone outside restart reconciliation", async () => {

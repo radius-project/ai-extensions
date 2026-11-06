@@ -175,6 +175,9 @@ export type AwsTrustSubjectArtifact = {
   state: "created" | "deleted";
   roleArn: string;
   roleName: string;
+  // IAM's id for the role the subject was added to, or null when IAM did not
+  // say. A rollback changes only a role that still has this id.
+  roleId: string | null;
   subject: string;
 };
 
@@ -184,6 +187,7 @@ export type AwsRolePolicyArtifact = {
   state: "created" | "deleted";
   roleArn: string;
   roleName: string;
+  roleId: string | null;
   policyName: string;
 };
 
@@ -193,6 +197,7 @@ export type AwsAccessEntryArtifact = {
   state: "created" | "deleted";
   roleArn: string;
   roleName: string;
+  roleId: string | null;
   cluster: string;
   region: string;
 };
@@ -1415,7 +1420,9 @@ function readAwsList<T>(value: unknown, fields: readonly string[]): T[] {
       roleName: String(raw.roleName || "").trim()
     };
     for (const field of fields) entry[field] = String(raw[field] || "").trim();
-    if (Object.values(entry).every(Boolean)) entries.push(entry as T);
+    if (!Object.values(entry).every(Boolean)) continue;
+    // Optional: a rollback refuses an entry without it, so it is kept.
+    entries.push({ ...entry, roleId: optionalIdentityString(raw.roleId) } as T);
   }
   return entries;
 }
@@ -2120,8 +2127,9 @@ export function recordAwsRole(op: any, patch: any): any {
 }
 
 // Add a created AWS list entry, or revive one a rollback had removed. The same
-// identity is never listed twice.
-function recordAwsListEntry<T extends { state: string }>(
+// identity is never listed twice, and a revived one takes the role id of the
+// write that made it again.
+function recordAwsListEntry<T extends { state: string; roleId: string | null }>(
   list: T[],
   artifactType: SetupCleanupArtifactType,
   entry: T
@@ -2130,8 +2138,10 @@ function recordAwsListEntry<T extends { state: string }>(
   const existing = list.find(
     (item) => cleanupArtifactIdentity(artifactType, item) === identity
   );
-  if (existing) existing.state = "created";
-  else list.push(entry);
+  if (existing) {
+    existing.state = "created";
+    existing.roleId = entry.roleId;
+  } else list.push(entry);
 }
 
 export function recordAwsTrustSubject(op: any, entry: any): any {

@@ -113,8 +113,10 @@ AWS setup journals each change before it sends it, and records it only when this
 
 - The IAM role, when `create-role` created it, with IAM's role ID.
 - Each GitHub subject the role did not trust before.
-- The environment's inline permission policy, when the role had no policy of that name before.
+- The environment's inline permission policy, when the role had no policy of that name before. A policy that replaces the environment's legacy policy is not recorded, so a rollback keeps the environment's grant.
 - The role's EKS access entry, when `create-access-entry` created it.
+
+Each change records IAM's ID for the role it was made on, whether setup created the role or reused it.
 
 Setup tags the role and access entry it creates with `radius-operation=<operationId>`. When a restart finds a `create-role` or `create-access-entry` with no answer, Radius records the role or entry as created only if it carries that operation's tag. A creation time can't prove this, because a role another setup creates later under the same name dates after the request too.
 
@@ -124,8 +126,8 @@ Rollback rule:
 - Rollback checks before each AWS command that its execution is still current. After a shutdown or a replaced operation it sends nothing more, keeps the results it already recorded, and still releases the lock.
 - It removes, in order, the access entry (by environment delete's rule, so one another environment uses stays), the policy, the trust subjects, then the role.
 - It removes a trust subject only when the subject names one repository and this environment, the same rule as environment delete. A subject such as `repository_id:<id>` from a custom OIDC template is kept, because other environments may present it.
-- It deletes the role only when its recorded role ID still matches, it trusts no other GitHub subject, and it has no other inline or attached policy. With no recorded role ID, it changes nothing on that role. When the role was created again under the same name, it removes only an access entry older than the new role, since EKS ties an entry to the role it was created for. It never deletes the GitHub identity provider or a role setup did not create. A role kept because an earlier step failed, or because its policies could not be listed, is a warning that **Retry deletion** tries again. A role kept because something else uses it, or because it was replaced, is reported once and left for the customer.
-- A change whose answer was lost is settled by reading AWS, never by sending it again. After a restart, an AWS setup then pauses for **Continue setup** or **Delete setup**. Azure setups instead roll back automatically.
+- It changes a role only when every change it undoes recorded that role's current ID. With an ID missing, it changes nothing on that role. It deletes the role only when its trust policy lets in no other principal (GitHub or not) and it has no other inline or attached policy. When the role was created again under the same name, it leaves the new role's policy and trust subjects, and it removes only an access entry older than the new role, since EKS ties an entry to the role it was created for. It never deletes the GitHub identity provider or a role setup did not create. A role kept because an earlier step failed, or because its policies could not be listed, is a warning that **Retry deletion** tries again. A role kept because something else uses it, or because it was replaced, is reported once and left for the customer.
+- A change whose answer was lost is settled by reading AWS, never by sending it again. After a restart, an AWS setup then pauses for **Continue setup** or **Delete setup**. Azure setups instead roll back automatically. If the AWS CLI session has expired, the read costs the change no attempt: Radius says so once and tries again until the person signs in.
 
 ### Azure role assignments
 

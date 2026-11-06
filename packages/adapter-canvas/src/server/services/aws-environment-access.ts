@@ -51,7 +51,10 @@ import {
   type AwsLockReleaseResult,
   type AwsLockWait
 } from "./aws-deploy-identity-lock.js";
-import type { AwsSetupJournal } from "./aws-setup-journal.js";
+import {
+  AwsSessionUnavailableError,
+  type AwsSetupJournal
+} from "./aws-setup-journal.js";
 
 // Connects the AWS deploy identity to an environment operation: it resolves the
 // GitHub OIDC subjects the environment's workflows may present, reports
@@ -577,16 +580,27 @@ export function createAwsEnvironmentAccess<Operation>(
     return paused(operation, pausedLine(created));
   }
 
+  // A session that failed while the journal read AWS, as a setup failure
+  // with the session's own code. The setup coordinator waits for sign-in on
+  // that code rather than charge the unsettled write.
+  function sessionFailure(error: unknown): AwsEnvironmentSetupResult {
+    if (!(error instanceof AwsSessionUnavailableError)) throw error;
+    return { ok: false, status: 400, error: error.message, code: error.code };
+  }
+
   return {
     async setup(operation, input, executor) {
       operations.enterStage(operation, stage);
       // An earlier run may have sent an AWS write and stopped before the
       // answer. Settle it from AWS first. During restart reconciliation that
       // asks for a pause, so the customer chooses Continue or Delete setup.
-      if (
-        (await journal?.reconcile(operation)) &&
-        dependencies.isStopRequested(operation)
-      ) {
+      let reconciled: boolean;
+      try {
+        reconciled = Boolean(await journal?.reconcile(operation));
+      } catch (error) {
+        return sessionFailure(error);
+      }
+      if (reconciled && dependencies.isStopRequested(operation)) {
         operations.setStageState(operation, stage, "paused");
         return paused(
           operation,
@@ -703,120 +717,126 @@ export function createAwsEnvironmentAccess<Operation>(
         }
         return result;
       };
-      const result = await setupAwsDeployIdentity(
-        {
-          repo,
-          operationId: dependencies.operationId(operation),
-          environment,
-          accountId,
-          region: text(input.region),
-          cluster: text(input.cluster),
-          roleName,
-          existingRoleArn,
-          policyName,
-          reconcileLegacyPolicy,
-          subjects
-        },
-        {
-          // Checked before every AWS command, including after setup's waits,
-          // so a pause lets the command in flight finish and runs nothing
-          // after it. No rollback: what already exists is recorded below.
-          runAws: async (args) => {
-            const refused = await guard(args);
-            if (refused) return refused;
-            return isAwsWrite(args) ? send(args) : dependencies.runAws(args);
+      let result: Awaited<ReturnType<typeof setupAwsDeployIdentity>>;
+      try {
+        result = await setupAwsDeployIdentity(
+          {
+            repo,
+            operationId: dependencies.operationId(operation),
+            environment,
+            accountId,
+            region: text(input.region),
+            cluster: text(input.cluster),
+            roleName,
+            existingRoleArn,
+            policyName,
+            reconcileLegacyPolicy,
+            subjects
           },
-          ...(journal ?
-            {
-              write: (change, args) =>
-                journal.write(operation, change, args, {
-                  read: async (read) =>
-                    (await guard(read)) ?? dependencies.runAws(read),
-                  guard,
-                  run: send
-                })
-            }
-          : {}),
-          step: (line) => {
-            operations.addLegacyStep(operation, line, stage);
-          },
-          recordPolicyIdentity: async (identity) => {
-            operations.setContext(operation, {
-              awsPolicyIdentity: { repoId, environment, ...identity }
-            });
-            await dependencies.store.persist();
-          },
-          isRecordedForeignPolicy: async (candidate) => {
-            if (candidate.repoId !== undefined)
-              return candidate.repoId !== repoId;
-            const identity = await resolveIdentity(
-              candidate.repo,
-              environment,
-              executor
-            );
-            return (
-              identity.repoId !== repoId &&
-              (await savedPolicyName(
-                identity.repo,
-                environment,
-                candidate.roleArn,
-                executor
-              )) === candidate.policyName
-            );
-          },
-          sleep: dependencies.sleep,
-          acquireLock: async ({ roleName }): Promise<AwsLockResult> => {
-            const recorded = readRecordedAwsLock(
-              operations.getContext(operation)
-            );
-            const taken = await lock(
+          {
+            // Checked before every AWS command, including after setup's waits,
+            // so a pause lets the command in flight finish and runs nothing
+            // after it. No rollback: what already exists is recorded below.
+            runAws: async (args) => {
+              const refused = await guard(args);
+              if (refused) return refused;
+              return isAwsWrite(args) ? send(args) : dependencies.runAws(args);
+            },
+            ...(journal ?
               {
-                accountId,
-                roleName,
-                repo,
+                write: (change, args) =>
+                  journal.write(operation, change, args, {
+                    read: async (read) =>
+                      (await guard(read)) ?? dependencies.runAws(read),
+                    guard,
+                    run: send
+                  })
+              }
+            : {}),
+            step: (line) => {
+              operations.addLegacyStep(operation, line, stage);
+            },
+            recordPolicyIdentity: async (identity) => {
+              operations.setContext(operation, {
+                awsPolicyIdentity: { repoId, environment, ...identity }
+              });
+              await dependencies.store.persist();
+            },
+            isRecordedForeignPolicy: async (candidate) => {
+              if (candidate.repoId !== undefined)
+                return candidate.repoId !== repoId;
+              const identity = await resolveIdentity(
+                candidate.repo,
                 environment,
-                action: "setup",
-                operationId: dependencies.operationId(operation),
-                ...((
-                  recorded?.policyArn === awsLockPolicyArn(accountId, roleName)
-                ) ?
-                  { adopt: recorded.policyId }
-                : {})
-              },
-              () => dependencies.isStopRequested(operation),
-              async (wait, line) => {
-                operations.touch(operation);
-                operations.setContext(operation, { awsLockWait: wait });
-                if (line) {
-                  operations.addLegacyStep(operation, line, stage);
-                  await dependencies.store.persist();
+                executor
+              );
+              return (
+                identity.repoId !== repoId &&
+                (await savedPolicyName(
+                  identity.repo,
+                  environment,
+                  candidate.roleArn,
+                  executor
+                )) === candidate.policyName
+              );
+            },
+            sleep: dependencies.sleep,
+            acquireLock: async ({ roleName }): Promise<AwsLockResult> => {
+              const recorded = readRecordedAwsLock(
+                operations.getContext(operation)
+              );
+              const taken = await lock(
+                {
+                  accountId,
+                  roleName,
+                  repo,
+                  environment,
+                  action: "setup",
+                  operationId: dependencies.operationId(operation),
+                  ...((
+                    recorded?.policyArn ===
+                    awsLockPolicyArn(accountId, roleName)
+                  ) ?
+                    { adopt: recorded.policyId }
+                  : {})
+                },
+                () => dependencies.isStopRequested(operation),
+                async (wait, line) => {
+                  operations.touch(operation);
+                  operations.setContext(operation, { awsLockWait: wait });
+                  if (line) {
+                    operations.addLegacyStep(operation, line, stage);
+                    await dependencies.store.persist();
+                  }
                 }
-              }
-            );
-            operations.setContext(operation, { awsLockWait: null });
-            if (!taken.ok) return taken;
-            current = taken.lock;
-            held.set(operation, taken.lock);
-            operations.setContext(operation, {
-              awsDeployIdentityLock: {
-                policyArn: taken.lock.policyArn,
-                policyId: taken.lock.policyId
-              }
-            });
-            operations.addLegacyStep(
-              operation,
-              taken.adopted ?
-                `🔒 Took back the lock this setup holds on IAM role ${roleName} from its earlier attempt.`
-              : `🔒 Locked IAM role ${roleName}, so no other Radius run changes its trust policy until this setup finishes.`,
-              stage
-            );
-            // Saved before the first write, so a record left by a stopped
-            // extension still names the lock it held.
-            await dependencies.store.persist();
-            return { ok: true };
+              );
+              operations.setContext(operation, { awsLockWait: null });
+              if (!taken.ok) return taken;
+              current = taken.lock;
+              held.set(operation, taken.lock);
+              operations.setContext(operation, {
+                awsDeployIdentityLock: {
+                  policyArn: taken.lock.policyArn,
+                  policyId: taken.lock.policyId
+                }
+              });
+              operations.addLegacyStep(
+                operation,
+                taken.adopted ?
+                  `🔒 Took back the lock this setup holds on IAM role ${roleName} from its earlier attempt.`
+                : `🔒 Locked IAM role ${roleName}, so no other Radius run changes its trust policy until this setup finishes.`,
+                stage
+              );
+              // Saved before the first write, so a record left by a stopped
+              // extension still names the lock it held.
+              await dependencies.store.persist();
+              return { ok: true };
+            }
           }
-        }
-      );
+        );
+      } catch (error) {
+        return sessionFailure(error);
+      }
       if (lockLost) {
         await dependencies.store.persist();
         const created = "created" in result ? result.created : [];

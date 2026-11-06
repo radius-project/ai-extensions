@@ -126,6 +126,9 @@ export type AwsSetupChange =
       readonly accountId: string;
       readonly roleArn: string;
       readonly roleName: string;
+      // IAM's id for the role the change is made on, or null when IAM did
+      // not say. A rollback changes only a role that still has this id.
+      readonly roleId: string | null;
       // Only the subjects the role did not trust before this write.
       readonly subjects: readonly string[];
     }
@@ -134,6 +137,7 @@ export type AwsSetupChange =
       readonly accountId: string;
       readonly roleArn: string;
       readonly roleName: string;
+      readonly roleId: string | null;
       readonly policyName: string;
     }
   | {
@@ -141,6 +145,7 @@ export type AwsSetupChange =
       readonly accountId: string;
       readonly roleArn: string;
       readonly roleName: string;
+      readonly roleId: string | null;
       readonly cluster: string;
       readonly region: string;
     };
@@ -625,6 +630,9 @@ export async function setupAwsDeployIdentity(
   let roleArn: string;
   let roleCreated = false;
   let roleCreatedAt: unknown = role?.CreateDate;
+  // IAM's id for the role every later change is made on.
+  let roleId: string | null =
+    role && typeof role.RoleId === "string" && role.RoleId ? role.RoleId : null;
   if (!trust) {
     const createRole = await write(
       {
@@ -677,6 +685,15 @@ export async function setupAwsDeployIdentity(
       isRecord(createdRole) && isRecord(createdRole.Role) ?
         createdRole.Role.CreateDate
       : undefined;
+    roleId =
+      (
+        isRecord(createdRole) &&
+        isRecord(createdRole.Role) &&
+        typeof createdRole.Role.RoleId === "string" &&
+        createdRole.Role.RoleId
+      ) ?
+        createdRole.Role.RoleId
+      : null;
     created.push(`IAM role ${roleName}`);
     ports.step(`✅ Created IAM role ${roleName}.`);
   } else {
@@ -701,6 +718,7 @@ export async function setupAwsDeployIdentity(
           accountId,
           roleArn,
           roleName,
+          roleId,
           subjects: request.subjects.filter(
             (subject) => !trustedBefore.includes(subject)
           )
@@ -747,6 +765,7 @@ export async function setupAwsDeployIdentity(
     accountId,
     roleArn,
     roleName,
+    roleId,
     policyName
   };
   const attached = await attachEnvironmentPolicy(
@@ -754,9 +773,16 @@ export async function setupAwsDeployIdentity(
     {
       ...ports,
       // Only the environment's own policy is recorded. Restoring a legacy
-      // policy after a failed migration is not a change this setup owns.
+      // policy after a failed migration is not a change this setup owns. A
+      // migration is not recorded either: it replaces a grant the environment
+      // already had, so a rollback keeps the replacement rather than leave
+      // the environment with no grant.
       runAws: (args) =>
-        args[1] === "put-role-policy" && args[5] === policyName ?
+        (
+          args[1] === "put-role-policy" &&
+          args[5] === policyName &&
+          !legacy.name
+        ) ?
           write(policyChange, args)
         : ports.runAws(args)
     }
@@ -784,6 +810,7 @@ export async function setupAwsDeployIdentity(
     accountId,
     roleArn,
     roleName,
+    roleId,
     cluster,
     region
   };
@@ -1442,14 +1469,15 @@ export async function removeAwsEnvironmentFromRole(
 }
 
 // One AWS change a setup recorded, as Roll back sees it.
+// Every target names IAM's id for the role it was made on. A role with
+// another id under the same name was deleted and created again since, so it
+// is not the role this setup changed.
 export type AwsSetupRollbackTarget =
   | {
       readonly key: string;
       readonly artifactType: "aws_role";
       readonly roleArn: string;
       readonly roleName: string;
-      // IAM's id for the role setup created. A role with another id under the
-      // same name is not the one setup created.
       readonly roleId: string | null;
     }
   | {
@@ -1457,6 +1485,7 @@ export type AwsSetupRollbackTarget =
       readonly artifactType: "aws_trust_subject";
       readonly roleArn: string;
       readonly roleName: string;
+      readonly roleId: string | null;
       readonly subject: string;
     }
   | {
@@ -1464,6 +1493,7 @@ export type AwsSetupRollbackTarget =
       readonly artifactType: "aws_role_policy";
       readonly roleArn: string;
       readonly roleName: string;
+      readonly roleId: string | null;
       readonly policyName: string;
     }
   | {
@@ -1471,6 +1501,7 @@ export type AwsSetupRollbackTarget =
       readonly artifactType: "aws_access_entry";
       readonly roleArn: string;
       readonly roleName: string;
+      readonly roleId: string | null;
       readonly cluster: string;
       readonly region: string;
     };
@@ -1556,8 +1587,8 @@ export async function rollbackAwsSetupChanges(
     (target) => target.artifactType === "aws_role"
   );
   // Without IAM's ID, a role created again under the name looks the same as
-  // the one setup created, and its policies and trust would go with it.
-  if (roleTarget?.artifactType === "aws_role" && !roleTarget.roleId) {
+  // the one setup changed, and its policies and trust would go with it.
+  if (targets.some((target) => !target.roleId)) {
     return everyTarget(
       "skipped",
       `Radius didn't record IAM's ID for role ${roleName}, so it can't tell whether the role there now is the one this setup created. Nothing was changed. Check the role in the IAM console and remove what this setup added by hand.`
@@ -1619,10 +1650,9 @@ export async function rollbackAwsSetupChanges(
     );
   }
   const role = roleRecord.Role;
-  if (
-    roleTarget?.artifactType === "aws_role" &&
-    role.RoleId !== roleTarget.roleId
-  ) {
+  // Every target, not only the role, so a reused role created again keeps
+  // its same-named policy and trust too.
+  if (targets.some((target) => target.roleId !== role.RoleId)) {
     await removeOrphanedEntries(role.CreateDate ?? null);
     const replaced = `IAM role ${roleName} was deleted and created again after this setup, so Radius left the new role and its policies as they are.`;
     for (const target of targets) {
@@ -1776,8 +1806,10 @@ async function deleteCreatedRole(
       "warning"
     );
   }
-  if (trustedGitHubSubjects(trust, ports.accountId).length > 0) {
-    return keep("its trust policy still lets in GitHub subjects");
+  // Fail closed, as delete does: any principal the trust policy still lets
+  // in, a GitHub subject or not, may be using the role.
+  if (!trustAllowsOnlySubjects(trust, ports.accountId, [])) {
+    return keep("its trust policy still lets other principals assume it");
   }
   for (const [command, field, noun] of [
     ["list-role-policies", "PolicyNames", "inline"],

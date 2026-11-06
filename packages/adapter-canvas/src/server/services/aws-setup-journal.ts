@@ -74,6 +74,25 @@ export interface AwsSetupJournal<Operation> {
 // it as not applied without reading AWS.
 class WriteNotSent extends Error {}
 
+/**
+ * The AWS CLI session failed before the journal could read AWS, such as an
+ * expired sign-in. It says nothing about the change, so it costs the change no
+ * reconciliation attempt: the caller reports it and tries again once the
+ * person signs in.
+ */
+export class AwsSessionUnavailableError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "AwsSessionUnavailableError";
+    this.code = code;
+  }
+}
+
+const isSessionUnavailable = (error: unknown): boolean =>
+  error instanceof AwsSessionUnavailableError;
+
 // The AWS CLI exits 254 when the service answered the request with an error.
 // The journal reads any exit of 128 or more as a killed process, so the
 // answer is passed on with an ordinary failure code.
@@ -141,12 +160,22 @@ export function awsSetupChangeIntent(
   };
   switch (change.kind) {
     case "aws_role.create":
-    case "aws_trust.add":
       return { ...base, subjects: JSON.stringify(change.subjects) };
+    case "aws_trust.add":
+      return {
+        ...base,
+        roleId: change.roleId,
+        subjects: JSON.stringify(change.subjects)
+      };
     case "aws_role_policy.put":
-      return { ...base, policyName: change.policyName };
+      return { ...base, roleId: change.roleId, policyName: change.policyName };
     case "aws_access_entry.create":
-      return { ...base, cluster: change.cluster, region: change.region };
+      return {
+        ...base,
+        roleId: change.roleId,
+        cluster: change.cluster,
+        region: change.region
+      };
   }
 }
 
@@ -174,20 +203,27 @@ export function awsSetupChangeFromIntent(
   const roleName = text(intent?.roleName);
   if (!accountId || !roleArn || !roleName) return null;
   const base = { accountId, roleArn, roleName };
+  // Optional: a missing id is kept, and a rollback refuses the entry.
+  const roleId = text(intent?.roleId) || null;
   switch (kind) {
-    case "aws_role.create":
-    case "aws_trust.add": {
+    case "aws_role.create": {
       const subjects = stringList(intent?.subjects);
       return subjects ? { kind, ...base, subjects } : null;
     }
+    case "aws_trust.add": {
+      const subjects = stringList(intent?.subjects);
+      return subjects ? { kind, ...base, roleId, subjects } : null;
+    }
     case "aws_role_policy.put": {
       const policyName = text(intent?.policyName);
-      return policyName ? { kind, ...base, policyName } : null;
+      return policyName ? { kind, ...base, roleId, policyName } : null;
     }
     case "aws_access_entry.create": {
       const cluster = text(intent?.cluster);
       const region = text(intent?.region);
-      return cluster && region ? { kind, ...base, cluster, region } : null;
+      return cluster && region ?
+          { kind, ...base, roleId, cluster, region }
+        : null;
     }
     default:
       return null;
@@ -221,7 +257,9 @@ export async function reconcileAwsSetupChange(
     { accountId: change.accountId },
     runAws
   );
-  if (!session.ok) throw new Error(session.message);
+  if (!session.ok) {
+    throw new AwsSessionUnavailableError(session.code, session.message);
+  }
   if (change.kind === "aws_access_entry.create") {
     const read = await runAws([
       "eks",
@@ -318,7 +356,7 @@ export function recordAwsSetupChange(
   const { roleArn, roleName } = change;
   switch (change.kind) {
     case "aws_role.create": {
-      const role = record(parse(stdout).Role);
+      const roleId = text(record(parse(stdout).Role).RoleId) || null;
       recordAwsRole(operation, {
         state: "created",
         origin: "this_operation",
@@ -326,28 +364,40 @@ export function recordAwsSetupChange(
         // under one role.
         roleArn,
         roleName,
-        roleId: text(role.RoleId) || null
+        roleId
       });
       for (const subject of change.subjects) {
-        recordAwsTrustSubject(operation, { roleArn, roleName, subject });
+        recordAwsTrustSubject(operation, {
+          roleArn,
+          roleName,
+          roleId,
+          subject
+        });
       }
       return;
     }
     case "aws_trust.add":
       for (const subject of change.subjects) {
-        recordAwsTrustSubject(operation, { roleArn, roleName, subject });
+        recordAwsTrustSubject(operation, {
+          roleArn,
+          roleName,
+          roleId: change.roleId,
+          subject
+        });
       }
       return;
     case "aws_role_policy.put":
       recordAwsRolePolicy(operation, {
         roleArn,
         roleName,
+        roleId: change.roleId,
         policyName: change.policyName
       });
       return;
     case "aws_access_entry.create":
       recordAwsAccessEntry(operation, {
         roleArn,
+        roleId: change.roleId,
         roleName,
         cluster: change.cluster,
         region: change.region
@@ -377,6 +427,7 @@ export function createAwsSetupJournal<
         target: awsSetupChangeTarget(change, attemptOf(operation)),
         intent: awsSetupChangeIntent(change, requestedAt),
         persist: dependencies.persist,
+        rethrowReconciliationError: isSessionUnavailable,
         validateBeforeMutation: async () => {
           refused = await sender.guard(args);
           if (refused) throw new WriteNotSent();
@@ -442,6 +493,7 @@ export function createAwsSetupJournal<
           kind: mutation.kind,
           target: mutation.target,
           persist: dependencies.persist,
+          rethrowReconciliationError: isSessionUnavailable,
           mutate: () => {
             throw new Error("A reconciled AWS change is never sent again.");
           },

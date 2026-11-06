@@ -10,7 +10,10 @@ import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { AwsCommandResult } from "./aws-deploy-identity.js";
 import { createAwsEnvironmentAccess } from "./aws-environment-access.js";
-import type { AwsSetupJournal } from "./aws-setup-journal.js";
+import {
+  AwsSessionUnavailableError,
+  type AwsSetupJournal
+} from "./aws-setup-journal.js";
 import {
   addLegacyStep,
   buildStages,
@@ -3158,6 +3161,64 @@ describe("AWS environment access with a setup journal", () => {
     );
   });
 
+  it.each([
+    ["while it settles an earlier write", "reconcile"],
+    ["while it settles a write it just sent", "write"]
+  ])(
+    "reports an AWS session that fails %s with the session's own code",
+    async (_label, where) => {
+      const expired = new AwsSessionUnavailableError(
+        "aws-cli-login-required",
+        "Your AWS CLI session has expired. Sign in again."
+      );
+      const h = harness(
+        happyPath,
+        defaultSubject,
+        undefined,
+        undefined,
+        undefined,
+        journalOf(
+          where === "reconcile" ?
+            {
+              reconcile: async () => {
+                throw expired;
+              }
+            }
+          : {
+              write: async () => {
+                throw expired;
+              }
+            }
+        )
+      );
+
+      expect(await h.access.setup(operation, input, EXECUTOR)).toEqual({
+        ok: false,
+        status: 400,
+        error: "Your AWS CLI session has expired. Sign in again.",
+        code: "aws-cli-login-required"
+      });
+    }
+  );
+
+  it("passes on any other journal error", async () => {
+    const h = harness(
+      happyPath,
+      defaultSubject,
+      undefined,
+      undefined,
+      undefined,
+      journalOf({
+        reconcile: async () => {
+          throw new Error("store offline");
+        }
+      })
+    );
+    await expect(h.access.setup(operation, input, EXECUTOR)).rejects.toThrow(
+      "store offline"
+    );
+  });
+
   it("goes on with setup when a settled write asked for no pause", async () => {
     const write = vi.fn<AwsSetupJournal<Operation>["write"]>(
       async (_op, _change, args, sender) =>
@@ -3232,6 +3293,7 @@ describe("AWS environment access rollback", () => {
     artifactType: "aws_role_policy" as const,
     roleArn: ROLE_ARN,
     roleName: ROLE,
+    roleId: "AROA1",
     policyName: "radius-deploy-dev-1"
   };
   const rollbackScript = (lock: Record<string, Answer>) => ({
@@ -3240,6 +3302,7 @@ describe("AWS environment access rollback", () => {
     "iam get-role": ok({
       Role: {
         Arn: ROLE_ARN,
+        RoleId: "AROA1",
         AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [DEV])
       }
     }),
@@ -3428,13 +3491,18 @@ describe("AWS environment access rollback", () => {
     artifactType: "aws_access_entry" as const,
     roleArn: ROLE_ARN,
     roleName: ROLE,
+    roleId: "AROA1",
     cluster: "shop",
     region: "us-west-2"
   };
   const entryScript = (lock: Record<string, Answer>) => ({
     ...rollbackScript(lock),
     "iam get-role": ok({
-      Role: { ...JSON.parse(managedRoleFor([DEV])), Arn: ROLE_ARN }
+      Role: {
+        ...JSON.parse(managedRoleFor([DEV])),
+        Arn: ROLE_ARN,
+        RoleId: "AROA1"
+      }
     }),
     "eks describe-access-entry": ok({
       accessEntry: { tags: { "radius-managed": "true" } }
@@ -3466,6 +3534,7 @@ describe("AWS environment access rollback", () => {
           artifactType: "aws_trust_subject",
           roleArn: ROLE_ARN,
           roleName: ROLE,
+          roleId: "AROA1",
           subject: DEV
         },
         entryTarget
@@ -3533,7 +3602,8 @@ describe("AWS environment access rollback", () => {
         "iam get-role": ok({
           Role: {
             ...JSON.parse(managedRoleFor([DEV])),
-            Arn: ROLE_ARN
+            Arn: ROLE_ARN,
+            RoleId: "AROA1"
           }
         }),
         "eks describe-access-entry": ok({
@@ -3554,6 +3624,7 @@ describe("AWS environment access rollback", () => {
           artifactType: "aws_access_entry",
           roleArn: ROLE_ARN,
           roleName: ROLE,
+          roleId: "AROA1",
           cluster: "shop",
           region: "us-west-2"
         }

@@ -3141,7 +3141,10 @@ describe("the changes setup records", () => {
   }
 
   it("names the role, its policy, and its access entry on a fresh account", async () => {
-    const aws = fakeAws(happyPath);
+    const aws = fakeAws({
+      ...happyPath,
+      "iam create-role": ok({ Role: { Arn: ROLE_ARN, RoleId: "AROA1" } })
+    });
     const recorded = recording(aws);
 
     expect(await setupAwsDeployIdentity(request, recorded.ports)).toMatchObject(
@@ -3161,6 +3164,7 @@ describe("the changes setup records", () => {
         accountId: ACCOUNT,
         roleArn: ROLE_ARN,
         roleName: ROLE,
+        roleId: "AROA1",
         policyName: "radius-deploy-dev-f5fb7acf8f59"
       },
       {
@@ -3168,16 +3172,49 @@ describe("the changes setup records", () => {
         accountId: ACCOUNT,
         roleArn: ROLE_ARN,
         roleName: ROLE,
+        roleId: "AROA1",
         cluster: "shop",
         region: "us-west-2"
       }
     ]);
   });
 
+  it("does not record a policy that replaces a legacy one, so a rollback keeps the grant", async () => {
+    const legacyDocument = buildAwsEnvironmentPermissionPolicy("us-west-2");
+    const aws = fakeAws({
+      ...happyPath,
+      ...existingProvider,
+      "iam get-role": ok({
+        Role: { ...managedRole([DEV, PROD]).Role, RoleId: "AROA1" }
+      }),
+      "iam get-role-policy": ok({
+        PolicyName: "radius-deploy-dev",
+        PolicyDocument: legacyDocument
+      }),
+      "iam update-assume-role-policy": ok(),
+      "iam delete-role-policy": ok()
+    });
+    const recorded = recording(aws);
+
+    expect(await setupAwsDeployIdentity(request, recorded.ports)).toMatchObject(
+      { ok: true }
+    );
+
+    // The replacement was written and the legacy policy removed, but only the
+    // access entry is this setup's to undo.
+    expect(aws.find("iam put-role-policy")).toBeDefined();
+    expect(aws.find("iam delete-role-policy")).toContain("radius-deploy-dev");
+    expect(recorded.changes.map((change) => change.kind)).toEqual([
+      "aws_access_entry.create"
+    ]);
+  });
+
   it("names only the subjects a reused role did not trust", async () => {
     const aws = fakeAws({
       ...happyPath,
-      "iam get-role": ok(managedRole([DEV])),
+      "iam get-role": ok({
+        Role: { ...managedRole([DEV]).Role, RoleId: "AROA7" }
+      }),
       "iam list-role-policies": ok({ PolicyNames: [] }),
       "iam update-assume-role-policy": ok()
     });
@@ -3193,6 +3230,7 @@ describe("the changes setup records", () => {
       accountId: ACCOUNT,
       roleArn: ROLE_ARN,
       roleName: ROLE,
+      roleId: "AROA7",
       subjects: [DEV_ID]
     });
   });
@@ -3234,6 +3272,7 @@ describe("rollbackAwsSetupChanges", () => {
       artifactType: "aws_access_entry" as const,
       roleArn: ROLE_ARN,
       roleName: ROLE,
+      roleId: "AROA1",
       cluster: "shop",
       region: "us-west-2"
     },
@@ -3242,6 +3281,7 @@ describe("rollbackAwsSetupChanges", () => {
       artifactType: "aws_role_policy" as const,
       roleArn: ROLE_ARN,
       roleName: ROLE,
+      roleId: "AROA1",
       policyName: "radius-deploy-dev-1"
     },
     subject: {
@@ -3249,6 +3289,7 @@ describe("rollbackAwsSetupChanges", () => {
       artifactType: "aws_trust_subject" as const,
       roleArn: ROLE_ARN,
       roleName: ROLE,
+      roleId: "AROA1",
       subject: DEV
     },
     role: {
@@ -3330,6 +3371,53 @@ describe("rollbackAwsSetupChanges", () => {
     expect(aws.locks).toEqual([{ roleName: ROLE, after: 2 }]);
   });
 
+  it.each([
+    ["an AWS service", { Service: "ec2.amazonaws.com" }],
+    ["another account", { AWS: "arn:aws:iam::999999999999:root" }],
+    [
+      "another identity provider",
+      {
+        Federated: "arn:aws:iam::123456789012:oidc-provider/token.example.com"
+      }
+    ]
+  ])(
+    "keeps a created role whose trust still lets in %s",
+    async (_label, principal) => {
+      const trust = buildGitHubTrustPolicy(ACCOUNT, [DEV]);
+      const aws = fakeAws({
+        ...fullRollback,
+        "iam get-role": ok({
+          Role: {
+            ...managedRole([DEV]).Role,
+            RoleId: "AROA1",
+            AssumeRolePolicyDocument: {
+              ...trust,
+              Statement: [
+                ...trust.Statement,
+                {
+                  Effect: "Allow",
+                  Principal: principal,
+                  Action: "sts:AssumeRole"
+                }
+              ]
+            }
+          }
+        })
+      });
+
+      const result = await rollback(aws);
+
+      expect(outcomes(result)).toMatchObject({
+        subject: "deleted",
+        role: "skipped"
+      });
+      expect(result.find((entry) => entry.key === "role")?.detail).toBe(
+        `Kept IAM role ${ROLE}, because its trust policy still lets other principals assume it. Delete it in the IAM console if nothing needs it.`
+      );
+      expect(writes(aws)).not.toContain("iam delete-role");
+    }
+  );
+
   it("keeps a created role another environment now trusts", async () => {
     const aws = fakeAws({
       ...fullRollback,
@@ -3343,7 +3431,7 @@ describe("rollbackAwsSetupChanges", () => {
       role: "skipped"
     });
     expect(result.find((entry) => entry.key === "role")?.detail).toBe(
-      `Kept IAM role ${ROLE}, because its trust policy still lets in GitHub subjects. Delete it in the IAM console if nothing needs it.`
+      `Kept IAM role ${ROLE}, because its trust policy still lets other principals assume it. Delete it in the IAM console if nothing needs it.`
     );
     expect(writes(aws)).not.toContain("iam delete-role");
   });
@@ -3651,6 +3739,43 @@ describe("rollbackAwsSetupChanges", () => {
       )
     ).toEqual([SHARED]);
     expect(writes(aws)).not.toContain("iam delete-role");
+  });
+
+  it.each([
+    ["a policy and trust subject", ["policy", "subject"]],
+    ["an access entry and policy", ["entry", "policy"]]
+  ])(
+    "leaves %s on a reused role created again under the same name",
+    async (_label, keys) => {
+      const aws = fakeAws({
+        ...fullRollback,
+        "iam get-role": ok({
+          Role: { ...managedRole([DEV]).Role, RoleId: "AROA9" }
+        }),
+        "eks describe-access-entry": ok({
+          accessEntry: {
+            createdAt: "2026-10-02T00:00:00+00:00",
+            tags: { "radius-managed": "true" }
+          }
+        })
+      });
+      const result = await rollback(
+        aws,
+        all.filter((target) => keys.includes(target.key))
+      );
+      expect(result.every((entry) => entry.outcome === "skipped")).toBe(true);
+      expect(writes(aws)).toEqual([]);
+    }
+  );
+
+  it("changes nothing for a change whose role id was not recorded", async () => {
+    const aws = fakeAws(fullRollback);
+    const result = await rollback(aws, [
+      targets.policy,
+      { ...targets.subject, roleId: null }
+    ]);
+    expect(result.every((entry) => entry.outcome === "skipped")).toBe(true);
+    expect(aws.calls).toEqual([]);
   });
 
   it("does nothing when the trust policy cannot be read", async () => {

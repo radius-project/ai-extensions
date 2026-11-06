@@ -872,6 +872,125 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it("waits for AWS sign-in while a restart settles a write, without counting it against the write", async () => {
+    const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      // Expired when the restart first reads AWS, then signed in again.
+      "sts get-caller-identity": [
+        {
+          stderr:
+            "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: The security token included in the request is expired",
+          code: 254
+        },
+        { stdout: '{"Account":"123456789012"}' }
+      ],
+      "iam get-role": {
+        stdout: JSON.stringify({
+          Role: {
+            Arn: roleArn,
+            RoleId: "AROA1",
+            Tags: [{ Key: "radius-operation", Value: "op_aws_expired" }]
+          }
+        })
+      }
+    });
+    const runtime = awsSetupRuntime();
+    try {
+      await runtime.getOrCreateServer("aws-panel", "environment");
+      const live = createOperation({
+        operationId: "op_aws_expired",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws",
+        stages: buildStages({ includeIdentity: true })
+      });
+      live.context.githubLogin = "saved-account";
+      live.resumeRequest = {
+        needsAzureCredentials: false,
+        github: { login: "saved-account", credentialSource: "keyring" },
+        environment: {
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop",
+          roleName: "radius-deploy-fixture-app",
+          existingRoleArn: ""
+        }
+      };
+      recordGitHubEnvironment(live, {
+        state: "created",
+        origin: "this_operation",
+        repo: "fixture/app",
+        name: "dev",
+        providerId: "17"
+      });
+      enterStage(live, STAGE_AUTHORIZE_IDENTITY);
+      // The extension stopped after sending create-role, before the answer.
+      prepareProviderMutation(live, {
+        kind: "aws_role.create",
+        target: `attempt-1|${roleArn}`,
+        intent: {
+          requestedAt: "2026-10-30T12:00:00.000Z",
+          accountId: "123456789012",
+          roleArn,
+          roleName: "radius-deploy-fixture-app",
+          subjects: '["repo:fixture/app:environment:dev"]'
+        }
+      });
+      setExecutionActive(live, true);
+      const op = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(live))
+      );
+      expect(op.recoveryState).toBe("provider_reconciliation_pending");
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+      runtime.setupExecution.recoverOperation(op);
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+
+      expect(
+        (await aws.calls()).map((call) => call.split(" ").slice(0, 2).join(" "))
+      ).toEqual([
+        "--version",
+        "sts get-caller-identity",
+        "--version",
+        "sts get-caller-identity",
+        "iam get-role"
+      ]);
+      expect(
+        op.steps.filter((step: { label: string }) =>
+          step.label.startsWith(
+            "Radius could not sign in to AWS to check the interrupted setup."
+          )
+        )
+      ).toHaveLength(1);
+      expect(op.providerRecovery.mutations[0].reconcileAttempts ?? 0).toBe(0);
+      expect(op.state).toBe("cancelled");
+      expect(op.providerRecovery.state).not.toBe("rollback_pending");
+      expect(op.providerRecovery.mutations[0]).toMatchObject({
+        kind: "aws_role.create",
+        status: "confirmed",
+        providerId: "AROA1"
+      });
+      expect(op.setupArtifacts.awsRole).toMatchObject({
+        state: "created",
+        roleId: "AROA1"
+      });
+      expect(
+        projectOperationActions(op).map((action: { id: string }) => action.id)
+      ).toEqual(
+        expect.arrayContaining(["continue-setup", "rollback", "exit-setup"])
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
   it("rolls back what an AWS setup created, under the lock, then its GitHub environment", async () => {
     const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
     const aws = await fakeAwsOnPath({
@@ -884,16 +1003,7 @@ describe("production environment owner HTTP binding", () => {
           Role: {
             Arn: roleArn,
             RoleId: "AROA1",
-            AssumeRolePolicyDocument: {
-              Version: "2012-10-17",
-              Statement: [
-                {
-                  Effect: "Allow",
-                  Principal: { Service: "ec2.amazonaws.com" },
-                  Action: "sts:AssumeRole"
-                }
-              ]
-            }
+            AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
           }
         })
       },
@@ -961,6 +1071,7 @@ describe("production environment owner HTTP binding", () => {
       recordAwsRolePolicy(op, {
         roleArn,
         roleName: "radius-deploy-fixture-app",
+        roleId: "AROA1",
         policyName: "radius-deploy-dev-1"
       });
       finish(op, "failed");
@@ -1100,6 +1211,7 @@ describe("production environment owner HTTP binding", () => {
       recordAwsRolePolicy(op, {
         roleArn,
         roleName: "radius-deploy-fixture-app",
+        roleId: "AROA1",
         policyName: "radius-deploy-dev-1"
       });
       finish(op, "failed");
@@ -1186,6 +1298,7 @@ describe("production environment owner HTTP binding", () => {
           stdout: JSON.stringify({
             Role: {
               Arn: arn(roles[0] as string),
+              RoleId: "AROA1",
               AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
             }
           })
@@ -1213,6 +1326,7 @@ describe("production environment owner HTTP binding", () => {
           recordAwsRolePolicy(op, {
             roleArn: arn(role),
             roleName: role,
+            roleId: "AROA1",
             policyName: "radius-deploy-dev-1"
           });
         }
@@ -1923,7 +2037,10 @@ describe("production environment owner HTTP binding", () => {
       expect(op.steps.map((step: { label: string }) => step.label)).toContain(
         "🔒 Took back the lock this setup holds on IAM role radius-deploy-fixture-app from its earlier attempt."
       );
-      expect(op.context.awsDeployIdentityLock).toBeNull();
+      // Cleared once the release answers, just after its delete-policy.
+      await vi.waitFor(() =>
+        expect(op.context.awsDeployIdentityLock).toBeNull()
+      );
     } finally {
       await runtime.stopServer("aws-panel", true);
       await aws.restore();

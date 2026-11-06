@@ -1840,6 +1840,7 @@ export class CanvasHarness {
       operationModule.recordAwsRolePolicy(operation, {
         roleArn,
         roleName: "radius-deploy-fixture-radius-app",
+        roleId: "AROA1",
         policyName: "radius-deploy-fixture-environment-1"
       });
     }

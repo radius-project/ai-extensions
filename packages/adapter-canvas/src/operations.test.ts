@@ -11347,17 +11347,24 @@ describe("the AWS setup ledger", () => {
     );
   });
 
-  it("records one entry per identity and revives a removed one", () => {
+  it("records one entry per identity and revives a removed one with its new role id", () => {
     const op = awsSetupWithChanges();
     const ledger = getSetupArtifactLedger(op);
     ledger.awsTrustSubjects[0].state = "deleted";
     recordAwsTrustSubject(op, {
       roleArn: ROLE_ARN,
       roleName: ROLE,
+      roleId: "AROA2",
       subject: SUBJECT
     });
     expect(ledger.awsTrustSubjects).toEqual([
-      { state: "created", roleArn: ROLE_ARN, roleName: ROLE, subject: SUBJECT }
+      {
+        state: "created",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA2",
+        subject: SUBJECT
+      }
     ]);
   });
 
@@ -11386,7 +11393,13 @@ describe("the AWS setup ledger", () => {
         roleId: 7
       },
       awsTrustSubjects: [
-        { state: "deleted", roleArn: ROLE_ARN, roleName: ROLE, subject: "s" },
+        {
+          state: "deleted",
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          roleId: "AROA1",
+          subject: "s"
+        },
         { roleArn: ROLE_ARN, roleName: ROLE },
         null,
         "text"
@@ -11409,7 +11422,13 @@ describe("the AWS setup ledger", () => {
       roleId: "7"
     });
     expect(restored.awsTrustSubjects).toEqual([
-      { state: "deleted", roleArn: ROLE_ARN, roleName: ROLE, subject: "s" }
+      {
+        state: "deleted",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        subject: "s"
+      }
     ]);
     expect(restored.awsRolePolicies).toEqual([]);
     expect(restored.awsAccessEntries).toEqual([
@@ -11417,6 +11436,8 @@ describe("the AWS setup ledger", () => {
         state: "created",
         roleArn: ROLE_ARN,
         roleName: ROLE,
+        // Kept without one, so a rollback can refuse it.
+        roleId: null,
         cluster: "shop",
         region: "us-west-2"
       }
