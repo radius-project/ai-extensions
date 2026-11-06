@@ -122,6 +122,11 @@ import {
 } from "./server/services/aws-environment-access.js";
 import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identity-lock.js";
 import { releaseRecordedAwsLock } from "./server/services/aws-recorded-lock.js";
+import { createAwsSetupJournal } from "./server/services/aws-setup-journal.js";
+import {
+  isAwsCleanupArtifactType,
+  rollbackAwsSetupArtifacts
+} from "./server/services/aws-setup-rollback.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
@@ -4102,7 +4107,7 @@ export interface EnvironmentOperationExecutionDependencies {
   awsEnabled: boolean;
   awsEnvironmentAccess: Pick<
     AwsEnvironmentAccess<EnvironmentOperationRecord>,
-    "setup" | "release"
+    "setup" | "release" | "rollback"
   >;
   executionOwner: EnvironmentExecutionOwner;
   scope: ReturnType<EnvironmentExecutionOwner["attachRuntime"]>;
@@ -4160,7 +4165,8 @@ export function createEnvironmentOperationExecution(
     throw new Error("Missing request coordinator dependency: awsEnabled");
   if (
     typeof awsEnvironmentAccess?.setup !== "function" ||
-    typeof awsEnvironmentAccess.release !== "function"
+    typeof awsEnvironmentAccess.release !== "function" ||
+    typeof awsEnvironmentAccess.rollback !== "function"
   )
     throw new Error(
       "Missing request coordinator dependency: awsEnvironmentAccess"
@@ -4930,6 +4936,26 @@ export function createEnvironmentOperationExecution(
     }
 
     if (isStopped()) return;
+    // The AWS changes go before the GitHub environment, the reverse of setup.
+    const awsPass = await rollbackAwsSetupArtifacts(op, {
+      attempt,
+      awsEnabled: dependencies.awsEnabled,
+      selected,
+      access: awsEnvironmentAccess,
+      steps,
+      persist,
+      isStopped
+    });
+    if (awsPass.attempted) {
+      if (awsPass.interrupted && awsPass.results.length === 0) return;
+      warnings.push(...awsPass.warnings);
+      results = [...results, ...awsPass.results];
+      recordCleanupState(op, { state: "running", results: carriedResults() });
+      await persist();
+      if (awsPass.interrupted) return;
+    }
+
+    if (isStopped()) return;
     // A GitHub environment can be one of the selected targets, and skipping it
     // here would report a clean removal while the environment survived.
     if (
@@ -4972,7 +4998,8 @@ export function createEnvironmentOperationExecution(
           .filter(
             (entry: { artifactType: string }) =>
               entry.artifactType !== "github_environment" &&
-              entry.artifactType !== "github_environment_variable"
+              entry.artifactType !== "github_environment_variable" &&
+              !isAwsCleanupArtifactType(entry.artifactType)
           )
           .map((entry: { key: string }) => entry.key)
       ),
@@ -5744,6 +5771,11 @@ export function createProductionCanvasServerRuntime(
       // Read through the live binding: the extension configures the
       // file-backed registry after this runtime is created.
       store: { persist: () => operations.persist() },
+      journal: createAwsSetupJournal<EnvironmentOperationRecord>({
+        runAws: runAwsCli,
+        persist: () => operations.persist(),
+        now: () => Date.now()
+      }),
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage
     });

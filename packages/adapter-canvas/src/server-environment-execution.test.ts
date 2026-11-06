@@ -96,7 +96,11 @@ function coordinator(
   operationControl: OperationControlService = unavailable,
   awsEnvironmentAccess: Parameters<
     typeof createInstanceRequestCoordinator
-  >[3]["awsEnvironmentAccess"] = { setup: unavailable, release: unavailable }
+  >[3]["awsEnvironmentAccess"] = {
+    setup: unavailable,
+    release: unavailable,
+    rollback: unavailable
+  }
 ) {
   return createInstanceRequestCoordinator(
     instanceId,
@@ -1155,7 +1159,7 @@ describe("production coordinator scheduling scopes", () => {
         { authorizeAzure: unavailable, configureEnvironment },
         undefined,
         undefined,
-        { setup, release }
+        { setup, release, rollback: unavailable }
       );
       const done = settled(owner, "panel");
       handler.scheduleEnvironmentOperation(op);
@@ -1406,7 +1410,7 @@ describe("production coordinator scheduling scopes", () => {
       undefined,
       undefined,
       undefined,
-      { setup, release: async () => {} }
+      { setup, release: async () => {}, rollback: unavailable }
     );
 
     const done = settled(owner, "panel");
@@ -1472,7 +1476,7 @@ describe("production coordinator scheduling scopes", () => {
       },
       undefined,
       undefined,
-      { setup, release: async () => {} }
+      { setup, release: async () => {}, rollback: unavailable }
     );
 
     const done = settled(owner, "panel");
@@ -1545,7 +1549,7 @@ describe("production coordinator scheduling scopes", () => {
         { authorizeAzure: unavailable, configureEnvironment },
         undefined,
         undefined,
-        { setup, release }
+        { setup, release, rollback: unavailable }
       );
 
       const done = settled(owner, "panel");
@@ -1705,7 +1709,11 @@ describe("production coordinator scheduling scopes", () => {
   ] as const)("requires the explicit %s dependency", (name) => {
     const dependencies = {
       awsEnabled: false,
-      awsEnvironmentAccess: { setup: unavailable, release: unavailable },
+      awsEnvironmentAccess: {
+        setup: unavailable,
+        release: unavailable,
+        rollback: unavailable
+      },
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: createEnvironmentAccountContext("runtime", {
         createReadOnlyExecutor: unavailable,
@@ -3546,7 +3554,11 @@ describe("production coordinator scheduling scopes", () => {
     });
     const execution = createEnvironmentOperationExecution({
       awsEnabled: false,
-      awsEnvironmentAccess: { setup: unavailable, release: unavailable },
+      awsEnvironmentAccess: {
+        setup: unavailable,
+        release: unavailable,
+        rollback: unavailable
+      },
       executionOwner: owner,
       scope,
       accountContext: account,

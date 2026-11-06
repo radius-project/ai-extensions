@@ -145,6 +145,23 @@ export interface FakeCliCommand {
   stdout?: string;
   stderr?: string;
   writeFiles?: Array<{ path: string; content: string; executable?: boolean }>;
+  /**
+   * Answers at most this many calls. Later calls fall through to the next
+   * matching command, so a scenario can answer one command differently the
+   * second time it runs.
+   */
+  times?: number;
+}
+
+/**
+ * Whether a command may answer another call, given how many it answered.
+ * Injected into the generated script by source, like `fakeCliArgsMatch`.
+ */
+export function fakeCliCommandAvailable(
+  command: Pick<FakeCliCommand, "times">,
+  answered: number
+): boolean {
+  return command.times === undefined || answered < command.times;
 }
 
 /**
@@ -580,6 +597,24 @@ function argsMatch(command) {
   return (${fakeCliArgsMatch.toString()})(command, args);
 }
 
+function available(command, answered) {
+  return (${fakeCliCommandAvailable.toString()})(command, answered);
+}
+
+async function answeredBy(index) {
+  if (!logPath) return 0;
+  let text = "";
+  try {
+    text = await fs.readFile(logPath, "utf8");
+  } catch {
+    return 0;
+  }
+  return text
+    .split("\\n")
+    .filter(Boolean)
+    .filter((line) => JSON.parse(line).commandIndex === index).length;
+}
+
 if (!scenarioPath) {
   await appendLog({ tool, args, stdin, matched: false, error: "missing scenario" });
   console.error("RADIUS_FAKE_CLI_SCENARIO is not set");
@@ -594,9 +629,15 @@ try {
   // exit quietly rather than printing a stack trace into the suite output.
   process.exit(127);
 }
-const command = (scenario.commands || []).find(
-  (candidate) => candidate.tool === tool && argsMatch(candidate) && envMatches(candidate.env)
-);
+const commands = scenario.commands || [];
+let commandIndex = -1;
+for (const [index, candidate] of commands.entries()) {
+  if (candidate.tool !== tool || !argsMatch(candidate) || !envMatches(candidate.env)) continue;
+  if (!available(candidate, await answeredBy(index))) continue;
+  commandIndex = index;
+  break;
+}
+const command = commands[commandIndex];
 
 if (!command) {
   await appendLog({ tool, args, stdin, matched: false });
@@ -612,7 +653,7 @@ for (const file of command.writeFiles || []) {
   if (file.executable && process.platform !== "win32") await fs.chmod(target, 0o755);
 }
 
-await appendLog({ tool, args, stdin, matched: true, exitCode: command.exitCode || 0 });
+await appendLog({ tool, args, stdin, matched: true, commandIndex, exitCode: command.exitCode || 0 });
 if (command.stdout) process.stdout.write(command.stdout);
 if (command.stderr) process.stderr.write(command.stderr);
 process.exit(command.exitCode || 0);
@@ -1740,10 +1781,14 @@ export class CanvasHarness {
    * restored the way a restart restores it. It created its GitHub environment
    * and still records the deploy identity lock it held.
    */
-  async seedInterruptedAwsSetup(lock: {
-    policyArn: string;
-    policyId: string;
-  }): Promise<string> {
+  async seedInterruptedAwsSetup(
+    lock: {
+      policyArn: string;
+      policyId: string;
+    },
+    // Records that the setup created its deploy role and permission policy.
+    { createdRole = false }: { createdRole?: boolean } = {}
+  ): Promise<string> {
     const operationModule: OperationsModule =
       await import("../../../src/operations.js");
     const operation = operationModule.createOperation({
@@ -1782,6 +1827,23 @@ export class CanvasHarness {
       operationModule.STAGE_AUTHORIZE_IDENTITY
     );
     operationModule.setContext(operation, { awsDeployIdentityLock: lock });
+    if (createdRole) {
+      const roleArn =
+        "arn:aws:iam::123456789012:role/radius-deploy-fixture-radius-app";
+      operationModule.recordAwsRole(operation, {
+        state: "created",
+        origin: "this_operation",
+        roleArn,
+        roleName: "radius-deploy-fixture-radius-app",
+        roleId: "AROA1"
+      });
+      operationModule.recordAwsRolePolicy(operation, {
+        roleArn,
+        roleName: "radius-deploy-fixture-radius-app",
+        roleId: "AROA1",
+        policyName: "radius-deploy-fixture-environment-1"
+      });
+    }
     operationModule.setExecutionActive(operation, true);
     const restored = operationModule.fromPersistedOperation(
       JSON.parse(

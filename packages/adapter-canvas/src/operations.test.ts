@@ -3,6 +3,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
+  recordAwsRole,
+  recordAwsTrustSubject,
+  recordAwsRolePolicy,
+  recordAwsAccessEntry,
   mayHaveStartedVerification,
   getSetupArtifactLedger,
   announceOperationTerminal,
@@ -2230,6 +2234,16 @@ describe("record shape", () => {
         name: null,
         providerId: null
       },
+      awsRole: {
+        state: "not_started",
+        origin: "unknown",
+        roleArn: null,
+        roleName: null,
+        roleId: null
+      },
+      awsTrustSubjects: [],
+      awsRolePolicies: [],
+      awsAccessEntries: [],
       githubEnvironmentVariables: [],
       commit: {
         mode: "not_started",
@@ -11164,3 +11178,469 @@ describe("mayHaveStartedVerification", () => {
     expect(mayHaveStartedVerification(op)).toBe(false);
   });
 });
+
+describe("the AWS setup ledger", () => {
+  const ROLE_ARN = "arn:aws:iam::123456789012:role/radius-deploy-contoso-store";
+  const ROLE = "radius-deploy-contoso-store";
+  const SUBJECT = "repo:contoso/store:environment:dev";
+
+  function awsSetupWithChanges() {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    op.context.githubLogin = "octocat";
+    op.resumeRequest = {
+      needsAzureCredentials: false,
+      environment: { provider: "aws" }
+    };
+    ledgerEnvironment(op, "created", { providerId: "17" });
+    recordAwsRole(op, {
+      state: "created",
+      origin: "this_operation",
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      roleId: "AROA1"
+    });
+    recordAwsTrustSubject(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      subject: SUBJECT
+    });
+    recordAwsRolePolicy(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      policyName: "radius-deploy-dev-1"
+    });
+    recordAwsAccessEntry(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      cluster: "shop",
+      region: "us-west-2"
+    });
+    requestStop(op);
+    stopAtBoundary(op, "after-aws-deploy-identity");
+    return op;
+  }
+
+  it("removes AWS changes in reverse order, before the GitHub environment", () => {
+    expect(
+      provenOwnedCleanupTargets(awsSetupWithChanges()).map((target) => [
+        target.artifactType,
+        target.target
+      ])
+    ).toEqual([
+      ["aws_access_entry", `IAM role ${ROLE} on EKS cluster shop (us-west-2)`],
+      ["aws_role_policy", `radius-deploy-dev-1 on IAM role ${ROLE}`],
+      [
+        "aws_trust_subject",
+        `${SUBJECT} in the trust policy of IAM role ${ROLE}`
+      ],
+      ["aws_role", `IAM role ${ROLE}`],
+      ["github_environment", "contoso/store:dev"]
+    ]);
+  });
+
+  it("offers Delete setup for a setup that only changed AWS", () => {
+    const op = awsSetupWithChanges();
+    getSetupArtifactLedger(op).githubEnvironment.state = "reused";
+    expect(canStartRollback(op)).toMatchObject({
+      ok: true,
+      targets: expect.arrayContaining([
+        expect.objectContaining({ artifactType: "aws_role" })
+      ])
+    });
+    expect(projectCleanupSummary(op).retainedArtifacts).toContainEqual({
+      kind: "aws_role",
+      target: `IAM role ${ROLE}`
+    });
+  });
+
+  it.each([
+    ["Exit setup", false],
+    ["Abandon setup", true]
+  ])("lists every recorded AWS change in %s", (label, abandons) => {
+    const op = awsSetupWithChanges();
+    if (abandons) {
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+    }
+    const action = projectOperationActions(op).find(
+      (entry) => entry.id === "exit-setup"
+    );
+    expect(action.label).toBe(label);
+    const listed = (
+      abandons ?
+        action.preview.manualActionRequired
+      : action.preview.removes).map((entry: { kind: string }) => entry.kind);
+    expect(listed).toEqual(
+      expect.arrayContaining([
+        "aws_access_entry",
+        "aws_role_policy",
+        "aws_trust_subject",
+        "aws_role"
+      ])
+    );
+  });
+
+  describe("what Delete setup says it removes", () => {
+    const preview = (op, options = {}) =>
+      projectOperationActions(op, options).find(
+        (action) => action.id === "rollback"
+      ).preview;
+    const keys = (entries) => entries.map((e) => `${e.kind}#${e.target}`);
+    const CONDITIONAL = [
+      {
+        kind: "aws_access_entry",
+        target: `IAM role ${ROLE} on EKS cluster shop (us-west-2), if nothing else uses it`
+      },
+      {
+        kind: "aws_role",
+        target: `IAM role ${ROLE}, if nothing else uses it`
+      }
+    ];
+
+    // Another environment on the cluster can share the role and entry, and
+    // only AWS and GitHub can tell. So the rows say what the rule is.
+    it("names the role and access entry as removed only if nothing else uses them", () => {
+      const removes = preview(awsSetupWithChanges()).removes;
+      expect(removes).toEqual(expect.arrayContaining(CONDITIONAL));
+      expect(removes).toContainEqual({
+        kind: "aws_role_policy",
+        target: `radius-deploy-dev-1 on IAM role ${ROLE}`
+      });
+    });
+
+    it("keeps every AWS change, saying why, while AWS is turned off", () => {
+      const { removes, keeps } = preview(awsSetupWithChanges(), {
+        awsEnabled: false
+      });
+      expect(removes.map((entry) => entry.kind)).toEqual([
+        "github_environment"
+      ]);
+      expect(
+        keeps
+          .filter((entry) => entry.kind.startsWith("aws_"))
+          .map((entry) => [entry.kind, entry.action])
+      ).toEqual(
+        [
+          "aws_access_entry",
+          "aws_role_policy",
+          "aws_trust_subject",
+          "aws_role"
+        ].map((kind) => [
+          kind,
+          "AWS environments are turned off, so Radius will not change this in AWS. Turn them on, then delete the setup again."
+        ])
+      );
+    });
+
+    it("keeps a trust subject other environments may present", () => {
+      const op = awsSetupWithChanges();
+      const shared = "repository_owner_id:11:repository_id:22";
+      recordAwsTrustSubject(op, {
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        subject: shared
+      });
+      const { removes, keeps } = preview(op);
+      const label = `${shared} in the trust policy of IAM role ${ROLE}`;
+      expect(keys(removes)).not.toContain(`aws_trust_subject#${label}`);
+      expect(keeps).toContainEqual({
+        kind: "aws_trust_subject",
+        target: label,
+        reason: "retained",
+        action:
+          "This subject doesn't name one repository and this environment, so other environments may present it too. Radius keeps it."
+      });
+    });
+
+    it.each([
+      ["Delete setup", "rollback", {}],
+      ["Delete setup with AWS off", "rollback", { awsEnabled: false }],
+      ["Retry deletion", "retry-cleanup", {}]
+    ])("lists no item in two places in %s", (_label, id, options) => {
+      const op = awsSetupWithChanges();
+      if (id === "retry-cleanup") {
+        const targets = provenOwnedCleanupTargets(op);
+        warnedCleanup(
+          op,
+          targets.map((target) => ({
+            artifactType: target.artifactType,
+            target: target.target,
+            identity: target.identity,
+            outcome: "warning",
+            detail: "Radius did not get a result."
+          }))
+        );
+        finish(op, "failed_partial", {
+          failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+        });
+      }
+      const action = projectOperationActions(op, options).find(
+        (entry) => entry.id === id
+      );
+      const { removes, keeps, manualActionRequired } = action.preview;
+      // Compared by row before any "if nothing else uses it" suffix.
+      const base = (entries) =>
+        keys(entries).map((key) =>
+          key.replace(/, if nothing else uses it$/, "")
+        );
+      const all = [
+        ...base(removes),
+        ...base(keeps),
+        ...base(manualActionRequired)
+      ];
+      expect(all.length).toBeGreaterThan(0);
+      expect(new Set(all).size).toBe(all.length);
+    });
+  });
+
+  it("lists a reused role as kept, with why", () => {
+    const op = awsSetupWithChanges();
+    getSetupArtifactLedger(op).awsRole.state = "reused";
+    getSetupArtifactLedger(op).awsRole.origin = "radius_earlier_setup";
+    const rollback = projectOperationActions(op).find(
+      (action) => action.id === "rollback"
+    );
+    expect(rollback.preview.removes).not.toContainEqual(
+      expect.objectContaining({ kind: "aws_role" })
+    );
+    expect(rollback.preview.keeps).toContainEqual(
+      expect.objectContaining({
+        kind: "aws_role",
+        reason: "reused",
+        action: expect.stringContaining("this IAM role")
+      })
+    );
+  });
+
+  it.each([
+    ["aws_role", (op) => op.setupArtifacts.awsRole.state],
+    ["aws_trust_subject", (op) => op.setupArtifacts.awsTrustSubjects[0].state],
+    ["aws_role_policy", (op) => op.setupArtifacts.awsRolePolicies[0].state],
+    ["aws_access_entry", (op) => op.setupArtifacts.awsAccessEntries[0].state]
+  ])("marks a removed %s deleted, only by its identity", (kind, state) => {
+    const op = awsSetupWithChanges();
+    const [target] = provenOwnedCleanupTargets(op).filter(
+      (entry) => entry.artifactType === kind
+    );
+    expect(
+      recordCleanupDeletion(op, { artifactType: kind, identity: "other" })
+    ).toBe(false);
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType: kind,
+        identity: target.identity
+      })
+    ).toBe(true);
+    expect(state(op)).toBe("deleted");
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType: kind,
+        identity: target.identity
+      })
+    ).toBe(false);
+    expect(
+      provenOwnedCleanupTargets(op).some((entry) => entry.artifactType === kind)
+    ).toBe(false);
+  });
+
+  it("leads the role's identity with IAM's role id", () => {
+    expect(
+      cleanupArtifactIdentity("aws_role", {
+        roleArn: ROLE_ARN,
+        roleId: "AROA1"
+      })
+    ).toBe(`aroa1|${ROLE_ARN.toLowerCase()}`);
+    expect(cleanupArtifactIdentity("aws_role", { roleArn: ROLE_ARN })).toBe(
+      ROLE_ARN.toLowerCase()
+    );
+  });
+
+  it("records one entry per identity and revives a removed one with its new role id", () => {
+    const op = awsSetupWithChanges();
+    const ledger = getSetupArtifactLedger(op);
+    ledger.awsTrustSubjects[0].state = "deleted";
+    recordAwsTrustSubject(op, {
+      roleArn: ROLE_ARN,
+      roleName: ROLE,
+      roleId: "AROA2",
+      subject: SUBJECT
+    });
+    expect(ledger.awsTrustSubjects).toEqual([
+      {
+        state: "created",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA2",
+        subject: SUBJECT
+      }
+    ]);
+  });
+
+  it.each([
+    ["a trust subject", recordAwsTrustSubject, { roleArn: ROLE_ARN }],
+    ["a policy", recordAwsRolePolicy, { roleArn: ROLE_ARN, roleName: ROLE }],
+    [
+      "an access entry",
+      recordAwsAccessEntry,
+      { roleArn: ROLE_ARN, roleName: ROLE, cluster: "shop" }
+    ]
+  ])("ignores %s it cannot target precisely", (_label, record, entry) => {
+    const op = newOp();
+    record(op, entry);
+    record(op, null);
+    expect(hasTrackedSetupArtifactsForTest(op)).toBe(false);
+  });
+
+  it("restores a saved AWS ledger and drops entries it cannot use", () => {
+    const restored = readSetupArtifactLedger({
+      awsRole: {
+        state: "bogus",
+        origin: "nowhere",
+        roleArn: ROLE_ARN,
+        roleName: " ",
+        roleId: 7
+      },
+      awsTrustSubjects: [
+        {
+          state: "deleted",
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          roleId: "AROA1",
+          subject: "s"
+        },
+        { roleArn: ROLE_ARN, roleName: ROLE },
+        null,
+        "text"
+      ],
+      awsRolePolicies: "not a list",
+      awsAccessEntries: [
+        {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          cluster: "shop",
+          region: "us-west-2"
+        }
+      ]
+    });
+    expect(restored.awsRole).toEqual({
+      state: "not_started",
+      origin: "unknown",
+      roleArn: ROLE_ARN,
+      roleName: null,
+      roleId: "7"
+    });
+    expect(restored.awsTrustSubjects).toEqual([
+      {
+        state: "deleted",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        subject: "s"
+      }
+    ]);
+    expect(restored.awsRolePolicies).toEqual([]);
+    expect(restored.awsAccessEntries).toEqual([
+      {
+        state: "created",
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        // Kept without one, so a rollback can refuse it.
+        roleId: null,
+        cluster: "shop",
+        region: "us-west-2"
+      }
+    ]);
+    expect(
+      readSetupArtifactLedger({ awsRole: { state: "reused" } }).awsRole
+    ).toMatchObject({ state: "reused" });
+  });
+
+  it("ignores a role record with nothing to record", () => {
+    expect(recordAwsRole(null, { state: "created" })).toBeNull();
+    const op = newOp();
+    recordAwsRole(op, null);
+    expect(op.setupArtifacts.awsRole.state).toBe("not_started");
+  });
+
+  it("drops a saved entry with no role", () => {
+    expect(
+      readSetupArtifactLedger({
+        awsTrustSubjects: [{ roleName: ROLE, subject: SUBJECT }]
+      }).awsTrustSubjects
+    ).toEqual([]);
+  });
+
+  it.each([
+    [
+      "a created role",
+      (op) =>
+        recordAwsRole(op, {
+          state: "created",
+          roleArn: ROLE_ARN,
+          roleName: ROLE
+        })
+    ],
+    [
+      "an added trust subject",
+      (op) =>
+        recordAwsTrustSubject(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          subject: SUBJECT
+        })
+    ],
+    [
+      "a written policy",
+      (op) =>
+        recordAwsRolePolicy(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          policyName: "p"
+        })
+    ],
+    [
+      "a created access entry",
+      (op) =>
+        recordAwsAccessEntry(op, {
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          cluster: "shop",
+          region: "us-west-2"
+        })
+    ]
+  ])("reports what exists while setup runs, for %s alone", (_label, record) => {
+    const op = createOperation({
+      provider: "aws",
+      repo: "contoso/store",
+      environment: "dev"
+    });
+    expect(projectCleanupSummary(op)).toBeNull();
+    record(op);
+    expect(projectCleanupSummary(op)).not.toBeNull();
+  });
+
+  it("keeps the AWS ledger through a save and restore", () => {
+    const op = awsSetupWithChanges();
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.setupArtifacts.awsAccessEntries).toEqual(
+      op.setupArtifacts.awsAccessEntries
+    );
+    expect(restored.setupArtifacts.awsRole).toEqual(op.setupArtifacts.awsRole);
+  });
+});
+
+function hasTrackedSetupArtifactsForTest(op) {
+  const ledger = getSetupArtifactLedger(op);
+  return (
+    ledger.awsTrustSubjects.length +
+      ledger.awsRolePolicies.length +
+      ledger.awsAccessEntries.length >
+    0
+  );
+}
