@@ -576,6 +576,7 @@ interface AppBicepHandoffInput {
 }
 
 export interface DeployRepairHandoffInput {
+  appFile?: string;
   repo: string;
   branch: string;
   error: string;

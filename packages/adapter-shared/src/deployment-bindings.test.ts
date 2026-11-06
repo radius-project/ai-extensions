@@ -99,12 +99,10 @@ describe("invocation artifact reader binding", () => {
         })
     );
     const observation = createWorkflowObservationScope(factory);
-    const resolveName = vi.fn(async () => "model-name");
     return {
       factory,
       observation,
-      resolveName,
-      reader: createDeploymentStatusReader(observation, resolveName)
+      reader: createDeploymentStatusReader(observation)
     };
   }
 
@@ -125,7 +123,6 @@ describe("invocation artifact reader binding", () => {
         runId: 7
       })
     );
-    expect(h.resolveName).not.toHaveBeenCalled();
     expect(await h.reader(state, "acme/app", "feature", 7)).toBe(reader);
     h.observation.stop();
     await expect(h.reader(state, "acme/app", "feature", 7)).rejects.toThrow(
@@ -133,7 +130,7 @@ describe("invocation artifact reader binding", () => {
     );
   });
 
-  it("resolves a missing model name using the deployment branch and retained run", async () => {
+  it("preserves unknown application identity while retaining the environment and run", async () => {
     const h = harness();
     const state: DeploymentState = {
       deployingBranch: "feature",
@@ -141,11 +138,10 @@ describe("invocation artifact reader binding", () => {
       deployRunId: 8
     };
     await h.reader(state, "acme/app", "");
-    expect(h.resolveName).toHaveBeenCalledWith("acme/app", "feature");
-    expect(state.deployAppName).toBe("model-name");
+    expect(state.deployAppName).toBeUndefined();
     expect(h.factory).toHaveBeenCalledWith(
       expect.objectContaining({
-        application: "model-name",
+        application: "",
         environment: "test",
         runId: 8
       })
@@ -155,10 +151,8 @@ describe("invocation artifact reader binding", () => {
 
   it("does not invent an application, environment, branch or run", async () => {
     const h = harness();
-    h.resolveName.mockResolvedValue("");
     const state: DeploymentState = {};
     await h.reader(state, "acme/app", "");
-    expect(h.resolveName).toHaveBeenCalledWith("acme/app", "");
     expect(state.deployAppName).toBeUndefined();
     expect(h.factory).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -168,17 +162,6 @@ describe("invocation artifact reader binding", () => {
       })
     );
     await h.reader({}, "", "");
-    expect(h.resolveName).toHaveBeenCalledOnce();
-    h.observation.stop();
-  });
-
-  it("propagates application resolution errors without constructing a reader", async () => {
-    const h = harness();
-    h.resolveName.mockRejectedValue(new Error("Application unavailable"));
-    await expect(h.reader({}, "acme/app", "feature")).rejects.toThrow(
-      "Application unavailable"
-    );
-    expect(h.factory).not.toHaveBeenCalled();
     h.observation.stop();
   });
 });

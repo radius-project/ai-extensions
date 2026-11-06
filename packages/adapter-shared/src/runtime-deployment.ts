@@ -297,6 +297,7 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
               branch: target.branch,
               provider: target.provider,
               requestedEnvironment: target.environment,
+              appFile: target.appFile,
               resources: state.deployingResources ?? [],
               log,
               isCurrent
@@ -328,6 +329,7 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
           if (isCurrent())
             await publishDelivery(invocation, () =>
               repair.coordinate({
+                appFile: invocation.target.appFile,
                 state,
                 attemptId: invocation.attemptId,
                 generation: invocation.generation,

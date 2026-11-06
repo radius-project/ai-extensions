@@ -202,6 +202,8 @@ A partial provider migration is acceptable between PRs if each provider has exac
 
 ## Stage 3: extract deployment and explicit repair coordination
 
+The selected-model follow-up carries one admitted path through preparation, command construction and the per-run `app_file` workflow input. Shared templates stay stable across deployments; unreadable models and incompatible workflow contracts fail before dispatch. Application identity comes only from the selected source. Abandonment captures the application and attempt before remote work, preserving unrelated or unidentified evidence and replacements. These corrections leave Stage 4 source provenance and Stage 6 deletion extraction unchanged.
+
 **Implementation:** Canvas and the registered deploy/status tools consume one runtime-owned deployment implementation. The [shared production factory](../../packages/adapter-shared/src/production-deployment.ts) composes the real command, repository, workflow, workspace, observation and artifact bindings without importing Canvas. The [Canvas host binding](../../packages/adapter-canvas/src/runtime/production-deployment.ts) supplies credentials, process execution, clocks and SDK delivery. Implementation and required local gates are complete; the [qualification record](./2026-09-github-radius-migration-inventory.md#deployment-admission-and-dispatch) includes native Windows process and Chromium results. This record does not imply hosted CI, merge, human acceptance or real-host qualification.
 
 Core owns target, parameter, command, workflow and repair policy. Shared adapters own Node execution and the in-memory runtime. Optional graph presentation is not a deployment prerequisite; the existing Stage 1 artifact/evidence readers still supply execution results.

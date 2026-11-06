@@ -18,6 +18,7 @@ function fixture(overrides: Partial<DeploymentRepairDependencies> = {}) {
     deployError: "password=synthetic-value"
   };
   const request: DeploymentRepairRequest = {
+    appFile: "models/custom.bicep",
     state,
     attemptId: "loop",
     generation: 1,
@@ -77,6 +78,7 @@ describe("explicit deployment repair coordination", () => {
     expect(f.deliveries).toHaveLength(1);
     expect(JSON.stringify(f.deliveries)).not.toContain("synthetic-value");
     expect(f.deliveries[0]).toMatchObject({
+      appFile: "models/custom.bicep",
       attemptId: "loop",
       branch: "feature"
     });

@@ -231,12 +231,13 @@ export function createRadiusExtension(
       })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
-    ({ repo, branch, error, deployRunUrl, attemptId }) =>
+    ({ repo, branch, error, deployRunUrl, attemptId, appFile }) =>
       deps.session.get().send(
         deployRepairHandoffMessage(repo, branch, {
           error,
           deployRunUrl,
-          attemptId
+          attemptId,
+          appFile
         })
       )
   );

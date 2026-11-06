@@ -210,6 +210,7 @@ export interface HostCallbackDependencies {
           error: string;
           deployRunUrl: string;
           attemptId: string;
+          appFile?: string;
           instanceId: string;
         }) => unknown)
       | null

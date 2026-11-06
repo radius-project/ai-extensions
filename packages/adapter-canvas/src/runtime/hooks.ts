@@ -35,6 +35,7 @@ import {
 import type { AppModelStatus } from "./graph-context.js";
 
 interface DeployRepairDetails {
+  appFile?: string;
   error?: string;
   deployRunUrl?: string;
   attemptId?: string;
@@ -356,12 +357,18 @@ export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "../deploy-d
 export function deployRepairHandoffPrompt(
   repo: string,
   branch: string,
-  { error = "", deployRunUrl = "", attemptId = "" }: DeployRepairDetails = {}
+  {
+    error = "",
+    deployRunUrl = "",
+    attemptId = "",
+    appFile
+  }: DeployRepairDetails = {}
 ): string {
   const where = repo ? ` of ${repo}` : "";
   const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
   const fenced = fenceDeployDiagnostic(error);
   const branchName = branch ? `\`${branch}\`` : "the deployed branch";
+  const model = appFile ? `\`${appFile}\`` : "deployed application file";
   const lines = [
     `The Radius deploy${where}${onPhrase} failed. Diagnose it, and repair and redeploy if the app model caused it.`,
     "",
@@ -373,11 +380,11 @@ export function deployRepairHandoffPrompt(
   lines.push(
     "",
     "First decide what kind of failure this is:",
-    `- A modeling or schema failure points at .radius/app.bicep — ${modelFailureSummaryList()}. Repair these.`,
+    `- A modeling or schema failure points at ${model} — ${modelFailureSummaryList()}. Repair these.`,
     `- An infrastructure or environment failure (${infrastructureFailureSummaryList()}) is not caused by the app model. Do not repair the model for these: report the failure and the workflow run URL to the user, and do not redeploy.`,
     "",
-    `For a modeling or schema failure: ${SKILL_HANDOFF}`,
-    `Then commit the repaired .radius/app.bicep and push it to ${branchName} before redeploying. The deploy runs on GitHub Actions against that branch as it exists on GitHub, so a fix left only in the local worktree is not deployed — the workflow would check out and redeploy the unchanged file. If you cannot push to that branch (for example it is protected), stop and tell the user, or open a pull request; do not redeploy an unchanged branch.`,
+    `For a modeling or schema failure: use the radius-app-bicep skill. Repair ${model} in place; do not regenerate or substitute a different application model.`,
+    `Then commit the repaired ${model} and push it to ${branchName} before redeploying. The deploy runs on GitHub Actions against that branch as it exists on GitHub, so a fix left only in the local worktree is not deployed — the workflow would check out and redeploy the unchanged file. If you cannot push to that branch (for example it is protected), stop and tell the user, or open a pull request; do not redeploy an unchanged branch.`,
     "Once the fix is pushed, redeploy by calling the radius_deploy tool, and poll the radius_deploy_status tool until the deploy reaches a terminal state.",
     attemptId ?
       `Pass attemptId "${attemptId}" to both tools. It identifies this deploy attempt, so the call is rejected rather than acting on a different deploy if the user starts another one. Do not pass repo, environment, branch, provider, or appFile: the attempt already fixes those.`

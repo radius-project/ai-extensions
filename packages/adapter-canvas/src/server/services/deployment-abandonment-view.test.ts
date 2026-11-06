@@ -23,6 +23,7 @@ function harness() {
       target,
       {
         deployStatus: "failed",
+        deployAppName: " APP ",
         deployError: "Original evidence"
       },
       reservation
@@ -62,6 +63,32 @@ const request = {
 };
 
 describe("abandonment owner retirement", () => {
+  it.each(["other-app", "", " ", undefined])(
+    "preserves evidence for an unrelated or unknown application %j",
+    async (application) => {
+      const h = harness();
+      h.first.state.deployAppName = application;
+      expect((await h.service.abandon(request)).status).toBe(200);
+      expect(h.retire).not.toHaveBeenCalled();
+      expect(h.runtime.owner.isCurrent(h.first)).toBe(true);
+      expect(h.state.deployError).toBe("Original evidence");
+    }
+  );
+
+  it("preserves evidence whose application changes while abandonment is pending", async () => {
+    const h = harness();
+    const finished =
+      createDeferred<
+        Awaited<ReturnType<DeploymentAbandonmentService["abandon"]>>
+      >();
+    h.abandon.mockReturnValue(finished.promise);
+    const result = h.service.abandon(request);
+    h.first.state.deployAppName = "another-app";
+    finished.resolve({ status: 200, body: { outcome: "abandoned" } });
+    expect((await result).status).toBe(200);
+    expect(h.retire).not.toHaveBeenCalled();
+  });
+
   it("retires only the captured matching target after remote success, across views", async () => {
     const h = harness();
     expect(await h.service.abandon(request)).toEqual({
@@ -120,7 +147,9 @@ describe("abandonment owner retirement", () => {
     { repo: "acme/app", environment: 9 },
     { repo: " ", environment: "production" },
     { repo: "acme/app", environment: " " },
-    { repo: "other/app", environment: "production" }
+    { repo: "other/app", environment: "production" },
+    { repo: "acme/app", environment: "production", application: 7 },
+    { repo: "acme/app", environment: "production", application: " " }
   ])(
     "leaves validation to the existing service and never retires an unrelated target: %j",
     async (payload) => {

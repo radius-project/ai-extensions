@@ -63,7 +63,7 @@ The check lives in the shared [`verify-ghcr-push`](actions/verify-ghcr-push/acti
 The workflows read GitHub Actions **variables** (`vars`) — never long-lived secrets. The GHCR package push check also uses the built-in `GITHUB_TOKEN`, which GitHub Actions provides automatically (nothing to configure). Configure these variables on the target GitHub Environment:
 
 | Provider | Variables                                                                                                                                                                                                                    |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Common   | `RADIUS_STATE_REGISTRY` (optional; enables the GHCR package push check)                                                                                                                                                      |
 | Azure    | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_AKS_CLUSTER_NAME`, `AZURE_AKS_RESOURCE_GROUP` (optional; the cluster's own resource group, defaults to `AZURE_RESOURCE_GROUP`) |
 | AWS      | `AWS_ROLE_ARN`, `AWS_REGION`, `AWS_ACCOUNT_ID`, `AWS_EKS_CLUSTER_NAME`                                                                                                                                                       |
@@ -87,6 +87,14 @@ To keep the two provider paths from duplicating the ~80% of steps they share, it
 - **`actions/*`** — composite actions holding the provider-agnostic phases both provider workflows share: [`setup-control-plane`](actions/setup-control-plane/action.yml), [`load-contrib-catalog`](actions/load-contrib-catalog/action.yml), [`restore-state`](actions/restore-state/action.yml), [`attach-recipe-pack`](actions/attach-recipe-pack/action.yml), [`apply-custom-recipe-packs`](actions/apply-custom-recipe-packs/action.yml), [`manage-routes-gateway`](actions/manage-routes-gateway/action.yml), [`run-rad-commands`](actions/run-rad-commands/action.yml), [`publish-deploy-status`](actions/publish-deploy-status/action.yml), [`delete-resource`](actions/delete-resource/action.yml), [`discard-deploy-status`](actions/discard-deploy-status/action.yml), and [`teardown`](actions/teardown/action.yml). The provider workflows reference them from `radius-project/ai-extensions` at a pinned ref (the `{{RADIUS_REF}}` placeholder the generator fills in), so the shared logic has a single reviewed home and is not copied into user repos. Third-party actions in these workflows are pinned to full commit SHAs (with a `# vX` comment); only the first-party Radius composite actions are referenced by ref.
 
 The deploy flow generates the dispatcher and both provider workflows, commits them to the target repo under `.github/workflows/`, and dispatches `run-rad-commands.yml`.
+
+### Select an application model
+
+The dispatcher accepts an optional string `app_file` and forwards it to each enabled provider workflow. Providers use that per-run value as `APP_FILE`; omitted or empty input retains the generated fallback. Parameter matching, recipe packs, live progress and deployed artifacts use the same file. Generated environment and recipe-pack Bicep files live beside the selected model so its Bicep configuration applies.
+
+The shared deployment runtime always sends its admitted path as `app_file` and builds `rad_commands` from that file. It does not rewrite shared template defaults for each model. Before provisioning parameter secrets or dispatching, it reads the selected branch's workflows and verifies input acceptance, forwarding and consumption. Older workflows must be upgraded first; a protected branch may require the existing workflow-update PR process. Failed verification does not dispatch a run.
+
+Runtime model paths use ASCII letters, digits, `.`, `_`, `-` and `/`, must end in `.bicep`, and cannot be absolute, traverse parents or begin with `-`. Windows separators and redundant path segments are normalized without changing case. The command runner splits on whitespace, so spaces and shell quoting are not supported. Direct workflow callers supplying both `app_file` and `rad_commands` must use the same model in both.
 
 ### Select a Radius release
 
@@ -171,7 +179,7 @@ GitHub Actions concurrency groups cannot coordinate runs in different repositori
 - **Inputs:**
 
   | Input          | Required | Description                                                                                                                                                                                                                                                                                                                                                                         |
-  | -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  |----------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
   | `environment`  | Yes      | The GitHub Environment name, used as the Radius environment.                                                                                                                                                                                                                                                                                                                        |
   | `image`        | No       | Container image for the application. Defaults to the commit SHA (`github.sha`) when unset and is passed only when the application template declares the `image` parameter.                                                                                                                                                                                                          |
   | `rad_commands` | No       | A single `rad` command string, or a JSON array of command strings run in order (the `rad` prefix omitted, e.g. `["deploy .radius/app.bicep --environment dev", "app graph my-app -o json"]`). Each command is validated against the allowed-command set. Falls back to the `RADIUS_RAD_COMMANDS` variable. When empty, the workflow runs its default `rad deploy` of the app bicep. |
@@ -192,7 +200,7 @@ The provider steps run only when the identifying variable (`AZURE_CLIENT_ID` or 
 This workflow also reads GitHub Actions **secrets** for image push and application configuration:
 
 | Secret                 | Purpose                                                                                                                                                  |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `GITHUB_TOKEN`         | Built-in. Used with `github.actor` to authenticate the containerImages recipe's image push to GHCR.                                                      |
 | `RADIUS_DEPLOY_PARAMS` | Optional. A JSON object of application parameters (`{"password":"…","apiKey":"…"}`) expanded into `--parameters name=value` pairs on the default deploy. |
 

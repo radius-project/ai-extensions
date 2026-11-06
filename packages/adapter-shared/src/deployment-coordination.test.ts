@@ -44,7 +44,7 @@ function dispatchDependencies(
     },
     readProcessEnv: () => ({}),
     ghCredentialSource: () => "keyring",
-    fetchFileForSelection: async () => null,
+    fetchFileForSelection: async () => "model source",
     appParams: () => [],
     resolveDeployParams: () => ({}),
     partitionParams: () => ({ secret: {}, public: {} }),
@@ -53,6 +53,7 @@ function dispatchDependencies(
     buildAppGraphRadCommand: () => "rad app graph",
     ensureDeployWorkflowsOnBranch: async () => {},
     ensureWorkflowsCurrent: async () => ({ created: [], updated: [] }),
+    verifyAppFileInput: async () => {},
     sleep: async () => {},
     latestWorkflowRunId: async () => 7,
     classifyDeployDispatchFailure,
@@ -122,6 +123,7 @@ function request(): {
     state,
     logs,
     input: {
+      appFile: ".radius/app.bicep",
       entry: { state },
       repo: "example/app",
       branch: "feature",
@@ -187,8 +189,12 @@ describe("shared deployment without a frontend", () => {
         "feature",
         "-f",
         "environment=dev",
+        "-f",
+        "app_file=.radius/app.bicep",
         "--repo",
-        "example/app"
+        "example/app",
+        "-f",
+        'rad_commands=["rad deploy"]'
       ]
     ]);
     expect(f.state.deployStatus).toBe("complete");
@@ -292,7 +298,7 @@ describe("shared dispatch generation fencing", () => {
           },
           fetchFileForSelection: async () => {
             stop("model");
-            return null;
+            return "model source";
           },
           ensureDeployWorkflowsOnBranch: async () => {
             stop("publication");

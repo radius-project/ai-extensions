@@ -5,6 +5,7 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import {
   toSafeRepoRelPath,
+  normalizeDeploymentAppFile,
   uncommittedGeneratedPaths,
   safeWorkspacePath,
   readWorkspaceFile,
@@ -22,6 +23,40 @@ beforeEach(() => {
   }
 });
 afterEach(() => vi.unstubAllEnvs());
+
+describe("deployment model path admission", () => {
+  it.each([
+    [".radius/app.bicep", ".radius/app.bicep"],
+    [".\\models\\\\.\\App.BICEP", "models/App.BICEP"],
+    ["./models//custom.bicep", "models/custom.bicep"],
+    ["app.bicep", "app.bicep"]
+  ])("canonicalizes %s without changing filename case", (input, expected) => {
+    expect(normalizeDeploymentAppFile(input)).toBe(expected);
+  });
+  it.each([
+    "",
+    ".",
+    "../app.bicep",
+    "models/../app.bicep",
+    "/app.bicep",
+    "\\app.bicep",
+    "C:\\app.bicep",
+    "//host/app.bicep",
+    "app\0.bicep",
+    "app file.bicep",
+    "app\nfile.bicep",
+    "app\tfile.bicep",
+    "'app.bicep",
+    "${{inputs.model}}.bicep",
+    "-app.bicep",
+    "./-app.bicep",
+    "models/app.json",
+    "models/app.bicep/",
+    "app*.bicep"
+  ])("rejects unsupported deployment path %j", (input) => {
+    expect(() => normalizeDeploymentAppFile(input)).toThrow();
+  });
+});
 
 describe("deployment workspace file and Git bindings", () => {
   it("normalizes files within the workspace and rejects sibling traversal", async () => {

@@ -44,23 +44,15 @@ export function createDeploymentFileReader(
 
 /** An invocation owns its readers; no frontend entry lookup participates. */
 export function createDeploymentStatusReader(
-  observation: WorkflowObservationScope,
-  resolveApplicationName: (repo: string, branch: string) => Promise<string>
+  observation: WorkflowObservationScope
 ) {
   return async (
     state: DeploymentState,
     repo: string,
-    branch: string,
+    _branch: string,
     runId?: string | number | null
   ) => {
-    let application = state.deployAppName || "";
-    if (!application && repo) {
-      application = await resolveApplicationName(
-        repo,
-        branch || state.deployingBranch || ""
-      );
-      if (application) state.deployAppName = application;
-    }
+    const application = state.deployAppName || "";
     return observation.reader({
       repo,
       environment: state.deployEnvName || state.envName || "",
