@@ -17,6 +17,7 @@ You do **not** need a design doc for minor changes such as documentation updates
 - [GitHub Radius: Extracting a Reusable Library from Canvas](./2026-09-github-radius.md) proposes sharing existing application and environment coordination across frontends, including Canvas.
 - [GitHub Radius library: staged implementation plan](./2026-09-github-radius-implementation-plan.md) sequences that extraction into independently mergeable capabilities while preserving Canvas contracts and coordinating with concurrent work.
 - [GitHub Radius migration inventory](./2026-09-github-radius-migration-inventory.md) records current capability ownership, compatibility contracts, known gaps, and stage 0 characterization evidence.
+- [Adopting layered, AI-assisted code review](./2026-10-ai-assisted-review-plan.md) proposes making Copilot code review, CodeQL, and the build checks catch problems on every push, and scaling human approval to each change's risk.
 
 ## How to create one
 
