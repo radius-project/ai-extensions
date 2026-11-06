@@ -1199,7 +1199,10 @@ describe("production environment owner HTTP binding", () => {
           kind: "aws_role_policy",
           target: "radius-deploy-dev-1 on IAM role radius-deploy-fixture-app"
         },
-        { kind: "aws_role", target: "IAM role radius-deploy-fixture-app" },
+        {
+          kind: "aws_role",
+          target: "IAM role radius-deploy-fixture-app, if nothing else uses it"
+        },
         { kind: "github_environment", target: "fixture/app:dev" }
       ]);
 

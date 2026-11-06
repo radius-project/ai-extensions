@@ -11285,6 +11285,120 @@ describe("the AWS setup ledger", () => {
     );
   });
 
+  describe("what Delete setup says it removes", () => {
+    const preview = (op, options = {}) =>
+      projectOperationActions(op, options).find(
+        (action) => action.id === "rollback"
+      ).preview;
+    const keys = (entries) => entries.map((e) => `${e.kind}#${e.target}`);
+    const CONDITIONAL = [
+      {
+        kind: "aws_access_entry",
+        target: `IAM role ${ROLE} on EKS cluster shop (us-west-2), if nothing else uses it`
+      },
+      {
+        kind: "aws_role",
+        target: `IAM role ${ROLE}, if nothing else uses it`
+      }
+    ];
+
+    // Another environment on the cluster can share the role and entry, and
+    // only AWS and GitHub can tell. So the rows say what the rule is.
+    it("names the role and access entry as removed only if nothing else uses them", () => {
+      const removes = preview(awsSetupWithChanges()).removes;
+      expect(removes).toEqual(expect.arrayContaining(CONDITIONAL));
+      expect(removes).toContainEqual({
+        kind: "aws_role_policy",
+        target: `radius-deploy-dev-1 on IAM role ${ROLE}`
+      });
+    });
+
+    it("keeps every AWS change, saying why, while AWS is turned off", () => {
+      const { removes, keeps } = preview(awsSetupWithChanges(), {
+        awsEnabled: false
+      });
+      expect(removes.map((entry) => entry.kind)).toEqual([
+        "github_environment"
+      ]);
+      expect(
+        keeps
+          .filter((entry) => entry.kind.startsWith("aws_"))
+          .map((entry) => [entry.kind, entry.action])
+      ).toEqual(
+        [
+          "aws_access_entry",
+          "aws_role_policy",
+          "aws_trust_subject",
+          "aws_role"
+        ].map((kind) => [
+          kind,
+          "AWS environments are turned off, so Radius will not change this in AWS. Turn them on, then delete the setup again."
+        ])
+      );
+    });
+
+    it("keeps a trust subject other environments may present", () => {
+      const op = awsSetupWithChanges();
+      const shared = "repository_owner_id:11:repository_id:22";
+      recordAwsTrustSubject(op, {
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        subject: shared
+      });
+      const { removes, keeps } = preview(op);
+      const label = `${shared} in the trust policy of IAM role ${ROLE}`;
+      expect(keys(removes)).not.toContain(`aws_trust_subject#${label}`);
+      expect(keeps).toContainEqual({
+        kind: "aws_trust_subject",
+        target: label,
+        reason: "retained",
+        action:
+          "This subject doesn't name one repository and this environment, so other environments may present it too. Radius keeps it."
+      });
+    });
+
+    it.each([
+      ["Delete setup", "rollback", {}],
+      ["Delete setup with AWS off", "rollback", { awsEnabled: false }],
+      ["Retry deletion", "retry-cleanup", {}]
+    ])("lists no item in two places in %s", (_label, id, options) => {
+      const op = awsSetupWithChanges();
+      if (id === "retry-cleanup") {
+        const targets = provenOwnedCleanupTargets(op);
+        warnedCleanup(
+          op,
+          targets.map((target) => ({
+            artifactType: target.artifactType,
+            target: target.target,
+            identity: target.identity,
+            outcome: "warning",
+            detail: "Radius did not get a result."
+          }))
+        );
+        finish(op, "failed_partial", {
+          failure: { code: "setup-cleanup-incomplete", stage: op.currentStage }
+        });
+      }
+      const action = projectOperationActions(op, options).find(
+        (entry) => entry.id === id
+      );
+      const { removes, keeps, manualActionRequired } = action.preview;
+      // Compared by row before any "if nothing else uses it" suffix.
+      const base = (entries) =>
+        keys(entries).map((key) =>
+          key.replace(/, if nothing else uses it$/, "")
+        );
+      const all = [
+        ...base(removes),
+        ...base(keeps),
+        ...base(manualActionRequired)
+      ];
+      expect(all.length).toBeGreaterThan(0);
+      expect(new Set(all).size).toBe(all.length);
+    });
+  });
+
   it("lists a reused role as kept, with why", () => {
     const op = awsSetupWithChanges();
     getSetupArtifactLedger(op).awsRole.state = "reused";

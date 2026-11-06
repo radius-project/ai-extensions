@@ -5101,7 +5101,7 @@ test.describe("Radius Canvas in Chromium", () => {
       const removes = dialog.locator("#env-rollback-remove li");
       await expect(removes).toHaveText([
         `${policyName} on IAM role ${roleName}`,
-        `IAM role ${roleName}`,
+        `IAM role ${roleName}, if nothing else uses it`,
         `GitHub environment: ${REPOSITORY}:fixture-environment`,
         `Lock on IAM role ${roleName} (policy ID LOCK0)`
       ]);

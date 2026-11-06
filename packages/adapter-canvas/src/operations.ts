@@ -25,7 +25,11 @@
 //      `failure.evidence`, fenced, and never in a label.
 
 import { createHash, randomUUID } from "node:crypto";
-import { formatAwsLockTime, readRecordedAwsLock } from "@radius-project/core";
+import {
+  formatAwsLockTime,
+  namesOneEnvironment,
+  readRecordedAwsLock
+} from "@radius-project/core";
 import {
   disabledOperationStore,
   PERSISTED_OPERATIONS_VERSION,
@@ -4606,23 +4610,101 @@ function keptAwsLock(
  * the browser from the inventory groups would let the dialog promise a deletion
  * the server would then refuse to perform.
  */
+const AWS_OFF_KEEP_ACTION =
+  "AWS environments are turned off, so Radius will not change this in AWS. Turn them on, then delete the setup again.";
+const SHARED_SUBJECT_KEEP_ACTION =
+  "This subject doesn't name one repository and this environment, so other environments may present it too. Radius keeps it.";
+// Rollback keeps these when something else uses them, which only AWS and
+// GitHub can tell. The preview says so rather than read them on every poll.
+const AWS_REMOVED_IF_UNUSED: ReadonlySet<string> = new Set([
+  "aws_role",
+  "aws_access_entry"
+]);
+
+/**
+ * Split targets into what a deletion removes and what it keeps, by the same
+ * rules the AWS rollback applies without reading AWS: with AWS turned off it
+ * changes nothing there, and it keeps a trust subject other environments may
+ * present. `keys` names every target, so a target is never also listed as
+ * kept by another rule.
+ */
+function previewTargets(
+  op: any,
+  targets: readonly {
+    artifactType: string;
+    target: string;
+    identity?: unknown;
+  }[],
+  options: OperationProjectionOptions
+): {
+  removes: Array<{ kind: string; target: string }>;
+  keeps: Array<{
+    kind: string;
+    target: string;
+    reason: string;
+    action: string;
+  }>;
+  keys: Set<string>;
+} {
+  const ledger = readSetupArtifactLedger(op?.setupArtifacts);
+  const context = op?.context || {};
+  const environment = String(
+    context.canonicalEnvironment || op?.environment || ""
+  );
+  const removes: Array<{ kind: string; target: string }> = [];
+  const keeps: Array<{
+    kind: string;
+    target: string;
+    reason: string;
+    action: string;
+  }> = [];
+  for (const entry of targets) {
+    const kind = entry.artifactType;
+    const keep = (action: string) =>
+      keeps.push({ kind, target: entry.target, reason: "retained", action });
+    if (kind.startsWith("aws_") && options.awsEnabled === false) {
+      keep(AWS_OFF_KEEP_ACTION);
+      continue;
+    }
+    if (kind === "aws_trust_subject") {
+      const subject = ledger.awsTrustSubjects.find(
+        (item) =>
+          cleanupArtifactIdentity("aws_trust_subject", item) === entry.identity
+      )?.subject;
+      if (subject && !namesOneEnvironment(subject, environment)) {
+        keep(SHARED_SUBJECT_KEEP_ACTION);
+        continue;
+      }
+    }
+    removes.push({
+      kind,
+      target:
+        AWS_REMOVED_IF_UNUSED.has(kind) ?
+          `${entry.target}, if nothing else uses it`
+        : entry.target
+    });
+  }
+  const keys = new Set(
+    targets.map((entry) => `${entry.artifactType}#${entry.target}`)
+  );
+  return { removes, keeps, keys };
+}
+
 function projectRollbackPreview(
   op: any,
   targets: RollbackTarget[],
   options: OperationProjectionOptions
 ): any {
   const summary = projectCleanupSummary(op) || {};
-  const removes = [
-    ...targets.map((entry) => ({
-      kind: entry.artifactType,
-      target: entry.target
-    })),
-    ...heldAwsLockRemoval(op, options)
-  ];
+  const split = previewTargets(op, targets, options);
+  const removes = [...split.removes, ...heldAwsLockRemoval(op, options)];
   const lockKept = keptAwsLock(op, options);
-  const removeKeys = new Set(
-    [...removes, ...lockKept].map((entry) => `${entry.kind}#${entry.target}`)
-  );
+  const removeKeys = new Set([
+    ...split.keys,
+    ...[...heldAwsLockRemoval(op, options), ...lockKept].map(
+      (entry) => `${entry.kind}#${entry.target}`
+    )
+  ]);
   const keeps = [
     ...(summary.reused || []).map((entry: any) => ({
       kind: entry.kind,
@@ -4642,6 +4724,7 @@ function projectRollbackPreview(
         reason: "retained",
         action: RETAINED_KEEP_ACTION
       })),
+    ...split.keeps,
     ...lockKept
   ];
   return {
@@ -5172,8 +5255,10 @@ export function projectOperationActions(
   const cleanup = canRetryCleanup(op);
   if (cleanup.ok) {
     // The retry removes its own unresolved subset, but keeps and manual items
-    // are the same whole-record projection a rollback that removes nothing has.
+    // are the same whole-record projection a rollback that removes nothing has,
+    // less what the retry removes.
     const kept = projectRollbackPreview(op, [], options);
+    const retry = previewTargets(op, cleanup.targets, options);
     actions.push({
       id: "retry-cleanup",
       kind: "retry_cleanup",
@@ -5190,15 +5275,17 @@ export function projectOperationActions(
       path: `${base}/retry/cleanup`,
       pending: false,
       preview: {
-        removes: [
-          ...cleanup.targets.map((entry: any) => ({
-            kind: entry.artifactType,
-            target: entry.target
-          })),
-          ...heldAwsLockRemoval(op, options)
+        removes: [...retry.removes, ...heldAwsLockRemoval(op, options)],
+        keeps: [
+          ...kept.keeps.filter(
+            (entry: any) => !retry.keys.has(`${entry.kind}#${entry.target}`)
+          ),
+          ...retry.keeps
         ],
-        keeps: kept.keeps,
-        manualActionRequired: kept.manualActionRequired
+        // The last attempt's warnings are what this retry tries again.
+        manualActionRequired: kept.manualActionRequired.filter(
+          (entry: any) => !retry.keys.has(`${entry.kind}#${entry.target}`)
+        )
       }
     });
   }
