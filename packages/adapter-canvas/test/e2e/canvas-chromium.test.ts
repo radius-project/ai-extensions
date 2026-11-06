@@ -681,11 +681,23 @@ test.describe("Radius Canvas in Chromium", () => {
     await seed(canvas);
   });
 
-  test("production deploy outcome masks host-known credentials through repair publication @safety", async ({
+  test("production deploy outcome masks credentials and accepted deletion cannot resurrect it @safety", async ({
     page,
     canvas
   }, testInfo) => {
     const environment = "fixture-environment";
+    const appFile = "models/custom.bicep";
+    await fs.mkdir(path.join(canvas.workspacePath, "models"), {
+      recursive: true
+    });
+    await fs.writeFile(
+      path.join(canvas.workspacePath, appFile),
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'radius-app'\n}\n"
+    );
+    await fs.writeFile(
+      path.join(canvas.workspacePath, ".radius", "app.bicep"),
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'different-default'\n}\n"
+    );
     const opaque = "OpaqueBindingWitness92741";
     const named = "UnregisteredNamedWitness63281";
     const runId = 102;
@@ -715,6 +727,24 @@ test.describe("Radius Canvas in Chromium", () => {
       "GET"
     ];
     const additions: FakeCliCommand[] = [
+      command(
+        [
+          "api",
+          `/repos/${REPOSITORY}/environments/${environment}/variables?per_page=100`,
+          "--jq",
+          ".variables[].name"
+        ],
+        "AZURE_CLIENT_ID\n"
+      ),
+      command(
+        [
+          "api",
+          `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`,
+          "--jq",
+          ".[].id"
+        ],
+        ""
+      ),
       {
         tool: "gh",
         args: repositoryArtifactArgs,
@@ -949,6 +979,7 @@ test.describe("Radius Canvas in Chromium", () => {
     // discovers, classifies and settles the failed run without state seeding.
     await canvas.seedState({
       ...baseCanvasState(canvas.workspacePath),
+      appFile,
       plannedResources: [
         { id: "web", name: "web", type: "Radius.Compute/containers" }
       ]
@@ -970,10 +1001,10 @@ test.describe("Radius Canvas in Chromium", () => {
         branch: WORKTREE_BRANCH,
         provider: "azure",
         environment,
-        appFile: ".radius/app.bicep"
+        appFile
       }
     });
-    expect(admitted.status()).toBe(200);
+    expect(admitted.status(), await admitted.text()).toBe(200);
     const attemptId = canvas.entry.state.deployAttempt?.id;
     expect(attemptId).toBeTruthy();
     try {
@@ -1021,6 +1052,7 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBe("delivered");
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]).toMatchObject({
+      appFile,
       attemptId,
       instanceId: canvas.instanceId,
       repo: REPOSITORY,
@@ -1048,6 +1080,14 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.request.get(`${canvas.baseUrl}/api/deploy-status`);
     expect(deliveries).toHaveLength(1);
     const calls = await canvas.cliCalls();
+    const deploymentCall = calls.find(
+      (call) => call.args.slice(0, 3).join(" ") === dispatchPrefix.join(" ")
+    );
+    expect(deploymentCall?.args).toContain(`app_file=${appFile}`);
+    expect(
+      deploymentCall?.args.find((arg) => arg.startsWith("rad_commands="))
+    ).toContain(`deploy ${appFile}`);
+    expect(canvas.entry.state.deployAppName).toBe("radius-app");
     expect(calls.filter((call) => !call.matched)).toEqual([]);
     expect(
       calls.filter(
@@ -1074,6 +1114,148 @@ test.describe("Radius Canvas in Chromium", () => {
           call.args.join(" ") === `run view ${runId} --log --repo ${REPOSITORY}`
       )
     ).toBe(true);
+
+    scenario.commands.unshift(
+      command(
+        [
+          "api",
+          `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`,
+          "--jq",
+          ".[].id"
+        ],
+        "failed-other-delete\n"
+      ),
+      {
+        tool: "gh",
+        argsPrefix: [
+          "api",
+          `/repos/${REPOSITORY}/deployments/failed-other-delete/statuses?per_page=1`
+        ],
+        stdout: `failure\thttps://github.com/${REPOSITORY}/actions/runs/104\t`
+      },
+      {
+        tool: "gh",
+        argsPrefix: ["api", `/repos/${REPOSITORY}/actions/runs/104`],
+        stdout: ".github/workflows/delete-application.yml\tcompleted\tfailure"
+      },
+      {
+        tool: "gh",
+        argsPrefix: [
+          "api",
+          "--method",
+          "POST",
+          `/repos/${REPOSITORY}/deployments/failed-other-delete/statuses`
+        ],
+        stdout: ""
+      }
+    );
+    await canvas.setScenario(scenario);
+    const abandoned = await page.request.post(
+      `${canvas.baseUrl}/api/abandon-deployment`,
+      {
+        headers: {
+          "x-radius-mutation-nonce": nonce,
+          origin: canvas.baseUrl,
+          "sec-fetch-site": "same-origin"
+        },
+        data: { repo: REPOSITORY, environment, application: "another-app" }
+      }
+    );
+    expect(abandoned.status(), await abandoned.text()).toBe(200);
+    const afterAbandonment = await (
+      await page.request.get(`${canvas.baseUrl}/api/deploy-status`)
+    ).json();
+    expect(afterAbandonment.attempt.id).toBe(attemptId);
+    expect(afterAbandonment.deployRunUrl).toBe(runUrl);
+    await expect(page.locator("body")).toContainText(
+      "binding-regression-witness"
+    );
+
+    scenario.commands.unshift(
+      command(
+        [
+          "api",
+          `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`,
+          "--jq",
+          ".[].id"
+        ],
+        "dep-1\n"
+      ),
+      command(
+        [
+          "workflow",
+          "run",
+          "delete-application.yml",
+          "-f",
+          `environment=${environment}`,
+          "-f",
+          "application=radius-app",
+          "--repo",
+          REPOSITORY
+        ],
+        ""
+      ),
+      command(
+        [
+          "run",
+          "list",
+          "--workflow=delete-application.yml",
+          "--limit",
+          "5",
+          "--json",
+          "databaseId,status,createdAt",
+          "--repo",
+          REPOSITORY
+        ],
+        JSON.stringify([
+          {
+            databaseId: 103,
+            status: "queued",
+            createdAt: new Date().toISOString()
+          }
+        ])
+      )
+    );
+    await canvas.setScenario(scenario);
+    await page.request.get(
+      `${canvas.baseUrl}/api/list-deployments?repo=${REPOSITORY}&fresh=1`
+    );
+    await gotoCanvas(page, canvas, "deploying");
+    await page.getByRole("button", { name: "Delete Deployment" }).click();
+    await page
+      .getByRole("button", { name: "I want to delete this deployment" })
+      .click();
+    await page
+      .getByRole("button", { name: /have read and understand/i })
+      .click();
+    await page.locator("#del-confirm-input").fill(`radius-app/${environment}`);
+    const accepted = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/delete-deployment") &&
+        response.request().method() === "POST"
+    );
+    await page.locator("#del-confirm-btn").click();
+    const deleted = await accepted;
+    expect(deleted.status(), await deleted.text()).toBe(200);
+    expect(await deleted.json()).toMatchObject({ success: true });
+    for (let poll = 0; poll < 3; poll++) {
+      const current = await (
+        await page.request.get(`${canvas.baseUrl}/api/deploy-status`)
+      ).json();
+      expect(current.status).toBe("pending");
+      expect(current.attempt).toBeNull();
+      expect(current.deployedGraph).toBeNull();
+      expect(current.deployRunUrl).toBeNull();
+    }
+    await gotoCanvas(page, canvas, "deploying");
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.locator("body")).not.toContainText(
+      "binding-regression-witness"
+    );
+    expect(canvas.entry.state.deployRunId).toBeUndefined();
+    expect((await canvas.cliCalls()).filter((call) => !call.matched)).toEqual(
+      []
+    );
   });
 
   for (const fixture of pageStateCases()) {
@@ -7325,6 +7507,7 @@ test.describe("Radius Canvas in Chromium", () => {
         const monitorState: CanvasState = {};
         if (completed) {
           await createUnconfirmedMonitor("future_conclusion").monitor.run({
+            appFile: ".radius/app.bicep",
             entry: { state: monitorState },
             repo: REPOSITORY,
             branch: WORKTREE_BRANCH,
@@ -7758,6 +7941,7 @@ test.describe("Radius Canvas in Chromium", () => {
       const monitorState: CanvasState = {};
       if (unconfirmed) {
         await createUnconfirmedMonitor("future_conclusion").monitor.run({
+          appFile: ".radius/app.bicep",
           entry: { state: monitorState },
           repo: REPOSITORY,
           branch: WORKTREE_BRANCH,

@@ -10,6 +10,7 @@ import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.j
 import * as gh from "../../../src/gh.js";
 import { createProductionCanvasServerRuntime } from "../../../src/server.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
+import { createFakeDeploymentRuntime } from "../../support/runtime/deployment.js";
 import {
   configureOperationStore,
   createOperation,
@@ -2435,6 +2436,7 @@ describe("production environment owner HTTP binding", () => {
 
   it("refuses construction without the shared owner", () => {
     const options = {
+      deploymentRuntime: createFakeDeploymentRuntime(),
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: createProductionGitHubAccountContext(),
       awsEnabled: false
@@ -2447,6 +2449,7 @@ describe("production environment owner HTTP binding", () => {
 
   it("refuses construction without the shared account context", () => {
     const options = {
+      deploymentRuntime: createFakeDeploymentRuntime(),
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: createProductionGitHubAccountContext(),
       awsEnabled: false
@@ -2459,6 +2462,7 @@ describe("production environment owner HTTP binding", () => {
 
   it("refuses construction without the AWS switch", () => {
     const options = {
+      deploymentRuntime: createFakeDeploymentRuntime(),
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: createProductionGitHubAccountContext(),
       awsEnabled: false

@@ -26,6 +26,14 @@ import {
 // all (a module that never imports it cannot call it), so that is what these
 // checks assert rather than banning the word "joinSession" from comments.
 describe("RU-20: createRadiusExtension never joins a session", () => {
+  it("requires a deployment runtime at construction", () => {
+    const { deps } = createFakeDependencies();
+    Reflect.deleteProperty(deps, "deployment");
+    expect(() => createRadiusExtension(deps)).toThrow(
+      "Missing Radius runtime dependency: deployment"
+    );
+  });
+
   it("bounds pending readiness at 2000ms without releasing it and gives SDK teardown its separate budget", async () => {
     vi.useFakeTimers();
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -670,6 +678,7 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     const session = createFakeSession();
     ext.attachSession(session);
     await capturedHostCallbacks.deployRepairHandoff!({
+      appFile: "models/custom.bicep",
       repo: "acme/widgets",
       branch: "main",
       error: "BCP037",
@@ -682,6 +691,8 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       .calls[0][0] as { prompt: string; displayPrompt: string };
     expect(sent.prompt).toContain("BCP037");
     expect(sent.prompt).toContain("attempt-A");
+    expect(sent.prompt).toContain("Repair `models/custom.bicep` in place");
+    expect(sent.prompt).not.toContain(".radius/app.bicep");
     expect(sent.displayPrompt).toBe(
       deployRepairHandoffDisplayPrompt("acme/widgets", "main")
     );
@@ -829,21 +840,25 @@ describe("RU-19: keepalive", () => {
     expect(session.metadata!.snapshot).not.toHaveBeenCalled();
   });
 
-  it("pings when a deploy is in flight even if the panel is not recently active", async () => {
+  it("pings during deployment admission without an open panel", async () => {
     const { ext, deps, setLastWebviewActivityAt } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
     setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
-    deps.servers.set("radius-panel", {
-      server: {} as never,
-      baseUrl: "http://127.0.0.1:0",
-      url: "http://127.0.0.1:0/?page=deployed",
-      page: "deployed",
-      state: { deployStatus: "in_progress" }
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
-
-    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
-    expect(session.metadata!.snapshot).toHaveBeenCalled();
+    const admission = deps.deployment.owner.trackAdmission(() => gate);
+    try {
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
+      expect(session.metadata!.snapshot).toHaveBeenCalled();
+      expect(deps.servers.size).toBe(0);
+    } finally {
+      release();
+      await admission;
+      await ext.shutdown("test");
+    }
   });
 
   it("never throws even when session.metadata.snapshot rejects", async () => {
@@ -952,6 +967,73 @@ describe("RU-21: operation-aware host keepalive", () => {
 // RU-18 (extension half): shutdown closes every server and tears down the
 // session exactly once, even under a duplicate/concurrent call.
 describe("RU-18: shutdown is idempotent and closes every server exactly once", () => {
+  it.each([1999, 2000, 2001])(
+    "drains panel-free deployment work against the 2000ms deadline (settles at %dms)",
+    async (delay) => {
+      vi.useFakeTimers();
+      const { ext, deps } = setup();
+      const owner = deps.deployment.owner;
+      const target = {
+        repo: "org/app",
+        branch: "feature",
+        environment: "production",
+        provider: "azure",
+        appFile: ".radius/app.bicep"
+      };
+      const reservation = owner.reserve(target, "deploy");
+      if (!reservation) throw new Error("Expected an available target");
+      const invocation = owner.begin(
+        target,
+        { deployStatus: "in_progress" },
+        reservation
+      );
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const work = owner.run(invocation, () => held);
+      owner.release(reservation);
+      const close = vi.fn();
+      ext.attachSession(createFakeSession({ close }));
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        const stopping = ext.shutdown("SIGTERM");
+        expect(ext.shutdown("SIGINT")).toBe(stopping);
+        expect(invocation.signal.aborted).toBe(true);
+        expect(owner.hasActiveWork()).toBe(true);
+        expect(owner.retire(invocation)).toBe(false);
+        setTimeout(release, delay);
+        await vi.advanceTimersByTimeAsync(1998);
+        expect(close).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(2);
+        await expect(stopping).resolves.toEqual({
+          complete: delay < 2000,
+          exitCode: delay < 2000 ? 0 : 1
+        });
+        expect(close).toHaveBeenCalledOnce();
+        expect(deps.servers.size).toBe(0);
+        if (delay >= 2000) {
+          expect(deps.logError).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `pending attempts: ${invocation.observationId}`
+            )
+          );
+        } else {
+          expect(deps.logError).not.toHaveBeenCalled();
+        }
+        await vi.advanceTimersByTimeAsync(1);
+        await work;
+        expect(owner.hasActiveWork()).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        release();
+        await work;
+        await ext.shutdown("test");
+        vi.useRealTimers();
+      }
+    }
+  );
+
   it("reports a server-only timeout without inventing a pending operation", async () => {
     vi.useFakeTimers();
     try {

@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  ABANDONED_DEPLOYMENT_DESCRIPTION,
-  resolveDeployStatus,
-  resolveEnvironmentDeployment
-} from "./deployment-resolver.js";
+import { ABANDONED_DEPLOYMENT_DESCRIPTION } from "@radius-project/core";
+import { createDeploymentLookup } from "./deployment-lookup.js";
+import { createDeploymentDeferred } from "../test/support/deployment.js";
 
 const REPO = "octo/app";
 const ENVIRONMENT = "dev";
@@ -66,30 +64,65 @@ function resolver(
   return {
     ghOrThrow,
     resolve: (appName = "radius-app") =>
-      resolveEnvironmentDeployment(REPO, ENVIRONMENT, appName, {
+      createDeploymentLookup({
         ghOrThrow,
         deployWorkflowFile: DEPLOY_WORKFLOW,
         deleteWorkflowFile: DELETE_WORKFLOW,
         maxParallelRecords: options.maxParallelRecords ?? 10
-      })
+      }).resolveEnvDeployment(REPO, ENVIRONMENT, appName)
   };
 }
 
-describe("resolveDeployStatus", () => {
-  it.each([
-    [{ runConclusion: "success" }, "success"],
-    [{ runConclusion: "failure" }, "failed"],
-    [{ runStatus: "in_progress" }, "pending"],
-    [{ state: "success" }, "success"],
-    [{ state: "failure" }, "failed"],
-    [{ state: "error" }, "failed"],
-    [{}, "pending"]
-  ])("maps %# to %s", (record, expected) => {
-    expect(resolveDeployStatus(record)).toBe(expected);
-  });
-});
-
 describe("resolveEnvironmentDeployment", () => {
+  it("bounds the default concurrent batch to ten before walking older records", async () => {
+    const release = createDeploymentDeferred<void>();
+    const batchStarted = createDeploymentDeferred<void>();
+    const statusIds: number[] = [];
+    const ghOrThrow = async (args: string[]) => {
+      const path = args[1];
+      if (path.includes("/variables?")) return "AZURE_CLIENT_ID";
+      if (path.includes("/deployments?"))
+        return Array.from({ length: 11 }, (_, index) => String(index + 1)).join(
+          "\n"
+        );
+      const status = /deployments\/(\d+)\/statuses/.exec(path);
+      if (status) {
+        const id = Number(status[1]);
+        statusIds.push(id);
+        if (statusIds.length === 10) batchStarted.resolve();
+        await release.promise;
+        return `success\thttps://github.com/${REPO}/actions/runs/${id}\t`;
+      }
+      const run = /actions\/runs\/(\d+)/.exec(path);
+      if (run)
+        return `.github/workflows/${Number(run[1]) === 11 ? DEPLOY_WORKFLOW : "unrelated.yml"}\tcompleted\tsuccess`;
+      throw new Error(`Unexpected request ${path}`);
+    };
+    const lookup = createDeploymentLookup({
+      ghOrThrow,
+      deployWorkflowFile: DEPLOY_WORKFLOW,
+      deleteWorkflowFile: DELETE_WORKFLOW
+    });
+    const result = lookup.resolveEnvDeployment(
+      REPO,
+      ENVIRONMENT,
+      "modeled-app"
+    );
+    try {
+      await batchStarted.promise;
+      expect(statusIds).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    } finally {
+      release.resolve();
+      await result;
+    }
+    expect(await result).toMatchObject({
+      deploymentId: "11",
+      app: "modeled-app",
+      status: "success"
+    });
+    expect(statusIds).toHaveLength(11);
+  });
+
   it("returns the failed deploy with its provider, identity and run URL", async () => {
     const harness = resolver(["20"], {
       "20": {
@@ -523,12 +556,87 @@ describe("resolveEnvironmentDeployment", () => {
     );
 
     await expect(
-      resolveEnvironmentDeployment(REPO, ENVIRONMENT, "app", {
+      createDeploymentLookup({
         ghOrThrow,
         deployWorkflowFile: DEPLOY_WORKFLOW,
         deleteWorkflowFile: DELETE_WORKFLOW,
         maxParallelRecords: 10
-      })
+      }).resolveEnvDeployment(REPO, ENVIRONMENT, "app")
     ).rejects.toBe(failure);
+  });
+});
+
+describe("repository application-name compatibility", () => {
+  function lookup(responses: readonly (string | Error)[]) {
+    let index = 0;
+    const ghOrThrow = vi.fn(async () => {
+      const response = responses[index++];
+      if (response === undefined) throw new Error("Unexpected GitHub request");
+      if (response instanceof Error) throw response;
+      return response;
+    });
+    return {
+      ghOrThrow,
+      lookup: createDeploymentLookup({
+        ghOrThrow,
+        deployWorkflowFile: DEPLOY_WORKFLOW,
+        deleteWorkflowFile: DELETE_WORKFLOW
+      })
+    };
+  }
+  const encode = (source: string) => Buffer.from(source).toString("base64");
+
+  it("reads the committed model on the exact requested branch and stops after its application name", async () => {
+    const h = lookup([
+      encode(
+        "resource app 'Radius.Core/applications@v1' = { name: 'modeled-app' }"
+      )
+    ]);
+    expect(await h.lookup.resolveRepoAppName("acme/repo", "feature")).toBe(
+      "modeled-app"
+    );
+    expect(h.ghOrThrow).toHaveBeenCalledExactlyOnceWith([
+      "api",
+      "/repos/acme/repo/contents/.radius/app.bicep?ref=feature",
+      "--jq",
+      ".content"
+    ]);
+  });
+
+  it.each([
+    new Error("not available"),
+    "",
+    "malformed base64",
+    encode("param location string")
+  ])(
+    "falls back to root app.bicep after an unreadable or nameless preferred model: %s",
+    async (first) => {
+      const h = lookup([first, encode("name: 'legacy-app'")]);
+      expect(await h.lookup.resolveRepoAppName("acme/repo", "feature")).toBe(
+        "legacy-app"
+      );
+      expect(h.ghOrThrow).toHaveBeenLastCalledWith([
+        "api",
+        "/repos/acme/repo/contents/app.bicep?ref=feature",
+        "--jq",
+        ".content"
+      ]);
+    }
+  );
+
+  it("retains the empty-branch main fallback and basename fallback when both reads fail", async () => {
+    const h = lookup([new Error("permission denied"), new Error("missing")]);
+    expect(await h.lookup.resolveRepoAppName("acme/repo", "")).toBe("repo");
+    expect(h.ghOrThrow).toHaveBeenNthCalledWith(1, [
+      "api",
+      "/repos/acme/repo/contents/.radius/app.bicep?ref=main",
+      "--jq",
+      ".content"
+    ]);
+  });
+
+  it("retains the complete repository label when it has no basename", async () => {
+    const h = lookup(["", ""]);
+    expect(await h.lookup.resolveRepoAppName("acme/", "feature")).toBe("acme/");
   });
 });
