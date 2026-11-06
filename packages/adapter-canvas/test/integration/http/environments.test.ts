@@ -12,6 +12,7 @@ import {
   type DeletionOperation
 } from "../../../src/server/services/environment-deletion.js";
 import { createAwsEnvironmentAccess } from "../../../src/server/services/aws-environment-access.js";
+import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
 import { createEnvironmentTargetReader } from "../../../src/server/services/environment-target.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
 import { redactGhCredentials } from "../../../src/gh.js";
@@ -744,6 +745,12 @@ function delayedDeleteWorkflow(outcome: "success" | "failure" | "missing") {
 }
 
 describe("the async delete route through its background runner", () => {
+  // Reads an AWS environment with these variables in repository 42.
+  const awsTarget = (variables: string) =>
+    createEnvironmentTargetReader(async (_command, args) =>
+      args[1] === `/repos/${REPO}` ? "42" : variables
+    );
+
   it.each(["failure", "missing"] as const)(
     "keeps credentials and the environment when delayed workflow discovery ends in %s",
     async (outcome) => {
@@ -779,6 +786,7 @@ describe("the async delete route through its background runner", () => {
             readAzureIdentity: unexpectedCleanup,
             removeCredentialProvenance: unexpectedCleanup,
             clearEnvironmentCredentialProvenance: unexpectedCleanup,
+            readRepositoryId: unexpectedCleanup,
             removeAwsEnvironmentAccess: unexpectedCleanup,
             persist: async () => {},
             errorMessage: (error) =>
@@ -809,14 +817,12 @@ describe("the async delete route through its background runner", () => {
     }
   );
 
-  it("schedules AWS deletion using the saved policy identity, never the request's replacement name", async () => {
+  it("schedules AWS deletion using the saved trust subjects, never the request's", async () => {
     let captured: unknown;
-    const policyName = "radius-deploy-dev-111111111111";
     const harness = await start(listingScript("7\tdev"), {
       awsEnabled: true,
-      discoverEnvironmentTarget: createEnvironmentTargetReader(
-        async () =>
-          `AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/picked\nAWS_TRUST_SUBJECTS\t["repo:old/name:environment:dev"]\nAWS_PERMISSION_POLICY_NAME\t${policyName}`
+      discoverEnvironmentTarget: awsTarget(
+        `AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/picked\nAWS_TRUST_SUBJECTS\t["repo:old/name:environment:dev"]`
       ),
       createOperation,
       buildDeleteStages,
@@ -834,14 +840,14 @@ describe("the async delete route through its background runner", () => {
       body: JSON.stringify({
         repo: REPO,
         environment: "dev",
-        policyName: "client-replacement"
+        trustSubjects: ["repo:client/replacement:environment:dev"]
       })
     });
     expect(response.status).toBe(202);
     expect(captured).toMatchObject({
       repo: REPO,
+      repoId: 42,
       provider: "aws",
-      policyName,
       trustSubjects: ["repo:old/name:environment:dev"]
     });
   });
@@ -893,6 +899,9 @@ describe("the async delete route through its background runner", () => {
         operations.push(op);
         void runEnvironmentDeletion(deletions.scheduled(op), {
           deleteRadiusEnvironment: workflow.run,
+          readRepositoryId: async () => {
+            throw new Error("unexpected repository read");
+          },
           removeAwsEnvironmentAccess: async () => {
             throw new Error("unexpected AWS role cleanup");
           },
@@ -1106,6 +1115,9 @@ describe("the async delete route through its background runner", () => {
         capturedOp = deletions.scheduled(op);
         void runEnvironmentDeletion(capturedOp, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          readRepositoryId: async () => {
+            throw new Error("unexpected repository read");
+          },
           removeAwsEnvironmentAccess: async () => {
             throw new Error("unexpected AWS role cleanup");
           },
@@ -1251,9 +1263,11 @@ describe("the async delete route through its background runner", () => {
       "iam create-policy": lock,
       "iam get-policy": lock,
       "iam delete-policy": "",
-      "iam list-role-policies": { PolicyNames: ["radius-deploy-dev"] },
+      "iam list-role-policies": {
+        PolicyNames: [awsEnvironmentPolicyName(42, "dev")]
+      },
       "iam get-role-policy": {
-        PolicyName: "radius-deploy-dev",
+        PolicyName: awsEnvironmentPolicyName(42, "dev"),
         PolicyDocument: {
           Version: "2012-10-17",
           Statement: [{ Effect: "Allow", Action: "ec2:*", Resource: "*" }]
@@ -1362,9 +1376,7 @@ describe("the async delete route through its background runner", () => {
     const deletions = trackDeletions();
     const deleteDeps: Partial<EnvironmentsDependencies> = {
       awsEnabled: true,
-      discoverEnvironmentTarget: createEnvironmentTargetReader(async () =>
-        awsVariables("shop", dev)
-      ),
+      discoverEnvironmentTarget: awsTarget(awsVariables("shop", dev)),
       createOperation: deletions.createOperation,
       buildDeleteStages: (options) => buildDeleteStages(options),
       startOperation: (op) => ({ ok: true as const, operation: op }),
@@ -1375,6 +1387,7 @@ describe("the async delete route through its background runner", () => {
         capturedOp = deletions.scheduled(op);
         void runEnvironmentDeletion(capturedOp, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          readRepositoryId: async () => 42,
           removeAwsEnvironmentAccess: access.remove,
           deleteStatePackage: async () => "deleted",
           reportStatePackageDeletionFailure: async () => {},
@@ -1432,7 +1445,7 @@ describe("the async delete route through its background runner", () => {
     ).toEqual(
       expect.arrayContaining([
         `Removed trust subject ${dev}`,
-        "Removed policy radius-deploy-dev",
+        `Removed policy ${awsEnvironmentPolicyName(42, "dev")}`,
         `Removed access entry for ${role} on shop`,
         `Kept IAM role ${role}`
       ])

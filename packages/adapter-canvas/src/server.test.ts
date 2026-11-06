@@ -6541,6 +6541,9 @@ describe("environment deletion session reporting coordinator", () => {
         removeAwsEnvironmentAccess: async () => {
           throw new Error("unexpected AWS role cleanup");
         },
+        readRepositoryId: async () => {
+          throw new Error("unexpected repository read");
+        },
         runAz: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
         readAzureIdentity: vi.fn(async () => ({
           tenantId: "tenant-1",

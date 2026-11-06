@@ -137,12 +137,16 @@ export interface EnvironmentDeletionPorts {
     repoId: number,
     environment: string
   ): Promise<void>;
+  // AWS only: the ID of the repository GitHub serves at `repo` now. Throws
+  // when GitHub can't say.
+  readRepositoryId(repo: string): Promise<number>;
   // AWS only: under the deploy identity lock, remove the environment's trust
   // subjects and permission policy from the shared deploy role, and its
   // cluster's access entry when nothing else uses it. The role itself is
   // never deleted.
   removeAwsEnvironmentAccess(input: {
     repo: string;
+    repoId: number;
     environment: string;
     roleArn: string;
     // The subjects setup recorded; empty when it recorded none.
@@ -150,7 +154,6 @@ export interface EnvironmentDeletionPorts {
     // Empty when the environment did not record its cluster.
     region: string;
     cluster: string;
-    policyName?: string;
     operationId: string;
     // Called on every poll while another run holds the lock, with a progress
     // line when there is something new to say.
@@ -254,6 +257,83 @@ function stagePending(op: DeletionOperation, stageId: string): boolean {
   return state === "pending" || state === "running";
 }
 
+// The trust subjects the deletion recorded, empty when it recorded none, or
+// null when the record is not a list of subjects.
+function recordedTrustSubjects(op: DeletionOperation): string[] | null {
+  const recorded: unknown = op.request?.trustSubjects;
+  if (recorded === undefined) return [];
+  return (
+      Array.isArray(recorded) &&
+        recorded.every(
+          (subject) => typeof subject === "string" && subject !== ""
+        )
+    ) ?
+      (recorded as string[])
+    : null;
+}
+
+// The AWS deletion stages, in order, that act on whatever the repository name
+// reaches now: its Radius environment, trust, GitHub environment, and state
+// package.
+const AWS_REPOSITORY_STAGES = [
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE
+];
+
+// Before any of those stages runs, fresh or resumed, confirm the name still
+// reaches the repository the deletion started for. When the trust is still to
+// be removed, also confirm its recorded history is readable.
+async function checkAwsDeletion(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts,
+  repo: string
+): Promise<
+  | { ok: true; trustSubjects: string[] }
+  | { ok: false; code: string; message: string }
+> {
+  // A retry whose GitHub environment delete is pending removes the trust again.
+  const removesTrust =
+    stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS) ||
+    stagePending(op, STAGE_DELETE_GITHUB_ENV);
+  const trustSubjects = removesTrust ? recordedTrustSubjects(op) : [];
+  if (trustSubjects === null) {
+    return {
+      ok: false,
+      code: "aws-saved-configuration-unreadable",
+      message:
+        "The environment's AWS_TRUST_SUBJECTS GitHub variable is not a JSON list of trust subjects, so Radius can't tell which trust to remove. Radius stopped before making further changes. Restore the complete list, using the deploy role's trust policy to find this environment's subjects, then delete the environment again. Don't delete the variable, because Radius would then leave the older subjects in the role's trust."
+    };
+  }
+  const savedId = op.request?.repoId;
+  if (!Number.isSafeInteger(savedId) || Number(savedId) <= 0) {
+    return {
+      ok: false,
+      code: "aws-repository-unconfirmed",
+      message: `This deletion has no valid GitHub repository ID, so Radius can't confirm ${repo} is the repository it started for. Radius stopped before making further changes. Delete the environment again.`
+    };
+  }
+  let currentId: number;
+  try {
+    currentId = await ports.readRepositoryId(repo);
+  } catch (error) {
+    return {
+      ok: false,
+      code: "aws-repository-unconfirmed",
+      message: `Could not read repository ${repo} from GitHub (${ports.errorMessage(error)}), so Radius couldn't confirm it is the repository this deletion started for. Radius stopped before making further changes. Delete the environment again.`
+    };
+  }
+  if (currentId !== savedId) {
+    return {
+      ok: false,
+      code: "aws-repository-unconfirmed",
+      message: `${repo} is no longer the repository this deletion started for. Radius stopped before making further changes. If the repository was renamed, delete the environment from its new name.`
+    };
+  }
+  return { ok: true, trustSubjects };
+}
+
 /**
  * Run (or resume) an environment-deletion operation to completion.
  *
@@ -268,6 +348,42 @@ export async function runEnvironmentDeletion(
   const environment = String(op.environment || "");
   const provider = String(op.provider || "");
   const log = ports.log || (() => {});
+
+  let trustSubjects: string[] = [];
+  const nextAwsStage =
+    stageState(op, STAGE_DELETE_AWS_ROLE_ACCESS) === null ? undefined : (
+      AWS_REPOSITORY_STAGES.find((id) => stagePending(op, id))
+    );
+  if (nextAwsStage) {
+    const checked = await checkAwsDeletion(op, ports, repo);
+    if (!checked.ok) {
+      // An interrupted stage is reset to pending on restart but keeps its
+      // steps, so only a deletion with neither has changed nothing.
+      const untouched =
+        op.steps.length === 0 && op.stages.every((s) => s.state === "pending");
+      addStep(op, {
+        stage: nextAwsStage,
+        kind: "observation",
+        label:
+          "Could not confirm the environment's AWS configuration. Deletion stopped.",
+        state: "failed"
+      });
+      setStageState(op, nextAwsStage, "failed");
+      finish(op, untouched ? "failed" : "failed_partial", {
+        failure: {
+          code: checked.code,
+          stage: nextAwsStage,
+          stepSeq: null,
+          message: checked.message,
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await ports.persist();
+      return;
+    }
+    trustSubjects = checked.trustSubjects;
+  }
 
   // Stage 1 — delete the Radius environment on the cluster.
   if (stagePending(op, STAGE_DELETE_RADIUS_ENV)) {
@@ -390,18 +506,6 @@ export async function runEnvironmentDeletion(
   // lock instead, below. Other environments have nothing to retire, so their
   // GitHub delete needs no lock.
   const roleArn = String(op.request?.roleArn || "");
-  // All or nothing: a damaged list falls back to resolving the subjects from
-  // GitHub rather than removing a partial set.
-  const recordedSubjects: unknown = op.request?.trustSubjects;
-  const trustSubjects =
-    (
-      Array.isArray(recordedSubjects) &&
-      recordedSubjects.every(
-        (subject) => typeof subject === "string" && subject !== ""
-      )
-    ) ?
-      (recordedSubjects as string[])
-    : [];
   // The trust removal and the GitHub environment delete run under one hold of
   // the deploy identity lock. Repair reads the GitHub environment under that
   // lock, so if the lock were released between the two steps, Repair could
@@ -438,14 +542,12 @@ export async function runEnvironmentDeletion(
     try {
       removal = await ports.removeAwsEnvironmentAccess({
         repo,
+        repoId: Number(op.request?.repoId),
         environment,
         roleArn,
         trustSubjects,
         region: String(op.request?.region || ""),
         cluster: String(op.request?.cluster || ""),
-        ...(op.request?.policyName !== undefined ?
-          { policyName: String(op.request.policyName) }
-        : {}),
         operationId: op.operationId,
         // Shown on the deletion's progress, where Remove lock is offered.
         waiting: async (wait, line) => {

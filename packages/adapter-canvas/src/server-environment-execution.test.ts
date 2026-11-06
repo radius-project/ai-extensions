@@ -105,6 +105,7 @@ function coordinator(
       deleteRadiusEnvironment: unavailable,
       runAz: unavailable,
       readAzureIdentity: unavailable,
+      readRepositoryId: unavailable,
       removeAwsEnvironmentAccess: unavailable,
       deleteGitHubEnvironment: unavailable,
       deleteStatePackage: unavailable,
@@ -207,8 +208,7 @@ function awsOperation(operationId: string) {
 const awsSetupResult = {
   ok: true as const,
   roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
-  subjects: ["repo:fixture/app:environment:dev"],
-  policyName: "radius-deploy-dev"
+  subjects: ["repo:fixture/app:environment:dev"]
 };
 
 afterEach(() => {
@@ -1728,6 +1728,7 @@ describe("production coordinator scheduling scopes", () => {
           deleteRadiusEnvironment: unavailable,
           runAz: unavailable,
           readAzureIdentity: unavailable,
+          readRepositoryId: unavailable,
           removeAwsEnvironmentAccess: unavailable,
           deleteGitHubEnvironment: unavailable,
           deleteStatePackage: unavailable,

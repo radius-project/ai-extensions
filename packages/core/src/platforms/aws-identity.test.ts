@@ -11,11 +11,11 @@ import {
   buildAwsDeployRoleName,
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
-  buildLegacyAwsEnvironmentPolicyName,
   buildAwsLockPolicyDocument,
   buildAwsLockPolicyName,
   buildGitHubTrustPolicy,
   checkAwsCliVersion,
+  isEarlierAwsEnvironmentPolicyName,
   classifyAwsCliFailure,
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
@@ -29,7 +29,6 @@ import {
   isAwsRoleName,
   isEksClusterName,
   isRadiusManagedRole,
-  legacyAwsPolicyOwnershipError,
   mergeGitHubTrustSubject,
   namesGitHubProvider,
   parseAwsCliVersion,
@@ -41,6 +40,7 @@ import {
   namesOneEnvironment,
   namesRepositoryEnvironment,
   immutableEnvironmentRepository,
+  subjectRepositoryName,
   removeGitHubTrustSubject,
   restrictedGitHubSubjects,
   repositoryLessSubjectMessage,
@@ -79,6 +79,25 @@ describe("immutable environment repository ownership", () => {
       expect(immutableEnvironmentRepository(subject, "dev")).toBeNull();
     }
   );
+});
+
+describe("subjectRepositoryName", () => {
+  it.each([
+    ["repo:octo/shop:environment:dev", "octo/shop"],
+    ["repository_owner_id:7:repo:octo/shop:environment:dev", "octo/shop"],
+    ["repository:octo@7/shop@42:environment:dev", "octo/shop"]
+  ])("reads the repository claim wherever it is: %s", (subject, name) => {
+    expect(subjectRepositoryName(subject)).toBe(name);
+  });
+  it.each([
+    "repository_id:42:environment:dev",
+    "repo:octo/shop:repository:octo/other:environment:dev",
+    "repo:octo/shop?per_page=1:environment:dev",
+    "repo:octo:environment:dev",
+    "not a subject"
+  ])("returns null without exactly one well-formed name: %s", (subject) => {
+    expect(subjectRepositoryName(subject)).toBeNull();
+  });
 });
 
 const ACCOUNT = "123456789012";
@@ -220,48 +239,65 @@ describe("names and identifiers", () => {
     expect(hashed).toEqual([`octo/${"a".repeat(60)}`]);
   });
 
-  it("recognizes legacy policy names without using them for new policies", () => {
-    expect(buildLegacyAwsEnvironmentPolicyName("dev")).toBe(
-      "radius-deploy-dev"
-    );
-    expect(buildLegacyAwsEnvironmentPolicyName("qa:east")).toBe(
-      "radius-deploy-qa-east"
-    );
-  });
-
   const hash = (value: string): string =>
     createHash("sha256").update(value).digest("hex");
 
   it("separates repositories and environments on a shared role", () => {
     const names = [
-      buildAwsEnvironmentPolicyName("octo/shop", "dev", hash),
-      buildAwsEnvironmentPolicyName("octo/api", "dev", hash),
-      buildAwsEnvironmentPolicyName("octo/shop", "prod", hash),
-      buildAwsEnvironmentPolicyName("octo/shop", "qa:east", hash),
-      buildAwsEnvironmentPolicyName("octo/shop", "qa-east", hash)
+      buildAwsEnvironmentPolicyName(42, "dev", hash),
+      buildAwsEnvironmentPolicyName(43, "dev", hash),
+      buildAwsEnvironmentPolicyName(42, "prod", hash),
+      buildAwsEnvironmentPolicyName(42, "qa:east", hash),
+      buildAwsEnvironmentPolicyName(42, "qa-east", hash)
     ];
     expect(new Set(names).size).toBe(names.length);
-    expect(names[0]).toBe("radius-deploy-dev-f5fb7acf8f59");
+    expect(names[0]).toBe("radius-deploy-dev-d800e3fc44abedc6");
   });
 
-  it("uses the same policy for case-insensitive repository and environment names", () => {
-    expect(buildAwsEnvironmentPolicyName("Octo/Shop", "DEV", hash)).toBe(
-      buildAwsEnvironmentPolicyName("octo/shop", "dev", hash)
+  it("uses the same policy for case-insensitive environment names", () => {
+    expect(buildAwsEnvironmentPolicyName(42, "DEV", hash)).toBe(
+      buildAwsEnvironmentPolicyName(42, "dev", hash)
     );
   });
 
   it("keeps the identity suffix when environment names require truncation", () => {
     const environment = "a".repeat(200);
-    const first = buildAwsEnvironmentPolicyName("octo/shop", environment, hash);
-    const second = buildAwsEnvironmentPolicyName(
-      "octo/shop",
-      `${environment}b`,
-      hash
-    );
+    const first = buildAwsEnvironmentPolicyName(42, environment, hash);
+    const second = buildAwsEnvironmentPolicyName(42, `${environment}b`, hash);
     expect(first).toHaveLength(128);
-    expect(first).toMatch(/-[a-f0-9]{12}$/);
+    expect(first).toMatch(/-[a-f0-9]{16}$/);
     expect(second).toHaveLength(128);
     expect(first).not.toBe(second);
+  });
+
+  it("recognizes the policy names earlier builds gave an environment", () => {
+    expect(isEarlierAwsEnvironmentPolicyName("radius-deploy-Dev", "Dev")).toBe(
+      true
+    );
+    expect(
+      isEarlierAwsEnvironmentPolicyName("radius-deploy-dev-0123456789ab", "DEV")
+    ).toBe(true);
+    for (const name of [
+      buildAwsEnvironmentPolicyName(42, "dev", hash),
+      "radius-deploy-prod-0123456789ab",
+      "radius-deploy-dev-0123456789",
+      "radius-deploy-devx"
+    ]) {
+      expect(isEarlierAwsEnvironmentPolicyName(name, "dev")).toBe(false);
+    }
+    const long = "a".repeat(200);
+    expect(
+      isEarlierAwsEnvironmentPolicyName(
+        buildAwsEnvironmentPolicyName(42, long, hash),
+        long
+      )
+    ).toBe(false);
+    expect(
+      isEarlierAwsEnvironmentPolicyName(
+        `radius-deploy-${long}`.slice(0, 115) + "-0123456789ab",
+        long
+      )
+    ).toBe(true);
   });
 
   it.each([
@@ -624,7 +660,9 @@ describe("trust policy", () => {
         {
           Version: "2012-10-17",
           Statement: [
-            github({ StringEquals: { [`${GITHUB}:aud`]: "sts.amazonaws.com" } })
+            github({
+              StringEquals: { [`${GITHUB}:aud`]: "sts.amazonaws.com" }
+            })
           ]
         }
       ],
@@ -823,34 +861,6 @@ describe("permissions and provenance", () => {
       "DescribeCluster"
     ])
       expect(excluded(action)).toBe(false);
-  });
-
-  it("recognizes picked-role ownership from trust and refuses unknown trust conditions", () => {
-    const input = {
-      repo: "octo/shop",
-      environment: "dev",
-      accountId: ACCOUNT,
-      subjects: [DEV]
-    };
-    const trust = buildGitHubTrustPolicy(ACCOUNT, [DEV, PROD]);
-    expect(
-      legacyAwsPolicyOwnershipError({
-        ...input,
-        role: { AssumeRolePolicyDocument: trust }
-      })
-    ).toBeNull();
-    trust.Statement.push({
-      Effect: "Allow",
-      Principal: { Federated: githubOidcProviderArn(ACCOUNT) },
-      Action: "sts:AssumeRoleWithWebIdentity",
-      Condition: { Bool: { "aws:MultiFactorAuthPresent": true } }
-    });
-    expect(
-      legacyAwsPolicyOwnershipError({
-        ...input,
-        role: { AssumeRolePolicyDocument: trust }
-      })
-    ).toContain("cannot interpret");
   });
 
   it("limits the power-user grant to the environment's region and never grants IAM", () => {
@@ -1267,7 +1277,10 @@ describe("repositoryLessSubjectMessage", () => {
       repositoryLessSubjectMessage(
         ["repository_owner:octo:environment:dev"],
         "octo/shop",
-        { useDefault: false, includeClaimKeys: ["repository_owner", "context"] }
+        {
+          useDefault: false,
+          includeClaimKeys: ["repository_owner", "context"]
+        }
       )
     ).toBe(
       "GitHub's OIDC subject for this environment, repository_owner:octo:environment:dev, does not name the repository, because the OIDC subject customization for octo/shop, set on the repository or its organization, includes only the claims repository_owner, context. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry."
