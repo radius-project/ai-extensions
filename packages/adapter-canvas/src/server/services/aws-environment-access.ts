@@ -13,6 +13,7 @@ import {
   formatAwsLockTime,
   readRecordedAwsLock,
   assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
   type AwsLockAction
 } from "@radius-project/core";
 import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
@@ -176,6 +177,8 @@ export interface AwsEnvironmentAccess<Operation> {
     warnings: string[];
     // Whether the lock this rollback took is gone.
     released: boolean;
+    // The run ended part way. `outcomes` holds each change that finished.
+    interrupted?: true;
   }>;
   // Add back the subjects GitHub presents for this environment's deploys but
   // the role no longer trusts, under the deploy identity lock. Does not wait
@@ -369,7 +372,10 @@ export function createAwsEnvironmentAccess<Operation>(
     },
     waiting: ((wait: AwsLockWait, line: string | null) => unknown) | null,
     work: (ports: AwsRoleChangePorts) => Promise<T>,
-    onAcquired?: (lock: AwsDeployIdentityLock) => Promise<void>
+    onAcquired?: (lock: AwsDeployIdentityLock) => Promise<void>,
+    // Called right before each AWS command is sent, after any lock check it
+    // waits on. Throws to stop the run; the lock is still released.
+    beforeSend: () => void = () => {}
   ): Promise<{ result: T; lost: string; released: AwsLockReleaseResult }> {
     // Boxed so the closures below and this function see one value.
     const state: {
@@ -387,12 +393,14 @@ export function createAwsEnvironmentAccess<Operation>(
               state.lost ??= lost;
               return lockLostResult(lost.reason);
             }
+            beforeSend();
             const result = await dependencies.runAws(args);
             if (result.code === 0 || result.code === "0") {
               state.writes.push(`aws ${args[0]} ${args[1]}`);
             }
             return result;
           }
+          beforeSend();
           return dependencies.runAws(args);
         },
         sleep: dependencies.sleep,
@@ -1014,7 +1022,9 @@ export function createAwsEnvironmentAccess<Operation>(
     }) {
       const active = () => assertSetupExecutionActive(isStopped);
       active();
-      const { result, lost, released } = await runUnderLock(
+      const outcomes: AwsSetupRollbackOutcome[] = [];
+      let interrupted = false;
+      const { lost, released } = await runUnderLock(
         {
           repo,
           environment,
@@ -1023,47 +1033,54 @@ export function createAwsEnvironmentAccess<Operation>(
           ...(adopt ? { adopt } : {})
         },
         null,
-        (ports) =>
-          rollbackAwsSetupChanges(
-            { repo, environment, roleArn, targets },
-            {
-              ...ports,
-              runAws: async (args) => {
-                active();
-                return ports.runAws(args);
-              },
-              acquireLock: async (role) => {
-                active();
-                return ports.acquireLock(role);
-              },
-              // Only the access entry needs this, so a GitHub read that fails
-              // keeps that entry rather than stopping the whole rollback.
-              listOtherEnvironments: async () => {
-                active();
-                try {
-                  const oidc = await resolveOidc(repo, environment);
-                  return await listOtherAwsEnvironments(
-                    repo,
-                    environment,
-                    oidc
-                  );
-                } catch (error) {
-                  return {
-                    ok: false,
-                    reason: dependencies.errorMessage(error)
-                  };
+        async (ports) => {
+          try {
+            await rollbackAwsSetupChanges(
+              { repo, environment, roleArn, targets },
+              {
+                ...ports,
+                acquireLock: async (role) => {
+                  active();
+                  return ports.acquireLock(role);
+                },
+                // Only the access entry needs this, so a GitHub read that fails
+                // keeps that entry rather than stopping the whole rollback.
+                listOtherEnvironments: async () => {
+                  active();
+                  try {
+                    const oidc = await resolveOidc(repo, environment);
+                    return await listOtherAwsEnvironments(
+                      repo,
+                      environment,
+                      oidc
+                    );
+                  } catch (error) {
+                    return {
+                      ok: false,
+                      reason: dependencies.errorMessage(error)
+                    };
+                  }
                 }
-              }
-            }
-          ),
+              },
+              outcomes
+            );
+          } catch (error) {
+            // The changes that finished stay in `outcomes`, and the lock is
+            // released below as on any other return.
+            if (!isSetupExecutionInterrupted(error)) throw error;
+            interrupted = true;
+          }
+        },
         onLocked &&
           ((lock) =>
-            onLocked({ policyArn: lock.policyArn, policyId: lock.policyId }))
+            onLocked({ policyArn: lock.policyArn, policyId: lock.policyId })),
+        active
       );
       return {
-        outcomes: result,
+        outcomes,
         warnings: [lost, released.ok ? "" : released.message].filter(Boolean),
-        released: released.ok || released.gone
+        released: released.ok || released.gone,
+        ...(interrupted ? { interrupted: true as const } : {})
       };
     },
 

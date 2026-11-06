@@ -1570,11 +1570,18 @@ export async function rollbackAwsSetupChanges(
     roleArn: string;
     targets: readonly AwsSetupRollbackTarget[];
   },
-  ports: AwsDeployIdentityRemovalPorts
+  ports: AwsDeployIdentityRemovalPorts,
+  // Each outcome is added as soon as AWS answers, so a caller whose run is
+  // cut short still holds every change that finished.
+  outcomes: AwsSetupRollbackOutcome[] = []
 ): Promise<AwsSetupRollbackOutcome[]> {
   const { targets } = request;
-  const everyTarget = (outcome: "skipped" | "warning", detail: string) =>
-    targets.map((target) => rollbackOutcome(target.key, outcome, detail));
+  const everyTarget = (outcome: "skipped" | "warning", detail: string) => {
+    for (const target of targets) {
+      outcomes.push(rollbackOutcome(target.key, outcome, detail));
+    }
+    return outcomes;
+  };
   const parsed = parseAwsRoleArn(request.roleArn);
   if (!parsed || parsed.partition !== "aws") {
     return everyTarget(
@@ -1610,7 +1617,6 @@ export async function rollbackAwsSetupChanges(
     "--output",
     "json"
   ]);
-  const outcomes: AwsSetupRollbackOutcome[] = [];
   // An entry whose role is gone grants nothing to anyone. When the role was
   // replaced, only an entry older than the new role is the old role's.
   const removeOrphanedEntries = async (replacedAt?: unknown) => {

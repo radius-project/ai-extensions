@@ -236,6 +236,19 @@ export async function rollbackAwsSetupArtifacts(
       warnings.push(line);
       steps.push(`⚠️ ${line}`);
     }
+    if (rolledBack.interrupted) {
+      // Only what AWS answered before the stop. The rest is tried again.
+      for (const target of forRole) {
+        const outcome = rolledBack.outcomes.find(
+          (entry) => entry.key === target.key
+        );
+        if (outcome) result(target, outcome);
+      }
+      // Saved here, so the lock's state is kept even when no change finished
+      // and the cleanup pass has nothing to record.
+      await persist();
+      return { attempted: true, results, warnings, interrupted: true };
+    }
     for (const target of forRole) {
       const outcome = rolledBack.outcomes.find(
         (entry) => entry.key === target.key

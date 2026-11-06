@@ -335,6 +335,63 @@ describe("rollbackAwsSetupArtifacts", () => {
     expect(op.setupArtifacts.awsRole.state).toBe("created");
   });
 
+  it.each([
+    ["released", true, null],
+    ["not released", false, { policyArn: LOCK_ARN, policyId: "LOCK7" }]
+  ])(
+    "keeps and saves what finished on a role when the execution ends part way, with the lock %s",
+    async (_label, released, lockAfter) => {
+      const op = setupWithChanges();
+      const lock = { policyArn: LOCK_ARN, policyId: "LOCK7" };
+      const saved: unknown[] = [];
+      const access = {
+        rollback: vi.fn(
+          async (input: {
+            onLocked?(lock: {
+              policyArn: string;
+              policyId: string;
+            }): Promise<void>;
+          }) => {
+            await input.onLocked?.(lock);
+            return {
+              outcomes: [deleted(provenOwnedCleanupTargets(op)[0]!.key)],
+              warnings: released ? [] : ["Radius could not release its lock."],
+              released,
+              interrupted: true as const
+            };
+          }
+        )
+      };
+
+      const pass = await rollbackAwsSetupArtifacts(op, {
+        persist: async () => {
+          saved.push({
+            lock: structuredClone(op.context.awsDeployIdentityLock),
+            entries: structuredClone(op.setupArtifacts.awsAccessEntries)
+          });
+        },
+        attempt: 1,
+        awsEnabled: true,
+        selected: provenOwnedCleanupTargets(op),
+        access,
+        steps: []
+      });
+
+      expect(pass.interrupted).toBe(true);
+      // Only the change AWS answered; the rest are tried again.
+      expect(
+        pass.results.map((entry) => [entry.artifactType, entry.outcome])
+      ).toEqual([["aws_access_entry", "deleted"]]);
+      expect(op.setupArtifacts.awsRole.state).toBe("created");
+      expect(op.context.awsDeployIdentityLock).toEqual(lockAfter);
+      // Saved after the role, with the deletion and the lock's state.
+      expect(saved.at(-1)).toEqual({
+        lock: lockAfter,
+        entries: [expect.objectContaining({ state: "deleted" })]
+      });
+    }
+  );
+
   it("passes on any other rollback error", async () => {
     const op = setupWithChanges();
     await expect(

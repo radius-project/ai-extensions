@@ -3409,11 +3409,82 @@ describe("AWS environment access rollback", () => {
           targets: [target],
           isStopped: () => h.commands().includes(last)
         })
-      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      ).resolves.toMatchObject({ interrupted: true, outcomes: [] });
       expect(h.commands()).not.toContain("iam delete-role-policy");
       expect(h.commands().includes("iam create-policy")).toBe(
         h.commands().at(-1) === "iam delete-policy"
       );
+    }
+  );
+
+  // The lock check before a write is itself an AWS read. A stop that lands
+  // during it must still keep the write from being sent.
+  it("sends no write when the execution ends while the lock is checked", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      })
+    );
+    const lockReads = () =>
+      h.commands().filter((command) => command === "iam get-policy").length;
+
+    expect(
+      await h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [target],
+        // Ends when the check before delete-role-policy starts.
+        isStopped: () => lockReads() >= 2
+      })
+    ).toMatchObject({ interrupted: true, outcomes: [], released: true });
+    expect(h.commands()).not.toContain("iam delete-role-policy");
+    expect(h.commands().at(-1)).toBe("iam delete-policy");
+  });
+
+  it.each([
+    ["released", ok(), true, []],
+    [
+      "kept when its release fails",
+      fail("An error occurred (AccessDenied) when calling DeletePolicy"),
+      false,
+      [expect.stringContaining("not allowed iam:DeletePolicy")]
+    ]
+  ])(
+    "returns what finished on a role when the execution ends part way, with the lock %s",
+    async (_label, release, released, warnings) => {
+      const h = harness(
+        rollbackScript({
+          "iam create-policy": lockPolicy("LOCK1"),
+          "iam get-policy": lockPolicy("LOCK1"),
+          "iam delete-policy": release
+        })
+      );
+
+      expect(
+        await h.access.rollback({
+          repo: "octo/shop",
+          environment: "dev",
+          operationId: "op-1",
+          roleArn: ROLE_ARN,
+          targets: [
+            target,
+            { ...target, key: "policy2", policyName: "radius-deploy-dev-2" }
+          ],
+          // Ends once the first policy is deleted.
+          isStopped: () => h.commands().includes("iam delete-role-policy")
+        })
+      ).toEqual({
+        outcomes: [{ key: "policy", outcome: "deleted", detail: null }],
+        warnings,
+        released,
+        interrupted: true
+      });
+      expect(
+        h.commands().filter((command) => command === "iam delete-role-policy")
+      ).toHaveLength(1);
     }
   );
 
