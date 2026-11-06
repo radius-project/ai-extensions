@@ -93,6 +93,14 @@ export class AwsSessionUnavailableError extends Error {
 const isSessionUnavailable = (error: unknown): boolean =>
   error instanceof AwsSessionUnavailableError;
 
+// The AWS CLI retries a call after a 5xx reply or a dropped connection by
+// default. A create that landed the first time is then refused as already
+// there, by this very request. The operation tag on what is there tells.
+const CREATED_BY_A_RETRY: Partial<Record<AwsSetupChange["kind"], RegExp>> = {
+  "aws_role.create": /\(EntityAlreadyExists\)/,
+  "aws_access_entry.create": /\(ResourceInUseException\)/
+};
+
 // The AWS CLI exits 254 when the service answered the request with an error.
 // The journal reads any exit of 128 or more as a killed process, so the
 // answer is passed on with an ordinary failure code.
@@ -420,6 +428,10 @@ export function createAwsSetupJournal<
   ): Promise<AwsCommandResult> {
     const requestedAt = new Date(dependencies.now()).toISOString();
     let refused: AwsCommandResult | null = null;
+    const alreadyThere = CREATED_BY_A_RETRY[change.kind];
+    // The answer AWS gave, kept so setup reads its own "already exists" when
+    // the tag shows another request made what is there.
+    const answered: { result: AwsCommandResult | null } = { result: null };
     try {
       const outcome = await executeRecoverableMutation({
         operation,
@@ -432,7 +444,16 @@ export function createAwsSetupJournal<
           refused = await sender.guard(args);
           if (refused) throw new WriteNotSent();
         },
-        mutate: async () => serviceAnswer(await sender.run(args)),
+        mutate: async () => {
+          answered.result = serviceAnswer(await sender.run(args));
+          return answered.result;
+        },
+        ...(alreadyThere ?
+          {
+            ambiguousRejection: (result) =>
+              alreadyThere.test(String(result.stderr))
+          }
+        : {}),
         accept: (result) => result.stdout,
         providerIdOf: (result) =>
           change.kind === "aws_role.create" ?
@@ -451,6 +472,8 @@ export function createAwsSetupJournal<
       if (outcome.state === "applied") {
         return { code: 0, stdout: outcome.value, stderr: "" };
       }
+      const sent = answered.result;
+      if (sent && alreadyThere?.test(sent.stderr)) return sent;
       return (
         outcome.result ?? {
           code: 1,

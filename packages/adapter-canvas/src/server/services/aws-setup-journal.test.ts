@@ -499,11 +499,73 @@ describe("createAwsSetupJournal", () => {
     expect(op.setupArtifacts.awsTrustSubjects).toEqual([]);
   });
 
-  it("returns a write AWS refused, and records nothing", async () => {
+  // The CLI resends a create after a lost reply, so "already exists" may be
+  // about this setup's own first request. The operation tag says which.
+  describe.each([
+    [
+      "aws_role.create",
+      "An error occurred (EntityAlreadyExists) when calling the CreateRole operation: Role with name radius-deploy-octo-shop already exists.",
+      "iam get-role",
+      (tag: string) =>
+        ok({
+          Role: {
+            Arn: ROLE_ARN,
+            RoleId: "AROA2",
+            Tags: [{ Key: "radius-operation", Value: tag }]
+          }
+        }),
+      (op: ReturnType<typeof operation>) => op.setupArtifacts.awsRole.state
+    ],
+    [
+      "aws_access_entry.create",
+      "An error occurred (ResourceInUseException) when calling the CreateAccessEntry operation: The specified access entry resource is already in use on this cluster.",
+      "eks describe-access-entry",
+      (tag: string) =>
+        ok({ accessEntry: { tags: { "radius-operation": tag } } }),
+      (op: ReturnType<typeof operation>) =>
+        op.setupArtifacts.awsAccessEntries[0]?.state ?? "not_started"
+    ]
+  ] as const)(
+    "a %s AWS answers as already there",
+    (kind, stderr, read, answer, recorded) => {
+      it("records it as created when it carries this operation's tag", async () => {
+        const { journal: j, aws } = journal({
+          ...SESSION,
+          [read]: answer("op_journal")
+        });
+        const op = operation();
+
+        expect(
+          await j.write(op, CHANGES[kind], ARGS, sender(fail(stderr)))
+        ).toMatchObject({ code: 0 });
+
+        expect(aws.calls).toContain(read);
+        expect(op.providerRecovery.mutations[0].status).toBe("confirmed");
+        expect(recorded(op)).toBe("created");
+      });
+
+      it("returns AWS's answer and records nothing when another operation's tag is on it", async () => {
+        const { journal: j } = journal({
+          ...SESSION,
+          [read]: answer("op_other")
+        });
+        const op = operation();
+
+        expect(
+          await j.write(op, CHANGES[kind], ARGS, sender(fail(stderr)))
+        ).toMatchObject({ code: 1, stderr });
+
+        expect(op.providerRecovery.mutations[0].status).toBe("not_applied");
+        expect(recorded(op)).toBe("not_started");
+      });
+    }
+  );
+
+  it("returns any other write AWS refused, and records nothing", async () => {
     const { journal: j, aws } = journal({});
     const op = operation();
     const refused = fail(
-      "An error occurred (EntityAlreadyExists) when calling the CreateRole operation"
+      "An error occurred (AccessDenied) when calling the CreateRole operation"
     );
 
     expect(

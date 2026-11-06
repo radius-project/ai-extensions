@@ -534,6 +534,13 @@ type RecoverableMutationInput<T> = {
    */
   rejectionGuidance?(result: ProviderMutationCommandResult): string;
   rethrowReconciliationError?(error: unknown): boolean;
+  /**
+   * A refusal that, for this write, may answer a resend of a request that
+   * already landed: a CLI that retries a create after a lost reply hears
+   * "already exists" about its own first try. Such a refusal is settled by
+   * reading the provider, like a lost answer.
+   */
+  ambiguousRejection?(result: ProviderMutationCommandResult): boolean;
 };
 
 type NonCancelledMutationResult<T> = Exclude<
@@ -685,7 +692,11 @@ export async function executeRecoverableMutation<T>(
     // Ambiguity is read before success. A command that timed out, was killed,
     // or died on a signal can still exit 0 on some runners, and accepting that
     // as an acknowledgement records a mutation nobody saw the provider answer.
-    const outcomeUnknown = providerMutationOutcomeUnknown(result, input.target);
+    const outcomeUnknown =
+      providerMutationOutcomeUnknown(result, input.target) ||
+      (result.code !== 0 &&
+        result.code !== "0" &&
+        input.ambiguousRejection?.(result) === true);
     if (outcomeUnknown || (result.code !== 0 && result.code !== "0")) {
       const diagnostic = [
         `Provider command exit code: ${result.code}${result.timedOut === true ? " (timed out)" : ""}.`,
