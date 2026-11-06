@@ -202,6 +202,8 @@ Two mechanisms enforce the boundary.
 
 **`assertCleanSlate()` runs before the journey starts.** It asserts every repository-scoped and identity-scoped right-hand item is absent. On a disposable resource group it also requires empty role-assignment scopes. On the shared cluster it does not require globally empty scopes because AKS-managed identities and other Terraform baseline assignments legitimately exist there. Later assertions instead identify the product-created service principal and require its exact three assignments.
 
+Exact role-assignment inventories disable Azure CLI principal-name resolution with `--fill-principal-name false`. They still check the assignment ID, principal ID, role name, and scope. The fixture does not use principal names, so these reads need no extra Microsoft Graph name lookup. The assertion keeps its shared time limit across scope reads. A timeout before a complete inventory returns reports unconfirmed assignments, not missing assignments; after a complete read, it reports what was missing in the last completed inventory.
+
 That places a real constraint on cleanup, because the application name is repository-scoped
 rather than per-run. [`resolveAzureAutoSetupApplication()`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-application.ts)
 derives it as `radius-deploy-<owner>-<repo>` and looks up an existing one by
