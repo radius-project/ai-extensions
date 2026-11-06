@@ -654,6 +654,54 @@ describe("environments — delete-environment refusal ladder", () => {
     );
   });
 
+  it("records a scheduling failure even when its corrective save fails", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-unscheduled",
+      currentStage: "delete-radius-env"
+    };
+    const persistOperations = vi
+      .fn<() => Promise<void>>()
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("corrective save unavailable"));
+    const finish = vi.fn();
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({
+            provider: "azure",
+            clientId: "app-123",
+            tenantId: "tenant-1",
+            repoId: 7
+          }),
+        createOperation: () => op,
+        buildDeleteStages: () => [],
+        startOperation: () => ({ ok: true as const, operation: op }),
+        persistOperations,
+        toClientView: () => ({ operationId: op.operationId }),
+        scheduleEnvironmentOperation: () => false,
+        finish
+      })
+    );
+
+    expect(recording.status).toBe(202);
+    expect(finish).toHaveBeenCalledWith(op, "failed", {
+      failure: expect.objectContaining({
+        code: "operation-scheduling-failed"
+      })
+    });
+    expect(persistOperations).toHaveBeenCalledTimes(2);
+  });
+
   it("includes Azure cleanup even when the client id could not be read", async () => {
     const op: DeleteOperationRecord = {
       operationId: "op-del-2",

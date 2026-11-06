@@ -3,7 +3,7 @@ import {
   verifyWorkflowFilesMatchSource,
   type ExpectedWorkflowFile,
   type WorkflowReadbackPorts
-} from "./delete-environment-workflow-verification.js";
+} from "./workflow-readback.js";
 
 const files: ExpectedWorkflowFile[] = [
   {
@@ -32,6 +32,31 @@ function ports(
 }
 
 describe("verifyWorkflowFilesMatchSource", () => {
+  it.each(["empty", "unavailable"])(
+    "reports an %s branch even when no workflow files were supplied",
+    async (outcome) => {
+      const result = await verifyWorkflowFilesMatchSource(
+        [],
+        ports({
+          defaultBranch: async () => {
+            if (outcome === "unavailable")
+              throw new Error("branch unavailable");
+            return "";
+          },
+          readFile: async () => {
+            throw new Error("No file read was expected.");
+          }
+        })
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        branch: "",
+        file: "",
+        reason: "branch-unreadable"
+      });
+    }
+  );
+
   it("passes when both files are present and match the packaged source", async () => {
     const result = await verifyWorkflowFilesMatchSource(files, ports({}));
     expect(result).toEqual({ ok: true, branch: "main" });

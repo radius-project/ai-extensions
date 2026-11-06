@@ -91,7 +91,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-vi.mock("./gh.js", () => ({
+vi.mock("./gh.js", async () => ({
+  redactGhCredentials: (await import("@radius-project/core")).redactCredentials,
   // Answers `gh api .../contents/<path>?ref=<branch> --jq .sha` from the
   // committed files, the way the branch publisher checks for a workflow.
   cliExec: (
@@ -143,6 +144,7 @@ const {
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
+  generatePortalUrl,
   configureVerifyGhcrProbe,
   configureVerifyOperationMarker,
   deployWorkflowFiles,
@@ -153,6 +155,15 @@ const {
 } = await import("./infra.js");
 const { hasVerificationOperationMarker } =
   await import("./verification-run-identity.js");
+
+describe("generatePortalUrl", () => {
+  it("delegates supported providers and rejects unknown providers", () => {
+    expect(
+      generatePortalUrl("Microsoft.Storage/storageAccounts", "azure")
+    ).toContain("portal.azure.com");
+    expect(generatePortalUrl("resource", "unknown")).toBe("");
+  });
+});
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
 

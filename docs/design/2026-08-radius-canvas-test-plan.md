@@ -39,6 +39,8 @@ Start with the status table. Use the phase sections for the work still to come. 
 
 ## Required checks
 
+Stage 3 deployment extraction extends TL-09/TL-10, RU-12, RF-07 and the lifecycle/cancellation contracts. The shared production factory is exercised without Canvas for admission, dispatch, observation, repeat-last, repair and ambiguous-send refusal. Registered tools and real HTTP cover their separate boundaries: observation-only handles versus repair authority, stale/mixed identity refusal, explicit missing-result errors and tool-only status translation. Owner tests cover target-wide exclusion, exact-token release and generation fencing; runtime/HTTP tests cover active-reset detachment, reopening, guarded retirement, no-panel keepalive and the 2,000 ms drain. Polling is read-only, and unknown remote outcomes never trigger repair. The moved and new suites participate in scheduled reliability. The [local qualification record](./2026-09-github-radius-migration-inventory.md#deployment-admission-and-dispatch) separately records the passing native Windows process and Chromium gates; none of these suites proves real-host behavior.
+
 Shared AWS admission extends RF-08 and the registered-tool runtime contracts with default-off refusal before account interaction, HTTP gate ordering, required network fields, role-name/existing-role/both-selector retention on the in-memory operation request and the identity stage. Registered Continue/Retry exercises in-process saved legacy input through the real coordinator and proves explicit refusal before AWS authorization or configuration; valid retry selectors reach the chosen role with existing-role precedence. These complement the existing AWS Chromium journey, provider-conflict/trust tests and cooperative Stop matrices. They do not qualify nested AWS runtime shutdown, mutation recovery or automatic restart authorization; those remain deferred. AWS requests are not durably saved, and restart still refuses Continue/Retry with a missing request. Existing Azure/GitHub/workflow shutdown evidence remains unchanged.
 
 | Check                       | Required when                                                                    | What it protects                                                                                           |
@@ -190,8 +192,8 @@ The full plan is complete when every requirement in the appendices has a passing
 | TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                                                      |
 | TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                                              |
 | TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                                                |
-| TL-09 | `radius_deploy`                        | Attempt identity, environment/repository/branch/provider mapping, dispatch, repeat-last behavior, errors                           |
-| TL-10 | `radius_deploy_status`                 | In-progress/success/failure, log bounds, workflow URL, diagnostics                                                                 |
+| TL-09 | `radius_deploy`                        | No-panel admission, target mapping, dispatch, repeat-last, observation handle versus repair authority, explicit errors             |
+| TL-10 | `radius_deploy_status`                 | Read-only no-panel observation, stale/mixed handle refusal, `in_progress`/`success`/`failed`, bounded diagnostics and workflow URL |
 | TL-12 | `radius_setup_environment`             | Panel-free verify-only Azure/AWS admission, strict provider schemas, explicit branch/account target, durable operation identity    |
 | TL-13 | `radius_environment_status`            | Saved operation/repository/environment/account binding, read-only observation, bounded redacted results, live interaction identity |
 | TL-14 | `radius_environment_control`           | Eligible saved-operation controls, trusted host confirmation, typed resume with stale/replay rejection, permissions-only bypass    |
@@ -381,7 +383,7 @@ LC-12 requires explicit branch selection, not a workspace-to-remote fallback or 
 | RU-09 | Custom-type publish confinement, defaults, invocation, errors                                             |
 | RU-10 | Recipe publish confinement, GHCR validation, errors                                                       |
 | RU-11 | Deploy attempt identity, input mapping, dispatch, repeat-last, failure                                    |
-| RU-12 | Deploy status, log bounds, workflow URL, diagnostics                                                      |
+| RU-12 | Direct deployment observation, validated identity/status, log bounds, workflow URL and diagnostics        |
 | RU-13 | Default/all pages, active graph view, stable title/URL                                                    |
 | RU-14 | Worktree branch, different-repository fallback, explicit branch                                           |
 | RU-15 | Graph/planned model resolution and explicit diff preload                                                  |

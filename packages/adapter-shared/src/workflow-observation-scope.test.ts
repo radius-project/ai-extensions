@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  createWorkflowArtifactReader,
-  type WorkflowRunner
-} from "@radius-project/adapter-shared";
+import { createWorkflowArtifactReader } from "./workflow-artifacts.js";
+import type { WorkflowRunner } from "./workflow-reads.js";
 import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
 
@@ -15,7 +13,7 @@ const rateLimited = () => ({
   stderr: ""
 });
 
-describe("instance workflow observation ownership", () => {
+describe("workflow observation ownership", () => {
   it("retains a missing rate deadline across polling and TTL expiry, but not a new instance", async () => {
     vi.useFakeTimers();
     const run = vi.fn(async () => rateLimited());

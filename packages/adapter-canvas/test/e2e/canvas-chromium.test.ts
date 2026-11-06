@@ -715,6 +715,24 @@ test.describe("Radius Canvas in Chromium", () => {
       "GET"
     ];
     const additions: FakeCliCommand[] = [
+      command(
+        [
+          "api",
+          `/repos/${REPOSITORY}/environments/${environment}/variables?per_page=100`,
+          "--jq",
+          ".variables[].name"
+        ],
+        "AZURE_CLIENT_ID\n"
+      ),
+      command(
+        [
+          "api",
+          `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`,
+          "--jq",
+          ".[].id"
+        ],
+        ""
+      ),
       {
         tool: "gh",
         args: repositoryArtifactArgs,
@@ -973,7 +991,7 @@ test.describe("Radius Canvas in Chromium", () => {
         appFile: ".radius/app.bicep"
       }
     });
-    expect(admitted.status()).toBe(200);
+    expect(admitted.status(), await admitted.text()).toBe(200);
     const attemptId = canvas.entry.state.deployAttempt?.id;
     expect(attemptId).toBeTruthy();
     try {
