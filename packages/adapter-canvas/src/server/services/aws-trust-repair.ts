@@ -32,7 +32,6 @@ export interface AwsTrustRepairDependencies {
     repo: string;
     environment: string;
     roleArn: string;
-    policyName?: string;
     confirmTarget(): Promise<{ code: string; message: string } | null>;
   }): Promise<AwsEnvironmentRepairResult>;
   errorMessage(error: unknown): string;
@@ -122,9 +121,6 @@ export function createAwsTrustRepairService(
           repo,
           environment,
           roleArn,
-          ...(target.policyName !== undefined ?
-            { policyName: target.policyName }
-          : {}),
           confirmTarget: async () => {
             let current: EnvironmentTarget;
             try {
@@ -148,12 +144,6 @@ export function createAwsTrustRepairService(
               return {
                 code: "repair-target-changed",
                 message: `GitHub environment "${environment}" changed while Repair took the lock: it now names ${current.roleArn} instead of ${roleArn}. Radius changed nothing. Deploy again to see the current result.`
-              };
-            }
-            if (current.policyName !== target.policyName) {
-              return {
-                code: "repair-target-changed",
-                message: `GitHub environment "${environment}" changed its permission policy while Repair took the lock. Radius changed nothing. Deploy again to see the current result.`
               };
             }
             return null;

@@ -5856,7 +5856,6 @@ interface PersistedDeleteRecovery {
   clientId?: string;
   tenantId?: string;
   roleArn?: string;
-  policyName?: string;
   trustSubjects?: string[];
   region?: string;
   cluster?: string;
@@ -5874,7 +5873,6 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "clientId",
     "tenantId",
     "roleArn",
-    "policyName",
     "region",
     "cluster"
   ] as const) {

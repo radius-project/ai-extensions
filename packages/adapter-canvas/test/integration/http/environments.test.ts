@@ -12,6 +12,7 @@ import {
   type DeletionOperation
 } from "../../../src/server/services/environment-deletion.js";
 import { createAwsEnvironmentAccess } from "../../../src/server/services/aws-environment-access.js";
+import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
 import { createEnvironmentTargetReader } from "../../../src/server/services/environment-target.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
 import { redactGhCredentials } from "../../../src/gh.js";
@@ -809,14 +810,13 @@ describe("the async delete route through its background runner", () => {
     }
   );
 
-  it("schedules AWS deletion using the saved policy identity, never the request's replacement name", async () => {
+  it("schedules AWS deletion using the saved trust subjects, never the request's", async () => {
     let captured: unknown;
-    const policyName = "radius-deploy-dev-111111111111";
     const harness = await start(listingScript("7\tdev"), {
       awsEnabled: true,
       discoverEnvironmentTarget: createEnvironmentTargetReader(
         async () =>
-          `AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/picked\nAWS_TRUST_SUBJECTS\t["repo:old/name:environment:dev"]\nAWS_PERMISSION_POLICY_NAME\t${policyName}`
+          `AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/picked\nAWS_TRUST_SUBJECTS\t["repo:old/name:environment:dev"]`
       ),
       createOperation,
       buildDeleteStages,
@@ -834,14 +834,13 @@ describe("the async delete route through its background runner", () => {
       body: JSON.stringify({
         repo: REPO,
         environment: "dev",
-        policyName: "client-replacement"
+        trustSubjects: ["repo:client/replacement:environment:dev"]
       })
     });
     expect(response.status).toBe(202);
     expect(captured).toMatchObject({
       repo: REPO,
       provider: "aws",
-      policyName,
       trustSubjects: ["repo:old/name:environment:dev"]
     });
   });
@@ -1432,7 +1431,7 @@ describe("the async delete route through its background runner", () => {
     ).toEqual(
       expect.arrayContaining([
         `Removed trust subject ${dev}`,
-        "Removed policy radius-deploy-dev",
+        `Removed policy ${awsEnvironmentPolicyName(42, "dev")}`,
         `Removed access entry for ${role} on shop`,
         `Kept IAM role ${role}`
       ])

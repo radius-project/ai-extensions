@@ -97,8 +97,7 @@ function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
       return {
         kind: "completed",
         roleArn: ROLE_ARN,
-        trustSubjects: SUBJECTS,
-        policyName: "radius-deploy-dev-f5fb7acf8f59"
+        trustSubjects: SUBJECTS
       };
     },
     releaseAws: async () => {
@@ -405,7 +404,6 @@ describe("runSetupCoordinator", () => {
             operationEnvironment: "dev",
             roleArn: ROLE_ARN,
             trustSubjects: SUBJECTS,
-            policyName: "radius-deploy-dev-f5fb7acf8f59",
             clientId: ""
           }
         ]
@@ -605,8 +603,7 @@ describe("runSetupCoordinator", () => {
         "configure",
         expect.objectContaining({
           roleArn: ROLE_ARN,
-          trustSubjects: SUBJECTS,
-          policyName: "radius-deploy-dev-f5fb7acf8f59"
+          trustSubjects: SUBJECTS
         })
       ]);
     });
@@ -643,8 +640,7 @@ describe("runSetupCoordinator", () => {
       const test = harness();
       test.operation.context = {
         awsRoleArn: ROLE_ARN,
-        awsTrustSubjects: SUBJECTS,
-        awsPolicyName: "radius-deploy-dev-111111111111"
+        awsTrustSubjects: SUBJECTS
       };
       await runSetupCoordinator(test.target, test.ports);
       const configure = test.transcript.find(
@@ -655,9 +651,6 @@ describe("runSetupCoordinator", () => {
       );
       expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
         "trustSubjects"
-      );
-      expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
-        "policyName"
       );
     });
   });

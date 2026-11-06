@@ -2,6 +2,6 @@
 "radius": patch
 ---
 
-**Fixed:** Isolate regional AWS grants by repository and environment, retain exact policy names for deletion after repository renames, and migrate unambiguous legacy policies on picked roles. Recover inline-policy space during migration without deleting another environment's grant. Deployment and deletion workflows use setup-granted EKS access, and Canvas blocks stale AWS workflow templates before dispatch.
+**Fixed:** Isolate regional AWS grants by repository and environment. Each environment's inline policy is named from the GitHub repository ID, so a rename keeps the name and a new repository at the old name gets a different one. Deletion removes that policy and the trust subjects setup recorded, including subjects from before a rename. Deployment and deletion workflows use setup-granted EKS access, and Canvas checks AWS workflow templates against the saved environment provider and blocks stale ones before dispatch.
 
-Persist policy identity before attachment so failed or paused setup can reuse it. Refuse unreconciled grants on fresh attempts, use the saved provider for workflow checks, and repair trust against the recorded policy name.
+AWS environments created by earlier development builds aren't migrated. Run setup again, and delete their old permission policies from the role by hand.

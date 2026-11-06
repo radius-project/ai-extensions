@@ -36,8 +36,7 @@ const awsInput = {
   vpcId: "vpc",
   subnetIds: "subnet",
   namespace: "radius",
-  trustSubjects: ["repo:o/r:environment:dev", "repository_owner_id:1:x"],
-  policyName: "radius-deploy-dev-111111111111"
+  trustSubjects: ["repo:o/r:environment:dev", "repository_owner_id:1:x"]
 };
 const awsWrites = [
   ["AWS_ROLE_ARN", awsInput.roleArn],
@@ -50,8 +49,7 @@ const awsWrites = [
   [
     "AWS_TRUST_SUBJECTS",
     '["repo:o/r:environment:dev","repository_owner_id:1:x"]'
-  ],
-  ["AWS_PERMISSION_POLICY_NAME", awsInput.policyName]
+  ]
 ];
 const start = ["event", { kind: "configuration-started" }];
 
