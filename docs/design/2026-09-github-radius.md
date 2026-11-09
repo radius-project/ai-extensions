@@ -292,7 +292,7 @@ Reuse shared helpers for managed `rad` execution, GitHub commands, and deploymen
 
 Preserve the user-facing plugin entry points and authoring skill behavior while their backing coordination moves to the library. Reuse the existing application-definition promotion and deployment paths; this proposal does not introduce a new plugin or require a second frontend to ship.
 
-`radius-environment` already uses setup/status/control tools and offers Canvas as an optional wizard. Deployment and deletion must follow: call shared coordination instead of selecting a Canvas server, while retaining trusted confirmation and authorization.
+`radius-environment` uses setup/status/control tools and offers Canvas as an optional wizard. Stage 3 also moved `radius_deploy` and `radius_deploy_status` onto the shared deployment runtime, without selecting a Canvas server. Deletion orchestration remains Stage 6 work: move it behind shared coordination while retaining trusted confirmation and authorization.
 
 #### Build & packaging
 
@@ -408,7 +408,7 @@ Error fixtures should cover rejected and ambiguous dispatches, status API outage
 
 Exercise actual frontend bindings as well as controlled dependencies, especially source selection and authorization.
 
-Test the tool-facing contract. The deploy tool currently returns Canvas's terminal `complete` where its skill expects `success`, and maps malformed status JSON to `pending`. Stage 3c must correct both without renaming Canvas or resource statuses. The target tool polls while `in_progress` and stops at `success` or `failed`.
+Retain tests for the tool-facing contract implemented in Stage 3c. The status tool reads the shared runtime directly, maps Canvas's terminal `complete` to tool-facing `success`, and reports missing or invalid status explicitly instead of manufacturing `pending`. Tool callers poll while `in_progress` and stop at `success` or `failed`; Canvas and resource-status vocabularies remain unchanged.
 
 Retain environment-tool/Canvas parity tests and the verify-only, read-only and trusted-interaction safeguards. Add independent-caller tests for the remaining setup bindings and deletion tools; a full second frontend is not required.
 
