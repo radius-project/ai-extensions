@@ -62,6 +62,8 @@ These are content-review exclusions only. They never remove paths from the chang
 
 ### Review convergence
 
+Use the [Copilot re-review operations runbook](../../../docs/eng/COPILOT_REVIEW_OPERATIONS.md#pausing-the-fix-and-push-loop) for the author-controlled pause, producer inventory, and admin rollback. The rules below remain the canonical review policy; the runbook does not impose a hard service round cap.
+
 - When you identify a bug, name its class and search the relevant changed scope and callers for every instance. Report all confirmed instances in the same round, with precise locations; do not turn that search into unrelated repository cleanup.
 - Before posting a finding, compare it with prior findings and their resolution. Do not repeat an already-posted or resolved finding. Point to an existing unresolved thread instead of opening a duplicate. If new code reintroduces a resolved defect, explain the new evidence and location rather than repeating the old comment.
 - Count completed automated review rounds on the PR, not individual comments or replies. Finish the third round with an explicit request for the author to take over unresolved findings and decide the next review step. Do not initiate a fourth automated round yourself. If invoked again after three rounds, summarize outstanding findings and request human direction instead of starting another autonomous fix/re-review loop.
