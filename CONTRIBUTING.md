@@ -168,6 +168,8 @@ Use the [radius-pre-pr-review skill](./.github/skills/radius-pre-pr-review/SKILL
 4. Assess release impact with [monorepo-changeset](./.github/skills/monorepo-changeset/SKILL.md); add a Changeset only for a notable change to a released product.
 5. Fill out the [pull request template](./.github/pull_request_template.md), including exact validation results and applicable test-matrix evidence.
 
+For hosted Copilot review requests, effort selection, and the human handoff after repeated rounds, use the [Copilot re-review operations runbook](./docs/eng/COPILOT_REVIEW_OPERATIONS.md). Its live rollout is separately gated; merging guidance does not enable new-push reviews or Copilot approvals.
+
 ## Changesets
 
 Packages are versioned and changelogged with
