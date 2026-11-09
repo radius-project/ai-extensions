@@ -19,6 +19,10 @@ export function captureDeployedApplicationState(
       value.contextRepo,
       value.workspaceRepo
     );
+  const capturedRepository = repository(state);
+  const attemptId = state.deployAttempt?.id;
+  const attemptRepo = state.deployAttempt?.targetRepo;
+  const attemptEnvironment = state.deployAttempt?.environment;
   const keys = [
     "deployAttempt",
     "deployGeneration",
@@ -33,12 +37,15 @@ export function captureDeployedApplicationState(
     "envName"
   ] as const;
   const matches =
-    repository(captured).toLowerCase() === target.repo.toLowerCase() &&
+    capturedRepository.toLowerCase() === target.repo.toLowerCase() &&
     matchesDeployedApplicationState(captured, target);
   return () => {
     if (
       matches &&
-      repository(state) === repository(captured) &&
+      repository(state) === capturedRepository &&
+      state.deployAttempt?.id === attemptId &&
+      state.deployAttempt?.targetRepo === attemptRepo &&
+      state.deployAttempt?.environment === attemptEnvironment &&
       keys.every((key) => state[key] === captured[key])
     )
       discardDeployedApplicationState(state, target);

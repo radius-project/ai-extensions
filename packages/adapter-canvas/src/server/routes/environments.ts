@@ -157,21 +157,7 @@ export async function handleDeleteEnvironment(
     // flow.
     let active: EnvironmentActiveDeployment | null = null;
     try {
-      // Resolve the real app name (from app.bicep) so the guard's message,
-      // redirect, and delete target the app declared in the bicep rather than
-      // the repo basename.
-      const delEntry = dependencies.readInstanceEntry(context.instanceId);
-      const delBranch =
-        delEntry?.state?.contextBranch ||
-        delEntry?.state?.plannedBranch ||
-        delEntry?.state?.graphBranch ||
-        "main";
-      const delAppName = await dependencies.resolveRepoAppName(repo, delBranch);
-      active = await dependencies.resolveEnvDeployment(
-        repo,
-        envName,
-        delAppName
-      );
+      active = await dependencies.resolveEnvDeployment(repo, envName, "");
     } catch (e) {
       // Fail closed: if we can't confirm whether an app is still deployed (e.g.
       // GitHub is unavailable), do NOT delete — that could orphan the
@@ -193,6 +179,20 @@ export async function handleDeleteEnvironment(
       return;
     }
     if (active) {
+      if (active.identity?.state !== "known") {
+        response.setHeader("Content-Type", "application/json");
+        response.writeHead(active.identity?.readFailed ? 503 : 409);
+        response.end(
+          JSON.stringify({
+            error:
+              active.identity?.reason ||
+              "A deployment exists but its application identity is unavailable. The environment was not deleted.",
+            code: "app-identity-unavailable",
+            environment: envName
+          })
+        );
+        return;
+      }
       const deleting = active.status === "deleting";
       const deleteFailed = active.status === "delete-failed";
       response.setHeader("Content-Type", "application/json");

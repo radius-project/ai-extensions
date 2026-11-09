@@ -45,7 +45,7 @@ export function selectLatestWorkflowRunId(runs: unknown): number | null {
   return max;
 }
 
-/** A monotonic baseline takes precedence over time/correlation discovery. */
+/** Correlation identifies an execution; a baseline only excludes older runs. */
 export function selectWorkflowRunId(
   runs: unknown,
   sinceMs: number,
@@ -54,6 +54,23 @@ export function selectWorkflowRunId(
 ): number | string | null {
   if (!Array.isArray(runs)) return null;
   const baseline = numericRunId(afterRunId);
+  if (correlationId) {
+    const matches = new Set<number>();
+    for (const value of runs) {
+      const run = parseWorkflowRun(value);
+      const id = run?.databaseId;
+      if (
+        id === undefined ||
+        !Number.isSafeInteger(id) ||
+        id <= 0 ||
+        (baseline !== null && id <= baseline) ||
+        run?.displayTitle?.trim().split(/\s+/).pop() !== correlationId
+      )
+        continue;
+      matches.add(id);
+    }
+    return matches.size === 1 ? [...matches][0] : null;
+  }
   if (baseline !== null) {
     let firstRunId: number | null = null;
     for (const value of runs) {
@@ -73,8 +90,6 @@ export function selectWorkflowRunId(
     if (!run) continue;
     const created = Date.parse(run.createdAt || "") || 0;
     if (created < cutoff || run.databaseId === undefined) continue;
-    if (correlationId && !(run.displayTitle || "").includes(correlationId))
-      continue;
     return run.databaseId;
   }
   return null;

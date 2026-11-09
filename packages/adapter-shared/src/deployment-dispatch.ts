@@ -54,6 +54,7 @@ export interface DeployCommandOptions {
 }
 
 export interface DeployDispatchDependencies {
+  id(): string;
   ghCommandPresentation?: GhCommandPresentation;
   // The workflow that actually runs `rad` commands, injected so the file name
   // stays owned by `server.ts`.
@@ -172,10 +173,8 @@ export type DeployDispatchOutcome =
       workflowFile: string;
       dispatchedAt: number;
       environment: string;
-      // Newest run id that existed just before this dispatch, so the run
-      // monitor can identify the run this dispatch created as the first one
-      // whose id exceeds it, rather than matching a prior run by time window.
-      // Null when the baseline could not be read.
+      correlationId?: string;
+      // The baseline bounds discovery; correlation identifies this execution.
       baselineRunId: number | string | null;
     };
 
@@ -186,6 +185,7 @@ export interface DeployDispatchService {
 }
 
 const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
+  "id",
   "verifyAppFileInput",
   "getBranchHeadSha",
   "getDefaultBranch",
@@ -879,6 +879,11 @@ export function createDeployDispatchService(
         if (validation.status === "skipped") log("• " + validation.message);
       }
 
+      const correlationId = `dep-${dependencies.id()}`;
+      if (!/^dep-[a-zA-Z0-9-]{1,64}$/.test(correlationId))
+        throw new Error(
+          "The deployment correlation generator returned an invalid identifier."
+        );
       const dispatchArgs = [
         "workflow",
         "run",
@@ -889,6 +894,8 @@ export function createDeployDispatchService(
         "environment=" + envForDeploy,
         "-f",
         "app_file=" + request.appFile,
+        "-f",
+        "correlation_id=" + correlationId,
         "--repo",
         repo
       ];
@@ -1058,7 +1065,7 @@ export function createDeployDispatchService(
           log(
             "⚠ Could not read the latest run id before dispatch (" +
               dependencies.errorMessage(e) +
-              "); run discovery will fall back to a time window."
+              "); run discovery will use the execution correlation."
           );
         }
         assertDispatchCurrent(request);
@@ -1070,7 +1077,13 @@ export function createDeployDispatchService(
         // Only the not-yet-registered race self-resolves; any other failure
         // (missing scope, Actions disabled, branch unresolved, …) will not, so
         // stop retrying and report it immediately.
-        if (!/not found|HTTP 404/i.test(dispatchDeployRes.stderr || "")) break;
+        if (
+          !/not found|HTTP 404/i.test(dispatchDeployRes.stderr || "") &&
+          !/unexpected inputs?.*correlation_id/i.test(
+            dispatchDeployRes.stderr || ""
+          )
+        )
+          break;
       }
       if (dispatchDeployRes.code !== 0) {
         const de = redactCredentials(dispatchDeployRes.stderr || "").trim();
@@ -1155,6 +1168,7 @@ export function createDeployDispatchService(
         workflowFile: deployWorkflowFile,
         dispatchedAt: deployDispatchedAt,
         environment: envForDeploy,
+        correlationId,
         baselineRunId
       };
     }

@@ -27,6 +27,7 @@ function dependencies(
   overrides: Partial<DeployDispatchDependencies> = {}
 ): DeployDispatchDependencies {
   return {
+    id: () => "execution",
     deployWorkflowFile: "run-rad-commands.yml",
     deployWorkflowFiles: ["run-rad-commands.yml", "run-rad-commands-azure.yml"],
     branchNotPushedKind: "branch-not-pushed",
@@ -434,6 +435,7 @@ describe("deploy dispatch environment and branch preflight", () => {
       workflowFile: "run-rad-commands.yml",
       dispatchedAt: 1_700_000_000_000,
       environment: "resolved-env",
+      correlationId: "dep-execution",
       baselineRunId: null
     });
   });
@@ -576,6 +578,8 @@ describe("deploy dispatch environment and branch preflight", () => {
       "environment=production",
       "-f",
       "app_file=.radius/app.bicep",
+      "-f",
+      "correlation_id=dep-execution",
       "--repo",
       "acme/widgets",
       "-f",
@@ -1756,7 +1760,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
 
     expect(outcome).toMatchObject({ dispatched: true, baselineRunId: null });
     expect(logs).toContain(
-      "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will fall back to a time window."
+      "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will use the execution correlation."
     );
   });
 
@@ -2071,6 +2075,56 @@ describe("deploy dispatch workflow publication and dispatch", () => {
   // synchronously, so an immediate `gh workflow run` 404s even though the
   // file is genuinely on the branch it dispatches from.
   describe("workflow registration delay (#767)", () => {
+    it("retries only an explicit correlation-input rejection using the same execution marker", async () => {
+      const { input } = request();
+      const gh = recordingGh([
+        {
+          code: 1,
+          stdout: "",
+          stderr: "HTTP 422: Unexpected inputs provided: [correlation_id]"
+        },
+        OK
+      ]);
+      let ids = 0;
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          id: () => `execution-${++ids}`,
+          ensureWorkflowsCurrent: async () => ({
+            created: [],
+            updated: ["run-rad-commands.yml"],
+            failed: []
+          })
+        })
+      );
+      expect(await service.prepareAndDispatch(input)).toMatchObject({
+        dispatched: true,
+        correlationId: "dep-execution-1"
+      });
+      expect(ids).toBe(1);
+      expect(
+        gh.calls.filter((call) => call.args[0] === "workflow")
+      ).toHaveLength(2);
+      for (const call of gh.calls.filter((call) => call.args[0] === "workflow"))
+        expect(call.args).toContain("correlation_id=dep-execution-1");
+    });
+
+    it("rejects an invalid correlation factory result before workflow changes", async () => {
+      const { input } = request();
+      let wrote = false;
+      const service = createDeployDispatchService(
+        dependencies({
+          id: () => "invalid marker!",
+          ensureWorkflowsCurrent: async () => {
+            wrote = true;
+            return { created: [], updated: [] };
+          }
+        })
+      );
+      await expect(service.prepareAndDispatch(input)).rejects.toThrow();
+      expect(wrote).toBe(false);
+    });
+
     it.each([false, true])(
       "refreshes discovery bounds after every wait when other runs start (last read fails: %s)",
       async (lastReadFails) => {
@@ -2128,7 +2182,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
         ]);
         if (lastReadFails) {
           expect(logs).toContain(
-            "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will fall back to a time window."
+            "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will use the execution correlation."
           );
         }
       }
@@ -2385,6 +2439,8 @@ describe("deploy dispatch workflow publication and dispatch", () => {
           "environment=production",
           "-f",
           "app_file=.radius/app.bicep",
+          "-f",
+          "correlation_id=dep-execution",
           "--repo",
           "acme/widgets",
           "-f",

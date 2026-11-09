@@ -19,6 +19,7 @@ import {
   E2E_TMP_ROOT,
   fakeCliArgsMatch,
   fakeCliCommandAvailable,
+  fakeCliWriteDirectory,
   FAKE_CLI_TOOLS,
   PLACEHOLDER_SECRET,
   planHarnessProcess,
@@ -32,6 +33,33 @@ import {
   type FakeCliCommand,
   type HarnessProcessPlanInput
 } from "./canvas-harness.js";
+
+describe("fake CLI artifact output directories", () => {
+  it("defaults ordinary fixture files to the command working directory", () => {
+    expect(fakeCliWriteDirectory({}, [], "workspace")).toBe("workspace");
+  });
+  it("uses the explicitly requested download directory", () => {
+    expect(
+      fakeCliWriteDirectory(
+        { writeFilesDirectoryArg: "--dir" },
+        ["run", "download", "1", "--dir", "artifact"],
+        "workspace"
+      )
+    ).toBe("artifact");
+  });
+  it.each([{ args: [] }, { args: ["--dir"] }])(
+    "rejects a missing output argument %j",
+    ({ args }) => {
+      expect(() =>
+        fakeCliWriteDirectory(
+          { writeFilesDirectoryArg: "--dir" },
+          args,
+          "workspace"
+        )
+      ).toThrow("Missing fake CLI output directory");
+    }
+  );
+});
 
 describe("harness deployment cleanup", () => {
   function restorationSpies() {

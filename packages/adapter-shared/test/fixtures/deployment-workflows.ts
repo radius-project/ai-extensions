@@ -26,10 +26,15 @@ jobs:
 
 export const deploymentTemplates: Readonly<Record<string, string>> = {
   [DEPLOY_DISPATCHER_FILE]: `name: "{{ENV}}/{{APP_FILE}}"
+run-name: Radius - Deploy \${{ inputs.environment }} \${{ inputs.correlation_id }}
 on:
   workflow_dispatch:
     inputs:
       environment: {}
+      correlation_id:
+        type: string
+        required: false
+        default: ''
       app_file:
         type: string
         required: false

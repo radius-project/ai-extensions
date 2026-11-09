@@ -161,6 +161,8 @@ describe("deployment workflow production bindings", () => {
     ["malformed", "provider"],
     ["non-object", "provider"],
     ["missing schema", "dispatcher"],
+    ["missing correlation", "dispatcher"],
+    ["uncorrelated title", "dispatcher"],
     ["no steps", "provider"],
     ["schema", "dispatcher"],
     ["schema", "provider"],
@@ -189,6 +191,14 @@ describe("deployment workflow production bindings", () => {
       malformed: "[",
       "non-object": "[]",
       "missing schema": source.replace("app_file:", "old_input:"),
+      "missing correlation": source.replace(
+        "correlation_id:",
+        "old_correlation:"
+      ),
+      "uncorrelated title": source.replace(
+        "${{ inputs.correlation_id }}",
+        "uncorrelated"
+      ),
       "no steps": source.slice(0, source.indexOf("    steps:")),
       schema: source.replace("type: string", "type: number"),
       forwarding: source.replace("${{ inputs.app_file }}", "default.bicep"),

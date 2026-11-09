@@ -56,6 +56,7 @@ import { observeWorkflowRun } from "@radius-project/core";
 import {
   readWorkflowRun,
   readWorkflowLog,
+  normalizeDeploymentAppFile,
   createWorkflowArtifactReader,
   type WorkflowExecution
 } from "@radius-project/adapter-shared";
@@ -131,6 +132,7 @@ interface Harness {
 function row(environment: string, status = "deployed"): DeploymentRow {
   return {
     app: "todo-app",
+    identity: { state: "known", application: "todo-app" },
     environment,
     provider: "azure",
     status,
@@ -1427,6 +1429,60 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.resets).toEqual([]);
   });
 
+  it.each(["matching", "default-name", "stale", "unavailable"] as const)(
+    "revalidates %s application identity between an HTTP listing and Delete",
+    async (scenario) => {
+      const h = start();
+      h.environments.push("dev");
+      const recorded: DeploymentRow = {
+        ...row("dev"),
+        app: "custom-app",
+        identity: { state: "known", application: "custom-app" },
+        runUrl: "https://github.com/octo/todo/actions/runs/42"
+      };
+      h.setDeploymentResolver(async () => recorded);
+      h.state.deployAppName = "custom-app";
+      h.state.deployStatus = "complete";
+      const graph = [
+        { id: "web", name: "web", type: "Radius.Compute/containers" }
+      ];
+      h.state.deployedGraph = graph;
+      const entry = await container!.getOrCreate("panel");
+      const listing = (await (
+        await fetch(`${entry.baseUrl}/api/list-deployments?repo=octo/todo`)
+      ).json()) as { deployments: DeploymentRow[] };
+      expect(listing).toEqual({ deployments: [recorded] });
+      const displayed = listing.deployments[0];
+      if (scenario === "stale") recorded.deploymentId = "replacement";
+      if (scenario === "unavailable")
+        recorded.identity = {
+          state: "unavailable",
+          reason: "Identity artifact expired."
+        };
+      const response = await post(
+        entry.baseUrl,
+        "/api/delete-deployment",
+        JSON.stringify({
+          repo: "octo/todo",
+          environment: displayed.environment,
+          application: scenario === "default-name" ? "todo-app" : displayed.app,
+          deploymentId: displayed.deploymentId,
+          runUrl: displayed.runUrl
+        })
+      );
+      expect(response.status).toBe(scenario === "matching" ? 200 : 409);
+      if (scenario === "matching") {
+        expect(h.dispatches).toHaveLength(1);
+        expect(h.dispatches[0]).toContain("application=custom-app");
+      } else {
+        expect(h.dispatches).toEqual([]);
+        expect(h.workflowSyncs).toEqual([]);
+        expect(h.state.deployedGraph).toBe(graph);
+        expect(h.state.deployStatus).toBe("complete");
+      }
+    }
+  );
+
   it("dispatches the delete workflow and evicts the cached listing over a real socket", async () => {
     const harness = start();
     harness.environments.push("dev");
@@ -1573,6 +1629,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     harness.setDeploymentResolver((_repo, environment) =>
       Promise.resolve({
         app: "todo-app",
+        identity: { state: "known", application: "todo-app" },
         environment,
         provider: "azure",
         status: "delete-failed",
@@ -1587,6 +1644,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     });
     harness.setArtifactFiles({
       "rad-delete-result.json": JSON.stringify({
+        resourceType: "application",
+        name: "todo-app",
         outcome: "failed",
         forced: false,
         output:
@@ -1645,6 +1704,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       "the delete failed for an unrelated reason",
       {
         "rad-delete-result.json": JSON.stringify({
+          resourceType: "application",
+          name: "todo-app",
           outcome: "failed",
           forced: false,
           output: "ERROR: failed to authenticate with the cloud provider"
@@ -1660,6 +1721,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       harness.setDeploymentResolver((_repo, environment) =>
         Promise.resolve({
           app: "todo-app",
+          identity: { state: "known", application: "todo-app" },
           environment,
           provider: "azure",
           status: "delete-failed",
@@ -1700,6 +1762,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     harness.setDeploymentResolver((_repo, environment) =>
       Promise.resolve({
         app: "todo-app",
+        identity: { state: "known", application: "todo-app" },
         environment,
         provider: "azure",
         status: "delete-failed",
@@ -1842,6 +1905,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     const resolverCalls: string[][] = [];
     harness.setDeploymentResolver((repo, environment, application) =>
       resolveEnvironmentDeployment(repo, environment, application, {
+        readApplicationIdentity: async () => {
+          throw new Error("Unexpected identity read");
+        },
         ghOrThrow: (args) => {
           resolverCalls.push(args);
           const path = args[1] ?? "";
@@ -1911,6 +1977,10 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     const harness = start();
     harness.setDeploymentResolver((repo, environment, application) =>
       resolveEnvironmentDeployment(repo, environment, application, {
+        readApplicationIdentity: async () => ({
+          state: "known",
+          application: "todo-app"
+        }),
         ghOrThrow: (args) => {
           const path = args[1] ?? "";
           if (path.includes("/variables?")) return Promise.resolve("");
@@ -2046,6 +2116,7 @@ function startDeploy(
 
   let sequence = 0;
   const runtime = createTestDeploymentRuntime({
+    normalizeAppFile: normalizeDeploymentAppFile,
     awsEnabled: true,
     id: () => String(++sequence),
     reportError: () => {},
@@ -2116,6 +2187,7 @@ function startDeploy(
   const views = createDeploymentViews(runtime);
   const deployRequest = createDeployRequestService({
     runtime,
+    resolveAppFile: async () => ".radius/app.bicep",
     attach: views.attach,
     readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
     reportError: (error) => {
@@ -2466,6 +2538,82 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
 });
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
+  it("refuses a reserved model through real HTTP admission before any execution", async () => {
+    const h = startDeploy();
+    const entry = await container!.getOrCreate("panel");
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy",
+      JSON.stringify({
+        targetRepo: "acme/widgets",
+        branch: "feature",
+        environment: "dev",
+        appFile: "models/radius-environment.bicep"
+      })
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining("reserved")
+    });
+    expect(h.runtime.owner.lookup()).toEqual({ kind: "missing" });
+  });
+
+  it("preserves an in-place replacement attempt while a delete waits for acceptance over HTTP", async () => {
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    startDeploy(undefined, {
+      deletion: {
+        async runGh() {
+          entered.resolve();
+          await release.promise;
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        findWorkflowRun: async () => null,
+        logError: () => {},
+        setTimer: () => ({})
+      }
+    });
+    const entry = await container!.getOrCreate("panel");
+    const attempt = {
+      id: "old",
+      targetRepo: "acme/widgets",
+      environment: "dev"
+    };
+    const graph = [
+      { id: "web", name: "web", type: "Radius.Compute/containers" }
+    ];
+    Object.assign(entry.state, {
+      contextRepo: "acme/widgets",
+      envName: "dev",
+      deployAttempt: attempt,
+      deployAppName: "widgets",
+      deployStatus: "complete",
+      deployRunId: 42,
+      deployedGraph: graph,
+      deployingResources: graph
+    });
+    const response = post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "acme/widgets",
+        environment: "dev",
+        application: "widgets"
+      })
+    );
+    try {
+      await entered.promise;
+      attempt.id = "replacement";
+    } finally {
+      release.resolve();
+    }
+    expect((await response).status).toBe(200);
+    expect(entry.state.deployAttempt).toBe(attempt);
+    expect(entry.state.deployedGraph).toEqual(graph);
+    expect(entry.state.deployRunId).toBe(42);
+    expect(entry.state.deployStatus).toBe("complete");
+  });
+
   it.each(["missing", "throwing"] as const)(
     "invalidates a completed tool deployment at delete acceptance, before %s run discovery, and allows fresh tool attachment",
     async (discovery) => {
@@ -2642,6 +2790,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         );
       };
       const dispatch = createDeployDispatchService({
+        id: () => "execution",
         verifyAppFileInput: async () => {},
         deployWorkflowFile: "run-rad-commands.yml",
         deployWorkflowFiles: [
@@ -2921,6 +3070,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   function oidcRefusalHarness(subjects: string[]) {
     const workflowDispatches: string[][] = [];
     const dispatch = createDeployDispatchService({
+      id: () => "execution",
       verifyAppFileInput: async () => {},
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [

@@ -21,7 +21,11 @@ interface RecordFixture {
 function resolver(
   ids: string[],
   records: Record<string, RecordFixture>,
-  options: { variables?: string | Error; maxParallelRecords?: number } = {}
+  options: {
+    variables?: string | Error;
+    maxParallelRecords?: number;
+    application?: string;
+  } = {}
 ) {
   const ghOrThrow = vi.fn((args: string[]) => {
     const path = args[1] ?? "";
@@ -65,6 +69,10 @@ function resolver(
     ghOrThrow,
     resolve: (appName = "radius-app") =>
       createDeploymentLookup({
+        readApplicationIdentity: async () => ({
+          state: "known",
+          application: options.application ?? "radius-app"
+        }),
         ghOrThrow,
         deployWorkflowFile: DEPLOY_WORKFLOW,
         deleteWorkflowFile: DELETE_WORKFLOW,
@@ -99,6 +107,10 @@ describe("resolveEnvironmentDeployment", () => {
       throw new Error(`Unexpected request ${path}`);
     };
     const lookup = createDeploymentLookup({
+      readApplicationIdentity: async () => ({
+        state: "known",
+        application: "modeled-app"
+      }),
       ghOrThrow,
       deployWorkflowFile: DEPLOY_WORKFLOW,
       deleteWorkflowFile: DELETE_WORKFLOW
@@ -136,6 +148,7 @@ describe("resolveEnvironmentDeployment", () => {
 
     await expect(harness.resolve()).resolves.toEqual({
       app: "radius-app",
+      identity: { state: "known", application: "radius-app" },
       environment: ENVIRONMENT,
       provider: "azure",
       status: "failed",
@@ -491,7 +504,8 @@ describe("resolveEnvironmentDeployment", () => {
     );
 
     await expect(harness.resolve("")).resolves.toEqual({
-      app: "app",
+      app: "radius-app",
+      identity: { state: "known", application: "radius-app" },
       environment: ENVIRONMENT,
       provider: "",
       status: "success",
@@ -557,6 +571,9 @@ describe("resolveEnvironmentDeployment", () => {
 
     await expect(
       createDeploymentLookup({
+        readApplicationIdentity: async () => {
+          throw new Error("Unexpected identity read");
+        },
         ghOrThrow,
         deployWorkflowFile: DEPLOY_WORKFLOW,
         deleteWorkflowFile: DELETE_WORKFLOW,
@@ -578,6 +595,9 @@ describe("repository application-name compatibility", () => {
     return {
       ghOrThrow,
       lookup: createDeploymentLookup({
+        readApplicationIdentity: async () => {
+          throw new Error("Unexpected identity read");
+        },
         ghOrThrow,
         deployWorkflowFile: DEPLOY_WORKFLOW,
         deleteWorkflowFile: DELETE_WORKFLOW

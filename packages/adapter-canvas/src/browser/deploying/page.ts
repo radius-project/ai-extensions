@@ -17,20 +17,13 @@ import {
   probeDeleteConflict
 } from "../force-delete.js";
 import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
-import {
-  isRecord,
-  readBoolean,
-  readNumber,
-  readRecord,
-  readString
-} from "../json.js";
+import { readBoolean, readNumber, readRecord, readString } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import { DEPLOYING_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   APPLICATIONS_PATH,
   BRANCHES_PATH,
-  DEFAULT_APP_FILE,
   DEPLOYMENTS_PATH,
   DEPLOY_PATH,
   ENVIRONMENTS_PATH,
@@ -43,6 +36,7 @@ import {
   parseApplicationListing,
   parseBranchListing,
   parseDeploymentListing,
+  parseRequiredDeploymentListing,
   parseEnvironmentListing
 } from "../repositories.js";
 import type { CommandActionHandle } from "../command-action.js";
@@ -204,10 +198,6 @@ export function deploymentStatusMarkup(status: string): string {
   return labels[status] ?? labels.pending;
 }
 
-function hasDeploymentsArray(payload: unknown): boolean {
-  return isRecord(payload) && Array.isArray(payload.deployments);
-}
-
 export function parseDeploymentRecords(payload: unknown): DeploymentRecord[] {
   return parseDeploymentListing(payload);
 }
@@ -302,6 +292,9 @@ function buildDeploymentRows(
   const present = new Set<string>();
   for (const deployment of deployments) {
     present.add(opKey(deployment.app, deployment.environment));
+    for (const override of overrides.values())
+      if (override.environment === deployment.environment)
+        present.add(opKey(override.app, override.environment));
   }
   // Surface just-started operations GitHub hasn't recorded yet as synthetic
   // rows. "deleting" is excluded: a delete always acts on an existing row, so
@@ -331,7 +324,9 @@ function computeBlockedEnvironments(
 ): Map<string, string> {
   const blocked = new Map<string, string>();
   for (const row of rows) {
-    const forced = overrides.get(opKey(row.app, row.environment))?.status;
+    const forced = [...overrides.values()].find(
+      (override) => override.environment === row.environment
+    )?.status;
     const status = forced ?? row.status;
     if (deploymentStatusBlocksMutation(status)) {
       blocked.set(row.environment, status);
@@ -344,24 +339,36 @@ function renderDeploymentRow(
   row: DeploymentRow,
   overrides: ReadonlyMap<string, DeploymentOverride>
 ): string {
-  const forced = overrides.get(opKey(row.app, row.environment))?.status;
+  const forced = [...overrides.values()].find(
+    (override) => override.environment === row.environment
+  )?.status;
   const status = forced ?? row.status;
   const statusHtml = deploymentStatusMarkup(status);
   const deployedHref = `/?page=deployed&environment=${encodeURIComponent(row.environment)}&application=${encodeURIComponent(row.app)}`;
-  const monitorCell = `<a class="rad-monitor-link" href="${escapeBrowserHtml(deployedHref)}" title="Monitor the deployed application graph">Monitor Graph</a>`;
+  const known = row.identity?.state === "known";
+  const monitorCell =
+    known ?
+      `<a class="rad-monitor-link" href="${escapeBrowserHtml(deployedHref)}" title="Monitor the deployed application graph">Monitor Graph</a>`
+    : row.synthetic ? "<span>Waiting for workflow evidence.</span>"
+    : `<span>${escapeBrowserHtml(row.identity?.state === "unavailable" ? row.identity.reason : "Application identity is unavailable.")}</span>`;
   const workflowCell =
-    row.runUrl ?
+    /^https:\/\/github\.com\//.test(row.runUrl) ?
       `<a class="rad-deploy-applink" href="${escapeBrowserHtml(row.runUrl)}" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">${ARROW_SVG}View Run</a>`
     : '<span class="rad-cell-empty">—</span>';
   const deleteDisabled =
-    status === "pending" || status === "deleting" || row.synthetic ?
+    !known || deploymentStatusBlocksMutation(status) || row.synthetic ?
       " disabled"
     : "";
   const appName = escapeBrowserHtml(row.app);
   const envName = escapeBrowserHtml(row.environment);
   return (
     "<tr>" +
-    `<td class="rad-table__env"><a class="rad-deploy-applink" href="${escapeBrowserHtml(deployedHref)}" title="View deployed application graph">${ARROW_SVG}${appName}</a></td>` +
+    `<td class="rad-table__env">${
+      known ?
+        `<a class="rad-deploy-applink" href="${escapeBrowserHtml(deployedHref)}" title="View deployed application graph">${ARROW_SVG}${appName}</a>`
+      : row.synthetic ? appName
+      : "Application identity unavailable"
+    }</td>` +
     `<td>${envName}</td>` +
     `<td>${statusHtml}</td>` +
     `<td>${monitorCell}</td>` +
@@ -728,6 +735,10 @@ export function initializeDeployingPage(
   // for that whole wait: without it the click looks ignored, and a second click
   // would start a second probe and open a second dialog behind the first.
   const probing = new Set<string>();
+  const deletionTargets = new Map<
+    string,
+    { deploymentId?: string; runUrl?: string }
+  >();
 
   const setDeleteBusy = (
     app: string,
@@ -785,6 +796,20 @@ export function initializeDeployingPage(
   ): void => {
     if (!dialog) return;
     const key = opKey(app, environment);
+    const selected = lastRecords.find(
+      (row) => row.app === app && row.environment === environment
+    );
+    if (selected?.identity?.state !== "known") {
+      showInline(
+        "error",
+        "Application identity is unavailable. Refresh the deployment listing."
+      );
+      return;
+    }
+    deletionTargets.set(key, {
+      deploymentId: selected.deploymentId || undefined,
+      runUrl: selected.runUrl || undefined
+    });
     if (probing.has(key)) return;
     probing.add(key);
     setDeleteBusy(app, environment, true);
@@ -836,6 +861,17 @@ export function initializeDeployingPage(
   const runDelete = (app: string, environment: string, force = false): void => {
     if (!options.repo || app === "" || environment === "") return;
     const key = opKey(app, environment);
+    const selected = lastRecords.find(
+      (row) => row.app === app && row.environment === environment
+    );
+    if (selected?.identity?.state !== "known") {
+      showInline(
+        "error",
+        "Application identity is unavailable. Refresh the deployment listing."
+      );
+      return;
+    }
+    const expected = deletionTargets.get(key);
     overrides.set(key, { app, environment, status: "deleting" });
     void loadDeployments(true, true);
     const started = `${force ? "Force deleting" : "Deleting"} deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`;
@@ -848,7 +884,8 @@ export function initializeDeployingPage(
           repo: options.repo,
           environment,
           application: app,
-          force
+          force,
+          ...expected
         })
       })
       .then((response) =>
@@ -912,18 +949,13 @@ export function initializeDeployingPage(
           if (!entry.active) return;
           // Only trust a complete, successful listing. A transient failure
           // or a malformed deployments field must not be read as "row gone".
-          if (
-            !result.ok ||
-            readString(result.payload, "error") ||
-            !hasDeploymentsArray(result.payload)
-          ) {
+          const listing = parseRequiredDeploymentListing(result.payload);
+          if (!result.ok || listing.error !== "") {
             pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
             return;
           }
-          const deployments = parseDeploymentRecords(result.payload);
-          const stillThere = deployments.some(
-            (deployment) =>
-              deployment.app === app && deployment.environment === environment
+          const stillThere = listing.deployments.some(
+            (deployment) => deployment.environment === environment
           );
           if (!stillThere) {
             overrides.delete(opKey(app, environment));
@@ -1543,8 +1575,7 @@ export function initializeDeployingPage(
           environment,
           provider,
           targetRepo: options.repo,
-          branch: deployBranch,
-          appFile: DEFAULT_APP_FILE
+          branch: deployBranch
         })
       })
       .then((response) =>

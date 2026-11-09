@@ -125,7 +125,7 @@ export function createDeploymentObservationBindings({
       "list",
       "--workflow=" + workflowFile,
       "--limit",
-      "5",
+      correlationId ? "100" : "5",
       "--json",
       fields,
       "--repo",

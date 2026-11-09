@@ -86,7 +86,9 @@ export * as ghcrBootstrap from "./ghcr-bootstrap.js";
 export * from "./setup-workflow-content.js";
 export * from "./deployment-command-bindings.js";
 export * from "./deployment-lookup.js";
+export { createDeploymentIdentityReader } from "./deployment-identity.js";
 export {
+  normalizeDeploymentAppFile,
   toSafeRepoRelPath,
   safeWorkspacePath,
   readWorkspaceFile,

@@ -20,7 +20,7 @@ Trigger the `Radius - Run rad Commands` workflow which spins up an ephemeral k3d
 Before invoking this skill, all of these must exist:
 
 1. A GitHub Environment configured with cloud credentials → use the `radius-environment` skill if missing.
-2. An application model, normally `.radius/app.bicep` → use the `radius-app-bicep` skill if missing. Select any other model, including root `app.bicep`, explicitly.
+2. An application model, normally `.radius/app.bicep` → use the `radius-app-bicep` skill if missing. For tool calls, pass any other model, including root `app.bicep`, explicitly. Canvas buttons resolve the selected repository and branch's `.radius/app.bicep` or root `app.bicep` automatically.
 3. GitHub credentials with access to the repository and target environment. Deployment uses the existing GitHub CLI credential path; environment setup's account selector does not select a deployment account.
 
 ## How to invoke
@@ -55,9 +55,9 @@ Use them like this:
 
 No-argument deploy calls repeat only an unambiguous target in the current runtime. Missing or ambiguous attempts and unavailable or malformed results return guidance or an error, never fabricated progress. A recorded `failed` result with `errorKind: "run-unconfirmed"` means the remote outcome is unknown: inspect the workflow, and do not automatically repair or redeploy it.
 
-Deployment reads only the admitted `appFile`; it never substitutes another model or stored environment commands. Paths must be repository-relative, end in `.bicep`, and use ASCII letters, digits, `.`, `_`, `-` and `/`. Windows separators and redundant `.`/separator segments are normalized; case is preserved. Absolute paths, traversal, spaces, control characters and a leading `-` are rejected.
+Deployment reads only the admitted `appFile`; it never substitutes another model or stored environment commands. Paths must be repository-relative, end in `.bicep`, and use ASCII letters, digits, `.`, `_`, `-` and `/`. Windows separators and redundant `.`/separator segments are normalized; case is preserved. Absolute paths, traversal, spaces, control characters and a leading `-` are rejected. The basenames `radius-environment.bicep` and `radius-recipe-pack.bicep` are reserved for generated setup, case-insensitively in every directory; rename such application models before deploying.
 
-`model-preflight-failed` and `workflow-preflight-failed` mean no workflow was dispatched. Correct the named model, parameter or workflow problem before explicitly retrying the same target. These failures do not trigger automatic model repair. The runtime verifies that the selected branch's dispatcher and provider workflows support the per-run `app_file` input before provisioning parameter secrets or dispatching.
+`model-preflight-failed` and `workflow-preflight-failed` mean no workflow was dispatched. Correct the named model, parameter or workflow problem before explicitly retrying the same target. These failures do not trigger automatic model repair. The runtime verifies that the selected branch's dispatcher and provider workflows support the per-run `app_file` input and that the dispatcher exposes its `correlation_id` in the run title before provisioning parameter secrets or dispatching. Missing correlated run evidence is not permission to adopt another run or dispatch again.
 
 An `observationId` reads one invocation only. It is not a repair ID, expires when that invocation is replaced or retired, and is not restored after the extension restarts. Closing or resetting an active Canvas detaches the view, not the deployment; monitoring continues while the same runtime remains alive.
 

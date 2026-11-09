@@ -30,6 +30,7 @@ function fixture(
     azure?: boolean;
     variableResponse?: string;
     models?: Readonly<Record<string, string>>;
+    conclusions?: Readonly<Record<string, "success" | "failure">>;
   } = {}
 ) {
   const calls: string[][] = [];
@@ -38,6 +39,7 @@ function fixture(
   let id = 0;
   let runId = 10;
   const runEnvironments = new Map<number, string>();
+  const runCorrelations = new Map<number, string>();
   const generated = generateDeployWorkflow(
     "dev",
     ".radius/app.bicep",
@@ -106,6 +108,11 @@ function fixture(
         ?.slice("environment=".length);
       if (!environment) throw new Error("Missing workflow environment");
       runEnvironments.set(runId, environment);
+      const correlation = args
+        .find((arg) => arg.startsWith("correlation_id="))
+        ?.slice("correlation_id=".length);
+      if (!correlation) throw new Error("Missing workflow correlation");
+      runCorrelations.set(runId, correlation);
       if (options.dispatch === "timeout") {
         callback(
           Object.assign(new Error("timed out"), {
@@ -119,9 +126,15 @@ function fixture(
       }
       stdout = `https://github.com/owner/app/actions/runs/${runId}`;
     } else if (options.dispatch && args[0] === "run" && args[1] === "list") {
-      stdout = JSON.stringify([
-        { databaseId: runId, createdAt: new Date().toISOString() }
-      ]);
+      stdout = JSON.stringify(
+        args.includes("databaseId,createdAt") ?
+          [{ databaseId: options.conclusions ? 10 : runId }]
+        : [...runCorrelations].map(([databaseId, correlation]) => ({
+            databaseId,
+            createdAt: new Date().toISOString(),
+            displayTitle: `Radius - Deploy ${runEnvironments.get(databaseId)} ${correlation}`
+          }))
+      );
     } else if (options.dispatch && args[0] === "run" && args[1] === "view") {
       stdout = "Error: application model is invalid";
     } else if (
@@ -231,7 +244,10 @@ function fixture(
               {
                 name: DEPLOY_RAD_COMMANDS_STEP,
                 status: "completed",
-                conclusion: options.dispatch
+                conclusion:
+                  options.conclusions?.[
+                    runEnvironments.get(requestedRunId) || ""
+                  ] ?? options.dispatch
               }
             ]
           }
@@ -244,7 +260,9 @@ function fixture(
       stdout = http({
         id: requestedRunId,
         status: "completed",
-        conclusion: options.dispatch
+        conclusion:
+          options.conclusions?.[runEnvironments.get(requestedRunId) || ""] ??
+          options.dispatch
       });
     } else if (options.dispatch && endpoint.includes("/artifacts?")) {
       stdout = http({
@@ -295,11 +313,32 @@ function fixture(
 }
 
 describe("shared production deployment composition", () => {
+  it.each(["radius-environment.bicep", "models/RADIUS-RECIPE-PACK.bicep"])(
+    "rejects the reserved model %s before any production command",
+    async (appFile) => {
+      const h = fixture();
+      const result = await h.runtime.start({
+        repo: "owner/app",
+        branch: "feature",
+        environment: "dev",
+        provider: "azure",
+        appFile
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        status: 400,
+        error: expect.stringContaining("reserved")
+      });
+      expect(h.calls).toEqual([]);
+    }
+  );
+
   it("keeps per-run model inputs separate during concurrent environment deployments", async () => {
     const model =
       "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'modeled-app'\n}";
     const h = fixture({
       dispatch: "success",
+      conclusions: { dev: "success", prod: "failure" },
       models: {
         "models/dev.bicep": model,
         "models/prod.bicep": model
@@ -319,6 +358,22 @@ describe("shared production deployment composition", () => {
     await vi.waitFor(() => expect(h.runtime.owner.hasActiveWork()).toBe(false));
     const runs = h.calls.filter((args) => args[0] === "workflow");
     expect(runs).toHaveLength(2);
+    const invocations = results.map((result) => {
+      if (!result.ok) throw new Error(result.error);
+      return result.invocation;
+    });
+    expect(
+      new Set(invocations.map((invocation) => invocation.state.deployRunId))
+        .size
+    ).toBe(2);
+    expect(
+      invocations.map((invocation) => invocation.state.deployStatus)
+    ).toEqual(["complete", "failed"]);
+    expect(h.sendRepair).toHaveBeenCalledTimes(1);
+    expect(h.sendRepair.mock.calls[0][0]).toMatchObject({
+      attemptId: invocations[1].attemptId,
+      appFile: "models/prod.bicep"
+    });
     for (const environment of ["dev", "prod"]) {
       const run = runs.find((args) =>
         args.includes(`environment=${environment}`)

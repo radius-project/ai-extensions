@@ -4,6 +4,7 @@ import type {
 } from "@radius-project/adapter-shared";
 import type {
   DeploymentState,
+  DeploymentTarget,
   DeploymentStartInput
 } from "@radius-project/core";
 import type { CanvasState } from "../../shared.js";
@@ -15,6 +16,11 @@ export interface DeployRequestInstanceEntry {
 
 export interface DeployRequestDependencies {
   runtime: DeploymentRuntime;
+  resolveAppFile(
+    state: CanvasState,
+    repo: string,
+    branch: string
+  ): Promise<string | null>;
   readInstanceEntry(instanceId: string): DeployRequestInstanceEntry | undefined;
   attach(
     instanceId: string,
@@ -49,7 +55,8 @@ export function createDeployRequestService(
     "readInstanceEntry",
     "attach",
     "errorMessage",
-    "reportError"
+    "reportError",
+    "resolveAppFile"
   ]);
   if (typeof dependencies.runtime?.start !== "function")
     throw new Error("createDeployRequestService requires runtime.");
@@ -89,13 +96,39 @@ export function createDeployRequestService(
           provider:
             optionalString(data.provider) ||
             (repair ? undefined : state.deployProvider),
-          appFile:
-            optionalString(data.appFile) ||
-            (repair ? undefined : state.appFile),
+          appFile: optionalString(data.appFile),
           attemptId: optionalString(data.attemptId)
         };
+        const selectionState = { ...state };
+        const selectionKeys = [
+          "contextRepo",
+          "contextBranch",
+          "plannedRepo",
+          "plannedBranch",
+          "workspaceRepo",
+          "workspaceBranch",
+          "workspacePath",
+          "envName"
+        ] as const;
         const result = await dependencies.runtime.start(input, {
           instanceId,
+          ...(!repair && !input.appFile ?
+            {
+              modelSelection: {
+                resolve: (target: Readonly<DeploymentTarget>) =>
+                  dependencies.resolveAppFile(
+                    selectionState,
+                    target.repo,
+                    target.branch
+                  ),
+                isCurrent: () =>
+                  dependencies.readInstanceEntry(instanceId) === entry &&
+                  selectionKeys.every(
+                    (key) => state[key] === selectionState[key]
+                  )
+              }
+            }
+          : {}),
           workspace:
             state.workspaceRepo && state.workspaceBranch ?
               {

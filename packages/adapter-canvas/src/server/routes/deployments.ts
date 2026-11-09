@@ -18,7 +18,10 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "../../gh-command-display.js";
-import { projectSafeApplicationGraph } from "@radius-project/core";
+import {
+  projectSafeApplicationGraph,
+  deploymentIdentityRefusal
+} from "@radius-project/core";
 
 // What the webview needs to decide whether to keep polling after a failed
 // deploy. Shaped to match `deployHandoffStatus` in `server.ts`, which is
@@ -445,15 +448,8 @@ export async function handleListDeployments(
     ]);
     const envNames =
       envNamesRaw ? [...new Set(envNamesRaw.split("\n").filter(Boolean))] : [];
-    // Resolve the real app name once (from app.bicep) so every row targets the
-    // app declared in the bicep, not the repo basename.
-    const listEntry = dependencies.readInstanceEntry(context.instanceId);
-    const listBranch = deployContextBranch(listEntry);
-    const listAppName = await dependencies.resolveRepoAppName(repo, listBranch);
     const resolved = await Promise.all(
-      envNames.map((name) =>
-        dependencies.resolveEnvDeployment(repo, name, listAppName)
-      )
+      envNames.map((name) => dependencies.resolveEnvDeployment(repo, name, ""))
     );
     const payload = { deployments: resolved.filter(Boolean) };
     dependencies.deployListCache.set(repo, { at: Date.now(), payload });
@@ -533,6 +529,12 @@ export async function handleDeleteDeployment(
     // whose external resources may still exist — so only the exact boolean
     // `true` enables it. A truthy string from a hand-made request does not.
     const force = record(data).force === true;
+    for (const field of ["deploymentId", "runUrl"]) {
+      if (data[field] !== undefined && typeof data[field] !== "string") {
+        respond(400, { error: `${field} must be a string.` });
+        return;
+      }
+    }
     if (
       !repo ||
       !environment ||
@@ -601,6 +603,15 @@ export async function handleDeleteDeployment(
         error:
           "Could not verify the current deployment state. Check your GitHub connection and try again."
       });
+      return;
+    }
+    const identityRefusal = deploymentIdentityRefusal(current, application, {
+      deploymentId: data.deploymentId,
+      runUrl: data.runUrl
+    });
+    if (identityRefusal) {
+      releaseReservation();
+      respond(identityRefusal.status, { error: identityRefusal.error });
       return;
     }
     if (

@@ -22,6 +22,7 @@ const ABANDON_LEASE: DeploymentAbandonmentReservation = {
 function row(status: string): DeploymentRow {
   return {
     app: PAYLOAD.application,
+    identity: { state: "known", application: PAYLOAD.application },
     environment: PAYLOAD.environment,
     provider: "azure",
     status,
@@ -60,6 +61,32 @@ function abandon(
 }
 
 describe("createDeploymentAbandonmentService", () => {
+  it.each([
+    undefined,
+    { state: "unavailable" as const, reason: "expired" },
+    { state: "unavailable" as const, reason: "denied", readFailed: true },
+    { state: "known" as const, application: "another-app" }
+  ])(
+    "never abandons a deployment without matching identity evidence %j",
+    async (identity) => {
+      const ghOrThrow = vi.fn(async () => "");
+      const releaseDeploymentMutation = vi.fn();
+      const result = await abandon({
+        resolveEnvDeployment: async () => ({
+          ...row("delete-failed"),
+          identity
+        }),
+        ghOrThrow,
+        releaseDeploymentMutation
+      });
+      expect(result.status).toBe(
+        identity?.state === "unavailable" && identity.readFailed ? 503 : 409
+      );
+      expect(ghOrThrow).not.toHaveBeenCalled();
+      expect(releaseDeploymentMutation).toHaveBeenCalledOnce();
+    }
+  );
+
   it("fails construction when a required dependency is missing", () => {
     const incomplete = dependencies();
     Reflect.deleteProperty(incomplete, "ghOrThrow");

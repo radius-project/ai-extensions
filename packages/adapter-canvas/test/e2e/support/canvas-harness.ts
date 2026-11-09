@@ -148,6 +148,7 @@ export interface FakeCliCommand {
   stdout?: string;
   stderr?: string;
   writeFiles?: Array<{ path: string; content: string; executable?: boolean }>;
+  writeFilesDirectoryArg?: string;
   /**
    * Answers at most this many calls. Later calls fall through to the next
    * matching command, so a scenario can answer one command differently the
@@ -165,6 +166,18 @@ export function fakeCliCommandAvailable(
   answered: number
 ): boolean {
   return command.times === undefined || answered < command.times;
+}
+
+export function fakeCliWriteDirectory(
+  command: Pick<FakeCliCommand, "writeFilesDirectoryArg">,
+  args: readonly string[],
+  cwd: string
+): string {
+  if (!command.writeFilesDirectoryArg) return cwd;
+  const index = args.indexOf(command.writeFilesDirectoryArg);
+  if (index < 0 || !args[index + 1])
+    throw new Error("Missing fake CLI output directory argument.");
+  return args[index + 1];
 }
 
 /**
@@ -648,9 +661,10 @@ if (!command) {
   process.exit(127);
 }
 
+const writeDirectory = (${fakeCliWriteDirectory.toString()})(command, args, process.cwd());
 for (const file of command.writeFiles || []) {
   const expanded = file.path.replace(/\\$([A-Z0-9_]+)/g, (_match, name) => process.env[name] || "");
-  const target = path.isAbsolute(expanded) ? expanded : path.resolve(process.cwd(), expanded);
+  const target = path.isAbsolute(expanded) ? expanded : path.resolve(writeDirectory, expanded);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, file.content, "utf8");
   if (file.executable && process.platform !== "win32") await fs.chmod(target, 0o755);
@@ -1014,6 +1028,53 @@ export function defaultFakeCliScenario(): FakeCliScenario {
           '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
         ],
         stdout: ".github/workflows/run-rad-commands.yml\tcompleted\tsuccess"
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/actions/runs/1/artifacts?per_page=100`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            artifacts: [
+              {
+                id: 1,
+                name: "radius-deploy-status-fixture",
+                workflow_run: { id: 1 }
+              }
+            ]
+          })
+      },
+      {
+        tool: "gh",
+        argsPrefix: [
+          "run",
+          "download",
+          "1",
+          "--name",
+          "radius-deploy-status-fixture",
+          "--dir"
+        ],
+        argsSuffix: ["--repo", REPOSITORY],
+        writeFilesDirectoryArg: "--dir",
+        writeFiles: [
+          {
+            path: "deploy-progress.json",
+            content: JSON.stringify({
+              schemaVersion: 1,
+              application: "radius-app",
+              environment: "fixture-environment",
+              runId: 1,
+              sequence: 1,
+              resources: []
+            })
+          }
+        ]
       },
       appBicep404,
       missingGhContent(

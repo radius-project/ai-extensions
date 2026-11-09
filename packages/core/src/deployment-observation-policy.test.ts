@@ -79,7 +79,7 @@ describe("selectWorkflowRunId", () => {
     ).toBe(8);
   });
   it.each([10, "10"])(
-    "uses the smallest id above baseline %s, independent of correlation or clock skew",
+    "uses the smallest id above baseline %s for legacy uncorrelated callers",
     (baseline) => {
       const runs = [
         {},
@@ -88,10 +88,48 @@ describe("selectWorkflowRunId", () => {
         { databaseId: 12 },
         { databaseId: 13 }
       ];
-      expect(selectWorkflowRunId(runs, since, "ignored", baseline)).toBe(12);
+      expect(selectWorkflowRunId(runs, since, undefined, baseline)).toBe(12);
       expect(selectWorkflowRunId(runs, since, undefined, 14)).toBeNull();
     }
   );
+  it.each([undefined, 10, "10"])(
+    "requires execution correlation with baseline %s despite clock skew",
+    (baseline) => {
+      const runs = [
+        { databaseId: 12, displayTitle: "Radius prod dep-prod" },
+        { databaseId: 11, displayTitle: "Radius dev dep-dev" }
+      ];
+      expect(selectWorkflowRunId(runs, since, "dep-dev", baseline)).toBe(11);
+      expect(selectWorkflowRunId(runs, since, "dep-prod", baseline)).toBe(12);
+      expect(
+        selectWorkflowRunId(runs, since, "dep-other", baseline)
+      ).toBeNull();
+      expect(selectWorkflowRunId(runs, since, "dep-dev", 11)).toBeNull();
+    }
+  );
+  it("rejects partial markers, invalid ids and ambiguous matching runs", () => {
+    const candidate = { databaseId: 12, displayTitle: "Radius dev dep-a" };
+    expect(selectWorkflowRunId([candidate], since, "dep")).toBeNull();
+    expect(
+      selectWorkflowRunId(
+        [{ ...candidate, displayTitle: "dep-a suffix" }],
+        since,
+        "dep-a"
+      )
+    ).toBeNull();
+    for (const databaseId of [0, -1, 1.5, NaN, Infinity])
+      expect(
+        selectWorkflowRunId([{ ...candidate, databaseId }], since, "dep-a")
+      ).toBeNull();
+    expect(
+      selectWorkflowRunId(
+        [candidate, { ...candidate, databaseId: 13 }],
+        since,
+        "dep-a",
+        10
+      )
+    ).toBeNull();
+  });
   it.each([undefined, null, "", " ", "not-a-number", Infinity, NaN])(
     "falls back to the time window for absent/non-finite baseline %s",
     (baseline) =>

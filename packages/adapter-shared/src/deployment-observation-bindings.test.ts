@@ -597,6 +597,41 @@ describe("ambient workflow discovery parsing", () => {
 });
 
 describe("selected-account workflow discovery", () => {
+  it.each([6, 100, 101])(
+    "discovers only its own run within the bounded scan (position %s)",
+    async (position) => {
+      const runs = Array.from(
+        { length: Math.min(position, 100) },
+        (_, index) => ({
+          databaseId: 11 + index,
+          createdAt: "2026-01-01T00:00:00Z",
+          displayTitle:
+            index + 1 === position ? "Radius dep-own" : "Radius dep-other"
+        })
+      );
+      const execute = vi.fn<DeploymentObservationExecutor>(
+        (_command, _args, _options, callback) =>
+          callback(null, JSON.stringify(runs), "")
+      );
+      const bound = createDeploymentObservationBindings({
+        execute,
+        redactDiagnostic: redactCredentials
+      });
+      expect(
+        await bound.findWorkflowRun(
+          "org/app",
+          "deploy.yml",
+          0,
+          undefined,
+          undefined,
+          10,
+          "dep-own"
+        )
+      ).toBe(position <= 100 ? 10 + position : null);
+      expect(execute.mock.calls[0][1]).toContain("100");
+    }
+  );
+
   it.each(["ambient", "selected"] as const)(
     "discovers the correlated run through %s execution without crossing credential sources",
     async (mode) => {
@@ -642,7 +677,7 @@ describe("selected-account workflow discovery", () => {
         "list",
         "--workflow=deploy.yml",
         "--limit",
-        "5",
+        "100",
         "--json",
         "databaseId,status,createdAt,displayTitle",
         "--repo",

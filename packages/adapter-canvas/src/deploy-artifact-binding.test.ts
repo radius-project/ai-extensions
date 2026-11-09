@@ -45,6 +45,8 @@ it("retains force-delete conflict proof through the real shared artifact binding
       writeFileSync(
         path.join(directory, "rad-delete-result.json"),
         JSON.stringify({
+          resourceType: "application",
+          name: "app",
           outcome: "failed",
           output: "in progress state: Updating",
           forced: false
@@ -64,6 +66,7 @@ it("retains force-delete conflict proof through the real shared artifact binding
       {
         resolveEnvDeployment: async () => ({
           app: "app",
+          identity: { state: "known", application: "app" },
           environment: "dev",
           provider: "azure",
           status: "delete-failed",

@@ -751,7 +751,13 @@ describe("planned selectors", () => {
     browser.net.handle(`${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`, () =>
       jsonResponse({
         deployments: [
-          { app: "store", environment: "dev", status: "pending", runUrl: "" },
+          {
+            app: "store",
+            identity: { state: "known", application: "store" },
+            environment: "dev",
+            status: "pending",
+            runUrl: ""
+          },
           { app: "other", environment: "dev", status: "pending", runUrl: "" }
         ]
       })
@@ -1136,12 +1142,13 @@ describe("planned selectors", () => {
 });
 
 describe("deployment listings", () => {
-  it("parses complete records and drops entries without an application or environment", () => {
+  it("retains unknown application rows while dropping entries without an environment", () => {
     expect(
       parseDeploymentListing({
         deployments: [
           {
             app: "store",
+            identity: { state: "known", application: "store" },
             environment: "dev",
             status: "pending",
             runUrl: "https://example.test/run"
@@ -1154,9 +1161,22 @@ describe("deployment listings", () => {
     ).toEqual([
       {
         app: "store",
+        identity: { state: "known" },
+        deploymentId: "",
         environment: "dev",
         status: "pending",
         runUrl: "https://example.test/run"
+      },
+      {
+        app: "",
+        environment: "dev",
+        status: "pending",
+        runUrl: "",
+        deploymentId: "",
+        identity: {
+          state: "unavailable",
+          reason: "Application identity is unavailable."
+        }
       }
     ]);
   });
@@ -1187,6 +1207,7 @@ describe("deployment listings", () => {
         deployments: [
           {
             app: "store",
+            identity: { state: "known", application: "store" },
             environment: "dev",
             status: "pending",
             runUrl: ""
@@ -1197,6 +1218,8 @@ describe("deployment listings", () => {
       deployments: [
         {
           app: "store",
+          identity: { state: "known" },
+          deploymentId: "",
           environment: "dev",
           status: "pending",
           runUrl: ""
@@ -1631,8 +1654,7 @@ describe("planned deployment dispatch", () => {
       environment: "dev",
       provider: "aws",
       targetRepo: "octo/app",
-      branch: "feature",
-      appFile: ".radius/app.bicep"
+      branch: "feature"
     });
     expect(browser.nav.assigned[0]).toBe(
       "/?page=deploying&application=store&environment=dev"

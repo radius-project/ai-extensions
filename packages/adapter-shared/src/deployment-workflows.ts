@@ -74,6 +74,17 @@ export function createDeploymentWorkflows(
       return workflow;
     };
     const dispatcher = await readWorkflow(DEPLOY_DISPATCHER_FILE);
+    const dispatchInputs = workflowRecord(
+      workflowRecord(workflowRecord(dispatcher.on).workflow_dispatch).inputs
+    );
+    if (
+      workflowRecord(dispatchInputs.correlation_id).type !== "string" ||
+      dispatcher["run-name"] !==
+        "Radius - Deploy ${{ inputs.environment }} ${{ inputs.correlation_id }}"
+    )
+      throw new Error(
+        "The dispatcher must accept correlation_id and expose it in its run-name. Update the Radius workflows."
+      );
     const jobs = Object.values(workflowRecord(dispatcher.jobs)).map(
       workflowRecord
     );

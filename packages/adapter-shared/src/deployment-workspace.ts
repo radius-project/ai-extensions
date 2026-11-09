@@ -19,6 +19,14 @@ export function normalizeDeploymentAppFile(input: string): string {
       "Deployment model paths must end in .bicep and use only ASCII letters, digits, '.', '_', '-', and '/'; spaces and leading '-' are not supported."
     );
   }
+  const basename = relative.split("/").pop()?.toLowerCase();
+  if (
+    basename === "radius-environment.bicep" ||
+    basename === "radius-recipe-pack.bicep"
+  )
+    throw new Error(
+      `Model "${relative}" is reserved for generated setup. Rename the application model before deploying.`
+    );
   return relative;
 }
 

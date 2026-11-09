@@ -3,6 +3,7 @@ import {
   resolveDeployRepairLoop,
   resolveDeploymentTarget,
   type DeploymentStartInput,
+  type DeploymentTarget,
   type DeploymentWorkspace,
   type DeploymentResource,
   type DeploymentState
@@ -29,6 +30,10 @@ export interface DeploymentStartContext {
   workspace?: DeploymentWorkspace;
   resources?: DeploymentResource[];
   instanceId?: string;
+  modelSelection?: {
+    resolve(target: Readonly<DeploymentTarget>): Promise<string | null>;
+    isCurrent(): boolean;
+  };
 }
 
 export interface DeploymentRuntimePorts extends DeploymentOwnerPorts {
@@ -157,12 +162,23 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
     const prior = previous.kind === "found" ? previous.invocation : undefined;
     const loop = resolveDeployRepairLoop(prior?.state ?? {}, input.attemptId);
     if (loop.error) return { ok: false, status: 409, error: loop.error };
-    const resolved = resolveDeploymentTarget(input, {
-      previous: prior?.target,
-      workspace: context.workspace,
-      awsEnabled: ports.awsEnabled,
-      normalizeAppFile: ports.normalizeAppFile
-    });
+    let resolved: ReturnType<typeof resolveDeploymentTarget>;
+    try {
+      resolved = resolveDeploymentTarget(input, {
+        previous: prior?.target,
+        workspace: context.workspace,
+        awsEnabled: ports.awsEnabled,
+        normalizeAppFile: ports.normalizeAppFile
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        status: 400,
+        error: ports.delivery.redactDiagnostic(
+          `Invalid deployment model: ${error instanceof Error ? error.message : String(error)}`
+        )
+      };
+    }
     if ("error" in resolved) return { ok: false, ...resolved };
     const { target } = resolved;
     const { repo } = target;
@@ -230,6 +246,55 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
           error:
             "The deployment context changed while checking its branch. Nothing was deployed."
         };
+      if (context.modelSelection && !input.appFile && !input.attemptId) {
+        const selection = context.modelSelection;
+        const current = () =>
+          !owner.isShuttingDown() &&
+          (!prior || owner.isCurrent(prior)) &&
+          selection.isCurrent();
+        if (!current())
+          return {
+            ok: false,
+            status: 409,
+            error: "The model selection changed. Nothing was deployed."
+          };
+        let selected: string | null;
+        try {
+          selected = await selection.resolve(Object.freeze({ ...target }));
+        } catch (error) {
+          return {
+            ok: false,
+            status: 503,
+            error: ports.delivery.redactDiagnostic(
+              `Could not resolve the application model: ${error instanceof Error ? error.message : String(error)}`
+            )
+          };
+        }
+        if (!current())
+          return {
+            ok: false,
+            status: 409,
+            error: "The model selection changed. Nothing was deployed."
+          };
+        if (!selected)
+          return {
+            ok: false,
+            status: 400,
+            error:
+              "No Radius application model was found on the selected branch."
+          };
+        try {
+          target.appFile = ports.normalizeAppFile(selected);
+        } catch (error) {
+          return {
+            ok: false,
+            status: 400,
+            error: ports.delivery.redactDiagnostic(
+              error instanceof Error ? error.message : String(error)
+            )
+          };
+        }
+      }
       const state: DeploymentState = {
         envName: target.environment,
         workspaceBranch: context.workspace?.branch,

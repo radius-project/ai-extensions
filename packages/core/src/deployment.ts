@@ -32,6 +32,7 @@ export interface DeploymentAttempt extends DeploymentParameters {
 }
 
 export interface DeploymentExecutionReference {
+  correlationId?: string;
   workflowFile: string;
   dispatchedAt: number;
   environment: string;

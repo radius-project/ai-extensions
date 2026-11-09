@@ -465,6 +465,40 @@ describe("environment listing diagnostics", () => {
 });
 
 describe("environment listing configuration over HTTP", () => {
+  it.each([false, true])(
+    "refuses environment deletion when application identity is unavailable (read failed: %s)",
+    async (readFailed) => {
+      const h = await start(
+        {},
+        {
+          resolveRepoAppName: async () => {
+            throw new Error("Default model is not deletion evidence");
+          },
+          resolveEnvDeployment: async () => ({
+            app: "",
+            environment: "dev",
+            status: "success",
+            provider: "azure",
+            deploymentId: "100",
+            runUrl: "https://github.com/octo/app/actions/runs/42",
+            identity: {
+              state: "unavailable",
+              reason: "Cannot verify application identity.",
+              readFailed
+            }
+          })
+        }
+      );
+      const response = await h.deleteEnvironment("dev");
+      expect(response).toMatchObject({
+        status: readFailed ? 503 : 409,
+        body: { code: "app-identity-unavailable", environment: "dev" }
+      });
+      expect(response.body).not.toHaveProperty("app");
+      expect(h.commands).toEqual([]);
+    }
+  );
+
   // The namespace reaches the Edit form as serialized `config.namespace` on
   // this route's response, so the contract is asserted through the real
   // loopback server rather than only at the handler.

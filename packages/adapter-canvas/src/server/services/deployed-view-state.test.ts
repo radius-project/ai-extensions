@@ -35,6 +35,36 @@ describe("discardDeployedApplicationState", () => {
     expect(state.deployRunId).toBeNull();
   });
 
+  it.each(["id", "targetRepo", "environment"] as const)(
+    "preserves an attempt whose %s changed in place",
+    (key) => {
+      const attempt = {
+        id: "original",
+        targetRepo: "octo/shop",
+        environment: "prod"
+      };
+      const state = deployedState({ deployAttempt: attempt });
+      const discard = captureDeployedApplicationState(state, target);
+      attempt[key] = "replacement";
+      const expected = structuredClone(state);
+      discard();
+      expect(state).toEqual(expected);
+    }
+  );
+
+  it("clears an unchanged captured attempt", () => {
+    const state = deployedState({
+      deployAttempt: {
+        id: "original",
+        targetRepo: "octo/shop",
+        environment: "prod"
+      }
+    });
+    captureDeployedApplicationState(state, target)();
+    expect(state.deployedGraph).toBeNull();
+    expect(state.deployRunId).toBeNull();
+  });
+
   it.each<Partial<CanvasState>>([
     {
       deployAttempt: {

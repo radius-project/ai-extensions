@@ -3,11 +3,19 @@ import {
   extractAppName,
   classifyDeploymentWorkflow,
   selectDeploymentRecord,
+  deploymentRunId,
+  type DeploymentApplicationIdentity,
   type DeploymentRecord,
   type DeploymentRow
 } from "@radius-project/core";
 
 export interface DeploymentResolverDependencies {
+  readApplicationIdentity(
+    repo: string,
+    environment: string,
+    runId: number,
+    workflow: "deploy" | "delete"
+  ): Promise<DeploymentApplicationIdentity>;
   ghOrThrow(args: string[]): Promise<string>;
   deployWorkflowFile: string;
   deleteWorkflowFile: string;
@@ -17,10 +25,9 @@ export interface DeploymentResolverDependencies {
 export async function resolveEnvironmentDeployment(
   repo: string,
   environment: string,
-  appName: string,
+  _appName: string,
   dependencies: DeploymentResolverDependencies
 ): Promise<DeploymentRow | null> {
-  const resolvedAppName = appName || repo.slice(repo.lastIndexOf("/") + 1);
   let provider = "";
   try {
     const varsRaw = await dependencies.ghOrThrow([
@@ -80,9 +87,9 @@ export async function resolveEnvironmentDeployment(
       ]);
     }
     let runUrl = "";
-    const match = /actions\/runs\/(\d+)/.exec(logUrl);
-    if (match) {
-      runUrl = `https://github.com/${repo}/actions/runs/${match[1]}`;
+    const matchedRunId = deploymentRunId(repo, logUrl);
+    if (matchedRunId) {
+      runUrl = `https://github.com/${repo}/actions/runs/${matchedRunId}`;
     } else if (/^https?:\/\//.test(logUrl)) {
       runUrl = logUrl;
     }
@@ -90,17 +97,17 @@ export async function resolveEnvironmentDeployment(
     let runPath = "";
     let runStatus = "";
     let runConclusion = "";
-    if (match) {
+    if (matchedRunId) {
       const runInfo = await dependencies.ghOrThrow([
         "api",
-        `/repos/${repo}/actions/runs/${match[1]}`,
+        `/repos/${repo}/actions/runs/${matchedRunId}`,
         "--jq",
         '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
       ]);
       [runPath = "", runStatus = "", runConclusion = ""] = runInfo.split("\t");
     }
     const workflow = classifyDeploymentWorkflow(
-      !!match,
+      !!matchedRunId,
       runPath,
       dependencies.deployWorkflowFile,
       dependencies.deleteWorkflowFile
@@ -117,23 +124,46 @@ export async function resolveEnvironmentDeployment(
     };
   };
 
-  const decide = (record: DeploymentRecord) =>
-    selectDeploymentRecord(record, {
-      appName: resolvedAppName,
+  const decide = async (record: DeploymentRecord) => {
+    const context: {
+      identity: DeploymentApplicationIdentity;
+      environment: string;
+      provider: string;
+    } = {
+      identity: {
+        state: "unavailable",
+        reason: "Application identity has not been verified."
+      },
       environment,
       provider
-    });
+    };
+    const row = selectDeploymentRecord(record, context);
+    if (!row || row === "skip") return row;
+    const runId = deploymentRunId(repo, row.runUrl);
+    if (
+      runId &&
+      (record.workflow === "deploy" || record.workflow === "delete")
+    ) {
+      context.identity = await dependencies.readApplicationIdentity(
+        repo,
+        environment,
+        runId,
+        record.workflow
+      );
+    }
+    return selectDeploymentRecord(record, context);
+  };
 
   const batch = ids.slice(0, dependencies.maxParallelRecords);
   const resolved = await Promise.allSettled(batch.map(resolveRecord));
   for (const result of resolved) {
     if (result.status === "rejected") throw result.reason;
-    const deployment = decide(result.value);
+    const deployment = await decide(result.value);
     if (deployment === "skip") continue;
     return deployment;
   }
   for (const id of ids.slice(dependencies.maxParallelRecords)) {
-    const deployment = decide(await resolveRecord(id));
+    const deployment = await decide(await resolveRecord(id));
     if (deployment === "skip") continue;
     return deployment;
   }

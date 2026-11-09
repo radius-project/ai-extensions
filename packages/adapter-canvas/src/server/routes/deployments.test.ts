@@ -229,6 +229,7 @@ function statusDependencies(
 function row(environment: string, status = "deployed"): DeploymentRow {
   return {
     app: "todolist",
+    identity: { state: "known", application: "todolist" },
     environment,
     provider: "azure",
     status,
@@ -1256,8 +1257,8 @@ describe("deployments routes (SU-06)", () => {
         ]
       ]);
       expect(resolveCalls).toEqual([
-        ["octo/todolist", "dev", "todo-app"],
-        ["octo/todolist", "prod", "todo-app"]
+        ["octo/todolist", "dev", ""],
+        ["octo/todolist", "prod", ""]
       ]);
       expect(JSON.parse(recording.body)).toEqual({
         deployments: [row("dev")]
@@ -1541,6 +1542,75 @@ describe("deployments routes (SU-06)", () => {
     function deleteContext(body = BODY) {
       return context("POST", "/api/delete-deployment", body);
     }
+
+    it.each([
+      { identity: undefined },
+      { identity: { state: "unavailable" as const, reason: "expired" } },
+      {
+        identity: {
+          state: "unavailable" as const,
+          reason: "denied",
+          readFailed: true
+        }
+      },
+      { identity: { state: "known" as const, application: "other-app" } }
+    ])(
+      "refuses unverified application identity before workflow writes %j",
+      async ({ identity }) => {
+        const { context: ctx, recording } = deleteContext();
+        const ensureWorkflowsCurrent = vi.fn(async () => ({
+          created: [],
+          failed: []
+        }));
+        const runGh = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+        const releaseDeploymentMutation = vi.fn();
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            resolveEnvDeployment: async () => ({ ...row("dev"), identity }),
+            ensureWorkflowsCurrent,
+            runGh,
+            releaseDeploymentMutation
+          })
+        );
+        expect(recording.status).toBe(
+          identity?.state === "unavailable" && identity.readFailed ? 503 : 409
+        );
+        expect(ensureWorkflowsCurrent).not.toHaveBeenCalled();
+        expect(runGh).not.toHaveBeenCalled();
+        expect(releaseDeploymentMutation).toHaveBeenCalledOnce();
+      }
+    );
+
+    it.each([
+      { deploymentId: "superseded" },
+      { runUrl: "https://github.com/other/run" }
+    ])("refuses a stale displayed deployment %j", async (expected) => {
+      const { context: ctx, recording } = deleteContext(
+        JSON.stringify({ ...JSON.parse(BODY), ...expected })
+      );
+      const runGh = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          resolveEnvDeployment: async () => row("dev"),
+          runGh
+        })
+      );
+      expect(recording.status).toBe(409);
+      expect(runGh).not.toHaveBeenCalled();
+    });
+
+    it.each([{ deploymentId: 12 }, { runUrl: false }])(
+      "rejects malformed freshness input %j",
+      async (expected) => {
+        const { context: ctx, recording } = deleteContext(
+          JSON.stringify({ ...JSON.parse(BODY), ...expected })
+        );
+        await handleDeleteDeployment(ctx, deleteDependencies());
+        expect(recording.status).toBe(400);
+      }
+    );
 
     it.each<{
       name: string;

@@ -23,6 +23,7 @@ function dispatchDependencies(
   overrides: Partial<DeployDispatchDependencies> = {}
 ): DeployDispatchDependencies {
   return {
+    id: () => "execution",
     deployWorkflowFile: "run-rad-commands.yml",
     deployWorkflowFiles: ["run-rad-commands.yml"],
     branchNotPushedKind: "branch-not-pushed",
@@ -191,6 +192,8 @@ describe("shared deployment without a frontend", () => {
         "environment=dev",
         "-f",
         "app_file=.radius/app.bicep",
+        "-f",
+        "correlation_id=dep-execution",
         "--repo",
         "example/app",
         "-f",
@@ -353,6 +356,7 @@ describe("shared dispatch generation fencing", () => {
       workflowFile: "run-rad-commands.yml",
       dispatchedAt: 100,
       environment: "dev",
+      correlationId: "dep-execution",
       baselineRunId: 7
     });
   });

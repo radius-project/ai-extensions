@@ -5,6 +5,9 @@ import {
   extractAppName,
   resolveDeployStatus,
   selectDeploymentRecord,
+  deploymentIdentityRefusal,
+  deploymentRunId,
+  readDeleteApplicationName,
   type DeploymentRecord
 } from "./deployment-lookup-policy.js";
 
@@ -43,7 +46,7 @@ describe("deployment workflow identity", () => {
 
 describe("deployment record selection", () => {
   const context = {
-    appName: "modeled-app",
+    identity: { state: "known" as const, application: "modeled-app" },
     environment: "production",
     provider: "azure"
   };
@@ -60,11 +63,130 @@ describe("deployment record selection", () => {
   it("returns the actual application name and run evidence", () => {
     expect(selectDeploymentRecord(record, context)).toEqual({
       app: "modeled-app",
+      identity: context.identity,
       environment: "production",
       provider: "azure",
       status: "success",
       deploymentId: "42",
       runUrl: record.runUrl
+    });
+  });
+
+  it("keeps unidentified rows visible without inventing an application", () => {
+    const identity = { state: "unavailable" as const, reason: "expired" };
+    expect(
+      selectDeploymentRecord(record, { ...context, identity })
+    ).toMatchObject({
+      app: "",
+      identity,
+      deploymentId: "42",
+      status: "success"
+    });
+  });
+
+  describe("deployment identity authorization", () => {
+    const row = {
+      app: "custom",
+      environment: "dev",
+      provider: "azure",
+      status: "success",
+      deploymentId: "42",
+      runUrl: "https://github.com/org/app/actions/runs/123",
+      identity: { state: "known" as const, application: "custom" }
+    };
+    it("requires matching application evidence and optional record freshness", () => {
+      expect(
+        deploymentIdentityRefusal(row, " CUSTOM ", {
+          deploymentId: "42",
+          runUrl: row.runUrl
+        })
+      ).toBeNull();
+      expect(deploymentIdentityRefusal(row, "default")).toMatchObject({
+        status: 409
+      });
+      expect(
+        deploymentIdentityRefusal(row, "custom", { deploymentId: "43" })
+      ).toMatchObject({ status: 409 });
+      expect(
+        deploymentIdentityRefusal(row, "custom", { runUrl: "other" })
+      ).toMatchObject({ status: 409 });
+      expect(
+        deploymentIdentityRefusal({ ...row, app: "wrong" }, "custom")
+      ).toMatchObject({ status: 409 });
+      expect(
+        deploymentIdentityRefusal(
+          { ...row, identity: { state: "known", application: " " } },
+          ""
+        )
+      ).toMatchObject({ status: 409 });
+    });
+    it("distinguishes absent legacy records, unavailable evidence and failed reads", () => {
+      expect(deploymentIdentityRefusal(null, "custom")).toBeNull();
+      expect(
+        deploymentIdentityRefusal(null, "custom", { deploymentId: "42" })
+      ).toMatchObject({ status: 409 });
+      expect(
+        deploymentIdentityRefusal({ ...row, identity: undefined }, "custom")
+      ).toMatchObject({ status: 409 });
+      expect(
+        deploymentIdentityRefusal(
+          { ...row, identity: { state: "unavailable", reason: "expired" } },
+          "custom"
+        )
+      ).toEqual({ status: 409, error: "expired" });
+      expect(
+        deploymentIdentityRefusal(
+          {
+            ...row,
+            identity: {
+              state: "unavailable",
+              reason: "denied",
+              readFailed: true
+            }
+          },
+          "custom"
+        )
+      ).toEqual({ status: 503, error: "denied" });
+    });
+    it.each([
+      undefined,
+      "",
+      "{",
+      "null",
+      "[]",
+      '{"name":"app"}',
+      '{"resourceType":"container","name":"app"}',
+      '{"resourceType":"application","name":" "}',
+      '{"resourceType":"application","name":7}'
+    ])("refuses invalid delete identity %s", (source) => {
+      expect(readDeleteApplicationName(source)).toBeNull();
+    });
+    it("reads application identity without relying on CLI output", () => {
+      expect(
+        readDeleteApplicationName(
+          '{"resourceType":"application","name":" custom ","output":"default"}'
+        )
+      ).toBe("custom");
+    });
+    it.each([
+      "",
+      "garbage",
+      "http://github.com/org/app/actions/runs/42",
+      "https://other.example/org/app/actions/runs/42",
+      "https://github.com/other/app/actions/runs/42",
+      "https://github.com/org/app/actions/runs/0",
+      "https://github.com/org/app/actions/runs/9007199254740992",
+      "https://github.com/org/app/actions/runs/42oops"
+    ])("rejects unlinked run URL %s", (url) => {
+      expect(deploymentRunId("org/app", url)).toBeNull();
+    });
+    it.each(["42", "42/", "42/job/123"])("reads a linked run %s", (suffix) => {
+      expect(
+        deploymentRunId(
+          "ORG/App",
+          `https://github.com/org/app/actions/runs/${suffix}`
+        )
+      ).toBe(42);
     });
   });
 

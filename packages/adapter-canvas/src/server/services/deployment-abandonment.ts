@@ -258,6 +258,12 @@ export function createDeploymentAbandonmentService(
             }
           };
         }
+        const identityRefusal = deploymentIdentityRefusal(current, application);
+        if (identityRefusal)
+          return {
+            status: identityRefusal.status,
+            body: { error: identityRefusal.error }
+          };
         if (dependencies.deploymentStatusBlocksMutation(current.status)) {
           return {
             status: 409,
@@ -330,3 +336,4 @@ export function createDeploymentAbandonmentService(
     }
   };
 }
+import { deploymentIdentityRefusal } from "@radius-project/core";

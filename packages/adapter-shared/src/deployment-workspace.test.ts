@@ -29,7 +29,9 @@ describe("deployment model path admission", () => {
     [".radius/app.bicep", ".radius/app.bicep"],
     [".\\models\\\\.\\App.BICEP", "models/App.BICEP"],
     ["./models//custom.bicep", "models/custom.bicep"],
-    ["app.bicep", "app.bicep"]
+    ["app.bicep", "app.bicep"],
+    ["models/custom-recipe-pack.bicep", "models/custom-recipe-pack.bicep"],
+    ["models/my-radius-environment.bicep", "models/my-radius-environment.bicep"]
   ])("canonicalizes %s without changing filename case", (input, expected) => {
     expect(normalizeDeploymentAppFile(input)).toBe(expected);
   });
@@ -55,6 +57,18 @@ describe("deployment model path admission", () => {
     "app*.bicep"
   ])("rejects unsupported deployment path %j", (input) => {
     expect(() => normalizeDeploymentAppFile(input)).toThrow();
+  });
+  it.each([
+    "radius-environment.bicep",
+    "radius-recipe-pack.bicep",
+    "models/radius-environment.bicep",
+    "models/radius-recipe-pack.bicep",
+    "./models//RADIUS-ENVIRONMENT.BICEP",
+    ".\\models\\.\\Radius-Recipe-Pack.Bicep"
+  ])("rejects generated setup file collisions: %s", (input) => {
+    expect(() => normalizeDeploymentAppFile(input)).toThrow(
+      "reserved for generated setup"
+    );
   });
 });
 

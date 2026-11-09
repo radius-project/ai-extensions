@@ -1987,6 +1987,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     };
 
     const dispatch = createDeployDispatchService({
+      id: () => "execution",
       verifyAppFileInput: async () => {},
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [

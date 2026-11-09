@@ -29,6 +29,7 @@ import { createDeploymentRepository } from "./deployment-repository.js";
 import type { DeploymentCommandExecutor } from "./deployment-command-bindings.js";
 import { createDeploymentWorkflows } from "./deployment-workflows.js";
 import { createDeploymentLookup } from "./deployment-lookup.js";
+import { createDeploymentIdentityReader } from "./deployment-identity.js";
 import {
   createDeploymentObservationBindings,
   type DeploymentObservationExecutor
@@ -90,12 +91,16 @@ export function createProductionDeploymentRuntime(
     now: ports.now,
     reportDiagnostic: ports.reportDiagnostic
   });
+  const reads = createDeploymentObservationBindings(ports);
   const lookup = createDeploymentLookup({
+    readApplicationIdentity: createDeploymentIdentityReader({
+      ...reads,
+      redactDiagnostic: ports.redactDiagnostic
+    }),
     ghOrThrow: repository.ghOrThrow,
     deployWorkflowFile: DEPLOY_DISPATCHER_FILE,
     deleteWorkflowFile: DELETE_APP_DISPATCHER_FILE
   });
-  const reads = createDeploymentObservationBindings(ports);
   const dispatchListeners = new Set<(repo: string) => void>();
   function notifyDispatch(repo: string): void {
     for (const listener of dispatchListeners) {
@@ -152,6 +157,7 @@ export function createProductionDeploymentRuntime(
         readRepositoryFile: repository.readFile
       });
       const dispatch = createDeployDispatchService({
+        id: ports.id,
         ghCommandPresentation: ports.ghCommandPresentation,
         deployWorkflowFile: DEPLOY_DISPATCHER_FILE,
         deployWorkflowFiles: workflows.files,
@@ -209,8 +215,16 @@ export function createProductionDeploymentRuntime(
         outcome,
         deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
         unconfirmedRunKind: "run-unconfirmed",
-        findWorkflowRun: (repo, workflow, since, known, after) =>
-          reads.findWorkflowRun(repo, workflow, since, known, undefined, after),
+        findWorkflowRun: (repo, workflow, since, known, after, correlation) =>
+          reads.findWorkflowRun(
+            repo,
+            workflow,
+            since,
+            known,
+            undefined,
+            after,
+            correlation
+          ),
         getRunDetail: (repo, runId, request) =>
           reads.getRunDetail(repo, runId, undefined, request, {
             includeProtection: true

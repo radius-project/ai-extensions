@@ -1,6 +1,8 @@
 import { workflowTempFile } from "@radius-project/adapter-shared";
 import {
   createDeploymentLookup,
+  createDeploymentIdentityReader,
+  createDeploymentObservationBindings,
   type DeploymentRuntime
 } from "@radius-project/adapter-shared";
 import { createDeploymentViews } from "./server/services/deployment-views.js";
@@ -42,7 +44,7 @@ import {
   buildRemediation,
   computeGraphDiff,
   deployStatusKeys,
-  fetchBicepFromRepo,
+  fetchBicepSelectionFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
   mergeDeployedGraphDisplayMetadata,
@@ -3471,6 +3473,11 @@ export function explainMissingPackagesScope(
 const DEPLOY_MAX_PARALLEL_RECORDS = 10;
 
 const resolveRepoAppName = createDeploymentLookup({
+  readApplicationIdentity: createDeploymentIdentityReader({
+    listWorkflowArtifacts,
+    downloadWorkflowArtifact,
+    redactDiagnostic: redactGhCredentials
+  }),
   ghOrThrow,
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
   deleteWorkflowFile: DELETE_WORKFLOW_FILE,
@@ -3484,11 +3491,8 @@ const resolveRepoAppName = createDeploymentLookup({
 // record out of a shared, repo-wide page. Rejects on any GitHub error so callers
 // fail closed rather than mistaking an outage for "nothing deployed".
 //
-// `appName` is the resolved Radius application name (see resolveRepoAppName); it
-// must be passed in so the returned row targets the real app declared in
-// app.bicep, not the repo basename — the environment-deletion guard dispatches a
-// delete for this name and redirects to it, and the deployments list links to it.
-// Returns `{ app, environment, provider, status, deploymentId, runUrl }`.
+// The legacy appName argument is not identity evidence. Each row resolves its
+// application from artifacts belonging to the deployment's own workflow run.
 async function resolveEnvDeployment(
   repo: string,
   environment: string,
@@ -3496,6 +3500,13 @@ async function resolveEnvDeployment(
   execute: typeof cliExec = cliExec
 ): Promise<DeploymentRow | null> {
   return resolveEnvironmentDeployment(repo, environment, appName, {
+    readApplicationIdentity: createDeploymentIdentityReader({
+      ...createDeploymentObservationBindings({
+        execute,
+        redactDiagnostic: redactGhCredentials
+      }),
+      redactDiagnostic: redactGhCredentials
+    }),
     ghOrThrow: (args) => ghOrThrow(args, 12000, execute),
     deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
     deleteWorkflowFile: DELETE_WORKFLOW_FILE,
@@ -3640,12 +3651,12 @@ async function fetchBicepSelection(
         bicepPath: local.repoPath
       };
   }
-  const remote = await fetchBicepFromRepo(github, repo, access.branch);
+  const remote = await fetchBicepSelectionFromRepo(github, repo, access.branch);
   return {
-    content: remote,
+    content: remote?.content ?? null,
     fromWorkspace: false,
     branch: access.branch,
-    bicepPath: ""
+    bicepPath: remote?.bicepPath ?? ""
   };
 }
 
@@ -6541,6 +6552,10 @@ export function createProductionCanvasServerRuntime(
 
   const deployRequestService = createDeployRequestService({
     runtime: deploymentRuntime,
+    resolveAppFile: async (state, repo, branch) => {
+      const selection = await fetchBicepSelection({ state }, repo, branch);
+      return selection.content ? selection.bicepPath : null;
+    },
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     attach: deploymentViews.attach,
     reportError: (error) =>

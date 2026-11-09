@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChildProcess } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createWorkflowObservationScope } from "@radius-project/adapter-shared";
 import type {
   DeployMonitorRequest,
@@ -11,13 +13,20 @@ import { createTestDeploymentRuntime } from "../../support/server/deployment-run
 import { createDeferred } from "../../support/browser/fakes.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import { redactCredentials } from "@radius-project/core";
+import { github } from "../../../src/gh.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
-  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  try {
+    await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  } finally {
+    vi.restoreAllMocks();
+  }
 });
 
 function harness(abandonment = false) {
+  let trackedApplication = "another-app";
+  let trackedRunId = 31;
   const finished = createDeferred<void>();
   const sendRepair = vi.fn(async () => {});
   let terminal: "success" | "failed" = "success";
@@ -52,8 +61,10 @@ function harness(abandonment = false) {
   const cli = vi.fn<
     NonNullable<Parameters<typeof createTestCanvasServerRuntime>[0]["cliExec"]>
   >((_command, args, _options, callback) => {
+    const endpoint = args
+      .find((arg) => /^\/?repos\//.test(arg))
+      ?.replace(/^\/?/, "/");
     if (!abandonment) throw new Error("Unexpected external command");
-    const endpoint = args.find((arg) => arg.startsWith("/repos/"));
     let output: string;
     if (
       endpoint ===
@@ -64,16 +75,39 @@ function harness(abandonment = false) {
       endpoint ===
       "/repos/acme/widgets/deployments?per_page=100&environment=production"
     )
-      output = "failed-delete";
+      output = `failed-delete-${trackedRunId}`;
     else if (
       endpoint ===
-      "/repos/acme/widgets/deployments/failed-delete/statuses?per_page=1"
+      `/repos/acme/widgets/deployments/failed-delete-${trackedRunId}/statuses?per_page=1`
     )
-      output = "failure\thttps://github.com/acme/widgets/actions/runs/31\t";
-    else if (endpoint === "/repos/acme/widgets/actions/runs/31")
+      output = `failure\thttps://github.com/acme/widgets/actions/runs/${trackedRunId}\t`;
+    else if (endpoint === `/repos/acme/widgets/actions/runs/${trackedRunId}`)
       output = ".github/workflows/delete-application.yml\tcompleted\tfailure";
     else if (
-      endpoint === "/repos/acme/widgets/deployments/failed-delete/statuses" &&
+      endpoint ===
+      `/repos/acme/widgets/actions/runs/${trackedRunId}/artifacts?per_page=100`
+    )
+      output = JSON.stringify({
+        artifacts: [
+          {
+            id: trackedRunId,
+            name: "rad-delete-result",
+            workflow_run: { id: trackedRunId }
+          }
+        ]
+      });
+    else if (args[0] === "run" && args[1] === "download") {
+      writeFileSync(
+        join(args[args.indexOf("--dir") + 1], "rad-delete-result.json"),
+        JSON.stringify({
+          resourceType: "application",
+          name: trackedApplication
+        })
+      );
+      output = "";
+    } else if (
+      endpoint ===
+        `/repos/acme/widgets/deployments/failed-delete-${trackedRunId}/statuses` &&
       args.includes("POST")
     )
       output = "";
@@ -81,7 +115,11 @@ function harness(abandonment = false) {
       throw new Error(
         `Unexpected abandonment command: ${JSON.stringify(args)}`
       );
-    callback(null, output, "");
+    callback(
+      null,
+      args.includes("--include") ? `HTTP/2 200\n\n${output}` : output,
+      ""
+    );
     return new ChildProcess();
   });
   const server = createTestCanvasServerRuntime({
@@ -103,6 +141,10 @@ function harness(abandonment = false) {
     sendRepair,
     cli,
     resolveDeployment,
+    trackApplication(application: string) {
+      trackedApplication = application;
+      trackedRunId++;
+    },
     request() {
       return request;
     },
@@ -134,6 +176,7 @@ async function post(entry: CanvasServerEntry, route: string, payload: object) {
 }
 
 const target = {
+  appFile: ".radius/app.bicep",
   targetRepo: "acme/widgets",
   repo: "acme/widgets",
   branch: "feature",
@@ -142,6 +185,36 @@ const target = {
 };
 
 describe("shared deployment runtime through production Canvas HTTP", () => {
+  it.each(["app.bicep", ".radius/app.bicep", null])(
+    "resolves the selected branch model through real HTTP (%s)",
+    async (appFile) => {
+      vi.spyOn(github, "getContent").mockImplementation(async (apiPath) => {
+        const model = [".radius/app.bicep", "app.bicep"].find(
+          (file) =>
+            apiPath === `/repos/acme/widgets/contents/${file}?ref=feature`
+        );
+        if (!model) throw new Error(`Unexpected source read: ${apiPath}`);
+        return model === appFile ?
+            "resource app 'Radius.Core/applications@2025-08-01-preview' = { name: 'widgets' }"
+          : null;
+      });
+      const h = harness();
+      const entry = await h.server.getOrCreateServer("panel", "deploying");
+      const response = await post(entry, "/api/deploy", {
+        ...target,
+        appFile: undefined
+      });
+      expect(response.status, await response.clone().text()).toBe(
+        appFile ? 200 : 400
+      );
+      if (appFile) expect(h.request()?.appFile).toBe(appFile);
+      else {
+        expect(h.request()).toBeUndefined();
+        expect(h.deployment.owner.hasActiveWork()).toBe(false);
+      }
+    }
+  );
+
   it("carries the selected model from Canvas into the shared execution request", async () => {
     const h = harness();
     const entry = await h.server.getOrCreateServer("panel", "deploying");
@@ -173,7 +246,7 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
       ...target,
       application: "another-app"
     });
-    expect(response.status).toBe(200);
+    expect(response.status, await response.clone().text()).toBe(200);
     expect(await response.json()).toEqual({ outcome: "abandoned" });
     expect(
       h.deployment.owner.lookup({ attemptId: selected.invocation.attemptId })
@@ -193,6 +266,7 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
         attempt: { id: selected.invocation.attemptId }
       });
     }
+    h.trackApplication("widgets");
     const matching = await post(second, "/api/abandon-deployment", target);
     expect(matching.status).toBe(200);
     await matching.json();

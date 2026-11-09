@@ -40,6 +40,7 @@ function harness(state: CanvasState = {}) {
   let entry: { state: CanvasState } | undefined = { state };
   const attach = vi.fn(views.attach);
   const dependencies = {
+    resolveAppFile: vi.fn(async () => ".radius/app.bicep"),
     runtime: { ...runtime, start },
     readInstanceEntry: () => entry,
     attach,
@@ -77,7 +78,8 @@ describe("deployment HTTP request adapter", () => {
     "readInstanceEntry",
     "attach",
     "errorMessage",
-    "reportError"
+    "reportError",
+    "resolveAppFile"
   ] as const)("requires the %s binding", (key) => {
     const h = harness();
     Object.defineProperty(h.dependencies, key, { value: undefined });
@@ -176,7 +178,7 @@ describe("deployment HTTP request adapter", () => {
       expect.objectContaining({
         repo: "acme/widgets",
         environment: "test",
-        appFile: ".radius/custom.bicep"
+        appFile: undefined
       }),
       expect.objectContaining({
         workspace: {
@@ -187,6 +189,7 @@ describe("deployment HTTP request adapter", () => {
       })
     );
     expect(h.state.deployingBranch).toBe("worktree");
+    expect(h.state.appFile).toBe(".radius/app.bicep");
     h.finished.resolve();
   });
 
@@ -264,13 +267,46 @@ describe("deployment HTTP request adapter", () => {
     const h = harness();
     const check = createDeferred<null>();
     h.checked.mockImplementation(() => check.promise);
-    const result = h.service.deploy({ instanceId: "panel", body: body() });
+    const result = h.service.deploy({
+      instanceId: "panel",
+      body: body({ appFile: ".radius/app.bicep" })
+    });
     h.close();
     check.resolve(null);
     expect(await result).toEqual({ status: 200, body: { ok: true } });
     expect(h.attach).not.toHaveBeenCalled();
     expect(h.runtime.owner.hasActiveWork()).toBe(true);
     h.finished.resolve();
+  });
+
+  it("uses the resolved root model instead of a previous deployment's file", async () => {
+    const h = harness({ appFile: "old.bicep" });
+    h.dependencies.resolveAppFile.mockResolvedValue("app.bicep");
+    expect(
+      await h.service.deploy({ instanceId: "panel", body: body() })
+    ).toMatchObject({ status: 200 });
+    expect(h.dependencies.resolveAppFile).toHaveBeenCalledWith(
+      expect.objectContaining({ appFile: "old.bicep" }),
+      "acme/widgets",
+      "feature"
+    );
+    expect(h.state.appFile).toBe("app.bicep");
+    h.finished.resolve();
+  });
+
+  it("refuses changed Canvas context while resolving the model", async () => {
+    const h = harness({ contextBranch: "feature" });
+    const selection = createDeferred<string>();
+    h.dependencies.resolveAppFile.mockImplementation(() => selection.promise);
+    const result = h.service.deploy({ instanceId: "panel", body: body() });
+    await vi.waitFor(() =>
+      expect(h.dependencies.resolveAppFile).toHaveBeenCalled()
+    );
+    h.state.contextBranch = "other";
+    selection.resolve("app.bicep");
+    expect(await result).toMatchObject({ status: 409 });
+    expect(h.runtime.owner.hasActiveWork()).toBe(false);
+    expect(h.attach).not.toHaveBeenCalled();
   });
 
   it("preserves fail-closed service errors and rejection status", async () => {

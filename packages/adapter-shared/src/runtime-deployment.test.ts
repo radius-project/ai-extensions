@@ -86,6 +86,157 @@ afterEach(async () => {
 });
 
 describe("panel-independent deployment runtime", () => {
+  it.each([new Error("invalid path"), "invalid path"])(
+    "translates explicit model normalization refusal into admission failure: %s",
+    async (error) => {
+      const h = fixture({
+        normalizeAppFile: () => {
+          throw error;
+        }
+      });
+      expect(await h.runtime.start(target)).toMatchObject({
+        ok: false,
+        status: 400,
+        error: expect.stringContaining("invalid path")
+      });
+      expect(h.resolveDeployment).not.toHaveBeenCalled();
+      expect(h.createExecution).not.toHaveBeenCalled();
+    }
+  );
+
+  it("resolves a host-selected model after the final branch and pins it to execution", async () => {
+    const h = fixture();
+    const resolve = vi.fn(async () => "app.bicep");
+    const result = await h.runtime.start(
+      { ...target, branch: "", appFile: undefined },
+      { modelSelection: { resolve, isCurrent: () => true } }
+    );
+    if (!result.ok) throw new Error(result.error);
+    expect(resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: target.repo, branch: "release" })
+    );
+    expect(result.invocation.target.appFile).toBe("app.bicep");
+    await expect.poll(() => h.run.mock.calls.length).toBe(1);
+    expect(h.run.mock.calls[0][0].appFile).toBe("app.bicep");
+  });
+
+  it.each([
+    "missing",
+    "unreadable",
+    "invalid",
+    "stale-before",
+    "stale-after",
+    "shutdown"
+  ] as const)(
+    "refuses %s host model selection and releases unadmitted ownership",
+    async (failure) => {
+      const h = fixture({
+        normalizeAppFile: (value) => {
+          if (value === "invalid") throw new Error("invalid model path");
+          return value;
+        }
+      });
+      let current = failure !== "stale-before";
+      const resolve = vi.fn(async () => {
+        if (failure === "unreadable") throw new Error("unavailable source");
+        if (failure === "stale-after") current = false;
+        if (failure === "shutdown") void h.runtime.owner.shutdown(0);
+        return (
+          failure === "missing" ? null
+          : failure === "invalid" ? "invalid"
+          : "app.bicep"
+        );
+      });
+      const result = await h.runtime.start(
+        { ...target, appFile: undefined },
+        { modelSelection: { resolve, isCurrent: () => current } }
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        status:
+          failure === "unreadable" ? 503
+          : failure === "missing" || failure === "invalid" ? 400
+          : 409
+      });
+      expect(h.createExecution).not.toHaveBeenCalled();
+      expect(h.runtime.owner.hasActiveWork()).toBe(false);
+    }
+  );
+
+  it("never replaces an explicit file using host model selection", async () => {
+    const h = fixture();
+    const resolve = vi.fn(async () => "other.bicep");
+    const result = await h.runtime.start(target, {
+      modelSelection: { resolve, isCurrent: () => false }
+    });
+    expect(result.ok).toBe(true);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it.each(["retained", "retired"] as const)(
+    "resolves a new selection without reusing a %s prior model",
+    async (state) => {
+      const h = fixture();
+      const first = await h.runtime.start(target);
+      if (!first.ok) throw new Error(first.error);
+      await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+      const second = await h.runtime.start(
+        { ...target, appFile: undefined },
+        {
+          modelSelection: {
+            isCurrent: () => true,
+            resolve: async () => {
+              if (state === "retired") h.runtime.owner.retire(first.invocation);
+              return "app.bicep";
+            }
+          }
+        }
+      );
+      if (state === "retired")
+        expect(second).toMatchObject({ ok: false, status: 409 });
+      else {
+        if (!second.ok) throw new Error(second.error);
+        expect(second.invocation.target.appFile).toBe("app.bicep");
+      }
+    }
+  );
+
+  it.each(["read", "normalization"] as const)(
+    "redacts non-Error model %s failures",
+    async (boundary) => {
+      const h = fixture({
+        normalizeAppFile: (value) => {
+          if (value === "invalid") throw "fixture-private";
+          return value;
+        },
+        delivery: {
+          redactDiagnostic: (text) =>
+            text.replaceAll("fixture-private", "[redacted]"),
+          reportDiagnostic: vi.fn()
+        }
+      });
+      const result = await h.runtime.start(
+        { ...target, appFile: undefined },
+        {
+          modelSelection: {
+            isCurrent: () => true,
+            resolve: async () => {
+              if (boundary === "read") throw "fixture-private";
+              return "invalid";
+            }
+          }
+        }
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        status: boundary === "read" ? 503 : 400,
+        error: expect.stringContaining("[redacted]")
+      });
+      expect(h.createExecution).not.toHaveBeenCalled();
+      expect(h.runtime.owner.hasActiveWork()).toBe(false);
+    }
+  );
+
   it("refuses incomplete production bindings during construction", () => {
     expect(() => fixture({ awsEnabled: undefined })).toThrow(
       "requires awsEnabled"

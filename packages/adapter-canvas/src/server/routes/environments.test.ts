@@ -443,8 +443,8 @@ describe("environments — delete-environment refusal ladder", () => {
         resolveEnvDeployment
       })
     );
-    // The context branch wins the fallback chain.
-    expect(resolveRepoAppName).toHaveBeenCalledWith("o/r", "ctx");
+    expect(resolveRepoAppName).not.toHaveBeenCalled();
+    expect(resolveEnvDeployment).toHaveBeenCalledWith("o/r", "dev", "");
     expect(recording.status).toBe(503);
     const body = JSON.parse(recording.body);
     expect(body.error).toContain(
@@ -454,7 +454,7 @@ describe("environments — delete-environment refusal ladder", () => {
     expect(logError).toHaveBeenCalledOnce();
   });
 
-  it("rung 2: falls through the branch chain to main when no entry state is set", async () => {
+  it("rung 2: reads deployment evidence without an instance or source model", async () => {
     const resolveRepoAppName = vi.fn(() => Promise.resolve("app"));
     const resolveEnvDeployment = vi.fn(() => Promise.reject(new Error("x")));
     const { ctx } = context(
@@ -471,12 +471,51 @@ describe("environments — delete-environment refusal ladder", () => {
         resolveEnvDeployment
       })
     );
-    expect(resolveRepoAppName).toHaveBeenCalledWith("o/r", "main");
+    expect(resolveRepoAppName).not.toHaveBeenCalled();
+    expect(resolveEnvDeployment).toHaveBeenCalledWith("o/r", "dev", "");
   });
+
+  it.each(["legacy", "expired", "read-failed"] as const)(
+    "refuses environment deletion without verified application identity: %s",
+    async (kind) => {
+      const active: EnvironmentActiveDeployment = {
+        app: "",
+        environment: "dev",
+        provider: "azure",
+        status: "deployed",
+        deploymentId: "1",
+        runUrl: "https://github.com/o/r/actions/runs/42",
+        identity:
+          kind === "legacy" ? undefined : (
+            {
+              state: "unavailable",
+              reason: "Identity evidence unavailable.",
+              readFailed: kind === "read-failed"
+            }
+          )
+      };
+      const { recording, ctx } = context(
+        "POST",
+        "/api/delete-environment",
+        JSON.stringify({ repo: "o/r", environment: "dev" })
+      );
+      await handleDeleteEnvironment(
+        ctx,
+        deps({ resolveEnvDeployment: async () => active })
+      );
+      expect(recording.status).toBe(kind === "read-failed" ? 503 : 409);
+      const response = JSON.parse(recording.body);
+      expect(response.code).toBe("app-identity-unavailable");
+      expect(response.error).toBeTruthy();
+      expect(response).not.toHaveProperty("app");
+      expect(response).not.toHaveProperty("redirect");
+    }
+  );
 
   it("rung 3: 409 when an app is still deployed, redirecting to the deploy flow", async () => {
     const active: EnvironmentActiveDeployment = {
       app: "store",
+      identity: { state: "known", application: "store" },
       environment: "dev",
       provider: "azure",
       status: "deployed",
@@ -507,6 +546,7 @@ describe("environments — delete-environment refusal ladder", () => {
   it("rung 3: 409 uses the deleting wording when the app is mid-deletion", async () => {
     const active: EnvironmentActiveDeployment = {
       app: "store",
+      identity: { state: "known", application: "store" },
       environment: "dev",
       provider: "azure",
       status: "deleting",
@@ -533,6 +573,7 @@ describe("environments — delete-environment refusal ladder", () => {
   it("rung 3: routes a failed teardown to its recovery controls", async () => {
     const active: EnvironmentActiveDeployment = {
       app: "store",
+      identity: { state: "known", application: "store" },
       environment: "dev",
       provider: "azure",
       status: "delete-failed",
@@ -4738,6 +4779,7 @@ describe("environments — real loopback", () => {
       resolveEnvDeployment: () =>
         Promise.resolve({
           app: "todo-app",
+          identity: { state: "known", application: "todo-app" },
           environment: "dev",
           provider: "azure",
           status: "deployed",

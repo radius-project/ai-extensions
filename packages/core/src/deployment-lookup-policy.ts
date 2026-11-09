@@ -1,6 +1,10 @@
 export const ABANDONED_DEPLOYMENT_DESCRIPTION =
   "Tracking abandoned in Radius Canvas; cloud resources were not deleted.";
 
+export type DeploymentApplicationIdentity =
+  | { state: "known"; application: string }
+  | { state: "unavailable"; reason: string; readFailed?: boolean };
+
 export interface DeploymentRow {
   app: string;
   environment: string;
@@ -8,6 +12,7 @@ export interface DeploymentRow {
   status: string;
   deploymentId: string;
   runUrl: string;
+  identity?: DeploymentApplicationIdentity;
 }
 
 export interface DeploymentRecord {
@@ -53,7 +58,11 @@ export function resolveDeployStatus(record: {
 
 export function selectDeploymentRecord(
   record: DeploymentRecord,
-  context: { appName: string; environment: string; provider: string }
+  context: {
+    identity: DeploymentApplicationIdentity;
+    environment: string;
+    provider: string;
+  }
 ): DeploymentRow | "skip" | null {
   if (
     record.state === "inactive" &&
@@ -69,7 +78,8 @@ export function selectDeploymentRecord(
   if (record.workflow === "delete" && record.runConclusion === "success")
     return null;
   return {
-    app: context.appName,
+    app: context.identity.state === "known" ? context.identity.application : "",
+    identity: context.identity,
     environment: context.environment,
     provider: context.provider,
     status:
@@ -81,6 +91,83 @@ export function selectDeploymentRecord(
     deploymentId: record.id,
     runUrl: record.runUrl
   };
+}
+
+export function deploymentIdentityRefusal(
+  row: DeploymentRow | null,
+  application: string,
+  expected: { deploymentId?: string; runUrl?: string } = {}
+): { status: 409 | 503; error: string } | null {
+  if (
+    (expected.deploymentId && row?.deploymentId !== expected.deploymentId) ||
+    (expected.runUrl && row?.runUrl !== expected.runUrl)
+  )
+    return {
+      status: 409,
+      error: "The deployment changed. Refresh the listing before trying again."
+    };
+  if (!row) return null;
+  if (row.identity?.state !== "known")
+    return {
+      status: row.identity?.readFailed ? 503 : 409,
+      error:
+        row.identity?.reason ||
+        "The deployment's application identity is unavailable."
+    };
+  const actual = row.identity.application.trim().toLowerCase();
+  if (
+    !actual ||
+    actual !== row.app.trim().toLowerCase() ||
+    actual !== application.trim().toLowerCase()
+  )
+    return {
+      status: 409,
+      error:
+        "The application does not match the current deployment. Refresh the listing before trying again."
+    };
+  return null;
+}
+
+export function readDeleteApplicationName(
+  source: string | undefined
+): string | null {
+  if (!source) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(source);
+  } catch {
+    return null;
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !("resourceType" in value) ||
+    value.resourceType !== "application" ||
+    !("name" in value) ||
+    typeof value.name !== "string" ||
+    !value.name.trim()
+  )
+    return null;
+  return value.name.trim();
+}
+
+export function deploymentRunId(repo: string, runUrl: string): number | null {
+  let url: URL;
+  try {
+    url = new URL(runUrl);
+  } catch {
+    return null;
+  }
+  const prefix = `/${repo}/actions/runs/`;
+  if (
+    url.origin !== "https://github.com" ||
+    !url.pathname.toLowerCase().startsWith(prefix.toLowerCase())
+  )
+    return null;
+  const suffix = url.pathname.slice(prefix.length);
+  const match = /^(\d+)(?:\/job\/\d+)?\/?$/.exec(suffix);
+  const id = match ? Number(match[1]) : 0;
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 /** Retains the workflow-compatible first-name fallback for older application models. */
