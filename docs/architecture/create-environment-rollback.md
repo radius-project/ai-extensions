@@ -124,6 +124,7 @@ Rollback rule:
 
 - Rollback takes the deploy identity lock with action `rollback`. It takes back the setup's own recorded lock rather than waiting on it, and it does not wait for a lock another run holds: those changes report the holder and **Retry deletion** tries again. It records the lock on the operation before its first change and clears it only once the release is confirmed, so a crash or a failed release leaves the lock listed, released on exit, and taken back by the next retry.
 - Rollback checks that its execution is still current right before each AWS command is sent, after any lock check that command waits on. After a shutdown or a replaced operation it sends nothing more, records and saves each change AWS already answered, including on the role it was working on, and still releases the lock.
+- Rollback saves each removal as AWS answers it, before it sends the next command, so a crash loses no removal AWS confirmed and a retry does not list it as still there.
 - It removes, in order, the access entry (by environment delete's rule, so one another environment uses stays), the policy, the trust subjects, then the role.
 - It removes a trust subject only when the subject names one repository and this environment, the same rule as environment delete. A subject such as `repository_id:<id>` from a custom OIDC template is kept, because other environments may present it.
 - It changes a role only when every change it undoes recorded that role's current ID. With an ID missing, it changes nothing on that role. It deletes the role only when its trust policy lets in no other principal (GitHub or not) and it has no other inline or attached policy. When the role was created again under the same name, it leaves the new role's policy and trust subjects, and it removes only an access entry older than the new role, since EKS ties an entry to the role it was created for. It never deletes the GitHub identity provider or a role setup did not create. A role kept because an earlier step failed, or because its policies could not be listed, is a warning that **Retry deletion** tries again. A role kept because something else uses it, or because it was replaced, is reported once and left for the customer.
@@ -437,15 +438,29 @@ Radius persists the operation after each meaningful result:
 
 - Workflow pass results.
 - GitHub environment deletion.
+- Each AWS removal result, as AWS answers it.
 - Each Azure deletion result.
 - Final cleanup state.
 - Command completion and terminal result.
 
-If the extension stops mid-rollback, the restored ledger keeps cleanup in the interrupted `running` state. The terminal record offers Rollback again, recomputes the target set from the surviving artifacts, and repeats no deletion or restoration the ledger proved complete.
+If the extension stops mid-rollback, the restored ledger keeps cleanup in the interrupted `running` state, and the restarted extension resumes the command the customer confirmed. A record whose command does not resume offers Rollback again. Either way, Radius recomputes the target set from the surviving artifacts and repeats no deletion or restoration the ledger proved complete.
 
 The restored record also retains repository admission while it can still remove a surviving proven-owned artifact. A new Create Environment request for the same repository receives `409 previous-cleanup-required` and links back to the older operation. This prevents a new setup from reusing a resource that the older rollback could later delete. The older operation may reacquire the lock to finish its own cleanup. Once every removable target is deleted, restored, or confirmed absent, the customer may submit the new Create Environment request again.
 
 Admission-blocking records are not pruned by age or by the terminal-record cap. The protection is scoped to one hydrated Copilot App Session and is not a distributed repository lock across sessions.
+
+### The deploy identity lock across a crash
+
+Each run that changes a deploy role takes the lock as an IAM policy that names the run's operation. A run that keeps a record saves the lock's policy ID on it before its first change, so a restart finds the lock named and the next attempt of that operation takes it back by itself:
+
+- AWS setup and its rollback record the lock on the setup operation. **Exit setup** and **Abandon setup** release it.
+- Environment delete records the lock on the delete operation. **Retry deletion** takes it back, including after an attempt that finished its changes but stopped before the release.
+
+Two gaps remain. A crash between the `create-policy` that takes the lock and the save that records it leaves a lock no record names. The lock still names the operation, so that operation's next attempt offers **Remove lock** at once. Repair keeps no record, so a crashed Repair leaves a lock that names no operation, and another run offers **Remove lock** once the lock is 10 minutes old.
+
+### Stop-point tests
+
+The stop-point tests drive AWS setup, rollback, **Exit setup**, **Abandon setup**, **Retry deletion**, Repair, and environment delete over a stateful fake AWS CLI and GitHub, and stop each run at every AWS and GitHub call in turn: a Stop while the call is in flight, a crash before the call reaches the service, and a crash after a write lands with its answer lost. At each stop they check that no write is sent after the stop, that every confirmed change is saved, that every lock is released or recorded, and that after a restart the operation lands where this document says and the person's next step ends cleanly. [`aws-stop-points.test.ts`](../../packages/adapter-canvas/test/integration/runtime/aws-stop-points.test.ts) runs every stop point against the services; [the HTTP variant](../../packages/adapter-canvas/test/integration/http/aws-stop-points.test.ts) runs the riskiest through the production runtime.
 
 ## Rollback completion
 
