@@ -162,13 +162,13 @@ Choose the recommended review disposition based on severity; submit it only if e
 - **Request changes** when blocking bugs, security issues, or broken builds exist.
 - **Approve** only when explicitly asked.
 
-### Hosted-review acceptance
+### Verify guidance in GitHub Copilot PR reviews
 
-The hosted service controls its review UI and overview. GitHub's [customization guidance](https://docs.github.com/en/copilot/tutorials/customize-code-review) currently lists overview-comment and formatting changes as unsupported, and notes that instruction following is non-deterministic. Do not claim that this skill forces the closing-summary format, skill loading, or the three-round stop in hosted reviews. Local/manual reviewers still follow the summary contract above.
+GitHub Copilot code review runs on GitHub when Copilot reviews a pull request. This is distinct from an agent reviewing code in the Copilot CLI or desktop app. GitHub controls the PR review interface and overview comment. Its [customization guidance](https://docs.github.com/en/copilot/tutorials/customize-code-review) lists overview-comment and formatting changes as unsupported, and notes that Copilot may not follow every instruction consistently. This skill cannot guarantee that GitHub's reviewer loads it, uses the closing-summary format, or stops after three rounds. Local/manual reviewers still follow the summary contract above.
 
-Before relying on this guidance for hosted review, use an authorized sample PR containing the instruction changes and record the head SHA and review URL. Inspect whether the review applies the canonical criteria, avoids repeated findings, reports a findings/no-findings result, and identifies genuinely risky changes for the human. Record each observed behavior and any missing output; a reviewer's claim that it loaded the skill is not sufficient. GitHub reads instructions and skills from the PR head, so changed guidance itself needs independent human scrutiny.
+Before relying on this guidance in GitHub Copilot PR reviews, check its effect on a separately authorized sample PR containing the instruction changes. Record the head SHA and review URL. Inspect whether Copilot applies the canonical criteria, avoids repeated findings, reports a findings/no-findings result, and identifies genuinely risky changes for the human. Record each observed behavior and any missing output; a reviewer's claim that it loaded the skill is not sufficient. GitHub reads instructions and skills from the PR head, so changed guidance itself needs independent human scrutiny.
 
-Keep unsupported or unobserved summary/convergence behavior as an explicit rollout gap. Do not silently duplicate the rule set into instruction files, invent successful acceptance evidence, post extra GitHub comments without authorization, or add enforcement automation as part of this guidance-only change.
+This check determines which parts of the guidance can be relied on in GitHub-run reviews; it is not a new required merge check. Mark unsupported summary or convergence behavior as unsupported, and behavior not yet observed as unverified. Do not silently duplicate the rule set into instruction files, claim successful verification without evidence, post extra GitHub comments without authorization, or add enforcement automation as part of this guidance-only change.
 
 ## Best Practices
 
