@@ -113,8 +113,19 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
 
   function refresh(instanceId: string, state: CanvasState): void {
     if (resetViews.has(instanceId)) return;
-    const previous = remembered.get(instanceId);
     const repo = state.contextRepo || state.workspaceRepo || state.plannedRepo;
+    let previous = remembered.get(instanceId);
+    if (
+      previous &&
+      repo &&
+      repo.toLowerCase() !== previous.target.repo.toLowerCase()
+    ) {
+      detach(instanceId);
+      remembered.delete(instanceId);
+      previous = undefined;
+      for (const key of PROJECTION_KEYS) delete state[key];
+      delete state.deployResult;
+    }
     const environment = state.envName;
     let selected =
       previous ? runtime.owner.lookup({ attemptId: previous.attemptId })

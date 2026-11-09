@@ -262,6 +262,47 @@ describe("detachable deployment projections", () => {
     expect(h.runtime.owner.isCurrent(invocation)).toBe(true);
   });
 
+  it.each([false, true])(
+    "selects the new repository after a context switch (old attempt retired: %s)",
+    (retired) => {
+      const h = harness();
+      const first = h.begin({ deployStatus: "failed", deployRunId: 11 });
+      const second = h.begin(
+        { deployStatus: "in_progress", deployRunId: 22 },
+        "acme/other"
+      );
+      const state: CanvasState = { contextRepo: h.target.repo };
+      h.views.attach("panel", state, first);
+      if (retired) h.runtime.owner.retire(first);
+      state.contextRepo = "ACME/other";
+      for (let poll = 0; poll < 2; poll++) {
+        h.views.refresh("panel", state);
+        expect(state.deployAttempt?.id).toBe(second.attemptId);
+        expect(state.deployRunId).toBe(22);
+      }
+      first.state.deployStatus = "complete";
+      h.runtime.owner.publish(first);
+      expect(state.deployStatus).toBe("in_progress");
+      second.state.deployStatus = "failed";
+      h.runtime.owner.publish(second);
+      expect(state.deployStatus).toBe("failed");
+      expect(h.runtime.owner.isCurrent(second)).toBe(true);
+    }
+  );
+
+  it("can attach a deployment that starts after the repository switch", () => {
+    const h = harness();
+    const first = h.begin({ deployStatus: "complete", deployRunId: 11 });
+    const state: CanvasState = { contextRepo: h.target.repo };
+    h.views.attach("panel", state, first);
+    state.contextRepo = "acme/other";
+    h.views.refresh("panel", state);
+    expect(state.deployRunId).toBeUndefined();
+    const second = h.begin({ deployStatus: "in_progress" }, "acme/other");
+    h.views.refresh("panel", state);
+    expect(state.deployAttempt?.id).toBe(second.attemptId);
+  });
+
   it("does not attach a different environment when only the environment is selected", () => {
     const h = harness();
     h.begin({ deployStatus: "success" });

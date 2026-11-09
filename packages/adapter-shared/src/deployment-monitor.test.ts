@@ -975,12 +975,14 @@ describe("deploy monitor stage sequencing", () => {
     const recovered: CanvasGraphResource[] = [{ id: "r1", name: "db" }];
     const recoveries: unknown[] = [];
     const settle = settleRecorder();
-    const { request: input } = request();
+    const { request: input, state } = request({
+      appFile: "models/custom.bicep"
+    });
     const service = createDeployMonitorService(
       dependencies({
         plannedGraph: {
           recover: (call) => {
-            recoveries.push(call.repo);
+            recoveries.push([call.repo, call.appFile]);
             return Promise.resolve(recovered);
           }
         },
@@ -990,8 +992,29 @@ describe("deploy monitor stage sequencing", () => {
 
     await service.run(input);
 
-    expect(recoveries).toEqual(["acme/widgets"]);
+    expect(recoveries).toEqual([["acme/widgets", "models/custom.bicep"]]);
     expect(settle.calls[0].resources).toBe(recovered);
+    expect(state.deployingResources).toBe(recovered);
+  });
+
+  it("discards graph recovery when the invocation stops being current", async () => {
+    const graph = createDeferred<CanvasGraphResource[]>();
+    let current = true;
+    const f = request({ isCurrent: () => current });
+    const dispatch = vi.fn(async () => ({ dispatched: false as const }));
+    const monitor = createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: () => graph.promise },
+        dispatch: { prepareAndDispatch: dispatch }
+      })
+    );
+    const pending = monitor.run(f.request);
+    const rejected = expect(pending).rejects.toThrow();
+    current = false;
+    graph.resolve([{ name: "stale" }]);
+    await rejected;
+    expect(f.state.deployingResources).toBeUndefined();
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("keeps the request's graph when one was already snapshotted", async () => {

@@ -66,6 +66,28 @@ describe("planned graph recovery construction", () => {
 });
 
 describe("planned graph recovery", () => {
+  it("uses the explicitly admitted model rather than reselecting a default", async () => {
+    const { input } = request();
+    const selections: unknown[][] = [];
+    const service = createPlannedGraphRecoveryService(
+      dependencies({
+        fetchBicepSelection: (...args) => {
+          selections.push(args);
+          return Promise.resolve({
+            content: "custom model",
+            fromWorkspace: false,
+            branch: "feat",
+            bicepPath: "models/custom.bicep"
+          });
+        }
+      })
+    );
+    await service.recover({ ...input, appFile: "models/custom.bicep" });
+    expect(selections).toEqual([
+      [input.entry, "acme/widgets", "feat", "models/custom.bicep"]
+    ]);
+  });
+
   it("rebuilds the graph, marks every node pending, and commits it to the panel", async () => {
     const { input, logs, state } = request();
     const calls: Record<string, unknown[]> = {
@@ -201,27 +223,32 @@ describe("planned graph recovery", () => {
     ]);
   });
 
-  it("reports the missing app.bicep instead of building an empty graph", async () => {
-    const { input, logs, state } = request();
-    const service = createPlannedGraphRecoveryService(
-      dependencies({
-        fetchBicepSelection: () =>
-          Promise.resolve({
-            content: null,
-            fromWorkspace: false,
-            branch: "feat",
-            bicepPath: ""
-          }),
-        buildGraphViaRad: () => {
-          throw new Error("rad must not run without a bicep source");
-        }
-      })
-    );
+  it.each([undefined, "models/custom.bicep"])(
+    "reports the missing model %s instead of building an empty graph",
+    async (appFile) => {
+      const { input, logs, state } = request();
+      const service = createPlannedGraphRecoveryService(
+        dependencies({
+          fetchBicepSelection: () =>
+            Promise.resolve({
+              content: null,
+              fromWorkspace: false,
+              branch: "feat",
+              bicepPath: ""
+            }),
+          buildGraphViaRad: () => {
+            throw new Error("rad must not run without a bicep source");
+          }
+        })
+      );
 
-    expect(await service.recover(input)).toBeNull();
-    expect(logs[1]).toContain(".radius/app.bicep not present");
-    expect(state.deployingResources).toBeUndefined();
-  });
+      expect(await service.recover({ ...input, appFile })).toBeNull();
+      expect(logs[1]).toContain(
+        `${appFile || ".radius/app.bicep"} not present`
+      );
+      expect(state.deployingResources).toBeUndefined();
+    }
+  );
 
   it.each([
     ["the bicep read", "fetchBicepSelection"],

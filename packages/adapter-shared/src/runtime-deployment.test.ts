@@ -494,11 +494,15 @@ describe("panel-independent deployment runtime", () => {
     const result = await pending;
     if (!result.ok) throw new Error(result.error);
     expect(result.invocation.target.branch).toBe("topic");
-    expect(createExecution).toHaveBeenCalledWith(result.invocation, {
-      repo: "fixture/app",
-      branch: "topic",
-      workspacePath: "fixture-workspace"
-    });
+    expect(createExecution).toHaveBeenCalledWith(
+      result.invocation,
+      {
+        repo: "fixture/app",
+        branch: "topic",
+        workspacePath: "fixture-workspace"
+      },
+      undefined
+    );
   });
 
   it("detaches a view without stopping the monitor or unlocking its target", async () => {

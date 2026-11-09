@@ -32,6 +32,7 @@ export interface DeploymentObservationScope {
 /** Optional frontend enrichment; deployments do not require a display graph. */
 export interface DeploymentGraphRecovery {
   recover(request: {
+    appFile: string;
     entry: DeployMonitorInstanceEntry;
     repo: string;
     branch: string;
@@ -277,6 +278,7 @@ export function createDeployMonitorService(
     // Build the planned graph if it was not resolved beforehand.
     if (!execution && resources.length === 0 && dependencies.plannedGraph) {
       const planned = await dependencies.plannedGraph.recover({
+        appFile: request.appFile,
         entry,
         repo,
         branch,
@@ -284,7 +286,10 @@ export function createDeployMonitorService(
         log
       });
       assertCurrent();
-      if (planned) resources = planned;
+      if (planned) {
+        resources = planned;
+        entry.state.deployingResources = planned;
+      }
     }
 
     const dispatched =

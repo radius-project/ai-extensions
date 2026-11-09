@@ -2187,6 +2187,7 @@ function startDeploy(
   const views = createDeploymentViews(runtime);
   const deployRequest = createDeployRequestService({
     runtime,
+    plannedGraph: { recover: async () => null },
     resolveAppFile: async () => ".radius/app.bicep",
     attach: views.attach,
     readInstanceEntry: (instanceId) => container?.instances.get(instanceId),

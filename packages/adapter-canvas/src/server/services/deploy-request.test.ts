@@ -6,6 +6,7 @@ import {
 import { createTestDeploymentRuntime } from "../../../test/support/server/deployment-runtime.js";
 import { createDeferred } from "../../../test/support/browser/fakes.js";
 import { createDeployRequestService } from "./deploy-request.js";
+import type { PlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import { createDeploymentViews } from "./deployment-views.js";
 import type { CanvasState } from "../../shared.js";
 
@@ -40,6 +41,9 @@ function harness(state: CanvasState = {}) {
   let entry: { state: CanvasState } | undefined = { state };
   const attach = vi.fn(views.attach);
   const dependencies = {
+    plannedGraph: {
+      recover: vi.fn<PlannedGraphRecoveryService["recover"]>(async () => null)
+    },
     resolveAppFile: vi.fn(async () => ".radius/app.bicep"),
     runtime: { ...runtime, start },
     readInstanceEntry: () => entry,
@@ -90,6 +94,68 @@ describe("deployment HTTP request adapter", () => {
     const h = harness();
     Object.defineProperty(h.dependencies, "runtime", { value: undefined });
     expect(() => createDeployRequestService(h.dependencies)).toThrow("runtime");
+  });
+
+  it("requires a planned graph recovery binding", () => {
+    const h = harness();
+    Object.defineProperty(h.dependencies, "plannedGraph", { value: undefined });
+    expect(() => createDeployRequestService(h.dependencies)).toThrow(
+      "plannedGraph.recover"
+    );
+  });
+
+  it("recovers the admitted model with isolated captured workspace state after panel close", async () => {
+    const h = harness({
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "feature",
+      workspacePath: "fixture-workspace"
+    });
+    await h.service.deploy({
+      instanceId: "panel",
+      body: body({ appFile: "models/custom.bicep" })
+    });
+    h.state.workspaceBranch = "other";
+    h.state.contextRepo = "acme/other";
+    h.close();
+    const recovery = h.start.mock.calls[0][1]?.plannedGraph;
+    if (!recovery) throw new Error("Missing graph recovery");
+    const runtimeState = {};
+    const log = vi.fn();
+    h.dependencies.plannedGraph.recover.mockImplementationOnce(
+      async ({ entry }) => {
+        entry.state.plannedRepo = "acme/widgets";
+        entry.state.deployingResources = [{ name: "recovered" }];
+        return entry.state.deployingResources;
+      }
+    );
+    expect(
+      await recovery.recover({
+        entry: { state: runtimeState },
+        repo: "acme/widgets",
+        branch: "feature",
+        provider: "azure",
+        appFile: "models/custom.bicep",
+        log
+      })
+    ).toEqual([{ name: "recovered" }]);
+    expect(h.dependencies.plannedGraph.recover).toHaveBeenCalledWith({
+      entry: {
+        state: expect.objectContaining({
+          workspaceRepo: "acme/widgets",
+          workspaceBranch: "feature",
+          workspacePath: "fixture-workspace"
+        })
+      },
+      repo: "acme/widgets",
+      branch: "feature",
+      provider: "azure",
+      appFile: "models/custom.bicep",
+      log
+    });
+    expect(h.state.plannedRepo).toBeUndefined();
+    expect(h.state.deployingResources).toEqual([]);
+    expect(runtimeState).toEqual({});
+    h.finished.resolve();
   });
 
   it.each(["{", "null", "[]", "42", '"text"'])(

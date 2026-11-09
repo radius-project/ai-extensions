@@ -48,7 +48,8 @@ export interface PlannedGraphRecoveryDependencies {
   fetchBicepSelection(
     entry: PlannedGraphInstanceEntry,
     repo: string,
-    branch: string
+    branch: string,
+    appFile?: string
   ): Promise<BicepSelection>;
   // `github` is bound at the composition root rather than threaded through
   // here, so this port stays a narrow typed description of what the stage
@@ -81,6 +82,7 @@ export interface PlannedGraphRecoveryDependencies {
 }
 
 export interface PlannedGraphRecoveryRequest {
+  appFile?: string;
   entry: PlannedGraphInstanceEntry;
   repo: string;
   branch: string;
@@ -120,7 +122,7 @@ export function createPlannedGraphRecoveryService(
   );
 
   return {
-    async recover({ entry, repo, branch, provider, log }) {
+    async recover({ entry, repo, branch, provider, appFile, log }) {
       log("Resolving planned application graph for " + repo + "...");
       const sourceRefContext = dependencies.prepareSourceRefResources(
         entry,
@@ -131,12 +133,13 @@ export function createPlannedGraphRecoveryService(
         const selection = await dependencies.fetchBicepSelection(
           entry,
           repo,
-          branch
+          branch,
+          appFile
         );
         const content = selection.content;
         if (!content) {
           log(
-            "⚠ .radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill to show the planned graph."
+            `⚠ ${appFile || ".radius/app.bicep"} not present — the deployment will continue without a planned graph.`
           );
           return null;
         }

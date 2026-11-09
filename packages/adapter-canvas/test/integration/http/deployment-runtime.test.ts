@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChildProcess } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkflowObservationScope } from "@radius-project/adapter-shared";
 import type {
   DeployMonitorRequest,
-  WorkflowObservationScope
+  WorkflowObservationScope,
+  buildGraphViaRad
 } from "@radius-project/adapter-shared";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
@@ -24,7 +26,7 @@ afterEach(async () => {
   }
 });
 
-function harness(abandonment = false) {
+function harness(abandonment = false, graphBuild?: typeof buildGraphViaRad) {
   let trackedApplication = "another-app";
   let trackedRunId = 31;
   const finished = createDeferred<void>();
@@ -35,7 +37,7 @@ function harness(abandonment = false) {
   const resolveDeployment = vi.fn(async () => null);
   const deployment = createTestDeploymentRuntime({
     resolveDeployment,
-    createExecution: () => {
+    createExecution: (_invocation, _workspace, plannedGraph) => {
       observation = createWorkflowObservationScope(() => {
         throw new Error("Unexpected artifact read");
       });
@@ -44,6 +46,13 @@ function harness(abandonment = false) {
         monitor: {
           async run(input) {
             request = input;
+            if (graphBuild) {
+              if (!plannedGraph)
+                throw new Error("Missing Canvas graph recovery");
+              const resources = await plannedGraph.recover(input);
+              if (resources) input.entry.state.deployingResources = resources;
+              input.log("Graph recovery finished");
+            }
             await finished.promise;
             input.entry.state.deployStatus = terminal;
             if (terminal === "failed")
@@ -125,6 +134,7 @@ function harness(abandonment = false) {
   const server = createTestCanvasServerRuntime({
     executionOwner: createEnvironmentExecutionOwner(),
     deploymentRuntime: deployment,
+    buildGraphViaRad: graphBuild,
     cliExec: cli
   });
   cleanups.push(async () => {
@@ -185,6 +195,116 @@ const target = {
 };
 
 describe("shared deployment runtime through production Canvas HTTP", () => {
+  it.each(["workspace", "remote", "workspace fallback"] as const)(
+    "binds fresh-panel graph recovery to the admitted %s model",
+    async (source) => {
+      const workspace = mkdtempSync(join(tmpdir(), "radius-deploy-graph-"));
+      const build = vi
+        .fn<typeof buildGraphViaRad>()
+        .mockResolvedValue([
+          { id: "web", name: "web", type: "Radius.Compute/containers" }
+        ]);
+      const h = harness(false, build);
+      cleanups.push(async () => {
+        h.finished.resolve();
+        await h.deployment.owner.shutdown(1000);
+        rmSync(workspace, { recursive: true, force: true });
+      });
+      mkdirSync(join(workspace, "models"));
+      writeFileSync(join(workspace, "app.bicep"), "wrong default model");
+      if (source === "workspace")
+        writeFileSync(
+          join(workspace, "models", "custom.bicep"),
+          "selected model"
+        );
+      const read = vi
+        .spyOn(github, "getContent")
+        .mockImplementation(async (apiPath) => {
+          if (
+            apiPath ===
+            "/repos/acme/widgets/contents/models/custom.bicep?ref=feature"
+          )
+            return "selected model";
+          if (
+            apiPath ===
+            "/repos/acme/widgets/contents/models/bicepconfig.json?ref=feature"
+          )
+            return null;
+          if (
+            apiPath ===
+            "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure-aks/azure-aks.bicep?ref=main"
+          )
+            return "param environment string";
+          throw new Error(`Unexpected graph source read: ${apiPath}`);
+        });
+      const entry = await h.server.getOrCreateServer("panel", "deploying");
+      if (source !== "remote")
+        Object.assign(entry.state, {
+          workspacePath: workspace,
+          workspaceRepo: target.repo,
+          workspaceBranch: target.branch
+        });
+      expect(
+        (
+          await post(entry, "/api/deploy", {
+            ...target,
+            appFile: "models/custom.bicep"
+          })
+        ).status
+      ).toBe(200);
+      await vi.waitFor(() =>
+        expect(entry.state.deployLogs?.join("\n")).toContain(
+          "Graph recovery finished"
+        )
+      );
+      expect(
+        entry.state.deployingResources,
+        entry.state.deployLogs?.join("\n")
+      ).toMatchObject([{ name: "web", deployStatus: "pending" }]);
+      expect(build).toHaveBeenCalledExactlyOnceWith(
+        "selected model",
+        "models/custom.bicep",
+        expect.any(Object)
+      );
+      expect(
+        read.mock.calls.some(
+          ([apiPath]) =>
+            apiPath ===
+            "/repos/acme/widgets/contents/models/custom.bicep?ref=feature"
+        )
+      ).toBe(source !== "workspace");
+      expect(entry.state.plannedResources).toBeUndefined();
+    }
+  );
+
+  it("reattaches a reused panel to the current repository's tool-started deployment", async () => {
+    const h = harness();
+    const entry = await h.server.getOrCreateServer("panel", "deploying");
+    entry.state.contextRepo = target.repo;
+    expect((await post(entry, "/api/deploy", target)).status).toBe(200);
+    const first = h.deployment.owner.lookup();
+    if (first.kind !== "found") throw new Error("Missing first deployment");
+    const second = await h.deployment.start({
+      repo: "acme/other",
+      branch: "feature",
+      environment: "production"
+    });
+    if (!second.ok) throw new Error(second.error);
+    entry.state.contextRepo = "acme/other";
+    for (let poll = 0; poll < 2; poll++) {
+      const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        attempt: { id: second.invocation.attemptId, targetRepo: "acme/other" }
+      });
+    }
+    first.invocation.state.deployError = "previous repository";
+    h.deployment.owner.publish(first.invocation);
+    expect(entry.state.deployError).toBe(second.invocation.state.deployError);
+    expect(first.invocation.signal.aborted).toBe(false);
+    expect(second.invocation.signal.aborted).toBe(false);
+  });
+
   it.each(["app.bicep", ".radius/app.bicep", null])(
     "resolves the selected branch model through real HTTP (%s)",
     async (appFile) => {

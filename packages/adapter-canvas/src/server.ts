@@ -3,6 +3,7 @@ import {
   createDeploymentLookup,
   createDeploymentIdentityReader,
   createDeploymentObservationBindings,
+  readWorkspaceFile,
   type DeploymentRuntime
 } from "@radius-project/adapter-shared";
 import { createDeploymentViews } from "./server/services/deployment-views.js";
@@ -386,6 +387,7 @@ import {
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import type { EnvironmentsDependencies } from "./server/routes/environments-types.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
+import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { createRadiusEnvironmentWorkflowDeletion } from "./server/services/radius-environment-workflow-deletion.js";
 import {
@@ -3633,7 +3635,8 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 async function fetchBicepSelection(
   entry: { state: CanvasState },
   repo: string,
-  branch: string
+  branch: string,
+  appFile?: string
 ): Promise<{
   content: string | null;
   fromWorkspace: boolean;
@@ -3641,6 +3644,22 @@ async function fetchBicepSelection(
   bicepPath: string;
 }> {
   const access = accessForSelection(entry, repo, branch);
+  if (appFile) {
+    const local =
+      access.useWorkspace ?
+        await readWorkspaceFile(entry.state.workspacePath, appFile)
+      : null;
+    return {
+      content:
+        local ??
+        (await github.getContent(
+          `/repos/${repo}/contents/${appFile}?ref=${encodeURIComponent(access.branch)}`
+        )),
+      fromWorkspace: local !== null,
+      branch: access.branch,
+      bicepPath: appFile
+    };
+  }
   if (access.useWorkspace) {
     const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
     if (local)
@@ -5388,6 +5407,7 @@ export interface ProductionCanvasServerRuntimeOptions {
   environmentOperationRunner?: EnvironmentOperationRunner;
   environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
   cliExec?: typeof cliExec;
+  buildGraphViaRad?: typeof buildGraphViaRad;
   // The developer-only AWS switch, read once by the composition root. Off, AWS
   // stays hidden: no AWS provider, no AWS environment create or delete, and no
   // AWS workflows committed to the repository.
@@ -5412,7 +5432,8 @@ export function createProductionCanvasServerRuntime(
     environmentDeletionPorts,
     serverDependencies,
     awsEnabled,
-    cliExec: cliExecPort = cliExec
+    cliExec: cliExecPort = cliExec,
+    buildGraphViaRad: buildGraphPort = buildGraphViaRad
   } = options;
   if (!executionOwner)
     throw new Error("Missing canvas server dependency: executionOwner");
@@ -6024,8 +6045,7 @@ export function createProductionCanvasServerRuntime(
       workspaceGraphJsonPath(state, bicepRepoPath),
     radArtifactsDirForSelection: (options) =>
       radArtifactsDirForSelection({ ...options, github }),
-    buildGraphViaRad: (content, bicepPath, options) =>
-      buildGraphViaRad(content, bicepPath, options),
+    buildGraphViaRad: buildGraphPort,
     canvasGraphResources,
     errorMessage,
     logError: (message) => console.error(message)
@@ -6054,8 +6074,7 @@ export function createProductionCanvasServerRuntime(
           fetchBicepSelection(entry, repo, branch),
         resolveRadArtifactsDir: (request) =>
           radArtifactsDirForSelection({ ...request, github }),
-        buildGraphViaRad: (content, definitionFile, options) =>
-          buildGraphViaRad(content, definitionFile, options),
+        buildGraphViaRad: buildGraphPort,
         canvasGraphResources,
         workspaceGraphJsonPath,
         graphDefinitionHash,
@@ -6552,6 +6571,19 @@ export function createProductionCanvasServerRuntime(
 
   const deployRequestService = createDeployRequestService({
     runtime: deploymentRuntime,
+    plannedGraph: createPlannedGraphRecoveryService({
+      prepareSourceRefResources,
+      setSourceRefResources,
+      fetchBicepSelection,
+      radArtifactsDirForSelection: (request) =>
+        radArtifactsDirForSelection({ ...request, github }),
+      buildGraphViaRad: buildGraphPort,
+      fetchRecipePack: (provider) => fetchRecipePack(github, provider),
+      resolveRecipeOutputs: (parsed, recipes, provider) =>
+        resolveRecipeOutputs(github, parsed, recipes, provider),
+      canvasGraphResources,
+      errorMessage
+    }),
     resolveAppFile: async (state, repo, branch) => {
       const selection = await fetchBicepSelection({ state }, repo, branch);
       return selection.content ? selection.bicepPath : null;

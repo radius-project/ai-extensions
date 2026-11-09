@@ -15,6 +15,7 @@ import {
   createProductionDeploymentRuntime,
   type ProductionDeploymentPorts
 } from "./production-deployment.js";
+import type { DeploymentGraphRecovery } from "./deployment-monitor.js";
 
 type Runtime = ReturnType<typeof createProductionDeploymentRuntime>;
 const runtimes: Runtime[] = [];
@@ -31,6 +32,7 @@ function fixture(
     variableResponse?: string;
     models?: Readonly<Record<string, string>>;
     conclusions?: Readonly<Record<string, "success" | "failure">>;
+    live?: boolean;
   } = {}
 ) {
   const calls: string[][] = [];
@@ -38,6 +40,7 @@ function fixture(
   const azureCalls: Array<{ args: string[]; timeout?: number }> = [];
   let id = 0;
   let runId = 10;
+  const running = Boolean(options.live);
   const runEnvironments = new Map<number, string>();
   const runCorrelations = new Map<number, string>();
   const generated = generateDeployWorkflow(
@@ -152,7 +155,20 @@ function fixture(
           environment: runEnvironments.get(Number(args[2])),
           runId: Number(args[2]),
           sequence: 1,
-          resources: []
+          updatedAt: "2026-09-01T00:00:00Z",
+          state: running ? "running" : "succeeded",
+          resources:
+            options.live ?
+              [
+                {
+                  id: "api",
+                  name: "api",
+                  type: "Radius.Compute/containers",
+                  provisioningState: "Succeeded",
+                  status: "success"
+                }
+              ]
+            : []
         })
       );
       writeFileSync(
@@ -243,11 +259,13 @@ function fixture(
             steps: [
               {
                 name: DEPLOY_RAD_COMMANDS_STEP,
-                status: "completed",
+                status: running ? "in_progress" : "completed",
                 conclusion:
-                  options.conclusions?.[
-                    runEnvironments.get(requestedRunId) || ""
-                  ] ?? options.dispatch
+                  running ? null : (
+                    (options.conclusions?.[
+                      runEnvironments.get(requestedRunId) || ""
+                    ] ?? options.dispatch)
+                  )
               }
             ]
           }
@@ -259,10 +277,12 @@ function fixture(
     ) {
       stdout = http({
         id: requestedRunId,
-        status: "completed",
+        status: running ? "in_progress" : "completed",
         conclusion:
-          options.conclusions?.[runEnvironments.get(requestedRunId) || ""] ??
-          options.dispatch
+          running ? null : (
+            (options.conclusions?.[runEnvironments.get(requestedRunId) || ""] ??
+            options.dispatch)
+          )
       });
     } else if (options.dispatch && endpoint.includes("/artifacts?")) {
       stdout = http({
@@ -313,6 +333,57 @@ function fixture(
 }
 
 describe("shared production deployment composition", () => {
+  it("recovers a fresh invocation's graph and applies artifact progress before workflow completion", async () => {
+    const h = fixture({
+      dispatch: "success",
+      live: true,
+      models: {
+        "models/custom.bicep":
+          "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n name: 'modeled-app'\n}"
+      }
+    });
+    const recover = vi.fn<DeploymentGraphRecovery["recover"]>(async () => [
+      {
+        id: "api",
+        name: "api",
+        type: "Radius.Compute/containers",
+        deployStatus: "pending"
+      }
+    ]);
+    try {
+      const result = await h.runtime.start(
+        {
+          repo: "owner/app",
+          branch: "topic",
+          environment: "dev",
+          appFile: "models/custom.bicep"
+        },
+        { resources: [], plannedGraph: { recover } }
+      );
+      if (!result.ok) throw new Error(result.error);
+      await vi.waitFor(() =>
+        expect(
+          result.invocation.state.deployingResources?.[0].deployStatus
+        ).toBe("success")
+      );
+      expect(result.invocation.state.deployStatus).toBe("in_progress");
+      expect(h.runtime.owner.hasActiveWork()).toBe(true);
+      expect(recover).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          appFile: "models/custom.bicep",
+          repo: "owner/app",
+          branch: "topic"
+        })
+      );
+      expect(
+        h.calls.some((args) => args[0] === "run" && args[1] === "download")
+      ).toBe(true);
+    } finally {
+      await h.runtime.owner.shutdown(1000);
+      expect(h.runtime.owner.hasActiveWork()).toBe(false);
+    }
+  });
+
   it.each(["radius-environment.bicep", "models/RADIUS-RECIPE-PACK.bicep"])(
     "rejects the reserved model %s before any production command",
     async (appFile) => {

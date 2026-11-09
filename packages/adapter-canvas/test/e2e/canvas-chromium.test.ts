@@ -1057,14 +1057,15 @@ test.describe("Radius Canvas in Chromium", () => {
       canvas.setDeployRepairHandoff(async (input) => {
         deliveries.push(input);
       });
-      // Planned inputs only: admission mints the attempt and the real monitor
-      // discovers, classifies and settles the failed run without state seeding.
+      // Only the Planned-page launch has a cached graph. The other launches
+      // must recover the admitted model through the production composition.
       await canvas.seedState({
         ...baseCanvasState(canvas.workspacePath),
         appFile,
-        plannedResources: [
-          { id: "web", name: "web", type: "Radius.Compute/containers" }
-        ]
+        plannedResources:
+          launch === "planned" ?
+            [{ id: "web", name: "web", type: "Radius.Compute/containers" }]
+          : []
       });
       expect(
         scenario.commands.find(
@@ -1120,6 +1121,30 @@ test.describe("Radius Canvas in Chromium", () => {
       const dispatched = (await canvas.cliCalls()).find(
         (call) => call.args.slice(0, 3).join(" ") === dispatchPrefix.join(" ")
       );
+      if (launch !== "planned") {
+        const progress = await page.request.get(
+          `${canvas.baseUrl}/api/deploy-status`
+        );
+        expect(await progress.json()).toMatchObject({
+          status: "in_progress",
+          resources: [
+            { name: "web", deployStatus: "pending" },
+            { name: "db", deployStatus: "pending" }
+          ]
+        });
+        expect(canvas.entry.state.plannedResources).toEqual([]);
+        const graphCall = (await canvas.cliCalls()).find(
+          (call) =>
+            call.tool === "rad" &&
+            call.args.slice(0, 2).join(" ") === "app graph"
+        );
+        expect(graphCall).toBeDefined();
+        expect(canvas.entry.state.deployLogs?.join("\n")).toContain(
+          "Planned 2 resource(s)."
+        );
+        await gotoCanvas(page, canvas, "deployed");
+        await expect(page.locator(".react-flow__node")).toHaveCount(2);
+      }
       const correlation = dispatched?.args
         .find((arg) => arg.startsWith("correlation_id="))
         ?.slice("correlation_id=".length);

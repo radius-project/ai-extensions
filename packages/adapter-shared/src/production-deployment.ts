@@ -151,7 +151,7 @@ export function createProductionDeploymentRuntime(
       redactDiagnostic: ports.redactDiagnostic,
       reportDiagnostic: ports.reportDiagnostic
     },
-    createExecution: (_invocation, workspace) => {
+    createExecution: (_invocation, workspace, plannedGraph) => {
       const readFile = createDeploymentFileReader(workspace, {
         readWorkspaceFile,
         readRepositoryFile: repository.readFile
@@ -211,6 +211,7 @@ export function createProductionDeploymentRuntime(
         reads.createDeployStatusReader
       );
       const monitor = createDeployMonitorService({
+        plannedGraph,
         dispatch,
         outcome,
         deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,

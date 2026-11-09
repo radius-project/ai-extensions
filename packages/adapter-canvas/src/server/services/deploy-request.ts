@@ -9,6 +9,7 @@ import type {
 } from "@radius-project/core";
 import type { CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import type { PlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 
 export interface DeployRequestInstanceEntry {
   state: CanvasState;
@@ -16,6 +17,7 @@ export interface DeployRequestInstanceEntry {
 
 export interface DeployRequestDependencies {
   runtime: DeploymentRuntime;
+  plannedGraph: PlannedGraphRecoveryService;
   resolveAppFile(
     state: CanvasState,
     repo: string,
@@ -60,6 +62,10 @@ export function createDeployRequestService(
   ]);
   if (typeof dependencies.runtime?.start !== "function")
     throw new Error("createDeployRequestService requires runtime.");
+  if (typeof dependencies.plannedGraph?.recover !== "function")
+    throw new Error(
+      "createDeployRequestService requires plannedGraph.recover."
+    );
   return {
     async deploy({ instanceId, body }) {
       try {
@@ -112,6 +118,23 @@ export function createDeployRequestService(
         ] as const;
         const result = await dependencies.runtime.start(input, {
           instanceId,
+          plannedGraph: {
+            recover: ({ repo, branch, provider, appFile, log }) =>
+              dependencies.plannedGraph.recover({
+                entry: {
+                  state: {
+                    workspaceRepo: selectionState.workspaceRepo,
+                    workspaceBranch: selectionState.workspaceBranch,
+                    workspacePath: selectionState.workspacePath
+                  }
+                },
+                repo,
+                branch,
+                provider,
+                appFile,
+                log
+              })
+          },
           ...(!repair && !input.appFile ?
             {
               modelSelection: {

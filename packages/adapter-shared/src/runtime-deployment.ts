@@ -13,7 +13,10 @@ import {
   type DeploymentInvocation,
   type DeploymentOwnerPorts
 } from "./deployment-owner.js";
-import type { DeployMonitorService } from "./deployment-monitor.js";
+import type {
+  DeployMonitorService,
+  DeploymentGraphRecovery
+} from "./deployment-monitor.js";
 import type { WorkflowObservationScope } from "./workflow-observation-scope.js";
 import { assertDeployDependencies } from "./deployment-service-dependencies.js";
 import {
@@ -30,6 +33,7 @@ export interface DeploymentStartContext {
   workspace?: DeploymentWorkspace;
   resources?: DeploymentResource[];
   instanceId?: string;
+  plannedGraph?: DeploymentGraphRecovery;
   modelSelection?: {
     resolve(target: Readonly<DeploymentTarget>): Promise<string | null>;
     isCurrent(): boolean;
@@ -48,7 +52,8 @@ export interface DeploymentRuntimePorts extends DeploymentOwnerPorts {
   statusBlocksMutation(status: string): boolean;
   createExecution(
     invocation: DeploymentInvocation<DeploymentState>,
-    workspace: DeploymentWorkspace | undefined
+    workspace: DeploymentWorkspace | undefined,
+    plannedGraph?: DeploymentGraphRecovery
   ): { monitor: DeployMonitorService; observation: WorkflowObservationScope };
   delivery: Pick<
     DeploymentRepairDependencies,
@@ -350,7 +355,11 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
           let execution:
             ReturnType<DeploymentRuntimePorts["createExecution"]> | undefined;
           try {
-            execution = ports.createExecution(invocation, workspace);
+            execution = ports.createExecution(
+              invocation,
+              workspace,
+              context.plannedGraph
+            );
             invocation.signal.addEventListener(
               "abort",
               execution.observation.stop,
