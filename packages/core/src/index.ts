@@ -12,6 +12,87 @@
 
 export { redactCredentials } from "./credential-redaction.js";
 export {
+  classifyProvider,
+  parseGitHubEnvironmentVariables,
+  type ClassifiedProvider
+} from "./provider-classification.js";
+export {
+  requireCurrentAwsWorkflows,
+  type WorkflowEnvironmentProvider
+} from "./aws-workflow-compatibility.js";
+export {
+  verifyWorkflowFilesMatchSource,
+  type ExpectedWorkflowFile,
+  type WorkflowReadbackPorts,
+  type WorkflowReadbackResult
+} from "./workflow-readback.js";
+export * from "./deployment-command-result.js";
+export * from "./deployment-lookup-policy.js";
+export {
+  selectLatestWorkflowRunId,
+  selectWorkflowRunId
+} from "./deployment-observation-policy.js";
+export {
+  assertTrustedGeneratedWorkflow,
+  deployWorkflowFiles,
+  stripAwsDispatcherJob,
+  stripWorkflowRunTrigger,
+  type GeneratedWorkflowArtifact
+} from "./workflows/generated-policy.js";
+export {
+  resolveDeploymentTarget,
+  type DeploymentTarget,
+  type DeploymentWorkspace,
+  type DeploymentStartInput
+} from "./deploy-admission.js";
+export {
+  synchronizeWorkflowCandidates,
+  type WorkflowCandidate,
+  type WorkflowCommitFailure,
+  type WorkflowSynchronizationResult,
+  type WorkflowSynchronizationRequest,
+  type WorkflowSynchronizationPorts
+} from "./workflow-synchronization.js";
+
+export {
+  DEPLOY_CANCELLED_MESSAGE,
+  DEPLOY_TIMED_OUT_MESSAGE,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
+  DEPLOY_FAILED_MESSAGE,
+  MAX_DEPLOY_MESSAGE_LENGTH,
+  unfinishedDeployMessage,
+  settleDeployStatuses,
+  type SettleableResource
+} from "./deployment-resource-status.js";
+
+export type {
+  DeploymentErrorKind,
+  DeploymentResource,
+  DeploymentParameters,
+  DeploymentAttempt,
+  DeploymentExecutionReference,
+  DeploymentState,
+  DeploymentBicepParameter
+} from "./deployment.js";
+export {
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
+  DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  DEPLOY_HANDOFF_RETRY_DELAY_MS,
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  DEPLOYMENT_MONITOR_LIMITS,
+  shouldRetryWithKeyringCredential,
+  classifyDeployDispatchFailure,
+  deploymentHandoffEligible,
+  deploymentNoticeEligible,
+  resolveDeployRepairLoop,
+  type DeploymentRepairDecision
+} from "./deployment-policy.js";
+export {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "./deployment-command-display.js";
+export {
   selectGitHubAccount,
   type GitHubAccountSelection,
   type GitHubAccountSelectionPorts,
@@ -351,3 +432,17 @@ export * from "./setup-verification-policy.js";
 export * from "./setup-verification-plan.js";
 export * from "./setup-command-admission.js";
 export * from "./setup-input-resume.js";
+export * from "./deployment-parameters.js";
+export {
+  normalizeProvisioningState,
+  resolveResourceStatus,
+  buildDeployStatusMap,
+  buildDeployMessageMap,
+  applyDeployMessages,
+  applyDeployStatusToResources
+} from "./deployment-progress.js";
+export {
+  deploymentGraphResources,
+  projectDeploymentGraph
+} from "./deployment-graph.js";
+export { deploymentStatusBlocksMutation } from "./deploy-admission.js";
