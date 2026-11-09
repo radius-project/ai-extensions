@@ -514,7 +514,9 @@ describe("runEnvironmentDeletion — AWS", () => {
       cluster: "shop",
       operationId: op.operationId,
       waiting: expect.any(Function),
-      whileLocked: expect.any(Function)
+      whileLocked: expect.any(Function),
+      onLocked: expect.any(Function),
+      onReleased: expect.any(Function)
     });
     expect(ports.runAz).not.toHaveBeenCalled();
     expect(op.stages.map((s: { id: string }) => s.id)).toEqual([
@@ -889,6 +891,97 @@ describe("runEnvironmentDeletion — AWS", () => {
 
     expect(op.state).toBe("succeeded");
     expect(removeAwsEnvironmentAccess).toHaveBeenCalledOnce();
+  });
+
+  describe("the deploy identity lock it takes", () => {
+    const LOCK_ARN =
+      "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-octo-app";
+    // Takes the lock, then releases it, unless `release` is "failed".
+    const locking = (release: "released" | "failed") =>
+      vi.fn(async (input: RemovalInput): Promise<Removal> => {
+        await input.onLocked?.({ policyArn: LOCK_ARN, policyId: "LOCK1" });
+        await input.whileLocked(nothing);
+        if (release === "released") input.onReleased?.();
+        return release === "released" ? nothing : (
+            { ...nothing, lockWarning: "Radius could not release its lock." }
+          );
+      });
+
+    it("records the lock and saves it before the first change, then clears it once released", async () => {
+      const op = makeAwsOp();
+      const saved: unknown[] = [];
+      const ports = makePorts({
+        removeAwsEnvironmentAccess: locking("released"),
+        persist: vi.fn(async () => {
+          saved.push(op.context?.awsDeployIdentityLock ?? null);
+        })
+      });
+
+      await runEnvironmentDeletion(op, ports);
+
+      expect(saved).toContainEqual({ policyArn: LOCK_ARN, policyId: "LOCK1" });
+      expect(op.context.awsDeployIdentityLock).toBeNull();
+      expect(op.state).toBe("succeeded");
+    });
+
+    it("keeps the lock recorded when its release did not happen", async () => {
+      const op = makeAwsOp();
+      await runEnvironmentDeletion(
+        op,
+        makePorts({ removeAwsEnvironmentAccess: locking("failed") })
+      );
+
+      expect(op.context.awsDeployIdentityLock).toEqual({
+        policyArn: LOCK_ARN,
+        policyId: "LOCK1"
+      });
+    });
+
+    it("takes back the lock an earlier attempt recorded", async () => {
+      const op = makeAwsOp();
+      op.context = {
+        awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+      };
+      const removeAwsEnvironmentAccess = locking("released");
+      await runEnvironmentDeletion(
+        op,
+        makePorts({ removeAwsEnvironmentAccess })
+      );
+
+      expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
+        expect.objectContaining({ adopt: "LOCK0" })
+      );
+      expect(op.context.awsDeployIdentityLock).toBeNull();
+    });
+
+    it("takes back and releases a lock an attempt left after it finished the role and the GitHub environment", async () => {
+      const op = makeAwsOp();
+      for (const stage of [
+        STAGE_DELETE_RADIUS_ENV,
+        STAGE_DELETE_AWS_ROLE_ACCESS,
+        STAGE_DELETE_GITHUB_ENV
+      ]) {
+        setStageState(op, stage, "succeeded");
+      }
+      op.context = {
+        awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+      };
+      const removeAwsEnvironmentAccess = locking("released");
+      const ports = makePorts({ removeAwsEnvironmentAccess });
+
+      await runEnvironmentDeletion(op, ports);
+
+      expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
+        expect.objectContaining({ adopt: "LOCK0" })
+      );
+      expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+      expect(op.steps.map((step: { label: string }) => step.label)).toContain(
+        "Checking the deploy identity again to release the lock an earlier attempt left on it"
+      );
+      expect(stageOf(op)).toBe("succeeded");
+      expect(op.context.awsDeployIdentityLock).toBeNull();
+      expect(op.state).toBe("succeeded");
+    });
   });
 
   it.each([

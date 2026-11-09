@@ -33,6 +33,7 @@
 
 import {
   parseAwsRoleArn,
+  readRecordedAwsLock,
   stateRegistryForEnvironment
 } from "@radius-project/core";
 import {
@@ -157,6 +158,13 @@ export interface EnvironmentDeletionPorts {
     waiting(wait: AwsLockWait, line: string | null): Promise<void>;
     // Runs after a successful removal, before the lock is released.
     whileLocked(removal: AwsRoleAccessRemoval): Promise<void>;
+    // The policy ID of the lock an earlier attempt of this deletion recorded,
+    // so a retry takes it back instead of waiting on it.
+    adopt?: string;
+    // Called with the lock once it is held and before the first change.
+    onLocked?(lock: { policyArn: string; policyId: string }): Promise<void>;
+    // Called once the lock this run took is released or known gone.
+    onReleased?(): void;
   }): Promise<
     | (AwsRoleAccessRemoval & {
         // Set when the removal finished but the lock was left behind.
@@ -407,12 +415,16 @@ export async function runEnvironmentDeletion(
   // lock, so if the lock were released between the two steps, Repair could
   // still see the environment and add its subjects back. For the same reason,
   // a retry whose GitHub environment delete is still pending removes the
-  // subjects again first. The removal is idempotent.
+  // subjects again first. The removal is idempotent. So is a retry whose
+  // earlier attempt stopped before its lock was released: it takes the
+  // recorded lock back, checks the role again, and releases it.
   const awsStageState = stageState(op, STAGE_DELETE_AWS_ROLE_ACCESS);
   const awsStagePending = stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS);
+  const githubStagePending = stagePending(op, STAGE_DELETE_GITHUB_ENV);
+  const recordedLock = readRecordedAwsLock(op.context);
   if (
     awsStageState !== null &&
-    (awsStagePending || stagePending(op, STAGE_DELETE_GITHUB_ENV))
+    (awsStagePending || githubStagePending || recordedLock)
   ) {
     enterStage(op, STAGE_DELETE_AWS_ROLE_ACCESS);
     addStep(op, {
@@ -421,7 +433,9 @@ export async function runEnvironmentDeletion(
       label:
         awsStagePending ?
           "Removing this environment's trust, policy, and unused cluster access from the deploy identity"
-        : "Checking the deploy identity again before deleting the GitHub environment",
+        : githubStagePending ?
+          "Checking the deploy identity again before deleting the GitHub environment"
+        : "Checking the deploy identity again to release the lock an earlier attempt left on it",
       state: "running"
     });
     await ports.persist();
@@ -447,6 +461,16 @@ export async function runEnvironmentDeletion(
           { policyName: String(op.request.policyName) }
         : {}),
         operationId: op.operationId,
+        // Recorded before the first change, so a crash still leaves the lock
+        // named on this deletion, and its retry takes it back by itself.
+        ...(recordedLock ? { adopt: recordedLock.policyId } : {}),
+        onLocked: async (lock) => {
+          setContext(op, { awsDeployIdentityLock: lock });
+          await ports.persist();
+        },
+        onReleased: () => {
+          setContext(op, { awsDeployIdentityLock: null });
+        },
         // Shown on the deletion's progress, where Remove lock is offered.
         waiting: async (wait, line) => {
           // Waiting is activity: without this, a wait longer than the
