@@ -1,5 +1,9 @@
 import { workflowTempFile } from "@radius-project/adapter-shared";
-import { ensureAzureServicePrincipal } from "@radius-project/core";
+import {
+  ensureAzureServicePrincipal,
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted
+} from "@radius-project/core";
 import { createAzureRecoveryPort } from "./server/services/azure-setup-recovery.js";
 // Canvas adapter — HTTP server host for the webview.
 //
@@ -116,10 +120,22 @@ import {
   createAwsEnvironmentAccess,
   type AwsEnvironmentAccess
 } from "./server/services/aws-environment-access.js";
+import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identity-lock.js";
+import { releaseRecordedAwsLock } from "./server/services/aws-recorded-lock.js";
+import { createAwsSetupJournal } from "./server/services/aws-setup-journal.js";
+import {
+  isAwsCleanupArtifactType,
+  rollbackAwsSetupArtifacts
+} from "./server/services/aws-setup-rollback.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
-import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
+import {
+  createEnvironmentProviderReader,
+  createEnvironmentTargetReader
+} from "./server/services/environment-target.js";
+import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
+import { requireCurrentAwsWorkflows } from "./server/services/aws-workflow-compatibility.js";
 import {
   appParams,
   resolveDeployParams,
@@ -170,6 +186,7 @@ import {
   hasWarnings,
   addLegacyStep,
   setContext,
+  touchOperation,
   setCanonicalEnvironment,
   setCloudContext,
   getSetupArtifactLedger,
@@ -184,7 +201,6 @@ import {
   recordCommittedWorkflowFile,
   recordCleanupState,
   recordCleanupDeletion,
-  reconcileRestoredOperation,
   cleanupArtifactIdentity,
   cleanupTargetKey,
   formatGitHubEnvironmentLabel,
@@ -199,7 +215,6 @@ import {
   resumeAfterInput,
   getAzureAppCreateContinuation,
   setAzureAppCreateContinuation,
-  setExecutionActive,
   announceOperationTerminal,
   shouldStop,
   stopAtBoundary,
@@ -285,12 +300,26 @@ import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { probeDeleteConflict } from "./server/services/delete-conflict.js";
-import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
+import {
+  createOperationsStatusRoutes,
+  type OperationActionDependencies
+} from "./server/routes/operations-status.js";
+import {
+  createOperationResumeService,
+  type OperationResumeService
+} from "./server/services/operation-resume.js";
+import { createSetupStartService } from "./server/services/setup-start.js";
+import { verificationBypass } from "./server/services/verification-bypass.js";
+import type { EnvironmentToolsPorts } from "./runtime/environment-tools.js";
+import {
+  createOperationsControlService,
+  type OperationControlService,
+  type OperationsControlDependencies
+} from "./server/services/operation-control.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
 import {
   cancelVerificationWorkflow,
-  requireVerificationWorkflowIdentity,
   readVerificationWorkflowState
 } from "./server/services/verification-workflow-cancellation.js";
 import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
@@ -319,7 +348,6 @@ import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createAwsDiscoveryRoutes } from "./server/routes/aws-discovery.js";
 import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
-import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
 import { createAzureSetupService } from "./server/services/azure-setup.js";
 import {
   createConfigureEnvironmentService,
@@ -346,8 +374,10 @@ import {
   graphRepairHandoffMessage,
   type GraphRepairRequest
 } from "./graph-model-repair.js";
-import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
-import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
+import {
+  createGhNamespaceClaimsPorts,
+  createSelectedNamespaceClaimsPorts
+} from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import type { EnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import {
@@ -355,6 +385,7 @@ import {
   createGitHubSelectionHandleStore
 } from "./server/services/github-account-readiness.js";
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
+import type { EnvironmentsDependencies } from "./server/routes/environments-types.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import {
@@ -407,10 +438,7 @@ import {
   recoverVerificationRun,
   verificationActionsUrl
 } from "./server/services/recovered-verification-run.js";
-import {
-  planRecoveredCleanup,
-  planRecoveredSchedule
-} from "./server/services/recovered-cleanup-command.js";
+import { planRecoveredCleanup } from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import {
@@ -441,9 +469,18 @@ import {
   verificationTrackingDeadline
 } from "./server/services/verification-retry.js";
 import { runVerificationRetry as runSelectedVerificationRetry } from "./server/services/verification-retry-runner.js";
+import { monitorSetupVerification } from "@radius-project/core";
+import {
+  createVerificationStatusService,
+  type VerificationStatusInput,
+  type VerificationStatusResult,
+  type VerificationStatusDependencies
+} from "./server/services/verification-status.js";
 import type { CanvasServerEntry } from "./server/types.js";
 import type { CanvasServerDependencyOverrides } from "./server/dependencies.js";
 import type { EnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
+import { createSetupExecution } from "./runtime/setup-execution.js";
+export { reopenProviderReconciliation } from "./runtime/setup-execution.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
 export { resolveDeployStatus } from "./server/services/deployment-resolver.js";
@@ -637,11 +674,12 @@ function record(value: unknown): Record<string, unknown> {
 // the default `gh` credentials, the same identity the rest of the deploy uses.
 async function runGitHubJsonRequest(
   apiPath: string,
-  executor?: SelectedGhExecutor
+  executor?: SelectedGhExecutor,
+  assertActive?: () => void
 ): Promise<GitHubJsonResponse> {
   const result =
     executor ?
-      await selectedGhApiJson(executor, apiPath)
+      await selectedGhApiJson(executor, apiPath, assertActive)
     : await ghApiJson(apiPath, {
         headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
       });
@@ -697,35 +735,6 @@ function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
 // the route module from `operations.ts`, which is independently tested; the
 // merge proof stays in its own service with a single GitHub port. What is
 // injected here is the genuine I/O the routes cannot decide alone.
-function requiredVerificationWorkflowContext(op: {
-  operationId: string;
-  repo?: unknown;
-  verification?: unknown;
-  context?: unknown;
-  [key: string]: unknown;
-}): {
-  identity: ReturnType<typeof requireVerificationWorkflowIdentity>;
-  login: string;
-} {
-  const identity = requireVerificationWorkflowIdentity(op);
-  const operationContext =
-    op.context && typeof op.context === "object" ? op.context : null;
-  const login =
-    (
-      operationContext &&
-      "githubLogin" in operationContext &&
-      typeof operationContext.githubLogin === "string"
-    ) ?
-      operationContext.githubLogin.trim()
-    : "";
-  if (!login) {
-    throw new Error(
-      "The interrupted setup does not record the GitHub account that started it."
-    );
-  }
-  return { identity, login };
-}
-
 // Composition root for the `azure-discovery` routes. Four seams:
 // `az` runner (which carries the agent-session-stripped `cliExec` environment
 // the Azure setup routes run under), the general trimmed-stdout CLI runner the
@@ -758,6 +767,7 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   runSessionPrompt: (prompt) =>
     invokeSessionPrompt(sessionPromptHandler, prompt),
   runCommand: (command, args, options) => runCommand(command, args, options),
+  runAws: (args) => runCliCommand("aws", args, 15000),
   errorMessage
 });
 
@@ -847,16 +857,6 @@ export type EnvironmentOperationRunner = (
   operationId: string,
   commandId?: string
 ) => Promise<void>;
-
-export function reopenProviderReconciliation(operation: any): boolean {
-  if (!operation || unresolvedProviderMutations(operation).length === 0) {
-    return false;
-  }
-
-  reconcileRestoredOperation(operation);
-  setExecutionActive(operation, false);
-  return true;
-}
 
 export function cleanupProviderRecoveryDisposition(operation: any): {
   blockers: ReturnType<typeof unresolvedProviderMutations>;
@@ -1132,7 +1132,9 @@ function kickoffWorkflowSync(
 // copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
 // scoped to just the workflow about to run (`only`), authors a missing file
 // (`create`), and is awaited so any create/update lands before the dispatch —
-// but a sync failure never blocks the dispatch (we log and proceed). `provider`
+// but Azure keeps its best-effort behavior. AWS provider workflows must pass
+// read-back verification before dispatch because older copies administer EKS
+// access that the deployment role no longer grants. `provider`
 // may be "" when unknown; deploy and delete workflow content is
 // provider-agnostic, so it only matters for verify. `workingBranch` (when it
 // matches the repo) is synced alongside the default branch so a
@@ -1151,6 +1153,11 @@ async function ensureWorkflowsCurrent(
 }> {
   if (!repo || !environment || !only || only.length === 0)
     return { created: [], updated: [], failed: [] };
+  let result: Awaited<ReturnType<typeof ensureWorkflowsCurrent>> = {
+    created: [],
+    updated: [],
+    failed: []
+  };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -1176,7 +1183,7 @@ async function ensureWorkflowsCurrent(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
-    return {
+    result = {
       // Downstream dispatchers use this list only to decide whether GitHub may
       // still be registering a workflow, including one created concurrently.
       created: [
@@ -1187,8 +1194,27 @@ async function ensureWorkflowsCurrent(
     };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
-    return { created: [], updated: [], failed: [] };
   }
+  if (includeAws) {
+    await requireCurrentAwsWorkflows(
+      { provider, files: only, workingBranch },
+      {
+        environmentProvider: () =>
+          createEnvironmentProviderReader(runCommand)(repo, environment),
+        defaultBranch: () => getDefaultBranch(repo),
+        templates: async () => ({
+          ...(await workflowTemplates(true).deploy(
+            environment,
+            ".radius/app.bicep"
+          )),
+          ...(await workflowTemplates(true).delete(environment))
+        }),
+        readFile: (path, branch) => fetchFileFromRepo(repo, path, branch),
+        errorMessage
+      }
+    );
+  }
+  return result;
 }
 
 // no access to the SDK `session`, so when a graph/generate route finds no
@@ -2025,12 +2051,14 @@ export async function resolveCleanupGitHubContext({
   targets,
   selectedLogin,
   createExecutor = createSelectedGhExecutor,
-  formatError = errorMessage
+  formatError = errorMessage,
+  isStopped
 }: {
   targets: readonly { artifactType: string }[];
   selectedLogin: string;
   createExecutor?: (login: string) => Promise<SelectedGhExecutor>;
   formatError?: (error: unknown) => string;
+  isStopped?: () => boolean;
 }): Promise<CleanupGitHubContext> {
   const needsGitHub = targets.some(
     (entry) =>
@@ -2047,8 +2075,11 @@ export async function resolveCleanupGitHubContext({
     } else {
       try {
         executor = await createExecutor(selectedLogin);
+        assertSetupExecutionActive(isStopped);
         await executor.verifyIdentity();
+        assertSetupExecutionActive(isStopped);
       } catch (error) {
+        if (isSetupExecutionInterrupted(error)) throw error;
         unavailable = formatError(error);
       }
     }
@@ -2291,6 +2322,7 @@ export async function ensureServicePrincipal(
   clientId: string,
   runAz: (args: string[]) => Promise<Partial<CommandResult>>,
   mutationRecovery?: {
+    isStopped(): boolean;
     operation: object & { operationId: string };
     persist(): Promise<void>;
   },
@@ -2303,7 +2335,8 @@ export async function ensureServicePrincipal(
     mutationRecovery ?
       createAzureRecoveryPort(
         mutationRecovery.operation,
-        mutationRecovery.persist
+        mutationRecovery.persist,
+        mutationRecovery.isStopped
       )
     : undefined,
     beforeCreate,
@@ -2340,11 +2373,12 @@ export function quarantineUnsettledCleanupDeletions(op: any): number {
 export async function cleanupAzureSetupArtifacts(
   op: any,
   {
-    runAz,
+    runAz: runAzCommand,
     steps,
     only,
     onResultRecorded,
-    persistJournal
+    persistJournal,
+    isStopped
   }: {
     runAz: (args: string[]) => Promise<Partial<CommandResult>>;
     steps?: string[];
@@ -2359,16 +2393,29 @@ export async function cleanupAzureSetupArtifacts(
     // exists, because a delete that is not written down before it is issued is
     // one a later attempt cannot tell from a delete that never happened.
     persistJournal?: () => Promise<void>;
+    isStopped?: () => boolean;
   }
 ): Promise<{
   attempt: number;
-  state: "not_needed" | "succeeded" | "succeeded_with_warnings";
+  state: "not_needed" | "succeeded" | "succeeded_with_warnings" | "interrupted";
   results: SetupCleanupResult[];
   warnings: string[];
   attemptedKeys: Set<string>;
 }> {
   const ledger = getSetupArtifactLedger(op);
   const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
+  if (isStopped?.())
+    return {
+      attempt,
+      state: "interrupted",
+      results: [],
+      warnings: [],
+      attemptedKeys: new Set()
+    };
+  const runAz = (args: string[]) => {
+    assertSetupExecutionActive(isStopped);
+    return runAzCommand(args);
+  };
   const priorResults =
     Array.isArray(ledger?.cleanup?.results) ? ledger.cleanup.results : [];
   if (!ledger) {
@@ -2624,6 +2671,14 @@ export async function cleanupAzureSetupArtifacts(
   };
 
   for (const deletion of selected) {
+    if (isStopped?.())
+      return {
+        attempt,
+        state: "interrupted",
+        results: attemptResults,
+        warnings,
+        attemptedKeys
+      };
     const label = cleanupTargetLabel(deletion.artifactType, deletion.artifact);
     const identity = cleanupArtifactIdentity(
       deletion.artifactType,
@@ -2719,6 +2774,12 @@ export async function cleanupAzureSetupArtifacts(
         label,
         ...(deletion.identityArgs ? { confirmRecordedIdentity } : {}),
         persist: persistJournal ?? (async () => {}),
+        isStopped,
+        onConfirmed: () =>
+          recordCleanupDeletion(op, {
+            artifactType: deletion.artifactType,
+            identity
+          }),
         runDelete: async () => {
           const result = await runAz(deletion.args || []);
           return {
@@ -2733,6 +2794,14 @@ export async function cleanupAzureSetupArtifacts(
         readExactIdentity
       });
     } catch (error) {
+      if (isSetupExecutionInterrupted(error))
+        return {
+          attempt,
+          state: "interrupted",
+          results: attemptResults,
+          warnings,
+          attemptedKeys
+        };
       if (!(error instanceof CleanupJournalPersistenceError)) throw error;
       // The journal did not reach disk. Radius stops here rather than deleting
       // anything else it could not account for afterwards.
@@ -2765,6 +2834,14 @@ export async function cleanupAzureSetupArtifacts(
     );
   }
 
+  if (isStopped?.())
+    return {
+      attempt,
+      state: "interrupted",
+      results: attemptResults,
+      warnings,
+      attemptedKeys
+    };
   const finalState = warnings.length ? "succeeded_with_warnings" : "succeeded";
   // Results from this attempt replace the ones it re-tried; anything an earlier
   // attempt recorded and this one did not touch survives untouched.
@@ -2797,19 +2874,22 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     run,
     persist,
     only,
-    steps
+    steps,
+    isStopped
   }: {
     attempt: number;
     run: GitHubVariableCommand;
     persist(): Promise<void>;
     only?: Set<string> | null;
     steps?: string[];
+    isStopped?: () => boolean;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   blocked: boolean;
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const variables = githubEnvironmentVariableRollbackTargets(op, only ?? null);
   if (variables.length === 0) {
@@ -2820,7 +2900,13 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     operation: op,
     persist,
     variables,
-    run
+    run,
+    isStopped,
+    onConfirmed: (variable) =>
+      recordCleanupDeletion(op, {
+        artifactType: "github_environment_variable",
+        identity: variable.identity
+      })
   });
   for (const entry of outcome.results) {
     if (
@@ -2839,6 +2925,7 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     results: outcome.results,
     warnings: outcome.warnings,
     blocked: outcome.blocked,
+    interrupted: outcome.interrupted,
     attempted: true
   };
 }
@@ -2867,18 +2954,23 @@ export async function rollbackCommittedWorkflowFiles(
     attempt,
     ports,
     only,
-    steps
+    steps,
+    isStopped,
+    persist
   }: {
     attempt: number;
     ports: WorkflowRollbackPorts;
     only?: Set<string> | null;
     steps?: string[];
+    isStopped?: () => boolean;
+    persist?: () => Promise<void>;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   blocked: boolean;
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const files = workflowRollbackTargets(op, only ?? null);
   if (files.length === 0) {
@@ -2891,7 +2983,17 @@ export async function rollbackCommittedWorkflowFiles(
       commit: workflowRollbackCommitState(op),
       files
     },
-    ports
+    {
+      ...ports,
+      isStopped,
+      onResultRecorded: async (entry) => {
+        recordCleanupDeletion(op, {
+          artifactType: "workflow_file",
+          identity: entry.identity ?? undefined
+        });
+        await persist?.();
+      }
+    }
   );
   for (const entry of outcome.results) {
     if (
@@ -2910,6 +3012,7 @@ export async function rollbackCommittedWorkflowFiles(
     results: outcome.results,
     warnings: outcome.warnings,
     blocked: outcome.blocked,
+    interrupted: outcome.interrupted,
     attempted: true
   };
 }
@@ -2919,10 +3022,11 @@ export async function cleanupGitHubEnvironmentArtifact(
   {
     attempt,
     runDeleteEnvironment,
-    readEnvironment,
+    readEnvironment: readEnvironmentCommand,
     persistJournal,
     invalidateEnvironmentListing,
-    steps
+    steps,
+    isStopped
   }: {
     attempt: number;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
@@ -2937,15 +3041,28 @@ export async function cleanupGitHubEnvironmentArtifact(
     // rolled-back environment under its last known status.
     invalidateEnvironmentListing?: ((repo: string) => void) | null;
     steps?: string[];
+    isStopped?: () => boolean;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const ledger = getSetupArtifactLedger(op);
   const results: SetupCleanupResult[] = [];
   const warnings: string[] = [];
+  if (isStopped?.())
+    return { results, warnings, attempted: false, interrupted: true };
+  const readEnvironment =
+    readEnvironmentCommand ?
+      async (args: string[]) => {
+        assertSetupExecutionActive(isStopped);
+        const result = await readEnvironmentCommand(args);
+        assertSetupExecutionActive(isStopped);
+        return result;
+      }
+    : undefined;
   if (!ledger) return { results, warnings, attempted: false };
   const artifact = ledger.githubEnvironment;
   if (artifact.state !== "created" && artifact.state !== "created_candidate") {
@@ -3011,6 +3128,12 @@ export async function cleanupGitHubEnvironmentArtifact(
       identity: identity || `${envRepo}:${envName}`,
       label: `GitHub environment "${target}"`,
       persist: persistJournal ?? (async () => {}),
+      isStopped,
+      onConfirmed: () =>
+        recordCleanupDeletion(op, {
+          artifactType: "github_environment",
+          identity
+        }),
       runDelete: async () => {
         try {
           await runDeleteEnvironment(deleteArgs);
@@ -3054,6 +3177,7 @@ export async function cleanupGitHubEnvironmentArtifact(
         try {
           current = await readEnvironment(["api", environmentPath]);
         } catch (error) {
+          if (isSetupExecutionInterrupted(error)) throw error;
           return {
             decision: "refuse",
             detail: `Radius could not read GitHub environment "${target}" to confirm its identity: ${errorMessage(error)}. It removed nothing.`
@@ -3130,6 +3254,8 @@ export async function cleanupGitHubEnvironmentArtifact(
       }
     });
   } catch (error) {
+    if (isSetupExecutionInterrupted(error))
+      return { results, warnings, attempted: true, interrupted: true };
     if (!(error instanceof CleanupJournalPersistenceError)) throw error;
     const detail = `Radius stopped before removing GitHub environment "${target}" because it could not save the record of what it was deleting: ${error.message}`;
     warnings.push(detail);
@@ -3170,7 +3296,8 @@ export async function finalizeSetupFailure(
     runAz,
     runGitHubVariable,
     runDeleteEnvironment,
-    readEnvironment
+    readEnvironment,
+    isStopped
   }: {
     status: number;
     error: string;
@@ -3185,8 +3312,10 @@ export async function finalizeSetupFailure(
     runGitHubVariable?: GitHubVariableCommand | null;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
     readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
+    isStopped?: () => boolean;
   }
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  assertSetupExecutionActive(isStopped);
   const safeExtra = sanitizeFailureExtra(extra || {});
   const body: Record<string, unknown> = {
     error,
@@ -3249,6 +3378,7 @@ export async function finalizeSetupFailure(
         op,
         {
           attempt,
+          isStopped,
           run:
             runGitHubVariable ??
             (async () => ({
@@ -3260,6 +3390,7 @@ export async function finalizeSetupFailure(
           steps
         }
       );
+      assertSetupExecutionActive(isStopped);
       warnings.push(...variableCleanup.warnings);
       results = [...results, ...variableCleanup.results];
       if (variableCleanup.results.length > 0) {
@@ -3270,9 +3401,11 @@ export async function finalizeSetupFailure(
       if (!variableCleanup.blocked && runAz) {
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
+          isStopped,
           steps,
           persistJournal: () => operations.persist()
         });
+        assertSetupExecutionActive(isStopped);
         warnings.push(...azureCleanup.warnings);
         results = [...results, ...azureCleanup.results];
         if (
@@ -3288,6 +3421,7 @@ export async function finalizeSetupFailure(
       if (!variableCleanup.blocked) {
         const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
           attempt,
+          isStopped,
           runDeleteEnvironment,
           readEnvironment,
           persistJournal: () => operations.persist(),
@@ -3296,6 +3430,7 @@ export async function finalizeSetupFailure(
           },
           steps
         });
+        assertSetupExecutionActive(isStopped);
         warnings.push(...environmentCleanup.warnings);
         results = [...results, ...environmentCleanup.results];
         if (environmentCleanup.warnings.length > 0) {
@@ -3374,13 +3509,28 @@ export async function finalizeSetupFailure(
 export async function preflightRepoAdmin(
   repo: string,
   executor?: SelectedGhExecutor,
-  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION,
+  assertActive?: () => void
 ): Promise<string> {
+  const read = async <T>(work: () => Promise<T>): Promise<T> => {
+    assertActive?.();
+    try {
+      return await work();
+    } finally {
+      assertActive?.();
+    }
+  };
   const result = await preflightSetupRepository(repo, {
     read: (path) =>
-      executor ? selectedGhApiJson(executor, path) : ghApiJson(path),
+      read(() =>
+        executor ?
+          selectedGhApiJson(executor, path, assertActive)
+        : ghApiJson(path)
+      ),
     fallbackLogin: async () =>
-      executor ? executor.login : (await getGitHubIdentity()).actingLogin,
+      executor ?
+        executor.login
+      : (await read(() => getGitHubIdentity())).actingLogin,
     isAppLogin: isGitHubAppBotLogin,
     probes: GITHUB_APP_ACCESS_PROBES,
     optionalString,
@@ -3952,36 +4102,72 @@ function productionEnvironmentDeletionPorts(
   };
 }
 
-export function createInstanceRequestCoordinator(
-  instanceId: string,
-  resolveBaseUrl: () => string,
-  environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts,
-  dependencies: {
-    awsEnabled: boolean;
-    awsEnvironmentAccess: Pick<
-      AwsEnvironmentAccess<EnvironmentOperationRecord>,
-      "setup"
-    >;
-    executionOwner: EnvironmentExecutionOwner;
-    accountContext: EnvironmentAccountContext;
-    setupServices: SetupServices;
-    servers: ReadonlyMap<string, CanvasServerEntry>;
-    environmentOperationRunner?: EnvironmentOperationRunner;
+export interface EnvironmentOperationExecutionDependencies {
+  // The AWS developer switch. Cleanup runs no AWS command while it is off.
+  awsEnabled: boolean;
+  awsEnvironmentAccess: Pick<
+    AwsEnvironmentAccess<EnvironmentOperationRecord>,
+    "setup" | "release" | "rollback"
+  >;
+  executionOwner: EnvironmentExecutionOwner;
+  scope: ReturnType<EnvironmentExecutionOwner["attachRuntime"]>;
+  accountContext: EnvironmentAccountContext;
+  setupServices: SetupServices;
+  verificationStatus(
+    input: VerificationStatusInput
+  ): Promise<VerificationStatusResult>;
+  admitRecoveryRollback(
+    operationId: string,
+    isCurrent: () => boolean
+  ): Promise<void>;
+  presentation?: { instanceId: string };
+  environmentOperationRunner?: EnvironmentOperationRunner;
+  runDeletion?(
+    operation: Parameters<typeof runEnvironmentDeletion>[0]
+  ): Promise<void>;
+}
+
+async function admitRecoveryRollback(
+  control: OperationControlService,
+  operationId: string,
+  isCurrent: () => boolean,
+  instanceId?: string
+): Promise<void> {
+  const result = await control({
+    instanceId,
+    operationId,
+    isCurrent,
+    command: "rollback"
+  });
+  if (result.status >= 400) {
+    throw new Error(
+      typeof result.body.error === "string" ?
+        result.body.error
+      : `Operation control failed with status ${result.status}.`
+    );
   }
+}
+
+export function createEnvironmentOperationExecution(
+  dependencies: EnvironmentOperationExecutionDependencies
 ) {
   const {
-    awsEnabled,
     awsEnvironmentAccess,
     executionOwner,
     accountContext,
-    servers,
-    setupServices
+    setupServices,
+    scope: attachment
   } = dependencies;
+  const instanceId = dependencies.presentation?.instanceId;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
-  if (typeof awsEnabled !== "boolean")
+  if (typeof dependencies.awsEnabled !== "boolean")
     throw new Error("Missing request coordinator dependency: awsEnabled");
-  if (typeof awsEnvironmentAccess?.setup !== "function")
+  if (
+    typeof awsEnvironmentAccess?.setup !== "function" ||
+    typeof awsEnvironmentAccess.release !== "function" ||
+    typeof awsEnvironmentAccess.rollback !== "function"
+  )
     throw new Error(
       "Missing request coordinator dependency: awsEnvironmentAccess"
     );
@@ -3992,10 +4178,12 @@ export function createInstanceRequestCoordinator(
       );
     }
   }
+  if (typeof dependencies.verificationStatus !== "function") {
+    throw new Error(
+      "Missing request coordinator dependency: verificationStatus"
+    );
+  }
   const githubAccountCoordinator = accountContext.coordinator;
-  const attachment = executionOwner.attach(instanceId);
-  const serverOwnedToken = randomUUID();
-  const browserMutationNonce = randomUUID();
 
   // Every server-owned runner saves through the same registry and reports
   // through the same diagnostic channel, so the wiring is bound once rather
@@ -4007,126 +4195,30 @@ export function createInstanceRequestCoordinator(
       report: (diagnostic) => operations.report?.(diagnostic)
     });
 
-  function scheduleServerOwnedTask(
-    operationId: string,
-    task: () => Promise<void>
-  ): void {
-    let reconciliationNeeded = false;
-    let currentAtSettlement: ReturnType<typeof operations.get>;
-    const op = operations.get(operationId);
-    if (op) setExecutionActive(op, true);
-    attachment.schedule(operationId, {
-      run: task,
-      failed: async (error) => {
-        const current = operations.get(operationId);
-        if (executionOwner.isShuttingDown(instanceId)) return;
-        if (reopenProviderReconciliation(current)) {
-          if (
-            !current.steps.some(
-              (step: { label?: string }) =>
-                step.label ===
-                "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
-            )
-          ) {
-            addLegacyStep(
-              current,
-              "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
-            );
-          }
-          reconciliationNeeded = true;
-          await operations.persist().catch(() => {});
-          return;
-        }
-        if (current && !current.endedAt) {
-          finish(current, "failed", {
-            failure: {
-              code: "server-owned-task-failed",
-              stage: current.currentStage,
-              stepSeq: null,
-              message: errorMessage(error),
-              classification: "unknown",
-              evidence: error instanceof Error ? error.stack || null : null
-            }
-          });
-          await operations.persist().catch(() => {});
-        }
-      },
-      settling: () => {
-        const current = (currentAtSettlement = operations.get(operationId));
-        if (current && !current.endedAt) setExecutionActive(current, false);
-      },
-      settled: () => {
-        const current = currentAtSettlement;
-        if (
-          current?.endedAt &&
-          current.providerRecovery?.state === "rollback_pending" &&
-          !providerRecoveryManualGuidance(current)
-        ) {
-          scheduleAutomaticRecoveryRollback(operationId);
-        } else if (
-          reconciliationNeeded &&
-          current &&
-          !current.endedAt &&
-          unresolvedProviderMutations(current).length > 0
-        ) {
-          scheduleProviderReconciliation(operationId);
-        }
-      }
-    });
-  }
-
-  function scheduleProviderReconciliation(operationId: string): void {
-    attachment.scheduleReconciliation(operationId, () => {
-      if (executionOwner.isShuttingDown(instanceId)) return;
-      const operation = operations.get(operationId);
-      if (
-        !operation ||
-        operation.endedAt ||
-        unresolvedProviderMutations(operation).length === 0
-      ) {
-        return;
-      }
-      scheduleRecoveredProviderMutation(operation);
-    });
-  }
-
-  function scheduleAutomaticRecoveryRollback(operationId: string): void {
-    if (!attachment.claimAutomaticRollback(operationId)) return;
-    queueMicrotask(() => {
-      void postInternal(
-        `/api/operations/${encodeURIComponent(operationId)}/rollback`,
-        {}
-      )
-        .catch((error) => {
-          operations.report?.({
-            scope: "provider-recovery-auto-rollback",
-            operationId,
-            message: errorMessage(error)
-          });
-        })
-        .finally(() => {
-          attachment.releaseAutomaticRollback(operationId);
-        });
-    });
-  }
-
-  async function postInternal(pathname: string, data: unknown): Promise<any> {
-    const response = await fetch(`${resolveBaseUrl()}${pathname}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": serverOwnedToken
-      },
-      body: JSON.stringify(data)
-    });
-    const result: any = await response.json();
-    if (!response.ok && !result?.inputRequired) {
-      throw new Error(
-        result?.error || `Request failed with HTTP ${response.status}.`
-      );
-    }
-    return result;
-  }
+  const execution = createSetupExecution({
+    scope: attachment,
+    deferAdmissionRecovery: executionOwner.deferAdmissionRecovery,
+    getOperation: (operationId) => operations.get(operationId),
+    persist: () => operations.persist(),
+    report: (diagnostic) => operations.report?.(diagnostic),
+    isShuttingDown: (operationId) =>
+      attachment.isShuttingDown() ||
+      (operations.get(operationId)?.kind === "delete" &&
+        executionOwner.isShuttingDown(instanceId)),
+    deferRecovery: queueMicrotask,
+    admitRecoveryRollback: dependencies.admitRecoveryRollback,
+    claimVerificationMonitor: executionOwner.claimVerificationMonitor,
+    runOperation: runEnvironmentOperation,
+    runVerificationRetry,
+    runVerificationContinuation: runRecoveredVerificationContinuation,
+    observeRecoveredVerification: (operation) =>
+      monitorVerificationAsSelectedAccount(operation, (executor) =>
+        resolveRecoveredVerificationRun(operation, executor)
+      ),
+    runCleanup: runCleanupCommand,
+    recoverBranchDelete: runRecoveredBranchDelete,
+    recoverCleanup: runRecoveredCleanup
+  });
 
   async function monitorVerification(operationId: string): Promise<void> {
     const initialOperation = operations.get(operationId);
@@ -4134,130 +4226,139 @@ export function createInstanceRequestCoordinator(
       initialOperation || { operationId },
       Date.now
     );
-    let delayMs = 5000;
-    while (Date.now() < deadline) {
-      const op = operations.get(operationId);
-      if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
-      // Each polling observation is a safe boundary: nothing is being written.
-      if (shouldStop(op)) {
-        stopAtBoundary(op, "verification-observation", { announce: false });
-        const saved = await saveOperation(op);
-        if (saved) announceOperationTerminal(op);
-        return;
-      }
-      const params = new URLSearchParams({
-        repo: op.repo,
-        environment: op.environment,
-        operationId
-      });
-      const response = await fetch(
-        `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
-        { headers: { "X-Radius-Server-Owned": serverOwnedToken } }
-      );
-      const result: any = await response.json();
-      if (!response.ok) {
-        throw new Error(
-          result?.error ||
-            `Verification status failed with HTTP ${response.status}.`
-        );
-      }
-      if (result?.state === "success" || result?.state === "failed") return;
-      if (result?.terminal || result?.state === "expired") {
-        const current = operations
-          .all()
-          .find((candidate: any) => candidate.operationId === operationId);
-        if (current && !current.endedAt) {
-          finish(current, "failed_partial", {
+    const observation = createWorkflowObservationScope(
+      createDeployStatusReader
+    );
+    const stopListening = executionOwner.onShutdown(() => observation.stop());
+    try {
+      await monitorSetupVerification(deadline, {
+        current: () => {
+          if (attachment.isShuttingDown()) return undefined;
+          const op = operations.get(operationId);
+          return op ?
+              {
+                active: !op.endedAt && op.currentStage === STAGE_VERIFY,
+                stopRequested: shouldStop(op)
+              }
+            : undefined;
+        },
+        observe: async () => {
+          const op = operations.get(operationId);
+          const outcome = await dependencies.verificationStatus({
+            repo: op?.repo || "",
+            environment: op?.environment,
+            operationId,
+            observation
+          });
+          if (outcome.status < 200 || outcome.status >= 300) {
+            throw new Error(
+              outcome.body.error ||
+                `Verification status failed with HTTP ${outcome.status}.`
+            );
+          }
+          return outcome.body;
+        },
+        stop: async () => {
+          const op = operations.get(operationId);
+          if (!op) return;
+          stopAtBoundary(op, "verification-observation", { announce: false });
+          const saved = await saveOperation(op);
+          if (saved) announceOperationTerminal(op);
+        },
+        expire: async (message) => {
+          const op = operations.get(operationId);
+          if (!op || op.endedAt) return;
+          finish(op, "failed_partial", {
             failure: {
               code: "verification-tracking-expired",
-              stage: current.currentStage,
+              stage: op.currentStage,
               stepSeq: null,
-              message:
-                result?.error ||
-                "Credential verification is no longer being tracked.",
+              message,
               classification: "user-fixable",
               evidence: null
             }
           });
-          await saveOperation(current);
-        }
-        return;
-      }
-      const jitterMs = Math.floor(Math.random() * 1000);
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
-      );
-      delayMs = Math.min(Math.ceil(delayMs * 1.5), 15_000);
+          await saveOperation(op);
+        },
+        now: Date.now,
+        sleep: (milliseconds) => observation.delay(milliseconds),
+        jitter: () => Math.floor(Math.random() * 1000)
+      });
+    } finally {
+      stopListening();
+      observation.stop();
     }
-    throw new Error(
-      "Credential verification did not complete within 45 minutes."
-    );
   }
 
   async function monitorVerificationAsSelectedAccount(
     op: any,
     beforeMonitor?: (executor: SelectedGhExecutor) => Promise<boolean>
   ): Promise<void> {
-    await monitorVerificationWithSelectedAccount(op, {
-      createExecutor: (login) =>
-        githubAccountCoordinator.createReadOnlyExecutor(login),
-      registerExecutor: (operationId, executor) => {
-        accountContext.registerExecutor(operationId, executor);
-      },
-      unregisterExecutor: (operationId) => {
-        accountContext.unregisterExecutor(operationId);
-      },
-      beforeMonitor,
-      monitor: monitorVerification,
-      accountUnavailable: async (operation, login, detail) => {
-        operation.verification = {
-          ...(operation.verification || {}),
-          accountUnavailablePhase:
-            operation.verification?.runId ? "monitor" : "dispatch"
-        };
-        const account = login ? `@${login}` : "the saved GitHub account";
-        addLegacyStep(
-          operation,
-          `❌ Could not use ${account} to resume credential verification.`
-        );
-        finish(operation, "failed_partial", {
-          failure: {
-            code:
-              login ?
-                "verification-retry-github-account-unavailable"
-              : "verification-retry-github-account-missing",
-            stage: STAGE_VERIFY,
-            stepSeq: null,
-            message:
-              login ?
-                `Radius could not use @${login} to resume credential verification. Re-check that account and retry verification.`
-              : "Radius cannot resume credential verification because this operation has no saved GitHub account. Start a new environment setup.",
-            classification: "user-fixable",
-            evidence: detail
-          }
-        });
-        await saveOperation(operation);
-      },
-      trackingExpired: async (operation, expiration) => {
-        const copy = verificationAcquisitionExpiredCopy("resume", expiration);
-        finish(operation, "failed_partial", {
-          failure: {
-            code: "verification-tracking-expired",
-            stage: STAGE_VERIFY,
-            stepSeq: null,
-            message: copy.message,
-            classification: "user-fixable",
-            evidence: expiration.detail
-          }
-        });
-        await saveOperation(operation);
-      },
-      isRateLimitError: (error) => isGitHubRateLimitError(error),
-      now: Date.now,
-      sleep: (milliseconds) =>
-        new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      errorMessage
-    });
+    const observation = createWorkflowObservationScope(
+      createDeployStatusReader
+    );
+    const stopListening = executionOwner.onShutdown(() => observation.stop());
+    try {
+      await monitorVerificationWithSelectedAccount(op, {
+        isStopped: attachment.isShuttingDown,
+        createExecutor: (login) =>
+          githubAccountCoordinator.createReadOnlyExecutor(login),
+        registerExecutor: (operationId, executor) =>
+          accountContext.registerExecutor(operationId, executor),
+        beforeMonitor,
+        monitor: monitorVerification,
+        accountUnavailable: async (operation, login, detail) => {
+          operation.verification = {
+            ...(operation.verification || {}),
+            accountUnavailablePhase:
+              operation.verification?.runId ? "monitor" : "dispatch"
+          };
+          const account = login ? `@${login}` : "the saved GitHub account";
+          addLegacyStep(
+            operation,
+            `❌ Could not use ${account} to resume credential verification.`
+          );
+          finish(operation, "failed_partial", {
+            failure: {
+              code:
+                login ?
+                  "verification-retry-github-account-unavailable"
+                : "verification-retry-github-account-missing",
+              stage: STAGE_VERIFY,
+              stepSeq: null,
+              message:
+                login ?
+                  `Radius could not use @${login} to resume credential verification. Re-check that account and retry verification.`
+                : "Radius cannot resume credential verification because this operation has no saved GitHub account. Start a new environment setup.",
+              classification: "user-fixable",
+              evidence: detail
+            }
+          });
+          await saveOperation(operation);
+        },
+        trackingExpired: async (operation, expiration) => {
+          const copy = verificationAcquisitionExpiredCopy("resume", expiration);
+          finish(operation, "failed_partial", {
+            failure: {
+              code: "verification-tracking-expired",
+              stage: STAGE_VERIFY,
+              stepSeq: null,
+              message: copy.message,
+              classification: "user-fixable",
+              evidence: expiration.detail
+            }
+          });
+          await saveOperation(operation);
+        },
+        isRateLimitError: (error) => isGitHubRateLimitError(error),
+        now: Date.now,
+        sleep: (milliseconds) => observation.delay(milliseconds),
+        errorMessage
+      });
+    } finally {
+      stopListening();
+      observation.stop();
+    }
   }
 
   async function runEnvironmentOperation(operationId: string): Promise<void> {
@@ -4268,21 +4369,12 @@ export function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
-      await runEnvironmentDeletion(op, {
-        ...environmentDeletionPorts,
-        reportStatePackageDeletionFailure: async (input) => {
-          const result = await invokeSessionPrompt(
-            sessionPromptHandler,
-            statePackageDeletionFailureMessage(input)
-          );
-          if (result.status >= 400) {
-            throw new Error(
-              result.error ||
-                "Could not report the GHCR package deletion failure to Copilot chat."
-            );
-          }
-        }
-      });
+      if (!dependencies.runDeletion) {
+        throw new Error(
+          "Environment deletion requires the server-ready deletion runner."
+        );
+      }
+      await dependencies.runDeletion(op);
       return;
     }
     const request = op.request || op.resumeRequest || {};
@@ -4295,28 +4387,34 @@ export function createInstanceRequestCoordinator(
         "The environment operation does not have a pinned GitHub account."
       );
     }
-    let executorRegistered = false;
+    let releaseExecutor: (() => void) | undefined;
     try {
       const setup = await githubAccountCoordinator.withSelectedAccount(
         selectedLogin,
         { ownerKey: accountContext.ownerKey, operationId },
-        async (executor) => {
-          accountContext.registerExecutor(operationId, executor);
-          executorRegistered = true;
+        async (executor, lease) => {
+          releaseExecutor = accountContext.registerExecutor(
+            operationId,
+            executor
+          );
+          if (attachment.isShuttingDown()) return { shouldMonitor: false };
           return runEnvironmentOperationWorkflow(op, executor, {
-            preflightRepoAdmin: (repo, selectedExecutor) =>
+            preflightRepoAdmin: (repo, selectedExecutor, assertActive) =>
               preflightRepoAdmin(
                 repo,
                 selectedExecutor,
-                GH_COMMAND_PRESENTATION
+                GH_COMMAND_PRESENTATION,
+                assertActive
               ),
             guardStopBoundary: (operation, boundary) =>
-              honorStopBoundary({
-                operation,
-                boundary,
-                persist: () => operations.persist(),
-                report: (diagnostic) => operations.report?.(diagnostic)
-              }),
+              attachment.isShuttingDown() ?
+                Promise.resolve(false)
+              : honorStopBoundary({
+                  operation,
+                  boundary,
+                  persist: () => operations.persist(),
+                  report: (diagnostic) => operations.report?.(diagnostic)
+                }),
             preflightGhcrPackageWriteAccess: (selectedExecutor) =>
               preflightGhcrPackageWriteAccess(
                 getGhPackageCredentials,
@@ -4344,6 +4442,7 @@ export function createInstanceRequestCoordinator(
                 report: (diagnostic) => operations.report?.(diagnostic),
                 fail: async (status, error, code) => {
                   await finalizeSetupFailure(operation, {
+                    isStopped: setupIsStopped(operation),
                     status,
                     error,
                     code,
@@ -4363,12 +4462,14 @@ export function createInstanceRequestCoordinator(
                 }
               }),
             persistProviderMutation: () => operations.persist(),
+            isStopped: attachment.isShuttingDown,
             finalizeEnvironmentResolutionFailure: async (
               operation,
               input,
               selectedExecutor
             ) => {
               await finalizeSetupFailure(operation, {
+                isStopped: setupIsStopped(operation),
                 ...input,
                 stage: operation.currentStage,
                 classification:
@@ -4391,28 +4492,74 @@ export function createInstanceRequestCoordinator(
             instanceId,
             setupServices: {
               authorizeAzure: (request) => {
-                if (executionOwner.isShuttingDown(instanceId))
-                  throw new Error("Setup execution is shutting down.");
+                assertSetupExecutionActive(attachment.isShuttingDown);
                 return setupServices.authorizeAzure(request);
               },
               configureEnvironment: (request, projectionInstanceId) => {
-                if (executionOwner.isShuttingDown(instanceId))
-                  throw new Error("Setup execution is shutting down.");
+                assertSetupExecutionActive(attachment.isShuttingDown);
                 return setupServices.configureEnvironment(
                   request,
-                  projectionInstanceId
+                  projectionInstanceId,
+                  attachment.isCurrent
                 );
               }
             },
-            setupAwsDeployIdentity: (operation, input, selectedExecutor) => {
-              if (executionOwner.isShuttingDown(instanceId))
-                throw new Error("Setup execution is shutting down.");
-              return awsEnvironmentAccess.setup(
+            // The deploy identity lock wait has no deadline, so AWS setup
+            // gives up the GitHub account lease while it runs. It takes the
+            // lease back for Configure environment, which runs gh as the
+            // selected account. No lease holder waits for the deploy identity
+            // lock this setup holds. A failed or paused AWS setup never needs
+            // the lease again.
+            setupAwsDeployIdentity: async (
+              operation,
+              input,
+              selectedExecutor
+            ) => {
+              // Returned as an AWS setup failure, so setup cleans up.
+              const switchFailure = (error: unknown) => ({
+                ok: false as const,
+                status: 409,
+                error: errorMessage(error),
+                code: "github-account-switch-failed"
+              });
+
+              // Entered before the release, so a failed release fails this
+              // stage.
+              enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+
+              try {
+                await lease.release();
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              // Shutdown can start while the release restores the account.
+              assertSetupExecutionActive(attachment.isShuttingDown);
+              const result = await awsEnvironmentAccess.setup(
                 operation,
                 input,
                 selectedExecutor
               );
+
+              if (!result.ok) return result;
+
+              try {
+                await lease.retake(() => {
+                  addLegacyStep(
+                    operation,
+                    "⏳ Waiting for another Radius run to finish with the GitHub CLI account."
+                  );
+                });
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              return result;
             },
+            // Runs during shutdown too: a lock left behind blocks every other
+            // run on this deploy identity until someone removes it.
+            releaseAwsDeployIdentity: (operation) =>
+              awsEnvironmentAccess.release(operation),
             now: () => Date.now()
           });
         },
@@ -4440,6 +4587,8 @@ export function createInstanceRequestCoordinator(
       await monitorVerification(operationId);
     } catch (error) {
       if (!(error instanceof ProviderMutationRecoveryError)) {
+        if (isSetupExecutionInterrupted(error)) throw error;
+        assertSetupExecutionActive(attachment.isShuttingDown);
         const unresolved = unresolvedProviderMutations(op)[0];
         if (unresolved) {
           await recordProviderReconciliationFailure(
@@ -4452,9 +4601,7 @@ export function createInstanceRequestCoordinator(
       }
       throw error;
     } finally {
-      if (executorRegistered) {
-        accountContext.unregisterExecutor(operationId);
-      }
+      releaseExecutor?.();
     }
   }
 
@@ -4478,41 +4625,48 @@ export function createInstanceRequestCoordinator(
 
     const operation = operations.get(operationId);
     if (!operation) return;
-    await runSelectedVerificationRetry(operation, commandId, {
-      createExecutor: (login) =>
-        githubAccountCoordinator.createReadOnlyExecutor(login),
-      registerExecutor: (id, executor) => {
-        accountContext.registerExecutor(id, executor);
-      },
-      unregisterExecutor: (id) => {
-        accountContext.unregisterExecutor(id);
-      },
-      stopBoundary: ({ operation: target, boundary, beforePersist }) =>
-        honorStopBoundary({
-          operation: target,
-          boundary,
-          persist: () => operations.persist(),
-          report: (diagnostic) => operations.report?.(diagnostic),
-          beforePersist
-        }),
-      buildDispatchArgs: buildVerifyWorkflowDispatchArgs,
-      selectedCommandAuthorizationError,
-      isAuthorizationError: isSelectedGhAuthorizationError,
-      isRateLimitError: isGitHubRateLimitError,
-      now: Date.now,
-      sleep: (milliseconds) =>
-        new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
-      stageVerify: STAGE_VERIFY,
-      addStep: (target, text, stage) => addLegacyStep(target, text, stage),
-      setCommandState,
-      finish,
-      persist: saveOperation,
-      persistJournal: () => operations.persist(),
-      monitor: monitorVerification,
-      currentState: (id) => operations.get(id)?.state || null,
-      errorMessage
-    });
+    const observation = createWorkflowObservationScope(
+      createDeployStatusReader
+    );
+    const stopListening = executionOwner.onShutdown(() => observation.stop());
+    try {
+      await runSelectedVerificationRetry(operation, commandId, {
+        isStopped: attachment.isShuttingDown,
+        createExecutor: (login) =>
+          githubAccountCoordinator.createReadOnlyExecutor(login),
+        registerExecutor: (id, executor) =>
+          accountContext.registerExecutor(id, executor),
+        stopBoundary: ({ operation: target, boundary, beforePersist }) =>
+          attachment.isShuttingDown() ?
+            Promise.resolve(false)
+          : honorStopBoundary({
+              operation: target,
+              boundary,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic),
+              beforePersist
+            }),
+        buildDispatchArgs: buildVerifyWorkflowDispatchArgs,
+        selectedCommandAuthorizationError,
+        isAuthorizationError: isSelectedGhAuthorizationError,
+        isRateLimitError: isGitHubRateLimitError,
+        now: Date.now,
+        sleep: (milliseconds) => observation.delay(milliseconds),
+        verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+        stageVerify: STAGE_VERIFY,
+        addStep: (target, text, stage) => addLegacyStep(target, text, stage),
+        setCommandState,
+        finish,
+        persist: saveOperation,
+        persistJournal: () => operations.persist(),
+        monitor: monitorVerification,
+        currentState: (id) => operations.get(id)?.state || null,
+        errorMessage
+      });
+    } finally {
+      stopListening();
+      observation.stop();
+    }
     return;
   }
 
@@ -4529,6 +4683,7 @@ export function createInstanceRequestCoordinator(
     await monitorVerificationAsSelectedAccount(operation, (executor) =>
       resolveRecoveredVerificationRun(operation, executor)
     );
+    if (attachment.isShuttingDown()) return;
     setCommandState(
       operation,
       commandId,
@@ -4558,6 +4713,86 @@ export function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
+    const targets = CLEANUP_COMMANDS[kind].selectTargets(op);
+    const selectedLogin = optionalString(op.context?.githubLogin);
+    const needsGitHub = targets.some((entry: { artifactType: string }) =>
+      [
+        "workflow_file",
+        "github_environment_variable",
+        "github_environment"
+      ].includes(entry.artifactType)
+    );
+    try {
+      if (needsGitHub && selectedLogin) {
+        const lease = await githubAccountCoordinator.withSelectedAccount(
+          selectedLogin,
+          { ownerKey: accountContext.ownerKey, operationId },
+          async (executor) => {
+            if (isStopped()) return;
+            const release = accountContext.registerExecutor(
+              operationId,
+              executor
+            );
+            try {
+              await runCleanupPass(
+                kind,
+                operationId,
+                commandId,
+                isStopped,
+                executor
+              );
+            } finally {
+              release();
+            }
+          }
+        );
+        if (
+          lease.restoration.state === "failed" ||
+          lease.restoration.state === "changed_externally"
+        ) {
+          operations.report({
+            scope: "setup-cleanup-account-restoration",
+            operationId,
+            message:
+              lease.restoration.guidance ||
+              "GitHub CLI account restoration needs attention."
+          });
+        }
+      } else {
+        await runCleanupPass(kind, operationId, commandId, isStopped);
+      }
+    } catch (error) {
+      if (!isSetupExecutionInterrupted(error)) throw error;
+    }
+  }
+
+  function setupIsStopped(op: {
+    operationId: string;
+    repo?: unknown;
+    environment?: unknown;
+    endedAt?: unknown;
+  }): () => boolean {
+    const { operationId, repo, environment } = op;
+    return () =>
+      attachment.isShuttingDown() ||
+      operations.get(operationId) !== op ||
+      op.operationId !== operationId ||
+      op.repo !== repo ||
+      op.environment !== environment ||
+      Boolean(op.endedAt);
+  }
+
+  async function runCleanupPass(
+    kind: CleanupCommandKind,
+    operationId: string,
+    commandId: string,
+    isStopped: () => boolean,
+    executor?: SelectedGhExecutor
+  ): Promise<void> {
+    assertSetupExecutionActive(isStopped);
+    const op = operations.get(operationId);
     const recoveryBeforeCleanup = cleanupProviderRecoveryDisposition(op);
     if (!recoveryBeforeCleanup.mayStartDestructiveCleanup) {
       throw new Error(
@@ -4574,7 +4809,7 @@ export function createInstanceRequestCoordinator(
     const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
     const steps: string[] = [];
     const persist = async (): Promise<void> => {
-      await saveOperation(op);
+      await operations.persist();
     };
     const warnings: string[] = [];
     let results: SetupCleanupResult[] = [];
@@ -4584,8 +4819,16 @@ export function createInstanceRequestCoordinator(
     ];
     const cleanupGitHub = await resolveCleanupGitHubContext({
       targets: selected,
-      selectedLogin: optionalString(op.context?.githubLogin)
+      isStopped,
+      selectedLogin: optionalString(op.context?.githubLogin),
+      createExecutor: async () => {
+        assertSetupExecutionActive(isStopped);
+        if (!executor)
+          throw new Error("Cleanup has no selected GitHub executor.");
+        return executor;
+      }
     });
+    if (isStopped()) return;
 
     // The workflow files come first and gate everything after them. Removing
     // the GitHub environment or the cloud identity while an installed workflow
@@ -4594,6 +4837,8 @@ export function createInstanceRequestCoordinator(
     // cannot finish stops the whole rollback here.
     const workflowPass = await rollbackCommittedWorkflowFiles(op, {
       attempt,
+      isStopped,
+      persist: () => operations.persist(),
       ports: createWorkflowRollbackPorts(cleanupGitHub.rollbackCommand),
       only: new Set<string>(
         selected
@@ -4606,10 +4851,12 @@ export function createInstanceRequestCoordinator(
       steps
     });
     if (workflowPass.attempted) {
+      if (workflowPass.interrupted && workflowPass.results.length === 0) return;
       warnings.push(...workflowPass.warnings);
       results = [...results, ...workflowPass.results];
       recordCleanupState(op, { state: "running", results: carriedResults() });
       await persist();
+      if (workflowPass.interrupted || isStopped()) return;
       if (workflowPass.blocked) {
         for (const step of steps) addLegacyStep(op, step);
         recordCleanupState(op, {
@@ -4634,8 +4881,10 @@ export function createInstanceRequestCoordinator(
       }
     }
 
+    if (isStopped()) return;
     const variablePass = await rollbackGitHubEnvironmentVariableArtifacts(op, {
       attempt,
+      isStopped,
       run: async (args) => {
         const result = await cleanupGitHub.rollbackCommand({ args });
         return {
@@ -4656,10 +4905,12 @@ export function createInstanceRequestCoordinator(
       steps
     });
     if (variablePass.attempted) {
+      if (variablePass.interrupted && variablePass.results.length === 0) return;
       warnings.push(...variablePass.warnings);
       results = [...results, ...variablePass.results];
       recordCleanupState(op, { state: "running", results: carriedResults() });
       await persist();
+      if (variablePass.interrupted || isStopped()) return;
       if (variablePass.blocked) {
         for (const step of steps) addLegacyStep(op, step);
         recordCleanupState(op, {
@@ -4684,6 +4935,27 @@ export function createInstanceRequestCoordinator(
       }
     }
 
+    if (isStopped()) return;
+    // The AWS changes go before the GitHub environment, the reverse of setup.
+    const awsPass = await rollbackAwsSetupArtifacts(op, {
+      attempt,
+      awsEnabled: dependencies.awsEnabled,
+      selected,
+      access: awsEnvironmentAccess,
+      steps,
+      persist,
+      isStopped
+    });
+    if (awsPass.attempted) {
+      if (awsPass.interrupted && awsPass.results.length === 0) return;
+      warnings.push(...awsPass.warnings);
+      results = [...results, ...awsPass.results];
+      recordCleanupState(op, { state: "running", results: carriedResults() });
+      await persist();
+      if (awsPass.interrupted) return;
+    }
+
+    if (isStopped()) return;
     // A GitHub environment can be one of the selected targets, and skipping it
     // here would report a clean removal while the environment survived.
     if (
@@ -4694,6 +4966,7 @@ export function createInstanceRequestCoordinator(
     ) {
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
+        isStopped,
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
         readEnvironment: cleanupGitHub.readEnvironment,
         persistJournal: () => operations.persist(),
@@ -4710,19 +4983,23 @@ export function createInstanceRequestCoordinator(
         recordCleanupState(op, { state: "running", results: carriedResults() });
         await persist();
       }
+      if (environmentCleanup.interrupted || isStopped()) return;
     }
 
+    if (isStopped()) return;
     const runAz = (args: string[]): Promise<CommandResult> =>
       runCliCommand("az", args);
     const azureCleanup = await cleanupAzureSetupArtifacts(op, {
       runAz,
+      isStopped,
       steps,
       only: new Set<string>(
         selected
           .filter(
             (entry: { artifactType: string }) =>
               entry.artifactType !== "github_environment" &&
-              entry.artifactType !== "github_environment_variable"
+              entry.artifactType !== "github_environment_variable" &&
+              !isAwsCleanupArtifactType(entry.artifactType)
           )
           .map((entry: { key: string }) => entry.key)
       ),
@@ -4731,8 +5008,16 @@ export function createInstanceRequestCoordinator(
     });
     warnings.push(...azureCleanup.warnings);
     results = [...results, ...azureCleanup.results];
+    if (azureCleanup.state === "interrupted" || isStopped()) return;
 
     for (const step of steps) addLegacyStep(op, step);
+    // Last, after everything this pass removes: the lock is what tells another
+    // run that this setup may still be changing the role.
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: dependencies.awsEnabled,
+      remove: (lock) => removeAwsDeployIdentityLock(lock, runAwsCli),
+      errorMessage
+    });
     // A deletion this pass issued and could not settle has nobody left to
     // settle it: the record is about to end, and every scheduler that would
     // reread it is gated on a live operation. Leaving it merely unresolved
@@ -4831,6 +5116,8 @@ export function createInstanceRequestCoordinator(
   async function runRecoveredBranchDelete(operationId: string): Promise<void> {
     const op = operations.get(operationId);
     if (!op) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
     const mutation = pendingBranchDelete(op);
     if (!mutation) return;
     // The branch belongs to the account that created it. An ambient `gh` here
@@ -4850,8 +5137,11 @@ export function createInstanceRequestCoordinator(
       }
       executor =
         await githubAccountCoordinator.createReadOnlyExecutor(selectedLogin);
+      if (isStopped()) return;
       await executor.verifyIdentity();
+      if (isStopped()) return;
     } catch (error) {
+      if (isStopped()) return;
       await failRecoveredBranchDelete(
         op,
         "setup-branch-delete-unresolved",
@@ -4863,6 +5153,7 @@ export function createInstanceRequestCoordinator(
     const outcome = await reconcileRecoveredBranchDelete({
       operation: op,
       mutation,
+      isStopped,
       readBranchRef: (repo, branch) =>
         executor.run(branchRefReadArgs(repo, branch)),
       // The same permission the 404 came from. Matching-refs answers with every
@@ -4872,6 +5163,7 @@ export function createInstanceRequestCoordinator(
       listBranchRefs: (repo, branch, page) =>
         executor.run(branchRefListingArgs(repo, branch, page))
     });
+    if (outcome.state === "interrupted" || isStopped()) return;
     if (outcome.state === "removed") {
       addLegacyStep(op, `✅ ${outcome.evidence}`);
       // `operations.persist` rather than the best-effort save: a command a
@@ -4881,6 +5173,7 @@ export function createInstanceRequestCoordinator(
         operation: op,
         persist: () => operations.persist()
       });
+      if (isStopped()) return;
       if (plan.state === "resume" || plan.state === "start") {
         if (plan.state === "start") {
           addLegacyStep(
@@ -4889,6 +5182,7 @@ export function createInstanceRequestCoordinator(
           );
         }
         await saveOperation(op);
+        if (isStopped()) return;
         await runCleanupCommand(plan.kind, operationId, plan.commandId);
         return;
       }
@@ -4974,7 +5268,11 @@ export function createInstanceRequestCoordinator(
    * reconcile branch — the delete is never issued a second time — so this
    * settles them from provider state alone.
    */
-  async function reconcileUnsettledCleanupDeletions(op: any): Promise<void> {
+  async function reconcileUnsettledCleanupDeletions(
+    op: any,
+    isStopped: () => boolean
+  ): Promise<void> {
+    if (isStopped()) return;
     const unsettled = new Set(
       unresolvedProviderMutations(op)
         .filter((mutation) => isCleanupDeletionKind(mutation.kind))
@@ -5000,8 +5298,12 @@ export function createInstanceRequestCoordinator(
     ) {
       const cleanupGitHub = await resolveCleanupGitHubContext({
         targets,
-        selectedLogin
+        selectedLogin,
+        createExecutor: (login) =>
+          githubAccountCoordinator.createReadOnlyExecutor(login),
+        isStopped
       });
+      if (isStopped()) return;
       await cleanupGitHubEnvironmentArtifact(op, {
         attempt: Number(getSetupArtifactLedger(op)?.cleanup?.attempts || 1),
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
@@ -5010,8 +5312,10 @@ export function createInstanceRequestCoordinator(
         invalidateEnvironmentListing: (repo) => {
           envListCache.invalidate(repo);
         },
-        steps
+        steps,
+        isStopped
       });
+      if (isStopped()) return;
     }
     const azureKeys = new Set<string>(
       targets
@@ -5023,8 +5327,10 @@ export function createInstanceRequestCoordinator(
         runAz: (args: string[]) => runCliCommand("az", args),
         steps,
         only: azureKeys,
-        persistJournal: () => operations.persist()
+        persistJournal: () => operations.persist(),
+        isStopped
       });
+      if (isStopped()) return;
     }
     for (const step of steps) addLegacyStep(op, step);
     await saveOperation(op);
@@ -5033,15 +5339,19 @@ export function createInstanceRequestCoordinator(
   async function runRecoveredCleanup(operationId: string): Promise<void> {
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
     // Settle the deletions this operation already issued before deciding
     // anything else. The executors reconcile a journaled entry by reading its
     // exact identity and never reissue it, so this is the reconciliation the
     // resume gate is waiting on rather than another pass over the ledger.
-    await reconcileUnsettledCleanupDeletions(op);
+    await reconcileUnsettledCleanupDeletions(op, isStopped);
+    if (isStopped()) return;
     const plan = await planRecoveredCleanup({
       operation: op,
       persist: () => operations.persist()
     });
+    if (isStopped()) return;
     if (plan.state === "resume" || plan.state === "start") {
       await runCleanupCommand(plan.kind, operationId, plan.commandId);
       return;
@@ -5077,94 +5387,6 @@ export function createInstanceRequestCoordinator(
     await saveOperation(op);
   }
 
-  function scheduleRecoveredProviderMutation(op: {
-    operationId: string;
-    providerRecovery?: { state?: string };
-    control?: {
-      commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
-    };
-  }): void {
-    const next = planRecoveredSchedule(op);
-    if (next.kind === "branch_delete") {
-      scheduleServerOwnedTask(op.operationId, () =>
-        runRecoveredBranchDelete(op.operationId)
-      );
-      return;
-    }
-    if (next.kind === "cleanup") {
-      scheduleServerOwnedTask(op.operationId, () =>
-        runRecoveredCleanup(op.operationId)
-      );
-      return;
-    }
-    if (next.kind === "verification_retry") {
-      const commandId = next.commandId;
-      scheduleServerOwnedTask(op.operationId, () =>
-        runVerificationRetry(op.operationId, commandId)
-      );
-      return;
-    }
-    scheduleEnvironmentOperation(op);
-  }
-
-  function startRecoveredTasks(): void {
-    for (const op of operations.all()) {
-      // Resume a delete operation that was mid-flight when the process
-      // restarted. The runner is resume-safe (each stage re-runs only while
-      // pending/running), so re-scheduling converges. Delete operations never
-      // enter input_required, so there is no prompt state to skip here.
-      if (
-        op.kind === "delete" &&
-        !op.endedAt &&
-        !attachment.hasTask(op.operationId)
-      ) {
-        scheduleServerOwnedTask(op.operationId, () =>
-          runEnvironmentOperation(op.operationId)
-        );
-        continue;
-      }
-      if (
-        op.endedAt &&
-        op.providerRecovery?.state === "rollback_pending" &&
-        !providerRecoveryManualGuidance(op)
-      ) {
-        scheduleAutomaticRecoveryRollback(op.operationId);
-        continue;
-      }
-      if (
-        op.recoveryState === "provider_reconciliation_pending" &&
-        !op.endedAt
-      ) {
-        scheduleRecoveredProviderMutation(op);
-        continue;
-      }
-      if (
-        (op.recoveryState !== "verification_pending" &&
-          op.recoveryState !== "verification_acquisition_pending") ||
-        op.currentStage !== STAGE_VERIFY ||
-        op.endedAt ||
-        !executionOwner.claimVerificationMonitor(op.operationId)
-      )
-        continue;
-      scheduleServerOwnedTask(op.operationId, async () => {
-        try {
-          if (op.recoveryState === "verification_acquisition_pending") {
-            await runVerificationRetry(
-              op.operationId,
-              String(op.verification?.retryCommandId || "")
-            );
-          } else {
-            await monitorVerificationAsSelectedAccount(op, (executor) =>
-              resolveRecoveredVerificationRun(op, executor)
-            );
-          }
-        } finally {
-          executionOwner.releaseVerificationMonitor(op.operationId);
-        }
-      });
-    }
-  }
-
   /**
    * Give a restarted verification the run identity its dispatch never recorded.
    *
@@ -5182,6 +5404,8 @@ export function createInstanceRequestCoordinator(
     op: any,
     executor: SelectedGhExecutor
   ): Promise<boolean> {
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return false;
     const identity = readRecoveredVerificationIdentity(
       op,
       VERIFY_WORKFLOW_FILE
@@ -5217,17 +5441,20 @@ export function createInstanceRequestCoordinator(
         identity,
         listRuns: async () => {
           const listed = await executor.run(listArgs, { timeout: 30000 });
+          if (isStopped()) return listed;
           const authorizationError = await selectedCommandAuthorizationError(
             executor,
             identity.repo,
             listed
           );
+          if (isStopped()) return listed;
           if (authorizationError) throw authorizationError;
           return listed;
         },
         isAuthorizationError: isSelectedGhAuthorizationError
       });
     } catch (error) {
+      if (isStopped()) return false;
       if (!isSelectedGhAuthorizationError(error)) throw error;
       addLegacyStep(
         op,
@@ -5250,6 +5477,7 @@ export function createInstanceRequestCoordinator(
       await saveOperation(op);
       return false;
     }
+    if (isStopped()) return false;
     if (outcome.state === "monitor") return true;
     if (outcome.state === "hand_off") return handOff(outcome.guidance);
     op.verification = {
@@ -5263,7 +5491,113 @@ export function createInstanceRequestCoordinator(
       STAGE_VERIFY
     );
     await saveOperation(op);
-    return true;
+    return !isStopped();
+  }
+
+  return execution;
+}
+
+export function createInstanceRequestCoordinator(
+  instanceId: string,
+  resolveBaseUrl: () => string,
+  environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts,
+  dependencies: {
+    awsEnabled: boolean;
+    awsEnvironmentAccess: EnvironmentOperationExecutionDependencies["awsEnvironmentAccess"];
+    executionOwner: EnvironmentExecutionOwner;
+    accountContext: EnvironmentAccountContext;
+    setupServices: SetupServices;
+    verificationStatus(
+      input: VerificationStatusInput
+    ): Promise<VerificationStatusResult>;
+    operationControl: OperationControlService;
+    servers: ReadonlyMap<string, CanvasServerEntry>;
+    environmentOperationRunner?: EnvironmentOperationRunner;
+  }
+) {
+  const { awsEnabled } = dependencies;
+  if (typeof awsEnabled !== "boolean")
+    throw new Error("Missing request coordinator dependency: awsEnabled");
+  if (typeof dependencies.operationControl !== "function") {
+    throw new Error("Missing request coordinator dependency: operationControl");
+  }
+  const attachment = dependencies.executionOwner.attach(instanceId);
+  const deletionAttachment =
+    dependencies.executionOwner.attachDeletion(instanceId);
+  const scope: typeof attachment = {
+    ...attachment,
+    schedule(operationId, task) {
+      const owner =
+        operations.get(operationId)?.kind === "delete" ?
+          deletionAttachment
+        : attachment;
+      owner.schedule(operationId, task);
+    }
+  };
+  const execution = createEnvironmentOperationExecution({
+    awsEnabled,
+    awsEnvironmentAccess: dependencies.awsEnvironmentAccess,
+    executionOwner: dependencies.executionOwner,
+    accountContext: dependencies.accountContext,
+    setupServices: dependencies.setupServices,
+    get verificationStatus() {
+      return dependencies.verificationStatus;
+    },
+    get environmentOperationRunner() {
+      return dependencies.environmentOperationRunner;
+    },
+    scope,
+    presentation: { instanceId },
+    admitRecoveryRollback: (operationId, isCurrent) =>
+      admitRecoveryRollback(
+        dependencies.operationControl,
+        operationId,
+        isCurrent,
+        instanceId
+      ),
+    runDeletion: (operation) =>
+      runEnvironmentDeletion(operation, {
+        ...environmentDeletionPorts,
+        reportStatePackageDeletionFailure: async (input) => {
+          const result = await invokeSessionPrompt(
+            sessionPromptHandler,
+            statePackageDeletionFailureMessage(input)
+          );
+          if (result.status >= 400) {
+            throw new Error(
+              result.error ||
+                "Could not report the GHCR package deletion failure to Copilot chat."
+            );
+          }
+        }
+      })
+  });
+  const serverOwnedToken = randomUUID();
+  const browserMutationNonce = randomUUID();
+
+  function startRecoveredTasks(): void {
+    for (const op of operations.all()) startRecoveredTask(op.operationId);
+  }
+
+  function startRecoveredTask(operationId: string): void {
+    const op = operations.get(operationId);
+    if (!op) return;
+    if (op.kind === "delete") {
+      if (!attachment.isCurrent() || deletionAttachment.isShuttingDown())
+        return;
+      if (
+        dependencies.executionOwner.deferAdmissionRecovery(
+          operationId,
+          startRecoveredTask
+        )
+      )
+        return;
+      if (!op.endedAt && !deletionAttachment.hasTask(op.operationId)) {
+        execution.scheduleEnvironmentOperation(op);
+      }
+    } else {
+      execution.recoverOperation(op);
+    }
   }
 
   const handleUnmatchedRequest = async (
@@ -5280,7 +5614,7 @@ export function createInstanceRequestCoordinator(
 
     // Default: serve the page HTML based on state
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    const entry = servers.get(instanceId);
+    const entry = dependencies.servers.get(instanceId);
     let page = requestedPage || entry?.page || DEFAULT_CANVAS_PAGE;
     const state = entry?.state || {};
     // While a deployment is actively in progress, an IMPLICIT landing on the
@@ -5325,44 +5659,15 @@ export function createInstanceRequestCoordinator(
       nonce: browserMutationNonce
     });
   };
-  // Exposed so the migrated `POST /api/operations` route, which is composed once
-  // per runtime, can reach this instance's server-owned task runner. The
-  // route registers and persists the operation itself and then hands the record
-  // back here to preserve the established scheduling order.
-  const scheduleEnvironmentOperation = (op: { operationId: string }): void => {
-    scheduleServerOwnedTask(op.operationId, () =>
-      runEnvironmentOperation(op.operationId)
-    );
-  };
-  // The three cooperative-control runners, exposed for the same reason: the
-  // control routes are composed once per runtime and hand the accepted
-  // command back to the instance that received the request.
-  const scheduleCommandTask = (
-    kind:
-      | "verification_monitor"
-      | "verification_retry"
-      | "cleanup_retry"
-      | "rollback"
-      | "exit_setup",
-    op: { operationId: string },
-    commandId: string
-  ): void => {
-    scheduleServerOwnedTask(op.operationId, () =>
-      kind === "verification_monitor" ?
-        runRecoveredVerificationContinuation(op.operationId, commandId)
-      : kind === "verification_retry" ?
-        runVerificationRetry(op.operationId, commandId)
-      : runCleanupCommand(kind, op.operationId, commandId)
-    );
-  };
   return {
     browserMutationNonce,
     handleUnmatchedRequest,
     startRecoveredTasks,
     isServerOwned,
     validateBrowserMutation,
-    scheduleEnvironmentOperation,
-    scheduleCommandTask
+    detach: attachment.detach,
+    scheduleEnvironmentOperation: execution.scheduleEnvironmentOperation,
+    scheduleCommandTask: execution.scheduleCommandTask
   };
 }
 
@@ -5407,6 +5712,7 @@ export interface ProductionCanvasServerRuntimeOptions {
   accountContext: EnvironmentAccountContext;
   environmentOperationRunner?: EnvironmentOperationRunner;
   environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
+  cliExec?: typeof cliExec;
   // The developer-only AWS switch, read once by the composition root. Off, AWS
   // stays hidden: no AWS provider, no AWS environment create or delete, and no
   // AWS workflows committed to the repository.
@@ -5429,7 +5735,8 @@ export function createProductionCanvasServerRuntime(
     accountContext,
     environmentDeletionPorts,
     serverDependencies,
-    awsEnabled
+    awsEnabled,
+    cliExec: cliExecPort = cliExec
   } = options;
   if (!executionOwner)
     throw new Error("Missing canvas server dependency: executionOwner");
@@ -5442,10 +5749,33 @@ export function createProductionCanvasServerRuntime(
     createAwsEnvironmentAccess<EnvironmentOperationRecord>({
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
+      environments: createGhNamespaceClaimsPorts(cliExecPort),
       sleep: sleepMs,
+      now: () => Date.now(),
       isStopRequested: shouldStop,
-      operations: { enterStage, addLegacyStep, setContext },
-      store: operations,
+      isStoppedOperation: (operationId) => {
+        const holder = operations.get(operationId);
+        return Boolean(holder) && isTerminalState(holder.state);
+      },
+      operationId: (operation) => operation.operationId,
+      operations: {
+        getContext: (operation) => operation.context ?? {},
+        enterStage,
+        setStageState,
+        addLegacyStep,
+        setContext,
+        touch: (operation) => {
+          touchOperation(operation);
+        }
+      },
+      // Read through the live binding: the extension configures the
+      // file-backed registry after this runtime is created.
+      store: { persist: () => operations.persist() },
+      journal: createAwsSetupJournal<EnvironmentOperationRecord>({
+        runAws: runAwsCli,
+        persist: () => operations.persist(),
+        now: () => Date.now()
+      }),
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage
     });
@@ -5459,6 +5789,7 @@ export function createProductionCanvasServerRuntime(
   );
   const githubSelectionHandles = createGitHubSelectionHandleStore();
   const identityProfilesRoutes = createIdentityProfilesRoutes({
+    runAws: (args) => runCliCommand("aws", args, 15000),
     listCredentialProfiles,
     saveCredentialProfile,
     deleteCredentialProfile,
@@ -5521,13 +5852,16 @@ export function createProductionCanvasServerRuntime(
     toSafeRepoRelPath
   });
 
-  // Server-owned work is scheduled on the instance that received the request, so
-  // an instance that is gone reports a miss instead of silently dropping accepted
-  // work. Every route that schedules resolves its runner through here.
+  // A missing presentation uses the runtime setup runner. An explicitly named
+  // attachment that disappeared must still report a miss, never fall back.
   function resolveInstanceRunner(
-    instanceId: string,
+    instanceId: string | undefined,
     operationId: string
-  ): ReturnType<typeof createInstanceRequestCoordinator> | null {
+  ): Pick<
+    ReturnType<typeof createInstanceRequestCoordinator>,
+    "scheduleEnvironmentOperation" | "scheduleCommandTask"
+  > | null {
+    if (instanceId === undefined) return setupExecution;
     const coordinator = instanceRequestCoordinators.get(instanceId);
     if (!coordinator) {
       console.error(
@@ -5539,7 +5873,7 @@ export function createProductionCanvasServerRuntime(
   }
 
   function scheduleEnvironmentOperationForInstance(
-    instanceId: string,
+    instanceId: string | undefined,
     operation: { operationId: string }
   ): boolean {
     const coordinator = resolveInstanceRunner(
@@ -5547,22 +5881,64 @@ export function createProductionCanvasServerRuntime(
       operation.operationId
     );
     if (!coordinator) return false;
-    coordinator.scheduleEnvironmentOperation(operation);
-    return true;
+    return coordinator.scheduleEnvironmentOperation(operation);
   }
 
   // Composition root for the migrated `operations-status` family. Reads, creates,
   // and resumable actions each receive only the registry, mutation, persistence,
   // projection, and per-instance scheduling seams they invoke.
-  const operationsStatusRoutes = createOperationsStatusRoutes(
-    {
-      latest: (repo) => operations.latest(repo),
-      latestAny: () => operations.latestAny(),
-      get: (operationId) => operations.get(operationId),
-      toClientView,
-      productVersion: resolveGeneratorVersion,
-      now: () => Date.now()
-    },
+  const operationActionDependencies: OperationActionDependencies = {
+    claimAdmission: executionOwner.claimAdmission,
+    getOperation: (operationId) => operations.get(operationId),
+    canResumeInput,
+    resumeAfterInput,
+    requireInput,
+    finish,
+    isTerminalState,
+    canDismissOperation,
+    dismissOperation,
+    persistOperations: () => operations.persist(),
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    errorMessage,
+    inputRequiredState: INPUT_REQUIRED_STATE
+  };
+  const sharedOperationResume = createOperationResumeService({
+    ...operationActionDependencies,
+    isShuttingDown: () => executionOwner.isShuttingDown()
+  });
+  const operationResume: OperationResumeService = (
+    input,
+    readInput,
+    publish
+  ) => {
+    if (input.instanceId === undefined && input.isCurrent && input.schedule) {
+      return sharedOperationResume(input, readInput, publish);
+    }
+    const original =
+      input.instanceId === undefined ?
+        undefined
+      : instanceRequestCoordinators.get(input.instanceId);
+    return sharedOperationResume(
+      {
+        ...input,
+        isCurrent: () =>
+          original !== undefined &&
+          input.instanceId !== undefined &&
+          instanceRequestCoordinators.get(input.instanceId) === original &&
+          (input.isCurrent?.() ?? true),
+        schedule: (operation) => {
+          if (!original) return false;
+          original.scheduleEnvironmentOperation(operation);
+          return true;
+        }
+      },
+      readInput,
+      publish
+    );
+  };
+
+  const setupStartDependencies: Parameters<typeof createSetupStartService>[0] =
     {
       awsEnabled,
       isValidRepoSlug,
@@ -5572,35 +5948,42 @@ export function createProductionCanvasServerRuntime(
       isUuid,
       buildStages,
       createOperation,
-      claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
       startConflict: (repo) => operations.startConflict(repo),
       startOperation: (op) => operations.start(op),
       persistOperations: () => operations.persist(),
       finish,
       scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
       errorMessage
+    };
+  const setupStart = createSetupStartService(setupStartDependencies);
+  const operationsStatusRoutes = createOperationsStatusRoutes(
+    {
+      latest: (repo) => operations.latest(repo),
+      latestAny: () => operations.latestAny(),
+      get: (operationId) => operations.get(operationId),
+      toClientView: (record: any) => toClientView(record, { awsEnabled }),
+      productVersion: resolveGeneratorVersion,
+      now: () => Date.now()
     },
     {
-      getOperation: (operationId) => operations.get(operationId),
-      canResumeInput,
-      resumeAfterInput,
-      requireInput,
-      finish,
-      isTerminalState,
-      canDismissOperation,
-      dismissOperation,
-      persistOperations: () => operations.persist(),
-      toClientView,
-      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-      errorMessage,
-      inputRequiredState: INPUT_REQUIRED_STATE
-    }
+      ...setupStartDependencies,
+      claimSelectionHandle: (input) => githubSelectionHandles.claim(input)
+    },
+    operationActionDependencies,
+    operationResume
   );
 
-  const operationsControlRoutes = createOperationsControlRoutes({
+  const operationsControlDependencies: OperationsControlDependencies = {
+    claimAdmission: executionOwner.claimAdmission,
+    stopPendingResume: sharedOperationResume.stopPendingResume,
+    isShuttingDown: () => executionOwner.isShuttingDown(),
     get: (operationId) => operations.get(operationId),
+    awsEnabled,
+    removeAwsDeployIdentityLock: (lock) =>
+      removeAwsDeployIdentityLock(lock, runAwsCli),
     acquireForRetry: (op) => operations.acquireForRetry(op),
     persistOperations: () => operations.persist(),
+    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
     checkPullRequestMerge: (op, pullRequestUrl) =>
       checkSetupPullRequestMergeForOperation(op, pullRequestUrl, {
         createExecutor: (login) =>
@@ -5611,47 +5994,64 @@ export function createProductionCanvasServerRuntime(
         },
         errorMessage
       }),
-    inspectVerificationWorkflow: async (op) => {
-      const { identity, login } = requiredVerificationWorkflowContext(op);
+    inspectVerificationWorkflow: async (target, assertCurrent) => {
+      assertCurrent();
       const result = await githubAccountCoordinator.withSelectedAccount(
-        login,
-        { ownerKey: accountContext.ownerKey, operationId: op.operationId },
-        (executor) =>
-          readVerificationWorkflowState(executor, identity, {
+        target.login,
+        { ownerKey: accountContext.ownerKey, operationId: target.operationId },
+        async (executor) => {
+          assertCurrent();
+          if (executor.login !== target.login)
+            throw new Error(
+              "The selected GitHub executor does not match the authorized account."
+            );
+          const state = await readVerificationWorkflowState(executor, target, {
             run: (selected, args) => selected.run(args, { timeout: 30000 })
-          }),
+          });
+          assertCurrent();
+          return state;
+        },
         30000
       );
+      assertCurrent();
       if (result.value !== "active" && result.value !== "inactive") {
         throw new Error("GitHub returned an unsupported workflow state.");
       }
       return result.value;
     },
-    cancelVerificationWorkflow: async (op) => {
-      const { identity, login } = requiredVerificationWorkflowContext(op);
+    cancelVerificationWorkflow: async (target, authority) => {
+      authority.assertCurrent();
       const result = await githubAccountCoordinator.withSelectedAccount(
-        login,
-        { ownerKey: accountContext.ownerKey, operationId: op.operationId },
-        (executor) =>
-          cancelVerificationWorkflow(executor, identity, {
-            run: (selected, args) => selected.run(args, { timeout: 30000 })
-          }),
+        target.login,
+        { ownerKey: accountContext.ownerKey, operationId: target.operationId },
+        (executor) => {
+          authority.assertCurrent();
+          if (executor.login !== target.login)
+            throw new Error(
+              "The selected GitHub executor does not match the authorized account."
+            );
+          return cancelVerificationWorkflow(executor, target, {
+            run: (selected, args, beforeExecute) =>
+              selected.run(args, { timeout: 30000, beforeExecute }),
+            authority
+          });
+        },
         30000
       );
       return result.value;
     },
     schedule: ({ kind, instanceId, operation, commandId }) => {
+      if (instanceId === undefined && operation.kind === "delete") return false;
       const coordinator = resolveInstanceRunner(
         instanceId,
         operation.operationId
       );
       if (!coordinator) return false;
       if (kind === "setup_continuation" || kind === "deletion_retry") {
-        coordinator.scheduleEnvironmentOperation(operation);
+        return coordinator.scheduleEnvironmentOperation(operation);
       } else {
-        coordinator.scheduleCommandTask(kind, operation, commandId);
+        return coordinator.scheduleCommandTask(kind, operation, commandId);
       }
-      return true;
     },
     // The environments picker reads a repo-scoped cached listing, so an exit that
     // closes a setup has to drop it here: the browser reloads the table straight
@@ -5660,7 +6060,34 @@ export function createProductionCanvasServerRuntime(
     invalidateEnvironmentListing: (repo) => {
       envListCache.invalidate(repo);
     }
-  });
+  };
+  const sharedOperationControl = createOperationsControlService(
+    operationsControlDependencies
+  );
+  const operationControl: OperationControlService = (input, publish) => {
+    if (operations.get(input.operationId)?.kind !== "delete")
+      return sharedOperationControl(input, publish);
+    const original =
+      input.instanceId === undefined ?
+        undefined
+      : instanceRequestCoordinators.get(input.instanceId);
+    return sharedOperationControl(
+      {
+        ...input,
+        isCurrent: () =>
+          (input.instanceId === undefined ||
+            (original !== undefined &&
+              instanceRequestCoordinators.get(input.instanceId) ===
+                original)) &&
+          (input.isCurrent?.() ?? true)
+      },
+      publish
+    );
+  };
+  const operationsControlRoutes = createOperationsControlRoutes(
+    operationsControlDependencies,
+    operationControl
+  );
 
   // Composition root for the migrated `repositories` family. Three seams: the
   // subprocess runner, a reader for the live instance state the branch cache is
@@ -5668,7 +6095,7 @@ export function createProductionCanvasServerRuntime(
   // injected rather than copied.
   const repositoriesRoutes = createRepositoriesRoutes({
     cliExec: (command, args, options, callback) => {
-      cliExec(command, args, options, callback);
+      cliExecPort(command, args, options, callback);
     },
     readInstanceState: (instanceId) =>
       canvasServer.instances.get(instanceId)?.state,
@@ -5716,11 +6143,20 @@ export function createProductionCanvasServerRuntime(
       new Promise((resolve) => {
         const opts: CliOptions = { timeout };
         if (extraEnv) opts.env = extraEnv;
-        cliExec("gh", args, opts, (err, stdout, stderr) => {
+        cliExecPort("gh", args, opts, (err, stdout, stderr) => {
           resolve(toGhCommandResult(err, stdout, stderr, { trimStdout: true }));
         });
       }),
     readProcessEnv: () => process.env,
+    awsTrustRepair: createAwsTrustRepairService({
+      awsEnabled,
+      readInstanceState: (instanceId) =>
+        canvasServer.instances.get(instanceId)?.state,
+      cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
+      readEnvironmentTarget: createEnvironmentTargetReader(runCommand),
+      repair: (input) => awsEnvironmentAccess.repair(input),
+      errorMessage
+    }),
     setTimer: (callback, ms) => setTimeout(callback, ms),
     // Declared as a getter for the same temporal-dead-zone reason as the cache
     // above: the deploy services are composed further down, after the workflow
@@ -5752,6 +6188,7 @@ export function createProductionCanvasServerRuntime(
   });
 
   const azureSetupDependencies = composeAzureAutoSetupDependencies({
+    isStopped: () => executionOwner.isShuttingDown(),
     lifecycle: {
       get: (operationId) => operations.get(operationId),
       isStale: (operation) => isStale(operation),
@@ -5820,8 +6257,13 @@ export function createProductionCanvasServerRuntime(
       getSelectedGitHubExecutor: (operationId) =>
         accountContext.getExecutor(operationId),
       getGitHubIdentity,
-      preflightRepoAdmin: (repo, executor) =>
-        preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+      preflightRepoAdmin: (repo, executor, assertActive) =>
+        preflightRepoAdmin(
+          repo,
+          executor,
+          GH_COMMAND_PRESENTATION,
+          assertActive
+        ),
       preflightGhcrPackageWriteAccess: (executor) =>
         preflightGhcrPackageWriteAccess(
           getGhPackageCredentials,
@@ -5829,8 +6271,8 @@ export function createProductionCanvasServerRuntime(
           executor,
           GH_COMMAND_PRESENTATION
         ),
-      runGitHubJson: (apiPath, executor) =>
-        runGitHubJsonRequest(apiPath, executor),
+      runGitHubJson: (apiPath, executor, assertActive) =>
+        runGitHubJsonRequest(apiPath, executor, assertActive),
       runAz: (args) => runCliCommand("az", args)
     },
     tempFile: {
@@ -5849,23 +6291,21 @@ export function createProductionCanvasServerRuntime(
       }
     },
     ensureServicePrincipal,
-    finalizeSetupFailure,
+    finalizeSetupFailure: (operation, input) =>
+      finalizeSetupFailure(operation, {
+        ...input,
+        isStopped: () => executionOwner.isShuttingDown()
+      }),
     persistMutationCheckpoint,
-    honorStopBoundary,
+    honorStopBoundary: (input) =>
+      executionOwner.isShuttingDown() ?
+        Promise.resolve(false)
+      : honorStopBoundary(input),
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
   });
   const authorizeAzure = createAzureSetupService(azureSetupDependencies);
-  const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
-    {
-      ...azureSetupDependencies,
-      isServerOwnedRequest: (instanceId, request) =>
-        instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-        false
-    },
-    authorizeAzure
-  );
 
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
@@ -6026,8 +6466,7 @@ export function createProductionCanvasServerRuntime(
     workflows: graphPlanningWorkflows
   });
 
-  // route, `POST /api/create-environment`, is large enough to own a separate
-  // composition root below. Every seam is a narrow named function: the two subprocess
+  // Every seam is a narrow named function: the two subprocess
   // runners (`cliExec`, `runCommand`), the repo-file fetch and bicep param parse
   // for `app-params`, the app-name and active-deployment resolvers plus the
   // error logger for `delete-environment`, three narrow accessors over the
@@ -6037,10 +6476,36 @@ export function createProductionCanvasServerRuntime(
   // `errorMessage`, `VERIFY_WORKFLOW_FILE`, and `STAGE_VERIFY` stay defined here
   // and are injected rather than moved, so the route module spawns nothing and
   // reads no module-level mutable state.
-  const environmentsRoutes = createEnvironmentsRoutes({
-    awsEnabled,
+  const verificationStatusDependencies: VerificationStatusDependencies = {
+    getOperation: (operationId) => operations.get(operationId),
+    getSelectedGitHubExecutor: (operationId) =>
+      accountContext.getExecutor(operationId),
+    isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+    hasCompleteVerificationIdentity,
+    getRunDetail,
+    fetchRunLog,
+    extractErrorLines,
+    extractGitHubActionsStepLog,
+    explainOidcEnterpriseClaim,
+    explainNoSubscriptions,
+    addLegacyStep,
+    isTerminalState,
+    finish,
+    finishSucceeded,
+    persistBestEffort,
+    persistOperations: () => operations.persist(),
+    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
     errorMessage,
-    redactDiagnostic: (value) => redactGhCredentials(value),
+    redactDiagnostic: redactGhCredentials,
+    stageVerify: STAGE_VERIFY
+  };
+  const verificationStatus = createVerificationStatusService(
+    verificationStatusDependencies,
+    () => createWorkflowObservationScope(createDeployStatusReader)
+  );
+  const environmentsDependencies: EnvironmentsDependencies = {
+    awsEnabled,
+    ...verificationStatusDependencies,
     repoMatchesWorkspace,
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     runCommand: (command, args, options) => runCommand(command, args, options),
@@ -6061,10 +6526,10 @@ export function createProductionCanvasServerRuntime(
     createOperation,
     buildDeleteStages: (options) => buildDeleteStages(options),
     startOperation: (op) => operations.start(op),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     cliExec: (command, args, options, callback) => {
-      cliExec(command, args, options, callback);
+      cliExecPort(command, args, options, callback);
     },
     activeDeleteEnvironment: (repo) => {
       const op = operations.latest(repo);
@@ -6089,12 +6554,6 @@ export function createProductionCanvasServerRuntime(
     envListTtlMs: ENV_LIST_TTL_MS,
     kickoffWorkflowSync: kickoffWorkflowSync.bind(undefined, awsEnabled),
     now: () => Date.now(),
-    getOperation: (operationId) => operations.get(operationId),
-    getSelectedGitHubExecutor: (operationId) =>
-      accountContext.getExecutor(operationId),
-    isSelectedGitHubAuthorizationError: (error) =>
-      isSelectedGhAuthorizationError(error),
-    hasCompleteVerificationIdentity,
     findWorkflowRun: (
       repo,
       workflowFile,
@@ -6130,37 +6589,18 @@ export function createProductionCanvasServerRuntime(
         );
       }
     },
-    getRunDetail,
-    fetchRunLog,
-    extractErrorLines: (logText, max) => extractErrorLines(logText, max),
-    extractGitHubActionsStepLog,
-    explainOidcEnterpriseClaim,
-    explainNoSubscriptions,
-    addLegacyStep: (operation, text) => addLegacyStep(operation, text),
-    isTerminalState,
-    finish,
-    finishSucceeded,
-    persistBestEffort,
-    persistOperations: () => operations.persist(),
-    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
-    verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
-    stageVerify: STAGE_VERIFY
-  });
+    verifyWorkflowFile: VERIFY_WORKFLOW_FILE
+  };
+  const environmentsRoutes = createEnvironmentsRoutes(environmentsDependencies);
 
-  // Composition root for `POST /api/create-environment`. The route's four seams
-  // live in `create-environment*.ts`; everything they touch is injected here, so
-  // the module spawns no process directly, imports no `node:fs`, and reads no
-  // module-level mutable state. `isServerOwnedRequest` is deliberately a
-  // per-request function rather than a value: the token is a per-instance
-  // `randomUUID()` held by that instance's request coordinator, and this route is
-  // used only by the retained HTTP adapter, not by the setup services.
+  // Direct environment setup retains the concrete adapters without an HTTP wrapper.
   const configureEnvironmentDependencies: ConfigureEnvironmentDependencies = {
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     getSelectedGitHubExecutor: (operationId) =>
       accountContext.getExecutor(operationId),
     cliExec: (command, args, options, callback) =>
-      cliExec(command, args, options, callback),
+      cliExecPort(command, args, options, callback),
     readProcessEnv: () => process.env,
     isValidRepoSlug,
     getOperation: (operationId) => operations.get(operationId),
@@ -6186,13 +6626,28 @@ export function createProductionCanvasServerRuntime(
       addLegacyStep(operation, text);
     },
     finalizeSetupFailure: (operation, input) =>
-      finalizeSetupFailure(operation, input as never),
+      finalizeSetupFailure(operation, {
+        ...input,
+        isStopped: () => executionOwner.isShuttingDown()
+      }),
     persistMutationCheckpoint,
     persistBestEffort,
-    guardStopBoundary,
+    isShuttingDown: () => executionOwner.isShuttingDown(),
+    guardStopBoundary: async (input) => {
+      if (executionOwner.isShuttingDown()) {
+        input.respond(503, {
+          code: "setup-shutting-down",
+          error:
+            "The session is shutting down; no further setup work was started.",
+          operationId: input.operation?.operationId
+        });
+        return false;
+      }
+      return guardStopBoundary(input);
+    },
     runAzCommand: (args) => runCliCommand("az", args),
-    preflightRepoAdmin: (repo, executor) =>
-      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+    preflightRepoAdmin: (repo, executor, assertActive) =>
+      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION, assertActive),
     preflightGhcrPackageWriteAccess: (executor) =>
       preflightGhcrPackageWriteAccess(
         getGhPackageCredentials,
@@ -6207,6 +6662,7 @@ export function createProductionCanvasServerRuntime(
         targetRepository: input.targetRepository,
         registry: input.registry,
         credentials: input.credentials as GhcrPackageCredentials,
+        assertActive: input.assertActive,
         ghCommandPresentation: GH_COMMAND_PRESENTATION
       }),
     stateRegistryForEnvironment,
@@ -6289,18 +6745,23 @@ export function createProductionCanvasServerRuntime(
   );
   const setupServices: SetupServices = {
     authorizeAzure: (data) => authorizeAzure({ data }),
-    configureEnvironment: (data, instanceId) =>
-      configureEnvironment({ data }, instanceId)
+    configureEnvironment: (data, instanceId, isCurrentPresentation) =>
+      configureEnvironment({ data }, instanceId, isCurrentPresentation)
   };
-  const createEnvironmentRoutes = createCreateEnvironmentRoutes(
-    {
-      ...configureEnvironmentDependencies,
-      isServerOwnedRequest: (instanceId, request) =>
-        instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-        false
-    },
-    configureEnvironment
-  );
+  const setupExecution = createEnvironmentOperationExecution({
+    awsEnabled,
+    awsEnvironmentAccess,
+    executionOwner,
+    scope: executionOwner.attachRuntime(),
+    accountContext,
+    setupServices,
+    verificationStatus,
+    admitRecoveryRollback: (operationId, isCurrent) =>
+      admitRecoveryRollback(operationControl, operationId, isCurrent),
+    get environmentOperationRunner() {
+      return options.environmentOperationRunner;
+    }
+  });
 
   // Built once per runtime so validation fails before opening any server.
   const serverRoutes = createServerRouteTable({
@@ -6311,19 +6772,16 @@ export function createProductionCanvasServerRuntime(
     ...deploymentsRoutes,
     ...azureDiscoveryRoutes,
     ...awsDiscoveryRoutes,
-    ...azureAutoSetupRoutes,
     ...identityProfilesRoutes,
     ...identityAuthRoutes,
     ...remediationRoutes,
     ...graphsPlanningRoutes,
     ...graphsPlanningStreamRoutes,
     ...graphsPlanningWritesRoutes,
-    ...environmentsRoutes,
-    ...createEnvironmentRoutes
+    ...environmentsRoutes
   });
 
-  // Coordinators retain transport and provider behavior. Task/claim storage lives
-  // in the runtime owner, preserving the scope of each attachment.
+  // Panels project shared setup; deletion retains its server-ready runner.
   const instanceRequestCoordinators = new Map<
     string,
     ReturnType<typeof createInstanceRequestCoordinator> & {
@@ -6336,7 +6794,9 @@ export function createProductionCanvasServerRuntime(
       {
         createRequestHandler: ({ instanceId, instances, markActivity }) => {
           let baseUrl = "";
-          const coordinator = createInstanceRequestCoordinator(
+          const coordinator: ReturnType<
+            typeof createInstanceRequestCoordinator
+          > = createInstanceRequestCoordinator(
             instanceId,
             () => baseUrl,
             environmentDeletionPorts ??
@@ -6350,6 +6810,9 @@ export function createProductionCanvasServerRuntime(
               executionOwner,
               accountContext,
               setupServices,
+              verificationStatus,
+              operationControl: (input, publish) =>
+                operationControl({ ...input, instanceId: undefined }, publish),
               servers: instances,
               get environmentOperationRunner() {
                 return options.environmentOperationRunner;
@@ -6391,6 +6854,7 @@ export function createProductionCanvasServerRuntime(
           }
         },
         onStopped: (instanceId) => {
+          instanceRequestCoordinators.get(instanceId)?.detach();
           instanceRequestCoordinators.delete(instanceId);
         },
         defaultPage: DEFAULT_CANVAS_PAGE,
@@ -6555,8 +7019,71 @@ export function createProductionCanvasServerRuntime(
     await canvasServer.stop(instanceId, force);
   }
 
+  const environmentServices: Pick<
+    EnvironmentToolsPorts,
+    | "start"
+    | "control"
+    | "resume"
+    | "scheduleResume"
+    | "verification"
+    | "bypass"
+    | "getOperation"
+    | "readExecutor"
+  > = {
+    start: setupStart,
+    control: operationControl,
+    resume: operationResume,
+    scheduleResume: (operation) =>
+      setupExecution.scheduleEnvironmentOperation(operation),
+    getOperation: (id) => operations.get(id),
+    readExecutor: (login) =>
+      githubAccountCoordinator.createReadOnlyExecutor(login),
+    verification: async (target, executor) => {
+      const scope = createWorkflowObservationScope(createDeployStatusReader);
+      const release = executionOwner.onShutdown(() => scope.stop());
+      try {
+        return await createVerificationStatusService(
+          {
+            ...environmentsDependencies,
+            getSelectedGitHubExecutor: () => executor
+          },
+          () => scope
+        )({ ...target, observation: scope });
+      } finally {
+        release();
+        scope.stop();
+      }
+    },
+    bypass: async (target, executor, isCurrent) => {
+      const scope = createWorkflowObservationScope(createDeployStatusReader);
+      const release = executionOwner.onShutdown(() => scope.stop());
+      try {
+        return await verificationBypass(
+          {
+            data: { ...target },
+            scope,
+            isCurrent,
+            permissionsOnly: true
+          },
+          {
+            ...environmentsDependencies,
+            getSelectedGitHubExecutor: () => executor
+          }
+        );
+      } finally {
+        release();
+        scope.stop();
+      }
+    }
+  };
+
   return {
     servers: canvasServer.instances,
+    setupExecution,
+    verificationStatus,
+    operationControl,
+    operationResume,
+    environmentServices,
     getOrCreateServer,
     stopServer,
     getLastWebviewActivityAt,

@@ -1,4 +1,4 @@
-// Seam 5 of the `POST /api/create-environment` slice: the namespace claim.
+// The environment setup namespace claim.
 //
 // Radius binds one environment to one Kubernetes namespace within a cluster.
 // The wizard refuses a duplicate before submitting, but that check reads a
@@ -373,10 +373,24 @@ function claimsPortsFrom(
 // reported does not depend on which call happens to return first.
 const CLAIM_READ_CONCURRENCY = 4;
 
-export async function loadNamespaceClaims(
+export interface EnvironmentClaim {
+  readonly claimant: NamespaceClaimant;
+  readonly variables: Readonly<Record<string, string>>;
+}
+
+export type EnvironmentClaimsLookup =
+  | { readonly ok: true; readonly claims: readonly EnvironmentClaim[] }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Every Radius environment of the repository that claims a cluster, with the
+ * variables it was read from. Fails when any environment can't be read, or
+ * when one Radius manages doesn't record its provider or cluster.
+ */
+export async function loadEnvironmentClaims(
   repo: string,
   ports: NamespaceClaimsPorts
-): Promise<NamespaceClaimsLookup> {
+): Promise<EnvironmentClaimsLookup> {
   const names = await ports.listEnvironmentNames(repo);
   if (!names.ok) return { ok: false, reason: names.reason };
   const reads = await mapWithLimit(
@@ -387,7 +401,7 @@ export async function loadNamespaceClaims(
       result: await ports.readEnvironmentVariables(repo, name)
     })
   );
-  const claims: NamespaceClaimant[] = [];
+  const claims: EnvironmentClaim[] = [];
   for (const { name, result } of reads) {
     // One unreadable environment is enough to make the answer unknown: the
     // namespace being claimed could be exactly the one it holds.
@@ -399,7 +413,19 @@ export async function loadNamespaceClaims(
         reason: `environment "${name}" does not record ${reading.missing}.`
       };
     }
-    if (reading.kind === "claim") claims.push(reading.claimant);
+    if (reading.kind === "claim") {
+      claims.push({ claimant: reading.claimant, variables: result.variables });
+    }
   }
   return { ok: true, claims };
+}
+
+export async function loadNamespaceClaims(
+  repo: string,
+  ports: NamespaceClaimsPorts
+): Promise<NamespaceClaimsLookup> {
+  const loaded = await loadEnvironmentClaims(repo, ports);
+  return loaded.ok ?
+      { ok: true, claims: loaded.claims.map(({ claimant }) => claimant) }
+    : loaded;
 }

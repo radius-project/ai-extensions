@@ -45,6 +45,55 @@ function runScripts(value, scripts = []) {
 }
 
 describe(".github/extension release assets", () => {
+  it("keeps the packaged report template aligned with every bug-report form field", () => {
+    const template = parseYaml(
+      readFileSync(
+        join(REPO_ROOT, ".github", "ISSUE_TEMPLATE", "bug-report.yml"),
+        "utf8"
+      )
+    );
+    const fallback = readFileSync(
+      join(
+        REPO_ROOT,
+        "extensions",
+        "radius",
+        "skills",
+        "radius-report-issue",
+        "references",
+        "bug-report.md"
+      ),
+      "utf8"
+    );
+    expect(
+      [...fallback.matchAll(/^### (.+)$/gm)].map((match) => match[1])
+    ).toEqual(template.body.map((field) => field.attributes.label));
+    expect(template.labels).toEqual(["bug"]);
+    for (const option of template.body.find((field) => field.id === "area")
+      .attributes.options) {
+      expect(fallback).toContain(option);
+    }
+  });
+
+  it("routes all owning skills to the same reviewed failure-report flow", () => {
+    const skills = [
+      "radius-app-bicep",
+      "radius-app-graph",
+      "radius-deploy",
+      "radius-environment",
+      "radius-delete"
+    ];
+    for (const skill of skills) {
+      const guidance = readFileSync(
+        join(REPO_ROOT, "extensions", "radius", "skills", skill, "SKILL.md"),
+        "utf8"
+      );
+      expect(guidance, skill).toContain("`radius-report-issue` skill");
+      expect(guidance, skill).toContain(
+        "require separate explicit permission to submit the reviewed draft"
+      );
+    }
+  });
+
   it("pins every remote action to a commit or the source-build placeholder", () => {
     const workflows = filesUnder(EXTENSION_ROOT).filter((path) =>
       /\.ya?ml$/u.test(path)

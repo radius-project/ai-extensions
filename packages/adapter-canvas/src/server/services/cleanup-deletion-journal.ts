@@ -7,6 +7,10 @@ import {
   providerMutationRecord,
   UNKNOWN_CLEANUP_OUTCOME
 } from "../../operations.js";
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted
+} from "@radius-project/core";
 
 // Journaling the deletions a rollback issues, so a lost answer never becomes a
 // second delete.
@@ -80,6 +84,8 @@ export async function executeJournaledCleanupDeletion(input: {
   identity: string;
   label: string;
   persist(): Promise<void>;
+  isStopped?(): boolean;
+  onConfirmed?(): void;
   runDelete(): Promise<CleanupDeletionCommandResult>;
   /**
    * How to read the provider's own answer that the resource was already gone.
@@ -110,6 +116,8 @@ export async function executeJournaledCleanupDeletion(input: {
    */
   confirmRecordedIdentity?(): Promise<CleanupIdentityVerdict>;
 }): Promise<CleanupDeletionOutcome> {
+  const assertActive = () => assertSetupExecutionActive(input.isStopped);
+  assertActive();
   let alreadyAbsent = false;
   const journaled = providerMutationRecord(
     input.operation,
@@ -123,6 +131,7 @@ export async function executeJournaledCleanupDeletion(input: {
   const willIssueDelete = !journaled || journaled.status === "not_applied";
   if (input.confirmRecordedIdentity && willIssueDelete) {
     const verdict = await input.confirmRecordedIdentity();
+    assertActive();
     if (verdict.decision === "refuse") {
       return { outcome: "skipped", detail: verdict.detail };
     }
@@ -139,6 +148,9 @@ export async function executeJournaledCleanupDeletion(input: {
       target: input.identity,
       providerIdempotencyKey: input.identity,
       persist: input.persist,
+      assertActive,
+      onConfirmed: input.onConfirmed,
+      rethrowReconciliationError: isSetupExecutionInterrupted,
       mutate: async () => {
         const result = await input.runDelete();
         if (result.code === 0 || result.code === "0") return result;
@@ -160,7 +172,9 @@ export async function executeJournaledCleanupDeletion(input: {
       },
       accept: () => (alreadyAbsent ? "not_found" : "deleted"),
       reconcile: async () => {
+        assertActive();
         const found = await input.readExactIdentity();
+        assertActive();
         if (found === "absent") {
           return {
             state: "applied" as const,
@@ -191,6 +205,7 @@ export async function executeJournaledCleanupDeletion(input: {
         { outcome: "not_found", detail: null }
       : { outcome: "deleted", detail: null };
   } catch (error) {
+    if (isSetupExecutionInterrupted(error)) throw error;
     if (!(error instanceof ProviderMutationRecoveryError)) throw error;
     if (error.code === "provider-mutation-recovery-persistence-failed") {
       // The record of what Radius is about to do, or has just done, did not

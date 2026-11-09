@@ -283,6 +283,32 @@ jobs:
           path: ${{ runner.temp }}/build-gate
           if-no-files-found: error
 
+  ci-gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs:
+      - plugin-matrix
+      - static-checks
+      - windows-process-integration
+      - canvas-chromium
+      - node-tests
+      - build-gate
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every build and test job to pass
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$NEEDS"
+          if ! jq --exit-status 'length > 0 and all(.[]; .result == "success")' <<<"$NEEDS"; then
+            echo "::error::All build and test jobs must succeed. A failed, cancelled, or skipped job blocks merge."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.plugin }} dist
     needs: plugin-matrix

@@ -17,7 +17,13 @@ import {
   probeDeleteConflict
 } from "../force-delete.js";
 import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
-import { isRecord, readBoolean, readRecord, readString } from "../json.js";
+import {
+  isRecord,
+  readBoolean,
+  readNumber,
+  readRecord,
+  readString
+} from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import { DEPLOYING_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
@@ -62,6 +68,10 @@ export { DEPLOYING_PAGE_STATE_ID };
 export const LIST_DEPLOYMENTS_PATH = DEPLOYMENTS_PATH;
 export const DELETE_DEPLOYMENT_PATH = "/api/delete-deployment";
 export const DEPLOY_STATUS_PATH = "/api/deploy-status";
+export const AWS_REPAIR_PATH = "/api/deploy/repair-aws-trust";
+export const AWS_REPAIR_BUTTON_ID = "deploy-repair-aws-trust";
+export const AWS_REPAIR_HELP_ID = "deploy-repair-aws-trust-help";
+export const AWS_REPAIR_STATUS_ID = "deploy-repair-aws-trust-status";
 
 // Safety caps mirror the legacy script exactly: a deploy-status poll that
 // never reaches a terminal state falls back to whatever the deployments
@@ -134,11 +144,14 @@ interface DeployStatusPayload {
   handoff: DeployHandoff;
   active: boolean;
   attempt: { targetRepo: string; environment: string };
+  generation: number;
 }
 
 interface DeployFailureDetails {
   app: string;
   environment: string;
+  // Which deploy failed, so an action on this panel names it.
+  generation: number;
   errorText: string;
   runUrl: string;
   errorKind: string;
@@ -222,7 +235,8 @@ function parseDeployStatus(payload: unknown): DeployStatusPayload {
     attempt: {
       targetRepo: readString(attempt, "targetRepo"),
       environment: readString(attempt, "environment")
-    }
+    },
+    generation: readNumber(payload, "generation") ?? 0
   };
 }
 
@@ -551,8 +565,15 @@ export function initializeDeployingPage(
           nextProviders[environment.name] = environment.provider;
           nextStatuses[environment.name] = environment.status;
         }
+        const repairable = (failure: DeployFailureDetails | null) =>
+          failure?.errorKind === "cloud-auth-drift" &&
+          providerFor(providers, failure.environment) !== "aws" &&
+          nextProviders[failure.environment] === "aws";
+        const redraw = repairable(shownFailure) ? shownFailure : null;
         providers = nextProviders;
         environmentStatuses = nextStatuses;
+        // A failure drawn before the listing could not offer Repair.
+        if (redraw) showDeployFailed(redraw);
         context.dom.setOptions(
           envSelect,
           buildEnvironmentOptions(
@@ -942,6 +963,7 @@ export function initializeDeployingPage(
   // Restores the deploy modal to its default "in progress" (spinner) layout;
   // the modal is mutated in place on failure, so this runs before each attempt.
   const resetDeployModal = (): void => {
+    shownFailure = null;
     if (progressSpinner) progressSpinner.style.display = "";
     if (progressFailIcon) progressFailIcon.style.display = "none";
     if (progressSubtitle) {
@@ -983,12 +1005,75 @@ export function initializeDeployingPage(
     });
   };
 
+  // Repair for an AWS deploy that could not sign in. Kept outside the markup
+  // so a re-render of the same failure keeps the result on screen.
+  let awsRepair: {
+    key: string;
+    generation: number;
+    running: boolean;
+    text: string;
+  } = { key: "", generation: 0, running: false, text: "" };
+
+  const showAwsRepair = (): void => {
+    const status = context.dom.byId(AWS_REPAIR_STATUS_ID);
+    if (status) status.textContent = awsRepair.text;
+    const button = context.dom.inputById(AWS_REPAIR_BUTTON_ID);
+    if (button) button.disabled = awsRepair.running;
+  };
+
+  const repairAwsTrust = (): void => {
+    if (awsRepair.running) return;
+    const repair = awsRepair;
+    repair.running = true;
+    repair.text = "Repairing the AWS deploy role…";
+    showAwsRepair();
+    const finish = (text: string): void => {
+      repair.running = false;
+      repair.text = text;
+      // The page was left, or a newer failure replaced this one, while the
+      // request was out. A page opened since has its own controls.
+      if (entry.active && awsRepair === repair) showAwsRepair();
+    };
+    void context.net
+      .fetch(AWS_REPAIR_PATH, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": options.mutationNonce
+        },
+        body: JSON.stringify({ generation: repair.generation })
+      })
+      .then((response) =>
+        response
+          .json()
+          .catch(() => ({}))
+          .then((payload) => {
+            finish(
+              response.ok ?
+                readString(payload, "message") ||
+                  "Radius repaired the AWS deploy role. Deploy again."
+              : readString(payload, "error") ||
+                  "Radius could not repair the AWS deploy role."
+            );
+          })
+      )
+      .catch(() => {
+        finish(
+          "Radius could not reach the canvas server, so nothing was repaired. Try again."
+        );
+      });
+  };
+
   // Switches the deploy modal into a "failed" state. errorKind lets a
   // well-known failure (an unpushed branch, a missing OIDC credential) render a
   // tailored panel instead of raw workflow error text.
   let failureMarkup = "";
   let failureHtml = "";
+  // The failure on screen, so it can be drawn again when the environment
+  // listing arrives after it and names its provider.
+  let shownFailure: DeployFailureDetails | null = null;
   const showDeployFailed = (details: DeployFailureDetails): void => {
+    shownFailure = details;
     if (progressSpinner) progressSpinner.style.display = "none";
     if (progressFailIcon) progressFailIcon.style.display = "";
     if (details.errorKind === "branch-not-pushed") {
@@ -1040,6 +1125,20 @@ export function initializeDeployingPage(
       // now fails before any resource is touched, so the fix is to re-verify
       // the credentials (Part 4) and redeploy — not a model repair. Send the
       // user to the Environments list where each environment can be re-verified.
+      // On AWS the usual cause is a trust subject removed from the shared
+      // deploy role, which Repair puts back.
+      const aws = providerFor(providers, details.environment) === "aws";
+      // One Repair state per failed deploy, so a new failure that reads the
+      // same never shows the last one's result.
+      const repairKey = `${details.generation}\u0000${details.app}\u0000${details.environment}`;
+      if (awsRepair.key !== repairKey) {
+        awsRepair = {
+          key: repairKey,
+          generation: details.generation,
+          running: false,
+          text: ""
+        };
+      }
       if (progressTitle) {
         progressTitle.innerHTML = "Cloud credentials need re-verifying";
       }
@@ -1050,7 +1149,17 @@ export function initializeDeployingPage(
           (details.errorText ?
             `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
           : "") +
-          `<div style="margin-top:12px;"><button type="button" id="deploy-reverify-credentials" class="rad-btn rad-btn--primary" style="margin:0;">Re-verify credentials</button></div>`;
+          (aws ?
+            `<div id="${AWS_REPAIR_HELP_ID}" style="margin-top:10px; color:var(--rad-text-secondary);">Repair adds this environment back to its AWS deploy role's trust policy if it was removed. It changes nothing else.</div>`
+          : "") +
+          `<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">` +
+          (aws ?
+            `<button type="button" id="${AWS_REPAIR_BUTTON_ID}" class="rad-btn rad-btn--primary" style="margin:0;" aria-describedby="${AWS_REPAIR_HELP_ID}"${awsRepair.running ? " disabled" : ""}>Repair</button>`
+          : "") +
+          `<button type="button" id="deploy-reverify-credentials" class="rad-btn ${aws ? "rad-btn--secondary" : "rad-btn--primary"}" style="margin:0;">Re-verify credentials</button></div>` +
+          (aws ?
+            `<div id="${AWS_REPAIR_STATUS_ID}" role="status" style="margin-top:10px; color:var(--rad-text);">${escapeBrowserHtml(awsRepair.text)}</div>`
+          : "");
       }
     } else {
       if (progressTitle) {
@@ -1115,6 +1224,12 @@ export function initializeDeployingPage(
     if (reverifyButton) {
       bind(copyBindings, reverifyButton, "click", () => {
         context.nav.assign("/?page=environment");
+      });
+    }
+    const repairButton = context.dom.byId(AWS_REPAIR_BUTTON_ID);
+    if (repairButton) {
+      bind(copyBindings, repairButton, "click", () => {
+        repairAwsTrust();
       });
     }
     deployBtn.disabled = false;
@@ -1199,6 +1314,7 @@ export function initializeDeployingPage(
             showDeployFailed({
               app,
               environment,
+              generation: status.generation,
               errorText: status.error,
               runUrl: status.deployRunUrl,
               errorKind: status.errorKind,
@@ -1367,6 +1483,7 @@ export function initializeDeployingPage(
               showDeployFailed({
                 app,
                 environment,
+                generation: status.generation,
                 errorText: status.error,
                 runUrl: status.deployRunUrl,
                 errorKind: status.errorKind,
@@ -1382,6 +1499,7 @@ export function initializeDeployingPage(
             showDeployFailed({
               app,
               environment,
+              generation: status.generation,
               errorText: status.error,
               runUrl: status.deployRunUrl,
               errorKind: status.errorKind,

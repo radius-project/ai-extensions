@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   DELETE_APP_DISPATCHER_FILE,
@@ -34,6 +34,7 @@ import {
   readOptionalDispatchedWorkflowRunId,
   readWorkflowRunStatus,
   quiesceOwnedWorkflowRuns,
+  acceptWorkflowCancellation,
   REQUIRED_DELETE_WORKFLOWS,
   REQUIRED_DEPLOY_WORKFLOWS,
   REQUIRED_ENVIRONMENT_VARIABLES,
@@ -210,6 +211,86 @@ describe("workflow run ownership", () => {
       }
     });
     expect(calls).toEqual(["cancel:12", "wait:12"]);
+  });
+
+  it("waits for a run that GitHub has not queued before allowing cleanup", async () => {
+    const calls: string[] = [];
+    await expect(
+      quiesceOwnedWorkflowRuns(new Set(["16"]), {
+        readStatus: async () => "requested",
+        cancel: async () => {
+          acceptWorkflowCancellation(
+            {
+              code: 1,
+              stdout: "",
+              stderr:
+                "gh: Cannot cancel a workflow run that has not been queued yet. (HTTP 409)"
+            },
+            "cancel 16"
+          );
+          calls.push("not queued");
+        },
+        waitUntilCompleted: async () => {
+          calls.push("wait for completion");
+          throw new Error("still requested");
+        }
+      })
+    ).rejects.toThrow("still requested");
+    expect(calls).toEqual(["not queued", "wait for completion"]);
+  });
+
+  it("allows cleanup only after the pre-queue run reaches completion", async () => {
+    const wait = vi.fn(async () => {});
+    await quiesceOwnedWorkflowRuns(new Set(["17"]), {
+      readStatus: async () => "requested",
+      cancel: async () =>
+        acceptWorkflowCancellation(
+          {
+            code: 1,
+            stdout: "",
+            stderr:
+              "gh: Cannot cancel a workflow run that has not been queued yet. (HTTP 409)"
+          },
+          "cancel 17"
+        ),
+      waitUntilCompleted: wait
+    });
+    expect(wait).toHaveBeenCalledWith("17");
+  });
+
+  it("accepts a successful cancellation response", () => {
+    expect(() =>
+      acceptWorkflowCancellation({ code: 0, stdout: "", stderr: "" }, "cancel")
+    ).not.toThrow();
+  });
+
+  it("rejects a timed-out cancellation even with a zero exit code", () => {
+    expect(() =>
+      acceptWorkflowCancellation(
+        { code: 0, stdout: "", stderr: "", timedOut: true },
+        "cancel"
+      )
+    ).toThrow(/cancel/);
+  });
+
+  it.each([
+    ["HTTP 403: cancellation denied", false],
+    ["HTTP 409: a different conflict", false],
+    [
+      "Cannot cancel a workflow run that has not been queued yet. (HTTP 403)",
+      false
+    ],
+    [
+      "Cannot cancel a workflow run that has not been queued yet. (HTTP 409)",
+      true
+    ]
+  ])("rejects cancellation failure %s (timedOut=%s)", (stderr, timedOut) => {
+    expect(() =>
+      acceptWorkflowCancellation(
+        { code: 1, stdout: "", stderr, timedOut },
+        "cancel"
+      )
+    ).toThrow(/cancel/);
   });
 
   it("accepts a cancellation race only after confirming completion", async () => {

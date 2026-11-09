@@ -53,9 +53,12 @@ const CLI = {
   eks: "aws eks list-clusters --query clusters --region us-west-2 --output json",
   describeCluster: (name: string) =>
     `aws eks describe-cluster --name ${name} --region us-west-2 --output json`,
-  vpcs: "aws ec2 describe-vpcs --region us-west-2 --output json",
-  subnets: "aws ec2 describe-subnets --region us-west-2 --output json",
-  routeTables: "aws ec2 describe-route-tables --region us-west-2 --output json",
+  vpcs: "aws ec2 describe-vpcs --vpc-ids vpc-1 --region us-west-2 --output json",
+  subnets:
+    "aws ec2 describe-subnets --filters Name=vpc-id,Values=vpc-1 --region us-west-2 --output json",
+  routeTables:
+    "aws ec2 describe-route-tables --filters Name=vpc-id,Values=vpc-1 --region us-west-2 --output json",
+  zones: "aws ec2 describe-availability-zones --region us-west-2 --output json",
   eksKubeconfig: (name: string) =>
     `aws eks update-kubeconfig --name ${name} --region us-west-2 --kubeconfig ${TEST_KUBECONFIG_PATH}`,
   eksNamespaces: `kubectl --kubeconfig ${TEST_KUBECONFIG_PATH} get namespaces -o jsonpath={.items[*].metadata.name}`
@@ -355,14 +358,20 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
       CLI.describeCluster("eks-1"),
       JSON.stringify({
         cluster: {
+          status: "ACTIVE",
           resourcesVpcConfig: { vpcId: "vpc-1" },
           accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" }
         }
       })
     );
-    cli.set(CLI.vpcs, { throws: new Error("vpcs denied") });
+    cli.set(CLI.vpcs, {
+      throws: new Error(
+        "An error occurred (UnauthorizedOperation) when calling the DescribeVpcs operation"
+      )
+    });
     cli.set(CLI.subnets, '{"Subnets":[]}');
     cli.set(CLI.routeTables, '{"RouteTables":[]}');
+    cli.set(CLI.zones, '{"AvailabilityZones":[]}');
     cli.set(CLI.eksKubeconfig("eks-1"), "");
     cli.set(CLI.eksNamespaces, "default team-a");
     const entry = await container!.getOrCreate("panel-a");
@@ -378,9 +387,10 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(
       '{"clusters":[{"id":"eks-1","name":"eks-1","vpcId":"vpc-1",' +
-        '"authenticationMode":"API_AND_CONFIG_MAP","usable":true}],"resourceGroups":[],' +
-        '"namespaces":["default","team-a"],"vpcs":[],"subnets":[],' +
-        '"errors":{"vpcs":"vpcs denied"}}'
+        '"authenticationMode":"API_AND_CONFIG_MAP","status":"ACTIVE","usable":true}],' +
+        '"resourceGroups":[],"namespaces":["default","team-a"],"vpcs":[],"subnets":[],' +
+        '"errors":{"vpcs":"An error occurred (UnauthorizedOperation) when calling the DescribeVpcs operation"},' +
+        '"errorKinds":{"vpcs":"denied"}}'
     );
   });
 

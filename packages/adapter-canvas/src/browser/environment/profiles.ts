@@ -30,6 +30,7 @@ import type {
   DomEventTarget
 } from "../ports.js";
 import type { ScopeTimer } from "../lifecycle.js";
+import type { DiscoverResourcesOptions } from "./discovery.js";
 
 export const PROFILES_PANEL_ENTRY_KEY = "environment-profiles-panel";
 export const CREDENTIAL_PROFILES_ENDPOINT = "/api/credential-profiles";
@@ -524,7 +525,8 @@ export interface CredentialProfilesPanelDeps {
   discoverResources(
     provider: CredentialProvider,
     subscriptionId: string,
-    tenantId: string
+    tenantId: string,
+    options?: DiscoverResourcesOptions
   ): void;
 }
 
@@ -1100,11 +1102,18 @@ export function initializeCredentialProfilesPanel(
     if (!refreshButton) continue;
     scope.on(refreshButton, "click", () => {
       if (!selectedProfile) return;
-      const provider: CredentialProvider =
-        selectedProfile.provider === "aws" ? "aws" : "azure";
+      if (selectedProfile.provider === "aws") {
+        // AWS Refresh keeps the selected cluster, namespace, and subnets.
+        deps.discoverResources(
+          "aws",
+          ...profileDiscoveryScope(selectedProfile, "aws"),
+          { keepSelection: true }
+        );
+        return;
+      }
       deps.discoverResources(
-        provider,
-        ...profileDiscoveryScope(selectedProfile, provider)
+        "azure",
+        ...profileDiscoveryScope(selectedProfile, "azure")
       );
     });
   }

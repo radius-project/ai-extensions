@@ -15,37 +15,11 @@ import {
   type SetupNamespaceIssue
 } from "@radius-project/core";
 
-// Seam 1 of the `POST /api/create-environment` slice: the refusal ladder.
-//
-// Seven rungs, in this exact order, every one of them reached before the route
-// performs any GitHub mutation:
-//
-//   1. 403 not server-owned            (before the body is even read)
-//   2. 400 no target repository
-//   3. 400 malformed repository slug
-//   4. 409 continuation does not match the operation it claims to continue
-//   5. 409 another setup is already running for the repo
-//   6. 500 the setup recovery record could not be persisted
-//   7. 409 the namespace is held by another environment, or its claims
-//          could not be established
-//
-// Rung 6 also finalizes the operation as failed, because a record that cannot be
-// saved must not be left looking live. Rungs are returned as data rather than
-// written to the socket so the ladder is assertable without a live response.
-//
 // The namespace rung runs last of the pre-mutation checks, once the operation
 // this request belongs to is settled. That ordering is required rather than
 // cosmetic: the claim read is authoritative, so it must run as the GitHub
 // account pinned to this operation, and that account is only known once the
 // operation is adopted or started. It still precedes every GitHub mutation.
-
-export const SERVER_OWNED_REFUSAL: CreateEnvironmentRefusal = {
-  status: 403,
-  body: {
-    error: "This endpoint is reserved for server-owned operations.",
-    code: "server-owned-operation-required"
-  }
-};
 
 export interface CreateEnvironmentRequestData {
   repo?: string;
@@ -126,13 +100,6 @@ export interface RefusedCreateEnvironmentRequest {
 
 export type CreateEnvironmentAdmission =
   AdmittedCreateEnvironmentRequest | RefusedCreateEnvironmentRequest;
-
-// Rung 1. Split out because it is decided before the request body is read.
-export function refuseUnlessServerOwned(
-  isServerOwned: boolean
-): CreateEnvironmentRefusal | null {
-  return isServerOwned ? null : SERVER_OWNED_REFUSAL;
-}
 
 // The namespace rung, factored out because it runs once the operation whose
 // pinned GitHub account will perform the read is known: adopted on the

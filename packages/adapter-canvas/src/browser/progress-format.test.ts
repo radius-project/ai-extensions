@@ -29,6 +29,7 @@ describe("stageGlyph", () => {
   it.each([
     ["pending", "○"],
     ["running", "◐"],
+    ["paused", "‖"],
     ["succeeded", "✓"],
     ["warning", "⚠"],
     ["failed", "✗"],

@@ -26,6 +26,11 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
+  formatAwsLockTime,
+  namesOneEnvironment,
+  readRecordedAwsLock
+} from "@radius-project/core";
+import {
   disabledOperationStore,
   PERSISTED_OPERATIONS_VERSION,
   type OperationStore
@@ -156,6 +161,51 @@ export type GitHubEnvironmentVariableArtifact = {
   previousKnown: boolean;
 };
 
+// The AWS deploy identity. `created` only when this setup's create-role call
+// made it; `reused` for a Radius role from an earlier setup or a picked role.
+// `roleId` is IAM's own id, which a role recreated under the same name does
+// not share.
+export type AwsRoleArtifact = {
+  state: SetupArtifactPresence;
+  origin: SetupArtifactOrigin;
+  roleArn: string | null;
+  roleName: string | null;
+  roleId: string | null;
+};
+
+// One GitHub subject this setup added to the role's trust policy. A subject the
+// role already trusted is not recorded, so a rollback never removes it.
+export type AwsTrustSubjectArtifact = {
+  state: "created" | "deleted";
+  roleArn: string;
+  roleName: string;
+  // IAM's id for the role the subject was added to, or null when IAM did not
+  // say. A rollback changes only a role that still has this id.
+  roleId: string | null;
+  subject: string;
+};
+
+// The environment's inline permission policy, recorded only when the role had
+// no policy of that name before this setup wrote it.
+export type AwsRolePolicyArtifact = {
+  state: "created" | "deleted";
+  roleArn: string;
+  roleName: string;
+  roleId: string | null;
+  policyName: string;
+};
+
+// The role's EKS access entry on the environment's cluster, recorded only when
+// this setup created it.
+export type AwsAccessEntryArtifact = {
+  state: "created" | "deleted";
+  roleArn: string;
+  roleName: string;
+  roleId: string | null;
+  cluster: string;
+  region: string;
+};
+
 // `state` keeps a reverted file in the ledger instead of deleting the entry:
 // the record still has to prove this operation crossed the commit point, and a
 // cleanup retry still needs the provenance of the write it is repeating.
@@ -194,6 +244,10 @@ export type SetupCleanupArtifactType =
   | "workflow_file"
   | "github_environment_variable"
   | "github_environment"
+  | "aws_access_entry"
+  | "aws_role_policy"
+  | "aws_trust_subject"
+  | "aws_role"
   | "role_assignment"
   | "federated_credential"
   | "service_principal"
@@ -229,6 +283,10 @@ export type SetupArtifactLedger = {
   federatedCredentials: FederatedCredentialArtifact[];
   roleAssignments: RoleAssignmentArtifact[];
   githubEnvironment: GitHubEnvironmentArtifact;
+  awsRole: AwsRoleArtifact;
+  awsTrustSubjects: AwsTrustSubjectArtifact[];
+  awsRolePolicies: AwsRolePolicyArtifact[];
+  awsAccessEntries: AwsAccessEntryArtifact[];
   githubEnvironmentVariables: GitHubEnvironmentVariableArtifact[];
   commit: SetupArtifactCommitState;
   cleanup: SetupArtifactCleanupState;
@@ -262,7 +320,19 @@ export type OperationCommandState = "accepted" | "running" | "finished";
 export type OperationAttemptKind =
   "setup" | "verification" | "cleanup" | "deletion";
 
+export interface WorkflowCancellationTarget {
+  readonly operationId: string;
+  readonly commandId: string;
+  readonly cancellationAttempt: number;
+  readonly repo: string;
+  readonly environment: string;
+  readonly login: string;
+  readonly runId: string;
+  readonly verificationAttempt: number;
+}
+
 export type OperationCommandRecord = {
+  workflowCancellation?: WorkflowCancellationTarget;
   kind: OperationCommandKind;
   commandId: string;
   attempt: number;
@@ -670,12 +740,25 @@ export function providerRecoveryManualGuidance(op: any): string | null {
   const manualMutation = recovery.mutations.find(
     (entry) => entry.status === "manual_required"
   );
-  if (recovery.state !== "manual_required" && !manualMutation) return null;
-  return (
-    recovery.guidance ||
-    manualMutation?.evidence ||
-    "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+  if (recovery.state === "manual_required" || manualMutation) {
+    return (
+      recovery.guidance ||
+      manualMutation?.evidence ||
+      "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+    );
+  }
+  const unappliedBranchDeletion = recovery.mutations.find(
+    (entry) =>
+      entry.kind === "github_branch.delete" && entry.status === "not_applied"
   );
+  if (unappliedBranchDeletion) {
+    const guidance =
+      "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again.";
+    return unappliedBranchDeletion.evidence ?
+        `${guidance} Details: ${unappliedBranchDeletion.evidence}`
+      : guidance;
+  }
+  return null;
 }
 
 export function terminalizeProviderManualRequired(
@@ -874,8 +957,36 @@ export function readOperationControl(value: any): OperationControlRecord {
         state: entry.state,
         acceptedAt: isoOrNull(entry.acceptedAt) || nowIso(),
         completedAt: isoOrNull(entry.completedAt),
-        outcome: isoOrNull(entry.outcome)
+        outcome: isoOrNull(entry.outcome),
+        ...(isWorkflowCancellationTarget(entry.workflowCancellation) ?
+          { workflowCancellation: structuredClone(entry.workflowCancellation) }
+        : {})
       });
+    }
+
+    function isWorkflowCancellationTarget(
+      value: unknown
+    ): value is WorkflowCancellationTarget {
+      if (!value || typeof value !== "object") return false;
+      const record = value as Record<string, unknown>;
+      return (
+        [
+          "operationId",
+          "commandId",
+          "repo",
+          "environment",
+          "login",
+          "runId"
+        ].every(
+          (key) => typeof record[key] === "string" && record[key].length > 0
+        ) &&
+        ["cancellationAttempt", "verificationAttempt"].every(
+          (key) =>
+            typeof record[key] === "number" &&
+            Number.isSafeInteger(record[key]) &&
+            record[key] >= 0
+        )
+      );
     }
   }
   if (Array.isArray(value.outcomes)) {
@@ -926,6 +1037,32 @@ export function isProviderRestartDecision(op: any): boolean {
   return (
     op?.state === "action_required" &&
     op?.terminal?.reason === PROVIDER_RESTART_DECISION_REASON
+  );
+}
+
+/**
+ * Whether a verification workflow run for this setup may exist.
+ *
+ * A run needs an installed workflow, so a record that never committed one and
+ * never attempted a workflow write or dispatch proves no run started. Anything
+ * short of that proof counts: setup records an automatic push run's identity
+ * only after the commit that triggered it is saved, so a crash in between
+ * leaves a run with no dispatch fields.
+ */
+export function mayHaveStartedVerification(op: any): boolean {
+  const verification = op?.verification;
+  if (verification && typeof verification === "object") {
+    if (Number(verification.dispatchedAt) > 0) return true;
+    if (verification.runId != null && String(verification.runId).trim())
+      return true;
+  }
+  const ledger = readSetupArtifactLedger(op?.setupArtifacts);
+  if (ledger.commit.mode !== "not_started") return true;
+  if (ledger.commit.workflowFiles.length > 0) return true;
+  return readProviderRecovery(op?.providerRecovery).mutations.some(
+    (mutation) =>
+      mutation.kind.startsWith("github_workflow.") &&
+      mutation.status !== "not_applied"
   );
 }
 
@@ -1178,6 +1315,16 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
       name: null,
       providerId: null
     },
+    awsRole: {
+      state: "not_started",
+      origin: "unknown",
+      roleArn: null,
+      roleName: null,
+      roleId: null
+    },
+    awsTrustSubjects: [],
+    awsRolePolicies: [],
+    awsAccessEntries: [],
     githubEnvironmentVariables: [],
     commit: {
       mode: "not_started",
@@ -1252,6 +1399,38 @@ function readRoleAssignmentArtifact(value: any): RoleAssignmentArtifact {
   };
 }
 
+function readAwsRoleState(value: unknown): SetupArtifactPresence {
+  return (
+      value === "created" ||
+        value === "reused" ||
+        value === "deleted" ||
+        value === "not_started"
+    ) ?
+      value
+    : "not_started";
+}
+
+// An AWS list entry with every field a rollback needs, or nothing. One missing
+// its role or target cannot be deleted precisely, so it is dropped rather than
+// guessed at.
+function readAwsList<T>(value: unknown, fields: readonly string[]): T[] {
+  if (!Array.isArray(value)) return [];
+  const entries: T[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const entry: Record<string, string> = {
+      state: raw.state === "deleted" ? "deleted" : "created",
+      roleArn: String(raw.roleArn || "").trim(),
+      roleName: String(raw.roleName || "").trim()
+    };
+    for (const field of fields) entry[field] = String(raw[field] || "").trim();
+    if (!Object.values(entry).every(Boolean)) continue;
+    // Optional: a rollback refuses an entry without it, so it is kept.
+    entries.push({ ...entry, roleId: optionalIdentityString(raw.roleId) } as T);
+  }
+  return entries;
+}
+
 /**
  * Restore a saved artifact ledger onto the current shape.
  *
@@ -1308,6 +1487,19 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
         source.githubEnvironment && source.githubEnvironment.providerId
       )
     },
+    awsRole: {
+      state: readAwsRoleState(source.awsRole?.state),
+      origin: readArtifactOrigin(source.awsRole?.origin),
+      roleArn: optionalIdentityString(source.awsRole?.roleArn),
+      roleName: optionalIdentityString(source.awsRole?.roleName),
+      roleId: optionalIdentityString(source.awsRole?.roleId)
+    },
+    awsTrustSubjects: readAwsList(source.awsTrustSubjects, ["subject"]),
+    awsRolePolicies: readAwsList(source.awsRolePolicies, ["policyName"]),
+    awsAccessEntries: readAwsList(source.awsAccessEntries, [
+      "cluster",
+      "region"
+    ]),
     githubEnvironmentVariables:
       Array.isArray(source.githubEnvironmentVariables) ?
         source.githubEnvironmentVariables
@@ -1927,6 +2119,71 @@ export function recordGitHubEnvironment(op: any, patch: any): any {
   return op;
 }
 
+export function recordAwsRole(op: any, patch: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger || !patch) return op;
+  ledger.awsRole = reconcileArtifactProvenance(
+    "aws_role",
+    ledger.awsRole,
+    patch
+  );
+  return op;
+}
+
+// Add a created AWS list entry, or revive one a rollback had removed. The same
+// identity is never listed twice, and a revived one takes the role id of the
+// write that made it again.
+function recordAwsListEntry<T extends { state: string; roleId: string | null }>(
+  list: T[],
+  artifactType: SetupCleanupArtifactType,
+  entry: T
+): void {
+  const identity = cleanupArtifactIdentity(artifactType, entry);
+  const existing = list.find(
+    (item) => cleanupArtifactIdentity(artifactType, item) === identity
+  );
+  if (existing) {
+    existing.state = "created";
+    existing.roleId = entry.roleId;
+  } else list.push(entry);
+}
+
+export function recordAwsTrustSubject(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const [record] = readAwsList<AwsTrustSubjectArtifact>([entry], ["subject"]);
+  if (!ledger || !record) return op;
+  recordAwsListEntry(ledger.awsTrustSubjects, "aws_trust_subject", {
+    ...record,
+    state: "created"
+  });
+  return op;
+}
+
+export function recordAwsRolePolicy(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const [record] = readAwsList<AwsRolePolicyArtifact>([entry], ["policyName"]);
+  if (!ledger || !record) return op;
+  recordAwsListEntry(ledger.awsRolePolicies, "aws_role_policy", {
+    ...record,
+    state: "created"
+  });
+  return op;
+}
+
+export function recordAwsAccessEntry(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const [record] = readAwsList<AwsAccessEntryArtifact>(
+    [entry],
+    ["cluster", "region"]
+  );
+  if (!ledger || !record) return op;
+  recordAwsListEntry(ledger.awsAccessEntries, "aws_access_entry", {
+    ...record,
+    state: "created"
+  });
+  return op;
+}
+
 export function recordGitHubEnvironmentVariable(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !entry) return op;
@@ -2142,6 +2399,25 @@ export function recordCleanupDeletion(
         return false;
       ledger.githubEnvironment.state = "deleted";
       return true;
+    case "aws_role":
+      if (ledger.awsRole.state !== "created" || !matches(ledger.awsRole))
+        return false;
+      ledger.awsRole.state = "deleted";
+      return true;
+    case "aws_trust_subject":
+    case "aws_role_policy":
+    case "aws_access_entry": {
+      const list: Array<{ state: string }> =
+        artifactType === "aws_trust_subject" ? ledger.awsTrustSubjects
+        : artifactType === "aws_role_policy" ? ledger.awsRolePolicies
+        : ledger.awsAccessEntries;
+      const entry = list.find(
+        (item) => item.state === "created" && matches(item)
+      );
+      if (!entry) return false;
+      entry.state = "deleted";
+      return true;
+    }
     case "github_environment_variable": {
       const variable = ledger.githubEnvironmentVariables.find(
         (entry) => entry.state === "created" && matches(entry)
@@ -2193,6 +2469,10 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
     ledger.roleAssignments.length > 0 ||
     ledger.githubEnvironment.state === "created" ||
     ledger.githubEnvironment.state === "created_candidate" ||
+    ledger.awsRole.state === "created" ||
+    ledger.awsTrustSubjects.some((entry) => entry.state === "created") ||
+    ledger.awsRolePolicies.some((entry) => entry.state === "created") ||
+    ledger.awsAccessEntries.some((entry) => entry.state === "created") ||
     ledger.githubEnvironmentVariables.some(
       (entry) => entry.state === "created"
     ) ||
@@ -2337,7 +2617,8 @@ const UNPROVEN_SERVICE_PRINCIPAL_ACTION =
 const REUSE_NOUNS: Record<string, string> = {
   azure_app: "App Registration",
   service_principal: "Service Principal",
-  github_environment: "GitHub environment"
+  github_environment: "GitHub environment",
+  aws_role: "IAM role"
 };
 
 const RETAINED_KEEP_ACTION =
@@ -2451,6 +2732,25 @@ export function cleanupArtifactIdentity(
           artifact.environment
         )}:${normalizeIdentityPart(artifact.name)}`
       );
+    // IAM's role id leads, so a role deleted and recreated under the same name
+    // is a different identity to a delete.
+    case "aws_role":
+      return identityLedBy(
+        artifact.roleId,
+        normalizeIdentityPart(artifact.roleArn)
+      );
+    case "aws_trust_subject":
+      return `${normalizeIdentityPart(artifact.roleArn)}#${normalizeIdentityPart(
+        artifact.subject
+      )}`;
+    case "aws_role_policy":
+      return `${normalizeIdentityPart(artifact.roleArn)}#${normalizeIdentityPart(
+        artifact.policyName
+      )}`;
+    case "aws_access_entry":
+      return `${normalizeIdentityPart(artifact.region)}:${normalizeIdentityPart(
+        artifact.cluster
+      )}:${normalizeIdentityPart(artifact.roleArn)}`;
     // Path plus branch, because the same workflow path on a setup branch and on
     // the default branch are two different files with two different provenances.
     case "workflow_file":
@@ -2554,6 +2854,53 @@ const LEDGER_ARTIFACTS: readonly LedgerArtifactRow[] = Object.freeze([
       )
     ],
     unprovenAction: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
+  },
+  {
+    kind: "aws_role",
+    entries: (ledger: any) => [
+      ledgerEntry(
+        "aws_role",
+        ledger.awsRole,
+        `IAM role ${String(ledger.awsRole.roleName || ledger.awsRole.roleArn || "")}`,
+        ledger.awsRole.state
+      )
+    ]
+  },
+  {
+    kind: "aws_trust_subject",
+    entries: (ledger: any) =>
+      ledger.awsTrustSubjects.map((entry: any) =>
+        ledgerEntry(
+          "aws_trust_subject",
+          entry,
+          `${entry.subject} in the trust policy of IAM role ${entry.roleName}`,
+          entry.state
+        )
+      )
+  },
+  {
+    kind: "aws_role_policy",
+    entries: (ledger: any) =>
+      ledger.awsRolePolicies.map((entry: any) =>
+        ledgerEntry(
+          "aws_role_policy",
+          entry,
+          `${entry.policyName} on IAM role ${entry.roleName}`,
+          entry.state
+        )
+      )
+  },
+  {
+    kind: "aws_access_entry",
+    entries: (ledger: any) =>
+      ledger.awsAccessEntries.map((entry: any) =>
+        ledgerEntry(
+          "aws_access_entry",
+          entry,
+          `IAM role ${entry.roleName} on EKS cluster ${entry.cluster} (${entry.region})`,
+          entry.state
+        )
+      )
   },
   {
     kind: "github_environment_variable",
@@ -2705,7 +3052,8 @@ export function projectCleanupSummary(op: any): any {
   if (
     !reportableState &&
     cleanupState === "not_started" &&
-    !hasTrackedSetupArtifacts(ledger)
+    !hasTrackedSetupArtifacts(ledger) &&
+    !heldAwsLockEntry(op)
   )
     return null;
 
@@ -2973,6 +3321,9 @@ function projectPartialState(
     if (entry.keepAlways || reusableOnRetry) retainedGroup.push(item);
     else created.push(item);
   }
+  // A continuation takes the lock back, so it groups with what it reuses.
+  const lock = heldAwsLockEntry(op);
+  if (lock) (reusableOnRetry ? retainedGroup : created).push(lock);
 
   return {
     created,
@@ -3151,13 +3502,32 @@ export const SETUP_RESUME_STEPS = Object.freeze([
   "service_principal",
   "federated_credentials",
   "role_assignments",
+  "aws_deploy_identity",
   "github_environment",
   "workflow_commit",
   "verification"
 ]);
 
-/** The first step the ledger does not already prove finished. */
-export function nextIncompleteSetupStep(op: any): string {
+/**
+ * The step a continuation resumes from.
+ *
+ * An AWS setup with an identity stage resumes from Authorize deploy identity:
+ * it takes the deploy identity lock again and holds it through Configure
+ * environment (see runSetupCoordinator), unless it only monitors the saved
+ * verification run. Every other setup resumes from the first step the ledger
+ * does not already prove finished.
+ */
+export function nextIncompleteSetupStep(
+  op: any,
+  { recoveredVerification = false }: { recoveredVerification?: boolean } = {}
+): string {
+  if (
+    op?.provider === "aws" &&
+    op.stages?.some((stage: any) => stage?.id === STAGE_AUTHORIZE_IDENTITY) &&
+    !recoveredVerification
+  ) {
+    return "aws_deploy_identity";
+  }
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return "azure_app";
   // A rolled-back artifact is incomplete again: cleanup proved it is gone, so
@@ -3182,7 +3552,8 @@ const SETUP_IDENTITY_RESUME_STEPS = Object.freeze([
   "azure_app",
   "service_principal",
   "federated_credentials",
-  "role_assignments"
+  "role_assignments",
+  "aws_deploy_identity"
 ]);
 
 export type SetupContinuationPlan = {
@@ -3341,12 +3712,15 @@ function setupForwardEligibility(
   // resources the customer just asked Radius to remove.
   if (intent === "continue" && rollbackRemovedEverything(op))
     return { ok: false, code: "setup-continue-rolled-back" };
+  // Continue then only monitors the saved verification run, so the resume
+  // point and the scheduled work must both come from this one answer.
+  const recoveredVerification =
+    isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY;
   return {
     ok: true,
     code: `${prefix}-allowed`,
-    resumeFrom: nextIncompleteSetupStep(op),
-    recoveredVerification:
-      isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY
+    resumeFrom: nextIncompleteSetupStep(op, { recoveredVerification }),
+    recoveredVerification
   };
 }
 
@@ -3394,6 +3768,10 @@ const ROLLBACK_ARTIFACT_ORDER: readonly SetupCleanupArtifactType[] =
   Object.freeze([
     "workflow_file",
     "github_environment_variable",
+    "aws_access_entry",
+    "aws_role_policy",
+    "aws_trust_subject",
+    "aws_role",
     "github_environment",
     "role_assignment",
     "federated_credential",
@@ -4125,6 +4503,7 @@ const SETUP_STEP_LABELS: Record<string, string> = {
   service_principal: "Create the Service Principal",
   federated_credentials: "Add the federated credentials",
   role_assignments: "Grant the Azure role assignments",
+  aws_deploy_identity: "Authorize the deploy identity",
   github_environment: "Configure the GitHub environment",
   workflow_commit: "Commit the deploy workflows",
   verification: "Verify the credentials"
@@ -4133,6 +4512,23 @@ const SETUP_STEP_LABELS: Record<string, string> = {
 /** The customer-facing name of a resume point. */
 export function setupStepLabel(step: any): string {
   return SETUP_STEP_LABELS[String(step || "")] || "the next setup step";
+}
+
+/**
+ * Where the last setup attempt stopped.
+ *
+ * An AWS continuation always resumes from Authorize deploy identity, so its
+ * resume point says nothing about where it stopped: the failed stage does.
+ * Every other resume point is also the step the attempt stopped at.
+ */
+function setupStopLabel(op: any, resumeFrom: any): string {
+  if (resumeFrom === "aws_deploy_identity") {
+    const stage = op?.stages?.find(
+      (entry: any) => entry?.id === op?.failure?.stage
+    );
+    if (stage?.label) return stage.label;
+  }
+  return setupStepLabel(resumeFrom);
 }
 
 /**
@@ -4157,6 +4553,56 @@ function projectContinuationPreview(op: any, resumeFrom: any): any {
   };
 }
 
+const AWS_LOCK_ARTIFACT_KIND = "aws_deploy_identity_lock";
+
+/**
+ * The deploy identity lock a stopped AWS setup still holds, as an inventory
+ * entry. It is not a ledger resource: it only orders Radius runs, so it is
+ * listed while this setup holds it, released when the customer deletes or
+ * leaves the setup, and taken back when they continue it.
+ */
+function heldAwsLockEntry(op: any): { kind: string; target: string } | null {
+  if (op?.provider !== "aws" || !isTerminalState(op.state)) return null;
+  const lock = readRecordedAwsLock(op.context);
+  if (!lock) return null;
+  return {
+    kind: AWS_LOCK_ARTIFACT_KIND,
+    target: `Lock on IAM role ${lock.roleName} (policy ID ${lock.policyId})`
+  };
+}
+
+/**
+ * How the server will act on a record, as far as its projection needs to say.
+ * Only the deploy identity lock depends on it: while the AWS switch is off,
+ * Radius runs no AWS command, so a destructive action keeps the lock.
+ */
+export interface OperationProjectionOptions {
+  awsEnabled?: boolean;
+}
+
+/** The held lock, if any, as the list a destructive preview removes. */
+function heldAwsLockRemoval(
+  op: any,
+  options: OperationProjectionOptions
+): Array<{ kind: string; target: string }> {
+  const lock = heldAwsLockEntry(op);
+  return lock && options.awsEnabled !== false ? [lock] : [];
+}
+
+const AWS_OFF_LOCK_ACTION =
+  "AWS environments are turned off, so Radius will not release this lock. Turn them on and delete the setup, or run the command in its step to remove it by hand.";
+
+/** The held lock, if the AWS switch keeps it, as a preview keep. */
+function keptAwsLock(
+  op: any,
+  options: OperationProjectionOptions
+): Array<{ kind: string; target: string; reason: string; action: string }> {
+  const lock = heldAwsLockEntry(op);
+  return lock && options.awsEnabled === false ?
+      [{ ...lock, reason: "retained", action: AWS_OFF_LOCK_ACTION }]
+    : [];
+}
+
 /**
  * What a rollback will remove, keep, and leave for the customer.
  *
@@ -4164,15 +4610,101 @@ function projectContinuationPreview(op: any, resumeFrom: any): any {
  * the browser from the inventory groups would let the dialog promise a deletion
  * the server would then refuse to perform.
  */
-function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
-  const summary = projectCleanupSummary(op) || {};
-  const removes = targets.map((entry) => ({
-    kind: entry.artifactType,
-    target: entry.target
-  }));
-  const removeKeys = new Set(
-    removes.map((entry) => `${entry.kind}#${entry.target}`)
+const AWS_OFF_KEEP_ACTION =
+  "AWS environments are turned off, so Radius will not change this in AWS. Turn them on, then delete the setup again.";
+const SHARED_SUBJECT_KEEP_ACTION =
+  "This subject doesn't name one repository and this environment, so other environments may present it too. Radius keeps it.";
+// Rollback keeps these when something else uses them, which only AWS and
+// GitHub can tell. The preview says so rather than read them on every poll.
+const AWS_REMOVED_IF_UNUSED: ReadonlySet<string> = new Set([
+  "aws_role",
+  "aws_access_entry"
+]);
+
+/**
+ * Split targets into what a deletion removes and what it keeps, by the same
+ * rules the AWS rollback applies without reading AWS: with AWS turned off it
+ * changes nothing there, and it keeps a trust subject other environments may
+ * present. `keys` names every target, so a target is never also listed as
+ * kept by another rule.
+ */
+function previewTargets(
+  op: any,
+  targets: readonly {
+    artifactType: string;
+    target: string;
+    identity?: unknown;
+  }[],
+  options: OperationProjectionOptions
+): {
+  removes: Array<{ kind: string; target: string }>;
+  keeps: Array<{
+    kind: string;
+    target: string;
+    reason: string;
+    action: string;
+  }>;
+  keys: Set<string>;
+} {
+  const ledger = readSetupArtifactLedger(op?.setupArtifacts);
+  const context = op?.context || {};
+  const environment = String(
+    context.canonicalEnvironment || op?.environment || ""
   );
+  const removes: Array<{ kind: string; target: string }> = [];
+  const keeps: Array<{
+    kind: string;
+    target: string;
+    reason: string;
+    action: string;
+  }> = [];
+  for (const entry of targets) {
+    const kind = entry.artifactType;
+    const keep = (action: string) =>
+      keeps.push({ kind, target: entry.target, reason: "retained", action });
+    if (kind.startsWith("aws_") && options.awsEnabled === false) {
+      keep(AWS_OFF_KEEP_ACTION);
+      continue;
+    }
+    if (kind === "aws_trust_subject") {
+      const subject = ledger.awsTrustSubjects.find(
+        (item) =>
+          cleanupArtifactIdentity("aws_trust_subject", item) === entry.identity
+      )?.subject;
+      if (subject && !namesOneEnvironment(subject, environment)) {
+        keep(SHARED_SUBJECT_KEEP_ACTION);
+        continue;
+      }
+    }
+    removes.push({
+      kind,
+      target:
+        AWS_REMOVED_IF_UNUSED.has(kind) ?
+          `${entry.target}, if nothing else uses it`
+        : entry.target
+    });
+  }
+  const keys = new Set(
+    targets.map((entry) => `${entry.artifactType}#${entry.target}`)
+  );
+  return { removes, keeps, keys };
+}
+
+function projectRollbackPreview(
+  op: any,
+  targets: RollbackTarget[],
+  options: OperationProjectionOptions
+): any {
+  const summary = projectCleanupSummary(op) || {};
+  const split = previewTargets(op, targets, options);
+  const removes = [...split.removes, ...heldAwsLockRemoval(op, options)];
+  const lockKept = keptAwsLock(op, options);
+  const removeKeys = new Set([
+    ...split.keys,
+    ...[...heldAwsLockRemoval(op, options), ...lockKept].map(
+      (entry) => `${entry.kind}#${entry.target}`
+    )
+  ]);
   const keeps = [
     ...(summary.reused || []).map((entry: any) => ({
       kind: entry.kind,
@@ -4191,7 +4723,9 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
         target: entry.target,
         reason: "retained",
         action: RETAINED_KEEP_ACTION
-      }))
+      })),
+    ...split.keeps,
+    ...lockKept
   ];
   return {
     removes,
@@ -4206,8 +4740,11 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
   };
 }
 
-function projectAbandonPreview(op: any): any {
-  const preview = projectRollbackPreview(op, []);
+function projectAbandonPreview(
+  op: any,
+  options: OperationProjectionOptions
+): any {
+  const preview = projectRollbackPreview(op, [], options);
   return {
     ...preview,
     manualActionRequired: [
@@ -4425,7 +4962,7 @@ export function projectOperationHeadline(op: any): any {
     return {
       code: "continue-failed",
       title: "Setup could not continue",
-      message: `Radius stopped at ${setupStepLabel(op.resumeFrom)}. Review what exists, then retry setup or delete what this attempt created.`
+      message: `Radius stopped at ${setupStopLabel(op, op.resumeFrom)}. Review what exists, then retry setup or delete what this attempt created.`
     };
   }
   return null;
@@ -4433,10 +4970,80 @@ export function projectOperationHeadline(op: any): any {
 
 const PAUSE_SETUP_LABEL = "Pause setup";
 
-export function projectOperationActions(op: any): any[] {
+/**
+ * The AWS deploy identity lock a live run is waiting for, once it has been held
+ * long enough to offer Remove lock. Null otherwise.
+ */
+export function removableAwsLockWait(op: any): {
+  policyArn: string;
+  policyId: string;
+  holder: string;
+  holderOperationId: string;
+  since: string;
+  stopped: boolean;
+} | null {
+  const wait = op?.context?.awsLockWait;
+  if (
+    !op ||
+    isTerminalState(op.state) ||
+    !wait ||
+    wait.removable !== true ||
+    typeof wait.policyArn !== "string" ||
+    !wait.policyArn ||
+    typeof wait.policyId !== "string" ||
+    !wait.policyId
+  ) {
+    return null;
+  }
+  return {
+    policyArn: wait.policyArn,
+    policyId: wait.policyId,
+    since: typeof wait.since === "string" ? wait.since : "",
+    holderOperationId:
+      typeof wait.holderOperationId === "string" ? wait.holderOperationId : "",
+    holder:
+      typeof wait.holder === "string" && wait.holder ?
+        wait.holder
+      : "Another run",
+    stopped: wait.stopped === true
+  };
+}
+
+// Radius never takes a lock over by itself: a run that only looks stopped could
+// still send a write it already prepared. So a person confirms it stopped.
+function removeAwsLockAction(op: any, base: string): any | null {
+  const wait = removableAwsLockWait(op);
+  if (!wait) return null;
+  return {
+    id: "remove-aws-lock",
+    kind: "remove_aws_lock",
+    label: "Remove lock",
+    placement: "row",
+    tone: "danger",
+    requiresConfirmation: true,
+    confirmTitle: "Remove the lock on the deploy identity?",
+    confirmLabel: "Remove lock",
+    cancelLabel: "Keep waiting",
+    description:
+      wait.stopped ?
+        `This lock is from an earlier attempt that stopped: ${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""}, which took it at ${formatAwsLockTime(wait.since)}. Remove it so this run can continue.`
+      : `${wait.holder}${wait.holderOperationId ? ` (operation ${wait.holderOperationId})` : ""} has held the lock since ${formatAwsLockTime(wait.since)}. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
+    method: "POST",
+    // Names the lock shown, so a confirmation that outlives it is refused.
+    path: `${base}/aws-lock/remove?policyId=${encodeURIComponent(wait.policyId)}`,
+    pending: false
+  };
+}
+
+export function projectOperationActions(
+  op: any,
+  options: OperationProjectionOptions = {}
+): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
   if (op.kind === OPERATION_KIND_DELETE) {
+    const removeLock = removeAwsLockAction(op, base);
+    if (removeLock) return [removeLock];
     // Delete work is not pausable and cannot be rolled back. While it is live,
     // project no setup controls; once it ends with unfinished work, offer only
     // the deletion-specific retry that resumes its idempotent stage sequence.
@@ -4498,7 +5105,9 @@ export function projectOperationActions(op: any): any[] {
     const active = activeCommandKind(op);
     if (active !== null && DISPOSAL_COMMAND_KINDS.includes(active)) return [];
     const waitingForInput = op.state === INPUT_REQUIRED_STATE;
+    const removeLock = removeAwsLockAction(op, base);
     return [
+      ...(removeLock ? [removeLock] : []),
       {
         id: "stop",
         kind: "stop",
@@ -4602,7 +5211,8 @@ export function projectOperationActions(op: any): any[] {
       placement: "row",
       tone: "primary",
       requiresConfirmation: false,
-      description: `The last attempt stopped at ${setupStepLabel(
+      description: `The last attempt stopped at ${setupStopLabel(
+        op,
         op.resumeFrom || setup.resumeFrom
       )}. Radius reuses the resources it already recorded and starts again from ${setupStepLabel(
         setup.resumeFrom
@@ -4639,14 +5249,16 @@ export function projectOperationActions(op: any): any[] {
       path: `${base}/rollback`,
       pending: false,
       scope: rollback.scope,
-      preview: projectRollbackPreview(op, rollback.targets)
+      preview: projectRollbackPreview(op, rollback.targets, options)
     });
   }
   const cleanup = canRetryCleanup(op);
   if (cleanup.ok) {
     // The retry removes its own unresolved subset, but keeps and manual items
-    // are the same whole-record projection a rollback that removes nothing has.
-    const kept = projectRollbackPreview(op, []);
+    // are the same whole-record projection a rollback that removes nothing has,
+    // less what the retry removes.
+    const kept = projectRollbackPreview(op, [], options);
+    const retry = previewTargets(op, cleanup.targets, options);
     actions.push({
       id: "retry-cleanup",
       kind: "retry_cleanup",
@@ -4663,12 +5275,17 @@ export function projectOperationActions(op: any): any[] {
       path: `${base}/retry/cleanup`,
       pending: false,
       preview: {
-        removes: cleanup.targets.map((entry: any) => ({
-          kind: entry.artifactType,
-          target: entry.target
-        })),
-        keeps: kept.keeps,
-        manualActionRequired: kept.manualActionRequired
+        removes: [...retry.removes, ...heldAwsLockRemoval(op, options)],
+        keeps: [
+          ...kept.keeps.filter(
+            (entry: any) => !retry.keys.has(`${entry.kind}#${entry.target}`)
+          ),
+          ...retry.keeps
+        ],
+        // The last attempt's warnings are what this retry tries again.
+        manualActionRequired: kept.manualActionRequired.filter(
+          (entry: any) => !retry.keys.has(`${entry.kind}#${entry.target}`)
+        )
       }
     });
   }
@@ -4678,7 +5295,12 @@ export function projectOperationActions(op: any): any[] {
     // panel rather than another attempt at the setup, so it never sits beside
     // the forward and destructive choices the command row offers.
     const abandons = exit.abandon === true;
-    const removes = exit.targets.length > 0;
+    const releasesLock = heldAwsLockRemoval(op, options).length > 0;
+    const keepsLock =
+      keptAwsLock(op, options).length > 0 ?
+        " The lock it holds on the deploy identity stays, because AWS environments are turned off."
+      : "";
+    const removes = exit.targets.length > 0 || releasesLock;
     actions.push({
       id: "exit-setup",
       kind: EXIT_COMMAND_KIND,
@@ -4705,18 +5327,20 @@ export function projectOperationActions(op: any): any[] {
       : {}),
       description:
         abandons ?
-          "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
-        : removes ?
-          "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. Anything it reused is left alone. This cannot be undone."
-        : "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.",
+          `Radius closes this setup without deleting resources that may still be used by external work.${releasesLock ? " It releases the lock this setup holds on the deploy identity." : keepsLock} You can start Create Environment again, but you may need to remove or reuse the remaining resources manually.`
+        : exit.targets.length > 0 ?
+          `Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added.${releasesLock ? " It also releases the lock this setup holds on the deploy identity." : keepsLock} Anything it reused is left alone. This cannot be undone.`
+        : releasesLock ?
+          "Radius closes this setup and releases the lock it holds on the deploy identity. Everything else that exists was already here before this attempt, so nothing else is removed."
+        : `Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.${keepsLock}`,
       method: "POST",
       path: abandons ? `${base}/exit?mode=abandon` : `${base}/exit`,
       pending: false,
       removesResources: removes,
       preview:
         abandons ?
-          projectAbandonPreview(op)
-        : projectRollbackPreview(op, exit.targets)
+          projectAbandonPreview(op, options)
+        : projectRollbackPreview(op, exit.targets, options)
     });
   }
   return actions;
@@ -5577,8 +6201,8 @@ const PERSISTED_OPERATION_KEYS = new Set([
 // restart. The live delete op carries its inputs in a broad `op.request` (which
 // is deliberately NOT persisted — it can be large and may hold secrets), so a
 // hydrated delete op would otherwise lose the `clientId` its Azure-cleanup and
-// app-registration stages depend on, or the AWS role and trust subjects its
-// role cleanup depends on. We persist only these typed fields.
+// app-registration stages depend on, or the AWS role, trust subjects, and
+// cluster its role cleanup depends on. We persist only these typed fields.
 interface PersistedDeleteRecovery {
   repo?: string;
   environment?: string;
@@ -5586,7 +6210,10 @@ interface PersistedDeleteRecovery {
   clientId?: string;
   tenantId?: string;
   roleArn?: string;
+  policyName?: string;
   trustSubjects?: string[];
+  region?: string;
+  cluster?: string;
   repoId?: number;
   credentialConsumerRetirementReady?: boolean;
 }
@@ -5600,7 +6227,10 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "provider",
     "clientId",
     "tenantId",
-    "roleArn"
+    "roleArn",
+    "policyName",
+    "region",
+    "cluster"
   ] as const) {
     if (typeof request[key] === "string") out[key] = request[key];
   }
@@ -6349,7 +6979,10 @@ export function setupInFlight(): boolean {
  * instruction-shaped text) and is stripped here. The panel renders structured
  * fields; evidence travels only on the diagnostic path, fenced.
  */
-export function toClientView(op: any): any {
+export function toClientView(
+  op: any,
+  options: OperationProjectionOptions = {}
+): any {
   if (!op) return null;
   const cleanup = projectCleanupSummary(op);
   const control = op.control || createOperationControl();
@@ -6425,7 +7058,7 @@ export function toClientView(op: any): any {
       code: entry.code,
       recordedAt: entry.recordedAt
     })),
-    actions: projectOperationActions(op),
+    actions: projectOperationActions(op, options),
     guidance: projectActionGuidance(op),
     headline: projectOperationHeadline(op),
     activeCommandKind: activeCommandKind(op),

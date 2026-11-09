@@ -1,4 +1,3 @@
-import type { IncomingMessage } from "node:http";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type {
   CallerIdentity,
@@ -168,7 +167,8 @@ export interface AzureAutoSetupExternalPort {
   } | null>;
   preflightRepoAdmin(
     repo: string,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<string>;
   preflightGhcrPackageWriteAccess(
     executor?: SelectedGhExecutor
@@ -177,7 +177,8 @@ export interface AzureAutoSetupExternalPort {
   >;
   runGitHubJson(
     apiPath: string,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<GitHubJsonResponse>;
   runAz(args: string[]): Promise<AzureAutoSetupCommandResult>;
 }
@@ -189,7 +190,7 @@ export interface AzureAutoSetupTempFilePort {
 }
 
 export interface AzureAutoSetupDependencies {
-  isServerOwnedRequest(instanceId: string, request: IncomingMessage): boolean;
+  isStopped(): boolean;
   operations: AzureAutoSetupOperationPort;
   external: AzureAutoSetupExternalPort;
   tempFile: AzureAutoSetupTempFilePort;
@@ -199,6 +200,7 @@ export interface AzureAutoSetupDependencies {
     mutationRecovery:
       | {
           operation: object & { operationId: string };
+          isStopped(): boolean;
           persist(): Promise<void>;
         }
       | undefined,
@@ -235,6 +237,7 @@ export interface AzureAutoSetupDependencies {
 }
 
 export interface AzureAutoSetupWorkflow {
+  isStopped(): boolean;
   operation: AzureAutoSetupOperation;
   steps: string[];
   respond(status: number, payload: Record<string, unknown>): void;

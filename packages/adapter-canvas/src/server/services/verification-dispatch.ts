@@ -1,8 +1,13 @@
 import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted
+} from "@radius-project/core";
+import {
   prepareProviderMutation,
   providerMutationRecord,
   recordProviderMutationDiagnostics,
   settleProviderMutation,
+  unresolvedProviderMutations,
   type ProviderMutationRecord
 } from "../../operations.js";
 import {
@@ -50,6 +55,7 @@ export type VerificationDispatchOutcome =
   | { state: "cancelled" };
 
 export interface VerificationDispatchPorts {
+  isStopped?(): boolean;
   runGh(args: string[]): Promise<ProviderMutationCommandResult>;
   sendDispatch(): Promise<ProviderMutationCommandResult>;
   persist(): Promise<void>;
@@ -134,6 +140,7 @@ async function persistOrThrow(
   try {
     await persist();
   } catch (error) {
+    if (isSetupExecutionInterrupted(error)) throw error;
     throw new ProviderMutationRecoveryError(
       `Could not persist the verification dispatch ${phase}: ${
         error instanceof Error ? error.message : String(error)
@@ -238,7 +245,23 @@ export async function runVerificationDispatch(
   input: VerificationDispatchInput
 ): Promise<VerificationDispatchOutcome> {
   const { operation, ports } = input;
-  const existing = providerMutationRecord(operation, input.kind, input.target);
+  const active = () => assertSetupExecutionActive(ports.isStopped);
+  const observe = async <T>(read: () => Promise<T>): Promise<T> => {
+    active();
+    try {
+      return await read();
+    } finally {
+      active();
+    }
+  };
+  active();
+  const unresolved = unresolvedProviderMutations(operation).find(
+    (mutation) =>
+      mutation.kind === "github_workflow.dispatch" ||
+      mutation.kind === "github_workflow.dispatch_retry"
+  );
+  const existing =
+    unresolved ?? providerMutationRecord(operation, input.kind, input.target);
   if (existing) {
     const run = confirmedRunIdentity(input, existing);
     if (run) return { state: "accepted", ...run, recovered: true };
@@ -259,17 +282,20 @@ export async function runVerificationDispatch(
     await persistOrThrow(ports.persist, "restored manual-required outcome");
     return { state: "manual_required", guidance };
   }
-  const baselineResult = await ports.runGh([
-    "run",
-    "list",
-    "--workflow=" + input.workflowFile,
-    "--limit",
-    "1",
-    "--json",
-    "databaseId",
-    "--repo",
-    input.repo
-  ]);
+  const baselineResult = await observe(() =>
+    ports.runGh([
+      "run",
+      "list",
+      "--workflow=" + input.workflowFile,
+      "--limit",
+      "1",
+      "--json",
+      "databaseId",
+      "--repo",
+      input.repo
+    ])
+  );
+  active();
   if (baselineResult.code !== 0 && baselineResult.code !== "0") {
     return {
       state: "baseline_failed",
@@ -335,18 +361,22 @@ export async function runVerificationDispatch(
     let finalDiagnostic =
       "No verification run with this operation's exact marker is visible.";
     for (const delay of RECONCILE_DELAYS_MS) {
-      if (delay > 0) await ports.sleep(delay);
-      const listed = await ports.runGh([
-        "run",
-        "list",
-        "--workflow=" + input.workflowFile,
-        "--limit",
-        "10",
-        "--json",
-        "databaseId,createdAt,displayTitle,event,headBranch",
-        "--repo",
-        input.repo
-      ]);
+      active();
+      if (delay > 0) await observe(() => ports.sleep(delay));
+      const listed = await observe(() =>
+        ports.runGh([
+          "run",
+          "list",
+          "--workflow=" + input.workflowFile,
+          "--limit",
+          "10",
+          "--json",
+          "databaseId,createdAt,displayTitle,event,headBranch",
+          "--repo",
+          input.repo
+        ])
+      );
+      active();
       if (listed.code !== 0 && listed.code !== "0") {
         finalDiagnostic = commandDiagnostic(listed);
         return manualRequired(
@@ -399,6 +429,7 @@ export async function runVerificationDispatch(
           exact.runId
         );
         await persistOrThrow(ports.persist, "reconciled run identity");
+        active();
         return {
           state: "accepted",
           runId: exact.runId,
@@ -433,9 +464,13 @@ export async function runVerificationDispatch(
   };
 
   for (let attempt = 1; ; attempt += 1) {
+    active();
     if (attempt > 1) {
-      await ports.sleep(REGISTRATION_RETRY_DELAYS_MS[attempt - 2]);
+      await observe(() =>
+        ports.sleep(REGISTRATION_RETRY_DELAYS_MS[attempt - 2])
+      );
     }
+    active();
     const mutation = prepareProviderMutation(operation, {
       kind: input.kind,
       target: input.target,
@@ -445,12 +480,25 @@ export async function runVerificationDispatch(
     if (mutation.status === "not_applied") {
       rearmRejectedMutation(mutation);
     }
-    await persistOrThrow(ports.persist, "intent before contacting GitHub");
-    if (
-      !(await ports.stopBoundary(
-        `before-verification-dispatch-attempt:${attempt}`
-      ))
-    ) {
+    let proceed: boolean;
+    try {
+      await persistOrThrow(ports.persist, "intent before contacting GitHub");
+      proceed = await observe(() =>
+        ports.stopBoundary(`before-verification-dispatch-attempt:${attempt}`)
+      );
+      active();
+    } catch (error) {
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "not_applied",
+        "Radius did not send the verification dispatch because preparation was interrupted."
+      );
+      if (!isSetupExecutionInterrupted(error)) throw error;
+      await persistOrThrow(ports.persist, "unsent shutdown outcome");
+      throw error;
+    }
+    if (!proceed) {
       settleProviderMutation(
         operation,
         mutation.mutationId,
@@ -458,6 +506,7 @@ export async function runVerificationDispatch(
         "Radius stopped before sending the verification dispatch."
       );
       await persistOrThrow(ports.persist, "cancelled outcome");
+      active();
       return { state: "cancelled" };
     }
 
@@ -476,6 +525,7 @@ export async function runVerificationDispatch(
         diagnostic
       );
       await persistOrThrow(ports.persist, "ambiguous dispatch outcome");
+      active();
       return reconcile(mutation.mutationId);
     }
 
@@ -492,6 +542,7 @@ export async function runVerificationDispatch(
         diagnostic
       );
       await persistOrThrow(ports.persist, "ambiguous dispatch outcome");
+      active();
       return reconcile(mutation.mutationId);
     }
 
@@ -515,6 +566,7 @@ export async function runVerificationDispatch(
           malformed
         );
         await persistOrThrow(ports.persist, "ambiguous dispatch response");
+        active();
         return reconcile(mutation.mutationId);
       }
       ports.applyIdentity(identity, run);
@@ -526,6 +578,7 @@ export async function runVerificationDispatch(
         run.runId
       );
       await persistOrThrow(ports.persist, "returned run identity");
+      active();
       return { state: "accepted", ...run, recovered: false };
     }
 
@@ -540,6 +593,7 @@ export async function runVerificationDispatch(
       diagnostic
     );
     await persistOrThrow(ports.persist, "rejected dispatch outcome");
+    active();
     if (!canRetry) {
       return { state: "rejected", detail: diagnostic, result };
     }

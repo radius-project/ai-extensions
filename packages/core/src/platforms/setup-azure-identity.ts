@@ -1038,7 +1038,8 @@ function statusText(res: GitHubJsonResponse | undefined): string {
  * Fetch a GitHub JSON resource through an injected `runner`, retrying idempotent
  * GETs on 429/5xx and transport errors with linear backoff.
  *
- * `runner(apiPath)` must resolve `{ ok, status, json, stderr }` and never reject.
+ * `runner(apiPath)` resolves ordinary provider errors as `{ ok, status, json,
+ * stderr }`; typed lifecycle interruption may reject to stop further retries.
  */
 export async function fetchGitHubJson(
   runner: GitHubJsonRunner,

@@ -24,9 +24,12 @@ function selectedLogin(operation: VerificationRetryOperation): string {
 }
 
 export interface SelectedVerificationMonitorDependencies {
+  isStopped?(): boolean;
   createExecutor(login: string): Promise<SelectedGhExecutor>;
-  registerExecutor(operationId: string, executor: SelectedGhExecutor): void;
-  unregisterExecutor(operationId: string): void;
+  registerExecutor(
+    operationId: string,
+    executor: SelectedGhExecutor
+  ): () => void;
   beforeMonitor?(executor: SelectedGhExecutor): Promise<boolean>;
   monitor(operationId: string): Promise<void>;
   accountUnavailable(
@@ -119,6 +122,7 @@ export function shouldResumeKnownVerificationRun(input: {
 }
 
 export interface SelectedExecutorAcquisitionDependencies {
+  isStopped?(): boolean;
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   isRateLimitError(error: unknown): boolean;
   now(): number;
@@ -128,6 +132,7 @@ export interface SelectedExecutorAcquisitionDependencies {
 
 export type SelectedExecutorAcquisition =
   | { state: "ready"; executor: SelectedGhExecutor }
+  | { state: "stopped" }
   | { state: "unavailable"; detail: string }
   | SelectedExecutorAcquisitionExpired;
 
@@ -177,6 +182,7 @@ export async function acquireSelectedExecutor(
   let expirationCause: SelectedExecutorAcquisitionExpired["cause"] =
     "deadline_elapsed";
   while (true) {
+    if (dependencies.isStopped?.()) return { state: "stopped" };
     if (dependencies.now() >= deadline) {
       return {
         state: "expired",
@@ -186,6 +192,7 @@ export async function acquireSelectedExecutor(
     }
     try {
       const executor = await dependencies.createExecutor(login);
+      if (dependencies.isStopped?.()) return { state: "stopped" };
       if (dependencies.now() >= deadline) {
         return {
           state: "expired",
@@ -195,6 +202,7 @@ export async function acquireSelectedExecutor(
       }
       return { state: "ready", executor };
     } catch (error) {
+      if (dependencies.isStopped?.()) return { state: "stopped" };
       const detail = dependencies.errorMessage(error);
       if (!dependencies.isRateLimitError(error)) {
         return { state: "unavailable", detail };
@@ -218,6 +226,7 @@ export async function monitorVerificationWithSelectedAccount(
   operation: VerificationRetryOperation,
   dependencies: SelectedVerificationMonitorDependencies
 ): Promise<void> {
+  if (dependencies.isStopped?.()) return;
   const login = selectedLogin(operation);
   if (!login) {
     await dependencies.accountUnavailable(
@@ -234,6 +243,7 @@ export async function monitorVerificationWithSelectedAccount(
     deadline,
     dependencies
   );
+  if (acquisition.state === "stopped") return;
   if (acquisition.state === "unavailable") {
     await dependencies.accountUnavailable(operation, login, acquisition.detail);
     return;
@@ -244,7 +254,10 @@ export async function monitorVerificationWithSelectedAccount(
   }
   const executor = acquisition.executor;
 
-  dependencies.registerExecutor(operation.operationId, executor);
+  const releaseExecutor = dependencies.registerExecutor(
+    operation.operationId,
+    executor
+  );
   try {
     if (
       dependencies.beforeMonitor &&
@@ -254,6 +267,6 @@ export async function monitorVerificationWithSelectedAccount(
     }
     await dependencies.monitor(operation.operationId);
   } finally {
-    dependencies.unregisterExecutor(operation.operationId);
+    releaseExecutor();
   }
 }

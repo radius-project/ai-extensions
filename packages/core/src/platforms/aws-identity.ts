@@ -3,6 +3,11 @@
 // permission policy, and the AWS CLI version gate. No I/O: callers run the
 // `aws` CLI and hand the parsed documents in.
 
+import {
+  buildEnvironmentSuffix,
+  type OidcSubjectConfig
+} from "./oidc-subject.js";
+
 export const AWS_CLI_MINIMUM_VERSION = "2.15.3";
 export const AWS_CLI_INSTALL_URL =
   "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html";
@@ -26,6 +31,7 @@ export const AWS_REPOSITORY_TAG = "radius-repository";
 const ROLE_NAME_MAX = 64;
 const ROLE_NAME_HASH_LENGTH = 6;
 const INLINE_POLICY_NAME_MAX = 128;
+const INLINE_POLICY_HASH_LENGTH = 12;
 const SUB_CLAIM = `${GITHUB_OIDC_HOST}:sub`;
 const AUD_CLAIM = `${GITHUB_OIDC_HOST}:aud`;
 const NO_SUBJECTS_SID = "RadiusNoTrustedEnvironments";
@@ -39,6 +45,47 @@ export function isAwsAccountId(value: string): boolean {
 
 export function isAwsRegion(value: string): boolean {
   return AWS_REGION_PATTERN.test(value);
+}
+
+export type AwsCliFailure =
+  | "missing-cli"
+  | "timeout"
+  | "login-required"
+  | "credentials-expired"
+  | "credentials-invalid"
+  | "access-denied"
+  | "provider-failed"
+  | "command-failed";
+
+/** Classify diagnostics without exposing credential-provider output. */
+export function classifyAwsCliFailure(input: {
+  output: string;
+  timedOut?: boolean;
+}): AwsCliFailure {
+  const { output } = input;
+  if (input.timedOut || /timed out|timeout|ETIMEDOUT/i.test(output))
+    return "timeout";
+  if (
+    /credential_process|credential process|retrieving credentials/i.test(output)
+  )
+    return "provider-failed";
+  if (/ENOENT|command not found|not recognized as .*command/i.test(output))
+    return "missing-cli";
+  if (
+    /Unable to locate credentials|NoCredentialsError|SSOTokenLoadError|Error loading SSO Token|SSO session .*expired|Error when retrieving token from sso:.*(?:expired|refresh failed)/i.test(
+      output
+    )
+  )
+    return "login-required";
+  if (/ExpiredToken|Token has expired|security token .*expired/i.test(output))
+    return "credentials-expired";
+  if (/InvalidClientTokenId|security token .*invalid/i.test(output))
+    return "credentials-invalid";
+  if (/AccessDenied|UnauthorizedOperation|not authorized/i.test(output))
+    return "access-denied";
+  // After the AWS error codes: ARNs such as role/MFA-admin can contain "MFA".
+  if (/MFA|multi-factor/i.test(output)) return "provider-failed";
+  return "command-failed";
 }
 
 /**
@@ -79,7 +126,7 @@ export function checkAwsCliVersion(output: string): AwsCliVersionCheck {
   if (!parsed || !minimum) {
     return {
       ok: false,
-      message: `Could not run the AWS CLI: ${output.trim() || "no version output"}. Upgrade the AWS CLI, then retry: ${AWS_CLI_INSTALL_URL}`
+      message: `Could not read the AWS CLI version. Radius needs AWS CLI ${AWS_CLI_MINIMUM_VERSION} or newer. Install or upgrade the AWS CLI, then retry: ${AWS_CLI_INSTALL_URL}`
     };
   }
   const version = parsed.join(".");
@@ -130,16 +177,87 @@ export function isAwsRoleName(value: string): boolean {
   return /^[A-Za-z0-9+=,.@_-]{1,64}$/.test(value);
 }
 
-/**
- * The per-environment permission policy name. It is an inline role policy, so
- * the name is unique per role rather than per account. Two repositories that
- * share a picked role and an environment name share this name.
- */
-export function buildAwsEnvironmentPolicyName(environment: string): string {
+/** Only for recognizing policies written before repository-scoped names. */
+export function buildLegacyAwsEnvironmentPolicyName(
+  environment: string
+): string {
   return iamSafe(`radius-deploy-${environment}`).slice(
     0,
     INLINE_POLICY_NAME_MAX
   );
+}
+
+export function buildAwsEnvironmentPolicyName(
+  repo: string,
+  environment: string,
+  sha256Hex: (text: string) => string
+): string {
+  const identity = [repo.toLowerCase(), environment.toLowerCase()];
+  const suffix = sha256Hex(JSON.stringify(identity)).slice(
+    0,
+    INLINE_POLICY_HASH_LENGTH
+  );
+  return `${awsEnvironmentPolicyPrefix(environment)}${suffix}`;
+}
+
+function awsEnvironmentPolicyPrefix(environment: string): string {
+  const prefix = iamSafe(`radius-deploy-${environment.toLowerCase()}`).slice(
+    0,
+    INLINE_POLICY_NAME_MAX - INLINE_POLICY_HASH_LENGTH - 1
+  );
+  return `${prefix}-`;
+}
+
+export function isAwsEnvironmentPolicyName(
+  name: string,
+  environment: string
+): boolean {
+  const prefix = awsEnvironmentPolicyPrefix(environment);
+  return (
+    name.startsWith(prefix) && /^[a-f0-9]{12}$/.test(name.slice(prefix.length))
+  );
+}
+
+export function legacyAwsPolicyOwnershipError(input: {
+  repo: string;
+  environment: string;
+  accountId: string;
+  subjects: readonly string[];
+  role: unknown;
+}): string | null {
+  const policy = parsePolicyDocument(
+    isRecord(input.role) ? input.role.AssumeRolePolicyDocument : null
+  );
+  if (
+    policy.Statement.some(
+      (statement) =>
+        statement.Effect === "Allow" &&
+        isGitHubStatement(statement, githubOidcProviderArn(input.accountId)) &&
+        !acceptsGitHubAudience(statement)
+    )
+  ) {
+    return "The role has GitHub trust conditions Radius cannot interpret.";
+  }
+  const name = buildLegacyAwsEnvironmentPolicyName(input.environment);
+  const subjects = trustedGitHubSubjects(policy, input.accountId);
+  const ambiguous = subjects.find((subject) => {
+    if (/[*?]/.test(subject)) return true;
+    if (input.subjects.includes(subject)) return false;
+    const environment = /:environment:(.+)$/.exec(subject)?.[1];
+    return (
+      !environment ||
+      buildLegacyAwsEnvironmentPolicyName(environment.replace(/%3A/gi, ":")) ===
+        name
+    );
+  });
+  if (ambiguous) return `The legacy policy may also belong to ${ambiguous}.`;
+  if (
+    !subjects.some((subject) => input.subjects.includes(subject)) &&
+    !isRadiusManagedRole(input.role, input.repo)
+  ) {
+    return "Neither the role's trust subjects nor its ownership tags identify this environment as the legacy policy's owner.";
+  }
+  return null;
 }
 
 export function githubOidcProviderArn(accountId: string): string {
@@ -313,6 +431,105 @@ export function trustedGitHubSubjects(
 }
 
 /**
+ * The exact GitHub OIDC subjects this trust policy lets GitHub's AWS tokens
+ * sign in with. Unlike `trustedGitHubSubjects`, a subject counts only when its
+ * statement accepts GitHub's audience, has no condition Radius cannot read, and
+ * every `sub` constraint on it accepts the subject. Patterns are left out.
+ */
+export function acceptedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" &&
+      isGitHubStatement(statement, providerArn) &&
+      acceptsGitHubAudience(statement)
+  ).flatMap((statement) =>
+    subjectsOf(statement).filter(
+      (subject) => !/[*?]/.test(subject) && acceptsSubject(statement, subject)
+    )
+  );
+}
+
+/**
+ * The subjects in `subjects` that a GitHub Allow statement in this trust
+ * policy already covers in a way adding a plain statement would widen: one
+ * that names the subject but excludes it with another `sub` constraint, or
+ * one whose `sub` constraints accept it, patterns included, under conditions
+ * Radius cannot read or for another audience.
+ */
+export function restrictedGitHubSubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): string[] {
+  const providerArn = githubOidcProviderArn(accountId);
+  const statements = policy.Statement.filter(
+    (statement) =>
+      statement.Effect === "Allow" && isGitHubStatement(statement, providerArn)
+  );
+  return subjects.filter((subject) =>
+    statements.some(
+      (statement) =>
+        subjectsOf(statement).includes(subject) ||
+        (!acceptsGitHubAudience(statement) &&
+          acceptsSubject(statement, subject))
+    )
+  );
+}
+
+// A subject is `claim:value` pairs joined by colons. GitHub's values have no
+// colon in them (an environment name is %3A-encoded), so a subject that does
+// not split into pairs is not one Radius can read.
+function subjectClaims(subject: string): [string, string][] | null {
+  const parts = subject.split(":");
+  if (parts.length < 2 || parts.length % 2 !== 0) return null;
+  const claims: [string, string][] = [];
+  for (let index = 0; index < parts.length; index += 2) {
+    const key = parts[index];
+    const value = parts[index + 1];
+    if (!key || !value) return null;
+    claims.push([key, value]);
+  }
+  return claims;
+}
+
+const REPOSITORY_CLAIMS: ReadonlySet<string> = new Set([
+  "repo",
+  "repository",
+  "repository_id"
+]);
+
+/**
+ * Whether a GitHub OIDC subject names one repository, by name or ID. A subject
+ * customized to, say, `repository_owner` and `context` does not, so every
+ * repository of that owner can present it.
+ */
+export function subjectNamesRepository(subject: string): boolean {
+  return (
+    subjectClaims(subject)?.some(([key]) => REPOSITORY_CLAIMS.has(key)) ?? false
+  );
+}
+
+/**
+ * Why setup and Repair refuse `subjects`, which fail `subjectNamesRepository`,
+ * and how to fix the customization that produced them. Only a customized
+ * subject can leave the repository out, so the fix is always to the claim keys.
+ */
+export function repositoryLessSubjectMessage(
+  subjects: readonly string[],
+  repository: string,
+  subjectConfig: OidcSubjectConfig
+): string {
+  const keys = subjectConfig.includeClaimKeys ?? [];
+  const claims =
+    keys.length > 0 ? `, includes only the claims ${keys.join(", ")}` : "";
+  return `GitHub's OIDC subject for this environment, ${subjects.join(", ")}, does not name the repository, because the OIDC subject customization for ${repository}, set on the repository or its organization${claims}. Other repositories with the same claim values present the same subject, so trusting it would let their workflows sign in to the deploy role. This attempt changed nothing in AWS. Add repo or repository_id to the customization's include_claim_keys, then retry.`;
+}
+
+/**
  * Whether any statement in this trust policy names the account's GitHub
  * provider. Unlike `trustedGitHubSubjects`, this also finds a Radius role
  * whose last environment was removed, which keeps only a Deny statement.
@@ -324,6 +541,142 @@ export function namesGitHubProvider(
   const providerArn = githubOidcProviderArn(accountId);
   return policy.Statement.some((statement) =>
     isGitHubStatement(statement, providerArn)
+  );
+}
+
+/**
+ * Whether the only principals this trust policy lets in are GitHub workflows
+ * presenting one of `subjects`. Deny statements grant nothing and are skipped.
+ * Another principal, a GitHub statement with no `sub` constraint, a wildcard
+ * pattern, or any subject not in `subjects` makes it false. A pattern admits
+ * subjects it doesn't spell out, so it never counts as listed.
+ */
+export function trustAllowsOnlySubjects(
+  policy: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): boolean {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.every((statement) => {
+    if (statement.Effect === "Deny") return true;
+    const principal = statement.Principal;
+    return (
+      statement.Effect === "Allow" &&
+      isRecord(principal) &&
+      Object.keys(principal).every((key) => key === "Federated") &&
+      stringList(principal.Federated).every((arn) => arn === providerArn) &&
+      isGitHubStatement(statement, providerArn) &&
+      subjectConstraints(statement).length > 0 &&
+      subjectConstraints(statement).every(
+        ({ operator, values }) =>
+          operator === "StringEquals" ||
+          values.every((value) => !/[*?]/.test(value))
+      ) &&
+      subjectsOf(statement).every((subject) => subjects.includes(subject))
+    );
+  });
+}
+
+export interface GitHubRepositoryIdentity {
+  /** The repository's current `owner/name`. */
+  readonly fullName: string;
+  readonly ownerId: number;
+  readonly repoId: number;
+}
+
+// Unlike repository names, IDs still distinguish owners after a rename.
+export function immutableEnvironmentRepository(
+  subject: string,
+  environment: string
+): { repo: string; repoId: number } | null {
+  const claims = subjectClaims(subject);
+  if (!claims || !namesOneEnvironment(subject, environment)) return null;
+  const repositories = claims.filter(
+    ([key]) => key === "repo" || key === "repository"
+  );
+  if (repositories.length !== 1) return null;
+  const match =
+    /^([a-z0-9_.-]+)(?:@[1-9]\d*)?\/([a-z0-9_.-]+)(?:@([1-9]\d*))?$/i.exec(
+      repositories[0][1]
+    );
+  if (!match) return null;
+  const ids = claims
+    .filter(([key]) => key === "repository_id")
+    .map(([, value]) => value);
+  if (match[3]) ids.push(match[3]);
+  if (
+    !ids.length ||
+    !/^[1-9]\d*$/.test(ids[0]) ||
+    ids.some((id) => id !== ids[0])
+  )
+    return null;
+  const repoId = Number(ids[0]);
+  return Number.isSafeInteger(repoId) && repoId > 0 ?
+      { repo: `${match[1]}/${match[2]}`, repoId }
+    : null;
+}
+
+// A subject's claims when none is a wildcard. A wildcard admits workflows the
+// subject doesn't spell out, so it can't be tied to one environment.
+function exactClaims(subject: string): [string, string][] | null {
+  const claims = subjectClaims(subject);
+  return claims && claims.every(([, value]) => !/[*?]/.test(value)) ?
+      claims
+    : null;
+}
+
+/**
+ * Whether a GitHub OIDC subject names this repository and an environment, so
+ * no other repository or a workflow outside an environment presents it. The
+ * repository counts when the subject has its `owner/name`, its immutable
+ * `owner@id/name@id`, or its `repository_id`. Anything else, including an
+ * owner-wide subject, an older name from before a rename, or a wildcard, is
+ * not proven to be this repository's.
+ */
+export function namesRepositoryEnvironment(
+  subject: string,
+  repository: GitHubRepositoryIdentity
+): boolean {
+  const claims = exactClaims(subject);
+  if (!claims) return false;
+  const [owner = "", name = ""] = repository.fullName.toLowerCase().split("/");
+  const slugs = [
+    `${owner}/${name}`,
+    `${owner}@${repository.ownerId}/${name}@${repository.repoId}`
+  ];
+  return (
+    claims.some(([key]) => key === "environment") &&
+    claims.some(
+      ([key, value]) =>
+        ((key === "repo" || key === "repository") &&
+          slugs.includes(value.toLowerCase())) ||
+        (key === "repository_id" && value === String(repository.repoId))
+    )
+  );
+}
+
+/**
+ * Whether a GitHub OIDC subject names a repository and exactly the environment
+ * `environment`, so only that one environment presents it. GitHub environment
+ * names are unique in a repository regardless of case. The repository may be
+ * named by an older name from before a rename. A subject with no repository,
+ * such as an owner-wide one, or with no environment is presented by other
+ * repositories or environments too.
+ */
+export function namesOneEnvironment(
+  subject: string,
+  environment: string
+): boolean {
+  const claims = exactClaims(subject);
+  if (!claims) return false;
+  const encoded = buildEnvironmentSuffix(environment)
+    .slice("environment:".length)
+    .toLowerCase();
+  const environments = claims.filter(([key]) => key === "environment");
+  return (
+    environments.length === 1 &&
+    environments[0][1].toLowerCase() === encoded &&
+    claims.some(([key]) => REPOSITORY_CLAIMS.has(key))
   );
 }
 
@@ -496,10 +849,7 @@ export function removeGitHubTrustSubject(
 // role out of its own job. These PowerUserAccess grants are not region-bounded.
 const GLOBAL_POWER_USER_ACTIONS = [
   "account:GetAccountInformation",
-  "account:GetPrimaryEmail",
   "account:ListRegions",
-  "iam:CreateServiceLinkedRole",
-  "iam:DeleteServiceLinkedRole",
   "iam:ListRoles",
   "organizations:DescribeOrganization"
 ];
@@ -509,8 +859,8 @@ const GLOBAL_POWER_USER_ACTIONS = [
  * `PowerUserAccess` managed policy, with the broad grant limited to the
  * environment's region. It is written per environment, so a role shared by
  * environments in two regions can act in exactly those two, and deleting one
- * environment narrows the role back. It never grants `iam:*`, so the role
- * cannot make itself or anyone else an administrator.
+ * environment removes only that environment's grant. Other policies on a
+ * picked role can grant additional access; this policy must not deny them.
  */
 export function buildAwsEnvironmentPermissionPolicy(
   region: string
@@ -519,17 +869,36 @@ export function buildAwsEnvironmentPermissionPolicy(
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "RadiusPowerUserInRegion",
         Effect: "Allow",
-        NotAction: ["iam:*", "organizations:*", "account:*"],
+        NotAction: [
+          "iam:*",
+          "organizations:*",
+          "account:*",
+          // Exclude the five access-administration actions, not the read APIs.
+          "eks:*teAccessEntry",
+          "eks:*AccessPolicy"
+        ],
         Resource: "*",
-        Condition: { StringEquals: { "aws:RequestedRegion": [region] } }
+        Condition: { StringEquals: { "aws:RequestedRegion": region } }
       },
       {
-        Sid: "RadiusPowerUserGlobal",
         Effect: "Allow",
-        Action: GLOBAL_POWER_USER_ACTIONS,
+        Action: [...GLOBAL_POWER_USER_ACTIONS],
         Resource: "*"
+      },
+      {
+        Effect: "Allow",
+        Action: "iam:CreateServiceLinkedRole",
+        Resource: "*",
+        Condition: {
+          StringEquals: {
+            "iam:AWSServiceName": [
+              "rds.amazonaws.com",
+              "elasticache.amazonaws.com",
+              "opensearchservice.amazonaws.com"
+            ]
+          }
+        }
       }
     ]
   };
@@ -615,6 +984,22 @@ export function eksAuthenticationMode(describeCluster: unknown): string {
   return typeof mode === "string" && mode ? mode : "CONFIG_MAP";
 }
 
+/**
+ * Why setup cannot use a cluster. When more than one applies, the first in
+ * this order wins: the cluster could not be described, its status is not
+ * ACTIVE or UPDATING, or its CONFIG_MAP authentication cannot take an access
+ * entry.
+ */
+export type AwsClusterUnusableReason =
+  "not-described" | "status" | "config-map";
+
+const EKS_CLUSTER_NAME_PATTERN = /^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$/;
+
+/** Whether a value has the form of an EKS cluster name. */
+export function isEksClusterName(value: string): boolean {
+  return EKS_CLUSTER_NAME_PATTERN.test(value);
+}
+
 /** Whether a cluster in this authentication mode accepts access entries. */
 export function eksAcceptsAccessEntries(authenticationMode: string): boolean {
   return authenticationMode !== "CONFIG_MAP";
@@ -633,4 +1018,163 @@ export function configMapClusterMessage(
   region: string
 ): string {
   return `Cluster ${cluster} uses CONFIG_MAP authentication, which does not support access entries. Radius grants cluster access through an access entry, so it cannot authorize the deploy role on this cluster. Run this command to enable access entries, then retry: ${enableAccessEntriesCommand(cluster, region)}`;
+}
+
+// The deploy identity lock. IAM has no conditional write for a trust policy,
+// but `CreatePolicy` refuses a name that already exists in the account, so
+// creating this policy is a test-and-set: one caller wins and the rest wait.
+// IAM names ignore case, as role names do, so one role always maps to one lock.
+
+const LOCK_POLICY_PREFIX = "radius-lock-";
+const LOCK_DESCRIPTION_MAX = 1000;
+
+/** How long a lock is held before a waiting run offers to remove it. */
+export const AWS_LOCK_REMOVABLE_AFTER_MS = 10 * 60 * 1000;
+
+export type AwsLockAction = "setup" | "delete" | "repair" | "rollback";
+
+const LOCK_ACTIONS: readonly AwsLockAction[] = [
+  "setup",
+  "delete",
+  "repair",
+  "rollback"
+];
+
+/** The Radius run that holds a deploy identity lock. */
+export interface AwsLockHolder {
+  readonly repo: string;
+  readonly environment: string;
+  readonly action: AwsLockAction;
+  readonly operationId: string;
+}
+
+/** The lock policy's name: `radius-lock-<role>`, at most 76 characters. */
+export function buildAwsLockPolicyName(roleName: string): string {
+  return `${LOCK_POLICY_PREFIX}${roleName}`;
+}
+
+export function awsLockPolicyArn(accountId: string, roleName: string): string {
+  return `arn:aws:iam::${accountId}:policy/${buildAwsLockPolicyName(roleName)}`;
+}
+
+/** A lock an operation recorded when it took it. */
+export interface RecordedAwsLock {
+  readonly policyArn: string;
+  readonly policyId: string;
+  // The role the lock protects, read from the lock's name.
+  readonly roleName: string;
+}
+
+const LOCK_POLICY_ARN = /^arn:aws:iam::\d{12}:policy\/radius-lock-(.+)$/;
+
+/**
+ * The lock an operation's context records in `awsDeployIdentityLock`, or null
+ * when it records none or the record is not a lock policy and its ID.
+ */
+export function readRecordedAwsLock(context: unknown): RecordedAwsLock | null {
+  if (typeof context !== "object" || context === null) return null;
+  const lock =
+    "awsDeployIdentityLock" in context ?
+      context.awsDeployIdentityLock
+    : undefined;
+  if (
+    typeof lock !== "object" ||
+    lock === null ||
+    !("policyArn" in lock) ||
+    typeof lock.policyArn !== "string" ||
+    !("policyId" in lock) ||
+    typeof lock.policyId !== "string" ||
+    !lock.policyId
+  ) {
+    return null;
+  }
+  const match = LOCK_POLICY_ARN.exec(lock.policyArn);
+  if (!match?.[1]) return null;
+  return {
+    policyArn: lock.policyArn,
+    policyId: lock.policyId,
+    roleName: match[1]
+  };
+}
+
+/**
+ * The lock policy's document. It is never attached, and even if it were, it
+ * only denies passing the lock policy itself as a role, which matches nothing.
+ */
+export function buildAwsLockPolicyDocument(
+  accountId: string,
+  roleName: string
+): PolicyDocument {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "RadiusDeployIdentityLock",
+        Effect: "Deny",
+        Action: "iam:PassRole",
+        Resource: awsLockPolicyArn(accountId, roleName)
+      }
+    ]
+  };
+}
+
+/**
+ * The lock policy's description, naming the holder. IAM descriptions accept
+ * only Latin-1 characters, so anything else is written as a JSON escape.
+ */
+export function describeAwsLockHolder(holder: AwsLockHolder): string {
+  const text = JSON.stringify({
+    repo: holder.repo,
+    environment: holder.environment,
+    action: holder.action,
+    operationId: holder.operationId
+  }).replace(
+    /[^\x20-\x7e]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
+  );
+  return text.length <= LOCK_DESCRIPTION_MAX ?
+      text
+    : JSON.stringify({
+        action: holder.action,
+        operationId: holder.operationId
+      });
+}
+
+/** The holder a lock description names, or null when it names none. */
+export function parseAwsLockHolder(description: unknown): AwsLockHolder | null {
+  if (typeof description !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(description);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const action = LOCK_ACTIONS.find((value) => value === parsed.action);
+  if (!action) return null;
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  return {
+    repo: text(parsed.repo),
+    environment: text(parsed.environment),
+    action,
+    operationId: text(parsed.operationId)
+  };
+}
+
+/** How a waiting run names the lock's holder. */
+export function awsLockHolderLabel(holder: AwsLockHolder | null): string {
+  if (!holder) return "Another run";
+  const target =
+    holder.environment && holder.repo ?
+      `environment ${holder.environment} in ${holder.repo}`
+    : holder.repo || "an unnamed environment";
+  return `The ${holder.action} of ${target}`;
+}
+
+/** When IAM created a lock, for a person: `2026-10-30 11:58 UTC`. */
+export function formatAwsLockTime(since: string): string {
+  const time = Date.parse(since);
+  return isNaN(time) ? "an unknown time" : (
+      `${new Date(time).toISOString().slice(0, 16).replace("T", " ")} UTC`
+    );
 }

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { createWorkflowFileCommitter as createCoreCommitter } from "@radius-project/core";
+import { createSetupWorkflowRecoveryPort } from "../services/setup-workflow-recovery.js";
 import {
   createOperation,
   fromPersistedOperation,
@@ -12,6 +14,7 @@ import {
 } from "../../operations.js";
 import {
   createWorkflowFileCommitter,
+  bindWorkflowFileCommitterPorts,
   recordedSetupBranchCreate,
   workflowContentDigest,
   type WorkflowFileCommitterPorts
@@ -137,6 +140,431 @@ const target = { targetRepo: "octo/app", envName: "dev" };
 
 afterEach(() => vi.useRealTimers());
 
+it.each(["saved-base", "replacement", "absent", "malformed"] as const)(
+  "settles only complete issued branch-create proof after shutdown (%s)",
+  async (boundary) => {
+    const operation = createOperation({ operationId: "op_branch-proof" });
+    const create = prepareProviderMutation(operation, {
+      kind: "github_branch.create",
+      target: "octo/app\0saved-branch\0base-sha"
+    });
+    settleProviderMutation(
+      operation,
+      create.mutationId,
+      "outcome_unknown",
+      "Lost acknowledgement"
+    );
+    const unknown = structuredClone(operation.providerRecovery);
+    const h = harness({ defaultBranch: "main" });
+    let stopped = false;
+    const read = vi.fn(async () => {
+      stopped = true;
+      return {
+        code: boundary === "absent" ? 1 : 0,
+        stderr: boundary === "absent" ? "HTTP 404" : "",
+        stdout:
+          boundary === "malformed" ? "{" : (
+            JSON.stringify({
+              object: {
+                sha: boundary === "saved-base" ? "base-sha" : "replacement"
+              }
+            })
+          )
+      };
+    });
+    h.ports.runGh = read;
+    const persist = vi.fn(async () => {});
+    h.ports.mutationRecovery = { operation, persist, isStopped: () => stopped };
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+    expect(read).toHaveBeenCalledOnce();
+    expect(h.calls).toEqual([]);
+    expect(h.tempWrites).toEqual([]);
+    if (boundary === "saved-base") {
+      expect(operation.providerRecovery.mutations).toHaveLength(1);
+      expect(operation.providerRecovery.mutations[0].status).toBe("confirmed");
+      expect(persist).toHaveBeenCalledOnce();
+    } else {
+      expect(operation.providerRecovery).toEqual(unknown);
+      expect(persist).not.toHaveBeenCalled();
+    }
+  }
+);
+
+describe.each(["new", 0, 11] as const)(
+  "workflow nested reads (%s prior attempts)",
+  (attempts) => {
+    it.each([
+      "content",
+      "absent",
+      "malformed-content",
+      "digest",
+      "between-pages",
+      "page-100",
+      "malformed-history",
+      "denied",
+      "rejection",
+      "ambiguous",
+      "unmatched",
+      "positive"
+    ] as const)(
+      "fences shutdown during %s without losing issued positive proof",
+      async (boundary) => {
+        let operation = createOperation({
+          operationId: "op_workflow-nested",
+          repo: "octo/app",
+          environment: "dev",
+          provider: "azure"
+        });
+        const marker = `radius-operation:op_workflow-nested:workflow:p:${CONTENT_DIGEST.slice(0, 16)}`;
+        if (attempts !== "new") {
+          const mutation = prepareProviderMutation(operation, {
+            kind: "github_workflow.put",
+            target: "octo/app:<default>:p",
+            intent: {
+              branch: "<default>",
+              path: "p",
+              previousBlobSha: null,
+              previousBlobKnown: true,
+              contentSha256: CONTENT_DIGEST,
+              operationMarker: marker
+            }
+          });
+          settleProviderMutation(
+            operation,
+            mutation.mutationId,
+            "outcome_unknown",
+            "Lost acknowledgement"
+          );
+          operation.providerRecovery.mutations[0].reconcileAttempts = attempts;
+          operation = fromPersistedOperation(toPersistedOperation(operation));
+          expect(
+            operation.providerRecovery.mutations[0].reconcileAttempts ?? 0
+          ).toBe(attempts);
+        }
+        const h = harness();
+        let stopped = false;
+        let unknown: unknown;
+        const persist = vi.fn(async () => {});
+        let savesAtShutdown = 0;
+        const shutdown = () => {
+          unknown = structuredClone(operation.providerRecovery);
+          savesAtShutdown = persist.mock.calls.length;
+          stopped = true;
+        };
+        const fullPage = Array.from({ length: 100 }, (_, i) => ({
+          sha: String(i).padStart(40, "0"),
+          commit: { message: "unrelated" }
+        }));
+        const matching = {
+          sha: "a".repeat(40),
+          commit: { message: `Radius-Operation: ${marker}` }
+        };
+        const read = vi.fn(async (args: string[]) => {
+          if (args.includes("--jq"))
+            return { code: 1, stdout: "", stderr: "HTTP 404" };
+          if (args[1].includes("/contents/")) {
+            if (
+              ["content", "absent", "malformed-content", "digest"].includes(
+                boundary
+              )
+            )
+              shutdown();
+            return {
+              code: boundary === "absent" ? 1 : 0,
+              stdout:
+                boundary === "malformed-content" ? "{" : (
+                  JSON.stringify({
+                    sha: "blob-1",
+                    content: boundary === "digest" ? "b3RoZXI=" : CONTENT
+                  })
+                ),
+              stderr: boundary === "absent" ? "HTTP 404" : ""
+            };
+          }
+          if (!args[1].includes("/commits?"))
+            throw new Error(`Unexpected read ${args}`);
+          if (boundary !== "page-100" || args[1].endsWith("page=100"))
+            shutdown();
+          if (boundary === "rejection") throw new Error("Read rejected");
+          return {
+            code: boundary === "denied" ? 1 : 0,
+            stdout:
+              boundary === "malformed-history" ? "{" : (
+                JSON.stringify(
+                  boundary === "between-pages" || boundary === "page-100" ?
+                    fullPage
+                  : boundary === "ambiguous" ? [matching, matching]
+                  : boundary === "unmatched" ? []
+                  : [matching]
+                )
+              ),
+            stderr: boundary === "denied" ? "HTTP 403" : ""
+          };
+        });
+        const write = vi.fn(async () => ({
+          code: 1,
+          stdout: "",
+          stderr: "ECONNRESET"
+        }));
+        h.ports.runGh = read;
+        h.ports.runGhWorkflow = write;
+        h.ports.mutationRecovery = {
+          operation,
+          persist,
+          isStopped: () => stopped
+        };
+        const pending = createWorkflowFileCommitter(
+          h.ports,
+          target
+        ).commitWorkflowFileSmart("p", CONTENT, "m");
+        if (boundary === "positive") {
+          await expect(pending).resolves.toMatchObject({
+            ok: true,
+            blobSha: "blob-1",
+            commitSha: matching.sha
+          });
+          expect(operation.providerRecovery.mutations[0].status).toBe(
+            "confirmed"
+          );
+        } else {
+          await expect(pending).rejects.toMatchObject({
+            code: "setup-execution-interrupted"
+          });
+          expect(operation.providerRecovery).toEqual(unknown);
+          expect(persist).toHaveBeenCalledTimes(savesAtShutdown);
+        }
+        expect(read).toHaveBeenCalledTimes(
+          (
+            ["content", "absent", "malformed-content", "digest"].includes(
+              boundary
+            )
+          ) ?
+            2
+          : boundary === "page-100" ? 102
+          : 3
+        );
+        expect(write).toHaveBeenCalledTimes(attempts === "new" ? 1 : 0);
+        expect(h.tempRemovals).toEqual(["/tmp/body-1.json"]);
+      }
+    );
+  }
+);
+
+describe.each(["create", "delete"] as const)(
+  "core-injected branch %s recovery",
+  (kind) => {
+    it.each(["page", "exact", "negative", "positive"] as const)(
+      "uses the core assertion at the nested %s boundary",
+      async (boundary) => {
+        const operation = createOperation({ operationId: "op_workflow" });
+        operation.recoveryState = "provider_reconciliation_pending";
+        const branch = "radius/setup-dev-workflows-workflow";
+        const create = prepareProviderMutation(operation, {
+          kind: "github_branch.create",
+          target: `octo/app\0${branch}\0sha-1`
+        });
+        settleProviderMutation(
+          operation,
+          create.mutationId,
+          "outcome_unknown",
+          "Lost create acknowledgement"
+        );
+        operation.providerRecovery.mutations[0].reconcileAttempts = 11;
+        const h = harness({ defaultBranch: "main" });
+        let stopped = false;
+        let unknown: unknown;
+        let exactReads = 0;
+        let savesAtShutdown = 0;
+        const persist = vi.fn(async () => {});
+        const shutdown = () => {
+          unknown = structuredClone(operation.providerRecovery);
+          savesAtShutdown = persist.mock.calls.length;
+          stopped = true;
+        };
+        const read = vi.fn(async (args: string[]) => {
+          if (args[1].includes("/matching-refs/")) {
+            if (boundary === "page" || boundary === "exact") shutdown();
+            return {
+              code: 0,
+              stderr: "",
+              stdout: JSON.stringify(
+                boundary === "page" ?
+                  Array.from({ length: 100 }, (_, i) => ({
+                    ref: `refs/heads/${branch}-${i}`
+                  }))
+                : []
+              )
+            };
+          }
+          if (args[1].includes("/git/ref/heads/")) {
+            exactReads++;
+            if (exactReads === 1 && kind === "delete")
+              return {
+                code: 0,
+                stderr: "",
+                stdout: '{"object":{"sha":"sha-1"}}'
+              };
+            if (exactReads === 2) shutdown();
+            return {
+              code: boundary === "negative" && exactReads === 2 ? 0 : 1,
+              stderr: "HTTP 404",
+              stdout: ""
+            };
+          }
+          throw new Error(`Unexpected read ${args}`);
+        });
+        h.ports.runGh = read;
+        const write = vi.fn(async () => ({
+          code: 1,
+          stderr: "ECONNRESET",
+          stdout: ""
+        }));
+        h.ports.runGhWorkflow = write;
+        // Production binds transport first; core injects recovery afterwards.
+        const ports = bindWorkflowFileCommitterPorts(h.ports);
+        ports.mutationRecovery = createSetupWorkflowRecoveryPort(
+          operation,
+          persist,
+          () => stopped
+        );
+        const pending = createCoreCommitter(
+          ports,
+          target
+        ).commitWorkflowFileSmart("p", CONTENT, "m");
+        if (kind === "delete" && boundary === "positive") {
+          await expect(pending).rejects.toMatchObject({
+            code: "provider-mutation-recovered-rollback"
+          });
+          expect(operation.providerRecovery.mutations.at(-1)?.status).toBe(
+            "confirmed"
+          );
+        } else {
+          await expect(pending).rejects.toMatchObject({
+            code: "setup-execution-interrupted"
+          });
+          expect(operation.providerRecovery).toEqual(unknown);
+          expect(persist).toHaveBeenCalledTimes(savesAtShutdown);
+        }
+        expect(read).toHaveBeenCalledTimes(
+          boundary === "page" || boundary === "exact" ? 2 : 3
+        );
+        expect(write).toHaveBeenCalledTimes(kind === "delete" ? 1 : 0);
+        expect(h.tempWrites).toEqual([]);
+      }
+    );
+  }
+);
+
+it("does not start history after shutdown during matching content reconciliation", async () => {
+  const operation = createOperation({
+    operationId: "workflow-content-shutdown"
+  });
+  const h = harness({
+    runGh: [
+      { code: 1, stderr: "HTTP 404" },
+      { stdout: JSON.stringify({ sha: "blob-1", content: CONTENT }) },
+      {
+        stdout: JSON.stringify([
+          {
+            sha: "a".repeat(40),
+            commit: {
+              message: `Radius-Operation: radius-operation:workflow-content-shutdown:workflow:p:${CONTENT_DIGEST.slice(0, 16)}`
+            }
+          }
+        ])
+      }
+    ],
+    runGhWorkflow: [{ code: 1, stderr: "ECONNRESET" }]
+  });
+  let stopped = false;
+  let unknown: unknown;
+  const read = h.ports.runGh;
+  h.ports.runGh = async (args) => {
+    const result = await read(args);
+    if (!args.includes("--jq")) {
+      unknown = structuredClone(operation.providerRecovery);
+      stopped = true;
+    }
+    return result;
+  };
+  h.ports.mutationRecovery = {
+    operation,
+    isStopped: () => stopped,
+    persist: async () => {}
+  };
+  await expect(
+    createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+      "p",
+      CONTENT,
+      "m"
+    )
+  ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+  expect(h.calls).toHaveLength(3);
+  expect(operation.providerRecovery).toEqual(unknown);
+  expect(h.tempRemovals).toEqual(["/tmp/body-1.json"]);
+});
+
+it.each(["github_workflow.put", "github_branch.create"])(
+  "sends no %s request when shutdown wins prepared-intent persistence",
+  async (kind) => {
+    const operation = createOperation({ operationId: "held-publication" });
+    const h = harness({
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }],
+      runGhWorkflow: [{ code: 1, stderr: "protected branch" }],
+      defaultBranch: "main",
+      headSha: "sha-1"
+    });
+    const branch = vi.spyOn(h.ports, "createBranchRef");
+    let stopped = false;
+    let release = () => {};
+    let entered = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prepared = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const statuses: string[] = [];
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => stopped,
+      persist: async () => {
+        const mutation = operation.providerRecovery.mutations.at(-1);
+        if (mutation?.kind !== kind) return;
+        statuses.push(mutation.status);
+        if (mutation.status === "prepared") {
+          entered();
+          await gate;
+        }
+      }
+    };
+    const pending = createWorkflowFileCommitter(
+      h.ports,
+      target
+    ).commitWorkflowFileSmart("p", CONTENT, "m");
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    await prepared;
+    const before = h.calls.length;
+    stopped = true;
+    release();
+    await rejected;
+    expect(h.calls).toHaveLength(before);
+    expect(branch).not.toHaveBeenCalled();
+    expect(statuses).toEqual(["prepared", "not_applied"]);
+    expect(h.tempRemovals).toEqual(
+      h.tempWrites.map((_, index) => `/tmp/body-${index + 1}.json`)
+    );
+  }
+);
+
 it("publication baseline parity: recovered empty-branch deletion", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(1700000000000);
@@ -156,6 +584,7 @@ it("publication baseline parity: recovered empty-branch deletion", async () => {
     providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
   });
   h.ports.mutationRecovery = {
+    isStopped: () => false,
     operation,
     persist: async () => {
       trace.push([
@@ -199,6 +628,7 @@ describe("committing a workflow file", () => {
       ]
     });
     first.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {
         saved.push(JSON.stringify(toPersistedOperation(operation)));
@@ -250,6 +680,7 @@ describe("committing a workflow file", () => {
       ]
     });
     second.ports.mutationRecovery = {
+      isStopped: () => false,
       operation: reloaded,
       persist: async () => {
         saved.push(JSON.stringify(toPersistedOperation(reloaded)));
@@ -343,7 +774,11 @@ describe("committing a workflow file", () => {
       ]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
     const committer = createWorkflowFileCommitter(h.ports, target);
 
     await committer.commitWorkflowFileSmart("first.yml", CONTENT, "Add first");
@@ -400,6 +835,7 @@ describe("committing a workflow file", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -467,7 +903,11 @@ describe("committing a workflow file", () => {
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -510,7 +950,11 @@ describe("committing a workflow file", () => {
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -543,7 +987,11 @@ describe("committing a workflow file", () => {
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -579,7 +1027,11 @@ describe("committing a workflow file", () => {
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -610,6 +1062,7 @@ describe("committing a workflow file", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -643,6 +1096,7 @@ describe("committing a workflow file", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -679,6 +1133,7 @@ describe("committing a workflow file", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -869,6 +1324,7 @@ describe("the protected-branch pull-request fallback", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -907,6 +1363,7 @@ describe("the protected-branch pull-request fallback", () => {
       providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
     });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -942,7 +1399,11 @@ describe("the protected-branch pull-request fallback", () => {
       target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
       providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -992,7 +1453,11 @@ describe("the protected-branch pull-request fallback", () => {
       target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
       providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1065,6 +1530,7 @@ describe("the protected-branch pull-request fallback", () => {
     const operation = createOperation({ operationId: "op_workflow" });
     const boundaries: string[] = [];
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {
         const fallbackWrite = operation.providerRecovery.mutations.find(
@@ -1207,6 +1673,51 @@ describe("the protected-branch pull-request fallback", () => {
     });
   });
 
+  it("reports cancellation on an established pull-request branch", async () => {
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 1, stderr: "HTTP 404: Not Found" }
+      ],
+      runGhWorkflow: [
+        { code: 1, stderr: "protected branch" },
+        { code: 0, stdout: PUT_RESPONSE }
+      ],
+      defaultBranch: "main",
+      headSha: "sha-1",
+      createBranch: { ok: true, stderr: "" }
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    let stopLaterWrites = false;
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {},
+      beforeMutation: async (kind) =>
+        kind !== "github_workflow.put" || !stopLaterWrites
+    };
+    const committer = createWorkflowFileCommitter(h.ports, target);
+
+    await expect(
+      committer.commitWorkflowFileSmart("first", CONTENT, "m")
+    ).resolves.toMatchObject({ ok: true, viaPr: true });
+    stopLaterWrites = true;
+
+    await expect(
+      committer.commitWorkflowFileSmart("second", CONTENT, "m")
+    ).resolves.toEqual({
+      ok: false,
+      changed: false,
+      cancelled: true,
+      stderr: "Operation stopped before writing the workflow.",
+      viaPr: true
+    });
+    expect(
+      h.calls.filter((call) => call.kind === "runGhWorkflow")
+    ).toHaveLength(2);
+  });
+
   it("keeps the original refusal and explains the fallback failure when the base head cannot be resolved", async () => {
     const h = harness({
       runGh: [{ code: 1 }],
@@ -1249,7 +1760,186 @@ describe("the protected-branch pull-request fallback", () => {
     });
     expect(committer.pullRequestState()).toBeUndefined();
   });
+
+  it("honors Stop after journaling the fallback branch without creating it", async () => {
+    const h = harness({
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }],
+      runGhWorkflow: [{ code: 1, stderr: "protected branch" }],
+      defaultBranch: "main",
+      headSha: "sha-1"
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    let branchBoundaries = 0;
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {
+        if (
+          operation.providerRecovery.mutations.some(
+            (entry: { kind: string; status: string }) =>
+              entry.kind === "github_branch.create" &&
+              entry.status === "prepared"
+          )
+        ) {
+          requestStop(operation);
+        }
+      },
+      beforeMutation: async (kind) => {
+        if (kind !== "github_branch.create") return true;
+        branchBoundaries += 1;
+        return branchBoundaries === 1;
+      }
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).resolves.toEqual({
+      ok: false,
+      changed: false,
+      cancelled: true,
+      stderr: "Operation stopped before creating the setup branch.",
+      viaPr: false
+    });
+    expect(branchBoundaries).toBe(2);
+    expect(committerBranchCreate(operation)).toMatchObject({
+      status: "not_applied"
+    });
+  });
+
+  it("fails closed when an interrupted branch create cannot read the branch", async () => {
+    const operation = recoveringBranchCreate();
+    const h = harness({
+      runGh: [{ code: 1, stdout: "branch lookup unavailable" }],
+      defaultBranch: "main"
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toThrow("branch lookup unavailable");
+  });
+
+  it.each([
+    ["unreadable JSON", "not-json", "unreadable state"],
+    ["a missing head sha", JSON.stringify({ object: {} }), "did not report"]
+  ])(
+    "fails closed when an interrupted branch create returns %s",
+    async (_label, stdout, message) => {
+      const operation = recoveringBranchCreate();
+      const h = harness({
+        runGh: [{ code: 0, stdout }],
+        defaultBranch: "main"
+      });
+      h.ports.mutationRecovery = {
+        operation,
+        isStopped: () => false,
+        persist: async () => {}
+      };
+
+      await expect(
+        createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+          "p",
+          CONTENT,
+          "m"
+        )
+      ).rejects.toThrow(message);
+    }
+  );
+
+  it("requires manual recovery when the interrupted branch moved", async () => {
+    const operation = recoveringBranchCreate();
+    const h = harness({
+      runGh: [
+        { code: 0, stdout: JSON.stringify({ object: { sha: "sha-other" } }) }
+      ],
+      defaultBranch: "main"
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("different commit")
+    });
+  });
+
+  it("does not recreate an interrupted branch until its absence is proven", async () => {
+    const operation = recoveringBranchCreate();
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 0, stdout: JSON.stringify([{ ref: "refs/heads/main" }]) },
+        { code: 1, stderr: "HTTP 404: Not Found" }
+      ],
+      defaultBranch: "main"
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toThrow(
+      'could not create branch "radius/setup-dev-workflows-workflow"'
+    );
+    expect(
+      h.calls.map((call) => call.args[1]).filter((value) => value !== undefined)
+    ).toEqual([
+      "/repos/octo/app/git/ref/heads/radius%2Fsetup-dev-workflows-workflow",
+      "/repos/octo/app/git/matching-refs/heads/radius%2Fsetup-dev-workflows-workflow?per_page=100&page=1",
+      "/repos/octo/app/git/ref/heads/radius%2Fsetup-dev-workflows-workflow"
+    ]);
+    expect(committerBranchCreate(operation)).toMatchObject({
+      status: "not_applied"
+    });
+  });
 });
+
+function recoveringBranchCreate() {
+  const operation = createOperation({ operationId: "op_workflow" });
+  operation.recoveryState = "provider_reconciliation_pending";
+  prepareProviderMutation(operation, {
+    kind: "github_branch.create",
+    target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
+    providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
+  });
+  return operation;
+}
+
+function committerBranchCreate(operation: {
+  providerRecovery: { mutations: Array<{ kind: string; status: string }> };
+}) {
+  return operation.providerRecovery.mutations.find(
+    (entry) => entry.kind === "github_branch.create"
+  );
+}
 
 describe("what survives a crash during a recovered branch delete", () => {
   function refusedDeleteHarness() {
@@ -1279,6 +1969,7 @@ describe("what survives a crash during a recovered branch delete", () => {
     // so none may say the delete is settled while the branch is still there.
     const saved: Array<string | undefined> = [];
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {
         saved.push(
@@ -1303,7 +1994,11 @@ describe("what survives a crash during a recovered branch delete", () => {
 
   it("keeps the blocker after the refused record is reloaded", async () => {
     const { h, operation } = refusedDeleteHarness();
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1338,7 +2033,11 @@ describe("the predecessor blob a workflow retry records", () => {
       runGh: [{ code: 0, stdout: "blob-before" }],
       runGhWorkflow: [{ code: 1, stderr: "HTTP 409: Conflict" }]
     });
-    first.ports.mutationRecovery = { operation, persist: async () => {} };
+    first.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
     await expect(
       createWorkflowFileCommitter(first.ports, target).commitWorkflowFileSmart(
         PATH,
@@ -1352,7 +2051,11 @@ describe("the predecessor blob a workflow retry records", () => {
       runGh: [{ code: 0, stdout: "blob-after" }],
       runGhWorkflow: [{ code: 0, stdout: PUT_RESPONSE }]
     });
-    second.ports.mutationRecovery = { operation, persist: async () => {} };
+    second.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(second.ports, target).commitWorkflowFileSmart(
@@ -1379,7 +2082,11 @@ describe("the predecessor blob a workflow retry records", () => {
       ],
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
-    first.ports.mutationRecovery = { operation, persist: async () => {} };
+    first.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
     await expect(
       createWorkflowFileCommitter(first.ports, target).commitWorkflowFileSmart(
         PATH,
@@ -1400,7 +2107,11 @@ describe("the predecessor blob a workflow retry records", () => {
         { code: 0, stdout: MARKED_COMMIT }
       ]
     });
-    second.ports.mutationRecovery = { operation, persist: async () => {} };
+    second.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(second.ports, target).commitWorkflowFileSmart(
@@ -1414,6 +2125,309 @@ describe("the predecessor blob a workflow retry records", () => {
     ).toEqual([]);
   });
 });
+
+describe("workflow write interruption recovery", () => {
+  it("cancels before journaling when the workflow boundary refuses the write", async () => {
+    const h = harness({
+      runGh: [{ code: 0, stdout: "blob-before" }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {},
+      beforeMutation: async () => false
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).resolves.toEqual({
+      ok: false,
+      changed: false,
+      cancelled: true,
+      stderr: "Operation stopped before writing the workflow.",
+      viaPr: false
+    });
+    expect(operation.providerRecovery.mutations).toEqual([]);
+    expect(h.tempWrites).toEqual([]);
+  });
+
+  it("honors Stop after journaling a workflow without calling GitHub", async () => {
+    const h = harness({
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    let boundaries = 0;
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {
+        if (
+          operation.providerRecovery.mutations.some(
+            (entry: { kind: string; status: string }) =>
+              entry.kind === "github_workflow.put" &&
+              entry.status === "prepared"
+          )
+        ) {
+          requestStop(operation);
+        }
+      },
+      beforeMutation: async () => {
+        boundaries += 1;
+        return boundaries === 1;
+      }
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).resolves.toEqual({
+      ok: false,
+      changed: false,
+      cancelled: true,
+      stderr: "Operation stopped before writing the workflow.",
+      viaPr: false
+    });
+    expect(boundaries).toBe(2);
+    expect(h.calls.filter((call) => call.kind === "runGhWorkflow")).toEqual([]);
+    expect(h.tempRemovals).toEqual(["/tmp/body-1.json"]);
+  });
+
+  it("keeps the journal unresolved when Stop cannot complete without a boundary", async () => {
+    const h = harness({
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {
+        if (
+          operation.providerRecovery.mutations.some(
+            (entry: { kind: string; status: string }) =>
+              entry.kind === "github_workflow.put" &&
+              entry.status === "prepared"
+          )
+        ) {
+          requestStop(operation);
+        }
+      }
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+    expect(h.calls.filter((call) => call.kind === "runGhWorkflow")).toEqual([]);
+    expect(h.tempRemovals).toEqual(["/tmp/body-1.json"]);
+  });
+
+  it("reports a recovered workflow write as not applied when the path is absent", async () => {
+    const operation = recoveringWorkflowPut();
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 1, stderr: "HTTP 404: Not Found" }
+      ]
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).resolves.toEqual({
+      ok: false,
+      changed: false,
+      stderr: "GitHub confirmed the workflow write was not applied.",
+      viaPr: false
+    });
+    expect(h.calls.filter((call) => call.kind === "runGhWorkflow")).toEqual([]);
+  });
+
+  it("keeps a workflow write unresolved when GitHub cannot read its path", async () => {
+    const operation = recoveringWorkflowPut();
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 1, stdout: "workflow lookup unavailable" }
+      ]
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown",
+      message: expect.stringContaining("workflow lookup unavailable")
+    });
+  });
+
+  it("uses a stable diagnostic when GitHub returns no workflow read detail", async () => {
+    const operation = recoveringWorkflowPut();
+    const h = harness({
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }, { code: 1 }]
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown",
+      message: expect.stringContaining(
+        "GitHub workflow state could not be read."
+      )
+    });
+  });
+
+  it("requires manual recovery for unreadable workflow state", async () => {
+    const operation = recoveringWorkflowPut();
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 0, stdout: "not-json" }
+      ]
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("unreadable state")
+    });
+  });
+
+  it("requires exact content when the workflow response omits its body", async () => {
+    const operation = recoveringWorkflowPut();
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 0, stdout: JSON.stringify({ sha: "blob-written" }) }
+      ]
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("does not match the exact content")
+    });
+  });
+
+  it("requires complete durable provenance before adopting a workflow write", async () => {
+    const operation = recoveringWorkflowPut({
+      branch: "<default>",
+      path: "p",
+      previousBlobSha: null,
+      contentSha256: CONTENT_DIGEST,
+      operationMarker:
+        "radius-operation:op_workflow:workflow:p:fff71b97a5a94949"
+    });
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-written", content: CONTENT })
+        }
+      ]
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("complete pre-write deletion provenance")
+    });
+  });
+});
+
+function recoveringWorkflowPut(intent?: {
+  branch: string;
+  path: string;
+  previousBlobSha: string | null;
+  previousBlobKnown?: boolean;
+  contentSha256: string;
+  operationMarker: string;
+}) {
+  const operation = createOperation({ operationId: "op_workflow" });
+  operation.recoveryState = "provider_reconciliation_pending";
+  prepareProviderMutation(operation, {
+    kind: "github_workflow.put",
+    target: "octo/app:<default>:p",
+    intent: intent ?? {
+      branch: "<default>",
+      path: "p",
+      previousBlobSha: null,
+      previousBlobKnown: true,
+      contentSha256: CONTENT_DIGEST,
+      operationMarker:
+        "radius-operation:op_workflow:workflow:p:fff71b97a5a94949"
+    }
+  });
+  return operation;
+}
 
 describe("recovering a setup branch after the default branch moved", () => {
   const CREATE_TARGET =
@@ -1472,7 +2486,11 @@ describe("recovering a setup branch after the default branch moved", () => {
       defaultBranch: "main",
       headSha: "sha-moved"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1550,7 +2568,11 @@ describe("recovering a setup branch after the default branch moved", () => {
       ],
       defaultBranch: "main"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1588,7 +2610,11 @@ describe("recovering a setup branch after the default branch moved", () => {
       defaultBranch: "main",
       headSha: "sha-moved"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1659,7 +2685,11 @@ describe("the in-process recovered branch delete", () => {
         stderr: "HTTP 403: Resource not accessible"
       })
     );
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1683,7 +2713,11 @@ describe("the in-process recovered branch delete", () => {
         NOT_FOUND
       )
     );
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1710,7 +2744,11 @@ describe("the in-process recovered branch delete", () => {
         { code: 0, stdout: JSON.stringify({ object: { sha: "sha-1" } }) }
       )
     );
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1728,6 +2766,44 @@ describe("the in-process recovered branch delete", () => {
     );
   });
 
+  it("refuses to delete a recovered branch that moved to replacement work", async () => {
+    const operation = recovering();
+    const h = harness(
+      script(
+        {
+          code: 0,
+          stdout: JSON.stringify([
+            { ref: "refs/heads/radius/setup-dev-workflows-workflow" }
+          ])
+        },
+        {
+          code: 0,
+          stdout: JSON.stringify({ object: { sha: "replacement-sha" } })
+        }
+      )
+    );
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => false,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-manual-required" });
+
+    expect(providerRecoveryManualGuidance(operation)).toContain(
+      "may contain replacement work"
+    );
+    expect(deleteMutation(operation)).toMatchObject({
+      status: "manual_required"
+    });
+  });
+
   it("issues the delete exactly once whatever the reconciliation decides", async () => {
     const operation = recovering();
     const h = harness(
@@ -1736,7 +2812,11 @@ describe("the in-process recovered branch delete", () => {
         stderr: "HTTP 403: Resource not accessible"
       })
     );
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(

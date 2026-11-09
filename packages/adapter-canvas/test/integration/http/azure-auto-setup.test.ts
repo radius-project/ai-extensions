@@ -23,7 +23,14 @@ import {
   toPersistedOperation
 } from "../../../src/operations.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "../../../src/server/routes/azure-auto-setup-application.js";
-import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
+import {
+  createAzureSetupService,
+  type AzureSetupRequest
+} from "../../../src/server/services/azure-setup.js";
+import type {
+  SetupInput,
+  SetupOutcome
+} from "../../../src/server/services/setup-outcome.js";
 import {
   createOperationsStatusRoutes,
   type OperationActionRecord
@@ -53,10 +60,12 @@ const SP_APP_ID = "55555555-5555-5555-5555-555555555555";
 const SP_OBJECT_ID = "66666666-6666-6666-6666-666666666666";
 
 let container: CanvasServerContainer | undefined;
+let setupService: ReturnType<typeof createAzureSetupService> | undefined;
 
 afterEach(async () => {
   await container?.stopAll();
   container = undefined;
+  setupService = undefined;
 });
 
 function start(
@@ -64,10 +73,8 @@ function start(
   unmatchedCalls: string[] = [],
   additionalRoutes: RouteHandlerRegistry = {}
 ): void {
-  const routes = createTestRouteTable({
-    ...createAzureAutoSetupRoutes(dependencies),
-    ...additionalRoutes
-  });
+  setupService = createAzureSetupService(dependencies);
+  const routes = createTestRouteTable(additionalRoutes);
   container = createCanvasServer({
     createHttpServer: (handler) => createServer(handler),
     createRequestHandler: ({ instanceId, instances, markActivity }) =>
@@ -89,6 +96,17 @@ function start(
     preferredPort: async () => 0,
     prepareIdentity: () => {}
   });
+}
+
+async function authorize(body: string): Promise<SetupOutcome> {
+  if (!setupService) throw new Error("Azure setup service was not started.");
+  let input: SetupInput<AzureSetupRequest>;
+  try {
+    input = { data: JSON.parse(body) };
+  } catch (error) {
+    input = { error };
+  }
+  return setupService(input);
 }
 
 async function entry(instanceId = "panel-a") {
@@ -176,8 +194,7 @@ async function successfulSetup(
   let scheduledPersistedOperation: ReturnType<
     typeof toPersistedOperation
   > | null = null;
-  let baseUrl = "";
-  let scheduledAttempt: Promise<Response> | null = null;
+  let scheduledAttempt: Promise<SetupOutcome> | null = null;
   const requiredTags = buildRadiusAppProvenanceTags({
     repo: "octo/app",
     environment: "dev",
@@ -297,8 +314,6 @@ async function successfulSetup(
     throw new Error(`unscripted az call: ${line}`);
   };
   const dependencies = createAzureAutoSetupTestDependencies({
-    isServerOwnedRequest: (_instanceId, request) =>
-      request.headers["x-radius-server-owned"] === "token-a",
     operations: {
       create: () => operation,
       get: () => operation,
@@ -403,6 +418,7 @@ async function successfulSetup(
         },
         {
           getOperation: () => operation as OperationActionRecord,
+          claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
           canResumeInput,
           resumeAfterInput,
           requireInput,
@@ -418,18 +434,13 @@ async function successfulSetup(
             const request = scheduledOperation.request as {
               azure: Record<string, unknown>;
             };
-            scheduledAttempt = fetch(`${baseUrl}/api/azure-auto-setup`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "X-Radius-Server-Owned": "token-a"
-              },
-              body: JSON.stringify({
+            scheduledAttempt = authorize(
+              JSON.stringify({
                 ...CREATE_BODY,
                 ...request.azure,
                 operationId: scheduledOperation.operationId
               })
-            });
+            );
             return true;
           },
           errorMessage: (error) =>
@@ -440,7 +451,6 @@ async function successfulSetup(
     : {};
   start(dependencies, unmatchedCalls, operationRoutes);
   const running = await entry();
-  baseUrl = running.baseUrl;
   return {
     dependencies,
     get operation() {
@@ -471,7 +481,7 @@ async function successfulSetup(
   };
 }
 
-describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () => {
+describe("Azure setup recovery and public operation resume contracts (RF-03)", () => {
   it.each([
     "rejection",
     "exception",
@@ -546,18 +556,8 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       };
       setup.dependencies.finalizeSetupFailure = finalizeSetupFailure;
 
-      const response = await fetch(
-        `${setup.running.baseUrl}/api/azure-auto-setup`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Radius-Server-Owned": "token-a"
-          },
-          body: JSON.stringify(VALID_BODY)
-        }
-      );
-      const payload = await response.json();
+      const response = await authorize(JSON.stringify(VALID_BODY));
+      const payload = response.body;
       expect(response.status).toBe(400);
       expect(payload.cleanup).toBeDefined();
       expect(JSON.stringify(payload)).not.toContain(
@@ -566,18 +566,20 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       const deleted = ["rejection", "exception", "delete-timeout"].includes(
         scenario
       );
-      expect(payload.cleanup.results).toContainEqual(
-        expect.objectContaining({
-          artifactType: "github_environment",
-          outcome:
-            deleted ?
-              scenario === "delete-timeout" ?
-                "not_found"
-              : "deleted"
-            : scenario === "delete-refused" ? "warning"
-            : "skipped"
-        })
-      );
+      expect(payload.cleanup).toMatchObject({
+        results: expect.arrayContaining([
+          expect.objectContaining({
+            artifactType: "github_environment",
+            outcome:
+              deleted ?
+                scenario === "delete-timeout" ?
+                  "not_found"
+                : "deleted"
+              : scenario === "delete-refused" ? "warning"
+              : "skipped"
+          })
+        ])
+      });
       expect(deletes).toBe(
         ["replacement", "read-refused", "read-timeout"].includes(scenario) ? 0
         : 1
@@ -621,17 +623,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     setup.dependencies.external.getSelectedGitHubExecutor = () => executor;
     setup.dependencies.finalizeSetupFailure = finalizeSetupFailure;
 
-    const response = await fetch(
-      `${setup.running.baseUrl}/api/azure-auto-setup`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Radius-Server-Owned": "token-a"
-        },
-        body: JSON.stringify(VALID_BODY)
-      }
-    );
+    const response = await authorize(JSON.stringify(VALID_BODY));
 
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(calls.some((args) => args.includes("DELETE"))).toBe(false);
@@ -686,18 +678,8 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       throw new Error(`Unexpected service-principal command: ${args[2]}`);
     };
 
-    const response = await fetch(
-      `${setup.running.baseUrl}/api/azure-auto-setup`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Radius-Server-Owned": "token-a"
-        },
-        body: JSON.stringify(VALID_BODY)
-      }
-    );
-    const payload = await response.json();
+    const response = await authorize(JSON.stringify(VALID_BODY));
+    const payload = response.body;
 
     expect(response.status).toBe(202);
     expect(payload).toMatchObject({
@@ -731,51 +713,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     ]);
   });
 
-  it("preserves method mismatch, malformed-body, refusal, and unmatched behavior", async () => {
-    const tokens = new Map([
-      ["panel-a", "token-a"],
-      ["panel-b", "token-b"]
-    ]);
-    start(
-      createAzureAutoSetupTestDependencies({
-        isServerOwnedRequest: (instanceId, request) =>
-          request.headers["x-radius-server-owned"] === tokens.get(instanceId),
-        finalizeSetupFailure: finalizer()
-      })
-    );
-    const first = await entry("panel-a");
-    const second = await entry("panel-b");
-
-    const wrongMethod = await fetch(`${first.baseUrl}/api/azure-auto-setup`);
-    expect(wrongMethod.status).toBe(404);
-    expect(await wrongMethod.text()).toBe("unmatched");
-
-    const refused = await fetch(`${first.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-b"
-      },
-      body: JSON.stringify(VALID_BODY)
-    });
-    expect(refused.status).toBe(403);
-    expect(await refused.text()).toBe(
-      '{"error":"This endpoint is reserved for server-owned operations.","code":"server-owned-operation-required"}'
-    );
-
-    const malformed = await fetch(`${second.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-b"
-      },
-      body: "{oops"
-    });
-    expect(malformed.status).toBe(400);
-    expect(await malformed.json()).toMatchObject({ code: "setup-unhandled" });
-  });
-
-  it("surfaces a selected-subscription failure with the legacy status, headers, and body", async () => {
+  it("surfaces a selected-subscription failure through the direct service", async () => {
     const operation: AzureAutoSetupOperation = {
       operationId: "op-failure",
       repo: "octo/app",
@@ -785,8 +723,6 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     };
     start(
       createAzureAutoSetupTestDependencies({
-        isServerOwnedRequest: (_instanceId, request) =>
-          request.headers["x-radius-server-owned"] === "token-a",
         operations: { create: () => operation },
         external: {
           getGitHubIdentity: async () => null,
@@ -806,18 +742,10 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
         finalizeSetupFailure: finalizer()
       })
     );
-    const running = await entry();
-    const response = await fetch(`${running.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-a"
-      },
-      body: JSON.stringify(VALID_BODY)
-    });
+    await entry();
+    const response = await authorize(JSON.stringify(VALID_BODY));
     expect(response.status).toBe(400);
-    expect(response.headers.get("content-type")).toBe("application/json");
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error:
         'Could not select subscription 22222222-2222-2222-2222-222222222222. Ensure you are logged in ("az login") to an account with access, then try again. Azure CLI: subscription unavailable',
       code: "az-subscription-set-failed"
@@ -825,17 +753,10 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
   });
 
   it("preserves the reused-client-id success contract", async () => {
-    const { running, unmatchedCalls, azCalls } = await successfulSetup(false);
-    const response = await fetch(`${running.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-a"
-      },
-      body: JSON.stringify(VALID_BODY)
-    });
+    const { unmatchedCalls, azCalls } = await successfulSetup(false);
+    const response = await authorize(JSON.stringify(VALID_BODY));
     expect(response.status).toBe(200);
-    const payload = (await response.json()) as {
+    const payload = response.body as {
       steps: string[];
       [key: string]: unknown;
     };
@@ -866,17 +787,10 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
   });
 
   it("records retention only after a newly created app completes setup", async () => {
-    const { operation, running, unmatchedCalls } = await successfulSetup(true);
-    const response = await fetch(`${running.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-a"
-      },
-      body: JSON.stringify(CREATE_BODY)
-    });
+    const { operation, unmatchedCalls } = await successfulSetup(true);
+    const response = await authorize(JSON.stringify(CREATE_BODY));
     expect(response.status).toBe(200);
-    const payload = (await response.json()) as {
+    const payload = response.body as {
       steps: string[];
       [key: string]: unknown;
     };
@@ -922,20 +836,10 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
         }
       );
       setup.dependencies.finalizeSetupFailure = finalizer();
-      const response = await fetch(
-        `${setup.running.baseUrl}/api/azure-auto-setup`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Radius-Server-Owned": "token-a"
-          },
-          body: JSON.stringify(CREATE_BODY)
-        }
-      );
+      const response = await authorize(JSON.stringify(CREATE_BODY));
 
       expect(response.status).toBe(outcome === "recovers" ? 200 : 400);
-      expect(await response.json()).toMatchObject(
+      expect(response.body).toMatchObject(
         outcome === "recovers" ?
           { success: true, clientId: APP_ID, operationId: "op-http-create" }
         : {
@@ -968,17 +872,10 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       { type: "user" },
       { requireSmrPrompt: true }
     );
-    const first = await fetch(`${setup.running.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-a"
-      },
-      body: JSON.stringify(CREATE_BODY)
-    });
+    const first = await authorize(JSON.stringify(CREATE_BODY));
 
     expect(first.status).toBe(400);
-    const firstPayload = await first.json();
+    const firstPayload = first.body;
     expect(firstPayload).toMatchObject({
       code: "service-management-reference-required",
       inputRequired: true,
@@ -1014,24 +911,16 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     setup.restorePersistedOperation();
     resumeAfterInput(setup.operation);
 
-    const second = await fetch(
-      `${setup.running.baseUrl}/api/azure-auto-setup`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Radius-Server-Owned": "token-a"
-        },
-        body: JSON.stringify({
-          ...CREATE_BODY,
-          operationId: "op_http_smr",
-          serviceManagementReference: "99999999-9999-9999-9999-999999999999"
-        })
-      }
+    const second = await authorize(
+      JSON.stringify({
+        ...CREATE_BODY,
+        operationId: "op_http_smr",
+        serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+      })
     );
 
     expect(second.status).toBe(200);
-    expect(await second.json()).toMatchObject({
+    expect(second.body).toMatchObject({
       success: true,
       operationId: "op_http_smr",
       clientId: APP_ID,
@@ -1068,35 +957,17 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
         { type: "user" },
         { requireSmrPrompt: true, liveDrift }
       );
-      const first = await fetch(
-        `${setup.running.baseUrl}/api/azure-auto-setup`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Radius-Server-Owned": "token-a"
-          },
-          body: JSON.stringify(CREATE_BODY)
-        }
-      );
+      const first = await authorize(JSON.stringify(CREATE_BODY));
       expect(first.status).toBe(400);
 
       setup.restorePersistedOperation();
       resumeAfterInput(setup.operation);
-      const second = await fetch(
-        `${setup.running.baseUrl}/api/azure-auto-setup`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Radius-Server-Owned": "token-a"
-          },
-          body: JSON.stringify({
-            ...CREATE_BODY,
-            operationId: "op_http_smr",
-            serviceManagementReference: "99999999-9999-9999-9999-999999999999"
-          })
-        }
+      const second = await authorize(
+        JSON.stringify({
+          ...CREATE_BODY,
+          operationId: "op_http_smr",
+          serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+        })
       );
 
       expect(second.status).toBe(200);
@@ -1118,32 +989,17 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       { type: "servicePrincipal", name: SP_APP_ID },
       { requireSmrPrompt: true }
     );
-    const first = await fetch(`${setup.running.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-a"
-      },
-      body: JSON.stringify(CREATE_BODY)
-    });
+    const first = await authorize(JSON.stringify(CREATE_BODY));
     expect(first.status).toBe(400);
     setup.restorePersistedOperation();
     resumeAfterInput(setup.operation);
 
-    const second = await fetch(
-      `${setup.running.baseUrl}/api/azure-auto-setup`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Radius-Server-Owned": "token-a"
-        },
-        body: JSON.stringify({
-          ...CREATE_BODY,
-          operationId: "op_http_smr",
-          serviceManagementReference: "99999999-9999-9999-9999-999999999999"
-        })
-      }
+    const second = await authorize(
+      JSON.stringify({
+        ...CREATE_BODY,
+        operationId: "op_http_smr",
+        serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+      })
     );
 
     expect(second.status).toBe(200);
@@ -1163,14 +1019,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       { type: "user" },
       { requireSmrPrompt: true, publicResume: true }
     );
-    const first = await fetch(`${setup.running.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-a"
-      },
-      body: JSON.stringify(CREATE_BODY)
-    });
+    const first = await authorize(JSON.stringify(CREATE_BODY));
     expect(first.status).toBe(400);
     setup.restorePersistedOperation();
 
@@ -1206,7 +1055,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     });
     const scheduled = await setup.scheduledAttempt();
     expect(scheduled.status).toBe(200);
-    expect(await scheduled.json()).toMatchObject({
+    expect(scheduled.body).toMatchObject({
       success: true,
       operationId: "op_http_smr",
       appName: "radius-deploy-octo-app",
@@ -1221,21 +1070,92 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     expect(setup.operation.azureAppCreateContinuation).toBeUndefined();
   });
 
+  it("retains the accepted durable checkpoint when public resume is interrupted during Azure validation", async () => {
+    const setup = await successfulSetup(
+      true,
+      { type: "user" },
+      {
+        requireSmrPrompt: true,
+        publicResume: true
+      }
+    );
+    expect((await authorize(JSON.stringify(CREATE_BODY))).status).toBe(400);
+    setup.restorePersistedOperation();
+    let enter = () => {};
+    let release = () => {};
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stopped = false;
+    setup.dependencies.isStopped = () => stopped;
+    const read = setup.dependencies.external.runAz;
+    setup.dependencies.external.runAz = async (args) => {
+      const result = await read(args);
+      expect(args).toEqual(["account", "show", "--output", "json"]);
+      enter();
+      await released;
+      return result;
+    };
+    const response = await fetch(
+      `${setup.running.baseUrl}/api/operations/op_http_smr/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          repo: "octo/app",
+          environment: "dev",
+          provider: "azure",
+          serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+        })
+      }
+    );
+    const rejected = expect(setup.scheduledAttempt()).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    try {
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({
+        operationId: "op_http_smr",
+        statusUrl: "/api/operations/op_http_smr"
+      });
+      await entered;
+      const durable = structuredClone(setup.persistedOperation());
+      const az = [...setup.azCalls];
+      const github = [...setup.githubCalls];
+      expect(durable).toMatchObject({
+        state: "running",
+        azureAppCreateContinuation: {
+          acceptedPrompt: { code: "service-management-reference-required" }
+        }
+      });
+      expect(setup.operation.azureAppCreateContinuation).toBeUndefined();
+      stopped = true;
+      release();
+      await rejected;
+      expect(setup.persistedOperation()).toEqual(durable);
+      expect(setup.azCalls).toEqual(az);
+      expect(setup.githubCalls).toEqual(github);
+      expect(setup.operation.operationId).toBe("op_http_smr");
+      expect(setup.operation).toHaveProperty("endedAt", null);
+    } finally {
+      stopped = true;
+      release();
+      await rejected;
+    }
+  });
+
   it("creates and owns the app registration when the CLI is a service principal", async () => {
-    const { running, unmatchedCalls, azCalls } = await successfulSetup(true, {
+    const { unmatchedCalls, azCalls } = await successfulSetup(true, {
       type: "servicePrincipal",
       name: SP_APP_ID
     });
-    const response = await fetch(`${running.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-a"
-      },
-      body: JSON.stringify(CREATE_BODY)
-    });
+    const response = await authorize(JSON.stringify(CREATE_BODY));
     expect(response.status).toBe(200);
-    const payload = (await response.json()) as {
+    const payload = response.body as {
       steps: string[];
       [key: string]: unknown;
     };
@@ -1269,8 +1189,6 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     };
     start(
       createAzureAutoSetupTestDependencies({
-        isServerOwnedRequest: (_instanceId, request) =>
-          request.headers["x-radius-server-owned"] === "token-a",
         operations: { create: () => operation },
         external: {
           getGitHubIdentity: async () => null,
@@ -1320,17 +1238,10 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
         finalizeSetupFailure: finalizer()
       })
     );
-    const running = await entry();
-    const response = await fetch(`${running.baseUrl}/api/azure-auto-setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": "token-a"
-      },
-      body: JSON.stringify(CREATE_BODY)
-    });
+    await entry();
+    const response = await authorize(JSON.stringify(CREATE_BODY));
     expect(response.status).toBe(400);
-    const payload = (await response.json()) as {
+    const payload = response.body as {
       error: string;
       code: string;
     };
@@ -1341,3 +1252,4 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     );
   });
 });
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";

@@ -426,7 +426,7 @@ export function createRadiusCanvas(
     onClose: async (ctx: CanvasContext) => {
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
-        if (deps.executionOwner.hasActiveEnvironmentTasks(ctx.instanceId)) {
+        if (deps.executionOwner.hasActiveDeletionTasks(ctx.instanceId)) {
           const closeGeneration = closeGenerations.get(ctx.instanceId) || 0;
           let closeTimer: ReturnType<typeof setTimeout> | undefined;
           const closeEntry = () => {
@@ -446,7 +446,7 @@ export function createRadiusCanvas(
                 deps.logError(`Could not stop Radius canvas: ${String(error)}`)
               );
           };
-          const stopListening = deps.executionOwner.onEnvironmentTasksSettled(
+          const stopListening = deps.executionOwner.onDeletionTasksSettled(
             ctx.instanceId,
             () => {
               closeEntry();

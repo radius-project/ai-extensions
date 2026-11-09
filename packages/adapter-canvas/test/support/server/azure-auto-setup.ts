@@ -71,7 +71,7 @@ export function createAzureAutoSetupTestDependencies(
     ...dependencyOverrides
   } = overrides;
   return {
-    isServerOwnedRequest: () => true,
+    isStopped: () => false,
     operations: {
       get: () => undefined,
       isStale: () => false,

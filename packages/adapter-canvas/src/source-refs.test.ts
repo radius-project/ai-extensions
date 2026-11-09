@@ -13,9 +13,37 @@ function entry(page = "graph"): SourceRefEntry {
 }
 
 describe("source-code reference state", () => {
+  it("creates natural context tokens for graph, planned, and diff views", () => {
+    expect(
+      prepareSourceRefResources(entry(), "graph", {
+        repo: "acme/app",
+        branch: "feature/source-refs"
+      }).token
+    ).toBe("graph|acme/app|feature/source-refs");
+    expect(prepareSourceRefResources(entry(), "planned", {}).token).toBe(
+      "planned||"
+    );
+    expect(
+      prepareSourceRefResources(entry(), "diff", {
+        repo: "acme/app",
+        baseBranch: "main",
+        headBranch: "feature/source-refs"
+      }).token
+    ).toBe("diff|acme/app|main...feature/source-refs");
+    expect(prepareSourceRefResources(entry(), "diff", {}).token).toBe(
+      "diff||..."
+    );
+  });
+
   it("rejects unknown graph views", () => {
     expect(() =>
       prepareSourceRefResources(entry(), "unknown", {
+        repo: "acme/app",
+        branch: "main"
+      })
+    ).toThrow("Unknown graph view");
+    expect(() =>
+      setSourceRefResources(entry(), "unknown", [], {
         repo: "acme/app",
         branch: "main"
       })
@@ -52,6 +80,39 @@ describe("source-code reference state", () => {
     ]);
   });
 
+  it("selects requested, page, active, and default view fallbacks", () => {
+    const state = entry("graph-diff");
+    setSourceRefResources(state, "graph", [{ id: "graph" }], {
+      repo: "acme/app",
+      branch: "main"
+    });
+    setSourceRefResources(state, "planned", [{ id: "planned" }], {
+      repo: "acme/app",
+      branch: "feature/source-refs"
+    });
+    setSourceRefResources(state, "diff", [{ id: "diff" }], {
+      repo: "acme/app",
+      baseBranch: "main",
+      headBranch: "feature/source-refs"
+    });
+
+    expect(getSourceRefResources(state).resources[0]?.id).toBe("diff");
+    state.page = "graphDiff";
+    expect(getSourceRefResources(state).resources[0]?.id).toBe("diff");
+    state.page = "graph";
+    expect(getSourceRefResources(state).resources[0]?.id).toBe("graph");
+    state.page = "other";
+    state.state.activeGraphView = "planned";
+    expect(getSourceRefResources(state).resources[0]?.id).toBe("planned");
+    delete state.state.activeGraphView;
+    expect(getSourceRefResources(state).resources[0]?.id).toBe("graph");
+    expect(getSourceRefResources(state, "invalid")).toEqual({
+      ready: false,
+      view: "invalid",
+      resources: []
+    });
+  });
+
   it("rejects stale context tokens and discards pending refs after a branch change", () => {
     const state = entry();
     setSourceRefResources(state, "graph", [], {
@@ -76,6 +137,43 @@ describe("source-code reference state", () => {
         { id: "db", codeReference: "src/old-db.js" }
       ]).error
     ).toContain("stale");
+  });
+
+  it("preserves current state and unrelated pending refs across context refreshes", () => {
+    const state = entry();
+    const context = { repo: "acme/app", branch: "main" };
+    const current = prepareSourceRefResources(state, "graph", context);
+    const resources: CanvasGraphResource[] = [{ id: "current" }];
+    state.state.graphResources = resources;
+    state.state.pendingSourceRefs = [
+      {
+        contextToken: current.token,
+        id: "current",
+        codeReference: "src/current.ts"
+      },
+      {
+        contextToken: "planned|acme/app|feature",
+        id: "planned",
+        codeReference: "src/planned.ts"
+      }
+    ];
+
+    prepareSourceRefResources(state, "graph", context);
+    expect(state.state.graphResources).toBe(resources);
+    expect(state.state.pendingSourceRefs).toHaveLength(2);
+
+    prepareSourceRefResources(state, "graph", {
+      repo: "acme/app",
+      branch: "feature/source-refs"
+    });
+    expect(state.state.graphResources).toBeNull();
+    expect(state.state.pendingSourceRefs).toEqual([
+      {
+        contextToken: "planned|acme/app|feature",
+        id: "planned",
+        codeReference: "src/planned.ts"
+      }
+    ]);
   });
 
   it("invalidates stale resources while a replacement graph is building", () => {
@@ -118,6 +216,27 @@ describe("source-code reference state", () => {
     expect(committed).toBe(false);
     expect(getSourceRefResources(state, "graph")).toMatchObject({
       ready: false,
+      resources: []
+    });
+  });
+
+  it("reports missing context and resources as not ready", () => {
+    const state = entry();
+
+    expect(getSourceRefResources(state)).toEqual({
+      ready: false,
+      view: "graph",
+      resources: []
+    });
+
+    prepareSourceRefResources(state, "diff", {
+      repo: "acme/app",
+      baseBranch: "main",
+      headBranch: "feature/source-refs"
+    });
+    expect(getSourceRefResources(state, "diff")).toEqual({
+      ready: false,
+      view: "diff",
       resources: []
     });
   });
@@ -166,6 +285,88 @@ describe("source-code reference state", () => {
     setSourceRefResources(state, "graph", rebuilt, context);
     expect(rebuilt[0].codeReference).toBe("src/later.ts");
     expect(state.state.pendingSourceRefs).toEqual([]);
+  });
+
+  it("preserves unrelated queued refs and existing code references on rebuild", () => {
+    const state = entry();
+    const context = { repo: "acme/app", branch: "main" };
+    const sourceRefContext = prepareSourceRefResources(state, "graph", context);
+    state.state.pendingSourceRefs = [
+      {
+        contextToken: "planned|acme/app|feature",
+        id: "other",
+        codeReference: "src/other.ts"
+      },
+      {
+        contextToken: sourceRefContext.token,
+        id: "existing",
+        codeReference: "src/replacement.ts"
+      },
+      {
+        contextToken: sourceRefContext.token,
+        id: "missing",
+        codeReference: "src/missing.ts"
+      }
+    ];
+    const resources: CanvasGraphResource[] = [
+      { id: "existing", codeReference: "src/original.ts" }
+    ];
+
+    expect(setSourceRefResources(state, "graph", resources, context)).toBe(
+      true
+    );
+
+    expect(resources[0].codeReference).toBe("src/original.ts");
+    expect(state.state.pendingSourceRefs).toEqual([
+      {
+        contextToken: "planned|acme/app|feature",
+        id: "other",
+        codeReference: "src/other.ts"
+      }
+    ]);
+  });
+
+  it("queues references while resources are unavailable", () => {
+    const state = entry();
+    const context = prepareSourceRefResources(state, "diff", {
+      repo: "acme/app",
+      baseBranch: "main",
+      headBranch: "feature/source-refs"
+    });
+
+    expect(
+      updateSourceRefs(state, context.token, [
+        { id: "later", codeReference: "src/later.ts" }
+      ])
+    ).toEqual({
+      updated: 0,
+      queued: 1,
+      skipped: 0,
+      view: "diff"
+    });
+    expect(state.state.pendingSourceRefs).toEqual([
+      {
+        contextToken: context.token,
+        id: "later",
+        codeReference: "src/later.ts"
+      }
+    ]);
+  });
+
+  it("returns a deterministic error for unknown context state", () => {
+    const state = entry();
+
+    expect(
+      updateSourceRefs(state, "graph|acme/app|stale", [
+        { id: "one", codeReference: "src/one.ts" },
+        { id: "two", codeReference: "src/two.ts" }
+      ])
+    ).toEqual({
+      error: "Graph context is stale or unknown. Fetch graph resources again.",
+      updated: 0,
+      queued: 0,
+      skipped: 2
+    });
   });
 
   it("replaces an already queued reference for the same context and resource", () => {

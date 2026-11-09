@@ -166,6 +166,7 @@ import {
   readOptionalDispatchedWorkflowRunId,
   readWorkflowRunStatus,
   quiesceOwnedWorkflowRuns,
+  acceptWorkflowCancellation,
   repositoryListingPath,
   requireDeploymentDeleted,
   requireWorkflowRunId,
@@ -209,6 +210,7 @@ import {
   findNewWorkflowRunId,
   readWorkflowRunIds
 } from "./support/workflow-run-discovery.js";
+import { createWorkflowRunObserver } from "./support/workflow-run-observer.js";
 
 const PROFILE_NAME = "cloud-e2e";
 // The main create selects its profile by matching PROFILE_NAME, so these names
@@ -291,7 +293,7 @@ async function waitForOwnedWorkflowRuns(
   await quiesceOwnedWorkflowRuns(runIds, {
     readStatus: status,
     cancel: async (runId) => {
-      expectSuccess(
+      acceptWorkflowCancellation(
         await commands.runGh([
           "api",
           "--method",
@@ -343,16 +345,14 @@ async function discoverNewWorkflowRunId(
   commands: CloudCommandPort,
   repository: string,
   workflow: string,
-  before: ReadonlySet<string>
+  before: ReadonlySet<string>,
+  readRunIds = () => listWorkflowRunIds(commands, repository, workflow)
 ): Promise<string> {
   let runId: string | undefined;
   await expect
     .poll(
       async () => {
-        runId = findNewWorkflowRunId(
-          before,
-          await listWorkflowRunIds(commands, repository, workflow)
-        );
+        runId = findNewWorkflowRunId(before, await readRunIds());
         return runId;
       },
       {
@@ -690,6 +690,20 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let deployedNamespace = "";
   const ownedWorkflowRunIds = new Set<string>();
   let untrackedWorkflowDispatch = false;
+  const workflowObserver = () => {
+    if (!fixture) throw new Error("The cloud fixture was not created.");
+    return createWorkflowRunObserver(fixture.repository, {
+      commands: ports.commands,
+      now: ports.now,
+      wait: ports.wait,
+      credentials: [
+        githubToken,
+        process.env.GH_TOKEN,
+        githubPackagesToken,
+        githubAppTokenConfig?.privateKey
+      ]
+    });
+  };
 
   const refreshGitHubToken = async (): Promise<void> => {
     if (!githubAppTokenConfig)
@@ -755,20 +769,42 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   test.beforeEach(refreshGitHubToken);
 
   test.afterAll(async () => {
+    const testInfo = test.info();
     const current = fixture;
-    fixture = undefined;
     if (!current) return;
+    const observer = workflowObserver();
+    fixture = undefined;
     await refreshGitHubToken();
     if (untrackedWorkflowDispatch)
       throw new Error(
         "A lifecycle workflow was dispatched without a trustworthy run id; leaving fixture state and its lease intact."
       );
-    await waitForOwnedWorkflowRuns(
-      ports.commands,
-      current.repository,
-      ownedWorkflowRunIds
-    );
+    const diagnosticSteps = [
+      ...[...ownedWorkflowRunIds].map((runId) => ({
+        label: `read final workflow timing for ${runId}`,
+        run: () => observer.readRunTiming(runId)
+      })),
+      {
+        label: "attach final workflow timing",
+        run: () =>
+          testInfo.attach("workflow-cleanup-timing.json", {
+            body: observer.serialize(),
+            contentType: "application/json"
+          })
+      }
+    ];
+    try {
+      await waitForOwnedWorkflowRuns(
+        ports.commands,
+        current.repository,
+        ownedWorkflowRunIds
+      );
+    } catch (error) {
+      await runCleanupSteps(diagnosticSteps, error);
+      throw error;
+    }
     await runCleanupSteps([
+      ...diagnosticSteps,
       {
         label: "reclaim product-created artifacts",
         run: async () => {
@@ -1119,6 +1155,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       workspacePath: cloud.workspacePath
     });
     const page = canvas.target;
+    const observer = workflowObserver();
+    const stageRunIds = new Set<string>();
     let primaryError: unknown;
 
     try {
@@ -1165,8 +1203,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       const deployButton = page.locator("#deploy-now-btn:not([disabled])");
       await expect(deployButton).toHaveText("Deploy");
       untrackedWorkflowDispatch = true;
+      observer.record("dispatch", { workflow: "deploy", action: "click" });
       await deployButton.click();
-      expect((await deployResponse).ok()).toBe(true);
+      const response = await deployResponse;
+      observer.record("dispatch", {
+        workflow: "deploy",
+        status: response.status()
+      });
+      expect(response.ok()).toBe(true);
 
       const snapshot = async (): Promise<
         ReturnType<typeof readDeployStatusSnapshot>
@@ -1183,9 +1227,12 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         const current = await snapshot();
         if (current.runUrl) {
           try {
-            ownedWorkflowRunIds.add(
-              requireWorkflowRunId(current.runUrl, cloud.repository)
+            const runId = requireWorkflowRunId(
+              current.runUrl,
+              cloud.repository
             );
+            ownedWorkflowRunIds.add(runId);
+            stageRunIds.add(runId);
             untrackedWorkflowDispatch = false;
           } catch (error) {
             untrackedWorkflowDispatch = true;
@@ -1202,6 +1249,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         })
         .toBe(true);
       const finished = await trackedSnapshot();
+      observer.record("operation", finished);
       try {
         ownedWorkflowRunIds.add(
           requireWorkflowRunId(finished.runUrl, cloud.repository)
@@ -1267,10 +1315,25 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       }
     } catch (error) {
       primaryError = error;
+      observer.record("failure", { message: String(error) });
       throw error;
     } finally {
       await runCleanupSteps(
-        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
+        [
+          ...[...stageRunIds].map((runId) => ({
+            label: `read deployment workflow timing for ${runId}`,
+            run: () => observer.readRunTiming(runId)
+          })),
+          {
+            label: "attach deployment workflow observations",
+            run: () =>
+              testInfo.attach("deploy-workflow-observations.json", {
+                body: observer.serialize(),
+                contentType: "application/json"
+              })
+          },
+          { label: "clean up the Radius canvas", run: () => canvas.cleanup() }
+        ],
         primaryError
       );
     }
@@ -1548,6 +1611,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       workspacePath: cloud.workspacePath
     });
     const page = canvas.target;
+    const observer = workflowObserver();
+    const stageRunIds = new Set<string>();
 
     let primaryError: unknown;
     try {
@@ -1576,12 +1641,13 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
           response.request().method() === "POST"
       );
-      const runsBefore = await listWorkflowRunIds(
-        ports.commands,
-        cloud.repository,
-        DELETE_ENVIRONMENT_WORKFLOW
-      );
+      const runsBefore = await observer.listRunIds(DELETE_ENVIRONMENT_WORKFLOW);
       untrackedWorkflowDispatch = true;
+      observer.record("dispatch", {
+        workflow: DELETE_ENVIRONMENT_WORKFLOW,
+        action: "confirm",
+        runIdsBefore: [...runsBefore]
+      });
       await page.locator("#env-confirm-ok").click();
       const response = await deleteResponse;
       const payload = (await response.json()) as unknown;
@@ -1599,6 +1665,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       ).toEqual([]);
 
       const operationId = readOperationId(payload);
+      observer.record("dispatch", { operationId, status: response.status() });
       const snapshot = async (): Promise<
         ReturnType<typeof readOperationSnapshot>
       > =>
@@ -1623,24 +1690,17 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         })
         .toBe(true);
       const finished = await snapshot();
+      observer.record("operation", finished);
       try {
-        const runId =
-          finished.state === "succeeded" ?
-            await discoverNewWorkflowRunId(
-              ports.commands,
-              cloud.repository,
-              DELETE_ENVIRONMENT_WORKFLOW,
-              runsBefore
-            )
-          : findNewWorkflowRunId(
-              runsBefore,
-              await listWorkflowRunIds(
-                ports.commands,
-                cloud.repository,
-                DELETE_ENVIRONMENT_WORKFLOW
-              )
-            );
-        if (runId) ownedWorkflowRunIds.add(runId);
+        const runId = await discoverNewWorkflowRunId(
+          ports.commands,
+          cloud.repository,
+          DELETE_ENVIRONMENT_WORKFLOW,
+          runsBefore,
+          () => observer.listRunIds(DELETE_ENVIRONMENT_WORKFLOW)
+        );
+        ownedWorkflowRunIds.add(runId);
+        stageRunIds.add(runId);
         untrackedWorkflowDispatch = false;
       } catch (error) {
         untrackedWorkflowDispatch = true;
@@ -1693,10 +1753,25 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       });
     } catch (error) {
       primaryError = error;
+      observer.record("failure", { message: String(error) });
       throw error;
     } finally {
       await runCleanupSteps(
-        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
+        [
+          ...[...stageRunIds].map((runId) => ({
+            label: `read environment-delete workflow timing for ${runId}`,
+            run: () => observer.readRunTiming(runId)
+          })),
+          {
+            label: "attach environment-delete workflow observations",
+            run: () =>
+              testInfo.attach("delete-environment-workflow-observations.json", {
+                body: observer.serialize(),
+                contentType: "application/json"
+              })
+          },
+          { label: "clean up the Radius canvas", run: () => canvas.cleanup() }
+        ],
         primaryError
       );
     }

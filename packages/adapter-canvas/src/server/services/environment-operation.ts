@@ -1,4 +1,7 @@
 import {
+  assertSetupExecutionActive,
+  isAwsRoleName,
+  parseAwsRoleArn,
   runSetupCoordinator,
   type SetupCoordinatorPorts
 } from "@radius-project/core";
@@ -33,6 +36,7 @@ export interface EnvironmentOperationRecord {
   endedAt?: unknown;
   currentStage?: string | null;
   context?: Record<string, unknown>;
+  steps?: ReadonlyArray<{ readonly label?: unknown }>;
   request?: unknown;
   resumeRequest?: unknown;
   setupArtifacts: {
@@ -53,9 +57,11 @@ export interface EnvironmentOperationRequest {
 }
 
 export interface EnvironmentOperationWorkflowDependencies {
+  isStopped(): boolean;
   preflightRepoAdmin(
     repo: string,
-    executor: SelectedGhExecutor
+    executor: SelectedGhExecutor,
+    assertActive?: () => void
   ): Promise<string>;
   guardStopBoundary(
     operation: EnvironmentOperationRecord,
@@ -117,11 +123,20 @@ export interface EnvironmentOperationWorkflowDependencies {
     request: Record<string, unknown>,
     executor: SelectedGhExecutor
   ): Promise<
-    | { ok: true; roleArn: string; subjects: readonly string[] }
+    | {
+        ok: true;
+        roleArn: string;
+        subjects: readonly string[];
+        policyName: string;
+      }
     | { ok: false; status: number; error: string; code: string }
     | { ok: false; stopped: true }
   >;
-  instanceId: string;
+  // AWS only: release the deploy identity lock setup took. Never throws.
+  releaseAwsDeployIdentity(
+    operation: EnvironmentOperationRecord
+  ): Promise<void>;
+  instanceId?: string;
   now(): number;
 }
 
@@ -134,19 +149,62 @@ function record(value: unknown): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value));
 }
 
+// AWS CLI session failures: the person signs in again, or fixes the CLI, and
+// the same request then works. None says anything about a GitHub write.
+const AWS_SESSION_FAILURES: ReadonlySet<string> = new Set([
+  "aws-cli-login-required",
+  "aws-verification-failed",
+  "aws-identity-invalid",
+  "aws-account-mismatch",
+  "aws-cli-unsupported"
+]);
+
+/**
+ * Keep reconciling a restarted setup whose AWS sign-in failed.
+ *
+ * Every AWS resume authorizes first, so after a restart a sign-in failure can
+ * come before the writes the earlier run left unsettled are read. Charged to
+ * one of them, it would use up that write's retries and end the setup. It is
+ * reported once instead, and the throw leaves those writes unsettled, so the
+ * runtime tries again until the person signs in.
+ */
+async function waitForAwsSignIn(
+  operation: EnvironmentOperationRecord,
+  dependencies: EnvironmentOperationWorkflowDependencies,
+  error: unknown
+): Promise<never> {
+  const message = String(record(error).message || "AWS sign-in failed.");
+  // Saved without its "⚠️ " prefix, which is how a later try finds it.
+  const step = `Radius could not sign in to AWS to check the interrupted setup. ${message} Sign in again, and Radius continues on its own.`;
+  if (!operation.steps?.some((entry) => entry.label === step)) {
+    dependencies.addLegacyStep(operation, `⚠️ ${step}`);
+    await dependencies.persistProviderMutation();
+  }
+  throw new ProviderMutationRecoveryError(
+    message,
+    "provider-mutation-outcome-unknown"
+  );
+}
+
 async function failResolution(
   operation: EnvironmentOperationRecord,
   executor: SelectedGhExecutor,
   dependencies: EnvironmentOperationWorkflowDependencies,
   error: unknown
 ): Promise<{ shouldMonitor: false }> {
+  assertSetupExecutionActive(dependencies.isStopped);
   const unresolvedMutation = unresolvedProviderMutations(operation)[0];
   if (unresolvedMutation) {
+    // A stage failure is a plain record, which would read as
+    // "[object Object]" in the saved evidence.
+    const message = record(error).message;
     return recordProviderReconciliationFailure(
       operation,
       unresolvedMutation,
       dependencies.persistProviderMutation,
-      error
+      !(error instanceof Error) && typeof message === "string" && message ?
+        new Error(message)
+      : error
     );
   }
   const ensureError =
@@ -232,7 +290,8 @@ export function createSetupCoordinatorPorts(
     preflightRepository: async () => {
       const message = await dependencies.preflightRepoAdmin(
         operation.repo,
-        executor
+        executor,
+        () => assertSetupExecutionActive(dependencies.isStopped)
       );
       if (!message) return true;
       preflightFailure = {
@@ -266,6 +325,7 @@ export function createSetupCoordinatorPorts(
         runGh: (args) => executor.run(args),
         now: dependencies.now,
         mutationRecovery: {
+          isStopped: dependencies.isStopped,
           operation,
           persist: dependencies.persistProviderMutation
         },
@@ -307,6 +367,14 @@ export function createSetupCoordinatorPorts(
     },
     checkpoint: () => dependencies.persistEnvironmentResolution(operation),
     finalizeFailure: async (failure) => {
+      if (
+        failure.kind === "aws-authorization" &&
+        AWS_SESSION_FAILURES.has(String(record(failure.error).code)) &&
+        unresolvedProviderMutations(operation).length > 0
+      ) {
+        assertSetupExecutionActive(dependencies.isStopped);
+        await waitForAwsSignIn(operation, dependencies, failure.error);
+      }
       await failResolution(
         operation,
         executor,
@@ -315,6 +383,7 @@ export function createSetupCoordinatorPorts(
       );
     },
     reconcileFailure: (mutationId, error) => {
+      assertSetupExecutionActive(dependencies.isStopped);
       const live = unresolvedProviderMutations(operation).find(
         (mutation) => mutation.mutationId === mutationId
       );
@@ -333,6 +402,20 @@ export function createSetupCoordinatorPorts(
         )
       ),
     authorizeAws: async ({ reused, ...request }) => {
+      if (
+        !isAwsRoleName(String(request.roleName || "")) &&
+        parseAwsRoleArn(String(request.existingRoleArn || "")) === null
+      ) {
+        return {
+          kind: "failed",
+          error: {
+            status: 400,
+            code: "invalid-aws-operation-input",
+            message:
+              "AWS setup requires a valid IAM role name or an existing role ARN. Start a new setup with roleName or existingRoleArn."
+          }
+        };
+      }
       const conflict =
         reused ?
           await awsEnvironmentConflict(
@@ -353,7 +436,8 @@ export function createSetupCoordinatorPorts(
           {
             kind: "completed",
             roleArn: result.roleArn,
-            trustSubjects: result.subjects
+            trustSubjects: result.subjects,
+            policyName: result.policyName
           }
         : {
             kind: "failed",
@@ -364,6 +448,7 @@ export function createSetupCoordinatorPorts(
             }
           };
     },
+    releaseAws: () => dependencies.releaseAwsDeployIdentity(operation),
     configureEnvironment: async (request) =>
       setupStageResult(
         await dependencies.setupServices.configureEnvironment(

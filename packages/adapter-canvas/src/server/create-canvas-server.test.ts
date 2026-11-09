@@ -25,7 +25,7 @@ class FakeServer extends EventEmitter {
     return { address: "127.0.0.1", family: "IPv4", port: this.port };
   }
 
-  close(callback?: () => void): this {
+  close(callback?: (error?: Error) => void): this {
     this.closeCalls += 1;
     queueMicrotask(() => callback?.());
     return this;
@@ -160,7 +160,7 @@ describe("createCanvasServer (SU-02)", () => {
     expect(stopObservation).toHaveBeenCalledTimes(1);
     expect(container.instances.size).toBe(0);
     expect(fakeServers[0].closeCalls).toBe(0);
-    expect(stopped).not.toHaveBeenCalled();
+    expect(stopped).toHaveBeenCalledExactlyOnceWith("panel");
   });
 
   it("creates isolated state, reuses one instance, and preserves its page by default", async () => {
@@ -300,20 +300,37 @@ describe("createCanvasServer (SU-02)", () => {
     expect(observedAtStop).toEqual([{ instances: 0, closeCalls: 1 }]);
   });
 
-  it("still signals the stopped hook when closing the socket throws", async () => {
-    const { container, dependencies, fakeServers } = setup();
-    const stopped: string[] = [];
-    dependencies.onStopped = (instanceId) => stopped.push(instanceId);
-    await container.getOrCreate("panel-a");
-    fakeServers[0].close = () => {
-      throw new Error("close failed");
-    };
+  it.each(["throws", "callback", "coded-failure", "already-closed"] as const)(
+    "signals the stopped hook and reports the socket close outcome: %s",
+    async (failure) => {
+      const { container, dependencies, fakeServers } = setup();
+      const stopped: string[] = [];
+      dependencies.onStopped = (instanceId) => stopped.push(instanceId);
+      await container.getOrCreate("panel-a");
+      fakeServers[0].close = (callback) => {
+        if (failure === "throws") throw new Error("close failed");
+        callback?.(
+          failure === "callback" ?
+            new Error("close failed")
+          : Object.assign(new Error("close failed"), {
+              code:
+                failure === "already-closed" ?
+                  "ERR_SERVER_NOT_RUNNING"
+                : "ECLOSE"
+            })
+        );
+        return fakeServers[0];
+      };
 
-    await expect(container.stop("panel-a")).resolves.toBeUndefined();
+      if (failure === "already-closed")
+        await expect(container.stop("panel-a")).resolves.toBeUndefined();
+      else
+        await expect(container.stop("panel-a")).rejects.toThrow("close failed");
 
-    expect(stopped).toEqual(["panel-a"]);
-    expect(container.instances.size).toBe(0);
-  });
+      expect(stopped).toEqual(["panel-a"]);
+      expect(container.instances.size).toBe(0);
+    }
+  );
 
   it("does not signal a stop for an instance that was never started", async () => {
     const { container, dependencies } = setup();
@@ -372,6 +389,48 @@ function bindHarness(failures: readonly number[]) {
 }
 
 describe("createCanvasServer bind failure (SU-02)", () => {
+  it("preserves the bind failure when the socket never started", async () => {
+    const { container, dependencies } = bindHarness([2]);
+    const create = dependencies.createHttpServer;
+    dependencies.createHttpServer = (handler) => {
+      const server = create(handler);
+      server.close = (callback) => {
+        callback?.(
+          Object.assign(new Error("Server is not running."), {
+            code: "ERR_SERVER_NOT_RUNNING"
+          })
+        );
+        return server;
+      };
+      return server;
+    };
+
+    await expect(container.getOrCreate("panel")).rejects.toEqual(
+      new Error("bind failed: 0")
+    );
+    expect(container.instances.size).toBe(0);
+  });
+
+  it("reports both bind and cleanup failures without losing the startup cause", async () => {
+    const { container, dependencies } = bindHarness([2]);
+    const create = dependencies.createHttpServer;
+    dependencies.createHttpServer = (handler) => {
+      const server = create(handler);
+      server.close = () => {
+        throw new Error("cleanup failed");
+      };
+      return server;
+    };
+    await expect(container.getOrCreate("panel")).rejects.toMatchObject({
+      message: "Canvas server startup and cleanup failed.",
+      cause: expect.objectContaining({ message: "cleanup failed" }),
+      errors: [
+        expect.objectContaining({ message: "bind failed: 0" }),
+        expect.objectContaining({ message: "cleanup failed" })
+      ]
+    });
+    expect(container.instances.size).toBe(0);
+  });
   it("falls back to an ephemeral port when the preferred port is taken", async () => {
     const { container, fakeServers } = bindHarness([1]);
 

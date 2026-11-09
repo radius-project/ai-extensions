@@ -138,6 +138,26 @@ Pull requests run the same comparison as the **Visual comparisons** check whenev
 
 The container supplies canonical Linux rasterization on every developer host; it does not prove native Canvas functionality on that host. The separate reliability workflow continues to qualify behavioral checks natively on Ubuntu, Windows, and macOS.
 
+## Required merge checks
+
+The `main` ruleset must require these exact check names, with GitHub Actions as their source except for DCO:
+
+- `CI gate`
+- `Action shell helpers`
+- `Deploy-progress artifact uploader`
+- `dependency-review / dependency-review`
+- `check / Check registry URLs`
+- `Visual comparisons`
+- `DCO` (the DCO app)
+
+`CI gate` waits for every job in the Build workflow, including both Chromium shards, Windows checks, coverage, library checks, and every plugin build. It runs even if another job fails. It fails if any dependency fails, is cancelled, or is skipped. When adding a Build job, add it to the gate's `needs` list; the workflow contract test checks this list.
+
+Workflow files do not set required checks in GitHub. After merging a change to this list or to a check name, a repository administrator must update **Settings > Rules > Rulesets > main > Require status checks to pass**. Keep the existing rules, check sources, and the requirement for branches to be up to date. A failed required check blocks a normal merge; the ruleset's existing bypass permissions remain unchanged.
+
+`Visual comparisons` can skip when there are no visual changes. Changeset comments and coverage service reports remain advisory. Live upstream tests, reliability, cloud E2E, modeling, and real-host qualification are not required merge checks.
+
+To check the gate itself, run `pnpm exec vitest run packages/adapter-canvas/test/ci/ci-gate.test.mjs`. The test executes the workflow's Bash step with successful, failed, cancelled, skipped, missing, and unknown job results.
+
 ## Before you open a pull request
 
 1. `pnpm typecheck` passes.

@@ -159,6 +159,7 @@ export interface SetupVerificationDispatchInput {
   operationMarker: string;
   allowRegistrationRetry: boolean;
   ports: {
+    isStopped?(): boolean;
     runGh(args: string[]): Promise<SetupWorkflowCommandResult>;
     sendDispatch(): Promise<SetupWorkflowCommandResult>;
     persist(): Promise<void>;
@@ -191,6 +192,8 @@ export interface SetupVerificationPlan {
 
 export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
   recovery: SetupWorkflowRecoveryPort;
+  // Runtime shutdown is immediate; the user's Stop retains its batch boundaries.
+  isExecutionStopped(): boolean;
   stopRequested(): boolean;
   stopBoundary(boundary: string): Promise<boolean>;
   checkpoint(boundary: string): Promise<boolean>;
@@ -236,6 +239,7 @@ export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
     targetRepository: string;
     registry: string;
     credentials: symbol | undefined;
+    assertActive(): void;
   }): Promise<{ visibility: string | undefined }>;
   workflowFiles(input: {
     targetRepo: string;
@@ -304,6 +308,7 @@ export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
     branch: string
   ): Promise<string | null | undefined>;
   discoverAutomaticVerificationRun(input: {
+    isStopped?(): boolean;
     identity: {
       repo: string;
       workflow: string;

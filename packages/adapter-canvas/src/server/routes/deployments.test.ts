@@ -157,6 +157,11 @@ function dependencies(
         throw new Error("abandonment.abandon not stubbed");
       }
     },
+    awsTrustRepair: {
+      repair: () => {
+        throw new Error("awsTrustRepair.repair not stubbed");
+      }
+    },
     probeDeleteConflict: () => {
       throw new Error("probeDeleteConflict not stubbed");
     },
@@ -233,10 +238,11 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the nine routes it owns", () => {
+  it("declares exactly the ten routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
+      "POST /api/deploy/repair-aws-trust",
       "GET /api/deploy-notification",
       "GET /api/list-applications",
       "GET /api/list-deployments",
@@ -572,6 +578,7 @@ describe("deployments routes (SU-06)", () => {
         deployedGraph: null,
         deployRunUrl: null,
         attempt: null,
+        generation: 0,
         active: false,
         repairing: false,
         handoff: IDLE_HANDOFF
@@ -2976,5 +2983,73 @@ describe("deployments routes (SU-06)", () => {
       ]);
       expect(recording.status).toBe(400);
     });
+  });
+});
+
+describe("POST /api/deploy/repair-aws-trust", () => {
+  it.each([
+    ["no body", ""],
+    ["text that is not JSON", "not json"],
+    ["no generation", "{}"],
+    ["a fractional generation", '{"generation":1.5}'],
+    ["a string generation", '{"generation":"4"}'],
+    ["a JSON array", "[4]"],
+    ["JSON null", "null"]
+  ])(
+    "answers 400 for a body with %s, without asking the repair service",
+    async (_label, body) => {
+      const calls: unknown[] = [];
+      const routes = createDeploymentsRoutes(
+        dependencies({
+          awsTrustRepair: {
+            repair: async (input) => {
+              calls.push(input);
+              return { status: 200, body: {} };
+            }
+          }
+        })
+      );
+      const { context: ctx, recording } = context(
+        "POST",
+        "/api/deploy/repair-aws-trust",
+        body
+      );
+
+      await routes["POST /api/deploy/repair-aws-trust"](ctx);
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        code: "repair-request-invalid",
+        error:
+          "Repair needs the deploy the panel shows, as an integer generation. Reload the page and try again."
+      });
+      expect(calls).toEqual([]);
+    }
+  );
+
+  it("drains the body and answers with the repair service's result", async () => {
+    const calls: unknown[] = [];
+    const routes = createDeploymentsRoutes(
+      dependencies({
+        awsTrustRepair: {
+          repair: async (input) => {
+            calls.push(input);
+            return { status: 409, body: { code: "aws-lock-busy" } };
+          }
+        }
+      })
+    );
+    const { context: ctx, recording } = context(
+      "POST",
+      "/api/deploy/repair-aws-trust",
+      '{"repo":"ignored/repo","generation":4}'
+    );
+
+    await routes["POST /api/deploy/repair-aws-trust"](ctx);
+
+    // Only the deploy the panel showed is read; the repository is ignored.
+    expect(calls).toEqual([{ instanceId: "panel-a", generation: 4 }]);
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({ code: "aws-lock-busy" });
   });
 });

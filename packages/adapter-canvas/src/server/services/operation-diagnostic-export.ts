@@ -29,6 +29,7 @@ const STAGES = new Set([
 const STAGE_STATES = new Set([
   "pending",
   "running",
+  "paused",
   "succeeded",
   "warning",
   "failed",
@@ -66,6 +67,10 @@ const CLEANUP_ARTIFACT_TYPES = new Set([
   "workflow_file",
   "github_environment_variable",
   "github_environment",
+  "aws_access_entry",
+  "aws_role_policy",
+  "aws_trust_subject",
+  "aws_role",
   "role_assignment",
   "federated_credential",
   "service_principal",

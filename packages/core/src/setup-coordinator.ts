@@ -3,7 +3,10 @@ import {
   GitHubEnvironmentEnsureError,
   type EnsuredGitHubEnvironment
 } from "./setup-github-environment.js";
-import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import {
+  isSetupExecutionInterrupted,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 
 export interface SetupCoordinatorTarget {
   operationId: string;
@@ -25,7 +28,12 @@ export type SetupCoordinatorStageResult =
   | { kind: "reconciling"; message?: unknown };
 
 export type SetupCoordinatorAwsResult =
-  | { kind: "completed"; roleArn: string; trustSubjects: readonly string[] }
+  | {
+      kind: "completed";
+      roleArn: string;
+      trustSubjects: readonly string[];
+      policyName: string;
+    }
   | { kind: "failed"; error: unknown }
   // A pause arrived during AWS setup, which recorded what it changed and ran
   // nothing after the pause.
@@ -83,6 +91,9 @@ export interface SetupCoordinatorPorts {
       reused: boolean;
     }
   ): Promise<SetupCoordinatorAwsResult>;
+  // Release the deploy identity lock `authorizeAws` took. Called once after
+  // Configure environment, or as soon as setup stops early. Never throws.
+  releaseAws(): Promise<void>;
   configureEnvironment(
     request: Record<string, unknown> &
       SetupCoordinatorTarget & {
@@ -209,6 +220,7 @@ export async function runSetupCoordinator(
     try {
       return await action();
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       if (
         outstanding &&
         ports
@@ -252,79 +264,86 @@ export async function runSetupCoordinator(
   const environmentRequest = record(request.environment);
   let awsRoleArn = "";
   let awsTrustSubjects: readonly string[] = [];
-  if (target.provider === "aws" && !outstanding) {
-    const aws = await ports.authorizeAws({
-      ...environmentRequest,
-      repo: target.repo,
-      environment: ensured.name,
-      reused: ensured.state === "reused"
-    });
-    if (aws.kind === "stopped") {
-      // The pause is still requested, so this boundary stops the operation.
-      // Should it not, finish as a failure rather than configure the
-      // environment without a deploy identity.
-      if (await ports.stopBoundary("after-aws-deploy-identity")) {
-        await ports.finalizeFailure({
-          kind: "aws-authorization",
-          error: {
-            status: 409,
-            message:
-              "AWS setup stopped for a pause before the deploy identity was ready.",
-            code: "aws-setup-interrupted"
-          }
-        });
-      }
-      return { shouldMonitor: false };
-    }
-    if (aws.kind === "failed") {
-      if (!(await ports.stopBoundary("before-setup-failure-cleanup"))) {
+  let awsPolicyName = "";
+  // AWS setup takes the deploy identity lock and keeps it until Configure
+  // environment has written the GitHub environment. Until then a delete that
+  // checks which environments use a cluster could not see this one, and could
+  // remove the cluster access this setup just granted.
+  //
+  // A resume with `outstanding` work runs it too: Configure environment still
+  // writes the variables a delete reads, so it needs the lock, and the role may
+  // have changed while setup was stopped. Each AWS step skips what exists.
+  const awsLocked = target.provider === "aws";
+  try {
+    if (awsLocked) {
+      const aws = await ports.authorizeAws({
+        ...environmentRequest,
+        repo: target.repo,
+        environment: ensured.name,
+        reused: ensured.state === "reused"
+      });
+      if (aws.kind === "stopped") {
+        // The pause is still requested, so this boundary stops the operation.
+        // Should it not, finish as a failure rather than configure the
+        // environment without a deploy identity.
+        if (await ports.stopBoundary("after-aws-deploy-identity")) {
+          await ports.finalizeFailure({
+            kind: "aws-authorization",
+            error: {
+              status: 409,
+              message:
+                "AWS setup stopped for a pause before the deploy identity was ready.",
+              code: "aws-setup-interrupted"
+            }
+          });
+        }
         return { shouldMonitor: false };
       }
-      await ports.finalizeFailure({
-        kind: "aws-authorization",
-        error: aws.error
-      });
-      return { shouldMonitor: false };
+      if (aws.kind === "failed") {
+        if (!(await ports.stopBoundary("before-setup-failure-cleanup"))) {
+          return { shouldMonitor: false };
+        }
+        await ports.finalizeFailure({
+          kind: "aws-authorization",
+          error: aws.error
+        });
+        return { shouldMonitor: false };
+      }
+      awsRoleArn = aws.roleArn;
+      awsTrustSubjects = aws.trustSubjects;
+      awsPolicyName = aws.policyName;
     }
-    awsRoleArn = aws.roleArn;
-    awsTrustSubjects = aws.trustSubjects;
-  }
-  const clientId =
-    setupResult && "clientId" in setupResult ? setupResult.clientId : undefined;
-  const liveContext = ports.operation().context;
-  if (!awsRoleArn && typeof liveContext?.awsRoleArn === "string") {
-    awsRoleArn = liveContext.awsRoleArn;
-  }
-  if (
-    awsTrustSubjects.length === 0 &&
-    Array.isArray(liveContext?.awsTrustSubjects)
-  ) {
-    awsTrustSubjects = liveContext.awsTrustSubjects.filter(
-      (subject): subject is string => typeof subject === "string"
+    const clientId =
+      setupResult && "clientId" in setupResult ?
+        setupResult.clientId
+      : undefined;
+    const liveContext = ports.operation().context;
+    const environmentResult = await invoke(() =>
+      ports.configureEnvironment({
+        ...environmentRequest,
+        repo: target.repo,
+        environment: ensured.name,
+        operationEnvironment: target.environment,
+        provider: target.provider,
+        operationId: target.operationId,
+        ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
+        ...(awsPolicyName ? { policyName: awsPolicyName } : {}),
+        ...(awsTrustSubjects.length > 0 ?
+          { trustSubjects: awsTrustSubjects }
+        : {}),
+        clientId:
+          (typeof clientId === "string" && clientId) ||
+          (typeof liveContext?.clientId === "string" && liveContext.clientId) ||
+          (typeof environmentRequest.clientId === "string" &&
+            environmentRequest.clientId) ||
+          ""
+      })
     );
+    if (environmentResult.kind === "reconciling") {
+      ports.raiseReconciling("environment", environmentResult.message);
+    }
+    return { shouldMonitor: true };
+  } finally {
+    if (awsLocked) await ports.releaseAws();
   }
-  const environmentResult = await invoke(() =>
-    ports.configureEnvironment({
-      ...environmentRequest,
-      repo: target.repo,
-      environment: ensured.name,
-      operationEnvironment: target.environment,
-      provider: target.provider,
-      operationId: target.operationId,
-      ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
-      ...(awsTrustSubjects.length > 0 ?
-        { trustSubjects: awsTrustSubjects }
-      : {}),
-      clientId:
-        (typeof clientId === "string" && clientId) ||
-        (typeof liveContext?.clientId === "string" && liveContext.clientId) ||
-        (typeof environmentRequest.clientId === "string" &&
-          environmentRequest.clientId) ||
-        ""
-    })
-  );
-  if (environmentResult.kind === "reconciling") {
-    ports.raiseReconciling("environment", environmentResult.message);
-  }
-  return { shouldMonitor: true };
 }

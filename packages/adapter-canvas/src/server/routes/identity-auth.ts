@@ -1,5 +1,9 @@
 import { remediationView } from "@radius-project/core";
 import type { RemediationView } from "@radius-project/core";
+import {
+  verifyAwsCliSession,
+  type AwsCliRunner
+} from "../services/aws-cli-session.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 
@@ -65,11 +69,11 @@ export interface IdentityAuthDependencies {
     message: SessionPromptMessage
   ): Promise<SessionPromptOutcome>;
   runCommand: IdentityAuthRunCommand;
+  runAws: AwsCliRunner;
   errorMessage(error: unknown): string;
 }
 
 const AZ_TIMEOUT = 10000;
-const AWS_TIMEOUT = 15000;
 
 function detailOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error || "");
@@ -95,7 +99,7 @@ export async function handleVerifyAzureLogin(
     // Reject non-GUID credential identifiers before using them in command
     // guidance or the az argv. The Windows process adapter quotes argv values,
     // but this remains the domain boundary and defense in depth. Empty falls
-    // back to the ambient CLI context. Mirrors /api/azure-auto-setup.
+    // back to the ambient CLI context. Mirrors the direct Azure setup service.
     const validationError = dependencies.azureCredentialIdValidationError({
       tenantId,
       subscriptionId
@@ -242,78 +246,61 @@ export async function handleAzureCliAssist(
   }
 }
 
-// Verify an AWS CLI session for a credential profile. Like the Azure
-// verify, we do NOT log in interactively — we check the caller's existing
-// `aws sts get-caller-identity` and (optionally) note the requested region.
-//
-// The inner catch swallows the underlying CLI error and answers a fixed
-// message, while the outer catch reports `errorMessage(e)`; both are 200.
 export async function handleVerifyAwsLogin(
   context: CanvasRequestContext,
   dependencies: IdentityAuthDependencies
 ): Promise<void> {
   const { response } = context;
   const body = await context.readTextBody();
+  const respond = (status: number, payload: Record<string, unknown>): void => {
+    response.setHeader("Content-Type", "application/json");
+    response.writeHead(status);
+    response.end(JSON.stringify(payload));
+  };
+  let data: unknown;
   try {
-    const data = JSON.parse(body || "{}");
-    let ident;
-    try {
-      const out = await dependencies.runCommand(
-        "aws",
-        ["sts", "get-caller-identity", "--output", "json"],
-        { timeout: AWS_TIMEOUT }
-      );
-      ident = JSON.parse(out);
-    } catch (e) {
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(200);
-      response.end(
-        JSON.stringify({
-          error:
-            'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.',
-          remediation: remediationView("aws-cli-login", {})
-        })
-      );
-      return;
-    }
-    const sessionAccount = String(ident.Account || "");
-    const requestedAccount = String(data.accountId || "").trim();
-    // A session in another account would verify, then deploy somewhere the
-    // profile does not describe. Fail and keep Save blocked instead.
-    if (requestedAccount && sessionAccount !== requestedAccount) {
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(200);
-      response.end(
-        JSON.stringify({
-          error: `Your AWS CLI session is signed in to account ${sessionAccount || "(unknown)"}, but this profile is for account ${requestedAccount}. Sign in to account ${requestedAccount}, or change the Account ID, then verify again.`,
-          code: "aws-account-mismatch",
-          sessionAccountId: sessionAccount,
-          accountId: requestedAccount
-        })
-      );
-      return;
-    }
-    response.setHeader("Content-Type", "application/json");
-    response.writeHead(200);
-    response.end(
-      JSON.stringify({
-        success: true,
-        accountId: sessionAccount || requestedAccount,
-        arn: ident.Arn || "",
-        user:
-          ident.Arn ? String(ident.Arn).split("/").pop() : ident.Account || "",
-        region: data.region || ""
-      })
-    );
-  } catch (e) {
-    response.setHeader("Content-Type", "application/json");
-    response.writeHead(200);
-    response.end(
-      JSON.stringify({
-        error: "AWS CLI verification failed: " + dependencies.errorMessage(e)
-      })
-    );
+    data = JSON.parse(body || "{}");
+  } catch {
+    respond(400, {
+      code: "aws-input-invalid",
+      error: "AWS verification requires a JSON object with an account ID."
+    });
+    return;
   }
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    Array.isArray(data) ||
+    !("accountId" in data) ||
+    typeof data.accountId !== "string" ||
+    ("region" in data && typeof data.region !== "string")
+  ) {
+    respond(400, {
+      code: "aws-input-invalid",
+      error: "AWS account ID and region must be strings."
+    });
+    return;
+  }
+  const region =
+    "region" in data && typeof data.region === "string" ?
+      data.region
+    : undefined;
+  const result = await verifyAwsCliSession(
+    { accountId: data.accountId, region },
+    dependencies.runAws
+  );
+  if (!result.ok) {
+    const { ok, message, ...fields } = result;
+    respond(200, { ...fields, error: message });
+    return;
+  }
+  respond(200, {
+    success: true,
+    accountId: result.accountId,
+    arn: result.arn,
+    user: result.user,
+    region: region?.trim() || ""
+  });
 }
 
 export function createIdentityAuthRoutes(

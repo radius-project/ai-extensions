@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import {
+  assertSetupExecutionActive,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 import {
   runAzureSetup,
   type AzureSetupPorts,
@@ -33,6 +37,95 @@ function harness(runAz = existingIdentityAz) {
 }
 
 describe("runAzureSetup", () => {
+  it.each(["success", "malformed", "refused", "rejected"] as const)(
+    "interrupts late initial account %s before consuming identity evidence",
+    async (result) => {
+      let stopped = false;
+      const test = harness(async (args) => {
+        if (args[0] !== "account" || args[1] !== "show")
+          return existingIdentityAz(args);
+        stopped = true;
+        if (result === "rejected") throw new Error("account unavailable");
+        if (result === "malformed") return command("{");
+        if (result === "refused") return command("", 1, "denied");
+        return existingIdentityAz(args);
+      });
+      test.application.assertActive = () =>
+        assertSetupExecutionActive(() => stopped);
+      const github = vi.fn(test.application.runGitHubJson);
+      test.application.runGitHubJson = github;
+      await expect(
+        runAzureSetup(
+          { request, serviceManagementReference: "", continuation: null },
+          test.ports
+        )
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(github).not.toHaveBeenCalled();
+      expect(test.identity).toEqual([
+        { kind: "select-subscription", subscriptionId },
+        { kind: "check-login" }
+      ]);
+      expect(test.failures).toEqual([]);
+      expect(test.events).toEqual([
+        ["stop", "before-azure-subscription-selection"]
+      ]);
+    }
+  );
+
+  it.each(["ordinary", "interruption"] as const)(
+    "preserves an active account read's %s rejection",
+    async (kind) => {
+      const error =
+        kind === "ordinary" ?
+          new Error("account unavailable")
+        : new ProviderMutationRecoveryError(
+            "interrupted",
+            "setup-execution-interrupted"
+          );
+      const test = harness(async (args) => {
+        if (args[0] === "account" && args[1] === "show") throw error;
+        return existingIdentityAz(args);
+      });
+      await expect(
+        runAzureSetup(
+          { request, serviceManagementReference: "", continuation: null },
+          test.ports
+        )
+      ).rejects.toBe(error);
+      expect(test.failures).toEqual([]);
+    }
+  );
+
+  it.each(["repository", "customization"] as const)(
+    "preserves typed OIDC interruption from the %s read",
+    async (boundary) => {
+      const test = harness();
+      const github = test.application.runGitHubJson;
+      const error = new ProviderMutationRecoveryError(
+        "interrupted",
+        "setup-execution-interrupted"
+      );
+      test.application.runGitHubJson = async (path) => {
+        if (boundary === "repository" || path.endsWith("/sub")) throw error;
+        return github(path);
+      };
+      await expect(
+        runAzureSetup(
+          { request, serviceManagementReference: "", continuation: null },
+          test.ports
+        )
+      ).rejects.toBe(error);
+      expect(test.failures).toEqual([]);
+      expect(test.identity.at(-1)).toEqual({ kind: "resolve-oidc" });
+      expect(test.events).toEqual([
+        ["stop", "before-azure-subscription-selection"],
+        ...(boundary === "customization" ?
+          [["github", "/repos/owner/repo"]]
+        : [])
+      ]);
+    }
+  );
+
   it("returns input-required only after saving the continuation seed and awaiting the prompt", async () => {
     const test = harness(async (args) =>
       args.slice(0, 3).join(" ") === "ad app list" ?

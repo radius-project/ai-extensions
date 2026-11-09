@@ -176,6 +176,14 @@ export interface DeploymentsDependencies {
     request: DeleteConflictRequest,
     instanceId: string
   ): Promise<DeleteConflictProbe>;
+  // Repair for an AWS deploy that could not sign in. The service decides from
+  // this canvas's failed deploy which environment it repairs.
+  awsTrustRepair: {
+    repair(input: { instanceId: string; generation: number }): Promise<{
+      status: number;
+      body: Record<string, unknown>;
+    }>;
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -258,6 +266,8 @@ export function handleDeployStatus(
   }
   const deployRunUrl = entry?.state?.deployRunUrl || null;
   const attempt = entry?.state?.deployAttempt || null;
+  // Advanced on every deploy, so an action on a failure names which one.
+  const generation = entry?.state?.deployGeneration || 0;
   const active = status === "in_progress";
   // The handoff trigger runs first and short-circuits the rest of the chain, so
   // a freshly-opened repair loop reports `repairing` on the very same poll that
@@ -301,6 +311,7 @@ export function handleDeployStatus(
         deployedGraph,
         deployRunUrl,
         attempt,
+        generation,
         active,
         repairing,
         handoff
@@ -323,6 +334,7 @@ export function handleDeployStatus(
         deployedGraph,
         deployRunUrl,
         attempt,
+        generation,
         active,
         repairing,
         handoff
@@ -931,6 +943,39 @@ export async function handleDeploy(
   context.json(result.status, result.body);
 }
 
+// Adds back the trust subjects the failed AWS deploy's role is missing. The
+// failed deploy names the environment; the body only names which deploy the
+// panel showed, so a stale panel cannot repair a newer failure.
+export async function handleRepairAwsTrust(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): Promise<void> {
+  const body = await context.readTextBody();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    parsed = null;
+  }
+  const generation =
+    typeof parsed === "object" && parsed !== null && "generation" in parsed ?
+      parsed.generation
+    : undefined;
+  if (typeof generation !== "number" || !Number.isSafeInteger(generation)) {
+    context.json(400, {
+      code: "repair-request-invalid",
+      error:
+        "Repair needs the deploy the panel shows, as an integer generation. Reload the page and try again."
+    });
+    return;
+  }
+  const result = await dependencies.awsTrustRepair.repair({
+    instanceId: context.instanceId,
+    generation
+  });
+  context.json(result.status, result.body);
+}
+
 // The ambient deploy chip's read-only source. Deliberately NOT served from
 // `/api/deploy-status`: that route drives the repair handoff and the failure
 // notice as a side effect of being polled, and the chip polls from every page
@@ -980,6 +1025,8 @@ export function createDeploymentsRoutes(
   return {
     "GET /api/deploy-status": (context) =>
       handleDeployStatus(context, dependencies),
+    "POST /api/deploy/repair-aws-trust": (context) =>
+      handleRepairAwsTrust(context, dependencies),
     "GET /api/deploy-notification": (context) =>
       handleDeployNotification(context, dependencies),
     "GET /api/list-applications": (context) =>

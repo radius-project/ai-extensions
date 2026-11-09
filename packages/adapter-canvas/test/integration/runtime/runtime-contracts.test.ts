@@ -50,7 +50,10 @@ const TOOL_NAMES = [
   "radius_publish_custom_type_extension",
   "radius_publish_recipe",
   "radius_deploy",
-  "radius_deploy_status"
+  "radius_deploy_status",
+  "radius_setup_environment",
+  "radius_environment_status",
+  "radius_environment_control"
 ];
 
 function parseSkillHandoff(value: unknown): Record<string, unknown> {
@@ -372,6 +375,12 @@ describe("P0-A Radius runtime registration contract", () => {
     expect(unrelated.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
     expect(unrelated.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
     expect(enabledResult?.additionalContext).toContain("radius-panel");
+    expect(enabledResult?.additionalContext).toContain(
+      "use the radius-report-issue skill"
+    );
+    expect(enabledResult?.additionalContext).toContain(
+      "require separate explicit permission before submitting"
+    );
     expect(
       enabled.deps.workspace.hasRadiusApplicationModel
     ).toHaveBeenCalledExactlyOnceWith("/worktrees/radius-app");

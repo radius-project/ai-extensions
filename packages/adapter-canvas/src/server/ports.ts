@@ -30,8 +30,7 @@ export interface CanvasServerDependencies {
   onStarted?(instanceId: string, entry: CanvasServerEntry): void;
   // Fires once per stopped instance, after the entry leaves the container and
   // the socket close settles, so per-instance bookkeeping owned by the facade
-  // can be released. Closing swallows its own failures, so a server that fails
-  // to close still releases rather than leaking the entry.
+  // can be released even when closing rejects.
   onStopped?(instanceId: string): void;
   preferredPort(instanceId: string): Promise<number>;
   prepareIdentity(): void;

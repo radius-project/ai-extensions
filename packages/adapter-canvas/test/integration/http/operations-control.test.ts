@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { createDeferred } from "../../support/browser/fakes.js";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { validateBrowserMutationRequest } from "../../../src/server/browser-mutation.js";
@@ -16,6 +18,9 @@ import {
 } from "../../support/server/operation-fixtures.js";
 import {
   acceptCommand,
+  beginRetryAttempt,
+  snapshotRetryState,
+  rollbackRetryAttempt,
   buildDeleteStages,
   buildStages,
   canDismissOperation,
@@ -23,6 +28,7 @@ import {
   createRegistry,
   enterStage,
   finish,
+  fromPersistedOperation,
   isTerminalState,
   dismissOperation,
   recordAzureApp,
@@ -30,11 +36,15 @@ import {
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordServicePrincipal,
+  prepareProviderMutation,
+  settleProviderMutation,
   setCommandState,
+  setContext,
   setStageState,
   setVerificationWorkflowState,
   stopAtBoundary,
   toClientView,
+  toPersistedOperation,
   INPUT_REQUIRED_STATE,
   OPERATION_KIND_DELETE,
   STAGE_VERIFY
@@ -67,12 +77,21 @@ afterEach(async () => {
 });
 
 interface Harness {
+  diagnostics: Array<{ code: string }>;
+  owner: ReturnType<typeof createEnvironmentExecutionOwner>;
+  setPersist(persist: () => Promise<void>): void;
   records: Map<string, OperationRecord>;
   invalidatedListings: string[];
   persistCalls: string[];
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
-  createScheduled: Array<{ instanceId: string; operationId: string }>;
+  createScheduled: Array<{
+    instanceId: string | undefined;
+    operationId: string;
+  }>;
   registry: ReturnType<typeof createRegistry>;
+  shuttingDown: { value: boolean };
+  // The AWS locks the panel asked to remove.
+  removedLocks: Array<{ policyArn: string; policyId: string }>;
   setPullRequestMergeCheck(
     check: () => Promise<
       | { state: "merged" }
@@ -83,12 +102,17 @@ interface Harness {
 }
 
 function start(): Harness {
+  const diagnostics: Harness["diagnostics"] = [];
+  const owner = createEnvironmentExecutionOwner();
+  let persist = async () => {};
   const records = new Map<string, OperationRecord>();
   const registry = createRegistry();
   const persistCalls: string[] = [];
   const scheduled: Harness["scheduled"] = [];
   const createScheduled: Harness["createScheduled"] = [];
   const invalidatedListings: string[] = [];
+  const shuttingDown = { value: false };
+  const removedLocks: Harness["removedLocks"] = [];
   let pullRequestMergeCheck = (): Promise<
     | { state: "merged" }
     | { state: "open" }
@@ -99,25 +123,39 @@ function start(): Harness {
 
   const persistOperations = () => {
     persistCalls.push("persist");
-    return Promise.resolve();
+    return persist();
   };
 
   const routes = createTestRouteTable({
     ...createOperationsControlRoutes({
+      stopPendingResume: () => null,
+      claimAdmission: owner.claimAdmission,
+      isShuttingDown: () => shuttingDown.value,
       get: (operationId) => records.get(operationId) ?? null,
       acquireForRetry: (operation) => registry.acquireForRetry(operation),
       persistOperations,
+      reportOperationDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+      },
       // Merge-proof eligibility is the route unit suite's to decide; no journey
       // here may reach GitHub for it, so the port refuses rather than answers.
       checkPullRequestMerge: () => pullRequestMergeCheck(),
       inspectVerificationWorkflow: () => Promise.resolve("inactive"),
       cancelVerificationWorkflow: () => Promise.resolve("inactive"),
       schedule: ({ kind, instanceId, commandId }) => {
+        if (instanceId === undefined) {
+          throw new Error("HTTP control lost its attachment identity");
+        }
         scheduled.push({ kind, instanceId, commandId });
         return true;
       },
       invalidateEnvironmentListing: (repo) => {
         invalidatedListings.push(repo);
+      },
+      awsEnabled: true,
+      removeAwsDeployIdentityLock: (lock) => {
+        removedLocks.push(lock);
+        return Promise.resolve({ ok: true, removed: true });
       }
     }),
     // The by-id read is composed too: a client that just issued a command polls
@@ -175,6 +213,7 @@ function start(): Harness {
         getOperation: (operationId) =>
           (records.get(operationId) ?? null) as OperationActionRecord | null,
         canResumeInput: () => false,
+        claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
         resumeAfterInput: () => {},
         requireInput: () => {},
         finish,
@@ -217,11 +256,18 @@ function start(): Harness {
   });
 
   return {
+    diagnostics,
+    owner,
+    setPersist: (callback) => {
+      persist = callback;
+    },
     records,
     persistCalls,
     scheduled,
     createScheduled,
     registry,
+    shuttingDown,
+    removedLocks,
     invalidatedListings,
     setPullRequestMergeCheck: (check) => {
       pullRequestMergeCheck = check;
@@ -234,6 +280,106 @@ function seed(harness: Harness, op: OperationFixture): OperationFixture {
   harness.registry.put(op);
   return op;
 }
+
+describe("admission race HTTP errors", () => {
+  it.each([false, true])(
+    "frames a final-save account refusal distinctly from failed undo (undo fails=%s)",
+    async (undoFails) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-account");
+      const op = seed(harness, mergeHandoff());
+      op.context = { githubLogin: "original" };
+      harness.setPullRequestMergeCheck(async () => ({ state: "merged" }));
+      const entered = createDeferred<void>();
+      const gate = createDeferred<void>();
+      let saves = 0;
+      harness.setPersist(async () => {
+        if (++saves === 2) {
+          entered.resolve();
+          await gate.promise;
+        } else if (saves === 3 && undoFails) throw new Error("undo offline");
+      });
+      const pending = post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/retry/verification`
+      );
+      await entered.promise;
+      op.context = { githubLogin: "replacement" };
+      gate.resolve();
+      const response = await pending;
+      expect(response.status).toBe(undoFails ? 500 : 409);
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const body = await response.json();
+      expect(body.code).toBe(
+        undoFails ?
+          "operation-control-recovery-persist-failed"
+        : "operation-context-changed"
+      );
+      expect(body.error).not.toContain("Try again");
+      expect(op.context).toEqual({ githubLogin: "replacement" });
+      expect(harness.scheduled).toEqual([]);
+      expect(harness.diagnostics).toEqual(
+        undoFails ?
+          [
+            expect.objectContaining({
+              code: "operation-control-recovery-persist-failed"
+            })
+          ]
+        : []
+      );
+      expect(saves).toBe(3);
+    }
+  );
+
+  it("returns duplicate 202 before transient busy and allows a fresh retry after the old task settles", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-busy");
+    const op = seed(harness, stoppedSetup());
+    const gate = createDeferred<void>();
+    const settled = createDeferred<void>();
+    harness.owner.attach("panel-busy").schedule(op.operationId, {
+      run: () => gate.promise,
+      failed: async () => {
+        throw new Error("Unexpected task failure");
+      },
+      settling: () => {},
+      settled: () => settled.resolve()
+    });
+    try {
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/continue`
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        code: "operation-task-busy"
+      });
+      expect(harness.persistCalls).toEqual([]);
+      const before = snapshotRetryState(op);
+      beginRetryAttempt(op, "setup");
+      acceptCommand(op, {
+        kind: "continue_setup",
+        attempt: 2,
+        target: "setup"
+      });
+      const duplicate = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/continue`
+      );
+      expect(duplicate.status).toBe(202);
+      expect(await duplicate.json()).toMatchObject({ duplicate: true });
+      rollbackRetryAttempt(op, before);
+    } finally {
+      gate.resolve();
+      await settled.promise;
+    }
+    expect(
+      (await post(entry.baseUrl, `/api/operations/${op.operationId}/continue`))
+        .status
+    ).toBe(202);
+  });
+});
 
 function post(
   baseUrl: string,
@@ -324,6 +470,81 @@ function action(
 }
 
 describe("operation controls real-loopback HIT", () => {
+  it.each([
+    { status: "not_applied", evidence: null },
+    { status: "not_applied", evidence: "" },
+    { status: "not_applied", evidence: "HTTP 403" },
+    { status: "outcome_unknown", evidence: null },
+    { status: "manual_required", evidence: null }
+  ] as const)(
+    "refuses rollback of a restored $status branch deletion ($evidence) without scheduling cleanup",
+    async ({ status, evidence }) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const saved = stoppedSetup({ includeEnvironment: true });
+      const mutation = prepareProviderMutation(saved, {
+        kind: "github_branch.delete",
+        target: "fixture/app\0setup-branch\0original-head"
+      });
+      settleProviderMutation(saved, mutation.mutationId, status, evidence);
+      const restored = fromPersistedOperation(toPersistedOperation(saved));
+      restored.providerRecovery.state = "rollback_pending";
+      const op = seed(harness, restored);
+      const before = structuredClone(op);
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await post(
+          entry.baseUrl,
+          `/api/operations/${op.operationId}/rollback`
+        );
+        expect(response.status).toBe(409);
+        expect(response.headers.get("Content-Type")).toBe("application/json");
+        const refusal = await body(response);
+        expect(refusal).toMatchObject({
+          code: "rollback-provider-outcome-unknown"
+        });
+        if (status === "not_applied") {
+          expect(refusal).toMatchObject({
+            detail:
+              "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again." +
+              (evidence ? ` Details: ${evidence}` : "")
+          });
+        }
+      }
+      const view = await poll(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}`
+      );
+      expect(action(view, "rollback")).toBeUndefined();
+      expect(harness.scheduled).toEqual([]);
+      expect(harness.persistCalls).toEqual([]);
+      expect(op).toEqual(before);
+    }
+  );
+  it("refuses a control during shutdown without accepting or changing the operation", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const operation = seed(harness, stoppedSetup());
+    const before = structuredClone(operation);
+    harness.shuttingDown.value = true;
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${operation.operationId}/continue`
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({
+      code: "operation-shutting-down",
+      operationId: operation.operationId
+    });
+    expect(operation).toEqual(before);
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.persistCalls).toEqual([]);
+  });
+
   it("returns the blocking cleanup operation and lets it reacquire the lock", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
@@ -560,6 +781,40 @@ describe("operation controls real-loopback HIT", () => {
     expect(harness.scheduled).toEqual([]);
   });
 
+  it.each(["account", "record"] as const)(
+    "refuses stale %s merge proof through the retained verification retry route",
+    async (change) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const op = seed(harness, mergeHandoff());
+      op.context = { githubLogin: "alice" };
+      harness.setPullRequestMergeCheck(async () => {
+        if (change === "account") op.context = { githubLogin: "bob" };
+        else harness.records.set(op.operationId, structuredClone(op));
+        return { state: "merged" };
+      });
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/retry/verification`
+      );
+      expect(response.status).toBe(409);
+      expect(response.headers.get("Content-Type")).toBe("application/json");
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(await response.json()).toMatchObject({
+        code:
+          change === "account" ? "operation-active" : (
+            "operation-context-changed"
+          ),
+        operationId: op.operationId
+      });
+      expect(harness.persistCalls).toEqual(
+        change === "account" ? ["persist"] : ["persist", "persist"]
+      );
+      expect(harness.scheduled).toEqual([]);
+      expect(op.control.commands).toEqual([]);
+    }
+  );
+
   it("refuses a control request that cannot prove it came from the panel", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
@@ -647,6 +902,7 @@ describe("stop, then continue or roll back, over the socket", () => {
       const harness = start();
       const entry = await container!.getOrCreate("panel-recovery");
       const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
+      op.context = { githubLogin: "saved-account" };
       op.verification = { runId: "42" };
       setVerificationWorkflowState(op, "active");
 
@@ -965,5 +1221,131 @@ describe("exiting a setup over the socket", () => {
       commandId: accepted.commandId
     });
     expect(harness.scheduled).toHaveLength(1);
+  });
+});
+
+describe("removing an abandoned AWS lock over the socket", () => {
+  const LOCK = {
+    policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
+    policyId: "LOCK0",
+    holder: "The setup of environment prod in octo/shop",
+    since: "2026-10-30T11:00:00Z"
+  };
+
+  it.each([
+    [
+      "setup",
+      () => {
+        const op = newOperation();
+        op.provider = "aws";
+        return op;
+      }
+    ],
+    [
+      "deletion",
+      () =>
+        createOperation({
+          provider: "aws",
+          repo: "octo/shop",
+          environment: "dev",
+          kind: OPERATION_KIND_DELETE,
+          stages: buildDeleteStages({ includeAwsCleanup: true })
+        }) as OperationFixture
+    ]
+  ])(
+    "offers Remove lock on a waiting %s, removes exactly that lock, and stops offering it",
+    async (_label, build) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const op = seed(harness, build());
+      setContext(op, { awsLockWait: { ...LOCK, removable: true } });
+      const statusPath = `/api/operations/${op.operationId}`;
+
+      const offered = action(
+        await poll(entry.baseUrl, statusPath),
+        "remove-aws-lock"
+      );
+      expect(offered).toMatchObject({
+        label: "Remove lock",
+        path: `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`,
+        requiresConfirmation: true,
+        confirmLabel: "Remove lock",
+        cancelLabel: "Keep waiting"
+      });
+
+      const response = await post(entry.baseUrl, offered!.path);
+      expect(response.status).toBe(200);
+      expect((await body(response)).code).toBe("aws-lock-removed");
+      expect(harness.removedLocks).toEqual([
+        { policyArn: LOCK.policyArn, policyId: LOCK.policyId }
+      ]);
+      expect(harness.persistCalls).toEqual(["persist"]);
+      expect(
+        action(await poll(entry.baseUrl, statusPath), "remove-aws-lock")
+      ).toBeUndefined();
+
+      const again = await post(entry.baseUrl, offered!.path);
+      expect(again.status).toBe(409);
+      expect((await body(again)).code).toBe("aws-lock-not-removable");
+      expect(harness.removedLocks).toHaveLength(1);
+    }
+  );
+
+  it("refuses a confirmation for a lock another run has since replaced", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness, newOperation());
+    setContext(op, { awsLockWait: { ...LOCK, removable: true } });
+    const shown = action(
+      await poll(entry.baseUrl, `/api/operations/${op.operationId}`),
+      "remove-aws-lock"
+    );
+    // While the dialog is open, the old holder releases and another run's
+    // lock becomes the one this run waits for.
+    setContext(op, {
+      awsLockWait: { ...LOCK, policyId: "LOCK1", removable: true }
+    });
+
+    const response = await post(entry.baseUrl, shown!.path);
+
+    expect(response.status).toBe(409);
+    expect((await body(response)).code).toBe("aws-lock-changed");
+    expect(harness.removedLocks).toEqual([]);
+  });
+
+  it("refuses a lock that is not yet old enough, without touching AWS", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness, newOperation());
+    setContext(op, { awsLockWait: { ...LOCK, removable: false } });
+
+    expect(
+      action(
+        await poll(entry.baseUrl, `/api/operations/${op.operationId}`),
+        "remove-aws-lock"
+      )
+    ).toBeUndefined();
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`
+    );
+    expect(response.status).toBe(409);
+    expect(harness.removedLocks).toEqual([]);
+  });
+
+  it("refuses a request that cannot prove it came from the panel", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness, newOperation());
+    setContext(op, { awsLockWait: { ...LOCK, removable: true } });
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/aws-lock/remove?policyId=LOCK0`,
+      { Origin: new URL(entry.baseUrl).origin }
+    );
+
+    expect(response.status).toBe(403);
+    expect(harness.removedLocks).toEqual([]);
   });
 });

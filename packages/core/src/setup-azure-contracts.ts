@@ -27,6 +27,7 @@ export interface AzureExecutionPorts {
 }
 
 export interface AzureApplicationPorts extends AzureExecutionPorts {
+  assertActive(): void;
   runGitHubJson(path: string): Promise<GitHubJsonResponse>;
   persist(): Promise<void>;
   persistenceFailure(error: unknown): void;

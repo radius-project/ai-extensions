@@ -127,7 +127,7 @@ describe("RU-02: action declarations", () => {
 
 // RU-03: tool names/schemas/descriptions/unique.
 describe("RU-03: tool declarations", () => {
-  it("declares exactly the retained 7 tool names, in order", () => {
+  it("declares the retained tools followed by the approved environment tools", () => {
     expect(RADIUS_TOOL_DECLARATIONS.map((t) => t.name)).toEqual([
       "radius_generate_app",
       "radius_report_modeling_failure",
@@ -135,7 +135,10 @@ describe("RU-03: tool declarations", () => {
       "radius_publish_custom_type_extension",
       "radius_publish_recipe",
       "radius_deploy",
-      "radius_deploy_status"
+      "radius_deploy_status",
+      "radius_setup_environment",
+      "radius_environment_status",
+      "radius_environment_control"
     ]);
   });
 
@@ -156,7 +159,53 @@ describe("RU-03: tool declarations", () => {
     for (const tool of RADIUS_TOOL_DECLARATIONS) {
       expect(tool.parameters.type).toBe("object");
       expect(typeof tool.parameters.properties).toBe("object");
+      expect(tool.parameters.properties).not.toEqual({});
+      for (const keyword of ["oneOf", "anyOf", "allOf", "enum", "not"])
+        expect(tool.parameters).not.toHaveProperty(keyword);
     }
+  });
+  it("advertises all environment inputs in flat provider-compatible schemas", () => {
+    const setup = RADIUS_TOOL_DECLARATIONS.find(
+      (tool) => tool.name === "radius_setup_environment"
+    );
+    const control = RADIUS_TOOL_DECLARATIONS.find(
+      (tool) => tool.name === "radius_environment_control"
+    );
+    expect(setup?.parameters).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["repo", "environment", "provider"],
+      properties: {
+        repo: { type: "string" },
+        environment: { type: "string" },
+        provider: { type: "string", enum: ["azure", "aws"] },
+        tenantId: { type: "string" },
+        subscriptionId: { type: "string" },
+        resourceGroup: { type: "string" },
+        cluster: { type: "string" },
+        roleName: { type: "string" },
+        existingRoleArn: { type: "string" },
+        accountId: { type: "string" },
+        region: { type: "string" },
+        vpcId: { type: "string" },
+        subnetIds: { type: "string" }
+      }
+    });
+    expect(control?.parameters).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "repo", "environment", "action"],
+      properties: {
+        action: {
+          type: "string",
+          enum: expect.arrayContaining(["continue", "resume"])
+        },
+        provider: { type: "string", enum: ["azure"] },
+        interactionId: { type: "string" },
+        checkpoint: { type: "string" },
+        answer: { anyOf: expect.any(Array) }
+      }
+    });
   });
 
   it("documents both generate-app response shapes", () => {
@@ -234,6 +283,30 @@ describe("RU-03: tool declarations", () => {
   });
 
   describe("RU-19: session start guidance", () => {
+    it("requires review and separate submission permission for terminal failure reports", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "use the radius-report-issue skill"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Collect extra diagnostics only after they agree"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "remove personal data and secrets"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "known session type, model and reasoning level"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Show the complete draft and require separate explicit permission before submitting to radius-project/ai-extensions"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Do not offer reports for active retries, pending input, deliberate cancellation, or expected unsupported features"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "do not ask twice for the same failed operation"
+      );
+    });
+
     it("opens the graph first and leaves missing-model authoring to the Canvas handoff", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
         "without explicitly requesting model creation or updates"
@@ -339,12 +412,16 @@ describe("RU-03: tool declarations", () => {
     });
   });
 
-  it("constrains provider enums to azure/aws where present", () => {
+  it("constrains cloud providers and keeps input resume Azure-only", () => {
     for (const tool of RADIUS_TOOL_DECLARATIONS) {
       const provider = props(tool.parameters).provider as
         { enum?: string[] } | undefined;
       if (provider?.enum) {
-        expect(provider.enum).toEqual(["azure", "aws"]);
+        expect(provider.enum).toEqual(
+          tool.name === "radius_environment_control" ?
+            ["azure"]
+          : ["azure", "aws"]
+        );
       }
     }
   });

@@ -94,7 +94,15 @@ function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
     },
     authorizeAws: async (request) => {
       transcript.push(["aws", request]);
-      return { kind: "completed", roleArn: ROLE_ARN, trustSubjects: SUBJECTS };
+      return {
+        kind: "completed",
+        roleArn: ROLE_ARN,
+        trustSubjects: SUBJECTS,
+        policyName: "radius-deploy-dev-f5fb7acf8f59"
+      };
+    },
+    releaseAws: async () => {
+      transcript.push(["release-aws"]);
     },
     configureEnvironment: async (request) => {
       transcript.push(["configure", request]);
@@ -112,6 +120,60 @@ function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
 }
 
 describe("runSetupCoordinator", () => {
+  it.each(["azure_application.create", "github_environment_variable.put"])(
+    "preserves interruption without counting a failed reread of %s",
+    async (kind) => {
+      const interruption = new ProviderMutationRecoveryError(
+        "Runtime stopped",
+        "setup-execution-interrupted"
+      );
+      const test = harness({
+        reconcileFailure: async () => {
+          throw new Error("No provider read occurred");
+        },
+        authorizeAzure: async () => {
+          throw interruption;
+        },
+        configureEnvironment: async () => {
+          throw interruption;
+        }
+      });
+      test.mutations.push({ mutationId: "pending", kind });
+      await expect(runSetupCoordinator(test.target, test.ports)).rejects.toBe(
+        interruption
+      );
+    }
+  );
+
+  it.each(["azure_application.create", "github_environment_variable.put"])(
+    "still accounts for genuine read failure while reconciling %s",
+    async (kind) => {
+      const failure = new Error("Provider read failed");
+      const reported = new ProviderMutationRecoveryError(
+        "Recovery remains unresolved",
+        "provider-mutation-outcome-unknown"
+      );
+      const calls: unknown[] = [];
+      const test = harness({
+        reconcileFailure: async (mutationId, error) => {
+          calls.push([mutationId, error]);
+          throw reported;
+        },
+        authorizeAzure: async () => {
+          throw failure;
+        },
+        configureEnvironment: async () => {
+          throw failure;
+        }
+      });
+      test.mutations.push({ mutationId: "pending", kind });
+      await expect(runSetupCoordinator(test.target, test.ports)).rejects.toBe(
+        reported
+      );
+      expect(calls).toEqual([["pending", failure]]);
+    }
+  );
+
   it("stops after the canonical environment checkpoint without invoking a provider", async () => {
     const test = harness({
       stopBoundary: async (boundary) => boundary !== "after-github-environment"
@@ -120,6 +182,15 @@ describe("runSetupCoordinator", () => {
       shouldMonitor: false
     });
     expect(test.transcript.at(-1)).toEqual(["checkpoint"]);
+  });
+
+  it("never releases an AWS lock for an Azure setup", async () => {
+    const test = harness();
+    await runSetupCoordinator(test.target, test.ports);
+    expect(test.transcript).toContainEqual(
+      expect.arrayContaining(["configure"])
+    );
+    expect(test.transcript).not.toContainEqual(["release-aws"]);
   });
 
   it("uses the saved resume request only when the original request is undefined", async () => {
@@ -334,10 +405,77 @@ describe("runSetupCoordinator", () => {
             operationEnvironment: "dev",
             roleArn: ROLE_ARN,
             trustSubjects: SUBJECTS,
+            policyName: "radius-deploy-dev-f5fb7acf8f59",
             clientId: ""
           }
         ]
       ]);
+    });
+
+    it("holds the deploy identity lock until the environment is configured", async () => {
+      const test = awsHarness();
+      await runSetupCoordinator(test.target, test.ports);
+      const order = test.transcript
+        .filter(
+          (entry) =>
+            Array.isArray(entry) &&
+            ["aws", "configure", "release-aws"].includes(String(entry[0]))
+        )
+        .map((entry) => (entry as unknown[])[0]);
+      expect(order).toEqual(["aws", "configure", "release-aws"]);
+    });
+
+    it.each([
+      [
+        "AWS authorization fails",
+        { authorizeAws: async () => ({ kind: "failed" as const, error: "x" }) }
+      ],
+      [
+        "AWS setup is paused",
+        { authorizeAws: async () => ({ kind: "stopped" as const }) }
+      ],
+      [
+        "the stop boundary declines after an AWS failure",
+        {
+          authorizeAws: async () => ({ kind: "failed" as const, error: "x" }),
+          stopBoundary: async (boundary: string) =>
+            boundary !== "before-setup-failure-cleanup"
+        }
+      ]
+    ])("releases the lock when %s", async (_label, overrides) => {
+      const test = awsHarness(overrides);
+      await runSetupCoordinator(test.target, test.ports);
+      expect(test.transcript.at(-1)).toEqual(["release-aws"]);
+      expect(
+        test.transcript.filter(
+          (entry) => Array.isArray(entry) && entry[0] === "release-aws"
+        )
+      ).toHaveLength(1);
+    });
+
+    it("releases the lock when configuring the environment throws", async () => {
+      const test = awsHarness({
+        configureEnvironment: async () => {
+          throw new Error("GitHub is down");
+        }
+      });
+      await expect(
+        runSetupCoordinator(test.target, test.ports)
+      ).rejects.toThrow("GitHub is down");
+      expect(test.transcript.at(-1)).toEqual(["release-aws"]);
+    });
+
+    it("releases the lock when configuring the environment is still reconciling", async () => {
+      const test = awsHarness({
+        configureEnvironment: async () => ({
+          kind: "reconciling",
+          message: "A variable write is unconfirmed."
+        })
+      });
+      await expect(
+        runSetupCoordinator(test.target, test.ports)
+      ).rejects.toThrow("A variable write is unconfirmed.");
+      expect(test.transcript.at(-1)).toEqual(["release-aws"]);
     });
 
     it("marks a newly created GitHub environment as not reused", async () => {
@@ -363,9 +501,10 @@ describe("runSetupCoordinator", () => {
       expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
         shouldMonitor: false
       });
-      expect(test.transcript.slice(-2)).toEqual([
+      expect(test.transcript.slice(-3)).toEqual([
         ["stop", "before-setup-failure-cleanup"],
-        ["failure", { kind: "aws-authorization", error }]
+        ["failure", { kind: "aws-authorization", error }],
+        ["release-aws"]
       ]);
       expect(
         test.transcript.some(
@@ -385,9 +524,9 @@ describe("runSetupCoordinator", () => {
       expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
         shouldMonitor: false
       });
-      expect(test.transcript.at(-1)).toEqual([
-        "stop",
-        "after-aws-deploy-identity"
+      expect(test.transcript.slice(-2)).toEqual([
+        ["stop", "after-aws-deploy-identity"],
+        ["release-aws"]
       ]);
       expect(
         test.transcript.some(
@@ -405,7 +544,7 @@ describe("runSetupCoordinator", () => {
       expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
         shouldMonitor: false
       });
-      expect(test.transcript.at(-1)).toEqual([
+      expect(test.transcript.at(-2)).toEqual([
         "failure",
         {
           kind: "aws-authorization",
@@ -435,50 +574,90 @@ describe("runSetupCoordinator", () => {
       ).toBe(false);
     });
 
-    it("reuses the recorded role instead of authorizing again while reconciling", async () => {
+    it("authorizes again under the lock before reconciling a GitHub write", async () => {
       const test = awsHarness({
-        authorizeAws: async () => {
-          throw new Error("A reconciling setup must not authorize again");
-        },
         readEnsuredEnvironment: (name) => ({
           name,
-          state: "reused",
+          state: "created",
           providerId: "17"
         })
       });
-      test.mutations.push({ mutationId: "pending", kind: "github_variable" });
-      test.operation.context = {
-        awsRoleArn: ROLE_ARN,
-        awsTrustSubjects: [...SUBJECTS, 7]
-      };
+      test.mutations.push({
+        mutationId: "pending",
+        kind: "github_environment_variable.put"
+      });
       expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
         shouldMonitor: true
       });
+      const order = test.transcript
+        .filter(
+          (entry) =>
+            Array.isArray(entry) &&
+            ["aws", "configure", "release-aws"].includes(String(entry[0]))
+        )
+        .map((entry) => (entry as unknown[])[0]);
+      expect(order).toEqual(["aws", "configure", "release-aws"]);
+      expect(test.transcript).toContainEqual([
+        "aws",
+        expect.objectContaining({ reused: false })
+      ]);
       expect(test.transcript).toContainEqual([
         "configure",
-        expect.objectContaining({ roleArn: ROLE_ARN, trustSubjects: SUBJECTS })
+        expect.objectContaining({
+          roleArn: ROLE_ARN,
+          trustSubjects: SUBJECTS,
+          policyName: "radius-deploy-dev-f5fb7acf8f59"
+        })
       ]);
     });
 
-    it("leaves the role out when no authorization or recorded role exists", async () => {
+    it("does not configure a reconciling setup whose AWS authorization fails", async () => {
+      const error = { status: 409, message: "busy", code: "aws-lock-busy" };
       const test = awsHarness({
+        authorizeAws: async () => ({ kind: "failed", error }),
         readEnsuredEnvironment: (name) => ({
           name,
-          state: "reused",
+          state: "created",
           providerId: "17"
         })
       });
-      test.mutations.push({ mutationId: "pending", kind: "github_variable" });
+      test.mutations.push({
+        mutationId: "pending",
+        kind: "github_environment_variable.put"
+      });
+      expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
+        shouldMonitor: false
+      });
+      expect(test.transcript.slice(-2)).toEqual([
+        ["failure", { kind: "aws-authorization", error }],
+        ["release-aws"]
+      ]);
+      expect(
+        test.transcript.some(
+          (entry) => Array.isArray(entry) && entry[0] === "configure"
+        )
+      ).toBe(false);
+    });
+
+    it("configures an Azure setup without AWS fields from a stale context", async () => {
+      const test = harness();
+      test.operation.context = {
+        awsRoleArn: ROLE_ARN,
+        awsTrustSubjects: SUBJECTS,
+        awsPolicyName: "radius-deploy-dev-111111111111"
+      };
       await runSetupCoordinator(test.target, test.ports);
       const configure = test.transcript.find(
         (entry) => Array.isArray(entry) && entry[0] === "configure"
       );
-      expect(configure).toBeDefined();
       expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
         "roleArn"
       );
       expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
         "trustSubjects"
+      );
+      expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
+        "policyName"
       );
     });
   });

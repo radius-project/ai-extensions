@@ -78,6 +78,76 @@ describe("naming a cleanup deletion in the journal", () => {
 });
 
 describe("issuing one cleanup deletion through the journal", () => {
+  it.each(["identity", "prepared"] as const)(
+    "does not send a deletion when shutdown wins %s preparation",
+    async (boundary) => {
+      let stopped = false;
+      const test = harness({
+        isStopped: () => stopped,
+        confirmRecordedIdentity: async () => {
+          if (boundary === "identity") stopped = true;
+          return { decision: "delete" };
+        },
+        persist: async () => {
+          if (boundary === "prepared") stopped = true;
+        }
+      });
+      await expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(test.deletes).toEqual([]);
+      if (boundary === "prepared")
+        expect(test.operation.providerRecovery.mutations[0].status).toBe(
+          "not_applied"
+        );
+    }
+  );
+
+  it.each(["acknowledged", "unknown", "persistence-rejected"] as const)(
+    "retains %s deletion evidence after shutdown without a new read",
+    async (outcome) => {
+      let stopped = false;
+      let confirmed = false;
+      let reads = 0;
+      const test = harness({
+        isStopped: () => stopped,
+        runDelete: async () => {
+          stopped = true;
+          return outcome === "unknown" ? lost() : ok();
+        },
+        onConfirmed: () => {
+          confirmed = true;
+        },
+        readExactIdentity: async () => {
+          reads++;
+          return "absent";
+        }
+      });
+      const result = test.run(
+        outcome === "persistence-rejected" ?
+          {
+            persist: async () => {
+              if (confirmed) throw new Error("Acknowledgement not durable");
+            }
+          }
+        : {}
+      );
+      if (outcome === "acknowledged")
+        await expect(result).resolves.toMatchObject({ outcome: "deleted" });
+      else if (outcome === "unknown")
+        await expect(result).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+      else await expect(result).rejects.toThrow(CleanupJournalPersistenceError);
+      expect(confirmed).toBe(outcome !== "unknown");
+      expect(reads).toBe(0);
+      expect(test.deletes).toEqual([1]);
+      expect(test.operation.providerRecovery.mutations[0].status).toBe(
+        outcome === "unknown" ? "outcome_unknown" : "confirmed"
+      );
+    }
+  );
+
   it("records the delete before issuing it and confirms it afterwards", async () => {
     const test = harness();
 

@@ -13,13 +13,17 @@ export function successfulSelectedGhExecutor(
   } = {}
 ): SelectedGhExecutor {
   const login = options.login || "octocat";
-  const run: SelectedGhExecutor["run"] =
+  const execute: SelectedGhExecutor["run"] =
     options.run ||
     (async () => ({
       code: 0,
       stdout: "",
       stderr: ""
     }));
+  const run: SelectedGhExecutor["run"] = (...args) => {
+    args[1]?.beforeExecute?.();
+    return execute(...args);
+  };
   const runOrThrow: SelectedGhExecutor["runOrThrow"] = async (
     args,
     message,

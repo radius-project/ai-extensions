@@ -47,6 +47,7 @@ import { ProviderMutationRecoveryError } from "@radius-project/core";
 export { ProviderMutationRecoveryError } from "@radius-project/core";
 
 type RecoveringOperation = {
+  provider?: string;
   recoveryState?: string | null;
   providerRecovery?: { state?: string; guidance?: string | null };
 };
@@ -64,6 +65,16 @@ function requireRecoveryRollback(
     mutation.kind.endsWith(".cleanup_delete") ||
     unresolvedProviderMutations(operation).length > 0
   ) {
+    return;
+  }
+  // AWS setup stops instead: the customer decides between Continue setup and
+  // Delete setup. A rollback nobody asked for would delete work a retry could
+  // reuse, and would have to wait in the background for the deploy identity
+  // lock. Decided by the setup, not by the write that settled: a GitHub write
+  // left by Configure environment settles the same way, and a rollback then
+  // would remove the role and access entry too.
+  if (operation.provider === "aws") {
+    requestStop(operation);
     return;
   }
   if (operation.providerRecovery) {
@@ -210,7 +221,10 @@ const CONCLUSIVE_REJECTION = new RegExp(
     String.raw`added object references already exist|object reference already exists`,
     // Service Management Reference identifiers, matched as the tenant emits them.
     String.raw`serviceManagementReference|serviceTreeNullValueProvided|serviceTreeInvalid`,
-    String.raw`Please run 'az login'|az login --|Please run 'az account set'`
+    String.raw`Please run 'az login'|az login --|Please run 'az account set'`,
+    // AWS CLI service errors name the code AWS returned for a request it saw
+    // and refused. Throttling and service failures are not listed.
+    String.raw`An error occurred \((?:AccessDenied|AccessDeniedException|EntityAlreadyExists|NoSuchEntity|LimitExceeded|MalformedPolicyDocument|InvalidInput|ValidationError|ValidationException|ResourceInUseException|InvalidParameterException|InvalidRequestException|ResourceNotFoundException|ResourceLimitExceededException|UnmodifiableEntity|DeleteConflict)\)`
   ].join("|"),
   "i"
 );
@@ -303,8 +317,10 @@ async function reconcileMutation<T>(
   reconcile: () => Promise<ProviderMutationReconciliation<T>>,
   persist: () => Promise<void>,
   onConfirmed?: (value: T, recovered: boolean) => void,
-  rethrowReconciliationError?: (error: unknown) => boolean
+  rethrowReconciliationError?: (error: unknown) => boolean,
+  assertActive?: () => void
 ): Promise<RecoverableMutationResult<T>> {
+  assertActive?.();
   // `settleProviderMutation` normalizes the whole recovery record, so the entry
   // it leaves behind is a different object from the one passed in here. The
   // attempt counter has to be written to that live entry or it is discarded.
@@ -323,6 +339,7 @@ async function reconcileMutation<T>(
     outcome = await reconcile();
   } catch (error) {
     if (rethrowReconciliationError?.(error)) throw error;
+    assertActive?.();
     return recordProviderReconciliationFailure(
       operation,
       mutation,
@@ -331,6 +348,7 @@ async function reconcileMutation<T>(
       recordAttempts
     );
   }
+  if (outcome.state !== "applied") assertActive?.();
   if (outcome.state === "manual_required") {
     settleProviderMutation(
       operation,
@@ -469,6 +487,7 @@ type RecoverableMutationInput<T> = {
   intent?: Record<string, string | number | boolean | null> | null;
   persist(): Promise<void>;
   beforeMutation?(): Promise<boolean>;
+  assertActive?(): void;
   /**
    * Revalidate provider identity after intent is durable but before the request
    * is sent. A rejection proves the provider mutation was not attempted.
@@ -515,6 +534,13 @@ type RecoverableMutationInput<T> = {
    */
   rejectionGuidance?(result: ProviderMutationCommandResult): string;
   rethrowReconciliationError?(error: unknown): boolean;
+  /**
+   * A refusal that, for this write, may answer a resend of a request that
+   * already landed: a CLI that retries a create after a lost reply hears
+   * "already exists" about its own first try. Such a refusal is settled by
+   * reading the provider, like a lost answer.
+   */
+  ambiguousRejection?(result: ProviderMutationCommandResult): boolean;
 };
 
 type NonCancelledMutationResult<T> = Exclude<
@@ -531,6 +557,7 @@ export function executeRecoverableMutation<T>(
 export async function executeRecoverableMutation<T>(
   input: RecoverableMutationInput<T>
 ): Promise<RecoverableMutationResult<T>> {
+  input.assertActive?.();
   const mutationId = providerMutationId(
     input.operation.operationId,
     input.kind,
@@ -614,9 +641,11 @@ export async function executeRecoverableMutation<T>(
       }
       return { state: "cancelled" };
     }
-    if (input.validateBeforeMutation) {
+    if (input.validateBeforeMutation || input.assertActive) {
       try {
-        await input.validateBeforeMutation();
+        input.assertActive?.();
+        await input.validateBeforeMutation?.();
+        input.assertActive?.();
       } catch (error) {
         settleProviderMutation(
           input.operation,
@@ -656,13 +685,18 @@ export async function executeRecoverableMutation<T>(
         input.reconcile,
         input.persist,
         input.onConfirmed,
-        input.rethrowReconciliationError
+        input.rethrowReconciliationError,
+        input.assertActive
       );
     }
     // Ambiguity is read before success. A command that timed out, was killed,
     // or died on a signal can still exit 0 on some runners, and accepting that
     // as an acknowledgement records a mutation nobody saw the provider answer.
-    const outcomeUnknown = providerMutationOutcomeUnknown(result, input.target);
+    const outcomeUnknown =
+      providerMutationOutcomeUnknown(result, input.target) ||
+      (result.code !== 0 &&
+        result.code !== "0" &&
+        input.ambiguousRejection?.(result) === true);
     if (outcomeUnknown || (result.code !== 0 && result.code !== "0")) {
       const diagnostic = [
         `Provider command exit code: ${result.code}${result.timedOut === true ? " (timed out)" : ""}.`,
@@ -693,7 +727,8 @@ export async function executeRecoverableMutation<T>(
         input.reconcile,
         input.persist,
         input.onConfirmed,
-        input.rethrowReconciliationError
+        input.rethrowReconciliationError,
+        input.assertActive
       );
     }
     if (result.code === 0 || result.code === "0") {
@@ -757,7 +792,8 @@ export async function executeRecoverableMutation<T>(
       input.reconcile,
       input.persist,
       input.onConfirmed,
-      input.rethrowReconciliationError
+      input.rethrowReconciliationError,
+      input.assertActive
     );
   }
   if (mutation.status === "manual_required") {

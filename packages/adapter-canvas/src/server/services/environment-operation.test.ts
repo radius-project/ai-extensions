@@ -1,24 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { buildGitHubTrustPolicy } from "@radius-project/core";
+import {
+  assertSetupExecutionActive,
+  buildGitHubTrustPolicy
+} from "@radius-project/core";
 import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import {
   addLegacyStep,
+  applySetupResumePoint,
+  beginRetryAttempt,
+  canContinueSetup,
   createOperation,
   enterStage,
   prepareProviderMutation,
+  projectOperationActions,
   promoteCreatedGitHubEnvironment,
   requestStop,
   settleProviderMutation,
+  shouldStop,
   provenOwnedCleanupTargets,
   recordGitHubEnvironment,
   setCanonicalEnvironment,
   setContext,
+  setStageState,
   STAGE_AUTHORIZE_IDENTITY,
   unresolvedProviderMutations
 } from "../../operations.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import { createAwsEnvironmentAccess } from "./aws-environment-access.js";
+import { honorStopBoundary } from "./operation-stop-boundary.js";
 import {
+  createSetupCoordinatorPorts,
   runEnvironmentOperationWorkflow,
   type EnvironmentOperationRecord,
   type EnvironmentOperationWorkflowDependencies
@@ -85,7 +96,8 @@ function awsIdentityReady(): Partial<EnvironmentOperationWorkflowDependencies> {
     setupAwsDeployIdentity: async () => ({
       ok: true,
       roleArn: AWS_ROLE_ARN,
-      subjects: AWS_SUBJECTS
+      subjects: AWS_SUBJECTS,
+      policyName: "radius-deploy-production-111111111111"
     })
   };
 }
@@ -120,6 +132,10 @@ function dependencies(
       setupAwsDeployIdentity: async () => {
         throw new Error("unexpected AWS deploy identity setup");
       },
+      releaseAwsDeployIdentity: async () => {
+        events.push("release-aws");
+      },
+      isStopped: () => false,
       guardStopBoundary: async (_target, boundary) => {
         events.push(`stop:${boundary}`);
         return true;
@@ -200,11 +216,66 @@ function dependencies(
 
 describe("runEnvironmentOperationWorkflow", () => {
   it.each([
-    ["azure", "azure_application.create"],
-    ["environment", "github_workflow.put"]
+    null,
+    "provider connection lost",
+    { detail: "unstructured failure" }
+  ])(
+    "finalizes an unstructured environment read rejection without inventing provider success: %j",
+    async (failure) => {
+      const op = operation();
+      const test = dependencies(op, {
+        readGitHubJson: async () => {
+          throw failure;
+        }
+      });
+      expect(
+        await runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor(),
+          test.dependencies
+        )
+      ).toEqual({ shouldMonitor: false });
+      expect(test.failures).toEqual([
+        {
+          status: 400,
+          error: String(failure),
+          code: "github-environment-resolution-failed",
+          remediation: null
+        }
+      ]);
+      expect(test.posts).toEqual([]);
+      expect(unresolvedProviderMutations(op)).toEqual([]);
+    }
+  );
+
+  it.each([
+    [
+      "azure",
+      "azure_application.create",
+      "One recovery attempt.",
+      "One recovery attempt."
+    ],
+    [
+      "environment",
+      "github_workflow.put",
+      "One recovery attempt.",
+      "One recovery attempt."
+    ],
+    [
+      "azure",
+      "azure_application.create",
+      "",
+      "Azure setup is reconciling an uncertain provider mutation."
+    ],
+    [
+      "environment",
+      "github_workflow.put",
+      undefined,
+      "Environment setup is reconciling an uncertain provider mutation."
+    ]
   ] as const)(
     "does not reconcile a returned %s reconciliation outcome a second time",
-    async (stage, mutationKind) => {
+    async (stage, mutationKind, message, expectedMessage) => {
       const op = operation();
       setCanonicalEnvironment(op, "Production");
       recordGitHubEnvironment(op, {
@@ -226,7 +297,7 @@ describe("runEnvironmentOperationWorkflow", () => {
             return {
               kind: "reconciling",
               status: 202,
-              body: { message: "One recovery attempt." }
+              body: { message }
             };
           },
           configureEnvironment: async () => {
@@ -234,7 +305,7 @@ describe("runEnvironmentOperationWorkflow", () => {
             return {
               kind: "reconciling",
               status: 202,
-              body: { message: "One recovery attempt." }
+              body: { message }
             };
           }
         }
@@ -247,7 +318,7 @@ describe("runEnvironmentOperationWorkflow", () => {
         )
       ).rejects.toMatchObject({
         code: "provider-mutation-outcome-unknown",
-        message: "One recovery attempt."
+        message: expectedMessage
       });
       expect(op).toEqual(saved);
       expect(test.events).toEqual([
@@ -265,7 +336,9 @@ describe("runEnvironmentOperationWorkflow", () => {
     const op = operation();
     op.provider = "aws";
     const nested = { value: "saved", omitted: undefined };
-    op.request = { environment: { nested, optional: undefined } };
+    op.request = {
+      environment: { nested, optional: undefined, roleName: "fixture" }
+    };
     const test = dependencies(op, {
       ...awsIdentityReady(),
       instanceId: "own-panel",
@@ -301,6 +374,7 @@ describe("runEnvironmentOperationWorkflow", () => {
         return false;
       }
     });
+
     let ghCalls = 0;
     const executor = successfulSelectedGhExecutor({
       run: async () => {
@@ -314,6 +388,32 @@ describe("runEnvironmentOperationWorkflow", () => {
     ).toEqual({ shouldMonitor: false });
     expect(test.events).toEqual(["stop:before-github-environment"]);
     expect(ghCalls).toBe(0);
+  });
+
+  it("keeps repository-read authority independent of cooperative Stop", async () => {
+    const op = operation();
+    requestStop(op);
+    let stopped = false;
+    const test = dependencies(op, {
+      isStopped: () => stopped,
+      preflightRepoAdmin: async (_repo, _executor, assertActive) => {
+        expect(assertActive).toBeTypeOf("function");
+        assertActive?.();
+        stopped = true;
+        assertActive?.();
+        throw new Error("Missing runtime interruption");
+      }
+    });
+    const ports = createSetupCoordinatorPorts(
+      op,
+      successfulSelectedGhExecutor(),
+      test.dependencies
+    );
+    await expect(ports.preflightRepository()).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    expect(test.failures).toEqual([]);
+    expect(op.endedAt).toBeNull();
   });
 
   it("lets Stop win over cleanup after a failed preflight", async () => {
@@ -409,6 +509,53 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.events).not.toContain("preflight-ghcr");
   });
 
+  it.each(["environment", "azure", "interruption"])(
+    "preserves unresolved evidence when %s rejects after shutdown",
+    async (boundary) => {
+      const op = operation();
+      let stopped = false;
+      if (boundary === "azure") {
+        setCanonicalEnvironment(op, "Production");
+        recordGitHubEnvironment(op, {
+          state: "reused",
+          origin: "pre_existing",
+          repo: op.repo,
+          name: "Production",
+          providerId: "environment-1"
+        });
+      }
+      prepareProviderMutation(op, {
+        kind:
+          boundary === "azure" ?
+            "azure_application.create"
+          : "github_environment.put",
+        target: "octo/app:production"
+      });
+      const original = structuredClone(unresolvedProviderMutations(op));
+      const fail = async (): Promise<never> => {
+        stopped = true;
+        if (boundary === "interruption")
+          assertSetupExecutionActive(() => stopped);
+        throw new Error("Late provider read failed");
+      };
+      const test = dependencies(op, {
+        isStopped: () => stopped,
+        ...(boundary === "azure" ?
+          { setupServices: stages(fail) }
+        : { readGitHubJson: fail })
+      });
+      await expect(
+        runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor(),
+          test.dependencies
+        )
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(unresolvedProviderMutations(op)).toEqual(original);
+      expect(test.failures).toEqual([]);
+      expect(test.events).not.toContain("persist-provider-mutation");
+    }
+  );
   it("bounds failures before an outstanding environment write can reconcile", async () => {
     const op = operation();
     const mutation = prepareProviderMutation(op, {
@@ -698,7 +845,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     let canonicalName: string | null = null;
     let putCalls = 0;
@@ -746,7 +893,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     const executor = successfulSelectedGhExecutor({
       run: async (args) =>
@@ -1099,7 +1246,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     ).toEqual({ shouldMonitor: false });
   });
 
-  it("treats a malformed persisted request as empty instead of forwarding it", async () => {
+  it("refuses a malformed persisted AWS request instead of authorizing a default role", async () => {
     const op = operation();
     op.provider = "aws";
     op.request = null;
@@ -1112,94 +1259,93 @@ describe("runEnvironmentOperationWorkflow", () => {
 
     expect(
       await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
-    ).toEqual({ shouldMonitor: true });
-    expect(test.posts).toEqual([
-      {
-        pathname: "/api/create-environment",
-        data: {
-          repo: "octo/app",
-          environment: "Production",
-          operationEnvironment: "production",
-          provider: "aws",
-          operationId: op.operationId,
-          roleArn: AWS_ROLE_ARN,
-          trustSubjects: AWS_SUBJECTS,
-          clientId: ""
+    ).toEqual({ shouldMonitor: false });
+    expect(test.posts).toEqual([]);
+    expect(test.failures).toEqual([
+      expect.objectContaining({ code: "invalid-aws-operation-input" })
+    ]);
+  });
+
+  it.each([
+    { roleName: "radius-deploy-octo-app", existingRoleArn: "" },
+    { roleName: "", existingRoleArn: AWS_ROLE_ARN },
+    { roleName: "radius-deploy-octo-app", existingRoleArn: AWS_ROLE_ARN }
+  ])(
+    "authorizes saved AWS selectors and forwards the resolved role and trust: %j",
+    async (selectors) => {
+      const op = operation();
+      op.provider = "aws";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: {
+          environment: "production",
+          ...selectors,
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks-1"
         }
-      }
-    ]);
-  });
+      };
+      const identityCalls: Array<Record<string, unknown>> = [];
+      const executor = successfulSelectedGhExecutor({
+        run: async () =>
+          command({ stdout: JSON.stringify({ name: "Production" }) })
+      });
+      const test = dependencies(op, {
+        setupAwsDeployIdentity: async (target, request, received) => {
+          expect(target).toBe(op);
+          expect(received).toBe(executor);
+          test.events.push("aws-identity");
+          identityCalls.push(request);
+          return {
+            ok: true,
+            roleArn: AWS_ROLE_ARN,
+            subjects: AWS_SUBJECTS,
+            policyName: "radius-deploy-production-111111111111"
+          };
+        }
+      });
 
-  it("prepares the AWS deploy identity after the GitHub environment and passes its role to create-environment", async () => {
-    const op = operation();
-    op.provider = "aws";
-    op.request = {
-      needsAzureCredentials: false,
-      environment: {
-        environment: "production",
-        roleName: "radius-deploy-octo-app",
-        existingRoleArn: "",
-        accountId: "123456789012",
-        region: "us-west-2",
-        cluster: "eks-1"
-      }
-    };
-    const identityCalls: Array<Record<string, unknown>> = [];
-    const executor = successfulSelectedGhExecutor({
-      run: async () =>
-        command({ stdout: JSON.stringify({ name: "Production" }) })
-    });
-    const test = dependencies(op, {
-      setupAwsDeployIdentity: async (target, request, received) => {
-        expect(target).toBe(op);
-        expect(received).toBe(executor);
-        test.events.push("aws-identity");
-        identityCalls.push(request);
-        return { ok: true, roleArn: AWS_ROLE_ARN, subjects: AWS_SUBJECTS };
-      }
-    });
+      expect(
+        await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+      ).toEqual({ shouldMonitor: true });
 
-    expect(
-      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
-    ).toEqual({ shouldMonitor: true });
-
-    expect(identityCalls).toEqual([
-      {
-        environment: "Production",
-        roleName: "radius-deploy-octo-app",
-        existingRoleArn: "",
-        accountId: "123456789012",
-        region: "us-west-2",
-        cluster: "eks-1",
-        repo: "octo/app"
-      }
-    ]);
-    expect(test.events.indexOf("canonical:Production")).toBeLessThan(
-      test.events.indexOf("aws-identity")
-    );
-    expect(test.events.indexOf("aws-identity")).toBeLessThan(
-      test.events.indexOf("post:/api/create-environment")
-    );
-    expect(test.posts).toEqual([
-      {
-        pathname: "/api/create-environment",
-        data: expect.objectContaining({
-          provider: "aws",
+      expect(identityCalls).toEqual([
+        {
           environment: "Production",
-          roleArn: AWS_ROLE_ARN,
-          trustSubjects: AWS_SUBJECTS
-        })
-      }
-    ]);
-    expect(test.failures).toEqual([]);
-  });
+          ...selectors,
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks-1",
+          repo: "octo/app"
+        }
+      ]);
+      expect(test.events.indexOf("canonical:Production")).toBeLessThan(
+        test.events.indexOf("aws-identity")
+      );
+      expect(test.events.indexOf("aws-identity")).toBeLessThan(
+        test.events.indexOf("post:/api/create-environment")
+      );
+      expect(test.posts).toEqual([
+        {
+          pathname: "/api/create-environment",
+          data: expect.objectContaining({
+            provider: "aws",
+            environment: "Production",
+            roleArn: AWS_ROLE_ARN,
+            trustSubjects: AWS_SUBJECTS
+          })
+        }
+      ]);
+      expect(test.failures).toEqual([]);
+    }
+  );
 
   it("stops at the AWS boundary when deploy identity setup is paused", async () => {
     const op = operation();
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     const executor = successfulSelectedGhExecutor({
       run: async () =>
@@ -1217,12 +1363,318 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.posts).toEqual([]);
   });
 
+  describe("an AWS failure while a restart settles an earlier write", () => {
+    function restartedAwsSetup() {
+      const op = operation();
+      op.provider = "aws";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: {
+          environment: "production",
+          roleName: "radius-deploy-octo-app",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "eks-1"
+        }
+      };
+      setCanonicalEnvironment(op, "Production");
+      recordGitHubEnvironment(op, {
+        state: "reused",
+        origin: "pre_existing",
+        repo: "octo/app",
+        name: "Production",
+        providerId: "environment-1"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_workflow.put",
+        target: "octo/app:main:.github/workflows/radius-verify-credentials.yml"
+      });
+      return { op, mutation };
+    }
+    const failedAws = (code: string) => ({
+      setupAwsDeployIdentity: async () => ({
+        ok: false as const,
+        status: 400,
+        code,
+        error: "The AWS CLI profile is not set up. Run aws configure."
+      })
+    });
+    const SIGN_IN_STEP =
+      "step:⚠️ Radius could not sign in to AWS to check the interrupted setup. The AWS CLI profile is not set up. Run aws configure. Sign in again, and Radius continues on its own.";
+
+    it.each([
+      "aws-cli-login-required",
+      "aws-verification-failed",
+      "aws-identity-invalid",
+      "aws-account-mismatch",
+      "aws-cli-unsupported"
+    ])(
+      "keeps reconciling after %s without charging the GitHub write",
+      async (code) => {
+        const { op, mutation } = restartedAwsSetup();
+        const test = dependencies(op, {
+          ...failedAws(code),
+          addLegacyStep: (target, text) => {
+            test.events.push(`step:${text}`);
+            addLegacyStep(target, text);
+          }
+        });
+
+        // A second try reads the same failure and does not repeat the step.
+        for (const _attempt of [1, 2]) {
+          await expect(
+            runEnvironmentOperationWorkflow(
+              op,
+              successfulSelectedGhExecutor(),
+              test.dependencies
+            )
+          ).rejects.toMatchObject({
+            code: "provider-mutation-outcome-unknown",
+            message: "The AWS CLI profile is not set up. Run aws configure."
+          });
+        }
+
+        expect(
+          test.events.filter((event) => event === SIGN_IN_STEP)
+        ).toHaveLength(1);
+        const live = unresolvedProviderMutations(op).find(
+          (entry) => entry.mutationId === mutation.mutationId
+        );
+        expect(live).toMatchObject({ status: "prepared" });
+        expect(live?.reconcileAttempts ?? 0).toBe(0);
+        expect(test.failures).toEqual([]);
+        expect(test.posts).toEqual([]);
+        expect(
+          test.events.filter((event) => event === "release-aws")
+        ).toHaveLength(2);
+      }
+    );
+
+    it("still charges an AWS failure that signing in would not fix", async () => {
+      const { op, mutation } = restartedAwsSetup();
+      const test = dependencies(op, failedAws("aws-role-unreadable"));
+
+      await expect(
+        runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor(),
+          test.dependencies
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+
+      expect(
+        unresolvedProviderMutations(op).find(
+          (entry) => entry.mutationId === mutation.mutationId
+        )
+      ).toMatchObject({
+        reconcileAttempts: 1,
+        evidence:
+          "Provider state could not be read: The AWS CLI profile is not set up. Run aws configure."
+      });
+      expect(test.events).not.toContain(SIGN_IN_STEP);
+    });
+
+    it("finalizes a sign-in failure as usual when nothing is unsettled", async () => {
+      const op = operation();
+      op.provider = "aws";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: { environment: "production", roleName: "fixture" }
+      };
+      const test = dependencies(op, failedAws("aws-cli-login-required"));
+
+      expect(
+        await runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor({
+            run: async () =>
+              command({ stdout: JSON.stringify({ name: "Production" }) })
+          }),
+          test.dependencies
+        )
+      ).toEqual({ shouldMonitor: false });
+      expect(test.failures).toEqual([
+        expect.objectContaining({ code: "aws-cli-login-required" })
+      ]);
+    });
+  });
+
+  it.each(["lock wait", "failed policy read"])(
+    "keeps authorization paused during %s, including after Continue",
+    async (pauseAt) => {
+      const account = "123456789012";
+      const op = createOperation({
+        provider: "aws",
+        repo: "octo/app",
+        environment: "production"
+      });
+      op.request = {
+        needsAzureCredentials: false,
+        environment: {
+          environment: "production",
+          roleName: "radius-deploy-octo-app",
+          accountId: account,
+          region: "us-west-2",
+          cluster: "eks-1"
+        }
+      };
+      op.resumeRequest = structuredClone(op.request);
+      const executor = successfulSelectedGhExecutor({
+        run: async () =>
+          command({ stdout: JSON.stringify({ name: "Production" }) })
+      });
+      const awsAnswers: Record<string, GitHubEnvironmentCommandResult> = {
+        "--version": command({
+          stdout: "aws-cli/2.17.0 Python/3.11 Darwin/23"
+        }),
+        "sts get-caller-identity": command({
+          stdout: JSON.stringify({ Account: account })
+        }),
+        "eks describe-cluster": command({
+          stdout: JSON.stringify({
+            cluster: {
+              status: "ACTIVE",
+              accessConfig: { authenticationMode: "API" }
+            }
+          })
+        }),
+        // Another run holds the lock for the whole test.
+        "iam create-policy": command({
+          code: 254,
+          stderr:
+            "An error occurred (EntityAlreadyExists) when calling CreatePolicy"
+        }),
+        "iam get-policy": command({
+          stdout: JSON.stringify({
+            Policy: { PolicyId: "LOCK0", CreateDate: "2026-08-25T01:05:00Z" }
+          })
+        })
+      };
+      const stageStates = () =>
+        Object.fromEntries(
+          op.stages.map((stage: { id: string; state: string }) => [
+            stage.id,
+            stage.state
+          ])
+        );
+      const waits: Array<Record<string, string>> = [];
+      const access = createAwsEnvironmentAccess<EnvironmentOperationRecord>({
+        async runAws(args) {
+          const answer = awsAnswers[args.slice(0, 2).join(" ")];
+          if (!answer) throw new Error(`unexpected aws ${args.join(" ")}`);
+          return answer;
+        },
+        async runGitHubJson(path) {
+          if (
+            pauseAt === "failed policy read" &&
+            path.endsWith("/variables?per_page=100")
+          ) {
+            waits.push(stageStates());
+            requestStop(op);
+            return { ok: false, status: 403, json: null };
+          }
+          if (path === "/repos/octo/app") {
+            return {
+              ok: true,
+              status: 200,
+              json: { full_name: "octo/app", id: 42, owner: { id: 7 } }
+            };
+          }
+          return { ok: false, status: 404, json: null };
+        },
+        environments: {
+          listEnvironmentNames: async () => {
+            throw new Error("unexpected environment listing");
+          },
+          readEnvironmentVariables: async () => {
+            throw new Error("unexpected variable read");
+          }
+        },
+        // Each poll of the held lock is where the customer presses Pause.
+        sleep: async () => {
+          waits.push(stageStates());
+          requestStop(op);
+        },
+        now: () => NOW,
+        isStopRequested: shouldStop,
+        isStoppedOperation: () => false,
+        operationId: (target) => target.operationId,
+        operations: {
+          getContext: (target) => target.context ?? {},
+          enterStage,
+          setStageState,
+          addLegacyStep,
+          setContext,
+          touch: () => {}
+        },
+        store: { persist: async () => {} },
+        stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      });
+      const test = dependencies(op, {
+        setupAwsDeployIdentity: (target, request, received) =>
+          access.setup(target, request, received),
+        releaseAwsDeployIdentity: (target) => access.release(target),
+        guardStopBoundary: (target, boundary) =>
+          honorStopBoundary({
+            operation: target,
+            boundary,
+            persist: async () => {}
+          })
+      });
+
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
+
+      expect(op.state).toBe("cancelled");
+      expect(stageStates()).toEqual({
+        authorize_identity: "paused",
+        configure_environment: "skipped",
+        verify: "skipped"
+      });
+      const eligibility = canContinueSetup(op);
+      expect(eligibility).toMatchObject({
+        ok: true,
+        resumeFrom: "aws_deploy_identity"
+      });
+      expect(
+        projectOperationActions(op).find(
+          (action: { kind: string }) => action.kind === "continue_setup"
+        )?.description
+      ).toContain("Authorize the deploy identity");
+
+      // What the Continue route does before it schedules the run again.
+      beginRetryAttempt(op, "setup");
+      applySetupResumePoint(op, eligibility.resumeFrom);
+      expect(stageStates()).toEqual({
+        authorize_identity: "running",
+        configure_environment: "pending",
+        verify: "pending"
+      });
+      waits.length = 0;
+
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
+
+      // Continue reruns authorization, not the later setup stages.
+      expect(waits).toEqual([
+        {
+          authorize_identity: "running",
+          configure_environment: "pending",
+          verify: "pending"
+        }
+      ]);
+      expect(test.posts).toEqual([]);
+      expect(op.state).toBe("cancelled");
+      expect(stageStates().authorize_identity).toBe("paused");
+    }
+  );
+
   it("finalizes an AWS deploy identity failure without creating the environment", async () => {
     const op = operation();
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     const executor = successfulSelectedGhExecutor({
       run: async () =>
@@ -1276,8 +1728,14 @@ describe("runEnvironmentOperationWorkflow", () => {
       "--version": "aws-cli/2.17.0 Python/3.11 Darwin/23",
       "sts get-caller-identity": { Account: account },
       "eks describe-cluster": {
-        cluster: { accessConfig: { authenticationMode: "API" } }
+        cluster: {
+          status: "ACTIVE",
+          accessConfig: { authenticationMode: "API" }
+        }
       },
+      "iam create-policy": { Policy: { PolicyId: "LOCK1" } },
+      "iam get-policy": { Policy: { PolicyId: "LOCK1" } },
+      "iam delete-policy": "",
       "iam get-role": {
         Role: {
           Arn: picked,
@@ -1292,6 +1750,11 @@ describe("runEnvironmentOperationWorkflow", () => {
       }
     };
     const githubAnswers: Record<string, GitHubJsonResponse> = {
+      "/repos/octo/app/environments/Production/variables?per_page=100": {
+        ok: true,
+        status: 200,
+        json: { variables: [] }
+      },
       "/repos/octo/app": {
         ok: true,
         status: 200,
@@ -1321,9 +1784,27 @@ describe("runEnvironmentOperationWorkflow", () => {
         if (!answer) throw new Error(`unexpected GitHub read ${path}`);
         return answer;
       },
+      environments: {
+        listEnvironmentNames: async () => {
+          throw new Error("unexpected environment listing");
+        },
+        readEnvironmentVariables: async () => {
+          throw new Error("unexpected variable read");
+        }
+      },
       sleep: async () => {},
+      now: () => NOW,
       isStopRequested: () => false,
-      operations: { enterStage, addLegacyStep, setContext },
+      isStoppedOperation: () => false,
+      operationId: (target) => target.operationId,
+      operations: {
+        getContext: (target) => target.context ?? {},
+        enterStage,
+        setStageState,
+        addLegacyStep,
+        setContext,
+        touch: () => {}
+      },
       store: { persist: async () => {} },
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage: (error) =>
@@ -1331,7 +1812,8 @@ describe("runEnvironmentOperationWorkflow", () => {
     });
     const test = dependencies(op, {
       setupAwsDeployIdentity: (target, request, received) =>
-        access.setup(target, request, received)
+        access.setup(target, request, received),
+      releaseAwsDeployIdentity: (target) => access.release(target)
     });
 
     expect(
@@ -1346,11 +1828,16 @@ describe("runEnvironmentOperationWorkflow", () => {
           "Radius created IAM role radius-deploy-octo-web for octo/web, so it cannot be used for octo/app. Nothing was changed. Pick another role or let Radius create one. Nothing was created in AWS."
       })
     ]);
+    // The lock is the only write, and the refused setup releases it.
     expect(awsCalls).toEqual([
       "--version",
       "sts get-caller-identity",
       "eks describe-cluster",
-      "iam get-role"
+      "iam create-policy",
+      "iam get-policy",
+      "iam get-role",
+      "iam get-policy",
+      "iam delete-policy"
     ]);
     expect(test.posts).toEqual([]);
   });
@@ -1382,7 +1869,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       op.provider = "aws";
       op.request = {
         needsAzureCredentials: false,
-        environment: { environment: "production" }
+        environment: { environment: "production", roleName: "fixture" }
       };
       const executor = successfulSelectedGhExecutor({
         run: async (args) =>
@@ -1413,7 +1900,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = {
       needsAzureCredentials: false,
-      environment: { environment: "production" }
+      environment: { environment: "production", roleName: "fixture" }
     };
     const executor = successfulSelectedGhExecutor({
       run: async (args) =>
@@ -1429,7 +1916,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       setupAwsDeployIdentity: async () => ({
         ok: true,
         roleArn: AWS_ROLE_ARN,
-        subjects: AWS_SUBJECTS
+        subjects: AWS_SUBJECTS,
+        policyName: "radius-deploy-production-111111111111"
       })
     });
 
@@ -1452,7 +1940,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       op.provider = "aws";
       op.request = {
         needsAzureCredentials: false,
-        environment: { environment: "production" }
+        environment: { environment: "production", roleName: "fixture" }
       };
       const executor = successfulSelectedGhExecutor({
         run: async () => command({ stdout: JSON.stringify(body) })

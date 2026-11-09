@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
 import { describe, expect, it } from "vitest";
 import {
   continuationMatchesLiveContext,
@@ -155,5 +156,23 @@ describe("live continuation fingerprint", () => {
         test
       )
     ).toBe(false);
+  });
+  it.each([
+    "/repos/owner/repo",
+    "/repos/owner/repo/actions/oidc/customization/sub"
+  ])("preserves typed interruption from %s", async (path) => {
+    const test = ports();
+    const read = test.runGitHubJson;
+    const interrupted = new ProviderMutationRecoveryError(
+      "stopped",
+      "setup-execution-interrupted"
+    );
+    test.runGitHubJson = async (current) => {
+      if (current === path) throw interrupted;
+      return read(current);
+    };
+    await expect(
+      continuationMatchesLiveContext(continuation, "owner/repo", "dev", test)
+    ).rejects.toBe(interrupted);
   });
 });

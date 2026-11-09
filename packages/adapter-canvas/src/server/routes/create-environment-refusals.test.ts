@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   admitCreateEnvironmentRequest,
-  refuseUnlessServerOwned,
-  SERVER_OWNED_REFUSAL,
   type AdmissionPorts,
   type CreateEnvironmentRequestData
 } from "./create-environment-refusals.js";
@@ -168,26 +166,6 @@ function ports(script: Script = {}): Recorder {
   };
   return recorder;
 }
-
-describe("rung 1 — the server-owned gate", () => {
-  it("refuses a request that does not carry the server-owned token", () => {
-    expect(refuseUnlessServerOwned(false)).toEqual({
-      status: 403,
-      body: {
-        error: "This endpoint is reserved for server-owned operations.",
-        code: "server-owned-operation-required"
-      }
-    });
-  });
-
-  it("admits a server-owned request", () => {
-    expect(refuseUnlessServerOwned(true)).toBeNull();
-  });
-
-  it("publishes the refusal as a shared constant so the wire body has one source", () => {
-    expect(refuseUnlessServerOwned(false)).toBe(SERVER_OWNED_REFUSAL);
-  });
-});
 
 describe("the create-environment refusal ladder", () => {
   it.each(SUPPORTED_OPERATION_SCHEMA_VERSIONS)(

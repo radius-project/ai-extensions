@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { assertSetupExecutionActive } from "./setup-recovery-error.js";
 import { ensureAzureServicePrincipal } from "./setup-azure-service-principal.js";
 import type {
   AzureMutationRecord,
@@ -10,6 +11,7 @@ const proceed = async () => true;
 const sleep = async () => {};
 function recovery(record: AzureMutationRecord | null): AzureRecoveryPort {
   return {
+    assertActive: () => {},
     find: () => record,
     willWrite: () => true,
     unresolved: () => [],
@@ -20,6 +22,38 @@ function recovery(record: AzureMutationRecord | null): AzureRecoveryPort {
 }
 
 describe("ensureAzureServicePrincipal", () => {
+  it.each(["before", "empty", "failed", "positive"] as const)(
+    "guards the first lookup at %s without discarding positive issued evidence",
+    async (boundary) => {
+      let stopped = boundary === "before";
+      const port = recovery(null);
+      port.assertActive = () => assertSetupExecutionActive(() => stopped);
+      const read = vi.fn(async () => {
+        stopped = true;
+        return boundary === "failed" ?
+            command("", 1, "Request_ResourceNotFound")
+          : command(boundary === "positive" ? "object-id" : "");
+      });
+      const pending = ensureAzureServicePrincipal(
+        "app",
+        read,
+        port,
+        proceed,
+        sleep
+      );
+      if (boundary === "positive")
+        await expect(pending).resolves.toMatchObject({
+          state: "reused",
+          objectId: "object-id"
+        });
+      else
+        await expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+      expect(read).toHaveBeenCalledTimes(boundary === "before" ? 0 : 1);
+    }
+  );
+
   it("fails closed when a precheck has neither status nor diagnostics", async () => {
     expect(
       await ensureAzureServicePrincipal(

@@ -95,6 +95,8 @@ The generated workflows serialize Gateway lifecycle operations across all Radius
 
 ## When a deploy fails
 
+When automatic recovery stops with a failure, use the `radius-report-issue` skill to offer a report to the Radius team. State that the user can review the issue before submission. Do not collect extra diagnostics until they agree, and require separate explicit permission to submit the reviewed draft. A monitoring timeout is a monitoring failure with an unknown remote outcome, not proof that deployment failed.
+
 `RETRY_CAP` = 5 — the maximum number of automatic repair-and-redeploy attempts before handing back to the user (used in the modeling-failure handling below).
 
 Before troubleshooting, classify the failure, because the fix lives in different places:

@@ -1,8 +1,13 @@
-import type { SetupWorkflowRecoveryPort } from "@radius-project/core";
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
+  type SetupWorkflowRecoveryPort
+} from "@radius-project/core";
 import {
   providerMutationId,
   providerMutationRecord,
   providerMutationsByKind,
+  providerRecoveryManualGuidance,
   settleProviderMutation,
   unresolvedProviderMutations
 } from "../../operations.js";
@@ -16,9 +21,12 @@ export function createSetupWorkflowRecoveryPort(
     operationId: string;
     providerRecovery?: { state?: string };
   },
-  persist: () => Promise<void>
+  persist: () => Promise<void>,
+  isStopped: () => boolean
 ): SetupWorkflowRecoveryPort {
+  const assertActive = () => assertSetupExecutionActive(isStopped);
   return {
+    assertActive,
     operationId: operation.operationId,
     find: (kind, target) => providerMutationRecord(operation, kind, target),
     byKind: (kind) => providerMutationsByKind(operation, kind),
@@ -26,11 +34,23 @@ export function createSetupWorkflowRecoveryPort(
     willWrite: (kind, target) =>
       providerMutationWillWrite(operation, kind, target),
     execute: (input) =>
-      executeRecoverableMutation({ ...input, operation, persist }),
+      executeRecoverableMutation({
+        ...input,
+        operation,
+        persist,
+        rethrowReconciliationError: isSetupExecutionInterrupted,
+        assertActive: () => {
+          assertActive();
+          input.assertActive?.();
+        }
+      }),
     rollbackPending: () =>
       operation.providerRecovery?.state === "rollback_pending",
     markRollbackPending: () => {
-      if (operation.providerRecovery)
+      if (
+        operation.providerRecovery &&
+        !providerRecoveryManualGuidance(operation)
+      )
         operation.providerRecovery.state = "rollback_pending";
     },
     settleManual: (kind, target, guidance) => {

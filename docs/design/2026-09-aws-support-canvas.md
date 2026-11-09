@@ -20,7 +20,7 @@ Three principles shape it.
 ## Terms and definitions
 
 | Term | Definition |
-| --- | --- |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Access entry | The EKS object that grants an IAM principal access to a cluster. Radius creates one for the deploy identity. |
 | Authentication mode | How an EKS cluster decides who may call it. `API` and `API_AND_CONFIG_MAP` accept access entries; the older `CONFIG_MAP` mode, configured through the `aws-auth` ConfigMap, does not. |
 | Deploy identity | The identity GitHub Actions uses when deploying. On Azure an Entra app registration the workflow signs in as, holding Contributor on one resource group. On AWS an IAM role the workflow assumes, which cannot leave its account. |
@@ -68,7 +68,7 @@ None of the following is needed for Azure parity, so none is in scope.
 Error handling covers what the developer is told when one of these is missing.
 
 | Dependency | Why it is needed |
-| --- | --- |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | AWS CLI 2.15.3 or later, with a live session | Discovery, verification, and identity setup all run through it |
 | A target EKS cluster the canvas may grant access to | Required to set up an environment on that cluster |
 | A GitHub identity provider in the AWS account | Required for passwordless role assumption; one serves every repository in the account, so Radius creates it only if the account has none, and never removes it |
@@ -94,7 +94,7 @@ The developer starts with a repository and no environment. The canvas reads it a
 Nothing here is AWS-specific. A dependency resolves to a **Radius resource type**, such as `Radius.Data/mySqlDatabases` rather than Amazon RDS. The environment decides later which cloud service sits behind that type. Everything generated lands in the repository beside the application definition and is reviewed in the same pull request.
 
 | Dependency found in the application | What the developer gets |
-| --- | --- |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | Core primitive: container, container image, route, volume, secret | Standard core Radius type deployed to K8s |
 | Tier 1 backing service | Standard Radius type, resolved at deploy to the cloud service in the catalog |
 | A service AWS can provision | Generated custom type whose recipe provisions the managed AWS service |
@@ -105,7 +105,7 @@ Generation is automatic rather than a path the developer chooses, and the type c
 **Parity with Azure**
 
 | Capability | Azure today | What AWS requires |
-| --- | --- | --- |
+| --------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | Dependency outside the built-in catalog | Generates a custom type, with an Azure Verified Module where one matches | The same, with a recipe declaring the AWS resource types directly, there being no verified-module equivalent |
 
 ### Step 2 · Connect an AWS account
@@ -125,7 +125,7 @@ Saving unlocks once both the cloud session and GitHub Packages access are verifi
 **Parity with Azure**
 
 | Capability | Azure today | What AWS requires |
-| --- | --- | --- |
+| -------------------------- | ---------------------------------------- | -------------------------------------------------------------- |
 | What the profile scopes to | Tenant and subscription | Account and region |
 | Signing in from the canvas | Azure CLI login remediation | `Sign in to AWS CLI`, which runs `aws sso login` |
 | Wrong account detected | Rejects a tenant mismatch, blocking Save | Rejects an account mismatch the same way, naming both accounts |
@@ -168,14 +168,22 @@ Progress runs through the same three stages Azure reports.
 - **`Authorize deploy identity`** prepares the AWS side, naming each check as it passes.
   - The AWS CLI version is detected and confirmed against the 2.15.3 minimum.
   - The account's GitHub identity provider is checked, and created if the account has none.
-  - The subject the role will trust is stated, as `Deploy identity will trust <subject>`. The subject is the same GitHub OIDC claim Azure's federated credential carries — `repo:<owner>/<repo>:environment:<env>` by default, and the immutable or customized form where the repository uses one — so the two clouds trust the identical string.
+  - The subject the role will trust is stated, as `Deploy identity will trust <subject>`. The subject is the same GitHub OIDC claim Azure's federated credential carries — `repo:<owner>/<repo>:environment:<env>` by default, and the immutable or customized form where the repository uses one — so the two clouds trust the identical string. A customized subject that names neither the repository nor its ID, such as one built from only `repository_owner` and `context`, is refused before anything is written to AWS, because every repository with the same claim values presents it. The message names the claim keys and says to add `repo` or `repository_id`.
   - The role is created, or an existing one reused.
-  - A deploy permission policy named `radius-deploy-<env>` is attached, carrying that environment's region. The role it attaches to already names the repository, so the policy name carries only the environment.
+  - A deploy permission policy named `radius-deploy-<sanitized-env>-<12-character-hash>` is attached, carrying that environment's region. The hash includes the canonical repository and exact environment name, so picked roles can serve separate repositories without overwriting their policies.
   - The cluster is checked, and the role granted access to it.
 - **`Configure environment`** records the environment on GitHub and commits the deploy workflow.
 - **`Verify credentials`** exercises the trust once, so the developer sees GitHub assume the role before a deploy depends on it.
 
-**What the developer ends up with** is a role granted `PowerUserAccess`, bounded to the regions of the environments that use it, and `cluster-admin` on the target cluster. It cannot make itself or anyone else an administrator. One role serves the repository in that account, carrying a trust subject and a permission policy per environment, so adding an environment cannot narrow another and tearing one down cannot break another.
+**What the developer ends up with** is a role with regional PowerUser-style grants and `cluster-admin` on the target cluster. The new inline policy omits IAM administration, service-linked-role deletion, and EKS access-entry and access-policy administration. It allows service-linked-role creation only for RDS, ElastiCache, and OpenSearch. These are omitted grants, not explicit denies: other policies on a picked or partly migrated role can still allow those actions. Other PowerUser-style permissions remain broad.
+
+The compact policy is 591 characters for `us-east-2` and 596 for `ap-southeast-7`, excluding whitespace. Seventeen copies fit IAM's 10,240-character aggregate inline-policy limit if no other inline policies consume the space. Trust-policy limits apply separately. The compact policy no longer includes `account:GetPrimaryEmail`.
+
+Setup migrates only the current environment's legacy `radius-deploy-<env>` policy. There is no bulk migration. Exact, unambiguous trust subjects can establish ownership on a picked role without Radius tags. Ambiguous subjects or unreadable policies stop setup before changes. Normally the replacement is attached before the legacy policy is removed. If both copies exceed the quota, setup removes only the owned legacy policy and retries. This can briefly interrupt the environment's permissions. If replacement fails, setup attempts to restore the original policy and reports any restoration failure. A pause or lost lock stops further writes, including restoration.
+
+Before attaching a policy, setup durably records its exact name, role ARN, environment, and GitHub repository ID in the operation. Failed and paused attempts reuse this identity after a rename. Completed setup also records `AWS_PERMISSION_POLICY_NAME` with the trust subjects in the GitHub environment. Conflicting or unreadable metadata stops setup before AWS changes. A fresh attempt without a recorded identity checks existing grants before changing the role. Another repository's same-environment grant requires an immutable repository ID in its accepted trust subject or a matching saved role/policy binding. Otherwise setup stops rather than guessing. This does not enable automatic AWS authorization recovery after process restart.
+
+Deployment and deletion workflows only authenticate and connect to EKS; developer setup creates access entries and associates access policies. Before dispatch, Canvas uses the saved environment provider, not a request hint, to check committed AWS workflow templates on both relevant branches. Azure and unconfigured environments skip that check because the dispatchers run their AWS job only for an environment saved as AWS. A failed synchronization cannot silently run an old workflow that still administers EKS access. Protected branches require a pull request with the current templates. Trust Repair checks the recorded policy name under the deploy-role lock, falling back to the legacy name only when none was recorded.
 
 **Other setup outcomes.**
 
@@ -189,7 +197,7 @@ Progress runs through the same three stages Azure reports.
 **Parity with Azure**
 
 | Capability | Azure today | What AWS requires |
-| --- | --- | --- |
+| --------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | What the wizard discovers for you | Resource groups, AKS clusters, namespaces | EKS clusters, namespaces, VPCs, subnets |
 | What is created or changed in the cloud | App registration when needed, federated credential, and scoped role assignments | GitHub identity provider when the account has none, IAM role when needed, repository trust, regional permissions, and EKS cluster access |
 | How many identities a repository gets | One per repository, spanning every subscription in the tenant | One per repository **per account**; an IAM role cannot span accounts, so an account per environment means a role per environment |
@@ -230,7 +238,7 @@ Failures caused by identity or cluster access name their specific cause rather t
 Watching a run, the deployments list, and the delete controls are provider-neutral and unchanged.
 
 | Capability | Azure today | What AWS requires |
-| --- | --- | --- |
+| ------------------------- | -------------------------------------------------------- | ------------------------------------------------------ |
 | The closing message | `🎉 Deployment complete! Application deployed to Azure.` | `🎉 Deployment complete! Application deployed to AWS.` |
 | When identity has drifted | Names the federated credential or role assignment | Names the trust policy or permissions |
 
@@ -241,7 +249,7 @@ The recipe pack decides which AWS service stands behind each Radius type.
 Ten backing services are in the first release, ranked by how often developers need them, from the ranked catalog proposed in [radius-project/radius#13122](https://github.com/radius-project/radius/pull/13122). They are where the pack starts, not the limit of what an application can use.
 
 | Rank | Developer dependency | Radius resource type | Azure outcome | AWS outcome |
-| --- | --- | --- | --- | --- |
+| ---- | -------------------- | --------------------------------- | ---------------------------- | --------------------- |
 | 1 | PostgreSQL | `Radius.Data/postgreSqlDatabases` | PostgreSQL Flexible Server | Amazon RDS PostgreSQL |
 | 2 | Redis | `Radius.Data/redisCaches` | Azure Managed Redis | Amazon ElastiCache |
 | 3 | Object storage | `Radius.Storage/objectStorage` | Storage Account | Amazon S3 |
@@ -261,12 +269,14 @@ A developer tearing down work needs to know what leaves their AWS account and wh
 
 Deleting an environment states the AWS consequences first. It names the cluster the environment is removed from, the trust subject and policy removed from the role, and the role that is left in place. If applications remain, deletion is blocked and names the applications to delete first.
 
-What the environment added to the role is removed: its subject leaves the trust policy and its `radius-deploy-<env>` policy is detached and deleted. The role itself is never deleted, whether Radius created it or Sam picked it — it is shared by every environment in the repository, so an environment teardown leaves it alone, names it, and says to remove it in the console if it is no longer needed. This matches Azure, which leaves the app registration in place for the same reason. The account's GitHub identity provider is always retained.
+Deletion removes the exact inline policy recorded in `AWS_PERMISSION_POLICY_NAME`, then removes the recorded trust subjects. It does not recompute the policy name from a repository that may have been renamed. Older environments without a saved name require a confirmed policy inventory and unambiguous legacy ownership. An unknown repository hash stops deletion instead of silently leaving a regional grant. Policy removal happens before trust removal so a failed legacy deletion retains the ownership evidence needed for retry.
+
+The role itself is never deleted, whether Radius created it or the developer picked it. Other environments' trust and grants remain. The account's GitHub identity provider is always retained. After deletion, Canvas names the retained role and says to remove it manually if nothing needs it.
 
 **Parity with Azure**
 
 | Capability | Azure today | What AWS requires |
-| --- | --- | --- |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | What happens to the deploy identity | Deletes the environment's federated credential; leaves the app registration and says to remove it manually | Removes the environment's trust subject and its policy; leaves the role and says to remove it manually |
 | What you are told afterwards | Names the federated credential removed | Names what was removed and what was kept |
 
@@ -281,7 +291,7 @@ These rules hold wherever a step fails.
 Several of these are not the developer's to fix. Where a permission they do not hold is required, the message names the command and is written to be handed to whoever does. The conditions below follow the order of the journey.
 
 | Condition | What the developer is told |
-| --- | --- |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | A dependency neither AWS nor the cluster can provide | Named during modeling, with nothing generated for it, and reported as permanent rather than offered a retry |
 | No AWS CLI session | Named, with the commands to sign in, alongside a `Sign in to AWS CLI` remediation that runs `aws sso login` for them |
 | Account ID or region is not a valid value | Named at the field, before verification runs |
@@ -311,7 +321,7 @@ Several of these are not the developer's to fix. Where a permission they do not 
 ### Needs engineering investigation
 
 | Area | Question |
-| --- | --- |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | AWS recipe coverage | Investigate an alternative to Terraform for building the AWS recipe pack, and whether it covers all ten backing services |
 | Application credentials | Whether every recipe can return an access key as a secret, or whether workload identity is needed for an application to reach its AWS resource. |
 | Deploy identity breadth | Azure scopes the deploy identity's permissions to a resource group. The `PowerUserAccess` policy in AWS, bounded by region, is account-wide within that region. Whether the role can be narrowed by tag, by permissions boundary, or by a scoped policy. |

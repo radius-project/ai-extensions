@@ -143,6 +143,22 @@ describe("handleRunRemediation", () => {
     expect(payload.message).toContain("Verify Credentials");
   });
 
+  it("hands the AWS discovery sign-in to the session with its discovery follow-up", async () => {
+    const { payload, sent } = await run(
+      JSON.stringify({
+        id: "aws-cli-login",
+        params: { nextStep: "refresh-discovery" }
+      })
+    );
+
+    expect(payload.success).toBe(true);
+    expect(payload.command).toBe("aws sso login");
+    expect(payload.message).toContain("refresh resource discovery");
+    expect(sent[0].displayPrompt).toBe(
+      "Signing in to AWS CLI so the Radius canvas can refresh AWS resource discovery."
+    );
+  });
+
   it.each([
     ["an unknown id", { id: "shutdown-the-cluster" }],
     ["a missing id", {}],
