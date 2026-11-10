@@ -67,12 +67,15 @@ describe("aws-discovery real-loopback list-aws-roles", () => {
   });
   const getRole = (name: string) =>
     `aws iam get-role --role-name ${name} --output json`;
-  const tagged = (repo: string) =>
+  // octo/shop's GitHub ID is 22.
+  const readRepoId = "gh api /repos/octo/shop --jq .id";
+  const tagged = (repo: string, id: number) =>
     JSON.stringify({
       Role: {
         Tags: [
           { Key: "Radius-Managed", Value: "true" },
-          { Key: "radius-repository", Value: repo }
+          { Key: "radius-repository", Value: repo },
+          { Key: "radius-repository-id", Value: String(id) }
         ]
       }
     });
@@ -104,8 +107,11 @@ describe("aws-discovery real-loopback list-aws-roles", () => {
         ]
       })
     );
-    cli.set(getRole("radius-deploy-octo-api"), tagged("octo/api"));
-    cli.set(getRole("radius-deploy-octo-shop"), tagged("octo/shop"));
+    // octo/api is the old name of the repository that is now octo/shop.
+    cli.set(getRole("radius-deploy-octo-api"), tagged("octo/api", 22));
+    // A repository that used the name octo/shop before.
+    cli.set(getRole("radius-deploy-octo-shop"), tagged("octo/shop", 99));
+    cli.set(readRepoId, "22\n");
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(
@@ -115,9 +121,9 @@ describe("aws-discovery real-loopback list-aws-roles", () => {
     expect(await response.json()).toEqual({
       roles: [
         {
-          arn: `arn:aws:iam::${account}:role/radius-deploy-octo-shop`,
-          name: "radius-deploy-octo-shop",
-          trustedSubjects: ["repo:octo/shop:environment:dev"]
+          arn: `arn:aws:iam::${account}:role/radius-deploy-octo-api`,
+          name: "radius-deploy-octo-api",
+          trustedSubjects: ["repo:octo/api:environment:dev"]
         },
         {
           arn: `arn:aws:iam::${account}:role/app-runtime`,
@@ -145,7 +151,8 @@ describe("aws-discovery real-loopback list-aws-roles", () => {
     cli.set(getRole("radius-deploy-octo-api"), {
       throws: new Error("AccessDenied: iam:GetRole")
     });
-    cli.set(getRole("radius-deploy-octo-shop"), tagged("octo/shop"));
+    cli.set(getRole("radius-deploy-octo-shop"), tagged("octo/shop", 22));
+    cli.set(readRepoId, "22");
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(
@@ -156,6 +163,40 @@ describe("aws-discovery real-loopback list-aws-roles", () => {
       error: "Failed to list IAM roles: AccessDenied: iam:GetRole",
       code: "aws-role-list-failed",
       roles: []
+    });
+  });
+
+  it("still lists roles Radius didn't tag when GitHub can't say which repository is asking", async () => {
+    const cli = start();
+    cli.set(
+      listRoles,
+      JSON.stringify({
+        Roles: [
+          githubRole(
+            "radius-deploy-octo-shop",
+            "repo:octo/shop:environment:dev"
+          ),
+          githubRole("platform-deploy", "repo:octo/shop:environment:ci")
+        ]
+      })
+    );
+    cli.set(getRole("radius-deploy-octo-shop"), tagged("octo/shop", 22));
+    cli.set(getRole("platform-deploy"), JSON.stringify({ Role: { Tags: [] } }));
+    cli.set(readRepoId, { throws: new Error("HTTP 404: Not Found") });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/list-aws-roles?accountId=${account}&repo=octo%2Fshop`
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      roles: [
+        {
+          arn: `arn:aws:iam::${account}:role/platform-deploy`,
+          name: "platform-deploy",
+          trustedSubjects: ["repo:octo/shop:environment:ci"]
+        }
+      ]
     });
   });
 });

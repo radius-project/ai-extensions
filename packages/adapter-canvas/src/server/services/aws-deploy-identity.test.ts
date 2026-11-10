@@ -19,7 +19,8 @@ import {
   type AwsDeployIdentityRequest,
   type AwsDeployIdentityRemovalRequest,
   type AwsEnvironmentListing,
-  type AwsLockResult
+  type AwsLockResult,
+  type AwsRepositoryIdLookup
 } from "./aws-deploy-identity.js";
 
 const ACCOUNT = "123456789012";
@@ -29,6 +30,16 @@ const DEV = "repo:octo/shop:environment:dev";
 const PROD = "repo:octo/shop:environment:prod";
 // The ID-based form a repository without immutable subjects also presents.
 const DEV_ID = "repository_owner_id:11:repository_id:22:environment:dev";
+// GitHub's ID for octo/shop.
+const REPO_ID = 22;
+// The tags Radius puts on a role it creates for a repository.
+const radiusTags = (repo: string, repoId: number | null) => [
+  { Key: "radius-managed", Value: "true" },
+  { Key: "radius-repository", Value: repo },
+  ...(repoId === null ?
+    []
+  : [{ Key: "radius-repository-id", Value: String(repoId) }])
+];
 
 const ok = (stdout: unknown = ""): AwsCommandResult => ({
   code: 0,
@@ -43,6 +54,7 @@ const fail = (stderr: string): AwsCommandResult => ({
 
 const request: AwsDeployIdentityRequest = {
   repo: "octo/shop",
+  repoId: REPO_ID,
   environment: "dev",
   accountId: ACCOUNT,
   region: "us-west-2",
@@ -62,6 +74,7 @@ const unexpectedListing = async (): Promise<never> => {
 // with no access entry for the role.
 const removalRequest: AwsDeployIdentityRemovalRequest = {
   repo: "octo/shop",
+  repoId: REPO_ID,
   roleArn: ROLE_ARN,
   environment: "dev",
   subjects: [DEV],
@@ -82,10 +95,7 @@ const managedRole = (subjects: string[]) => ({
     Arn: ROLE_ARN,
     CreateDate: ROLE_CREATED_AT,
     AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects),
-    Tags: [
-      { Key: "radius-managed", Value: "true" },
-      { Key: "radius-repository", Value: "octo/shop" }
-    ]
+    Tags: radiusTags("octo/shop", REPO_ID)
   }
 });
 
@@ -538,6 +548,7 @@ describe("setupAwsDeployIdentity", () => {
     const createRole = aws.find("iam create-role");
     expect(createRole).toContain("Key=radius-managed,Value=true");
     expect(createRole).toContain("Key=radius-repository,Value=octo/shop");
+    expect(createRole).toContain(`Key=radius-repository-id,Value=${REPO_ID}`);
     const trust = parsePolicyDocument(
       JSON.parse(
         createRole?.[createRole.indexOf("--assume-role-policy-document") + 1] ??
@@ -606,6 +617,88 @@ describe("setupAwsDeployIdentity", () => {
       JSON.parse(update[update.indexOf("--policy-document") + 1] ?? "{}")
     );
     expect(trustedGitHubSubjects(merged, ACCOUNT)).toEqual([PROD, DEV]);
+  });
+
+  it("reuses this repository's role after the repository was renamed", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-role": ok({
+        Role: {
+          ...managedRole([PROD]).Role,
+          Tags: radiusTags("octo/old-shop", REPO_ID)
+        }
+      }),
+      ...existingProvider,
+      "iam update-assume-role-policy": ok(),
+      "eks create-access-entry": ok(),
+      "eks associate-access-policy": ok()
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({ ok: true, roleCreated: false });
+    expect(aws.steps).toContain(
+      `✅ Reusing the Radius-managed IAM role ${ROLE}`
+    );
+  });
+
+  // Ownership is the repository ID tag alone: a role found by the default
+  // name is reused only when it carries this repository's ID.
+  it.each([
+    [
+      "another repository's ID under this repository's name",
+      radiusTags("octo/shop", 99),
+      `An IAM role named ${ROLE} already exists, but Radius created it for octo/shop (repository ID 99), not for octo/shop (repository ID ${REPO_ID}). That can be a repository that used this name before. No change was made. Choose a different name.`
+    ],
+    [
+      "only the name tag an earlier build wrote",
+      radiusTags("octo/shop", null),
+      `An IAM role named ${ROLE} already exists, but Radius did not create it for octo/shop. No change was made. Either select that role deliberately with "use an existing role…", or choose a different name.`
+    ],
+    [
+      "this repository's ID without the managed tag",
+      [{ Key: "radius-repository-id", Value: String(REPO_ID) }],
+      `An IAM role named ${ROLE} already exists, but Radius did not create it for octo/shop. No change was made. Either select that role deliberately with "use an existing role…", or choose a different name.`
+    ]
+  ])(
+    "refuses a role found by name that has %s, before any write",
+    async (_label, tags, message) => {
+      const aws = fakeAws({
+        ...freeChecks,
+        "iam get-role": ok({ Role: { ...managedRole([DEV]).Role, Tags: tags } })
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toEqual({
+        ok: false,
+        code: "aws-role-not-radius-managed",
+        message,
+        created: []
+      });
+      expect(aws.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+        "--version",
+        "sts get-caller-identity",
+        "eks describe-cluster",
+        "iam get-role"
+      ]);
+    }
+  );
+
+  it("adds to a role an earlier build tagged only by name when it is picked deliberately", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      ...existingProvider,
+      "iam get-role": ok({
+        Role: {
+          ...managedRole([PROD]).Role,
+          Tags: radiusTags("octo/api", null)
+        }
+      }),
+      "iam update-assume-role-policy": ok()
+    });
+    const result = await setupAwsDeployIdentity(
+      { ...request, existingRoleArn: ROLE_ARN },
+      aws.ports
+    );
+    expect(result).toMatchObject({ ok: true, roleCreated: false });
+    expect(aws.steps).toContain(`✅ Using the selected IAM role ${ROLE}.`);
   });
 
   it("trusts every subject the environment may present on a new role", async () => {
@@ -968,7 +1061,8 @@ describe("setupAwsDeployIdentity", () => {
           ]),
           Tags: [
             { Key: "Radius-Managed", Value: "true" },
-            { Key: "radius-repository", Value: "octo/api" }
+            { Key: "radius-repository", Value: "octo/api" },
+            { Key: "radius-repository-id", Value: "33" }
           ]
         }
       })
@@ -981,7 +1075,7 @@ describe("setupAwsDeployIdentity", () => {
       ok: false,
       code: "aws-role-other-repository",
       message:
-        "Radius created IAM role radius-deploy-octo-api for octo/api, so it cannot be used for octo/shop. Nothing was changed. Pick another role or let Radius create one.",
+        "Radius created IAM role radius-deploy-octo-api for octo/api (repository ID 33), so it cannot be used for octo/shop (repository ID 22). Nothing was changed. Pick another role or let Radius create one.",
       created: []
     });
     expect(aws.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
@@ -992,17 +1086,14 @@ describe("setupAwsDeployIdentity", () => {
     ]);
   });
 
-  it("accepts a picked role Radius created for this repository in another case", async () => {
+  it("accepts a picked role Radius created for this repository under its old name", async () => {
     const aws = fakeAws({
       ...freeChecks,
       ...existingProvider,
       "iam get-role": ok({
         Role: {
           ...managedRole([PROD]).Role,
-          Tags: [
-            { Key: "radius-managed", Value: "true" },
-            { Key: "radius-repository", Value: "Octo/Shop" }
-          ]
+          Tags: radiusTags("octo/old-shop", REPO_ID)
         }
       }),
       "iam update-assume-role-policy": ok(),
@@ -2182,14 +2273,12 @@ describe("removeAwsEnvironmentFromRole", () => {
     it.each([
       ["a picked role with no tags", { Arn: ROLE_ARN }],
       [
-        "a role Radius created for another repository",
-        {
-          Arn: ROLE_ARN,
-          Tags: [
-            { Key: "radius-managed", Value: "true" },
-            { Key: "radius-repository", Value: "octo/renamed" }
-          ]
-        }
+        "a role Radius created for another repository with this name",
+        { Arn: ROLE_ARN, Tags: radiusTags("octo/shop", 99) }
+      ],
+      [
+        "a role an earlier build tagged only by name",
+        { Arn: ROLE_ARN, Tags: radiusTags("octo/shop", null) }
       ]
     ])("never touches the entry of %s", async (_label, role) => {
       const aws = fakeAws({
@@ -2613,6 +2702,7 @@ describe("waiting for IAM to show a trust policy write", () => {
 describe("repairAwsEnvironmentTrust", () => {
   const repair = {
     repo: "octo/shop",
+    repoId: REPO_ID,
     environment: "dev",
     roleArn: ROLE_ARN,
     subjects: [DEV, DEV_ID],
@@ -2777,7 +2867,16 @@ describe("repairAwsEnvironmentTrust", () => {
       "only another repository",
       unmanagedRole(["repo:mallory/evil:environment:dev"])
     ],
-    ["no GitHub subject", unmanagedRole([])]
+    ["no GitHub subject", unmanagedRole([])],
+    [
+      "another environment, with only an earlier build's name tag",
+      {
+        Role: {
+          ...unmanagedRole([PROD]).Role,
+          Tags: radiusTags("octo/shop", null)
+        }
+      }
+    ]
   ])(
     "refuses a role Radius did not tag that trusts %s but not this environment",
     async (_label, role) => {
@@ -2797,10 +2896,8 @@ describe("repairAwsEnvironmentTrust", () => {
     const role = {
       Role: {
         ...managedRole([DEV]).Role,
-        Tags: [
-          { Key: "radius-managed", Value: "true" },
-          { Key: "radius-repository", Value: "octo/web" }
-        ]
+        // The name is this repository's: another repository had it first.
+        Tags: radiusTags("octo/shop", 99)
       }
     };
     const aws = fakeAws({ ...ready, "iam get-role": ok(role) });
@@ -2808,7 +2905,7 @@ describe("repairAwsEnvironmentTrust", () => {
     expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
       ok: false,
       code: "aws-role-not-this-repository",
-      message: `Radius created IAM role ${ROLE} for octo/web, not octo/shop, so Repair will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role.`
+      message: `Radius created IAM role ${ROLE} for octo/shop (repository ID 99), not octo/shop (repository ID ${REPO_ID}), so Repair will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role.`
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
@@ -3333,11 +3430,13 @@ describe("rollbackAwsSetupChanges", () => {
   const rollback = (
     aws: ReturnType<typeof fakeAws>,
     which: readonly AwsSetupRollbackTarget[] = all,
-    listOtherEnvironments = noOtherEnvironments
+    listOtherEnvironments = noOtherEnvironments,
+    repository: AwsRepositoryIdLookup = { ok: true, repoId: REPO_ID }
   ) =>
     rollbackAwsSetupChanges(
       {
         repo: "octo/shop",
+        repository,
         environment: "dev",
         roleArn: ROLE_ARN,
         targets: which
@@ -3575,6 +3674,47 @@ describe("rollbackAwsSetupChanges", () => {
     ]);
   });
 
+  it("keeps only the access entry, for Retry deletion, when the repository's ID can't be read", async () => {
+    const aws = fakeAws(fullRollback);
+    const result = await rollback(aws, all, unexpectedListing, {
+      ok: false,
+      reason: "HTTP 502"
+    });
+    expect(outcomes(result)).toEqual({
+      entry: "warning",
+      policy: "deleted",
+      subject: "deleted",
+      role: "deleted"
+    });
+    expect(result.find((entry) => entry.key === "entry")?.detail).toBe(
+      `Kept any access entry for ${ROLE} on shop, because Radius couldn't read octo/shop's repository ID from GitHub (HTTP 502), so it can't tell whether Radius created this role for it. Retry deletion to try again.`
+    );
+    expect(writes(aws)).not.toContain("eks delete-access-entry");
+    expect(aws.find("eks describe-access-entry")).toBeUndefined();
+  });
+
+  it("keeps the access entry of a role tagged with this repository's name but another repository's ID", async () => {
+    const aws = fakeAws({
+      ...fullRollback,
+      "iam get-role": ok({
+        Role: {
+          ...managedRole([DEV]).Role,
+          RoleId: "AROA1",
+          Tags: radiusTags("octo/shop", 99)
+        }
+      })
+    });
+    const result = await rollback(aws, [targets.entry], unexpectedListing);
+    expect(result).toEqual([
+      expect.objectContaining({
+        key: "entry",
+        outcome: "skipped",
+        detail: `Kept any access entry for ${ROLE} on shop, because Radius didn't create this role for octo/shop, and other repositories may use it.`
+      })
+    ]);
+    expect(aws.calls.some((args) => args[0] === "eks")).toBe(false);
+  });
+
   it("does nothing when another run holds the lock", async () => {
     const aws = fakeAws(fullRollback, {
       ok: false,
@@ -3608,6 +3748,7 @@ describe("rollbackAwsSetupChanges", () => {
     const result = await rollbackAwsSetupChanges(
       {
         repo: "octo/shop",
+        repository: { ok: true, repoId: REPO_ID },
         environment: "dev",
         roleArn: "arn:aws-cn:iam::123456789012:role/x",
         targets: all

@@ -16,6 +16,7 @@ const ACCOUNT = "123456789012";
 const SUBJECT = "repo:octo/shop:environment:dev";
 const request = {
   repo: "octo/shop",
+  repoId: 22,
   environment: "dev",
   roleName: "picked",
   accountId: ACCOUNT,

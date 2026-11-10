@@ -664,12 +664,17 @@ describe("listAwsRoles exclusions", () => {
   });
   const getRole = (name: string) =>
     `aws iam get-role --role-name ${name} --output json`;
-  const tagged = (repo: string) =>
+  // octo/shop's GitHub ID is 22.
+  const READ_REPO_ID = "gh api /repos/octo/shop --jq .id";
+  const tagged = (repo: string, id: number | null) =>
     JSON.stringify({
       Role: {
         Tags: [
           { Key: "Radius-Managed", Value: "true" },
-          { Key: "radius-repository", Value: repo }
+          { Key: "radius-repository", Value: repo },
+          ...(id === null ?
+            []
+          : [{ Key: "radius-repository-id", Value: String(id) }])
         ]
       }
     });
@@ -713,10 +718,11 @@ describe("listAwsRoles exclusions", () => {
           ])
         ]
       }),
-      [getRole("radius-deploy-octo-old")]: tagged("octo/old"),
+      [getRole("radius-deploy-octo-old")]: tagged("octo/old", 33),
       [getRole("zeta-ci")]: JSON.stringify({ Role: { Tags: [] } }),
-      [getRole("radius-deploy-octo-shop")]: tagged("Octo/Shop"),
-      [getRole("radius-deploy-octo-api")]: tagged("octo/api")
+      [getRole("radius-deploy-octo-shop")]: tagged("octo/old-shop", 22),
+      [getRole("radius-deploy-octo-api")]: tagged("octo/api", 44),
+      [READ_REPO_ID]: "22\n"
     });
     const roles = await listAwsRoles(
       { accountId: ACCOUNT, repo: "octo/shop" },
@@ -733,18 +739,104 @@ describe("listAwsRoles exclusions", () => {
       getRole("radius-deploy-octo-shop"),
       getRole("radius-deploy-octo-api")
     ]);
+    expect(calls.filter((line) => line === READ_REPO_ID)).toHaveLength(1);
   });
 
-  it("leaves out every Radius role when the repository is unknown", async () => {
+  it("leaves out a role tagged with this repository's name but another repository's ID", async () => {
+    // A repository created at the old name of a renamed one.
     const { dependencies } = fakes({
+      "aws iam list-roles": JSON.stringify({
+        Roles: [githubRole("radius-deploy-octo-shop", ["repo:octo/shop:x"])]
+      }),
+      [getRole("radius-deploy-octo-shop")]: tagged("octo/shop", 99),
+      [READ_REPO_ID]: "22"
+    });
+    expect(
+      await listAwsRoles(
+        { accountId: ACCOUNT, repo: "octo/shop" },
+        dependencies
+      )
+    ).toEqual([]);
+  });
+
+  it("lists a role an earlier build tagged only by name, without reading GitHub", async () => {
+    const { calls, dependencies } = fakes({
       "aws iam list-roles": JSON.stringify({
         Roles: [githubRole("radius-deploy-octo-api", ["repo:octo/api:x"])]
       }),
-      [getRole("radius-deploy-octo-api")]: tagged("octo/api")
+      [getRole("radius-deploy-octo-api")]: tagged("octo/api", null)
+    });
+    expect(
+      (
+        await listAwsRoles(
+          { accountId: ACCOUNT, repo: "octo/shop" },
+          dependencies
+        )
+      ).map((role) => role.name)
+    ).toEqual(["radius-deploy-octo-api"]);
+    expect(calls.some((line) => line.startsWith("gh "))).toBe(false);
+  });
+
+  it("leaves out every role Radius tagged with a repository ID when the repository is unknown", async () => {
+    const { calls, dependencies } = fakes({
+      "aws iam list-roles": JSON.stringify({
+        Roles: [githubRole("radius-deploy-octo-api", ["repo:octo/api:x"])]
+      }),
+      [getRole("radius-deploy-octo-api")]: tagged("octo/api", 44)
     });
     expect(await listAwsRoles({ accountId: ACCOUNT }, dependencies)).toEqual(
       []
     );
+    expect(calls.some((line) => line.startsWith("gh "))).toBe(false);
+  });
+
+  it.each([
+    ["GitHub fails", new Error("HTTP 404")],
+    ["GitHub returns no ID", "null"],
+    ["GitHub returns zero", "0"],
+    ["GitHub returns an unsafe ID", "9007199254740992"]
+  ])(
+    "leaves out only the roles Radius tagged when %s",
+    async (_label, answer) => {
+      const { calls, dependencies } = fakes({
+        "aws iam list-roles": JSON.stringify({
+          Roles: [
+            githubRole("radius-deploy-octo-shop", ["repo:octo/shop:x"]),
+            githubRole("radius-deploy-octo-api", ["repo:octo/api:x"]),
+            githubRole("zeta-ci", ["repo:octo/shop:ci"])
+          ]
+        }),
+        [getRole("radius-deploy-octo-shop")]: tagged("octo/shop", 22),
+        [getRole("radius-deploy-octo-api")]: tagged("octo/api", 44),
+        [getRole("zeta-ci")]: JSON.stringify({ Role: { Tags: [] } }),
+        [READ_REPO_ID]: answer
+      });
+      expect(
+        (
+          await listAwsRoles(
+            { accountId: ACCOUNT, repo: "octo/shop" },
+            dependencies
+          )
+        ).map((role) => role.name)
+      ).toEqual(["zeta-ci"]);
+      expect(calls.filter((line) => line === READ_REPO_ID)).toHaveLength(1);
+    }
+  );
+
+  it("leaves out the roles Radius tagged, without asking GitHub, for a repository that isn't owner/name", async () => {
+    const { calls, dependencies } = fakes({
+      "aws iam list-roles": JSON.stringify({
+        Roles: [githubRole("deploy", ["repo:octo/shop:x"])]
+      }),
+      [getRole("deploy")]: tagged("octo/shop", 22)
+    });
+    expect(
+      await listAwsRoles(
+        { accountId: ACCOUNT, repo: "octo/shop/../../user" },
+        dependencies
+      )
+    ).toEqual([]);
+    expect(calls.some((line) => line.startsWith("gh "))).toBe(false);
   });
 
   it.each([

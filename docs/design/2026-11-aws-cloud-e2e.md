@@ -95,7 +95,7 @@ Everything except IAM is limited to the two regions. The test role can't create 
 
 **The deploy role.** Setup gives it permissions by writing inline policies on it, so whoever runs setup controls what it can do. In an account shared with Radius's tests, that must be capped, so the administrator creates it ahead of time with:
 
-- The tags setup puts on a role it creates, so setup reuses it instead of creating one.
+- The tags setup puts on a role it creates, including `radius-repository-id` with the fixture repository's GitHub ID, so setup reuses it instead of creating one.
 - The trust policy setup leaves when no environment uses the role: one deny statement, `RadiusNoTrustedEnvironments`.
 - A permissions boundary, which is the most a role can ever do, whatever its own policies say. It allows only the services the recipes use (Cloud Control, RDS, and a few EKS and EC2 reads), only in the two regions. It denies IAM, account settings, and `s3:PutAccountPublicAccessBlock`. Each new recipe adds its service.
 

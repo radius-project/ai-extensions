@@ -37,7 +37,8 @@ import {
   parseAwsRoleArn,
   parsePolicyDocument,
   readRecordedAwsLock,
-  radiusRoleRepository,
+  radiusRoleRepositoryId,
+  describeRadiusRoleOwner,
   namesOneEnvironment,
   namesRepositoryEnvironment,
   immutableEnvironmentRepository,
@@ -827,7 +828,7 @@ describe("permissions and provenance", () => {
 
   it("recognizes picked-role ownership from trust and refuses unknown trust conditions", () => {
     const input = {
-      repo: "octo/shop",
+      repoId: 42,
       environment: "dev",
       accountId: ACCOUNT,
       subjects: [DEV]
@@ -851,6 +852,31 @@ describe("permissions and provenance", () => {
         role: { AssumeRolePolicyDocument: trust }
       })
     ).toContain("cannot interpret");
+  });
+
+  it("accepts the legacy policy's role by its repository ID tag, not its name tag", () => {
+    const input = {
+      repoId: 42,
+      environment: "dev",
+      accountId: ACCOUNT,
+      subjects: [DEV]
+    };
+    const role = (id: string | null) => ({
+      AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, []),
+      Tags: [
+        { Key: "radius-managed", Value: "true" },
+        { Key: "radius-repository", Value: "octo/shop" },
+        ...(id === null ? [] : [{ Key: "radius-repository-id", Value: id }])
+      ]
+    });
+    expect(legacyAwsPolicyOwnershipError({ ...input, role: role("42") })).toBe(
+      null
+    );
+    for (const id of ["99", null]) {
+      expect(
+        legacyAwsPolicyOwnershipError({ ...input, role: role(id) })
+      ).toContain("Neither the role's trust subjects nor its ownership tags");
+    }
   });
 
   it("limits the power-user grant to the environment's region and never grants IAM", () => {
@@ -907,64 +933,93 @@ describe("permissions and provenance", () => {
     ).toEqual({ team: "shop" });
   });
 
-  it("recognizes only roles Radius tagged for this repository", () => {
+  it("recognizes only roles Radius tagged with this repository's ID", () => {
     const role = {
       Tags: [
         { Key: "radius-managed", Value: "true" },
-        { Key: "radius-repository", Value: "Octo/Shop" }
+        { Key: "radius-repository", Value: "Octo/Shop" },
+        { Key: "radius-repository-id", Value: "42" }
       ]
     };
-    expect(awsRoleTags(role)).toEqual({
-      "radius-managed": "true",
-      "radius-repository": "Octo/Shop"
-    });
-    expect(isRadiusManagedRole(role, "octo/shop")).toBe(true);
-    expect(isRadiusManagedRole(role, "octo/other")).toBe(false);
-    expect(isRadiusManagedRole({ Tags: [] }, "octo/shop")).toBe(false);
-    expect(
-      isRadiusManagedRole(
-        { Tags: [{ Key: "radius-managed", Value: "true" }] },
-        "octo/shop"
-      )
-    ).toBe(false);
-    expect(isRadiusManagedRole(null, "octo/shop")).toBe(false);
+    expect(radiusRoleRepositoryId(role)).toBe(42);
+    expect(isRadiusManagedRole(role, 42)).toBe(true);
+    expect(isRadiusManagedRole(role, 43)).toBe(false);
+    expect(isRadiusManagedRole(null, 42)).toBe(false);
+  });
+
+  it("gives a role with the right name but another repository's ID to that repository", () => {
+    // A repository created at a renamed repository's old name.
+    const role = {
+      Tags: [
+        { Key: "radius-managed", Value: "true" },
+        { Key: "radius-repository", Value: "octo/shop" },
+        { Key: "radius-repository-id", Value: "42" }
+      ]
+    };
+    expect(isRadiusManagedRole(role, 99)).toBe(false);
+    expect(describeRadiusRoleOwner(role)).toBe("octo/shop (repository ID 42)");
+  });
+
+  it("gives no repository a role an earlier build tagged only by name", () => {
+    const role = {
+      Tags: [
+        { Key: "radius-managed", Value: "true" },
+        { Key: "radius-repository", Value: "octo/shop" }
+      ]
+    };
+    expect(radiusRoleRepositoryId(role)).toBeNull();
+    expect(describeRadiusRoleOwner(role)).toBeNull();
   });
 
   it("reads Radius's tags whatever their key case, as IAM role tag keys ignore case", () => {
     const role = {
       Tags: [
         { Key: "Radius-Managed", Value: "true" },
-        { Key: "RADIUS-REPOSITORY", Value: "octo/api" }
+        { Key: "RADIUS-REPOSITORY-ID", Value: "7" }
       ]
     };
-    expect(radiusRoleRepository(role)).toBe("octo/api");
-    expect(isRadiusManagedRole(role, "octo/api")).toBe(true);
+    expect(radiusRoleRepositoryId(role)).toBe(7);
+    expect(isRadiusManagedRole(role, 7)).toBe(true);
+    expect(describeRadiusRoleOwner(role)).toBe("repository ID 7");
   });
 
   it.each([
     ["no tags", { Tags: [] }],
-    ["no managed tag", { Tags: [{ Key: "radius-repository", Value: "o/r" }] }],
+    ["no managed tag", { Tags: [{ Key: "radius-repository-id", Value: "7" }] }],
     [
       "a managed tag that is not true",
       {
         Tags: [
           { Key: "radius-managed", Value: "false" },
-          { Key: "radius-repository", Value: "o/r" }
+          { Key: "radius-repository-id", Value: "7" }
         ]
       }
     ],
-    [
-      "an empty repository tag",
-      {
-        Tags: [
-          { Key: "radius-managed", Value: "true" },
-          { Key: "radius-repository", Value: "" }
-        ]
-      }
-    ],
+    ...["", "0", "-7", "07", "7.0", " 7", "1e3", "abc", "9007199254740992"].map(
+      (value) => [
+        `the repository ID tag ${JSON.stringify(value)}`,
+        {
+          Tags: [
+            { Key: "radius-managed", Value: "true" },
+            { Key: "radius-repository-id", Value: value }
+          ]
+        }
+      ]
+    ),
     ["a value that is not a role", "role"]
   ])("names no repository for a role with %s", (_label, role) => {
-    expect(radiusRoleRepository(role)).toBeNull();
+    expect(radiusRoleRepositoryId(role)).toBeNull();
+  });
+
+  it("accepts the largest safe repository ID", () => {
+    expect(
+      radiusRoleRepositoryId({
+        Tags: [
+          { Key: "radius-managed", Value: "true" },
+          { Key: "radius-repository-id", Value: "9007199254740991" }
+        ]
+      })
+    ).toBe(Number.MAX_SAFE_INTEGER);
   });
 });
 
