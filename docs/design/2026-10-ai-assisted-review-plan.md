@@ -116,7 +116,7 @@ We need to know whether Copilot code review can remember facts about our repo. S
 
 ### Phase 2: Copilot code review on every push
 
-The [operations runbook](../eng/COPILOT_REVIEW_OPERATIONS.md) covers setup, monitoring, stopping review loops, rollback, and testing in GitHub. Merging it changes no settings or approval rules. Before enabling reviews on every push, we must verify Stage 1 in GitHub, agree what to check instead of the unsupported summary format, and obtain separate approval for the rollout.
+Merging this proposal changes no settings or approval rules. Before enabling reviews on every push, we must verify Stage 1 in GitHub, agree what to check instead of the unsupported summary format, and obtain separate approval for the rollout.
 
 #### Step 2.1: Have Copilot re-review new pushes
 
@@ -147,7 +147,7 @@ Keep these rules in `radius-code-review`; `code-review.instructions.md` links to
 
 - When you find a bug, name its class and list every instance, not just the first.
 - Read prior findings and avoid duplicates. GitHub warns that resolved findings can still recur.
-- After three completed automated review rounds, hand unresolved findings to the author. Following the runbook, the author stops every agent or automation that applies fixes or pushes commits, then decides what to do next. The skill cannot make GitHub stop reviewing.
+- After three completed automated review rounds, hand unresolved findings to the author. The author stops every agent or automation that applies fixes or pushes commits, then decides what to do next. The skill cannot make GitHub stop reviewing.
 
 If reviews keep running unexpectedly, an admin authorized to roll back can restore the push-review and effort settings changed by this rollout. Keep merge protections intact. Personal or organization triggers can still start reviews, and queued or running reviews may continue. This stage adds no automation to enforce a round limit.
 
@@ -291,7 +291,7 @@ We need evidence for two separate questions. The Step 4.5 trial measures whether
 Each phase gets one verification:
 
 - **Phase 1.** Open a pull request after Step 1.2 and confirm that Copilot's review applied the `radius-code-review` skill and ended with the summary comment.
-- **Phase 2.** Once the rollout is separately authorized, run the [checks in GitHub](../eng/COPILOT_REVIEW_OPERATIONS.md#live-acceptance-record). Confirm that Copilot reviews the new commit after a push, skips drafts under the tested settings, handles resolved findings, and uses the requested effort. Test a maintainer's review request, the author's pause after round three, and admin rollback. Record any blocked case or platform limitation. Local reviews cannot establish these results.
+- **Phase 2.** Once the rollout is separately authorized, test it in GitHub. Confirm that Copilot reviews the new commit after a push, skips drafts under the tested settings, handles resolved findings, and uses the requested effort. Test a maintainer's review request, the author's pause after round three, and admin rollback. Record any blocked case or platform limitation. Local reviews cannot establish these results.
 - **Phase 3.** On a scratch branch, break each required check in turn (a failing test, a lint error, a vulnerable dependency, a seeded CodeQL alert) and confirm the pull request can't merge.
 - **Phase 4.** Run the acceptance cases below on a scratch repository with a copy of the `main` ruleset and the same Copilot settings, before we change anything in ai-extensions.
 
@@ -331,7 +331,7 @@ This proposal lets some changes merge without a human, so its main risk is a pul
 ## Open questions
 
 **Q: Who pays for reviews on every push?**
-Automatic reviews usually charge the author; manual reviews usually charge the requester. Organization policies and bot/cloud-agent billing rules can change who pays, and Actions charges are separate. Before enabling Phase 2, the billing owner must confirm who pays, what bounds spending, who can monitor it, and who can stop the experiment. Follow the [billing procedure](../eng/COPILOT_REVIEW_OPERATIONS.md#billing-and-monitoring); get separate authorization before changing organization billing or paid-usage policies.
+Automatic reviews usually charge the author; manual reviews usually charge the requester. Organization policies and bot/cloud-agent billing rules can change who pays, and Actions charges are separate. Before enabling Phase 2, the billing owner must confirm who pays, what bounds spending, who can monitor it, and who can stop the experiment. Get separate authorization before changing organization billing or paid-usage policies.
 
 **Q: Is the trial bar right?**
 Step 4.5 asks for four weeks, 30 low-tier pull requests, and zero false approvals. Someone has to record Copilot's assessment next to the human decision for each of those pull requests. Proposed: keep the bar, and name an owner for the record before the trial starts.
