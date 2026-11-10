@@ -116,6 +116,8 @@ We need to know whether Copilot code review can remember facts about our repo. S
 
 ### Phase 2: Copilot code review on every push
 
+Merging this proposal changes no settings or approval rules. Before enabling reviews on every push, we must verify Stage 1 in GitHub, agree what to check instead of the unsupported summary format, and obtain separate approval for the rollout.
+
 #### Step 2.1: Have Copilot re-review new pushes
 
 We need Copilot to review every push to a pull request that is ready for review, not just its first version. A fix pushed after the first review can bring a new bug, and today only a human reviewer stands between that bug and `main` unless someone manually asks Copilot to look again.
@@ -125,9 +127,13 @@ We should change two sets of settings:
 - In the `main` ruleset, turn on "Review new pushes."
 - In the repository's Copilot code review settings, set the default effort level to Balanced and the maximum to Max, so authors can request a Max review of a risky change by hand. Leave Copilot approvals off for now; Step 4.5 sets the conditions for turning them on.
 
-Copilot code review is billed in AI credits, to the pull request author by default. A Balanced review costs about $1.50, so reviewing every push multiplies that by the number of pushes. A re-review also keeps the last effort level used, so once someone requests Max, every later push costs about $10.
+Leave draft reviews off in the repository rule. Personal or organization settings can still trigger them. Keep all existing merge requirements, including human approvals, required checks, and thread resolution.
 
-The ruleset reviews only pull requests [created by people with access to Copilot](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#automatic-pull-request-reviews). An outside contributor without a Copilot license gets no automatic review, so a maintainer must request one by hand, and the maintainer will pay for it.
+Reviews use AI credits and may also incur Actions charges. GitHub's [published costs](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#estimated-consumption) are estimates, not fixed prices or spending caps.
+
+GitHub chooses effort in this order: an explicit request, the previous review's effort, the requester's preference, the repository default, then the organization default. After a Max review, later automatic reviews can therefore use Max despite the repository's Balanced default. Max is in preview. Check that it is available under our policies and confirm the effort each completed review reports.
+
+Automatic reviews usually charge the author; manual reviews usually charge the requester. Organization policies and bot billing rules can change who pays. Organization members without individual licenses [may qualify](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-code-review-without-a-copilot-license) when the required policies are enabled; outside contributors do not necessarily qualify. If the author lacks access, a maintainer with access can request the review once spending is authorized. If nobody can request it, continue with human review and leave merge requirements unchanged.
 
 #### Step 2.2: Keep every finding answered
 
@@ -137,11 +143,13 @@ Our `main` ruleset already requires every review thread to be resolved before me
 
 We need reviews to converge instead of looping forever. One of Anthropic's pull requests went through more than fifty rounds of review and fixes overnight. When the team traced what the reviewer kept flagging, 59% of it was code present at the first review: the reviewer was handing out old findings a few at a time instead of catching new bugs.
 
-We should add three rules to `code-review.instructions.md`:
+Keep these rules in `radius-code-review`; `code-review.instructions.md` links to the skill:
 
 - When you find a bug, name its class and list every instance, not just the first.
-- Never repeat a finding already posted.
-- After three rounds of automated review, stop and ask the pull request author to step in.
+- Read prior findings and avoid duplicates. GitHub warns that resolved findings can still recur.
+- After three completed automated review rounds, hand unresolved findings to the author. The author stops every agent or automation that applies fixes or pushes commits, then decides what to do next. The skill cannot make GitHub stop reviewing.
+
+If reviews keep running unexpectedly, an admin authorized to roll back can restore the push-review and effort settings changed by this rollout. Keep merge protections intact. Personal or organization triggers can still start reviews, and queued or running reviews may continue. This stage adds no automation to enforce a round limit.
 
 ### Phase 3: Blocking security and build checks
 
@@ -181,11 +189,11 @@ This list leaves out the per-plugin `Build <plugin> dist` jobs. Their check name
 
 We should write a short `docs/eng/REVIEW_POLICY.md` that assigns each change a tier by what it touches.
 
-| Tier | Examples in this repo | Human approvals | Why |
-| --- | --- | --- | --- |
-| Low | Docs, copy, changesets, visual baseline updates, and tests that run without credentials (unit, integration, browser) | Copilot approval for trusted authors, one human approval for all other authors | Nothing here runs with credentials or ships as code. A mistake is visible in the diff and cheap to revert. |
-| Medium | Ordinary changes to `packages/core` and `packages/adapter-canvas` | One | This code ships to users, but CI, coverage, and Copilot review catch most mistakes, and a bad release can be fixed with the next one. |
-| High | `.github/workflows/**`, `.github/extension/**`, `packages/core/src/platforms/**`, `packages/core/src/workflows/**`, the cloud test suite (`packages/adapter-canvas/test/e2e-cloud/**` and `packages/adapter-canvas/playwright.cloud.config.ts`), and the release scripts (`scripts/plugins.mjs`, `scripts/version.mjs`, `scripts/release-version.mjs`, `scripts/release-plan.mjs`, `scripts/verified-git.mjs`, `scripts/validate-plugin-dist.mjs`) | One | These run with credentials, act outside this repo, and are hard to undo. Passing tests don't show they're safe (more info below). |
+| Tier   | Examples in this repo                                                                                                                                                                                                                                                                                                                                                                                                                              | Human approvals                                                                | Why                                                                                                                                   |
+|--------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+| Low    | Docs, copy, changesets, visual baseline updates, and tests that run without credentials (unit, integration, browser)                                                                                                                                                                                                                                                                                                                               | Copilot approval for trusted authors, one human approval for all other authors | Nothing here runs with credentials or ships as code. A mistake is visible in the diff and cheap to revert.                            |
+| Medium | Ordinary changes to `packages/core` and `packages/adapter-canvas`                                                                                                                                                                                                                                                                                                                                                                                  | One                                                                            | This code ships to users, but CI, coverage, and Copilot review catch most mistakes, and a bad release can be fixed with the next one. |
+| High   | `.github/workflows/**`, `.github/extension/**`, `packages/core/src/platforms/**`, `packages/core/src/workflows/**`, the cloud test suite (`packages/adapter-canvas/test/e2e-cloud/**` and `packages/adapter-canvas/playwright.cloud.config.ts`), and the release scripts (`scripts/plugins.mjs`, `scripts/version.mjs`, `scripts/release-version.mjs`, `scripts/release-plan.mjs`, `scripts/verified-git.mjs`, `scripts/validate-plugin-dist.mjs`) | One                                                                            | These run with credentials, act outside this repo, and are hard to undo. Passing tests don't show they're safe (more info below).     |
 
 Each high-tier path is there for a specific reason:
 
@@ -283,24 +291,24 @@ We need evidence for two separate questions. The Step 4.5 trial measures whether
 Each phase gets one verification:
 
 - **Phase 1.** Open a pull request after Step 1.2 and confirm that Copilot's review applied the `radius-code-review` skill and ended with the summary comment.
-- **Phase 2.** Push to an open pull request and confirm that Copilot reviews the new commit without being asked.
+- **Phase 2.** Once the rollout is separately authorized, test it in GitHub. Confirm that Copilot reviews the new commit after a push, skips drafts under the tested settings, handles resolved findings, and uses the requested effort. Test a maintainer's review request, the author's pause after round three, and admin rollback. Record any blocked case or platform limitation. Local reviews cannot establish these results.
 - **Phase 3.** On a scratch branch, break each required check in turn (a failing test, a lint error, a vulnerable dependency, a seeded CodeQL alert) and confirm the pull request can't merge.
 - **Phase 4.** Run the acceptance cases below on a scratch repository with a copy of the `main` ruleset and the same Copilot settings, before we change anything in ai-extensions.
 
 In each case, "blocked" means GitHub won't allow the merge.
 
-| # | Scenario | Setup | Expected result |
-| --- | --- | --- | --- |
-| 1 | Mixed tiers | A trusted author changes `docs/setup.md` and `.github/workflows/build.yml`, and Copilot approves. | Blocked until a human approves. Copilot's approval doesn't count, because the workflow file matches no glob. |
-| 2 | Stale human approval | A human approves, then the author pushes another commit. | Blocked until a human approves the new commit. The ruleset dismisses stale approvals on push and requires approval of the latest push. |
-| 3 | Dismissed Copilot approval | Copilot approves a low-tier change, then the author pushes again. | Blocked until Copilot approves the new commit or a human does. |
-| 4 | A push raises the tier | A low-tier pull request gets a new commit that touches `packages/core/src/workflows/`. | Copilot's approval no longer counts, so the new commit needs a human approval. |
-| 5 | Label tampering | Someone removes `risk:high` or adds `risk:low` by hand. | No change. The checks ignore labels. |
-| 6 | Untrusted author | An outside contributor's docs-only pull request gets a Copilot approval. | Blocked until a human approves. |
-| 7 | Instruction change | A pull request edits `.github/instructions/code-review.instructions.md` along with a docs file. | Copilot's approval doesn't count, and the labeler adds `review-instructions-changed` and its comment. |
-| 8 | Team lookup fails | The trusted-author check runs with a token that can't read team membership. | The check fails, so the pull request is blocked. |
-| 9 | Agent of unknown origin | An agent opens a low-tier pull request, and the check can't confirm which team member started it. | Treated as untrusted: blocked until a human approves. |
-| 10 | Approvals suspended | A maintainer turns off "Allow Copilot approvals to count toward merge requirements," then Copilot approves a trusted author's low-tier pull request. | Blocked until a human approves (Step 4.7). |
+| #  | Scenario                   | Setup                                                                                                                                                | Expected result                                                                                                                        |
+|----|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| 1  | Mixed tiers                | A trusted author changes `docs/setup.md` and `.github/workflows/build.yml`, and Copilot approves.                                                    | Blocked until a human approves. Copilot's approval doesn't count, because the workflow file matches no glob.                           |
+| 2  | Stale human approval       | A human approves, then the author pushes another commit.                                                                                             | Blocked until a human approves the new commit. The ruleset dismisses stale approvals on push and requires approval of the latest push. |
+| 3  | Dismissed Copilot approval | Copilot approves a low-tier change, then the author pushes again.                                                                                    | Blocked until Copilot approves the new commit or a human does.                                                                         |
+| 4  | A push raises the tier     | A low-tier pull request gets a new commit that touches `packages/core/src/workflows/`.                                                               | Copilot's approval no longer counts, so the new commit needs a human approval.                                                         |
+| 5  | Label tampering            | Someone removes `risk:high` or adds `risk:low` by hand.                                                                                              | No change. The checks ignore labels.                                                                                                   |
+| 6  | Untrusted author           | An outside contributor's docs-only pull request gets a Copilot approval.                                                                             | Blocked until a human approves.                                                                                                        |
+| 7  | Instruction change         | A pull request edits `.github/instructions/code-review.instructions.md` along with a docs file.                                                      | Copilot's approval doesn't count, and the labeler adds `review-instructions-changed` and its comment.                                  |
+| 8  | Team lookup fails          | The trusted-author check runs with a token that can't read team membership.                                                                          | The check fails, so the pull request is blocked.                                                                                       |
+| 9  | Agent of unknown origin    | An agent opens a low-tier pull request, and the check can't confirm which team member started it.                                                    | Treated as untrusted: blocked until a human approves.                                                                                  |
+| 10 | Approvals suspended        | A maintainer turns off "Allow Copilot approvals to count toward merge requirements," then Copilot approves a trusted author's low-tier pull request. | Blocked until a human approves (Step 4.7).                                                                                             |
 
 We also need to confirm these facts before the step that depends on each:
 
@@ -323,7 +331,7 @@ This proposal lets some changes merge without a human, so its main risk is a pul
 ## Open questions
 
 **Q: Who pays for reviews on every push?**
-Copilot bills each review to the pull request's author, so a busy pull request costs its author more with every push, and a re-review at Max costs about $10 (Step 2.1). Maintainers would also pay to review outside contributions. Proposed: watch spend during the Phase 2 rollout, then decide whether the organization should pay through a budget.
+Automatic reviews usually charge the author; manual reviews usually charge the requester. Organization policies and bot/cloud-agent billing rules can change who pays, and Actions charges are separate. Before enabling Phase 2, the billing owner must confirm who pays, what bounds spending, who can monitor it, and who can stop the experiment. Get separate authorization before changing organization billing or paid-usage policies.
 
 **Q: Is the trial bar right?**
 Step 4.5 asks for four weeks, 30 low-tier pull requests, and zero false approvals. Someone has to record Copilot's assessment next to the human decision for each of those pull requests. Proposed: keep the bar, and name an owner for the record before the trial starts.
