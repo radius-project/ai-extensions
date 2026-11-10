@@ -1,0 +1,339 @@
+# radius
+
+## 0.5.0
+
+### Minor Changes
+
+- [#1073](https://github.com/radius-project/ai-extensions/pull/1073) [@nellshamrell](https://github.com/nellshamrell) - **Added:** Configure and verify Azure or AWS environments without opening Canvas using `radius_setup_environment`, inspect saved setup and verification with `radius_environment_status`, and resume or control that same operation with `radius_environment_control`. Setup never deploys; account choices and sensitive commands require trusted host interaction, and cleanup remains limited to proven-owned setup resources.
+
+  Cooperative Stop remains available while setup holds its GitHub account lease, credentials are unavailable or another tool interaction is pending. Concurrent Stop requests stay bound to the same target and account rather than being refused because an earlier Stop changed progress. Stop rechecks its original target and runtime immediately before recording the request, without an intervening asynchronous wait. Setup trims surrounding whitespace from environment names and returns the canonical target with its operation ID for subsequent status and control calls.
+
+  AWS remains behind the default-off startup developer switch. Supply account, region, cluster, VPC, subnet IDs and either `roleName` or `existingRoleArn`; an existing role takes precedence when both selectors are supplied. Disabled AWS setup does not ask for a GitHub account. Continue/Retry refuses a missing or invalid role selector instead of authorizing a default role. AWS setup requests are not retained across runtime restarts; start a new setup after restarting.
+
+  Input prompts refresh after setup finishes settling, and application-selection prompts include bounded, redacted choices with IDs, creation dates and the saved default. Verification reports the required setup pull request merge with a validated link to the saved repository's pull request when available. Runtime shutdown preserves uncertain verification dispatch evidence without starting further reconciliation or reporting a false terminal failure.
+
+  Resume keeps the original request's authority through answer reads and saves without requiring a panel. Controls report temporary task-busy guidance separately from failed durable correction. Verification bypass rechecks the saved target and runtime immediately before writing its marker, including after GitHub identity verification; already-issued writes retain their actual result.
+
+  An inconclusive GitHub Packages check reports unavailable access and asks you to retry the same account, rather than silently selecting another account or suggesting a scope grant. Confirmed push access remains valid if empty-upload cleanup fails. Workflow status observations that were saved successfully remain intact if authority is lost immediately afterward.
+
+  Runtime shutdown prevents new account-access probes and includes pending upload cleanup and account restoration in the existing bounded drain.
+
+- [#1171](https://github.com/radius-project/ai-extensions/pull/1171) [@nicolejms](https://github.com/nicolejms) - **Added:** Offer an issue draft after a terminal Radius failure, with sanitized diagnostics, session settings, user review, and separate permission before submission to the Radius team.
+
+- [#1162](https://github.com/radius-project/ai-extensions/pull/1162) [@nicolejms](https://github.com/nicolejms) - **Added:** Ask for approval at session start before updating the Radius plugin from its current marketplace, then wait 7 days after any answer before asking again for that marketplace. Unavailable approval and preference-storage errors do not show session warnings. Start a new session to load installed changes, or set `COPILOT_AUTO_UPDATE=false` to turn off the request.
+
+### Patch Changes
+
+- [#1164](https://github.com/radius-project/ai-extensions/pull/1164) [@nithyatsu](https://github.com/nithyatsu) - **Security:** Update the deploy progress artifact uploader to undici 6.29.1. Existing generated provider workflows need to be refreshed to pick up this fix.
+
+- [#1176](https://github.com/radius-project/ai-extensions/pull/1176) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Check the AWS CLI version and account before credential verification, profile saves, setup, environment removal, and lock removal. Use noninteractive verification, distinguish credential failures from other errors, and invalidate verification when AWS account or region fields change.
+
+  Restore verification controls and dismiss the pending dialog when a credential form changes provider, including an interrupted Azure verification.
+
+  Keep credential fields locked while Save is pending, then restore their state on success or failure.
+
+- [#1177](https://github.com/radius-project/ai-extensions/pull/1177) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Isolate regional AWS grants by repository and environment, retain exact policy names for deletion after repository renames, and migrate unambiguous legacy policies on picked roles. Recover inline-policy space during migration without deleting another environment's grant. Deployment and deletion workflows use setup-granted EKS access, and Canvas blocks stale AWS workflow templates before dispatch.
+
+  Persist policy identity before attachment so failed or paused setup can reuse it. Refuse unreconciled grants on fresh attempts, use the saved provider for workflow checks, and repair trust against the recorded policy name.
+
+- [#1189](https://github.com/radius-project/ai-extensions/pull/1189) [@AzureMike](https://github.com/AzureMike) - **Fixed:** While AWS setup waits for another run to release the deploy identity lock, the original GitHub CLI account stays active. GitHub readiness checks and verification workflow inspection and cancellation can switch accounts during the wait instead of failing because the account is in use. Before it configures the GitHub environment, AWS setup waits for any other GitHub CLI account work to finish and selects its account again.
+
+- [#1166](https://github.com/radius-project/ai-extensions/pull/1166) [@AzureMike](https://github.com/AzureMike) - **Fixed:** The AWS environment form now offers only EKS clusters that Radius can use and says why each other cluster can't be used. The VPC comes from the selected cluster, and Create Environment stays disabled until the selected subnets cover two standard availability zones. Refresh keeps the selected cluster, namespace, and subnets when they're still available. The namespace list follows the selected cluster, and Create Environment stays disabled while the list loads. If the cluster's namespaces can't be read, the list shows only `default`, and a note says why. Setup waits for an `UPDATING` cluster to be `ACTIVE` before it changes anything.
+
+- [#1073](https://github.com/radius-project/ai-extensions/pull/1073) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep workflow cancellation bound to the confirmed GitHub account and exact run, refusing a new cancellation if setup changes or the runtime shuts down while it waits. Preserve the original run's result when an already-issued cancellation settles, and report results that cannot be saved without overwriting a replacement setup.
+
+  Keep a recorded Stop separate from a delayed workflow-status read: refuse stale results without changing a replacement run or announcing its completion, and report a failed status save without discarding the known result. Cancel remains available while the stopped setup task settles; an unissued cancellation restores only its own unchanged command and workflow status.
+
+- [#1190](https://github.com/radius-project/ai-extensions/pull/1190) [@kachawla](https://github.com/kachawla) - **Fixed:** When a deployment fails before Radius runs, show the failing workflow step's own error message first in the failure details, instead of losing it among error lines from the cleanup steps that run afterward.
+
+- [#1201](https://github.com/radius-project/ai-extensions/pull/1201) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Check peer hostnames built into container images during application modeling, use proven configuration or compatible names, and stop with a clear report when the selected Recipe cannot supply the required DNS name.
+
+- [#1144](https://github.com/radius-project/ai-extensions/pull/1144) [@kachawla](https://github.com/kachawla) - **Fixed:** The progress chips and the setup panel's dismiss button are now named by the text they show, so speech-input users can activate them by saying what they see. The full status sentence remains available as the accessible description.
+
+- [#1069](https://github.com/radius-project/ai-extensions/pull/1069) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Stop setup rollback when removal of a recovered setup branch is not confirmed, rather than reporting the branch removed and deleting remaining setup resources. Keep branch-review instructions alongside provider error details after restarting Radius.
+
+- [#1203](https://github.com/radius-project/ai-extensions/pull/1203) [@kachawla](https://github.com/kachawla) - **Fixed:** Pausing an environment setup that the extension restarted before it committed the deploy workflows now offers **Delete setup** and **Exit setup**. Before, Radius treated the verification workflow as unknown even though none could have run, so **Abandon setup** was the only way out.
+
+- [#1202](https://github.com/radius-project/ai-extensions/pull/1202) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep authored custom-type recipe sources when publishing a model, including recipes named with the lowerCamelCase type name.
+
+- [#1027](https://github.com/radius-project/ai-extensions/pull/1027) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Delete credential profiles safely when stored profile data contains malformed entries.
+
+- [#1070](https://github.com/radius-project/ai-extensions/pull/1070) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Refuse a credential-verification retry when its saved GitHub account or operation changes while checking whether the setup pull request merged or saving the accepted command. A previous account's merge confirmation cannot authorize a replacement operation.
+
+  Reject setup answers when the original operation or panel attachment is removed, replaced, or retargeted while reading or saving the answer. Restore and save an unchanged, unstarted prompt when its panel closes before admission, without overwriting a competing prompt or operation. Report failed corrective saves with inspection guidance instead of suggesting an unsafe retry.
+
+  Refuse setup controls when their operation or original coordinator changes during admission. Wait for pending saves to settle before recovery, restore only an unchanged and unstarted request, and report a failed durable undo instead of accepting or starting stale work. Recheck only the affected operation after its admission settles, without restarting recovery for unrelated operations.
+
+  Keep controls retryable when a previous task is still settling: return a temporary busy response instead of permanently blocking recovery, while preserving duplicate-command acceptance.
+
+  Honor Stop while a setup answer is being saved without starting more setup work or leaving the operation running without a task. Report completion only after saving the stopped state; if that save fails, block further admission and show inspection guidance rather than claiming Stop was durable.
+
+  Keep agent-callable controls bound to their authorized setup target, account, configuration and resource ownership while allowing the shared service to save its own command progress. Preserve diagnostic guidance to inspect the saved operation when admission cannot be durably undone.
+
+- [#1071](https://github.com/radius-project/ai-extensions/pull/1071) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep a replacement setup or verification task connected to its GitHub account when an older task finishes.
+
+- [#1169](https://github.com/radius-project/ai-extensions/pull/1169) [@kachawla](https://github.com/kachawla) - **Fixed:** The setup progress panel now shows a paused setup as paused when the pause lands right after you continue the setup or reopen the panel, instead of staying on the running stages.
+
+- [#1071](https://github.com/radius-project/ai-extensions/pull/1071) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep environment setup running when its panel closes, reuse the same operation when it reopens, and stop local verification and further Azure/GitHub setup work safely when the session shuts down without claiming to cancel remote work.
+
+  AWS setup retains its selected GitHub account and cooperative Stop behavior without an open panel. Stop records partial AWS progress and prevents configuration after a pause; nested AWS runtime-shutdown fencing remains deferred.
+
+  Session shutdown also stops cleanup between deletions and configuration between individual variable writes. Writes already in flight retain their account until their acknowledged results are recorded; interrupted cleanup and verification discovery remain resumable instead of reporting completion.
+
+  Shutdown during recovery-record persistence prevents unsent Azure, GitHub environment, branch and workflow writes. Radius records that those requests were not applied and does not start failure cleanup.
+
+  Shutdown before rereading an unresolved request preserves its original evidence and reconciliation-attempt count instead of consuming retries or escalating to manual recovery.
+
+  Shutdown after a lost write response or while a provider read fails also preserves unresolved evidence without consuming recovery attempts. GHCR bootstrap stops before the next HTTP request, upload step or retry, while responses already issued retain their actual outcome.
+
+  Azure owner and provenance-tag propagation retries stop issuing writes and reads after shutdown, including when shutdown interrupts a read delay. Incomplete or failed late reads preserve unresolved evidence instead of triggering failure cleanup or manual recovery; positive responses already in flight can still confirm the request. Rejected attempts retain their diagnostics, while user Stop still completes the current logical mutation.
+
+  Service-principal, GitHub environment and workflow recovery also stop nested retries, commit-history pages and branch-absence reads after shutdown. Incomplete evidence stays unresolved rather than claiming absence or requiring manual recovery. Complete proof from a request already in flight can still settle; matching workflow content alone cannot authorize another history read.
+
+  Verification dispatch and automatic run discovery stop further reads and monitoring after shutdown, without turning a late response into a setup failure. Sent requests retain their actual outcome; uncertain dispatches require inspection before another run can be sent, including after restart. Storage failures remain explicit.
+
+  Session shutdown waits up to two seconds for detached setup tasks, acknowledgement saves and account restoration alongside closing panels. Incomplete settlement or teardown failures are reported and exit nonzero; external work that exceeds the deadline can still be interrupted and requires recovery inspection.
+
+  Late absent or mismatched Azure recovery reads preserve unresolved evidence after shutdown. Caller-identity retries stop before another Azure invocation, and retrying an accepted verification dispatch after a save failure reuses its confirmed run rather than dispatching again.
+
+  Initial and resumed Azure setup stop identity reads, nested repository checks and preflight work after shutdown without turning late reads into failure cleanup or overwriting saved checkpoints. An OIDC retry wait already in progress may finish, but it cannot start another request.
+
+- [#1167](https://github.com/radius-project/ai-extensions/pull/1167) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Stop repository-access checks from starting another request after the session begins shutting down.
+
+- [#1071](https://github.com/radius-project/ai-extensions/pull/1071) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Share in-progress environment setup recovery across panel attachments, and prevent old tasks or delayed updates from clearing newer work or overwriting a reopened panel.
+
+  Queued tasks and delayed reconciliation cannot run against a replaced, removed or retargeted operation. A replacement can register its own reconciliation without an old timer consuming it.
+
+- [#1137](https://github.com/radius-project/ai-extensions/pull/1137) [@kachawla](https://github.com/kachawla) - **Changed:** Azure deploys and deletes now retry a failed GitHub token refresh every 15 seconds instead of waiting 2 minutes, so a brief outage is less likely to fail a long operation.
+
+- [#1070](https://github.com/radius-project/ai-extensions/pull/1070) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Redact credentials and limit diagnostic text in credential-verification progress and failures. Keep a confirmed workflow failure visible with an explicit warning when its log cannot be read, instead of replacing the known outcome with an unknown status.
+
+  Include that warning in both the response and saved failure evidence when GitHub returns no logs, as well as when the log request throws an error.
+
+- [#1070](https://github.com/radius-project/ai-extensions/pull/1070) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep credential verification pending while its run is being acquired, preserve uncertainty for unsupported workflow conclusions, and prevent late verification results from replacing a stopped operation or a changed account's outcome.
+
+- [#1069](https://github.com/radius-project/ai-extensions/pull/1069) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Clarify that environment setup only verifies credentials and cluster access; deploying an application requires a separate explicit action.
+
+- [#1205](https://github.com/radius-project/ai-extensions/pull/1205) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep looking for a delayed environment-delete workflow run within the existing 30-minute completion limit, without starting another deletion or removing its credentials early.
+
+## 0.4.0
+
+### Minor Changes
+
+- [#1124](https://github.com/radius-project/ai-extensions/pull/1124) [@nicolejms](https://github.com/nicolejms) - **Added:** Allow deployment workflows to select a Radius release, including a release candidate, through `RADIUS_RELEASE_OVERRIDE`, with a matching CLI, control plane, and recipe catalog.
+
+### Patch Changes
+
+- [#1123](https://github.com/radius-project/ai-extensions/pull/1123) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Allow Azure environment deletion when Radius returns JSON `null` for an empty application list, while still stopping deletion on failed or invalid reads.
+
+- [#1126](https://github.com/radius-project/ai-extensions/pull/1126) [@ryanwaite](https://github.com/ryanwaite) - **Fixed:** Supply digest-verified Recipe implementations during app modeling, using deployment's release-selected Kubernetes versions, so OCI registrations can be checked for inputs, outputs, credentials, and runtime behavior without bypassing authoring safeguards.
+
+## 0.3.0
+
+### Minor Changes
+
+- [#1035](https://github.com/radius-project/ai-extensions/pull/1035) [@kachawla](https://github.com/kachawla) - **Added:** Regenerate the application model after a plugin update moves to a newer Radius version, and move the Radius extension pin in `.radius/bicepconfig.json` with it when modeling wrote that pin. A pin set by hand is left unchanged, and an older Radius CLI shows a note to update the plugin instead of regenerating.
+
+### Patch Changes
+
+- [#1058](https://github.com/radius-project/ai-extensions/pull/1058) [@kachawla](https://github.com/kachawla) - **Security:** Update the deploy progress artifact uploader to patched brace-expansion and undici releases.
+
+- [#1046](https://github.com/radius-project/ai-extensions/pull/1046) [@kachawla](https://github.com/kachawla) - **Fixed:** Stop modeling from falling back to a Kubernetes recipe for a custom resource type that cannot be provisioned on Azure. Modeling now reports the unsupported dependency instead.
+
+- [#1047](https://github.com/radius-project/ai-extensions/pull/1047) [@kachawla](https://github.com/kachawla) - **Fixed:** Show the deployed graph after a deployment instead of falling back to the planned graph when the deployment artifact download failed on a fractional timeout.
+
+- [#1044](https://github.com/radius-project/ai-extensions/pull/1044) [@kachawla](https://github.com/kachawla) - **Fixed:** Force deleting an application now runs a forced delete instead of silently falling back to a normal delete.
+
+- [#1072](https://github.com/radius-project/ai-extensions/pull/1072) [@kachawla](https://github.com/kachawla) - **Fixed:** Open the application graph view before generating a missing model when you ask to see the graph, without stopping the rest of your request.
+
+- [#1068](https://github.com/radius-project/ai-extensions/pull/1068) [@kachawla](https://github.com/kachawla) - **Fixed:** Clarify that graph previews use saved models for the current workspace without a commit or push, while other repository or branch selections read models from GitHub.
+
+- [#1045](https://github.com/radius-project/ai-extensions/pull/1045) [@kachawla](https://github.com/kachawla) - **Fixed:** Correct the environment form's namespace help to say a new namespace is created on the first deploy, not during environment setup.
+
+- [#1084](https://github.com/radius-project/ai-extensions/pull/1084) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Radius app modeling now reads credential sensitivity only from the printed type schema, which marks nested values such as an authored Secret's data values. The skill tells the model not to use the staged summary that only the checker reads.
+
+- [#1019](https://github.com/radius-project/ai-extensions/pull/1019) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Report unexpected environment setup failures instead of leaving the request unanswered, without retrying failed cleanup.
+
+- [#1040](https://github.com/radius-project/ai-extensions/pull/1040) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep the correct environment verification status when more than 100 newer workflow runs exist. Look up only runs linked to the environment's recent deployments instead of reading the full repository history.
+
+  For a GitHub App that cannot write workflow files, show how to grant the missing Workflows permission and renew the installation token instead of suggesting an OAuth scope refresh.
+
+## 0.2.3
+
+### Patch Changes
+
+- [#1014](https://github.com/radius-project/ai-extensions/pull/1014) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Retry temporary Azure errors when creating an environment's federated credential, while preserving safe recovery and Stop controls.
+
+- [#1032](https://github.com/radius-project/ai-extensions/pull/1032) [@kachawla](https://github.com/kachawla) - **Fixed:** Keep a failed deployment's dialog within the panel, so a long error scrolls and Back to Deployments stays reachable.
+
+- [#1033](https://github.com/radius-project/ai-extensions/pull/1033) [@kachawla](https://github.com/kachawla) - **Fixed:** Show each failed resource's own deployment error on the deployed graph, and keep the Radius error when the workflow log read fails briefly.
+
+- [#1008](https://github.com/radius-project/ai-extensions/pull/1008) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep permanent modeling failures across automatic reloads. Retry after saved source changes, a new branch commit, a target environment or provider change, or an explicit **Refresh**.
+
+  If source reads fail or lack a baseline, automatic retry stays paused. **Refresh** lets you retry after an external fix without a source edit or commit.
+
+  When a retry is recommended on the application graph or the planned graph, the primary button changes from **Plan Deployment** or **Deploy Application** to **Refresh**, and the graph subtitle tells you to click **Refresh**. If the repository has no environment, the graph keeps **Create Environment** and shows a separate **Refresh** button. The graph diff shows its **Refresh** button only after a comparison fails.
+
+- [#1011](https://github.com/radius-project/ai-extensions/pull/1011) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Prevent environment task error reporting failures from terminating the Radius extension.
+
+## 0.2.2
+
+### Patch Changes
+
+- [#956](https://github.com/radius-project/ai-extensions/pull/956) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** When only post-deployment teardown fails, explain that deployment commands succeeded, resources may have changed, and saved state may be out of date; advise reviewing teardown logs and verifying saved state before retrying.
+
+- [#958](https://github.com/radius-project/ai-extensions/pull/958) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Show environment protection waiting evidence as historical observations, make uncertainty explicit, and avoid implying approval when protection checks become unavailable.
+
+- [#981](https://github.com/radius-project/ai-extensions/pull/981) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Generate the application graph before you select or create a deployment environment. When no environment is named and no contract is supplied, model generation leaves Recipe registration checks to deployment. Named environments still require Recipe behavior and registration evidence.
+
+- [#949](https://github.com/radius-project/ai-extensions/pull/949) [@kachawla](https://github.com/kachawla) - **Fixed:** Generated application definitions now give every consumer of a provisioned database or message broker the same username the service is created with, read from one place instead of repeated as a separate value. The username is `myadmin` unless you ask for a specific one or the application's code or checked-in configuration fixes a login; a username the application reads from an environment variable is not treated as fixed, even when Compose, Helm, or Kubernetes manifests set it. Refreshing an existing model keeps the username it already sets, so an existing database's administrator login is not changed.
+
+- [#988](https://github.com/radius-project/ai-extensions/pull/988) [@nellshamrell](https://github.com/nellshamrell) - **Security:** Mask entire credential strings in escaped JSON diagnostics so embedded quotes and backslashes cannot expose part of a secret.
+
+- [#989](https://github.com/radius-project/ai-extensions/pull/989) [@nellshamrell](https://github.com/nellshamrell) - **Security:** Redact known credentials and recognizable credential fields from workflow and control-plane diagnostics before displaying them or sending them to deployment repair.
+
+- [#1005](https://github.com/radius-project/ai-extensions/pull/1005) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Azure environment setup now retries temporary Microsoft Entra errors when it creates the service principal. It shows Entra's real error instead of a general message, and it removes the GitHub environment that a failed setup created. If Radius cannot tell whether the service principal was created, it checks the directory before it retries or removes anything.
+
+- [#950](https://github.com/radius-project/ai-extensions/pull/950) [@kachawla](https://github.com/kachawla) - **Fixed:** Application model validation now reports a container that repeats a provisioned database's or message broker's username as its own value instead of reading it from the resource or one shared variable, so the two cannot drift apart and break the login.
+
+## 0.2.1
+
+### Patch Changes
+
+- [#352](https://github.com/radius-project/ai-extensions/pull/352) [@zachcasper](https://github.com/zachcasper) - **Fixed:** Keep the planned application graph and Radius type lookups working after the Azure Recipe Pack in `resource-types-contrib` moved to `recipe-packs/azure-aks/azure-aks.bicep` and the Kubernetes pack to `recipe-packs/kubernetes/default.bicep`. Recipe lookups now use the `azure-aks` pack entry from newer Radius releases and still fall back to the `azure` entry from older ones.
+
+- [#939](https://github.com/radius-project/ai-extensions/pull/939) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Recover from eligible temporary workflow-read failures with bounded retries that respect GitHub's retry deadlines across polling, while retaining confirmed deployment and credential-verification outcomes when diagnostic evidence is unavailable. Resume artifact reads after timed cooldowns and release retired payloads during long deployments.
+
+  When a closed Canvas instance is physically stopped, Radius ends its local deployment monitoring and subsequent automatic repair handoff without cancelling the GitHub workflow. Monitoring continues during the existing deferred close for an active environment task.
+
+- [#857](https://github.com/radius-project/ai-extensions/pull/857) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Show every resource listed in the delete confirmation without clipping the last entry or the remaining-count line. On macOS the list could outgrow its height limit and hide part of what the deletion would destroy behind a scrollbar that stays invisible until you interact with it.
+
+- [#894](https://github.com/radius-project/ai-extensions/pull/894) [@kachawla](https://github.com/kachawla) - **Security:** Application model validation now fails when a Bicep credential-safety rule has been turned off instead of passing silently. A rule set to `off` or `info` in `bicepconfig.json`, a disabled Bicep linter, or a `#disable-next-line` or `#disable-diagnostics` directive naming one of these rules previously let a model with a hardcoded credential in a sensitive property validate cleanly. Validation now names the setting and the rule so it can be removed and the underlying problem fixed. This covers `use-secure-value-for-secure-inputs`, `secure-parameter-default`, `secure-secrets-in-params`, `outputs-should-not-contain-secrets`, and `secure-params-in-nested-deploy`. Settings for other rules in `bicepconfig.json` are still preserved.
+
+- [#893](https://github.com/radius-project/ai-extensions/pull/893) [@kachawla](https://github.com/kachawla) - **Security:** Pass Azure environment variables into the generated workflows' shell steps through the environment instead of substituting them into the script, so a value containing shell syntax is treated as data rather than as commands. No reconfiguration is needed; the same variables are read and resolve to the same values.
+
+- [#926](https://github.com/radius-project/ai-extensions/pull/926) [@kachawla](https://github.com/kachawla) - **Fixed:** Deploy and delete workflows now install the Radius CLI and control plane from the pinned stable Radius release instead of the latest unreleased `edge` build, so an unreleased Radius change can no longer break or change deployments.
+
+- [#907](https://github.com/radius-project/ai-extensions/pull/907) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Preserve confirmed deployment outcomes when diagnostic logs or graph artifacts cannot be read, keep attributable deployment errors ahead of teardown errors, and avoid treating an unconfirmed workflow outcome as a confirmed failure.
+
+  Stop waiting when GitHub reports a completed workflow with an unsupported outcome. Report that the outcome could not be confirmed without suggesting the workflow is still running or starting automatic repair; missing outcomes retain their recovery window.
+
+- [#915](https://github.com/radius-project/ai-extensions/pull/915) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Reject conflicting deployment-artifact identities and unsafe status files, retire stale evidence even when another application's graph is malformed, and report malformed artifact listings as unavailable evidence rather than a missing deployment. Allow later reads to recover after an unexpected failure; bound malformed graph scanning and decoding while keeping valid progress readable even when a later graph cannot be recovered.
+
+- [#888](https://github.com/radius-project/ai-extensions/pull/888) [@sk593](https://github.com/sk593) - **Changed:** Remove the transitional Azure recipe-pack compatibility shim now that the Radius defaults catalog points at the pack-only recipe pack. The Azure deploy workflow no longer probes the downloaded pack for the legacy `environmentName`, `environmentNamespace`, `azureSubscriptionId`, and `azureResourceGroup` parameters, and passes only the parameters the pack-only artifact owns. Workflows already committed to a repository keep deploying unchanged and do not need to be regenerated: each loads the catalog its own pinned ref names, and the shim they still carry passes a legacy parameter only while the pack it downloads declares one.
+
+- [#927](https://github.com/radius-project/ai-extensions/pull/927) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Stop blocking pull request creation in worktrees that contain a Radius application model. Radius no longer requires an application graph diff before every pull request, no longer opens the graph-diff canvas after a pull request is created, and no longer tells the agent to generate a graph diff for unrelated pull requests. Ask for a graph diff explicitly when you want one.
+
+- [#720](https://github.com/radius-project/ai-extensions/pull/720) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Select stable and exact release-candidate Radius Bicep types from the CLI's stamped release, allow edge's mutable latest types only for an executable `RADIUS_RAD_BINARY` developer override, and stop before modeling edge managed binaries or pull-request builds. Keep relative developer CLI paths usable when graph compilation changes working directories.
+
+- [#914](https://github.com/radius-project/ai-extensions/pull/914) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Avoid immediately repeating failed workflow reads and retain a confirmed run outcome when job details are unavailable.
+
+## 0.2.0
+
+### Minor Changes
+
+- [#548](https://github.com/radius-project/ai-extensions/pull/548) [@sk593](https://github.com/sk593) - Let users create an environment even when credential verification fails for a reason they can accept (exceptions 4.4 permissions and 4.5 cluster/cloud unreachable). The failed-verification panel now offers a **Create Environment anyway** action that records a durable `RADIUS_VERIFICATION_BYPASSED` marker on the GitHub Environment. The Environments list then reports the environment as `bypassed` — a distinct, deployable status labelled `(verification bypassed)` rather than masquerading as verified — so deploys are unblocked without discarding the real verification result. Bypass is offered only for recoverable failures (never for OIDC-trust or unknown errors), and a later genuine verification success supersedes the marker.
+
+- [#873](https://github.com/radius-project/ai-extensions/pull/873) [@sk593](https://github.com/sk593) - **Changed:** Deployments now use the latest released Radius resource types and recipe packs. The Azure and Kubernetes recipe packs define only recipes, so the deploy workflow creates the Radius environment on its own and then attaches the pack to it. Existing environments keep their recipe packs and no action is required.
+
+- [#861](https://github.com/radius-project/ai-extensions/pull/861) [@ryanwaite](https://github.com/ryanwaite) - **Changed:** Show recognizable provider service names in planned and deployed application graphs while keeping the exact concrete resource type available in node details.
+
+### Patch Changes
+
+- [#878](https://github.com/radius-project/ai-extensions/pull/878) [@kachawla](https://github.com/kachawla) - **Fixed:** Look the AKS cluster up in its own resource group when connecting to it during deploy, verify, and delete. The generated Azure workflows used the application's resource group, which only works while the cluster happens to live there. Environments that do not record the cluster's resource group keep using the application's, so nothing needs to be reconfigured.
+
+- [#856](https://github.com/radius-project/ai-extensions/pull/856) [@kachawla](https://github.com/kachawla) - **Fixed:** Allow an environment on an AKS cluster that shares its name with another cluster in the same subscription. Radius now records the cluster's resource group, so a namespace is only reported as taken when it is taken on the same cluster. Environments created before this change do not record it and are still treated as possible holders of the namespace; recreate one to clear a false conflict.
+
+- [#587](https://github.com/radius-project/ai-extensions/pull/587) [@sk593](https://github.com/sk593) - **Fixed:** Avoid redundant GitHub commits when generated Radius workflows are already up to date.
+
+- [#753](https://github.com/radius-project/ai-extensions/pull/753) [@sk593](https://github.com/sk593) - **Fixed:** Azure environment setup now grants the deploy identity the least-privilege **Locks Contributor** role (Azure built-in role `28bf596f-4eb7-45ce-b5bc-6cf482fec137`) on the target resource group, so recipes can create and remove resource locks without broader access-management permissions. The grant is best-effort and non-fatal, like the AKS cluster role: setup continues with a warning and the exact `az role assignment create` command when the operator cannot create the assignment.
+
+- [#644](https://github.com/radius-project/ai-extensions/pull/644) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Show clearer Radius setup recovery guidance when workflow publication needs a fork or a pull-request merge is not enough to start credential verification.
+
+- [#655](https://github.com/radius-project/ai-extensions/pull/655) [@willdavsmith](https://github.com/willdavsmith) - Harden Radius Canvas application graphs against accidental secret disclosure. Canvas-generated graph artifacts and modeled or deployed graph state now retain only required resource, relationship, and provider-output metadata; non-null graph-visible `Radius.Security/secrets` data is rejected before the graph is saved or rendered.
+
+- [#548](https://github.com/radius-project/ai-extensions/pull/548) [@sk593](https://github.com/sk593) - Detect cloud credential drift on a redeploy (exception 5.2). When a deploy run fails at its cloud login/credentials step before `rad deploy` touches any resource — meaning an environment that verified earlier no longer authenticates because its trust or permissions changed — the deploy panel now explains that the credentials drifted and offers a Re-verify credentials action that opens the Environments list, instead of showing a raw workflow error. The failure is also stamped with a dedicated kind so the automatic repair loop leaves it for the user to re-verify rather than redeploying an unchanged, still-failing configuration.
+
+- [#548](https://github.com/radius-project/ai-extensions/pull/548) [@sk593](https://github.com/sk593) - Classify cloud credential-verification failures and validate the Create Environment form before dispatch. A failed verify run is now inferred canvas-side from its failed step names and log into an OIDC-trust, permissions, or unreachable-cluster/cloud category, so the progress panel explains what to fix (and lists missing permissions) instead of showing one generic message. The environment form also rejects malformed environment names before the verify workflow is dispatched.
+
+- [#782](https://github.com/radius-project/ai-extensions/pull/782) [@nicolejms](https://github.com/nicolejms) - **Changed:** The delete confirmation now summarizes resources last reported for the selected application and environment before you type the confirmation phrase, from both the deployed graph and the deployments list. Long lists show the first several names and types, with a count of the rest. When a matching resource report is unavailable, the dialog keeps its existing warning rather than treating modeled graph nodes as deployed resources. Stopping tracking of a failed teardown is unchanged.
+
+- [#828](https://github.com/radius-project/ai-extensions/pull/828) [@nithyatsu](https://github.com/nithyatsu) - **Fixed:** Stop the graph compare view from asking for an application model forever after modeling has permanently failed. When neither compared branch has `.radius/app.bicep` and Copilot reports that it cannot author one, the compare view now shows the reported reason and stops re-requesting generation, and refreshing the Radius Canvas starts a fresh attempt.
+
+- [#792](https://github.com/radius-project/ai-extensions/pull/792) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Distinguish actionable application-model diagnostics from unavailable validation, report compiler and policy findings together, and preserve repair history across unavailable checks.
+
+- [#809](https://github.com/radius-project/ai-extensions/pull/809) [@sk593](https://github.com/sk593) - **Fixed:** Speed up Azure credential setup by checking App Registration ownership in parallel and resuming directly after a Service Management Reference prompt.
+
+- [#829](https://github.com/radius-project/ai-extensions/pull/829) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Allow Repo Radius control-plane bootstrap on standard private-repository runners by lowering PostgreSQL's CPU request. Update the Radius plugin, then regenerate and recommit existing pinned `run-rad-commands-azure.yml`, `run-rad-commands-aws.yml`, `delete-azure.yml`, `delete-aws.yml`, and `delete-environment-azure.yml` workflows to use the corrected setup action.
+
+- [#700](https://github.com/radius-project/ai-extensions/pull/700) [@kachawla](https://github.com/kachawla) - **Fixed:** Stop reporting an application model as permanently out of date when two copies of the Radius plugin are installed with different versions. The generator version written into `.radius/app.origin.json` is now the one the running extension supplies, rather than one read from whichever copy of the writer script happened to run, so the recorded version and the version the freshness check compares it against can no longer disagree. When no version is supplied the record leaves it unknown and says so, which skips the generator comparison for that model instead of recording a wrong value.
+
+- [#711](https://github.com/radius-project/ai-extensions/pull/711) [@sk593](https://github.com/sk593) - **Fixed:** Report GHCR package deletion failures in Copilot chat so users can resolve cleanup errors.
+
+- [#854](https://github.com/radius-project/ai-extensions/pull/854) [@nithyatsu](https://github.com/nithyatsu) - **Fixed:** Say "Loading the application graph" while the Graph tab reads an existing `.radius/app.bicep`, instead of "Generating application graph", which implied the model was being written. The progress panel switches to "Generating the application graph" only once Copilot actually starts authoring a model.
+
+- [#855](https://github.com/radius-project/ai-extensions/pull/855) [@nithyatsu](https://github.com/nithyatsu) - **Fixed:** Clicking a node in an application graph now toggles its details menu, so clicking the same node again dismisses the menu instead of leaving it open. Clicking another node still re-anchors the menu, clicking the empty pane still closes it, and clicks inside the menu keep its controls usable.
+
+- [#683](https://github.com/radius-project/ai-extensions/pull/683) [@nithyatsu](https://github.com/nithyatsu) - **Changed:** Show the application graph sooner after Copilot generates the app model. The Graph tab now re-checks for `.radius/app.bicep` on a 300ms, 1s, 2s, 5s, 10s backoff instead of waiting a fixed 10 seconds between polls, so a model that finishes quickly renders almost immediately while a long modeling run settles back onto the same 10 second steady-state polling interval as before.
+
+- [#788](https://github.com/radius-project/ai-extensions/pull/788) [@sk593](https://github.com/sk593) - **Fixed:** Create Radius environments separately and explicitly attach provider recipe packs so deployments remain compatible with pack-only contrib artifacts.
+
+- [#858](https://github.com/radius-project/ai-extensions/pull/858) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Preserve Bicep diagnostic columns in validation output and Canvas modeling errors, so compiler findings on the same line point to the correct locations.
+
+- [#754](https://github.com/radius-project/ai-extensions/pull/754) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Preserve the deployment graph's zoom and viewport while live status refreshes update its resources, including when a deployment finishes and the graph switches from live to terminal. Refreshes that change which resources exist, such as switching application or environment, still re-fit so the new graph is framed on screen.
+
+- [#874](https://github.com/radius-project/ai-extensions/pull/874) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Preserve Radius resource-type icon hashes and SVGs when application graphs are sanitized, saved, and rendered.
+
+- [#686](https://github.com/radius-project/ai-extensions/pull/686) [@sk593](https://github.com/sk593) - Verify first-time environment setup automatically from protected-branch pull requests when the default branch is proven safe from legacy verify-to-deploy workflow chains.
+
+- [#749](https://github.com/radius-project/ai-extensions/pull/749) [@willdavsmith](https://github.com/willdavsmith) - **Fixed:** Application modeling now traces native environment and configuration values to their consuming parser, matches the exact required format, and safely composes incompatible Recipe outputs or stops before publishing a broken model. The model checker also rejects Recipe aggregate-secret bindings that contradict an address-shaped native setting, including same-container helper aliases and local-module parameter pass-through.
+
+- [#742](https://github.com/radius-project/ai-extensions/pull/742) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Refresh an open application graph automatically after regenerating the workspace `app.bicep`.
+
+- [#785](https://github.com/radius-project/ai-extensions/pull/785) [@willdavsmith](https://github.com/willdavsmith) - **Fixed:** Reject Radius container connections that use a managed Kubernetes Secret name instead of the producer resource ID.
+
+- [#864](https://github.com/radius-project/ai-extensions/pull/864) [@nithyatsu](https://github.com/nithyatsu) - **Fixed:** Stop application modeling from downloading a Node.js runtime when `node` is not on the shell's `PATH`. The extension now resolves an existing Node.js installation — including Homebrew, Volta, scoop, Chocolatey, nvm, and nvm-windows locations — checks that it is Node.js 18 or newer, and hands its absolute path to the modeling skill, which runs its scripts through that interpreter. When no supported installation can be found, modeling stops and asks you to install Node.js — naming any too-old installations it found — instead of installing software on your machine.
+
+- [#786](https://github.com/radius-project/ai-extensions/pull/786) [@kachawla](https://github.com/kachawla) - **Changed:** Application modeling guidance now states sensitivity as a rule about the schema node rather than a list of known cases. Guidance already required a `@secure()` parameter for a sensitive property and for a value placed in an authored `Radius.Security/secrets` resource, but named those two cases specifically, so a sensitive field in any other shape was left to inference: a leaf nested inside a plain object, a property that compiles to a `secureObject` and takes one secure parameter, and the same fields on custom resource types a modeling run authors, whose `x-radius-sensitive` flags are compiled into the published extension and enforced exactly as a predefined type's are. Guidance also now states what may be assigned once a node is marked — only a `@secure()` parameter referenced by name, never a literal, a parameter declared without `@secure()`, or a string interpolation, including one whose operands are all secure.
+
+  **Changed:** A secure-value violation now explains how to repair it. Radius reports these findings with no severity, so they printed as a `warning` that nonetheless failed the build, and the message named the rejected property without naming a remedy. `use-secure-value-for-secure-inputs`, `secure-secrets-in-params`, and `secure-parameter-default` now carry the fix, so a repair attempt is spent on the correction rather than on rediscovering the rule.
+
+  **Fixed:** Guidance no longer reads a sensitive Recipe output as something the application must supply. A schema can mark one node both sensitive and read-only, and a resource type may declare a sensitive output for a credential its Recipe generates. The rule to assign a `@secure()` parameter now applies only to writable sensitive nodes; a sensitive read-only output is left unset and read through the Recipe's secrets result, as any other output is. The `secure-secrets-in-params` remedy also distinguishes its two repairs, because the rule reads a parameter's name rather than its value: add `@secure()` when the parameter carries the credential, but rename it when it carries a `Radius.Security/secrets` resource ID, where adding `@secure()` would only trade the warning for a `secure-parameter-target` failure.
+
+  **Fixed:** The registry-credentials Secret in the container-image guidance no longer specifies a definition that cannot compile. It declared `registryUsername` as a plain parameter and assigned it to the Secret's `data.username.value`, which the schema marks sensitive, so following the instruction produced `use-secure-value-for-secure-inputs` and failed the build. Both parameters are now `@secure()`, in the worked example and in every rule that referenced them.
+
+  **Fixed:** The worked examples for authored Secrets no longer show definitions that cannot compile. The canonical `Radius.Security/secrets` example assigned an administrator username as a literal, and the config-file delivery example inlined a configuration file the same way; both sit in `data.<key>.value`, which the schema marks sensitive, so each produced `use-secure-value-for-secure-inputs`. Both now take their value from a `@secure()` parameter, and the surrounding rules say why: every value in an authored Secret's `data` is sensitive because of where it is stored, not because of what it holds, so the rule covers a username or a configuration file as much as a password. The guidance also states the contrast that made this confusing — the same administrator name stays a plain literal on a backing resource's own non-sensitive `username` property.
+
+- [#781](https://github.com/radius-project/ai-extensions/pull/781) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Explain failed deployment graph nodes with cancellation, workflow timeout, monitoring timeout, or concise Radius error messages. Preserve resource-specific failures, remove stale progress text from successful nodes, and accept later terminal results only with verified deployment identity. Monitoring timeouts warn that the workflow may still be running without allowing an unsafe automatic redeploy.
+
+- [#718](https://github.com/radius-project/ai-extensions/pull/718) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep single-color resource-type icons legible in the application graph. Icons that a resource type pack draws in `currentColor` now follow the canvas theme in node cards and the legend instead of always painting black, which made them nearly invisible in dark mode. Multi-color icons, remote icons, and built-in glyphs are unchanged.
+
+- [#774](https://github.com/radius-project/ai-extensions/pull/774) [@sk593](https://github.com/sk593) - **Fixed:** Generated app models now warn that the registry credential Secret's `name` value must remain `radius-ghcr-registry-creds` because image pushes depend on that fixed value.
+
+- [#684](https://github.com/radius-project/ai-extensions/pull/684) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Run managed Radius CLI commands on Windows without detaching them from the automation caller, allowing windowless execution and caller-owned process-tree cancellation with current Radius builds.
+
+## 0.1.1
+
+### Patch Changes
+
+- [#712](https://github.com/radius-project/ai-extensions/pull/712) [`da03f88`](https://github.com/radius-project/ai-extensions/commit/da03f884e0a44cbcae38fe350ecf8ced78a21208) Thanks [@willdavsmith](https://github.com/willdavsmith)! - **Fixed:** Preserve developer-configured Radius CLI builds when application modeling cannot derive a compatible extension reference.
+
+- [#737](https://github.com/radius-project/ai-extensions/pull/737) [`5712652`](https://github.com/radius-project/ai-extensions/commit/57126527220638d2fc26c8047560d9b79019a4a6) Thanks [@willdavsmith](https://github.com/willdavsmith)! - **Fixed:** Reject invalid Kubernetes namespace names during environment creation instead of allowing deployment to fail later.
+
+- [#730](https://github.com/radius-project/ai-extensions/pull/730) [`f9d6c1b`](https://github.com/radius-project/ai-extensions/commit/f9d6c1bb8f5bb58caaa2b8750f47250570a7d535) Thanks [@kachawla](https://github.com/kachawla)! - **Fixed:** Generated `app.bicep` no longer breaks a backing service whose schema takes a credential as a secret reference. Two defects are corrected. First, two resource types can name a property `password` with opposite meanings — `Radius.Data/mySqlDatabases.password` is the sensitive value itself, while `Radius.Messaging/rabbitMQ.password` is the resource ID of a `Radius.Security/secrets` resource — and the previous guidance chose by property name, so a RabbitMQ app was modeled with the password where the Secret's resource ID belongs and the deployment failed Kubernetes validation. Second, an authored Secret could expose the credential under a renamed key such as `PASSWORD`, so the broker resolved the right Secret but never found the lowercase `password` key its recipe requires and the container failed to start. The application modeling guidance now decides from the schema's `x-radius-sensitive` flag instead of the property's name, requires the authored Secret to use the exact case-sensitive data key the consuming schema names, and ships a worked RabbitMQ example alongside the MySQL one.
+
+- [#731](https://github.com/radius-project/ai-extensions/pull/731) [`c4aaf0f`](https://github.com/radius-project/ai-extensions/commit/c4aaf0f81c4c31518dc0109bed10f9193262a7c2) Thanks [@kachawla](https://github.com/kachawla)! - **Fixed:** The application model checker now rejects a `@secure()` parameter assigned to a resource property that the type's schema does not mark sensitive, so a credential can no longer be written where a `Radius.Security/secrets` resource ID belongs. Type resolution records each resolved property's sensitivity for the checker, which lets it separate `Radius.Data/mySqlDatabases.password`, where the secure parameter belongs inline, from `Radius.Messaging/rabbitMQ.password`, where it produces a deployment that Kubernetes rejects. Resolve every predefined type the model uses so the check has the schema evidence it needs.
+
+- [#594](https://github.com/radius-project/ai-extensions/pull/594) [`1654059`](https://github.com/radius-project/ai-extensions/commit/1654059b7886f769116465541953d1b58ececabc) Thanks [@Reshrahim](https://github.com/Reshrahim)! - Update the plugin installation instructions to use the GitHub Copilot app's searchable plugin catalog.
+
+## 0.1.0
+
+- Explore Radius applications across modeled, planned, deployed, and branch-diff views, with resolved cloud resources, per-resource deployment status and logs, and links to local or remote source definitions.
+
+- Generate validated `.radius/app.bicep` application definitions from repository source with source references, deployment-aware container settings, and secret-connection guidance that matches the managed Radius version. Radius publishes the complete `.radius/` model atomically, so an unsuccessful run leaves existing files unchanged.
+
+- Delete application deployments and Azure environments through tracked, confirmed workflows that preserve shared or manually changed resources. Radius requires application deployments to be removed before environment cleanup, cleans up owned resources in dependency order, manages Gateway API prerequisites for route deployments, removes only unused Radius-owned gateway infrastructure, and offers guarded force-delete recovery when an application resource is stuck in progress, with a warning that cloud resources may require manual cleanup.
+
+- Create and verify deploy environments in a guided, resumable workflow that keeps the selected cloud and GitHub identities visible, validates credentials, and offers retry, continue, and rollback controls with redacted diagnostics. Azure setup supports immutable or customized GitHub OIDC subjects, Entra Service Management Reference policies, Enterprise Managed User accounts, service-principal sign-in, and AKS Azure RBAC, and prevents environments on the same cluster from sharing a Kubernetes namespace.
+
+- Resolve setup and deployment problems from Radius Canvas through validated **Copy** and **Run with Copilot** command actions. Commands target the selected identity or branch, work across supported shells, require confirmation for state-changing operations, and return control for verification or retry.
