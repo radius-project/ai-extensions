@@ -5,6 +5,7 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
 import { createEnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
+import { createRadiusEnvironmentWorkflowDeletion } from "../../../src/server/services/radius-environment-workflow-deletion.js";
 import { deleteGitHubEnvironmentIdempotent } from "../../../src/server/services/github-environment.js";
 import {
   runEnvironmentDeletion,
@@ -703,7 +704,148 @@ function trackDeletions(): {
   };
 }
 
+function delayedDeleteWorkflow(outcome: "success" | "failure" | "missing") {
+  let clock = 0;
+  let lookups = 0;
+  const dispatch = vi.fn(async () => ({
+    code: 0,
+    stdout: "",
+    stderr: ""
+  }));
+  const findRun = vi.fn(async () =>
+    ++lookups < 4 || outcome === "missing" ? null : "42"
+  );
+  const readRun = vi.fn(async () => ({
+    status: "completed",
+    conclusion: outcome,
+    steps: []
+  }));
+  const run = createRadiusEnvironmentWorkflowDeletion({
+    workflowFiles: ["delete-environment.yml"],
+    ensureWorkflowsCurrent: async () => ({ created: [] }),
+    generateDeleteWorkflow: async () => ({
+      "delete-environment.yml": "workflow"
+    }),
+    getDefaultBranch: async () => "main",
+    fetchFileFromRepo: async () => "workflow",
+    runGh: dispatch,
+    processEnv: {},
+    findWorkflowRun: findRun,
+    getRunDetail: readRun,
+    sleep: async (milliseconds) => {
+      clock += milliseconds;
+    },
+    now: () => clock,
+    random: () => 0.5,
+    errorMessage: (error) =>
+      error instanceof Error ? error.message : String(error)
+  });
+  return { run, dispatch, findRun, readRun };
+}
+
 describe("the async delete route through its background runner", () => {
+  it.each(["failure", "missing"] as const)(
+    "keeps credentials and the environment when delayed workflow discovery ends in %s",
+    async (outcome) => {
+      const workflow = delayedDeleteWorkflow(outcome);
+      const unexpectedCleanup = vi.fn(async () => {
+        throw new Error("cleanup must not run before confirmed deletion");
+      });
+      const deletions = trackDeletions();
+      let operation: DeletionOperation | undefined;
+      let task: Promise<void> | undefined;
+      const harness = await start(listingScript("7\tdev"), {
+        discoverEnvironmentTarget: async () => ({
+          provider: "azure",
+          clientId: "app-xyz",
+          tenantId: "tenant-1",
+          repoId: 7
+        }),
+        createOperation: deletions.createOperation,
+        buildDeleteStages,
+        startOperation: (op) => ({ ok: true, operation: op }),
+        toClientView,
+        persistOperations: async () => {},
+        scheduleEnvironmentOperation: (_instance, op) => {
+          operation = deletions.scheduled(op);
+          task = runEnvironmentDeletion(operation, {
+            deleteRadiusEnvironment: workflow.run,
+            runAz: unexpectedCleanup,
+            withCredentialProvenanceLock: unexpectedCleanup,
+            deleteGitHubEnvironment: unexpectedCleanup,
+            deleteStatePackage: unexpectedCleanup,
+            reportStatePackageDeletionFailure: unexpectedCleanup,
+            readCredentialProvenance: unexpectedCleanup,
+            readAzureIdentity: unexpectedCleanup,
+            removeCredentialProvenance: unexpectedCleanup,
+            clearEnvironmentCredentialProvenance: unexpectedCleanup,
+            removeAwsEnvironmentAccess: unexpectedCleanup,
+            persist: async () => {},
+            errorMessage: (error) =>
+              error instanceof Error ? error.message : String(error)
+          });
+          return true;
+        }
+      });
+
+      const response = await harness.deleteEnvironment("dev");
+      expect(response.status).toBe(202);
+      expect(task).toBeDefined();
+      await task;
+
+      expect(operation).toMatchObject({
+        state: "failed_partial",
+        failure: { code: "radius-env-delete-failed" }
+      });
+      expect(unexpectedCleanup).not.toHaveBeenCalled();
+      expect(workflow.dispatch).toHaveBeenCalledTimes(1);
+      expect(workflow.findRun.mock.calls.length).toBeGreaterThan(3);
+      expect(names((await harness.list()).body)).toEqual(["dev"]);
+      if (outcome === "missing") {
+        expect(workflow.readRun).not.toHaveBeenCalled();
+      } else {
+        expect(workflow.readRun).toHaveBeenCalledTimes(1);
+      }
+    }
+  );
+
+  it("schedules AWS deletion using the saved policy identity, never the request's replacement name", async () => {
+    let captured: unknown;
+    const policyName = "radius-deploy-dev-111111111111";
+    const harness = await start(listingScript("7\tdev"), {
+      awsEnabled: true,
+      discoverEnvironmentTarget: createEnvironmentTargetReader(
+        async () =>
+          `AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/picked\nAWS_TRUST_SUBJECTS\t["repo:old/name:environment:dev"]\nAWS_PERMISSION_POLICY_NAME\t${policyName}`
+      ),
+      createOperation,
+      buildDeleteStages,
+      startOperation: (op) => ({ ok: true, operation: op }),
+      toClientView,
+      persistOperations: async () => {},
+      scheduleEnvironmentOperation: (_instance, op) => {
+        captured = op.request;
+        return true;
+      }
+    });
+    const response = await fetch(`${harness.baseUrl}/api/delete-environment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo: REPO,
+        environment: "dev",
+        policyName: "client-replacement"
+      })
+    });
+    expect(response.status).toBe(202);
+    expect(captured).toMatchObject({
+      repo: REPO,
+      provider: "aws",
+      policyName,
+      trustSubjects: ["repo:old/name:environment:dev"]
+    });
+  });
+
   /** A deferred the test resolves once the scheduled runner has finished. */
   function deferred(): { promise: Promise<void>; resolve: () => void } {
     let resolve = (): void => {};
@@ -714,6 +856,7 @@ describe("the async delete route through its background runner", () => {
   }
 
   it("stops listing the environment once the runner tears it down", async () => {
+    const workflow = delayedDeleteWorkflow("success");
     let runnerFinished = deferred();
     const azCommands: string[][] = [];
     let packageFailure = false;
@@ -749,7 +892,7 @@ describe("the async delete route through its background runner", () => {
       scheduleEnvironmentOperation: (_instanceId, op) => {
         operations.push(op);
         void runEnvironmentDeletion(deletions.scheduled(op), {
-          deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          deleteRadiusEnvironment: workflow.run,
           removeAwsEnvironmentAccess: async () => {
             throw new Error("unexpected AWS role cleanup");
           },
@@ -848,6 +991,9 @@ describe("the async delete route through its background runner", () => {
     // The route returned 202 before the background work ran; wait for the real
     // runner to finish, then observe the listing the same cache now serves.
     await runnerFinished.promise;
+    expect(workflow.dispatch).toHaveBeenCalledTimes(1);
+    expect(workflow.findRun).toHaveBeenCalledTimes(4);
+    expect(workflow.readRun).toHaveBeenCalledTimes(1);
     harness.setScript(listingScript(""));
     const after = await harness.list();
 
@@ -1101,9 +1247,18 @@ describe("the async delete route through its background runner", () => {
       }
     };
     const awsAnswers: Record<string, unknown> = {
+      "--version": "aws-cli/2.17.0 Python/3.11 Darwin/23",
       "iam create-policy": lock,
       "iam get-policy": lock,
       "iam delete-policy": "",
+      "iam list-role-policies": { PolicyNames: ["radius-deploy-dev"] },
+      "iam get-role-policy": {
+        PolicyName: "radius-deploy-dev",
+        PolicyDocument: {
+          Version: "2012-10-17",
+          Statement: [{ Effect: "Allow", Action: "ec2:*", Resource: "*" }]
+        }
+      },
       "sts get-caller-identity": { Account: account },
       "iam get-role": {
         Role: {
@@ -1188,8 +1343,10 @@ describe("the async delete route through its background runner", () => {
       sleep: async () => {},
       now: () => Date.parse("2026-11-03T12:00:00Z"),
       isStopRequested: () => false,
+      isStoppedOperation: () => false,
       operationId: () => "",
       operations: {
+        getContext: () => ({}),
         enterStage: () => {},
         setStageState: () => {},
         addLegacyStep: () => {},

@@ -17,6 +17,7 @@ import {
   PLACEHOLDER_SECRET,
   PROFILE_NAME,
   PROFILE_SUBSCRIPTION_ID,
+  prepareCredentialStoreIsolation,
   REPOSITORY,
   REPOSITORY_ROOT,
   test,
@@ -3836,6 +3837,114 @@ test.describe("Radius Canvas in Chromium", () => {
       };
     }
 
+    async function openAwsCredentialForm(
+      page: Page,
+      canvas: CanvasHarness
+    ): Promise<void> {
+      await gotoCanvas(page, canvas, "credentials");
+      await page.locator("#new-cred-btn").click();
+      await page.locator("#cred-provider-select").selectOption("aws");
+      await page.locator("#cred-name-input").fill("aws-verification");
+      await page.locator("#aws-account-id").fill(AWS_ACCOUNT);
+      await page.locator("#aws-region").fill("us-east-2");
+    }
+
+    test("invalidates AWS verification after account and region edits in Chromium @safety", async ({
+      page,
+      canvas
+    }) => {
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText(
+        "Credentials verified"
+      );
+      await page.locator("#aws-account-id").fill("999988887777");
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      await expect(page.locator("#cred-verify-status")).toBeHidden();
+      await page.locator("#aws-account-id").fill(AWS_ACCOUNT);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText(
+        "Credentials verified"
+      );
+      await page.locator("#aws-region").fill("us-west-2");
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      await expect(page.locator("#cred-verify-status")).toBeHidden();
+      expect(
+        (await canvas.cliCalls())
+          .filter((call) => call.tool === "aws")
+          .map((call) => call.args)
+      ).toContainEqual([
+        "sts",
+        "get-caller-identity",
+        "--output",
+        "json",
+        "--region",
+        "us-east-2"
+      ]);
+    });
+
+    test("offers the AWS installer remediation before STS in Chromium @safety", async ({
+      page,
+      canvas
+    }) => {
+      const scenario = defaultFakeCliScenario();
+      const version = scenario.commands.find(
+        (command) => command.tool === "aws" && command.args?.[0] === "--version"
+      );
+      if (!version) throw new Error("AWS version command is not modeled");
+      version.stdout = "aws-cli/2.15.2";
+      await canvas.setScenario(scenario);
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#cred-verify-status")).toContainText("2.15.3");
+      await expect(page.locator("#cred-verify-action")).toContainText(
+        "Install or upgrade AWS CLI"
+      );
+      await expect(page.locator("#save-cred-btn")).toBeDisabled();
+      expect(
+        (await canvas.cliCalls()).some(
+          (call) => call.tool === "aws" && call.args[0] === "sts"
+        )
+      ).toBe(false);
+    });
+
+    test("keeps credential fields locked until an AWS save completes @safety", async ({
+      page,
+      canvas
+    }) => {
+      await openAwsCredentialForm(page, canvas);
+      await page.locator("#btn-verify-aws").click();
+      await expect(page.locator("#save-cred-btn")).toBeEnabled();
+      let releaseSave = () => {};
+      const saving = new Promise<void>((resolve) => {
+        releaseSave = resolve;
+      });
+      await page.route("**/api/save-credential-profile", async (route) => {
+        await saving;
+        await route.fulfill({ response: await route.fetch() });
+      });
+      try {
+        await page.locator("#save-cred-btn").click();
+        await expect(page.locator("#save-cred-btn")).toHaveText("Saving…");
+        await expect(page.locator("#aws-account-id")).not.toBeEditable();
+        await expect(page.locator("#aws-region")).not.toBeEditable();
+        await expect(page.locator("#cred-provider-select")).toBeDisabled();
+        await expect(page.locator("#cred-name-input")).not.toBeEditable();
+        releaseSave();
+        await expect(page.locator("#cred-success-banner")).toContainText(
+          "Successfully created credential profile aws-verification"
+        );
+        await page.locator("#new-cred-btn").click();
+        await page.locator("#cred-provider-select").selectOption("aws");
+        await expect(page.locator("#aws-account-id")).toBeEditable();
+        await expect(page.locator("#aws-region")).toBeEditable();
+      } finally {
+        releaseSave();
+        await page.unrouteAll({ behavior: "wait" });
+        await prepareCredentialStoreIsolation();
+      }
+    });
+
     // Answers each discovery with the next reply. The last reply repeats.
     async function routeAwsProfileAndDiscovery(
       page: Page,
@@ -4829,6 +4938,331 @@ test.describe("Radius Canvas in Chromium", () => {
       await expectNoWcagViolations(page);
     });
 
+    test("offers Remove lock at once for a lock left by a stopped setup @safety", async ({
+      page,
+      canvas
+    }) => {
+      const lockArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-radius-deploy-fixture-app`;
+      const operationId = await canvas.seedAwsLockWait(
+        { policyArn: lockArn, policyId: "LOCK0" },
+        { since: new Date().toISOString(), stopped: true }
+      );
+      await page.goto(
+        `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+      );
+
+      const removeLock = page.getByRole("button", { name: "Remove lock" });
+      await expect(removeLock).toBeVisible();
+      await expect(removeLock).toHaveAccessibleDescription(
+        /^This lock is from an earlier attempt that stopped: The setup of environment prod in fixture\/app \(operation op_chromium_aws_lock_holder\), which took it at \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\. Remove it so this run can continue\.$/
+      );
+      await expectNoWcagViolations(page);
+    });
+
+    test("deletes the IAM role and policy a stopped AWS setup created, under its own lock, by keyboard @safety", async ({
+      page,
+      canvas
+    }) => {
+      const roleName = "radius-deploy-fixture-radius-app";
+      const policyName = "radius-deploy-fixture-environment-1";
+      const lockArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-${roleName}`;
+      const operationId = await canvas.seedInterruptedAwsSetup(
+        { policyArn: lockArn, policyId: "LOCK0" },
+        { createdRole: true }
+      );
+      const environmentPath = `/repos/${REPOSITORY}/environments/fixture-environment`;
+      const aws = (args: string[], stdout: unknown = "") => ({
+        tool: "aws" as const,
+        args,
+        stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout)
+      });
+      const scenario = defaultFakeCliScenario();
+      scenario.commands.push(
+        {
+          tool: "gh",
+          args: ["api", environmentPath],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: JSON.stringify({ id: 123, name: "fixture-environment" })
+        },
+        {
+          tool: "gh",
+          args: ["api", "--method", "DELETE", environmentPath],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: ""
+        },
+        // The setup's own lock is there, so the rollback replaces it.
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "create-policy"],
+          exitCode: 254,
+          stderr:
+            "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
+          times: 1
+        },
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "create-policy"],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK1" } })
+        },
+        {
+          ...aws(
+            ["iam", "get-policy", "--policy-arn", lockArn, "--output", "json"],
+            {
+              Policy: {
+                PolicyId: "LOCK0",
+                Description: JSON.stringify({
+                  repo: REPOSITORY,
+                  environment: "fixture-environment",
+                  action: "setup",
+                  operationId
+                })
+              }
+            }
+          ),
+          times: 1
+        },
+        aws(
+          ["iam", "get-policy", "--policy-arn", lockArn, "--output", "json"],
+          { Policy: { PolicyId: "LOCK1" } }
+        ),
+        aws(["iam", "get-role", "--role-name", roleName, "--output", "json"], {
+          Role: {
+            Arn: `arn:aws:iam::${AWS_ACCOUNT}:role/${roleName}`,
+            RoleId: "AROA1",
+            AssumeRolePolicyDocument: {
+              Version: "2012-10-17",
+              Statement: []
+            }
+          }
+        }),
+        aws([
+          "iam",
+          "delete-role-policy",
+          "--role-name",
+          roleName,
+          "--policy-name",
+          policyName
+        ]),
+        aws(
+          [
+            "iam",
+            "list-role-policies",
+            "--role-name",
+            roleName,
+            "--output",
+            "json"
+          ],
+          { PolicyNames: [] }
+        ),
+        aws(
+          [
+            "iam",
+            "list-attached-role-policies",
+            "--role-name",
+            roleName,
+            "--output",
+            "json"
+          ],
+          { AttachedPolicies: [] }
+        ),
+        aws(["iam", "delete-role", "--role-name", roleName]),
+        aws(["iam", "delete-policy", "--policy-arn", lockArn])
+      );
+      await canvas.setScenario(scenario);
+      const awsWrites = async () =>
+        (await canvas.cliCalls())
+          .filter(
+            (call) =>
+              call.tool === "aws" &&
+              /^(delete|create)-/.test(call.args[1] ?? "")
+          )
+          .map((call) => call.args.slice(0, 2).join(" "));
+      await page.goto(
+        `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+      );
+
+      await page.locator("#env-progress-details > summary").click();
+      const inventory = page.locator("#env-progress-state");
+      await expect(inventory).toContainText(`IAM role ${roleName}`);
+      await expect(inventory).toContainText(
+        `${policyName} on IAM role ${roleName}`
+      );
+
+      const pause = page.getByRole("button", { name: "Pause setup" });
+      await pause.focus();
+      await page.keyboard.press("Enter");
+      const deleteSetup = page.getByRole("button", { name: "Delete setup" });
+      await expect(deleteSetup).toBeVisible();
+      await deleteSetup.focus();
+      await page.keyboard.press("Enter");
+
+      const dialog = page.locator("#env-rollback-modal");
+      await expect(dialog).toBeVisible();
+      const removes = dialog.locator("#env-rollback-remove li");
+      await expect(removes).toHaveText([
+        `${policyName} on IAM role ${roleName}`,
+        `IAM role ${roleName}, if nothing else uses it`,
+        `GitHub environment: ${REPOSITORY}:fixture-environment`,
+        `Lock on IAM role ${roleName} (policy ID LOCK0)`
+      ]);
+      await expectNoWcagViolations(page);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      expect(await awsWrites()).toEqual([]);
+
+      await deleteSetup.focus();
+      await page.keyboard.press("Enter");
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Delete setup" }).focus();
+      await page.keyboard.press("Enter");
+
+      await expect(page.locator("#env-progress-title")).toHaveText(
+        "Setup deleted",
+        { timeout: 15_000 }
+      );
+      expect(await awsWrites()).toEqual([
+        "iam create-policy",
+        "iam delete-policy",
+        "iam create-policy",
+        "iam delete-role-policy",
+        "iam delete-role",
+        "iam delete-policy"
+      ]);
+      const record = await canvas.operationRecord(operationId);
+      expect(record).toMatchObject({
+        state: "cancelled",
+        terminal: { reason: "rollback-complete" },
+        context: { awsDeployIdentityLock: null },
+        setupArtifacts: {
+          awsRole: { state: "deleted" },
+          awsRolePolicies: [{ state: "deleted" }],
+          githubEnvironment: { state: "deleted" }
+        }
+      });
+      await expectNoWcagViolations(page);
+    });
+
+    test("lists a restarted AWS setup's deploy identity lock and releases it when the setup is deleted, by keyboard @safety", async ({
+      page,
+      canvas
+    }) => {
+      const roleName = "radius-deploy-fixture-radius-app";
+      const lockArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-${roleName}`;
+      const lockEntry = `Lock on IAM role ${roleName} (policy ID LOCK0)`;
+      const operationId = await canvas.seedInterruptedAwsSetup({
+        policyArn: lockArn,
+        policyId: "LOCK0"
+      });
+      const environmentPath = `/repos/${REPOSITORY}/environments/fixture-environment`;
+      const scenario = defaultFakeCliScenario();
+      scenario.commands.push(
+        {
+          tool: "gh",
+          args: ["api", environmentPath],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: JSON.stringify({ id: 123, name: "fixture-environment" })
+        },
+        {
+          tool: "gh",
+          args: ["api", "--method", "DELETE", environmentPath],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: ""
+        },
+        {
+          tool: "aws",
+          args: [
+            "iam",
+            "get-policy",
+            "--policy-arn",
+            lockArn,
+            "--output",
+            "json"
+          ],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK0" } })
+        },
+        {
+          tool: "aws",
+          args: ["iam", "delete-policy", "--policy-arn", lockArn],
+          stdout: ""
+        }
+      );
+      await canvas.setScenario(scenario);
+      const deletedLock = async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "aws" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify(["iam", "delete-policy", "--policy-arn", lockArn])
+        );
+      await page.goto(
+        `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+      );
+
+      await expect(page.locator("#env-progress-title")).toContainText(
+        "Environment setup was interrupted"
+      );
+      await expect(
+        page.getByRole("button", { name: "Continue setup" })
+      ).toBeVisible();
+      await page.locator("#env-progress-details > summary").click();
+      const inventory = page.locator("#env-progress-state");
+      await expect(inventory).toContainText("What exists right now");
+      await expect(inventory).toContainText(lockEntry);
+
+      const pause = page.getByRole("button", { name: "Pause setup" });
+      await pause.focus();
+      await page.keyboard.press("Enter");
+      const deleteSetup = page.getByRole("button", { name: "Delete setup" });
+      await expect(deleteSetup).toBeVisible();
+      await deleteSetup.focus();
+      await page.keyboard.press("Enter");
+
+      const dialog = page.locator("#env-rollback-modal");
+      await expect(dialog).toBeVisible();
+      await expect(dialog.locator("#env-rollback-remove")).toContainText(
+        lockEntry
+      );
+      await expect(
+        dialog.locator("#env-rollback-keep-block")
+      ).not.toContainText(lockEntry);
+      await expectNoWcagViolations(page);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      expect(await deletedLock()).toBe(false);
+
+      await deleteSetup.focus();
+      await page.keyboard.press("Enter");
+      await expect(dialog).toBeVisible();
+      const confirmDelete = dialog.getByRole("button", {
+        name: "Delete setup"
+      });
+      await confirmDelete.focus();
+      await page.keyboard.press("Enter");
+
+      await expect.poll(deletedLock).toBe(true);
+      await expect(page.locator("#env-progress-title")).toHaveText(
+        "Setup deleted",
+        { timeout: 15_000 }
+      );
+      await expect
+        .poll(async () => {
+          const record = await canvas.operationRecord(operationId);
+          const context = record.context as Record<string, unknown>;
+          const terminal = record.terminal as Record<string, unknown> | null;
+          return {
+            state: record.state,
+            reason: terminal?.reason ?? null,
+            lock: context.awsDeployIdentityLock
+          };
+        })
+        .toEqual({
+          state: "cancelled",
+          reason: "rollback-complete",
+          lock: null
+        });
+      await expectNoWcagViolations(page);
+    });
+
     test("pauses an AWS setup during the deploy identity lock wait and continues from Authorize deploy identity by keyboard @safety", async ({
       page,
       canvas
@@ -4911,8 +5345,13 @@ test.describe("Radius Canvas in Chromium", () => {
           ),
         now: () => Date.now(),
         isStopRequested: ops.shouldStop,
+        isStoppedOperation: (operationId: string) => {
+          const holder = ops.operations.get(operationId);
+          return Boolean(holder) && ops.isTerminalState(holder.state);
+        },
         operationId: (operation) => operation.operationId,
         operations: {
+          getContext: (operation) => operation.context ?? {},
           enterStage: ops.enterStage,
           setStageState: ops.setStageState,
           addLegacyStep: ops.addLegacyStep,

@@ -121,11 +121,21 @@ import {
   type AwsEnvironmentAccess
 } from "./server/services/aws-environment-access.js";
 import { removeAwsDeployIdentityLock } from "./server/services/aws-deploy-identity-lock.js";
+import { releaseRecordedAwsLock } from "./server/services/aws-recorded-lock.js";
+import { createAwsSetupJournal } from "./server/services/aws-setup-journal.js";
+import {
+  isAwsCleanupArtifactType,
+  rollbackAwsSetupArtifacts
+} from "./server/services/aws-setup-rollback.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
-import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
+import {
+  createEnvironmentProviderReader,
+  createEnvironmentTargetReader
+} from "./server/services/environment-target.js";
 import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
+import { requireCurrentAwsWorkflows } from "./server/services/aws-workflow-compatibility.js";
 import {
   appParams,
   resolveDeployParams,
@@ -757,6 +767,7 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   runSessionPrompt: (prompt) =>
     invokeSessionPrompt(sessionPromptHandler, prompt),
   runCommand: (command, args, options) => runCommand(command, args, options),
+  runAws: (args) => runCliCommand("aws", args, 15000),
   errorMessage
 });
 
@@ -1121,7 +1132,9 @@ function kickoffWorkflowSync(
 // copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
 // scoped to just the workflow about to run (`only`), authors a missing file
 // (`create`), and is awaited so any create/update lands before the dispatch —
-// but a sync failure never blocks the dispatch (we log and proceed). `provider`
+// but Azure keeps its best-effort behavior. AWS provider workflows must pass
+// read-back verification before dispatch because older copies administer EKS
+// access that the deployment role no longer grants. `provider`
 // may be "" when unknown; deploy and delete workflow content is
 // provider-agnostic, so it only matters for verify. `workingBranch` (when it
 // matches the repo) is synced alongside the default branch so a
@@ -1140,6 +1153,11 @@ async function ensureWorkflowsCurrent(
 }> {
   if (!repo || !environment || !only || only.length === 0)
     return { created: [], updated: [], failed: [] };
+  let result: Awaited<ReturnType<typeof ensureWorkflowsCurrent>> = {
+    created: [],
+    updated: [],
+    failed: []
+  };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -1165,7 +1183,7 @@ async function ensureWorkflowsCurrent(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
-    return {
+    result = {
       // Downstream dispatchers use this list only to decide whether GitHub may
       // still be registering a workflow, including one created concurrently.
       created: [
@@ -1176,8 +1194,27 @@ async function ensureWorkflowsCurrent(
     };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
-    return { created: [], updated: [], failed: [] };
   }
+  if (includeAws) {
+    await requireCurrentAwsWorkflows(
+      { provider, files: only, workingBranch },
+      {
+        environmentProvider: () =>
+          createEnvironmentProviderReader(runCommand)(repo, environment),
+        defaultBranch: () => getDefaultBranch(repo),
+        templates: async () => ({
+          ...(await workflowTemplates(true).deploy(
+            environment,
+            ".radius/app.bicep"
+          )),
+          ...(await workflowTemplates(true).delete(environment))
+        }),
+        readFile: (path, branch) => fetchFileFromRepo(repo, path, branch),
+        errorMessage
+      }
+    );
+  }
+  return result;
 }
 
 // no access to the SDK `session`, so when a graph/generate route finds no
@@ -4066,9 +4103,11 @@ function productionEnvironmentDeletionPorts(
 }
 
 export interface EnvironmentOperationExecutionDependencies {
+  // The AWS developer switch. Cleanup runs no AWS command while it is off.
+  awsEnabled: boolean;
   awsEnvironmentAccess: Pick<
     AwsEnvironmentAccess<EnvironmentOperationRecord>,
-    "setup" | "release"
+    "setup" | "release" | "rollback"
   >;
   executionOwner: EnvironmentExecutionOwner;
   scope: ReturnType<EnvironmentExecutionOwner["attachRuntime"]>;
@@ -4122,9 +4161,12 @@ export function createEnvironmentOperationExecution(
   const instanceId = dependencies.presentation?.instanceId;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
+  if (typeof dependencies.awsEnabled !== "boolean")
+    throw new Error("Missing request coordinator dependency: awsEnabled");
   if (
     typeof awsEnvironmentAccess?.setup !== "function" ||
-    typeof awsEnvironmentAccess.release !== "function"
+    typeof awsEnvironmentAccess.release !== "function" ||
+    typeof awsEnvironmentAccess.rollback !== "function"
   )
     throw new Error(
       "Missing request coordinator dependency: awsEnvironmentAccess"
@@ -4350,7 +4392,7 @@ export function createEnvironmentOperationExecution(
       const setup = await githubAccountCoordinator.withSelectedAccount(
         selectedLogin,
         { ownerKey: accountContext.ownerKey, operationId },
-        async (executor) => {
+        async (executor, lease) => {
           releaseExecutor = accountContext.registerExecutor(
             operationId,
             executor
@@ -4462,13 +4504,57 @@ export function createEnvironmentOperationExecution(
                 );
               }
             },
-            setupAwsDeployIdentity: (operation, input, selectedExecutor) => {
+            // The deploy identity lock wait has no deadline, so AWS setup
+            // gives up the GitHub account lease while it runs. It takes the
+            // lease back for Configure environment, which runs gh as the
+            // selected account. No lease holder waits for the deploy identity
+            // lock this setup holds. A failed or paused AWS setup never needs
+            // the lease again.
+            setupAwsDeployIdentity: async (
+              operation,
+              input,
+              selectedExecutor
+            ) => {
+              // Returned as an AWS setup failure, so setup cleans up.
+              const switchFailure = (error: unknown) => ({
+                ok: false as const,
+                status: 409,
+                error: errorMessage(error),
+                code: "github-account-switch-failed"
+              });
+
+              // Entered before the release, so a failed release fails this
+              // stage.
+              enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+
+              try {
+                await lease.release();
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              // Shutdown can start while the release restores the account.
               assertSetupExecutionActive(attachment.isShuttingDown);
-              return awsEnvironmentAccess.setup(
+              const result = await awsEnvironmentAccess.setup(
                 operation,
                 input,
                 selectedExecutor
               );
+
+              if (!result.ok) return result;
+
+              try {
+                await lease.retake(() => {
+                  addLegacyStep(
+                    operation,
+                    "⏳ Waiting for another Radius run to finish with the GitHub CLI account."
+                  );
+                });
+              } catch (error) {
+                return switchFailure(error);
+              }
+
+              return result;
             },
             // Runs during shutdown too: a lock left behind blocks every other
             // run on this deploy identity until someone removes it.
@@ -4850,6 +4936,26 @@ export function createEnvironmentOperationExecution(
     }
 
     if (isStopped()) return;
+    // The AWS changes go before the GitHub environment, the reverse of setup.
+    const awsPass = await rollbackAwsSetupArtifacts(op, {
+      attempt,
+      awsEnabled: dependencies.awsEnabled,
+      selected,
+      access: awsEnvironmentAccess,
+      steps,
+      persist,
+      isStopped
+    });
+    if (awsPass.attempted) {
+      if (awsPass.interrupted && awsPass.results.length === 0) return;
+      warnings.push(...awsPass.warnings);
+      results = [...results, ...awsPass.results];
+      recordCleanupState(op, { state: "running", results: carriedResults() });
+      await persist();
+      if (awsPass.interrupted) return;
+    }
+
+    if (isStopped()) return;
     // A GitHub environment can be one of the selected targets, and skipping it
     // here would report a clean removal while the environment survived.
     if (
@@ -4892,7 +4998,8 @@ export function createEnvironmentOperationExecution(
           .filter(
             (entry: { artifactType: string }) =>
               entry.artifactType !== "github_environment" &&
-              entry.artifactType !== "github_environment_variable"
+              entry.artifactType !== "github_environment_variable" &&
+              !isAwsCleanupArtifactType(entry.artifactType)
           )
           .map((entry: { key: string }) => entry.key)
       ),
@@ -4904,6 +5011,13 @@ export function createEnvironmentOperationExecution(
     if (azureCleanup.state === "interrupted" || isStopped()) return;
 
     for (const step of steps) addLegacyStep(op, step);
+    // Last, after everything this pass removes: the lock is what tells another
+    // run that this setup may still be changing the role.
+    await releaseRecordedAwsLock(op, {
+      awsEnabled: dependencies.awsEnabled,
+      remove: (lock) => removeAwsDeployIdentityLock(lock, runAwsCli),
+      errorMessage
+    });
     // A deletion this pass issued and could not settle has nobody left to
     // settle it: the record is about to end, and every scheduler that would
     // reread it is gated on a live operation. Leaving it merely unresolved
@@ -5421,6 +5535,7 @@ export function createInstanceRequestCoordinator(
     }
   };
   const execution = createEnvironmentOperationExecution({
+    awsEnabled,
     awsEnvironmentAccess: dependencies.awsEnvironmentAccess,
     executionOwner: dependencies.executionOwner,
     accountContext: dependencies.accountContext,
@@ -5597,6 +5712,7 @@ export interface ProductionCanvasServerRuntimeOptions {
   accountContext: EnvironmentAccountContext;
   environmentOperationRunner?: EnvironmentOperationRunner;
   environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
+  cliExec?: typeof cliExec;
   // The developer-only AWS switch, read once by the composition root. Off, AWS
   // stays hidden: no AWS provider, no AWS environment create or delete, and no
   // AWS workflows committed to the repository.
@@ -5619,7 +5735,8 @@ export function createProductionCanvasServerRuntime(
     accountContext,
     environmentDeletionPorts,
     serverDependencies,
-    awsEnabled
+    awsEnabled,
+    cliExec: cliExecPort = cliExec
   } = options;
   if (!executionOwner)
     throw new Error("Missing canvas server dependency: executionOwner");
@@ -5632,12 +5749,17 @@ export function createProductionCanvasServerRuntime(
     createAwsEnvironmentAccess<EnvironmentOperationRecord>({
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
-      environments: createGhNamespaceClaimsPorts(cliExec),
+      environments: createGhNamespaceClaimsPorts(cliExecPort),
       sleep: sleepMs,
       now: () => Date.now(),
       isStopRequested: shouldStop,
+      isStoppedOperation: (operationId) => {
+        const holder = operations.get(operationId);
+        return Boolean(holder) && isTerminalState(holder.state);
+      },
       operationId: (operation) => operation.operationId,
       operations: {
+        getContext: (operation) => operation.context ?? {},
         enterStage,
         setStageState,
         addLegacyStep,
@@ -5646,7 +5768,14 @@ export function createProductionCanvasServerRuntime(
           touchOperation(operation);
         }
       },
-      store: operations,
+      // Read through the live binding: the extension configures the
+      // file-backed registry after this runtime is created.
+      store: { persist: () => operations.persist() },
+      journal: createAwsSetupJournal<EnvironmentOperationRecord>({
+        runAws: runAwsCli,
+        persist: () => operations.persist(),
+        now: () => Date.now()
+      }),
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage
     });
@@ -5660,6 +5789,7 @@ export function createProductionCanvasServerRuntime(
   );
   const githubSelectionHandles = createGitHubSelectionHandleStore();
   const identityProfilesRoutes = createIdentityProfilesRoutes({
+    runAws: (args) => runCliCommand("aws", args, 15000),
     listCredentialProfiles,
     saveCredentialProfile,
     deleteCredentialProfile,
@@ -5768,7 +5898,7 @@ export function createProductionCanvasServerRuntime(
     canDismissOperation,
     dismissOperation,
     persistOperations: () => operations.persist(),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     errorMessage,
     inputRequiredState: INPUT_REQUIRED_STATE
@@ -5831,7 +5961,7 @@ export function createProductionCanvasServerRuntime(
       latest: (repo) => operations.latest(repo),
       latestAny: () => operations.latestAny(),
       get: (operationId) => operations.get(operationId),
-      toClientView,
+      toClientView: (record: any) => toClientView(record, { awsEnabled }),
       productVersion: resolveGeneratorVersion,
       now: () => Date.now()
     },
@@ -5965,7 +6095,7 @@ export function createProductionCanvasServerRuntime(
   // injected rather than copied.
   const repositoriesRoutes = createRepositoriesRoutes({
     cliExec: (command, args, options, callback) => {
-      cliExec(command, args, options, callback);
+      cliExecPort(command, args, options, callback);
     },
     readInstanceState: (instanceId) =>
       canvasServer.instances.get(instanceId)?.state,
@@ -6013,7 +6143,7 @@ export function createProductionCanvasServerRuntime(
       new Promise((resolve) => {
         const opts: CliOptions = { timeout };
         if (extraEnv) opts.env = extraEnv;
-        cliExec("gh", args, opts, (err, stdout, stderr) => {
+        cliExecPort("gh", args, opts, (err, stdout, stderr) => {
           resolve(toGhCommandResult(err, stdout, stderr, { trimStdout: true }));
         });
       }),
@@ -6396,10 +6526,10 @@ export function createProductionCanvasServerRuntime(
     createOperation,
     buildDeleteStages: (options) => buildDeleteStages(options),
     startOperation: (op) => operations.start(op),
-    toClientView,
+    toClientView: (record: any) => toClientView(record, { awsEnabled }),
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
     cliExec: (command, args, options, callback) => {
-      cliExec(command, args, options, callback);
+      cliExecPort(command, args, options, callback);
     },
     activeDeleteEnvironment: (repo) => {
       const op = operations.latest(repo);
@@ -6470,7 +6600,7 @@ export function createProductionCanvasServerRuntime(
     getSelectedGitHubExecutor: (operationId) =>
       accountContext.getExecutor(operationId),
     cliExec: (command, args, options, callback) =>
-      cliExec(command, args, options, callback),
+      cliExecPort(command, args, options, callback),
     readProcessEnv: () => process.env,
     isValidRepoSlug,
     getOperation: (operationId) => operations.get(operationId),
@@ -6619,6 +6749,7 @@ export function createProductionCanvasServerRuntime(
       configureEnvironment({ data }, instanceId, isCurrentPresentation)
   };
   const setupExecution = createEnvironmentOperationExecution({
+    awsEnabled,
     awsEnvironmentAccess,
     executionOwner,
     scope: executionOwner.attachRuntime(),

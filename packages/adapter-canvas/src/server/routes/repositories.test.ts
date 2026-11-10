@@ -135,7 +135,7 @@ function dependencies(
 type Handler = (
   context: ReturnType<typeof createRequestContext>,
   deps: RepositoriesDependencies
-) => Promise<void>;
+) => void | Promise<void>;
 
 async function run(
   method: string,
@@ -200,6 +200,21 @@ describe("repositories routes (SU-05)", () => {
       ARGV.orgRepos("globex")
     ]);
     expect(cli.calls.every((call) => call.timeout === 15000)).toBe(true);
+  });
+
+  it("naturally parses repository output with blank lines removed", async () => {
+    const cli = cliFake({
+      [ARGV.personal]: { stdout: "\nocto/app\n\n octo/site \n" },
+      [ARGV.orgs]: { stdout: "\n" }
+    });
+    const recording = await run(
+      "GET",
+      "/api/user-repos",
+      "",
+      handleUserRepos,
+      dependencies({ cliExec: cli.exec })
+    );
+    expect(recording.body).toBe('{"repos":["octo/app"," octo/site"]}');
   });
 
   it("degrades an unauthenticated gh to an empty list rather than an error", async () => {
@@ -325,6 +340,20 @@ describe("repositories routes (SU-05)", () => {
     expect(cli.calls[0].timeout).toBe(15000);
   });
 
+  it("naturally parses branch output with blank lines removed", async () => {
+    const cli = cliFake({
+      [ARGV.branchNames("octo/app")]: { stdout: "\nmain\n\ndev\n" }
+    });
+    const recording = await run(
+      "POST",
+      "/api/repo-branches",
+      '{"repo":"octo/app"}',
+      handleRepoBranches,
+      dependencies({ cliExec: cli.exec })
+    );
+    expect(recording.body).toBe('{"branches":["main","dev"]}');
+  });
+
   it("answers a missing repo with 200 and no Content-Type at all", async () => {
     // Pre-existing header asymmetry. The success and failure paths both set
     // `Content-Type`; this one never does. Normalizing it would be observable.
@@ -361,6 +390,19 @@ describe("repositories routes (SU-05)", () => {
       "POST",
       "/api/repo-branches",
       "not json",
+      handleRepoBranches,
+      dependencies()
+    );
+    expect(recording.status).toBe(200);
+    expect(recording.headerOrder).toEqual(JSON_ONLY);
+    expect(recording.body).toBe('{"branches":[]}');
+  });
+
+  it("answers a null branch-list body with the same success fallback", async () => {
+    const recording = await run(
+      "POST",
+      "/api/repo-branches",
+      "null",
       handleRepoBranches,
       dependencies()
     );
@@ -607,6 +649,96 @@ describe("repositories routes (SU-05)", () => {
     expect(state.branchShas).toEqual({});
   });
 
+  it("normalizes malformed branch entries without rejecting the response", async () => {
+    const state: CanvasState = {};
+    const cli = cliFake({
+      [ARGV.branchObjects("octo/app")]: {
+        stdout: JSON.stringify([
+          null,
+          [],
+          "main",
+          { name: 42, commit: null },
+          { name: "dev", commit: { sha: 17 } }
+        ])
+      }
+    });
+    const recording = await run(
+      "POST",
+      "/api/discover-branches",
+      '{"repo":"octo/app"}',
+      handleDiscoverBranches,
+      dependencies({
+        cliExec: cli.exec,
+        readInstanceState: () => state,
+        repoMatchesWorkspace: () => false
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      branches: [
+        { name: "", sha: "" },
+        { name: "", sha: "" },
+        { name: "", sha: "" },
+        { name: "", sha: "" },
+        { name: "dev", sha: "" }
+      ]
+    });
+    expect(state.branches).toEqual(["", "", "", "", "dev"]);
+    expect(state.branchShas).toEqual({ "": "", dev: "" });
+  });
+
+  it("uses an empty repository when discover input omits repo", async () => {
+    const cli = cliFake({
+      [ARGV.branchObjects("")]: { stdout: "[]" }
+    });
+    const recording = await run(
+      "POST",
+      "/api/discover-branches",
+      "{}",
+      handleDiscoverBranches,
+      dependencies({
+        cliExec: cli.exec,
+        readInstanceState: () => ({}),
+        repoMatchesWorkspace: () => false
+      })
+    );
+    expect(recording.status).toBe(200);
+    expect(recording.body).toBe('{"branches":[]}');
+    expect(cli.calls.map((call) => call.line)).toEqual([
+      ARGV.branchObjects("")
+    ]);
+  });
+
+  it("still selects the matching workspace branch when gh returns an error", async () => {
+    const state: CanvasState = {
+      workspaceBranch: "feature/local",
+      workspaceRepo: "octo/app"
+    };
+    const cli = cliFake({
+      [ARGV.branchObjects("octo/app")]: {
+        error: new Error("offline"),
+        stderr: "gh unavailable"
+      }
+    });
+    const recording = await run(
+      "POST",
+      "/api/discover-branches",
+      '{"repo":"octo/app"}',
+      handleDiscoverBranches,
+      dependencies({
+        cliExec: cli.exec,
+        readInstanceState: () => state,
+        repoMatchesWorkspace: () => true
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "gh unavailable",
+      branches: [{ name: "feature/local", sha: "worktree" }],
+      workspaceBranch: "feature/local"
+    });
+    expect(state.branches).toEqual(["feature/local"]);
+    expect(state.branchShas).toEqual({ "feature/local": "worktree" });
+  });
+
   it("answers 503 without Content-Type when the instance has no entry", async () => {
     const cli = cliFake({
       [ARGV.branchObjects("octo/app")]: {
@@ -640,5 +772,75 @@ describe("repositories routes (SU-05)", () => {
     expect(recording.status).toBe(400);
     expect(recording.headerOrder).toEqual(JSON_ONLY);
     expect(JSON.parse(recording.body)).toHaveProperty("error");
+  });
+
+  it("answers a null discover body with the property-read error", async () => {
+    const recording = await run(
+      "POST",
+      "/api/discover-branches",
+      "null",
+      handleDiscoverBranches,
+      dependencies()
+    );
+    expect(recording.status).toBe(400);
+    expect(recording.headerOrder).toEqual(JSON_ONLY);
+    expect(JSON.parse(recording.body).error).toContain("repo");
+  });
+
+  it("stringifies a non-Error dependency failure", async () => {
+    const recording = await run(
+      "POST",
+      "/api/discover-branches",
+      '{"repo":"octo/app"}',
+      handleDiscoverBranches,
+      dependencies({
+        cliExec: () => {
+          throw "cli unavailable";
+        }
+      })
+    );
+    expect(recording.status).toBe(400);
+    expect(recording.body).toBe('{"error":"cli unavailable"}');
+  });
+
+  it("serves all three handlers through the public route registry", async () => {
+    const cli = cliFake({
+      [ARGV.personal]: { stdout: "octo/app\n" },
+      [ARGV.orgs]: { stdout: "" },
+      [ARGV.branchNames("octo/app")]: { stdout: "main\n" },
+      [ARGV.branchObjects("octo/app")]: { stdout: "[]" }
+    });
+    const deps = dependencies({
+      cliExec: cli.exec,
+      readInstanceState: () => ({}),
+      repoMatchesWorkspace: () => false
+    });
+    const routes = createRepositoriesRoutes(deps);
+
+    const userRepos = await run(
+      "GET",
+      "/api/user-repos",
+      "",
+      routes["GET /api/user-repos"],
+      deps
+    );
+    const repoBranches = await run(
+      "POST",
+      "/api/repo-branches",
+      '{"repo":"octo/app"}',
+      routes["POST /api/repo-branches"],
+      deps
+    );
+    const discoverBranches = await run(
+      "POST",
+      "/api/discover-branches",
+      '{"repo":"octo/app"}',
+      routes["POST /api/discover-branches"],
+      deps
+    );
+
+    expect(JSON.parse(userRepos.body)).toEqual({ repos: ["octo/app"] });
+    expect(JSON.parse(repoBranches.body)).toEqual({ branches: ["main"] });
+    expect(JSON.parse(discoverBranches.body)).toEqual({ branches: [] });
   });
 });

@@ -104,11 +104,12 @@ The managed Contour Gateway supports HTTP and TLS routes. TCP and UDP routes req
 
 - `AWS_ROLE_ARN` — ARN of the IAM role the runner assumes via OIDC
 - `AWS_REGION` — AWS region (e.g. `us-west-2`)
+- `AWS_ACCOUNT_ID` — the 12-digit account of `AWS_ROLE_ARN`. Verification, deploys, and deletes fail when the role signs in to a different account.
 - `AWS_EKS_CLUSTER_NAME` — name of the EKS cluster the workflow verifies access to
 
 **AWS** — also set from the form for deploys (not read by verification):
 
-- `AWS_ACCOUNT_ID`, `RADIUS_VPC_ID` (the EKS cluster's VPC), `RADIUS_SUBNET_IDS`
+- `RADIUS_VPC_ID` (the EKS cluster's VPC), `RADIUS_SUBNET_IDS`
 
 **AWS**, recorded for environment deletion (not read by any workflow):
 
@@ -130,14 +131,23 @@ The OIDC trust must already exist on the cloud side before the workflow can auth
 
 - **Local GitHub authentication:** `gh` must have a stored keyring login with `read:packages` and `write:packages`. The extension deliberately ignores ambient `GH_TOKEN` / `GITHUB_TOKEN` for package creation. If needed, run `gh auth refresh -s read:packages -s write:packages`.
 - **Azure:** a federated credential on the AAD app whose subject is exactly `repo:<owner>/<repo>:environment:<environment-name>`, audience `api://AzureADTokenExchange`.
-- **AWS:** an IAM role trust policy that allows `sts:AssumeRoleWithWebIdentity` from `token.actions.githubusercontent.com` with audience `sts.amazonaws.com` and subject `repo:<owner>/<repo>:environment:<environment-name>`.
+- **AWS:** an IAM role trust policy that allows `sts:AssumeRoleWithWebIdentity` from `token.actions.githubusercontent.com` with audience `sts.amazonaws.com` and the subjects GitHub presents for the environment (see the AWS OIDC entry under Common errors and fixes).
 
 ## Common errors and fixes
+
+When setup or verification ends in failure and recovery stops, use the `radius-report-issue` skill to offer a report to the Radius team. State that the user can review the issue before submission. Do not collect extra diagnostics until they agree, and require separate explicit permission to submit the reviewed draft. Pending input, account selection, consent, and expected AWS admission refusal are not terminal bugs.
 
 - **`refusing to allow an OAuth App to create or update workflow .github/workflows/verify-<provider>.yml without 'workflow' scope`** — the PAT lacks `workflow` scope. Run `gh auth refresh -s workflow` (the extension auto-prefers a `gh auth token` over `$GITHUB_TOKEN`).
 - **"Workflow dispatch accepted, but no new run appeared after 30s"** — usually means GitHub hasn't indexed the just-pushed workflow yet. The extension already retries dispatch with backoff; if it still fails, check the Actions tab in the browser.
 - **Azure OIDC fails with `AADSTS70021: No matching federated identity record found`** — the federated credential subject on the AAD app doesn't match. Subject must be exactly `repo:<owner>/<repo>:environment:<env-name>`.
-- **AWS OIDC fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`** — IAM role trust policy missing or wrong audience. Audience should be `sts.amazonaws.com`, condition on `token.actions.githubusercontent.com:sub == repo:<owner>/<repo>:environment:<env-name>`. When a deploy fails this way, the canvas offers **Repair**, which adds the subjects GitHub now presents for this environment back to the deploy role's trust policy and changes nothing else. It only changes a role Radius created for this repository, or one that already trusts another environment of it. If Repair reports the trust is intact, the cause is elsewhere, such as the role's permissions.
+- **AWS OIDC fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`** — IAM role trust policy missing or wrong audience. Audience should be `sts.amazonaws.com`, and `token.actions.githubusercontent.com:sub` must list the subjects GitHub presents for the environment. With GitHub's default subject these are `repo:<owner>/<repo>:environment:<env-name>` and the ID form `repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:<env-name>`, or only the ID form when the repository uses immutable subjects. With a customized subject it is the one subject built from the customization's `include_claim_keys`, such as `repository_id:<repo-id>:environment:<env-name>`. When a deploy fails this way, the canvas offers **Repair**, which adds the subjects GitHub now presents for this environment back to the deploy role's trust policy and changes nothing else. It only changes a role Radius created for this repository, or one that already trusts another environment of it. If Repair reports the trust is intact, the cause is elsewhere, such as the role's permissions.
+- **AWS setup or Repair refuses with `aws-subject-not-repository-specific`** — the repository's OIDC subject customization, set on the repository or its organization, names neither the repository nor its ID, for example only `repository_owner` and `context`. Every repository with the same claim values presents that subject, so setup and Repair refuse to trust it. The refused attempt changed nothing in AWS. Add `repo` or `repository_id` to the customization's `include_claim_keys`, then retry setup or Repair. For example, this makes the subject `repository_id:<repo-id>:environment:<env-name>`:
+
+  ```sh
+  gh api -X PUT repos/<owner>/<repo>/actions/oidc/customization/sub \
+    --input - <<<'{"use_default":false,"include_claim_keys":["repository_id","context"]}'
+  ```
+
 - **AWS setup or deletion waits for "the lock on IAM role …"** — another Radius run is changing the same deploy role's trust policy, so this one waits. The lock is an IAM policy named `radius-lock-<role>`. After 10 minutes the canvas offers **Remove lock**. Use it only after confirming the other run has stopped, because two runs writing the trust policy at once can drop an environment's access.
 - **AWS setup stops with "not allowed iam:CreatePolicy"** — the signed-in AWS identity needs `iam:CreatePolicy`, `iam:GetPolicy`, and `iam:DeletePolicy` on `arn:aws:iam::<account>:policy/radius-lock-*` to take the deploy role's lock. Setup changed nothing.
 - **GHCR package bootstrap fails** — refresh the stored `gh` credential with `read:packages` and `write:packages`. The extension pushes a harmless retained `bootstrap` artifact with an `org.opencontainers.image.source` annotation, then requires the package to be private/internal and linked to the target repository. It never uses a public repository's `GITHUB_TOKEN` to create the package because that can make the package public.

@@ -28,7 +28,12 @@ export type SetupCoordinatorStageResult =
   | { kind: "reconciling"; message?: unknown };
 
 export type SetupCoordinatorAwsResult =
-  | { kind: "completed"; roleArn: string; trustSubjects: readonly string[] }
+  | {
+      kind: "completed";
+      roleArn: string;
+      trustSubjects: readonly string[];
+      policyName: string;
+    }
   | { kind: "failed"; error: unknown }
   // A pause arrived during AWS setup, which recorded what it changed and ran
   // nothing after the pause.
@@ -259,15 +264,16 @@ export async function runSetupCoordinator(
   const environmentRequest = record(request.environment);
   let awsRoleArn = "";
   let awsTrustSubjects: readonly string[] = [];
+  let awsPolicyName = "";
   // AWS setup takes the deploy identity lock and keeps it until Configure
   // environment has written the GitHub environment. Until then a delete that
   // checks which environments use a cluster could not see this one, and could
   // remove the cluster access this setup just granted.
   //
-  // A resume with `outstanding` work skips the deploy identity step, so it
-  // takes no lock and runs the rest of setup without one. That resume path
-  // belongs to #1096.
-  const awsLocked = target.provider === "aws" && !outstanding;
+  // A resume with `outstanding` work runs it too: Configure environment still
+  // writes the variables a delete reads, so it needs the lock, and the role may
+  // have changed while setup was stopped. Each AWS step skips what exists.
+  const awsLocked = target.provider === "aws";
   try {
     if (awsLocked) {
       const aws = await ports.authorizeAws({
@@ -305,23 +311,13 @@ export async function runSetupCoordinator(
       }
       awsRoleArn = aws.roleArn;
       awsTrustSubjects = aws.trustSubjects;
+      awsPolicyName = aws.policyName;
     }
     const clientId =
       setupResult && "clientId" in setupResult ?
         setupResult.clientId
       : undefined;
     const liveContext = ports.operation().context;
-    if (!awsRoleArn && typeof liveContext?.awsRoleArn === "string") {
-      awsRoleArn = liveContext.awsRoleArn;
-    }
-    if (
-      awsTrustSubjects.length === 0 &&
-      Array.isArray(liveContext?.awsTrustSubjects)
-    ) {
-      awsTrustSubjects = liveContext.awsTrustSubjects.filter(
-        (subject): subject is string => typeof subject === "string"
-      );
-    }
     const environmentResult = await invoke(() =>
       ports.configureEnvironment({
         ...environmentRequest,
@@ -331,6 +327,7 @@ export async function runSetupCoordinator(
         provider: target.provider,
         operationId: target.operationId,
         ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
+        ...(awsPolicyName ? { policyName: awsPolicyName } : {}),
         ...(awsTrustSubjects.length > 0 ?
           { trustSubjects: awsTrustSubjects }
         : {}),

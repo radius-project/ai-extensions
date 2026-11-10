@@ -27,6 +27,7 @@ const VALID_PARAMS: Readonly<Record<RemediationId, Record<string, string>>> = {
   "azure-cli-login": { tenantId: TENANT },
   "azure-subscription-set": { subscriptionId: SUBSCRIPTION },
   "aws-cli-login": { nextStep: "refresh-discovery" },
+  "aws-cli-install": {},
   "github-cli-login": {},
   "github-packages-scope": { login: "octocat" },
   "github-workflow-scope": {},
@@ -445,12 +446,15 @@ describe("github remediations", () => {
 });
 
 describe("aws remediation", () => {
-  it("offers SSO login and mentions the static-credential alternative", () => {
+  it("offers SSO login without replacing another credential provider", () => {
     const remediation = build("aws-cli-login", {});
 
     expect(remediation.displayCommand).toBe("aws sso login");
     expect(remediation.argv).toEqual([["aws", "sso", "login"]]);
-    expect(remediation.confirmBody).toContain("aws configure");
+    expect(remediation.confirmBody).toContain("refresh that provider");
+    expect(remediation.confirmBody).toContain(
+      "Radius will not change your AWS profiles."
+    );
     expect(remediation.impact).toBe("low");
     expect(remediation.params).toEqual({});
     expect(remediation.followUp).toBe(

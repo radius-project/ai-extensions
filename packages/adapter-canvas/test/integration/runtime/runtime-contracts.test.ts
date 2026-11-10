@@ -375,6 +375,12 @@ describe("P0-A Radius runtime registration contract", () => {
     expect(unrelated.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
     expect(unrelated.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
     expect(enabledResult?.additionalContext).toContain("radius-panel");
+    expect(enabledResult?.additionalContext).toContain(
+      "use the radius-report-issue skill"
+    );
+    expect(enabledResult?.additionalContext).toContain(
+      "require separate explicit permission before submitting"
+    );
     expect(
       enabled.deps.workspace.hasRadiusApplicationModel
     ).toHaveBeenCalledExactlyOnceWith("/worktrees/radius-app");

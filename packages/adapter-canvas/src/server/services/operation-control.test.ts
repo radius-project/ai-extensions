@@ -12,7 +12,10 @@ import {
   beginRetryAttempt,
   finish,
   pauseForProviderRestart,
+  prepareProviderMutation,
+  recordCommittedWorkflowFile,
   onOperationTerminal,
+  STAGE_AUTHORIZE_IDENTITY,
   STAGE_VERIFY,
   verificationWorkflowState
 } from "../../operations.js";
@@ -383,6 +386,130 @@ describe("direct operation control service", () => {
     expect(dependencies.persistOperations).toHaveBeenCalledTimes(2);
     expect(operation.journey?.notifiedAt).toBeFalsy();
   });
+
+  it.each([
+    ["no verification record", undefined],
+    ["a record without a dispatch", { workflow: "radius-verify.yml" }],
+    ["a zero dispatch time", { dispatchedAt: 0, runId: " " }]
+  ])(
+    "pauses a restarted setup that never dispatched verification without inspecting a workflow: %s",
+    async (_label, verification) => {
+      const operation = newOperation();
+      operation.context = { githubLogin: "alice" };
+      enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+      if (verification) operation.verification = verification;
+      pauseForProviderRestart(operation);
+      const inspect = vi.fn();
+      const { dependencies } = fixture({
+        get: () => operation,
+        inspectVerificationWorkflow: inspect
+      });
+      const announce = vi.fn();
+      onOperationTerminal(announce);
+
+      expect(
+        await createOperationsControlService(dependencies)({
+          operationId: operation.operationId,
+          command: "stop"
+        })
+      ).toMatchObject({
+        status: 200,
+        body: { code: "operation-stopped" }
+      });
+      expect(inspect).not.toHaveBeenCalled();
+      expect(operation.state).toBe("cancelled");
+      expect(verificationWorkflowState(operation)).toBeNull();
+      expect(dependencies.persistOperations).toHaveBeenCalledTimes(1);
+      expect(announce).toHaveBeenCalledOnce();
+    }
+  );
+
+  it.each([
+    [
+      "committed a workflow file",
+      (operation: OperationRecord) => {
+        recordCommittedWorkflowFile(operation, {
+          path: ".github/workflows/radius-verify.yml",
+          mode: "pull_request",
+          branch: "radius/setup-dev",
+          commitSha: "c".repeat(40),
+          blobSha: "b".repeat(40),
+          contentSha256: "a".repeat(64),
+          previousBlobSha: null,
+          previousBlobKnown: true
+        });
+      }
+    ],
+    [
+      "started a workflow write",
+      (operation: OperationRecord) => {
+        prepareProviderMutation(operation, {
+          kind: "github_workflow.put",
+          target: "radius/setup-dev:.github/workflows/radius-verify.yml"
+        });
+      }
+    ]
+  ])(
+    "keeps the workflow state unknown for a restarted setup that %s without dispatch fields",
+    async (_label, record) => {
+      const operation = newOperation();
+      operation.context = { githubLogin: "alice" };
+      enterStage(operation, STAGE_VERIFY);
+      record(operation);
+      pauseForProviderRestart(operation);
+      const { dependencies } = fixture({ get: () => operation });
+
+      expect(
+        await createOperationsControlService(dependencies)({
+          operationId: operation.operationId,
+          command: "stop"
+        })
+      ).toMatchObject({
+        status: 200,
+        body: { code: "operation-stopped-workflow-status-unknown" }
+      });
+      expect(verificationWorkflowState(operation)).toBe("unknown");
+    }
+  );
+
+  it.each(["replaced", "shutdown"] as const)(
+    "refuses a no-dispatch pause whose operation changed while the Stop saved (%s)",
+    async (change) => {
+      const operation = newOperation();
+      operation.context = { githubLogin: "alice" };
+      enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+      pauseForProviderRestart(operation);
+      let current: OperationRecord | null = operation;
+      let shuttingDown = false;
+      const { dependencies } = fixture({
+        get: () => current,
+        isShuttingDown: () => shuttingDown,
+        persistOperations: vi.fn(async () => {
+          if (change === "replaced") current = null;
+          else shuttingDown = true;
+        })
+      });
+      const announce = vi.fn();
+      onOperationTerminal(announce);
+
+      expect(
+        await createOperationsControlService(dependencies)({
+          operationId: operation.operationId,
+          command: "stop"
+        })
+      ).toMatchObject({
+        status: change === "replaced" ? 409 : 503,
+        body: {
+          code:
+            change === "replaced" ?
+              "operation-context-changed"
+            : "operation-shutting-down",
+          stopRecorded: true
+        }
+      });
+      expect(announce).not.toHaveBeenCalled();
+    }
+  );
 
   it("rejects a replacement login during final admission persistence without restoring the old account", async () => {
     const operation = mergeHandoff();

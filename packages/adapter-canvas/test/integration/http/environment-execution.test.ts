@@ -18,6 +18,8 @@ import {
   reconcileRestoredOperation,
   projectOperationActions,
   recordGitHubEnvironment,
+  recordAwsRole,
+  recordAwsRolePolicy,
   recordCommittedWorkflowFile,
   recordCommitState,
   recordAzureApp,
@@ -32,8 +34,17 @@ import {
   STAGE_DELETE_RADIUS_ENV,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_VERIFY,
+  buildStages,
+  enterStage,
+  setExecutionActive,
+  prepareProviderMutation,
+  requestStop,
+  shouldStop,
+  stopAtBoundary,
+  STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
+import { executeRecoverableMutation } from "../../../src/server/services/provider-mutation-recovery.js";
 import {
   disabledOperationStore,
   parseOperationsEnvelope,
@@ -650,6 +661,857 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it.each([true, false])(
+    "releases a rolled-back AWS setup's lock only while AWS is on (awsEnabled=%s)",
+    async (awsEnabled) => {
+      const lockArn =
+        "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
+      const aws = await fakeAwsOnPath({
+        "--version": { stdout: "aws-cli/2.39.0" },
+        "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+        "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK0"}}' },
+        "iam delete-policy": { stdout: "" }
+      });
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api /repos/fixture/app/environments/dev")
+          return { code: 0, stdout: '{"id":17,"name":"dev"}', stderr: "" };
+        if (
+          command === "api --method DELETE /repos/fixture/app/environments/dev"
+        )
+          return { code: 0, stdout: "", stderr: "" };
+        throw new Error(`Unexpected cleanup command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        awsEnabled,
+        accountContext: createEnvironmentAccountContext(
+          "aws-cleanup",
+          createGitHubAccountCoordinator({
+            createExecutor: async () => executor,
+            getActiveKeyringLogin: async () => executor.login,
+            switchKeyringAccount: async () => {
+              throw new Error("Unexpected keyring switch");
+            },
+            resetIdentityCache: () => {}
+          })
+        )
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "aws-cleanup",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: "op_aws_cleanup",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        op.context.githubLogin = executor.login;
+        setContext(op, {
+          awsDeployIdentityLock: { policyArn: lockArn, policyId: "LOCK0" }
+        });
+        recordGitHubEnvironment(op, {
+          state: "created",
+          origin: "this_operation",
+          repo: op.repo,
+          name: op.environment,
+          providerId: "17"
+        });
+        finish(op, "failed");
+        operations.put(op);
+        vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        expect(response.status).toBe(202);
+        await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+          timeout: 15000
+        });
+
+        expect(op.terminal).toMatchObject({ reason: "rollback-complete" });
+        const labels = op.steps.map((step: { label: string }) => step.label);
+        if (awsEnabled) {
+          expect(await aws.calls()).toEqual([
+            "--version",
+            "sts get-caller-identity --output json",
+            `iam get-policy --policy-arn ${lockArn} --output json`,
+            `iam delete-policy --policy-arn ${lockArn}`
+          ]);
+          expect(op.context.awsDeployIdentityLock).toBeNull();
+        } else {
+          expect(await aws.calls()).toEqual([]);
+          expect(op.context.awsDeployIdentityLock).toEqual({
+            policyArn: lockArn,
+            policyId: "LOCK0"
+          });
+          expect(labels).toContainEqual(
+            expect.stringMatching(
+              /^AWS environments are turned off, so Radius did not release the lock/
+            )
+          );
+        }
+      } finally {
+        owner.shutdown();
+        await runtime.stopServer("aws-cleanup", true);
+        await aws.restore();
+      }
+    }
+  );
+
+  it.each([
+    ["an AWS setup", "aws", false],
+    ["an Azure setup", "azure", true]
+  ])(
+    "after a restart settles a GitHub write, pauses %s only when it is AWS",
+    async (_label, provider, rollsBack) => {
+      const roleArn =
+        "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+      const target =
+        "fixture/app:<default>:.github/workflows/radius-verify-credentials.yml";
+      const runs: Array<string | undefined> = [];
+      const owner = createEnvironmentExecutionOwner();
+      // Configure environment's part of a resumed run: it settles the write
+      // the crash left, then stops at the next boundary if asked to. The
+      // cleanup a rollback would schedule comes here too, with its command.
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        awsEnabled: true,
+        environmentOperationRunner: async (operationId, commandId) => {
+          runs.push(commandId);
+          if (commandId) return;
+          const op = operations.get(operationId);
+          await executeRecoverableMutation({
+            operation: op,
+            kind: "github_workflow.put",
+            target,
+            persist: async () => {},
+            mutate: async () => {
+              throw new Error("A settled write is never sent again.");
+            },
+            accept: (result) => result,
+            // GitHub answered 404: the request never reached it.
+            reconcile: async () => ({
+              state: "not_applied",
+              evidence: "GitHub has no such file."
+            })
+          });
+          if (shouldStop(op)) stopAtBoundary(op, "before-workflow-commit");
+        }
+      });
+      try {
+        await runtime.getOrCreateServer("restart", "environment");
+        const live = createOperation({
+          operationId: `op_restart_${provider}`,
+          repo: "fixture/app",
+          environment: "dev",
+          provider,
+          stages: buildStages({ includeIdentity: true })
+        });
+        recordAwsRole(live, {
+          state: "created",
+          origin: "this_operation",
+          roleArn,
+          roleName: "radius-deploy-fixture-app",
+          roleId: "AROA1"
+        });
+        live.resumeRequest = {
+          needsAzureCredentials: false,
+          environment: { provider, roleName: "radius-deploy-fixture-app" }
+        };
+        enterStage(live, STAGE_CONFIGURE_ENVIRONMENT);
+        // The extension stopped after sending the workflow write.
+        prepareProviderMutation(live, { kind: "github_workflow.put", target });
+        setExecutionActive(live, true);
+        const op = reconcileRestoredOperation(
+          fromPersistedOperation(toPersistedOperation(live))
+        );
+        expect(op.recoveryState).toBe("provider_reconciliation_pending");
+        operations.put(op);
+        vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+        runtime.setupExecution.recoverOperation(op);
+        if (rollsBack) {
+          // The Azure rule this keeps: settled, then rolled back on its own.
+          await vi.waitFor(
+            () =>
+              expect(runs).toEqual([
+                undefined,
+                expect.stringMatching(/:rollback:/)
+              ]),
+            { timeout: 15000 }
+          );
+          expect(op.providerRecovery.state).toBe("rollback_pending");
+          return;
+        }
+        await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+          timeout: 15000
+        });
+        await vi.waitFor(() =>
+          expect(owner.hasActiveEnvironmentTasks("restart")).toBe(false)
+        );
+        expect(op.state).toBe("cancelled");
+        expect(op.providerRecovery.state).not.toBe("rollback_pending");
+        // No rollback was scheduled, so the role is still there to reuse.
+        expect(runs).toEqual([undefined]);
+        expect(op.setupArtifacts.awsRole.state).toBe("created");
+        expect(
+          projectOperationActions(op).map((action: { id: string }) => action.id)
+        ).toEqual(expect.arrayContaining(["continue-setup", "rollback"]));
+      } finally {
+        owner.shutdown();
+        await runtime.stopServer("restart", true);
+      }
+    }
+  );
+
+  it("settles an AWS write a restart interrupted, then pauses for the developer instead of rolling back", async () => {
+    const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "iam get-role": {
+        stdout: JSON.stringify({
+          Role: {
+            Arn: roleArn,
+            RoleId: "AROA1",
+            Tags: [{ Key: "radius-operation", Value: "op_aws_crashed" }]
+          }
+        })
+      }
+    });
+    const runtime = awsSetupRuntime();
+    try {
+      await runtime.getOrCreateServer("aws-panel", "environment");
+      const live = createOperation({
+        operationId: "op_aws_crashed",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws",
+        stages: buildStages({ includeIdentity: true })
+      });
+      live.context.githubLogin = "saved-account";
+      live.resumeRequest = {
+        needsAzureCredentials: false,
+        github: { login: "saved-account", credentialSource: "keyring" },
+        environment: {
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop",
+          roleName: "radius-deploy-fixture-app",
+          existingRoleArn: ""
+        }
+      };
+      recordGitHubEnvironment(live, {
+        state: "created",
+        origin: "this_operation",
+        repo: "fixture/app",
+        name: "dev",
+        providerId: "17"
+      });
+      enterStage(live, STAGE_AUTHORIZE_IDENTITY);
+      // The extension stopped after sending create-role, before the answer.
+      prepareProviderMutation(live, {
+        kind: "aws_role.create",
+        target: `attempt-1|${roleArn}`,
+        intent: {
+          requestedAt: "2026-10-30T12:00:00.000Z",
+          accountId: "123456789012",
+          roleArn,
+          roleName: "radius-deploy-fixture-app",
+          subjects: '["repo:fixture/app:environment:dev"]'
+        }
+      });
+      setExecutionActive(live, true);
+      const op = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(live))
+      );
+      expect(op.recoveryState).toBe("provider_reconciliation_pending");
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+      runtime.setupExecution.recoverOperation(op);
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+
+      // Read only: the write is never sent again, and no lock is taken.
+      expect(
+        (await aws.calls()).map((call) => call.split(" ").slice(0, 2).join(" "))
+      ).toEqual(["--version", "sts get-caller-identity", "iam get-role"]);
+      expect(op.state).toBe("cancelled");
+      expect(op.providerRecovery.state).not.toBe("rollback_pending");
+      expect(op.providerRecovery.mutations[0]).toMatchObject({
+        kind: "aws_role.create",
+        status: "confirmed",
+        providerId: "AROA1"
+      });
+      expect(op.setupArtifacts.awsRole).toMatchObject({
+        state: "created",
+        roleId: "AROA1"
+      });
+      expect(
+        projectOperationActions(op).map((action: { id: string }) => action.id)
+      ).toEqual(
+        expect.arrayContaining(["continue-setup", "rollback", "exit-setup"])
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it("waits for AWS sign-in while a restart settles a write, without counting it against the write", async () => {
+    const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      // Expired when the restart first reads AWS, then signed in again.
+      "sts get-caller-identity": [
+        {
+          stderr:
+            "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: The security token included in the request is expired",
+          code: 254
+        },
+        { stdout: '{"Account":"123456789012"}' }
+      ],
+      "iam get-role": {
+        stdout: JSON.stringify({
+          Role: {
+            Arn: roleArn,
+            RoleId: "AROA1",
+            Tags: [{ Key: "radius-operation", Value: "op_aws_expired" }]
+          }
+        })
+      }
+    });
+    const runtime = awsSetupRuntime();
+    try {
+      await runtime.getOrCreateServer("aws-panel", "environment");
+      const live = createOperation({
+        operationId: "op_aws_expired",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws",
+        stages: buildStages({ includeIdentity: true })
+      });
+      live.context.githubLogin = "saved-account";
+      live.resumeRequest = {
+        needsAzureCredentials: false,
+        github: { login: "saved-account", credentialSource: "keyring" },
+        environment: {
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop",
+          roleName: "radius-deploy-fixture-app",
+          existingRoleArn: ""
+        }
+      };
+      recordGitHubEnvironment(live, {
+        state: "created",
+        origin: "this_operation",
+        repo: "fixture/app",
+        name: "dev",
+        providerId: "17"
+      });
+      enterStage(live, STAGE_AUTHORIZE_IDENTITY);
+      // The extension stopped after sending create-role, before the answer.
+      prepareProviderMutation(live, {
+        kind: "aws_role.create",
+        target: `attempt-1|${roleArn}`,
+        intent: {
+          requestedAt: "2026-10-30T12:00:00.000Z",
+          accountId: "123456789012",
+          roleArn,
+          roleName: "radius-deploy-fixture-app",
+          subjects: '["repo:fixture/app:environment:dev"]'
+        }
+      });
+      setExecutionActive(live, true);
+      const op = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(live))
+      );
+      expect(op.recoveryState).toBe("provider_reconciliation_pending");
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+      runtime.setupExecution.recoverOperation(op);
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+
+      expect(
+        (await aws.calls()).map((call) => call.split(" ").slice(0, 2).join(" "))
+      ).toEqual([
+        "--version",
+        "sts get-caller-identity",
+        "--version",
+        "sts get-caller-identity",
+        "iam get-role"
+      ]);
+      expect(
+        op.steps.filter((step: { label: string }) =>
+          step.label.startsWith(
+            "Radius could not sign in to AWS to check the interrupted setup."
+          )
+        )
+      ).toHaveLength(1);
+      expect(op.providerRecovery.mutations[0].reconcileAttempts ?? 0).toBe(0);
+      expect(op.state).toBe("cancelled");
+      expect(op.providerRecovery.state).not.toBe("rollback_pending");
+      expect(op.providerRecovery.mutations[0]).toMatchObject({
+        kind: "aws_role.create",
+        status: "confirmed",
+        providerId: "AROA1"
+      });
+      expect(op.setupArtifacts.awsRole).toMatchObject({
+        state: "created",
+        roleId: "AROA1"
+      });
+      expect(
+        projectOperationActions(op).map((action: { id: string }) => action.id)
+      ).toEqual(
+        expect.arrayContaining(["continue-setup", "rollback", "exit-setup"])
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+  it("rolls back what an AWS setup created, under the lock, then its GitHub environment", async () => {
+    const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.39.0" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": {
+        stdout: JSON.stringify({
+          Role: {
+            Arn: roleArn,
+            RoleId: "AROA1",
+            AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
+          }
+        })
+      },
+      "iam delete-role-policy": { stdout: "" },
+      "iam list-role-policies": { stdout: '{"PolicyNames":[]}' },
+      "iam list-attached-role-policies": { stdout: '{"AttachedPolicies":[]}' },
+      "iam delete-role": { stdout: "" },
+      "iam delete-policy": { stdout: "" }
+    });
+    const run = vi.fn(async (args: string[]) => {
+      const command = args.join(" ");
+      if (command === "api /repos/fixture/app/environments/dev")
+        return { code: 0, stdout: '{"id":17,"name":"dev"}', stderr: "" };
+      if (command === "api --method DELETE /repos/fixture/app/environments/dev")
+        return { code: 0, stdout: "", stderr: "" };
+      throw new Error(`Unexpected cleanup command: ${command}`);
+    });
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      requiresKeyringSwitch: false,
+      run
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      awsEnabled: true,
+      accountContext: createEnvironmentAccountContext(
+        "aws-rollback",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => executor.login,
+          switchKeyringAccount: async () => {
+            throw new Error("Unexpected keyring switch");
+          },
+          resetIdentityCache: () => {}
+        })
+      )
+    });
+    try {
+      const entry = await runtime.getOrCreateServer(
+        "aws-rollback",
+        "environment"
+      );
+      const op = createOperation({
+        operationId: "op_aws_rollback",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      op.context.githubLogin = executor.login;
+      recordGitHubEnvironment(op, {
+        state: "created",
+        origin: "this_operation",
+        repo: op.repo,
+        name: op.environment,
+        providerId: "17"
+      });
+      recordAwsRole(op, {
+        state: "created",
+        origin: "this_operation",
+        roleArn,
+        roleName: "radius-deploy-fixture-app",
+        roleId: "AROA1"
+      });
+      recordAwsRolePolicy(op, {
+        roleArn,
+        roleName: "radius-deploy-fixture-app",
+        roleId: "AROA1",
+        policyName: "radius-deploy-dev-1"
+      });
+      finish(op, "failed");
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+
+      const status = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}`
+      );
+      const rollback = (await status.json()).operation.actions.find(
+        (action: { id: string }) => action.id === "rollback"
+      );
+      expect(rollback.preview.removes).toEqual([
+        {
+          kind: "aws_role_policy",
+          target: "radius-deploy-dev-1 on IAM role radius-deploy-fixture-app"
+        },
+        {
+          kind: "aws_role",
+          target: "IAM role radius-deploy-fixture-app, if nothing else uses it"
+        },
+        { kind: "github_environment", target: "fixture/app:dev" }
+      ]);
+
+      const response = await fetch(`${entry.baseUrl}${rollback.path}`, {
+        method: "POST",
+        headers: {
+          origin: entry.baseUrl,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+        }
+      });
+      expect(response.status).toBe(202);
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+
+      expect(op.terminal).toMatchObject({ reason: "rollback-complete" });
+      const calls = await aws.calls();
+      expect(
+        calls.map((call) => call.split(" ").slice(0, 2).join(" "))
+      ).toEqual([
+        "--version",
+        "sts get-caller-identity",
+        "iam create-policy",
+        "iam get-policy",
+        "iam get-role",
+        "iam get-policy",
+        "iam delete-role-policy",
+        "iam list-role-policies",
+        "iam list-attached-role-policies",
+        "iam get-policy",
+        "iam delete-role",
+        "iam get-policy",
+        "iam delete-policy"
+      ]);
+      expect(calls[2]).toContain('"action":"rollback"');
+      expect(op.setupArtifacts.awsRole.state).toBe("deleted");
+      expect(op.setupArtifacts.awsRolePolicies[0].state).toBe("deleted");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+      expect(run).toHaveBeenCalledWith(
+        ["api", "--method", "DELETE", "/repos/fixture/app/environments/dev"],
+        expect.anything()
+      );
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("aws-rollback", true);
+      await aws.restore();
+    }
+  });
+
+  it("keeps an AWS role whose policy rollback could not delete, then removes both on Retry deletion", async () => {
+    const roleArn = "arn:aws:iam::123456789012:role/radius-deploy-fixture-app";
+    const answers = (deletePolicy: FakeAwsAnswer) => ({
+      "--version": { stdout: "aws-cli/2.39.0" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": {
+        stdout: JSON.stringify({
+          Role: {
+            Arn: roleArn,
+            RoleId: "AROA1",
+            AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
+          }
+        })
+      },
+      "iam delete-role-policy": deletePolicy,
+      "iam list-role-policies": { stdout: '{"PolicyNames":[]}' },
+      "iam list-attached-role-policies": { stdout: '{"AttachedPolicies":[]}' },
+      "iam delete-role": { stdout: "" },
+      "iam delete-policy": { stdout: "" }
+    });
+    let aws = await fakeAwsOnPath(
+      answers({
+        code: 254,
+        stderr:
+          "An error occurred (ServiceFailure) when calling the DeleteRolePolicy operation"
+      })
+    );
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      requiresKeyringSwitch: false,
+      run: vi.fn(async (args: string[]) => {
+        throw new Error(`Unexpected cleanup command: ${args.join(" ")}`);
+      })
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      awsEnabled: true,
+      accountContext: createEnvironmentAccountContext(
+        "aws-retry",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => executor.login,
+          switchKeyringAccount: async () => {
+            throw new Error("Unexpected keyring switch");
+          },
+          resetIdentityCache: () => {}
+        })
+      )
+    });
+    try {
+      const entry = await runtime.getOrCreateServer("aws-retry", "environment");
+      const op = createOperation({
+        operationId: "op_aws_retry",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      op.context.githubLogin = executor.login;
+      recordAwsRole(op, {
+        state: "created",
+        origin: "this_operation",
+        roleArn,
+        roleName: "radius-deploy-fixture-app",
+        roleId: "AROA1"
+      });
+      recordAwsRolePolicy(op, {
+        roleArn,
+        roleName: "radius-deploy-fixture-app",
+        roleId: "AROA1",
+        policyName: "radius-deploy-dev-1"
+      });
+      finish(op, "failed");
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      const post = async (id: string) => {
+        const status = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}`
+        );
+        const action = (await status.json()).operation.actions.find(
+          (candidate: { id: string }) => candidate.id === id
+        );
+        return fetch(`${entry.baseUrl}${action.path}`, {
+          method: "POST",
+          headers: {
+            origin: entry.baseUrl,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+          }
+        });
+      };
+
+      expect((await post("rollback")).status).toBe(202);
+      await vi.waitFor(
+        () =>
+          expect(op.setupArtifacts.cleanup).toMatchObject({
+            attempts: 1,
+            state: "succeeded_with_warnings"
+          }),
+        { timeout: 15000 }
+      );
+      expect(op.state).toBe("failed_partial");
+      expect(op.failure?.code).toBe("setup-cleanup-incomplete");
+      expect(
+        op.setupArtifacts.cleanup.results.map(
+          (result: { artifactType: string; outcome: string }) =>
+            `${result.artifactType} ${result.outcome}`
+        )
+      ).toEqual(["aws_role_policy warning", "aws_role warning"]);
+      expect(op.setupArtifacts.awsRolePolicies[0].state).toBe("created");
+      expect(op.setupArtifacts.awsRole.state).toBe("created");
+      expect(
+        (await aws.calls()).some((call) => call.startsWith("iam delete-role "))
+      ).toBe(false);
+
+      await aws.restore();
+      aws = await fakeAwsOnPath(answers({ stdout: "" }));
+      expect((await post("retry-cleanup")).status).toBe(202);
+      await vi.waitFor(
+        () => expect(op.setupArtifacts.awsRole.state).toBe("deleted"),
+        { timeout: 15000 }
+      );
+      expect(op.setupArtifacts.awsRolePolicies[0].state).toBe("deleted");
+      const retried = (await aws.calls()).map((call) =>
+        call.split(" ").slice(0, 2).join(" ")
+      );
+      expect(retried).toContain("iam delete-role-policy");
+      expect(retried).toContain("iam delete-role");
+      expect(retried.at(-1)).toBe("iam delete-policy");
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("aws-retry", true);
+      await aws.restore();
+    }
+  });
+
+  it.each([
+    ["before any AWS change", 1],
+    ["after the first role's changes", 2]
+  ])(
+    "stops an AWS rollback when its operation is replaced %s, and releases the lock",
+    async (_label, stopAtLock) => {
+      const roles = [
+        "radius-deploy-fixture-app",
+        "radius-deploy-fixture-other"
+      ];
+      const arn = (role: string) => `arn:aws:iam::123456789012:role/${role}`;
+      const aws = await fakeAwsOnPath({
+        "--version": { stdout: "aws-cli/2.39.0" },
+        "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+        "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+        "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+        "iam get-role": {
+          stdout: JSON.stringify({
+            Role: {
+              Arn: arn(roles[0] as string),
+              RoleId: "AROA1",
+              AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
+            }
+          })
+        },
+        "iam delete-role-policy": { stdout: "" },
+        "iam delete-policy": { stdout: "" }
+      });
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        awsEnabled: true
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "aws-replaced",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: "op_aws_replaced",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        for (const role of roles) {
+          recordAwsRolePolicy(op, {
+            roleArn: arn(role),
+            roleName: role,
+            roleId: "AROA1",
+            policyName: "radius-deploy-dev-1"
+          });
+        }
+        finish(op, "failed");
+        operations.put(op);
+        let locks = 0;
+        // Each rollback saves its lock before its first change. Replacing the
+        // record then ends this execution, as a restart or a new setup does.
+        vi.spyOn(operations, "persist").mockImplementation(async () => {
+          if (
+            op.context.awsDeployIdentityLock &&
+            ++locks === stopAtLock &&
+            operations.get(op.operationId) === op
+          ) {
+            operations.put(structuredClone(op));
+          }
+        });
+
+        const status = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}`
+        );
+        const rollback = (await status.json()).operation.actions.find(
+          (action: { id: string }) => action.id === "rollback"
+        );
+        const response = await fetch(`${entry.baseUrl}${rollback.path}`, {
+          method: "POST",
+          headers: {
+            origin: entry.baseUrl,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+          }
+        });
+        expect(response.status).toBe(202);
+        const commands = async () =>
+          (await aws.calls()).map((call) =>
+            call.split(" ").slice(0, 2).join(" ")
+          );
+        await vi.waitFor(
+          async () =>
+            expect(
+              (await commands()).filter(
+                (command) => command === "iam delete-policy"
+              )
+            ).toHaveLength(stopAtLock),
+          { timeout: 15000 }
+        );
+        await vi.waitFor(() =>
+          expect(owner.hasActiveEnvironmentTasks("aws-replaced")).toBe(false)
+        );
+
+        const sent = await commands();
+        // The role the stop interrupted was never changed.
+        expect(
+          sent.filter((command) => command === "iam delete-role-policy")
+        ).toHaveLength(stopAtLock - 1);
+        expect(sent.at(-1)).toBe("iam delete-policy");
+        expect(op.endedAt).toBeNull();
+        // The role that finished first keeps its recorded result.
+        expect(
+          op.setupArtifacts.cleanup.results.map(
+            (result: { artifactType: string; outcome: string }) =>
+              `${result.artifactType} ${result.outcome}`
+          )
+        ).toEqual(stopAtLock === 1 ? [] : ["aws_role_policy deleted"]);
+      } finally {
+        owner.shutdown();
+        await runtime.stopServer("aws-replaced", true);
+        await aws.restore();
+      }
+    }
+  );
+
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
@@ -997,6 +1859,32 @@ describe("production environment owner HTTP binding", () => {
     }
   );
 
+  it("refuses a subject without the repository before running the AWS CLI", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" }
+    });
+    const runtime = awsSetupRuntime({
+      use_default: false,
+      include_claim_keys: ["repository_owner", "context"]
+    });
+    try {
+      const op = await runAwsSetup(runtime, "op_aws_shared_subject");
+
+      expect(await aws.calls()).toEqual([]);
+      expect(op.state).toBe("failed");
+      expect(op.failure.code).toBe("aws-subject-not-repository-specific");
+      expect(op.failure.message).toContain(
+        "repository_owner:fixture:environment:dev, does not name the repository"
+      );
+      expect(op.failure.message).toContain(
+        "includes only the claims repository_owner, context."
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
   it("runs the AWS CLI on PATH for AWS deploy identity setup", async () => {
     // Answers the version check, then refuses the sign-in check so setup
     // stops before anything could be written.
@@ -1009,10 +1897,11 @@ describe("production environment owner HTTP binding", () => {
 
       expect(await aws.calls()).toEqual([
         "--version",
-        "sts get-caller-identity --output json"
+        "sts get-caller-identity --output json --region us-west-2"
       ]);
       expect(op.state).toBe("failed");
-      expect(op.failure.message).toContain("fake aws: refused");
+      expect(op.failure.message).toContain("AWS CLI verification failed");
+      expect(op.failure.message).not.toContain("fake aws: refused");
       expect(op.failure.message).toContain("Nothing was created in AWS.");
     } finally {
       await runtime.stopServer("aws-panel", true);
@@ -1051,8 +1940,298 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
+  it("saves the AWS lock to the operation store configured after the runtime, before reading the role", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout:
+          '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+      },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": {
+        stderr: "An error occurred (AccessDenied) when calling GetRole",
+        code: 254
+      },
+      "iam delete-policy": { stdout: "" }
+    });
+    // Created first, as extension.ts does at module load.
+    const runtime = awsSetupRuntime();
+    const lockSaves: string[][] = [];
+    await configureOperationStore({
+      load: async () => null,
+      save: async (envelope) => {
+        const held = JSON.stringify(envelope.operations).includes(
+          '"policyId":"LOCK1"'
+        );
+        if (held) lockSaves.push(await aws.calls());
+      }
+    });
+    try {
+      await runAwsSetup(runtime, "op_aws_saved_lock");
+      expect(lockSaves.length).toBeGreaterThan(0);
+      expect(lockSaves[0]).not.toContainEqual(
+        expect.stringMatching(/^iam get-role /)
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it.each([
+    [true, "releases the lock it holds"],
+    [false, "The lock it holds on the deploy identity stays"]
+  ])(
+    "projects the AWS switch (%s) into the status route's exit wording",
+    async (awsEnabled, wording) => {
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: createEnvironmentExecutionOwner(),
+        awsEnabled
+      });
+      try {
+        const entry = await runtime.getOrCreateServer("aws-off", "environment");
+        const op = createOperation({
+          operationId: "op_aws_switch_view",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws"
+        });
+        setContext(op, {
+          awsDeployIdentityLock: {
+            policyArn:
+              "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app",
+            policyId: "LOCK0"
+          }
+        });
+        finish(op, "failed");
+        operations.put(op);
+        const status = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}`
+        );
+        const exit = (await status.json()).operation.actions.find(
+          (action: { id: string }) => action.id === "exit-setup"
+        );
+        expect(exit.description).toContain(wording);
+      } finally {
+        await runtime.stopServer("aws-off", true);
+      }
+    }
+  );
+
+  it("continues a restarted AWS setup from its saved request, taking back its own lock", async () => {
+    const lockArn =
+      "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
+    const mine = JSON.stringify({
+      repo: "fixture/app",
+      environment: "dev",
+      action: "setup",
+      operationId: "op_aws_restarted"
+    });
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout:
+          '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+      },
+      // Its own earlier lock is there, so it is replaced with a fresh one.
+      "iam create-policy": [
+        {
+          stderr:
+            "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
+          code: 254
+        },
+        { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' }
+      ],
+      "iam get-policy": [
+        {
+          stdout: JSON.stringify({
+            Policy: { PolicyId: "LOCK0", Description: mine }
+          })
+        },
+        { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' }
+      ],
+      "iam get-role": {
+        stderr: "An error occurred (AccessDenied) when calling GetRole",
+        code: 254
+      },
+      "iam delete-policy": { stdout: "" }
+    });
+    const runtime = awsSetupRuntime();
+    try {
+      const entry = await runtime.getOrCreateServer("aws-panel", "environment");
+      const live = createOperation({
+        operationId: "op_aws_restarted",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws",
+        stages: buildStages({ includeIdentity: true })
+      });
+      live.context.githubLogin = "saved-account";
+      live.resumeRequest = {
+        needsAzureCredentials: false,
+        github: { login: "saved-account", credentialSource: "keyring" },
+        environment: {
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop",
+          roleName: "radius-deploy-fixture-app",
+          existingRoleArn: ""
+        }
+      };
+      enterStage(live, STAGE_AUTHORIZE_IDENTITY);
+      setContext(live, {
+        awsDeployIdentityLock: { policyArn: lockArn, policyId: "LOCK0" }
+      });
+      setExecutionActive(live, true);
+      const op = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(live))
+      );
+      operations.put(op);
+      const status = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}`
+      );
+      expect(status.status).toBe(200);
+      const view = (await status.json()).operation;
+      expect(view.cleanup.retainedArtifacts).toContainEqual({
+        kind: "aws_deploy_identity_lock",
+        target: "Lock on IAM role radius-deploy-fixture-app (policy ID LOCK0)"
+      });
+      const cont = view.actions.find(
+        (action: { id: string }) => action.id === "continue-setup"
+      );
+      expect(cont).toMatchObject({
+        path: `/api/operations/${op.operationId}/continue`
+      });
+
+      const response = await fetch(`${entry.baseUrl}${cont.path}`, {
+        method: "POST",
+        headers: {
+          origin: entry.baseUrl,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": String(entry.state.browserMutationNonce),
+          "content-type": "application/json"
+        },
+        body: "{}"
+      });
+      expect(response.status).toBe(202);
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+      // Released after Authorize ends, which is after the record ends. The
+      // first delete replaced the earlier lock; the second is the release.
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await aws.calls()).filter(
+              (call) => call === `iam delete-policy --policy-arn ${lockArn}`
+            )
+          ).toHaveLength(2),
+        { timeout: 15000 }
+      );
+
+      const calls = await aws.calls();
+      expect(calls.filter((call) => call.startsWith("iam "))).toEqual([
+        expect.stringMatching(/^iam create-policy /),
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        `iam delete-policy --policy-arn ${lockArn}`,
+        expect.stringMatching(/^iam create-policy /),
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        "iam get-role --role-name radius-deploy-fixture-app --output json",
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        `iam delete-policy --policy-arn ${lockArn}`
+      ]);
+      expect(op.failure.code).toBe("aws-role-unreadable");
+      expect(op.steps.map((step: { label: string }) => step.label)).toContain(
+        "🔒 Took back the lock this setup holds on IAM role radius-deploy-fixture-app from its earlier attempt."
+      );
+      // Cleared once the release answers, just after its delete-policy.
+      await vi.waitFor(() =>
+        expect(op.context.awsDeployIdentityLock).toBeNull()
+      );
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it.each([
+    ["a stopped setup in this store", true],
+    ["a run this store does not know", false]
+  ])(
+    "tells a waiting AWS setup whether its lock holder is %s",
+    async (_label, known) => {
+      const holder = createOperation({
+        operationId: "op_aws_holder",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      finish(holder, "cancelled");
+      if (known) operations.put(holder);
+      const aws = await fakeAwsOnPath({
+        "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+        "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+        "eks describe-cluster": {
+          stdout:
+            '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+        },
+        "iam create-policy": {
+          stderr:
+            "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
+          code: 254
+        },
+        "iam get-policy": {
+          stdout: JSON.stringify({
+            Policy: {
+              PolicyId: "LOCK0",
+              CreateDate: new Date().toISOString(),
+              Description: JSON.stringify({
+                repo: "fixture/app",
+                environment: "dev",
+                action: "setup",
+                operationId: "op_aws_holder"
+              })
+            }
+          })
+        }
+      });
+      const runtime = awsSetupRuntime();
+      try {
+        const op = await startAwsSetup(runtime, "op_aws_waiting");
+        await vi.waitFor(
+          () =>
+            expect(op.context.awsLockWait).toMatchObject({
+              holderOperationId: "op_aws_holder",
+              stopped: known,
+              removable: known
+            }),
+          { timeout: 15000 }
+        );
+        requestStop(op);
+        await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+          timeout: 15000
+        });
+        expect(
+          (await aws.calls()).filter((call) =>
+            /^iam (put|update|delete|attach)/.test(call)
+          )
+        ).toEqual([]);
+      } finally {
+        await runtime.stopServer("aws-panel", true);
+        await aws.restore();
+      }
+    }
+  );
+
   it("removes exactly the AWS lock a waiting run was shown, through the AWS CLI on PATH", async () => {
     const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.39.0" },
       "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
       "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK0"}}' },
       "iam delete-policy": { stdout: "" }
@@ -1099,6 +2278,7 @@ describe("production environment owner HTTP binding", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ code: "aws-lock-removed" });
       expect(await aws.calls()).toEqual([
+        "--version",
         "sts get-caller-identity --output json",
         `iam get-policy --policy-arn ${lockArn} --output json`,
         `iam delete-policy --policy-arn ${lockArn}`
@@ -1474,22 +2654,48 @@ interface FakeAwsAnswer {
 
 /**
  * Put a fake `aws` first on PATH. It logs every call and answers by its first
- * two words; anything else is refused, so setup stops rather than writes.
+ * two words; anything else is refused, so setup stops rather than writes. A
+ * list answers successive calls in order, repeating its last entry.
  */
-async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
+async function fakeAwsOnPath(
+  answers: Record<string, FakeAwsAnswer | FakeAwsAnswer[]>
+) {
   const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
   const log = path.join(fakeBin, "calls.log");
+  // Created up front, so a run that never calls `aws` reads as no calls.
+  await fs.writeFile(log, "");
   const originalPath = process.env.PATH;
   const originalPathExt = process.env.PATHEXT;
   const originalLog = process.env.FAKE_AWS_LOG;
-  const shCases = Object.entries(answers).map(([command, answer]) =>
-    [
+  const shAnswer = (answer: FakeAwsAnswer, indent: string) => [
+    ...(answer.stdout ? [`${indent}printf '%s\\n' '${answer.stdout}'`] : []),
+    ...(answer.stderr ?
+      [`${indent}printf '%s\\n' '${answer.stderr}' >&2`]
+    : []),
+    `${indent}exit ${answer.code ?? 0}`
+  ];
+  const shCases = Object.entries(answers).map(([command, answer]) => {
+    if (!Array.isArray(answer)) {
+      return [
+        `  ${JSON.stringify(command)})`,
+        ...shAnswer(answer, "    "),
+        "    ;;"
+      ].join("\n");
+    }
+    // The log already holds this call, so the count is its 1-based turn.
+    return [
       `  ${JSON.stringify(command)})`,
-      ...(answer.stdout ? [`    printf '%s\\n' '${answer.stdout}'`] : []),
-      ...(answer.stderr ? [`    printf '%s\\n' '${answer.stderr}' >&2`] : []),
-      `    exit ${answer.code ?? 0} ;;`
-    ].join("\n")
-  );
+      `    n=$(grep -c -e "^${command}" "$FAKE_AWS_LOG")`,
+      "    case $n in",
+      ...answer.flatMap((entry, index) => [
+        index === answer.length - 1 ? "      *)" : `      ${index + 1})`,
+        ...shAnswer(entry, "        "),
+        "        ;;"
+      ]),
+      "    esac",
+      "    ;;"
+    ].join("\n");
+  });
   await fs.writeFile(
     path.join(fakeBin, "aws"),
     [
@@ -1515,7 +2721,15 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
       `const answers = ${JSON.stringify(answers)};`,
       "const args = process.argv.slice(2);",
       'fs.appendFileSync(process.env.FAKE_AWS_LOG, `${args.join(" ")}\\n`);',
-      'const answer = answers[args.slice(0, 2).join(" ")];',
+      'const key = args.slice(0, 2).join(" ");',
+      "const listed = answers[key];",
+      "const turn = fs",
+      '  .readFileSync(process.env.FAKE_AWS_LOG, "utf8")',
+      "  .split(/\\r?\\n/)",
+      "  .filter((line) => line.startsWith(key)).length;",
+      "const answer = Array.isArray(listed)",
+      "  ? listed[Math.min(turn, listed.length) - 1]",
+      "  : listed;",
       "if (answer) {",
       "  if (answer.stdout) console.log(answer.stdout);",
       "  if (answer.stderr) console.error(answer.stderr);",
@@ -1553,8 +2767,9 @@ async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
 }
 
 // A canvas runtime with the AWS switch on whose GitHub account answers the
-// reads AWS setup makes for fixture/app.
-function awsSetupRuntime() {
+// reads AWS setup makes for fixture/app. `subjectCustomization` is GitHub's
+// OIDC subject customization for it; by default it has none.
+function awsSetupRuntime(subjectCustomization?: unknown) {
   const run = vi.fn(async (args: string[]) => {
     const command = args.join(" ");
     if (command === "api user") {
@@ -1585,7 +2800,9 @@ function awsSetupRuntime() {
       return { code: 0, stdout: '{"variables":[]}', stderr: "" };
     }
     if (command === "api /repos/fixture/app/actions/oidc/customization/sub") {
-      return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      return subjectCustomization ?
+          { code: 0, stdout: JSON.stringify(subjectCustomization), stderr: "" }
+        : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
     }
     throw new Error(`Unexpected selected command: ${command}`);
   });
@@ -1613,6 +2830,17 @@ function awsSetupRuntime() {
 
 // Schedule a saved AWS setup through the server and wait for it to end.
 async function runAwsSetup(
+  runtime: ReturnType<typeof awsSetupRuntime>,
+  operationId: string
+) {
+  const op = await startAwsSetup(runtime, operationId);
+  // The setup outlives the request, so wait for the operation to finish.
+  await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), { timeout: 15000 });
+  return op;
+}
+
+// Schedule a saved AWS setup through the server without waiting for it.
+async function startAwsSetup(
   runtime: ReturnType<typeof awsSetupRuntime>,
   operationId: string
 ) {
@@ -1663,7 +2891,5 @@ async function runAwsSetup(
     }
   );
   expect(response.status).toBe(202);
-  // The setup outlives the request, so wait for the operation to finish.
-  await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), { timeout: 15000 });
   return op;
 }
