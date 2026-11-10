@@ -57,13 +57,19 @@ let installed: CliShim | null = null;
 
 afterEach(async () => {
   // A crashed runtime still holds a call. Refuse it and everything after,
-  // stop every runtime, and take the shim off PATH only once they are all
-  // quiet, so no late call reaches the next test or a real CLI.
+  // then stop every runtime and wait for its work to drain: a refused lock
+  // release retries after a delay. The shim leaves PATH only once nothing
+  // is left to call it, so no late call reaches the next test or a real CLI.
   installed?.refuseAll();
-  for (const { owner, runtime, panel } of extensions.splice(0)) {
-    owner.shutdown();
+  const stopped = extensions.splice(0);
+  for (const { owner, runtime, panel } of stopped) {
+    const drained = owner.shutdown();
     await runtime.stopServer(panel, true);
+    await drained;
   }
+  expect(stopped.flatMap(({ owner }) => owner.pendingOperationIds())).toEqual(
+    []
+  );
   await installed?.quiet();
   await installed?.restore();
   installed = null;
