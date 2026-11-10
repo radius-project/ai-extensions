@@ -133,6 +133,130 @@ describe("deployment target admission", () => {
     ).toEqual({ target: previous });
   });
 
+  it.each(["", " ", "\t"])(
+    "refuses explicit empty model %j before fallback for fresh and repair starts",
+    (appFile) => {
+      const normalizeAppFile = vi.fn((path: string) => path);
+      for (const attemptId of [undefined, "repair"]) {
+        expect(
+          resolveDeploymentTarget(
+            { appFile, attemptId },
+            {
+              ...options(),
+              previous,
+              previousAppFile: "custom.bicep",
+              normalizeAppFile
+            }
+          )
+        ).toMatchObject({
+          status: 400,
+          error: expect.stringContaining("must not be empty")
+        });
+      }
+      expect(normalizeAppFile).not.toHaveBeenCalled();
+    }
+  );
+
+  it("does not promote an automatically selected model to explicit repeat intent", () => {
+    expect(
+      resolveDeploymentTarget(
+        {},
+        {
+          ...options(),
+          previous: { ...previous, appFile: "app.bicep" }
+        }
+      )
+    ).toEqual({ target: previous });
+  });
+
+  it("inherits explicit prior model intent only within the repository and resolved branch", () => {
+    const prior = { ...previous, appFile: "custom.bicep" };
+    expect(
+      resolveDeploymentTarget(
+        {},
+        {
+          ...options(),
+          previous: prior,
+          previousAppFile: "custom.bicep"
+        }
+      )
+    ).toEqual({ target: prior });
+    for (const input of [
+      { branch: "other" },
+      { repo: "fixture/other", environment: "dev", branch: "topic" },
+      { environment: "other" }
+    ]) {
+      expect(
+        resolveDeploymentTarget(input, {
+          ...options(),
+          previous: prior,
+          previousAppFile: "custom.bicep"
+        })
+      ).toMatchObject({ target: { appFile: ".radius/app.bicep" } });
+    }
+  });
+
+  it("keeps explicit selection authoritative and repairs pinned to the selected model", () => {
+    const prior = { ...previous, appFile: "custom.bicep" };
+    expect(
+      resolveDeploymentTarget(
+        { appFile: "chosen.bicep" },
+        {
+          ...options(),
+          previous: prior,
+          previousAppFile: "custom.bicep"
+        }
+      )
+    ).toMatchObject({ target: { appFile: "chosen.bicep" } });
+    expect(
+      resolveDeploymentTarget(
+        { attemptId: "repair" },
+        {
+          ...options(),
+          previous: prior
+        }
+      )
+    ).toEqual({ target: prior });
+    expect(
+      resolveDeploymentTarget(
+        { attemptId: "repair", branch: "other" },
+        {
+          ...options(),
+          previous: prior
+        }
+      )
+    ).toMatchObject({ status: 409 });
+  });
+
+  it("resolves branch as explicit, eligible prior, matching workspace, then unresolved repository default", () => {
+    const workspace = { repo: previous.repo, branch: "workspace" };
+    const base = { ...options(), previous, workspace };
+    expect(resolveDeploymentTarget({ branch: "explicit" }, base)).toMatchObject(
+      { target: { branch: "explicit" } }
+    );
+    expect(resolveDeploymentTarget({}, base)).toMatchObject({
+      target: { branch: "topic" }
+    });
+    expect(
+      resolveDeploymentTarget({ environment: "other" }, base)
+    ).toMatchObject({ target: { branch: "workspace", provider: "azure" } });
+    expect(
+      resolveDeploymentTarget(
+        { repo: previous.repo, environment: "dev" },
+        { ...options(), workspace }
+      )
+    ).toMatchObject({ target: { branch: "workspace" } });
+    expect(
+      resolveDeploymentTarget(
+        { repo: previous.repo, environment: "dev" },
+        {
+          ...options(),
+          workspace: { repo: "fixture/other", branch: "unrelated" }
+        }
+      )
+    ).toMatchObject({ target: { branch: "" } });
+  });
+
   it("normalizes the path through the authorized host boundary and propagates refusal", () => {
     const normalizeAppFile = vi.fn(() => {
       throw new Error("path escaped workspace");

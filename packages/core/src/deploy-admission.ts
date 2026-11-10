@@ -27,6 +27,8 @@ export function resolveDeploymentTarget(
   input: DeploymentStartInput,
   options: {
     previous?: Readonly<DeploymentTarget>;
+    /** Prior explicit request intent, never an automatically selected filename. */
+    previousAppFile?: string;
     workspace?: DeploymentWorkspace;
     awsEnabled: boolean;
     normalizeAppFile(path: string): string;
@@ -35,21 +37,34 @@ export function resolveDeploymentTarget(
   const prior = options.previous;
   const repo = input.repo || prior?.repo || options.workspace?.repo || "";
   const sameRepository = prior?.repo.toLowerCase() === repo.toLowerCase();
+  const eligiblePrior =
+    sameRepository &&
+    (!input.environment || input.environment === prior?.environment);
+  const branch =
+    input.branch ||
+    (eligiblePrior ? prior?.branch : "") ||
+    (options.workspace?.repo.toLowerCase() === repo.toLowerCase() ?
+      options.workspace.branch
+    : "");
+  if (input.appFile !== undefined && !input.appFile.trim())
+    return {
+      status: 400,
+      error: "An explicit application model path must not be empty."
+    };
   const target: DeploymentTarget = {
     repo,
-    branch:
-      input.branch ||
-      (sameRepository ? prior?.branch : "") ||
-      (options.workspace?.repo.toLowerCase() === repo.toLowerCase() ?
-        options.workspace.branch
-      : ""),
+    branch,
     environment:
-      input.environment || (sameRepository ? prior?.environment : "") || "",
+      input.environment || (eligiblePrior ? prior?.environment : "") || "",
     provider:
-      input.provider || (sameRepository ? prior?.provider : "") || "azure",
+      input.provider || (eligiblePrior ? prior?.provider : "") || "azure",
     appFile:
-      input.appFile ||
-      (sameRepository ? prior?.appFile : "") ||
+      input.appFile ??
+      (eligiblePrior && branch === prior?.branch ?
+        input.attemptId ?
+          prior.appFile
+        : options.previousAppFile
+      : undefined) ??
       ".radius/app.bicep"
   };
   if (!isValidRepoSlug(repo) || !target.environment.trim())

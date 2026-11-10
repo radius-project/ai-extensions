@@ -762,12 +762,9 @@ describe("unfinishedDeployMessage", () => {
 // loop on a one-sided contract change, which would otherwise fail silently:
 // an empty Deployed graph with nothing red anywhere.
 //
-// The historical producer fixture remains canonical in the Canvas fixture directory.
+// The verbatim producer fixture and its provenance are owned by this consumer.
 const REAL_PROGRESS = readFileSync(
-  new URL(
-    "../../adapter-canvas/src/fixtures/deploy-progress.json",
-    import.meta.url
-  ),
+  new URL("../test/fixtures/deploy-progress.json", import.meta.url),
   "utf8"
 );
 

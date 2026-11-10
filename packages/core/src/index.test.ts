@@ -49,7 +49,7 @@ const EXPECTED_FUNCTIONS = [
   "resolveResourceStatus",
   "selectDeploymentRecord",
   "selectLatestWorkflowRunId",
-  "selectWorkflowRunId",
+  "selectDeploymentWorkflowRunId",
   "settleDeployStatuses",
   "shouldRetryWithKeyringCredential",
   "stripAwsDispatcherJob",

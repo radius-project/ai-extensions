@@ -46,7 +46,7 @@ export function selectLatestWorkflowRunId(runs: unknown): number | null {
 }
 
 /** Correlation identifies an execution; a baseline only excludes older runs. */
-export function selectWorkflowRunId(
+export function selectDeploymentWorkflowRunId(
   runs: unknown,
   sinceMs: number,
   correlationId?: string | null,

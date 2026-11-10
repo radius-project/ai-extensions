@@ -2776,7 +2776,7 @@ test.describe("Radius Canvas in Chromium", () => {
       ghCommandPresentation: {
         kind: "absolute",
         shell: "posix",
-        executablePath: "/opt/Copilot Tools/gh",
+        executablePath: "/opt/User's $HOME; `tools`/gh",
         installationNote: "Install GitHub CLI system-wide."
       }
     });
@@ -2805,10 +2805,19 @@ test.describe("Radius Canvas in Chromium", () => {
     // disclosure, and it is reachable by keyboard.
     const repair = page.locator("#env-gh-repair");
     await expect(repair).toBeVisible();
-    await expect(repair).toContainText("'/opt/Copilot Tools/gh' auth switch");
+    const literalCommand = "'/opt/User'\\''s $HOME; `tools`/gh' auth switch";
+    await expect(repair).toContainText(literalCommand);
     await expect(note).toContainText("Install GitHub CLI system-wide.");
     const runButton = repair.getByRole("button", { name: COMMAND_RUN_LABEL });
     await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"]);
+    await repair.getByRole("button", { name: "Copy" }).click();
+    await expect(repair.getByRole("button", { name: "Copied" })).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toContain(
+      literalCommand
+    );
     await runButton.focus();
     await expect(runButton).toBeFocused();
     await canvas.expectCliInvoked("gh");

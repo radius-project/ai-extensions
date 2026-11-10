@@ -30,7 +30,7 @@ export * from "./deployment-command-result.js";
 export * from "./deployment-lookup-policy.js";
 export {
   selectLatestWorkflowRunId,
-  selectWorkflowRunId
+  selectDeploymentWorkflowRunId
 } from "./deployment-observation-policy.js";
 export {
   assertTrustedGeneratedWorkflow,

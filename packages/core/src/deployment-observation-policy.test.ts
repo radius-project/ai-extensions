@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   selectLatestWorkflowRunId,
-  selectWorkflowRunId
+  selectDeploymentWorkflowRunId
 } from "./deployment-observation-policy.js";
 
-describe("selectWorkflowRunId", () => {
+describe("selectDeploymentWorkflowRunId", () => {
   const since = Date.parse("2026-08-20T10:00:00Z");
   it.each([null, {}])("returns null for non-array input %j", (runs) => {
-    expect(selectWorkflowRunId(runs, since)).toBeNull();
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBeNull();
   });
   it("picks the newest run inside the clock-skew window", () => {
     expect(
-      selectWorkflowRunId(
+      selectDeploymentWorkflowRunId(
         [
           { databaseId: 3, createdAt: "2026-08-20T10:00:05Z" },
           { databaseId: 2, createdAt: "2026-08-20T09:59:59Z" }
@@ -22,19 +22,19 @@ describe("selectWorkflowRunId", () => {
   });
   it("ignores stale runs and tolerates clock skew including the exact cutoff", () => {
     expect(
-      selectWorkflowRunId(
+      selectDeploymentWorkflowRunId(
         [{ databaseId: 9, createdAt: "2026-08-20T09:58:00Z" }],
         since
       )
     ).toBeNull();
     expect(
-      selectWorkflowRunId(
+      selectDeploymentWorkflowRunId(
         [{ databaseId: 7, createdAt: "2026-08-20T09:59:10Z" }],
         since
       )
     ).toBe(7);
     expect(
-      selectWorkflowRunId(
+      selectDeploymentWorkflowRunId(
         [{ databaseId: 7, createdAt: "2026-08-20T09:59:00Z" }],
         since
       )
@@ -53,10 +53,12 @@ describe("selectWorkflowRunId", () => {
         displayTitle: "Radius - Delete Environment prod del-abc-123"
       }
     ];
-    expect(selectWorkflowRunId(runs, since, "del-abc-123")).toBe(4);
-    expect(selectWorkflowRunId(runs, since, "del-missing")).toBeNull();
+    expect(selectDeploymentWorkflowRunId(runs, since, "del-abc-123")).toBe(4);
     expect(
-      selectWorkflowRunId(
+      selectDeploymentWorkflowRunId(runs, since, "del-missing")
+    ).toBeNull();
+    expect(
+      selectDeploymentWorkflowRunId(
         [{ databaseId: 8, createdAt: "2026-08-20T10:00:05Z" }],
         since,
         "missing"
@@ -65,7 +67,7 @@ describe("selectWorkflowRunId", () => {
   });
   it("skips malformed records and missing or nonnumeric ids", () => {
     expect(
-      selectWorkflowRunId(
+      selectDeploymentWorkflowRunId(
         [
           null,
           [],
@@ -88,8 +90,12 @@ describe("selectWorkflowRunId", () => {
         { databaseId: 12 },
         { databaseId: 13 }
       ];
-      expect(selectWorkflowRunId(runs, since, undefined, baseline)).toBe(12);
-      expect(selectWorkflowRunId(runs, since, undefined, 14)).toBeNull();
+      expect(
+        selectDeploymentWorkflowRunId(runs, since, undefined, baseline)
+      ).toBe(12);
+      expect(
+        selectDeploymentWorkflowRunId(runs, since, undefined, 14)
+      ).toBeNull();
     }
   );
   it.each([undefined, 10, "10"])(
@@ -99,19 +105,25 @@ describe("selectWorkflowRunId", () => {
         { databaseId: 12, displayTitle: "Radius prod dep-prod" },
         { databaseId: 11, displayTitle: "Radius dev dep-dev" }
       ];
-      expect(selectWorkflowRunId(runs, since, "dep-dev", baseline)).toBe(11);
-      expect(selectWorkflowRunId(runs, since, "dep-prod", baseline)).toBe(12);
       expect(
-        selectWorkflowRunId(runs, since, "dep-other", baseline)
+        selectDeploymentWorkflowRunId(runs, since, "dep-dev", baseline)
+      ).toBe(11);
+      expect(
+        selectDeploymentWorkflowRunId(runs, since, "dep-prod", baseline)
+      ).toBe(12);
+      expect(
+        selectDeploymentWorkflowRunId(runs, since, "dep-other", baseline)
       ).toBeNull();
-      expect(selectWorkflowRunId(runs, since, "dep-dev", 11)).toBeNull();
+      expect(
+        selectDeploymentWorkflowRunId(runs, since, "dep-dev", 11)
+      ).toBeNull();
     }
   );
   it("rejects partial markers, invalid ids and ambiguous matching runs", () => {
     const candidate = { databaseId: 12, displayTitle: "Radius dev dep-a" };
-    expect(selectWorkflowRunId([candidate], since, "dep")).toBeNull();
+    expect(selectDeploymentWorkflowRunId([candidate], since, "dep")).toBeNull();
     expect(
-      selectWorkflowRunId(
+      selectDeploymentWorkflowRunId(
         [{ ...candidate, displayTitle: "dep-a suffix" }],
         since,
         "dep-a"
@@ -119,10 +131,14 @@ describe("selectWorkflowRunId", () => {
     ).toBeNull();
     for (const databaseId of [0, -1, 1.5, NaN, Infinity])
       expect(
-        selectWorkflowRunId([{ ...candidate, databaseId }], since, "dep-a")
+        selectDeploymentWorkflowRunId(
+          [{ ...candidate, databaseId }],
+          since,
+          "dep-a"
+        )
       ).toBeNull();
     expect(
-      selectWorkflowRunId(
+      selectDeploymentWorkflowRunId(
         [candidate, { ...candidate, databaseId: 13 }],
         since,
         "dep-a",
@@ -134,7 +150,7 @@ describe("selectWorkflowRunId", () => {
     "falls back to the time window for absent/non-finite baseline %s",
     (baseline) =>
       expect(
-        selectWorkflowRunId(
+        selectDeploymentWorkflowRunId(
           [{ databaseId: 8, createdAt: "2026-08-20T10:00:05Z" }],
           since,
           undefined,
@@ -143,7 +159,7 @@ describe("selectWorkflowRunId", () => {
       ).toBe(8)
   );
   it("retains the zero-dispatch-time and missing-date compatibility behavior", () => {
-    expect(selectWorkflowRunId([{ databaseId: 1 }], 0)).toBe(1);
+    expect(selectDeploymentWorkflowRunId([{ databaseId: 1 }], 0)).toBe(1);
   });
 });
 
