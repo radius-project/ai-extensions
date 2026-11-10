@@ -18,6 +18,7 @@ import {
 } from "@radius-project/core";
 import { remediationView } from "@radius-project/core/remediations";
 import { isValidRepoSlug } from "../../azure-oidc.js";
+import type { AwsRepositoryIdLookup } from "./aws-deploy-identity.js";
 import type {
   AwsDiscoveryList,
   AwsDiscoveryResult,
@@ -349,16 +350,16 @@ const ROLE_TAG_READ_CONCURRENCY = 4;
 const GITHUB_API_TIMEOUT_MS = 15000;
 
 // GitHub's ID for the repository, which the role's ownership tag holds. A
-// name can't be compared, because another repository can take it. Null when
-// it can't be read, for example when the default `gh` account can't see the
-// repository: every role Radius created is then left out as possibly
-// another's, and the rest of the list still shows. Setup checks the ID again
-// with the selected account.
+// name can't be compared, because another repository can take it. The read
+// uses the default `gh` account, which may not see the repository; setup
+// checks the ID again with the selected account.
 async function readRepositoryId(
   repo: string,
   dependencies: AwsRoleListDependencies
-): Promise<number | null> {
-  if (!isValidRepoSlug(repo)) return null;
+): Promise<AwsRepositoryIdLookup> {
+  if (!isValidRepoSlug(repo)) {
+    return { ok: false, reason: `"${repo}" is not an owner/name repository` };
+  }
   let out: string;
   try {
     out = await dependencies.runCli(
@@ -366,18 +367,24 @@ async function readRepositoryId(
       ["api", `/repos/${repo.trim()}`, "--jq", ".id"],
       { timeout: GITHUB_API_TIMEOUT_MS }
     );
-  } catch {
-    return null;
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error)
+    };
   }
   const id = /^[1-9]\d*$/.test(out.trim()) ? Number(out.trim()) : NaN;
-  return Number.isSafeInteger(id) ? id : null;
+  return Number.isSafeInteger(id) ?
+      { ok: true, repoId: id }
+    : { ok: false, reason: "GitHub returned no repository ID" };
 }
 
-async function managedForAnotherRepository(
+// GitHub's ID for the repository Radius created the role for, or null when
+// Radius did not tag it with one.
+async function readRoleOwner(
   roleName: string,
-  repoId: () => Promise<number | null>,
   dependencies: AwsRoleListDependencies
-): Promise<boolean> {
+): Promise<number | null> {
   const out = await dependencies.runCli(
     "aws",
     ["iam", "get-role", "--role-name", roleName, "--output", "json"],
@@ -387,9 +394,17 @@ async function managedForAnotherRepository(
   if (!isRecord(parsed) || !isRecord(parsed.Role)) {
     throw new Error(`get-role returned no role for ${roleName}.`);
   }
-  const owner = radiusRoleRepositoryId(parsed.Role);
-  return owner !== null && owner !== (await repoId());
+  return radiusRoleRepositoryId(parsed.Role);
 }
+
+export interface AwsRoleList {
+  readonly roles: AwsRoleCandidate[];
+  // Why roles Radius created were left out without knowing whose they are.
+  // Absent when every role could be checked.
+  readonly hiddenReason?: string;
+}
+
+const NOT_READ: AwsRepositoryIdLookup = { ok: false, reason: "not read" };
 
 /**
  * Roles the signed-in identity can see, for the `use an existing role…`
@@ -402,12 +417,13 @@ async function managedForAnotherRepository(
  * those reads fails, the whole listing fails, because the picker cannot tell
  * whether another repository owns that role. A role Radius created belongs to
  * the repository whose GitHub ID it is tagged with, so this repository's ID is
- * read once, when the first such role turns up.
+ * read once when any such role turns up. If that read fails, those roles are
+ * left out and `hiddenReason` says why.
  */
 export async function listAwsRoles(
   data: { accountId?: string; repo?: string },
   dependencies: AwsRoleListDependencies
-): Promise<AwsRoleCandidate[]> {
+): Promise<AwsRoleList> {
   const accountId = typeof data.accountId === "string" ? data.accountId : "";
   const repo = typeof data.repo === "string" ? data.repo : "";
   const out = await dependencies.runCli(
@@ -446,22 +462,30 @@ export async function listAwsRoles(
       readTags: policy !== null && namesGitHubProvider(policy, accountId)
     });
   }
-  // Read only once a role has Radius's ownership tag, and only once.
-  let repositoryId: Promise<number | null> | undefined;
-  const repoId = () => (repositoryId ??= readRepositoryId(repo, dependencies));
-  const otherRepository = await mapWithLimit(
+  const owners = await mapWithLimit(
     listed,
     ROLE_TAG_READ_CONCURRENCY,
     async ({ candidate, readTags }) =>
-      readTags &&
-      (await managedForAnotherRepository(candidate.name, repoId, dependencies))
+      readTags ? readRoleOwner(candidate.name, dependencies) : null
   );
+  const tagged = owners.filter((owner) => owner !== null).length;
+  // Read only when a role has Radius's ownership tag.
+  const repository =
+    tagged > 0 ? await readRepositoryId(repo, dependencies) : NOT_READ;
   const candidates = listed
-    .filter((_, index) => !otherRepository[index])
+    .filter((_, index) => {
+      const owner = owners[index];
+      return owner === null || (repository.ok && owner === repository.repoId);
+    })
     .map(({ candidate }) => candidate);
   const trustsGitHub = (candidate: AwsRoleCandidate): number =>
     candidate.trustedSubjects.length > 0 ? 0 : 1;
-  return candidates.sort(
+  const sorted = candidates.sort(
     (a, b) => trustsGitHub(a) - trustsGitHub(b) || a.name.localeCompare(b.name)
   );
+  if (repository.ok || tagged === 0) return { roles: sorted };
+  return {
+    roles: sorted,
+    hiddenReason: `Radius left out ${tagged} role${tagged === 1 ? "" : "s"} it created, because GitHub didn't return the ID of ${repo || "this repository"} (${repository.reason}), so it can't tell which repository ${tagged === 1 ? "it belongs" : "they belong"} to. Check that the default GitHub CLI account can read the repository and try again, or type the role name.`
+  };
 }

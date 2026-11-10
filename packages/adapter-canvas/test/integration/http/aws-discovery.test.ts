@@ -166,7 +166,7 @@ describe("aws-discovery real-loopback list-aws-roles", () => {
     });
   });
 
-  it("still lists roles Radius didn't tag when GitHub can't say which repository is asking", async () => {
+  it("still lists roles Radius didn't tag, and says why the others are left out, when GitHub can't say which repository is asking", async () => {
     const cli = start();
     cli.set(
       listRoles,
@@ -196,7 +196,9 @@ describe("aws-discovery real-loopback list-aws-roles", () => {
           name: "platform-deploy",
           trustedSubjects: ["repo:octo/shop:environment:ci"]
         }
-      ]
+      ],
+      hiddenReason:
+        "Radius left out 1 role it created, because GitHub didn't return the ID of octo/shop (HTTP 404: Not Found), so it can't tell which repository it belongs to. Check that the default GitHub CLI account can read the repository and try again, or type the role name."
     });
   });
 });

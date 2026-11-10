@@ -553,7 +553,7 @@ describe("listAwsRoles", () => {
     ["a non-object answer", JSON.stringify(["role"])]
   ])("returns no roles for %s", async (_label, output) => {
     const { dependencies } = fakes({ "aws iam list-roles": output });
-    expect(await listAwsRoles({}, dependencies)).toEqual([]);
+    expect(await listAwsRoles({}, dependencies)).toEqual({ roles: [] });
   });
 
   it("skips malformed role entries", async () => {
@@ -570,7 +570,7 @@ describe("listAwsRoles", () => {
         ]
       })
     });
-    expect(await listAwsRoles({}, dependencies)).toEqual([
+    expect((await listAwsRoles({}, dependencies)).roles).toEqual([
       {
         arn: "arn:aws:iam::123456789012:role/deploy",
         name: "deploy",
@@ -627,7 +627,7 @@ describe("listAwsRoles", () => {
       })
     });
     expect(
-      await listAwsRoles({ accountId: "123456789012" }, dependencies)
+      (await listAwsRoles({ accountId: "123456789012" }, dependencies)).roles
     ).toEqual([
       {
         arn: "arn:aws:iam::123456789012:role/zeta",
@@ -724,11 +724,12 @@ describe("listAwsRoles exclusions", () => {
       [getRole("radius-deploy-octo-api")]: tagged("octo/api", 44),
       [READ_REPO_ID]: "22\n"
     });
-    const roles = await listAwsRoles(
+    const list = await listAwsRoles(
       { accountId: ACCOUNT, repo: "octo/shop" },
       dependencies
     );
-    expect(roles.map((role) => role.name)).toEqual([
+    expect(list.hiddenReason).toBeUndefined();
+    expect(list.roles.map((role) => role.name)).toEqual([
       "radius-deploy-octo-shop",
       "zeta-ci",
       "app-runtime"
@@ -756,7 +757,7 @@ describe("listAwsRoles exclusions", () => {
         { accountId: ACCOUNT, repo: "octo/shop" },
         dependencies
       )
-    ).toEqual([]);
+    ).toEqual({ roles: [] });
   });
 
   it("lists a role an earlier build tagged only by name, without reading GitHub", async () => {
@@ -766,14 +767,14 @@ describe("listAwsRoles exclusions", () => {
       }),
       [getRole("radius-deploy-octo-api")]: tagged("octo/api", null)
     });
-    expect(
-      (
-        await listAwsRoles(
-          { accountId: ACCOUNT, repo: "octo/shop" },
-          dependencies
-        )
-      ).map((role) => role.name)
-    ).toEqual(["radius-deploy-octo-api"]);
+    const list = await listAwsRoles(
+      { accountId: ACCOUNT, repo: "octo/shop" },
+      dependencies
+    );
+    expect(list.roles.map((role) => role.name)).toEqual([
+      "radius-deploy-octo-api"
+    ]);
+    expect(list.hiddenReason).toBeUndefined();
     expect(calls.some((line) => line.startsWith("gh "))).toBe(false);
   });
 
@@ -784,20 +785,27 @@ describe("listAwsRoles exclusions", () => {
       }),
       [getRole("radius-deploy-octo-api")]: tagged("octo/api", 44)
     });
-    expect(await listAwsRoles({ accountId: ACCOUNT }, dependencies)).toEqual(
-      []
-    );
+    expect(await listAwsRoles({ accountId: ACCOUNT }, dependencies)).toEqual({
+      roles: [],
+      hiddenReason:
+        "Radius left out 1 role it created, because GitHub didn't return the ID of this repository (\"\" is not an owner/name repository), so it can't tell which repository it belongs to. Check that the default GitHub CLI account can read the repository and try again, or type the role name."
+    });
     expect(calls.some((line) => line.startsWith("gh "))).toBe(false);
   });
 
   it.each([
-    ["GitHub fails", new Error("HTTP 404")],
-    ["GitHub returns no ID", "null"],
-    ["GitHub returns zero", "0"],
-    ["GitHub returns an unsafe ID", "9007199254740992"]
+    ["GitHub fails", new Error("HTTP 404: Not Found"), "HTTP 404: Not Found"],
+    ["GitHub fails with a non-Error", "throw", "offline"],
+    ["GitHub returns no ID", "null", "GitHub returned no repository ID"],
+    ["GitHub returns zero", "0", "GitHub returned no repository ID"],
+    [
+      "GitHub returns an unsafe ID",
+      "9007199254740992",
+      "GitHub returned no repository ID"
+    ]
   ])(
-    "leaves out only the roles Radius tagged when %s",
-    async (_label, answer) => {
+    "leaves out only the roles Radius tagged, and says why, when %s",
+    async (_label, answer, reason) => {
       const { calls, dependencies } = fakes({
         "aws iam list-roles": JSON.stringify({
           Roles: [
@@ -811,14 +819,22 @@ describe("listAwsRoles exclusions", () => {
         [getRole("zeta-ci")]: JSON.stringify({ Role: { Tags: [] } }),
         [READ_REPO_ID]: answer
       });
-      expect(
-        (
-          await listAwsRoles(
-            { accountId: ACCOUNT, repo: "octo/shop" },
-            dependencies
-          )
-        ).map((role) => role.name)
-      ).toEqual(["zeta-ci"]);
+      if (answer === "throw") {
+        const runCli = dependencies.runCli;
+        dependencies.runCli = async (command, args, options) => {
+          const out = await runCli(command, args, options);
+          if (command === "gh") throw "offline";
+          return out;
+        };
+      }
+      const list = await listAwsRoles(
+        { accountId: ACCOUNT, repo: "octo/shop" },
+        dependencies
+      );
+      expect(list.roles.map((role) => role.name)).toEqual(["zeta-ci"]);
+      expect(list.hiddenReason).toBe(
+        `Radius left out 2 roles it created, because GitHub didn't return the ID of octo/shop (${reason}), so it can't tell which repository they belong to. Check that the default GitHub CLI account can read the repository and try again, or type the role name.`
+      );
       expect(calls.filter((line) => line === READ_REPO_ID)).toHaveLength(1);
     }
   );
@@ -830,12 +846,14 @@ describe("listAwsRoles exclusions", () => {
       }),
       [getRole("deploy")]: tagged("octo/shop", 22)
     });
-    expect(
-      await listAwsRoles(
-        { accountId: ACCOUNT, repo: "octo/shop/../../user" },
-        dependencies
-      )
-    ).toEqual([]);
+    const list = await listAwsRoles(
+      { accountId: ACCOUNT, repo: "octo/shop/../../user" },
+      dependencies
+    );
+    expect(list.roles).toEqual([]);
+    expect(list.hiddenReason).toContain(
+      '"octo/shop/../../user" is not an owner/name repository'
+    );
     expect(calls.some((line) => line.startsWith("gh "))).toBe(false);
   });
 
@@ -875,7 +893,7 @@ describe("listAwsRoles exclusions", () => {
           { accountId: ACCOUNT, repo: "octo/shop" },
           dependencies
         )
-      ).toEqual([]);
+      ).toEqual({ roles: [] });
       expect(calls).toEqual(["aws iam list-roles --output json"]);
     }
   );
@@ -913,7 +931,7 @@ describe("listAwsRoles exclusions", () => {
     );
     await started;
     release();
-    expect((await listing).map((role) => role.name)).toEqual(names);
+    expect((await listing).roles.map((role) => role.name)).toEqual(names);
     expect(peak).toBe(4);
   });
 });

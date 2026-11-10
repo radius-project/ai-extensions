@@ -4012,6 +4012,8 @@ test.describe("Radius Canvas in Chromium", () => {
     }) => {
       await routeAwsProfileAndDiscovery(page);
       let roleLookups = 0;
+      const hiddenReason =
+        "Radius left out 1 role it created, because GitHub didn't return the ID of octo/shop (HTTP 404: Not Found).";
       await page.route("**/api/list-aws-roles**", async (route) => {
         roleLookups += 1;
         await route.fulfill({
@@ -4024,6 +4026,7 @@ test.describe("Radius Canvas in Chromium", () => {
                 code: "aws-role-list-failed",
                 roles: []
               }
+            : roleLookups === 2 ? { roles: [], hiddenReason }
             : {
                 roles: [
                   {
@@ -4031,7 +4034,8 @@ test.describe("Radius Canvas in Chromium", () => {
                     name: "platform-deploy",
                     trustedSubjects: ["repo:octo/api:environment:dev"]
                   }
-                ]
+                ],
+                hiddenReason
               }
           )
         });
@@ -4111,12 +4115,24 @@ test.describe("Radius Canvas in Chromium", () => {
       );
       await expect(page.locator("#env-appselect-modal")).toBeHidden();
 
+      // Roles Radius created but couldn't check are left out, and the note
+      // says why instead of reporting an ordinary empty list.
+      await useExisting.focus();
+      await page.keyboard.press("Enter");
+      await expect(roleNote).toHaveText(
+        `No IAM role in this account can be used for this repository. ${hiddenReason}`
+      );
+      await expect(page.locator("#env-appselect-modal")).toBeHidden();
+
       await useExisting.focus();
       await page.keyboard.press("Enter");
       const picker = page.locator("#env-appselect-modal");
       await expect(picker).toBeVisible();
       await expect(page.locator("#env-appselect-intro")).toContainText(
         `account ${AWS_ACCOUNT}`
+      );
+      await expect(page.locator("#env-appselect-intro")).toContainText(
+        hiddenReason
       );
       const pickedRole = picker.getByRole("radio", { name: /platform-deploy/ });
       await pickedRole.focus();
@@ -4139,7 +4155,7 @@ test.describe("Radius Canvas in Chromium", () => {
       await page.keyboard.press("Enter");
       await expect(roleName).toBeEnabled();
       await expect(roleName).toHaveValue(defaultAwsDeployRoleName(REPOSITORY));
-      expect(roleLookups).toBe(2);
+      expect(roleLookups).toBe(3);
       expect(operationPosts).toBe(0);
     });
 
