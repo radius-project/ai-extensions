@@ -4080,6 +4080,16 @@ function productionEnvironmentDeletionPorts(
         applicationObjectId: application.stdout.trim()
       };
     },
+    readRepositoryId: async (repo) => {
+      const response = await runGitHubJsonRequest(`/repos/${repo}`);
+      const id = response.json?.id;
+      if (!response.ok || typeof id !== "number") {
+        throw new Error(
+          response.stderr || `HTTP ${response.status ?? "unknown"}`
+        );
+      }
+      return id;
+    },
     removeAwsEnvironmentAccess: awsEnvironmentAccess.remove,
     removeAwsDeployIdentityLock: (lock) =>
       removeAwsDeployIdentityLock(lock, runAwsCli),

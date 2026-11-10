@@ -46,14 +46,19 @@ describe("reading the provider a dispatcher selects", () => {
 });
 
 describe("reading the environment a deletion targets", () => {
-  it("returns the deploy role and cluster an AWS environment recorded", async () => {
-    const run = vi.fn(async () =>
-      [
-        "AWS_ACCOUNT_ID\t123456789012",
-        "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
-        "AWS_REGION\tus-west-2",
-        "AWS_EKS_CLUSTER_NAME\tshop"
-      ].join("\n")
+  // GitHub answers the variable read with `variables`, then the repository ID.
+  const answers = (...variables: string[]) =>
+    vi
+      .fn()
+      .mockResolvedValueOnce(variables.join("\n"))
+      .mockResolvedValueOnce(" 42\n");
+
+  it("returns the deploy role, cluster, and repository ID of an AWS environment", async () => {
+    const run = answers(
+      "AWS_ACCOUNT_ID\t123456789012",
+      "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
+      "AWS_REGION\tus-west-2",
+      "AWS_EKS_CLUSTER_NAME\tshop"
     );
 
     expect(
@@ -62,13 +67,16 @@ describe("reading the environment a deletion targets", () => {
       provider: "aws",
       clientId: "",
       tenantId: "",
-      repoId: 0,
+      repoId: 42,
       roleArn: "arn:aws:iam::123456789012:role/deployer",
       trustSubjects: [],
       region: "us-west-2",
       cluster: "shop"
     });
-    expect(run.mock.calls).toEqual([["gh", VARIABLES, { timeout: 15000 }]]);
+    expect(run.mock.calls).toEqual([
+      ["gh", VARIABLES, { timeout: 15000 }],
+      ["gh", ["api", "/repos/octo/shop", "--jq", ".id"], { timeout: 15000 }]
+    ]);
   });
 
   it("returns the trust subjects setup recorded", async () => {
@@ -76,11 +84,9 @@ describe("reading the environment a deletion targets", () => {
       "repo:octo/shop:environment:dev",
       "repository_owner_id:7:repository_id:42:environment:dev"
     ];
-    const run = vi.fn(async () =>
-      [
-        "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
-        `AWS_TRUST_SUBJECTS\t${JSON.stringify(subjects)}`
-      ].join("\n")
+    const run = answers(
+      "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
+      `AWS_TRUST_SUBJECTS\t${JSON.stringify(subjects)}`
     );
     expect(
       (await createEnvironmentTargetReader(run)("octo/shop", "dev one"))
@@ -92,20 +98,19 @@ describe("reading the environment a deletion targets", () => {
     ["not JSON", "{"],
     ["not a list", '"repo:octo/shop:environment:dev"'],
     ["a list with a non-string", '["repo:octo/shop:environment:dev", 7]'],
-    ["a list with an empty subject", '[""]']
+    ["a list with an empty subject", '[""]'],
+    ["empty", ""]
   ])(
-    "leaves deletion to resolve the subjects when the variable is %s",
+    "reports unreadable trust subjects, which deletion refuses, when the variable is %s",
     async (_label, value) => {
-      const run = vi.fn(async () =>
-        [
-          "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
-          `AWS_TRUST_SUBJECTS\t${value}`
-        ].join("\n")
+      const run = answers(
+        "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
+        `AWS_TRUST_SUBJECTS\t${value}`
       );
       expect(
         (await createEnvironmentTargetReader(run)("octo/shop", "dev one"))
           .trustSubjects
-      ).toEqual([]);
+      ).toBeNull();
     }
   );
 
@@ -173,17 +178,4 @@ describe("reading the environment a deletion targets", () => {
       createEnvironmentTargetReader(run)("octo/shop", "dev")
     ).rejects.toThrow("HTTP 403");
   });
-
-  it.each(["radius-deploy-dev-111111111111", ""])(
-    "preserves the recorded policy name %j without deriving it from the current repository",
-    async (policyName) => {
-      const run = vi.fn(
-        async () =>
-          `AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/picked\nAWS_PERMISSION_POLICY_NAME\t${policyName}`
-      );
-      expect(
-        await createEnvironmentTargetReader(run)("renamed/repo", "dev")
-      ).toMatchObject({ provider: "aws", policyName });
-    }
-  );
 });

@@ -32,7 +32,6 @@ export type SetupCoordinatorAwsResult =
       kind: "completed";
       roleArn: string;
       trustSubjects: readonly string[];
-      policyName: string;
     }
   | { kind: "failed"; error: unknown }
   // A pause arrived during AWS setup, which recorded what it changed and ran
@@ -264,7 +263,6 @@ export async function runSetupCoordinator(
   const environmentRequest = record(request.environment);
   let awsRoleArn = "";
   let awsTrustSubjects: readonly string[] = [];
-  let awsPolicyName = "";
   // AWS setup takes the deploy identity lock and keeps it until Configure
   // environment has written the GitHub environment. Until then a delete that
   // checks which environments use a cluster could not see this one, and could
@@ -311,7 +309,6 @@ export async function runSetupCoordinator(
       }
       awsRoleArn = aws.roleArn;
       awsTrustSubjects = aws.trustSubjects;
-      awsPolicyName = aws.policyName;
     }
     const clientId =
       setupResult && "clientId" in setupResult ?
@@ -327,7 +324,6 @@ export async function runSetupCoordinator(
         provider: target.provider,
         operationId: target.operationId,
         ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
-        ...(awsPolicyName ? { policyName: awsPolicyName } : {}),
         ...(awsTrustSubjects.length > 0 ?
           { trustSubjects: awsTrustSubjects }
         : {}),

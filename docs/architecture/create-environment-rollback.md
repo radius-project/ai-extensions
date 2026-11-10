@@ -113,12 +113,14 @@ AWS setup journals each change before it sends it, and records it only when this
 
 - The IAM role, when `create-role` created it, with IAM's role ID.
 - Each GitHub subject the role did not trust before.
-- The environment's inline permission policy, when the role had no policy of that name before. A policy that replaces the environment's legacy policy is not recorded, so a rollback keeps the environment's grant.
+- The environment's inline permission policy, when the role had no policy of that name before. Its name includes the immutable GitHub repository ID.
 - The role's EKS access entry, when `create-access-entry` created it.
 
 Each change records IAM's ID for the role it was made on, whether setup created the role or reused it.
 
 Setup tags the role and access entry it creates with `radius-operation=<operationId>`. When a restart finds a `create-role` or `create-access-entry` with no answer, Radius records the role or entry as created only if it carries that operation's tag. The same check runs when `create-role` answers `EntityAlreadyExists` or `create-access-entry` answers `ResourceInUseException`, because the AWS CLI resends a call after a lost reply and the request's own first try can be what is there. A creation time can't prove this, because a role another setup creates later under the same name dates after the request too.
+
+Setup reads earlier attempts' trust subjects from this ledger after reconciliation. It combines them with the current subjects and the environment's saved `AWS_TRUST_SUBJECTS`, reread while holding the role lock. A retry after a repository rename keeps that cleanup history without adding the old subjects back to IAM.
 
 Rollback rule:
 

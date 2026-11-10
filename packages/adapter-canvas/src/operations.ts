@@ -6227,8 +6227,7 @@ interface PersistedDeleteRecovery {
   clientId?: string;
   tenantId?: string;
   roleArn?: string;
-  policyName?: string;
-  trustSubjects?: string[];
+  trustSubjects?: string[] | null;
   region?: string;
   cluster?: string;
   repoId?: number;
@@ -6245,23 +6244,24 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "clientId",
     "tenantId",
     "roleArn",
-    "policyName",
     "region",
     "cluster"
   ] as const) {
     if (typeof request[key] === "string") out[key] = request[key];
   }
-  // Kept only when every entry is a subject, so a damaged list falls back to
-  // resolving the subjects rather than removing a partial set.
+  // A damaged list is kept as null, which deletion refuses, so a restart
+  // can't turn it into a deletion with no recorded subjects.
   const subjects = request.trustSubjects;
-  if (
-    Array.isArray(subjects) &&
-    subjects.length > 0 &&
-    subjects.every(
-      (subject: unknown) => typeof subject === "string" && subject !== ""
-    )
-  ) {
-    out.trustSubjects = [...subjects];
+  if (subjects !== undefined) {
+    out.trustSubjects =
+      (
+        Array.isArray(subjects) &&
+        subjects.every(
+          (subject: unknown) => typeof subject === "string" && subject !== ""
+        )
+      ) ?
+        [...subjects]
+      : null;
   }
   if (typeof request.credentialConsumerRetirementReady === "boolean") {
     out.credentialConsumerRetirementReady =

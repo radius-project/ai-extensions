@@ -35,6 +35,7 @@ const deletionPorts: EnvironmentDeletionCoordinatorPorts = {
   deleteRadiusEnvironment: unexpectedDeletion,
   removeAwsEnvironmentAccess: unexpectedDeletion,
   removeAwsDeployIdentityLock: unexpectedDeletion,
+  readRepositoryId: unexpectedDeletion,
   runAz: unexpectedDeletion,
   readAzureIdentity: unexpectedDeletion,
   deleteGitHubEnvironment: unexpectedDeletion,

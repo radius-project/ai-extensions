@@ -24,6 +24,7 @@ import {
   STAGE_CONFIGURE_ENVIRONMENT,
   touchOperation
 } from "../../../src/operations.js";
+import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
 import type { SelectedGhExecutor } from "../../../src/gh.js";
 import {
   createAwsEnvironmentAccess,
@@ -62,7 +63,6 @@ export const LOCK_ARN = `arn:aws:iam::${ACCOUNT}:policy/radius-lock-${ROLE}`;
 // The other environment of the repository that a reused role already serves.
 export const OTHER_ENVIRONMENT = "prod";
 const OTHER_SUBJECT = `repo:${REPO}:environment:${OTHER_ENVIRONMENT}`;
-const OTHER_POLICY = "radius-deploy-prod-0123456789ab";
 // How long a lock wait may poll before the test calls it stuck.
 const SLEEP_LIMIT = 400;
 
@@ -125,7 +125,12 @@ export async function createAwsScenario(
         // GitHub ID, and setup reuses only a role tagged with its own.
         { Key: "radius-repository-id", Value: String(github.repoId) }
       ],
-      inline: { [OTHER_POLICY]: { Version: "2012-10-17", Statement: [] } }
+      inline: {
+        [awsEnvironmentPolicyName(github.repoId, OTHER_ENVIRONMENT)]: {
+          Version: "2012-10-17",
+          Statement: []
+        }
+      }
     });
     aws.addAccessEntry(
       REGION,
@@ -139,8 +144,7 @@ export async function createAwsScenario(
       AWS_REGION: REGION,
       AWS_ACCOUNT_ID: ACCOUNT,
       AWS_EKS_CLUSTER_NAME: CLUSTER,
-      AWS_TRUST_SUBJECTS: JSON.stringify([OTHER_SUBJECT]),
-      AWS_PERMISSION_POLICY_NAME: OTHER_POLICY
+      AWS_TRUST_SUBJECTS: JSON.stringify([OTHER_SUBJECT])
     });
   }
   const disk = new MemoryDisk();
@@ -322,8 +326,7 @@ export async function runSetup(
         region: REGION,
         accountId: ACCOUNT,
         cluster: CLUSTER,
-        trustSubjects: result.subjects,
-        policyName: result.policyName
+        trustSubjects: result.subjects
       },
       {
         setEnvironmentVariable: (name, value) =>
@@ -372,7 +375,7 @@ export function assertSetupFinished(
   op: Operation
 ): void {
   const variables = scenario.github.environment(ENVIRONMENT)?.variables;
-  if (op.failure || !variables?.has("AWS_PERMISSION_POLICY_NAME")) {
+  if (op.failure || !variables?.has("AWS_TRUST_SUBJECTS")) {
     const last = op.steps.at(-1)?.label ?? "no step";
     throw new Error(
       `Setup did not finish: ${String(op.failure?.message ?? last).replace(/\.$/, "")}. Update the scenario so a clean setup succeeds.`
@@ -445,10 +448,7 @@ export function createDeleteOperation(
     roleArn: variables.AWS_ROLE_ARN ?? "",
     trustSubjects: JSON.parse(variables.AWS_TRUST_SUBJECTS ?? "[]"),
     region: variables.AWS_REGION ?? "",
-    cluster: variables.AWS_EKS_CLUSTER_NAME ?? "",
-    ...(variables.AWS_PERMISSION_POLICY_NAME !== undefined ?
-      { policyName: variables.AWS_PERMISSION_POLICY_NAME }
-    : {})
+    cluster: variables.AWS_EKS_CLUSTER_NAME ?? ""
   };
   operations.put(op);
   return op;
@@ -477,6 +477,16 @@ export async function runDelete(
     readAzureIdentity: unexpected("Azure identity read"),
     removeCredentialProvenance: unexpected("provenance removal"),
     clearEnvironmentCredentialProvenance: unexpected("provenance clear"),
+    readRepositoryId: async (repo) => {
+      const response = await outside.readGitHubJson(`/repos/${repo}`);
+      const id = response.json?.id;
+      if (!response.ok || typeof id !== "number") {
+        throw new Error(
+          response.stderr || `HTTP ${response.status ?? "unknown"}`
+        );
+      }
+      return id;
+    },
     removeAwsEnvironmentAccess: scenario.access.remove,
     removeAwsDeployIdentityLock: (lock) =>
       removeAwsDeployIdentityLock(lock, outside.runAws),
@@ -501,6 +511,12 @@ export async function runRepair(
     cloudAuthDriftKind: "cloud-auth-drift",
     readEnvironmentTarget: createEnvironmentTargetReader(async (_c, args) => {
       const path = args.find((arg) => arg.startsWith("/")) ?? "";
+      // The repository ID read, `gh api /repos/<repo> --jq .id`.
+      if (!path.includes("/environments/")) {
+        const response = await scenario.outside.readGitHubJson(path);
+        if (!response.ok) throw new Error(response.stderr);
+        return String(response.json?.id);
+      }
       const name = decodeURIComponent(
         /\/environments\/([^/]+)\/variables/.exec(path)?.[1] ?? ""
       );

@@ -10,6 +10,7 @@ import {
   requestStop,
   unresolvedProviderMutations
 } from "../../../src/operations.js";
+import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
 import { disabledOperationStore } from "../../../src/operation-store.js";
 import { removeAwsDeployIdentityLock } from "../../../src/server/services/aws-deploy-identity-lock.js";
 import { releaseRecordedAwsLock } from "../../../src/server/services/aws-recorded-lock.js";
@@ -90,8 +91,9 @@ async function discover(
   return points;
 }
 
-// The environment policy every setup of dev in octo/shop attaches.
-const SETUP_POLICY = "radius-deploy-dev-f5fb7acf8f59";
+// The environment policy every setup of dev in octo/shop, repository ID 42,
+// attaches.
+const SETUP_POLICY = awsEnvironmentPolicyName(42, ENVIRONMENT);
 
 // The account's GitHub identity provider is never removed, by design.
 function withoutProvider(snapshot: FakeAwsSnapshot) {

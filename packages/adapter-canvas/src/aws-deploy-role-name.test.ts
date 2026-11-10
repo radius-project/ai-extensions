@@ -12,12 +12,10 @@ const LONG_B_DIGEST = "f6cb13";
 const PREFIX = `radius-deploy-contoso-${"a".repeat(35)}`;
 
 describe("defaultAwsDeployRoleName", () => {
-  it("hashes the repository and environment for inline policies", () => {
-    expect(awsEnvironmentPolicyName("octo/shop", "dev")).toBe(
-      "radius-deploy-dev-f5fb7acf8f59"
-    );
-    expect(awsEnvironmentPolicyName("octo/api", "dev")).not.toBe(
-      awsEnvironmentPolicyName("octo/shop", "dev")
+  it("keeps the repository ID readable in inline policy names", () => {
+    expect(awsEnvironmentPolicyName(42, "dev")).toBe("radius-deploy-dev-42");
+    expect(awsEnvironmentPolicyName(43, "dev")).not.toBe(
+      awsEnvironmentPolicyName(42, "dev")
     );
   });
 
