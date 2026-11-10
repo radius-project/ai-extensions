@@ -261,13 +261,13 @@ Each recipe that creates a VPC-based service builds a subnet group from the envi
 
 ### How apps get AWS credentials
 
-On Azure, a recipe returns a key, such as a storage account key, and the app uses it. Amazon S3 and Amazon Bedrock accept only IAM credentials, which a recipe can't hand back as a key today. We'll use **EKS Pod Identity**: a role per app, with access to only its own resources, linked to the app's pod.
+On Azure, a recipe returns a key, such as a storage account key, and the app uses it. Amazon S3 and Amazon Bedrock accept only IAM credentials, which a recipe can't hand back as a key today. We'll use **EKS Pod Identity**: a role per container, with access to only the resources it connects to, linked to the container's pod.
 
 Pod Identity stores no secret. The app's AWS SDK gets short-lived credentials automatically, so most apps need no code change. It's AWS's recommended way for pods to reach AWS services, and it matches the passwordless model the canvas already uses for deploys. It brings three new requirements:
 
 - **A cluster prerequisite:** the EKS Pod Identity Agent add-on, installed once per cluster. Setup checks for it and tells the developer if it's missing.
-- **A change to a shared type:** the container type and its recipe give each app its own Kubernetes service account.
-- **More IAM rights for the deploy identity:** it must be able to create per-app roles, limited by a permissions boundary and an IAM path, so it can't create a role with more access than itself.
+- **A change to a shared type:** the container type and its recipe give each container its own Kubernetes service account.
+- **More IAM rights for the deploy identity:** it must be able to create per-container roles, limited by a permissions boundary and an IAM path, so it can't create a role with more access than itself.
 
 AWS ships before pod identity, without the object storage and models recipes.
 
