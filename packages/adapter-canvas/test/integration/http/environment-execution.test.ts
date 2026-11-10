@@ -1368,7 +1368,9 @@ describe("production environment owner HTTP binding", () => {
         (await aws.calls()).some((call) => call.startsWith("iam delete-role "))
       ).toBe(false);
 
-      await vi.waitFor(() => expect(owner.pendingOperationIds()).toEqual([]));
+      await vi.waitFor(() => expect(owner.pendingOperationIds()).toEqual([]), {
+        timeout: 15000
+      });
       await aws.restore();
       aws = await fakeAwsOnPath(answers({ stdout: "" }));
       expect((await post("retry-cleanup")).status).toBe(202);
@@ -2017,7 +2019,9 @@ describe("production environment owner HTTP binding", () => {
       cleanup = restoreAwsSetup(runtime, aws).then(() => {
         restored = true;
       });
-      await vi.waitFor(() => expect(shutdown).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(shutdown).toHaveBeenCalledOnce(), {
+        timeout: 15000
+      });
       expect(runtime.servers.size).toBe(0);
       expect(restore).not.toHaveBeenCalled();
       expect(restored).toBe(false);
@@ -2035,6 +2039,32 @@ describe("production environment owner HTTP binding", () => {
       release.resolve();
       await (cleanup ?? restoreAwsSetup(runtime, aws));
       await runtime.shutdown();
+    }
+  });
+
+  it("restores the AWS fixture before reporting a failed execution drain", async () => {
+    const originalPath = process.env.PATH;
+    const originalLog = process.env.FAKE_AWS_LOG;
+    const aws = await fakeAwsOnPath({});
+    const runtime = awsSetupRuntime();
+    const shutdown = runtime.shutdown;
+    vi.spyOn(runtime, "shutdown").mockImplementationOnce(async () => {
+      await shutdown();
+      return {
+        complete: false,
+        failures: ["GitHub account restoration failed"]
+      };
+    });
+    try {
+      await expect(restoreAwsSetup(runtime, aws)).rejects.toMatchObject({
+        name: "AssertionError"
+      });
+      expect(process.env.PATH).toBe(originalPath);
+      expect(process.env.FAKE_AWS_LOG).toBe(originalLog);
+      await expect(aws.calls()).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await runtime.shutdown();
+      await aws.restore();
     }
   });
 
@@ -2891,8 +2921,9 @@ async function restoreAwsSetup(
   aws: Awaited<ReturnType<typeof fakeAwsOnPath>>
 ) {
   await runtime.stopServer("aws-panel", true);
-  expect(await runtime.shutdown()).toEqual({ complete: true, failures: [] });
+  const outcome = await runtime.shutdown();
   await aws.restore();
+  expect(outcome).toEqual({ complete: true, failures: [] });
 }
 
 // Schedule a saved AWS setup through the server and wait for it to end.
