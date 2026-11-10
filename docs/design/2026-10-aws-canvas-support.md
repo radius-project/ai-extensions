@@ -185,10 +185,10 @@ Two kinds of actions aren't granted:
 
 **Limits.** Two IAM size limits cap how many environments one deploy identity holds. The limit of 20 attached managed policies per role doesn't apply, because each environment's permissions are an inline policy.
 
-- **Inline policies:** a role's inline policies share 10,240 characters, and each environment's policy is about 580, so a deploy identity holds about 17 environments.
+- **Inline policies:** a role's inline policies share 10,240 characters. Each environment's policy is about 1,550 with the pod identity grants, so a deploy identity holds about 6 environments. Setup stops with a message naming the limit, and more environments need another role.
 - **Trust policy:** it allows 2,048 characters by default. That holds about 20 environments for a new repository, and about 12 for an older one, which needs two subjects each. A quota increase raises it to 8,192 characters.
 
-So a deploy identity holds about 17 environments for a new repository, and about 12 for an older one.
+So the inline policy limit applies first: a deploy identity holds about 6 environments.
 
 When either limit is reached, setup stops at that step, naming the limit and quoting AWS's error. Each environment keeps its own policy, so adding or deleting one never changes another's permissions. Raising the limit, for example by splitting environments across roles, is a question for both clouds and is separate work.
 
@@ -394,7 +394,7 @@ Create a new IAM role for each environment, so each has its own trust policy and
 |--------------------------------------------------|----------------------------------------------------|--------------------------------------------------------------------|
 | Roles in the example                             | `radius-deploy-contoso-storefront-dev` and `-prod` | `radius-deploy-contoso-storefront`                                 |
 | Two setups at once                               | No conflict                                        | A lock on the deploy identity                                      |
-| Size limits                                      | Per role                                           | Shared: about 17 environments per role, 12 for an older repository |
+| Size limits                                      | Per role                                           | Shared: about 6 environments per role |
 | Rights the developer needs for a new environment | `iam:CreateRole` every time                        | `iam:CreateRole` once                                              |
 | A role from the platform team                    | One per environment to request                     | One for the repository                                             |
 | Matches Azure                                    | No                                                 | Yes, one app registration per repository                           |
