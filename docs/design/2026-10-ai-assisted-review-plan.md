@@ -116,7 +116,7 @@ We need to know whether Copilot code review can remember facts about our repo. S
 
 ### Phase 2: Copilot code review on every push
 
-**Implementation clarification:** the [Copilot re-review operations runbook](../eng/COPILOT_REVIEW_OPERATIONS.md) defines preparation, separate activation authorization, monitoring, handoff, rollback, and live acceptance. The clarifications below reflect current platform behavior; they do not activate settings or change approval policy. Stage 1 hosted acceptance remains a prerequisite, including an explicit decision about unsupported summary customization.
+The [operations runbook](../eng/COPILOT_REVIEW_OPERATIONS.md) covers setup, monitoring, stopping review loops, rollback, and testing in GitHub. Merging it changes no settings or approval rules. Before enabling reviews on every push, we must verify Stage 1 in GitHub, agree what to check instead of the unsupported summary format, and obtain separate approval for the rollout.
 
 #### Step 2.1: Have Copilot re-review new pushes
 
@@ -127,11 +127,13 @@ We should change two sets of settings:
 - In the `main` ruleset, turn on "Review new pushes."
 - In the repository's Copilot code review settings, set the default effort level to Balanced and the maximum to Max, so authors can request a Max review of a risky change by hand. Leave Copilot approvals off for now; Step 4.5 sets the conditions for turning them on.
 
-Keep review of drafts off in the repository rule. Personal and organization review triggers are independent, so this setting alone does not guarantee that no draft is reviewed. Preserve thread resolution and every existing human/check protection.
+Leave draft reviews off in the repository rule. Personal or organization settings can still trigger them. Keep all existing merge requirements, including human approvals, required checks, and thread resolution.
 
-Copilot code review consumes AI credits and can also consume Actions usage. [Published costs](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#estimated-consumption) are estimates, not fixed prices or caps. Explicit effort requests take precedence over prior PR effort, requester preferences, repository settings, and organization settings. A previous Max review can therefore carry over, while the repository's Balanced default does not force every review to use Balanced. Max is currently in preview; verify availability, effective limits, and the effort recorded in each run.
+Reviews use AI credits and may also incur Actions charges. GitHub's [published costs](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#estimated-consumption) are estimates, not fixed prices or spending caps.
 
-Automatic reviews normally attribute credits to the author; manual requests normally attribute them to the requester, subject to organization and bot billing rules. [Eligibility](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-code-review-without-a-copilot-license) can include organization members without individual licenses when the required policies are enabled. Do not assume the same exception covers outside contributors. If an author lacks access, an eligible maintainer can request a review after confirming billing authorization. Unavailable reviews still require human attention; they do not relax merge requirements.
+GitHub chooses effort in this order: an explicit request, the previous review's effort, the requester's preference, the repository default, then the organization default. After a Max review, later automatic reviews can therefore use Max despite the repository's Balanced default. Max is in preview. Check that it is available under our policies and confirm the effort each completed review reports.
+
+Automatic reviews usually charge the author; manual reviews usually charge the requester. Organization policies and bot billing rules can change who pays. Organization members without individual licenses [may qualify](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-code-review-without-a-copilot-license) when the required policies are enabled; outside contributors do not necessarily qualify. If the author lacks access, a maintainer with access can request the review once spending is authorized. If nobody can request it, continue with human review and leave merge requirements unchanged.
 
 #### Step 2.2: Keep every finding answered
 
@@ -141,13 +143,13 @@ Our `main` ruleset already requires every review thread to be resolved before me
 
 We need reviews to converge instead of looping forever. One of Anthropic's pull requests went through more than fifty rounds of review and fixes overnight. When the team traced what the reviewer kept flagging, 59% of it was code present at the first review: the reviewer was handing out old findings a few at a time instead of catching new bugs.
 
-The canonical `radius-code-review` skill owns these rules; `code-review.instructions.md` remains a thin pointer:
+Keep these rules in `radius-code-review`; `code-review.instructions.md` links to the skill:
 
 - When you find a bug, name its class and list every instance, not just the first.
-- Consult prior findings and avoid duplicates. This is reviewer guidance: GitHub documents that resolved comments can recur.
-- After three completed rounds of automated review, hand unresolved work to the author. The author pauses all automatic fix/push producers and decides the next action using the runbook; the skill cannot impose a hard service cap.
+- Read prior findings and avoid duplicates. GitHub warns that resolved findings can still recur.
+- After three completed automated review rounds, hand unresolved findings to the author. Following the runbook, the author stops every agent or automation that applies fixes or pushes commits, then decides what to do next. The skill cannot make GitHub stop reviewing.
 
-If reviews continue unexpectedly, the authorized admin can roll back this rollout's repository push-review and effort changes without weakening merge protections. Independent triggers and in-flight work may remain. No separate enforcement automation is included in this stage.
+If reviews keep running unexpectedly, an admin authorized to roll back can restore the push-review and effort settings changed by this rollout. Keep merge protections intact. Personal or organization triggers can still start reviews, and queued or running reviews may continue. This stage adds no automation to enforce a round limit.
 
 ### Phase 3: Blocking security and build checks
 
@@ -289,7 +291,7 @@ We need evidence for two separate questions. The Step 4.5 trial measures whether
 Each phase gets one verification:
 
 - **Phase 1.** Open a pull request after Step 1.2 and confirm that Copilot's review applied the `radius-code-review` skill and ended with the summary comment.
-- **Phase 2.** After separate activation authorization, complete the [live acceptance record](../eng/COPILOT_REVIEW_OPERATIONS.md#live-acceptance-record): verify the reviewed commit on a new push, controlled non-draft scope, duplicate handling, effort selection, maintainer-request access, third-round handoff, and rollback. Record blocked cases and platform limitations explicitly; a local review does not prove hosted behavior.
+- **Phase 2.** Once the rollout is separately authorized, run the [checks in GitHub](../eng/COPILOT_REVIEW_OPERATIONS.md#live-acceptance-record). Confirm that Copilot reviews the new commit after a push, skips drafts under the tested settings, handles resolved findings, and uses the requested effort. Test a maintainer's review request, the author's pause after round three, and admin rollback. Record any blocked case or platform limitation. Local reviews cannot establish these results.
 - **Phase 3.** On a scratch branch, break each required check in turn (a failing test, a lint error, a vulnerable dependency, a seeded CodeQL alert) and confirm the pull request can't merge.
 - **Phase 4.** Run the acceptance cases below on a scratch repository with a copy of the `main` ruleset and the same Copilot settings, before we change anything in ai-extensions.
 
@@ -329,7 +331,7 @@ This proposal lets some changes merge without a human, so its main risk is a pul
 ## Open questions
 
 **Q: Who pays for reviews on every push?**
-Automatic reviews normally attribute AI credits to the author and manual requests to the requester, but organization policy and bot/cloud-agent attribution can change the payer. Costs vary and Actions usage is separate. Before Phase 2 activation, the billing owner must confirm the effective payer, spending guardrail, monitoring access, and pause authority using the [operations runbook](../eng/COPILOT_REVIEW_OPERATIONS.md#billing-and-monitoring). Changing organization billing or paid-usage policy requires separate authorization.
+Automatic reviews usually charge the author; manual reviews usually charge the requester. Organization policies and bot/cloud-agent billing rules can change who pays, and Actions charges are separate. Before enabling Phase 2, the billing owner must confirm who pays, what bounds spending, who can monitor it, and who can stop the experiment. Follow the [billing procedure](../eng/COPILOT_REVIEW_OPERATIONS.md#billing-and-monitoring); get separate authorization before changing organization billing or paid-usage policies.
 
 **Q: Is the trial bar right?**
 Step 4.5 asks for four weeks, 30 low-tier pull requests, and zero false approvals. Someone has to record Copilot's assessment next to the human decision for each of those pull requests. Proposed: keep the bar, and name an owner for the record before the trial starts.
