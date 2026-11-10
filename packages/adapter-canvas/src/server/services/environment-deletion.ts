@@ -560,7 +560,9 @@ export async function runEnvironmentDeletion(
             "Other Radius runs that change this IAM role wait until the lock is removed."
         }
       });
-      setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "warning");
+      // The stage keeps the role cleanup's own verdict. The lock stays
+      // recorded, so Retry deletion releases only that lock and never runs
+      // the role cleanup again for an environment that may exist again.
     }
     await ports.persist();
     if (lockedWork.failed) throw lockedWork.error;
@@ -869,7 +871,6 @@ async function releaseLeftoverAwsLock(
           "Other Radius runs that change this IAM role wait until the lock is removed."
       }
     });
-    setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "warning");
   }
   await ports.persist();
 }

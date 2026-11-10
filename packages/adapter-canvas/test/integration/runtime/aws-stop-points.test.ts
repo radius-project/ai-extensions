@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { readRecordedAwsLock } from "@radius-project/core";
 import {
+  applyDeletionRetry,
+  beginRetryAttempt,
   configureOperationStore,
   operations,
   projectOperationActions,
@@ -370,6 +372,71 @@ describe.each(["new", "reused"] as const)(
       expect(recordedLocks()).toEqual(new Set());
       expect(operations.get(op.operationId).state).toBe("succeeded");
     });
+  }
+);
+
+describe.each(["new", "reused"] as const)(
+  "environment delete on a %s role whose lock release IAM refused",
+  (role) => {
+    it.each([
+      ["the person removed the lock by hand", true],
+      ["the lock is still there", false]
+    ])(
+      "retries only the lock after a restart, when %s, keeping an environment created again since",
+      async (_label, removedByHand) => {
+        const s = await createAwsScenario(role);
+        await completedSetup(s, "succeeded");
+        const op = createDeleteOperation(s);
+        await operations.persist();
+        // IAM refuses the release, and the deletion finishes without it.
+        s.aws.refuseOnce("iam delete-policy", "AccessDenied");
+        await runDelete(s, op);
+        expect(op.state).toBe("succeeded_with_warnings");
+        const [held] = s.aws.locks();
+        expect(held).toBeDefined();
+
+        await restart(s.outside);
+        expect(recordedLocks()).toEqual(new Set([held?.PolicyId]));
+        expect(actionIds(op.operationId)).toEqual(["retry-deletion"]);
+        if (removedByHand && held) {
+          await removeAwsDeployIdentityLock(
+            { policyArn: held.Arn, policyId: held.PolicyId },
+            s.outside.runAws
+          );
+        }
+
+        // Another setup creates the environment again before the retry.
+        // While the old lock is still there, it waits; the old deletion has
+        // stopped, so the person removes that lock to let it go on.
+        s.github.addEnvironment(ENVIRONMENT);
+        const again = createSetupOperation(s, "op_setup_again");
+        s.onSleep = async () => {
+          const wait = operations.get(again.operationId)?.context?.awsLockWait;
+          if (wait?.policyId === held?.PolicyId) {
+            await removeAwsDeployIdentityLock(wait, s.outside.runAws);
+          }
+        };
+        await runSetup(s, again);
+        s.onSleep = null;
+        const recreated = withoutProvider(s.aws.snapshot());
+        expect(recreated.roles[0]?.inline).toContain(SETUP_POLICY);
+
+        const retrying = s.outside.calls.length;
+        const restored = operations.get(op.operationId);
+        beginRetryAttempt(restored, "deletion");
+        applyDeletionRetry(restored);
+        await runDelete(s, restored);
+
+        expect(withoutProvider(s.aws.snapshot())).toEqual(recreated);
+        expect(
+          writeLabels(s.outside.calls.slice(retrying)).filter(
+            (label) => !label.endsWith("iam delete-policy")
+          )
+        ).toEqual([]);
+        expect(recordedLocks()).toEqual(new Set());
+        expect(restored.state).toBe("succeeded");
+      }
+    );
   }
 );
 

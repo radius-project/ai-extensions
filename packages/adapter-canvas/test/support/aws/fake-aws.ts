@@ -290,7 +290,7 @@ export class FakeAws {
     const refusal = this.refusals.get(command);
     if (refusal !== undefined) {
       this.refusals.delete(command);
-      return serviceError(refusal, command, "Rate exceeded");
+      return serviceError(refusal, command, "Refused by the test.");
     }
     if (this.sessionExpired) {
       return serviceError(

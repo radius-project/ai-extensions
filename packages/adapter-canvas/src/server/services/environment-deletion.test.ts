@@ -927,17 +927,42 @@ describe("runEnvironmentDeletion — AWS", () => {
       expect(op.state).toBe("succeeded");
     });
 
-    it("keeps the lock recorded when its release did not happen", async () => {
+    it("keeps the lock recorded, and the role cleanup done, when its release did not happen", async () => {
       const op = makeAwsOp();
-      await runEnvironmentDeletion(
-        op,
-        makePorts({ removeAwsEnvironmentAccess: locking("failed") })
-      );
+      const removeAwsEnvironmentAccess = locking("failed");
+      const removeAwsDeployIdentityLock = vi.fn(async () => ({
+        ok: true as const,
+        removed: true
+      }));
+      const ports = makePorts({
+        removeAwsEnvironmentAccess,
+        removeAwsDeployIdentityLock
+      });
+      await runEnvironmentDeletion(op, ports);
 
       expect(op.context.awsDeployIdentityLock).toEqual({
         policyArn: LOCK_ARN,
         policyId: "LOCK1"
       });
+      expect(stageOf(op)).toBe("succeeded");
+      expect(op.state).toBe("succeeded_with_warnings");
+
+      // Retry deletion, after a restart, releases only that lock.
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(op))
+      );
+      expect(canRetryDeletion(restored)).toMatchObject({ ok: true });
+      beginRetryAttempt(restored, "deletion");
+      applyDeletionRetry(restored);
+      await runEnvironmentDeletion(restored, ports);
+
+      expect(removeAwsEnvironmentAccess).toHaveBeenCalledOnce();
+      expect(removeAwsDeployIdentityLock).toHaveBeenCalledExactlyOnceWith({
+        policyArn: LOCK_ARN,
+        policyId: "LOCK1"
+      });
+      expect(restored.context.awsDeployIdentityLock).toBeNull();
+      expect(restored.state).toBe("succeeded");
     });
 
     it("takes back the lock an earlier attempt recorded", async () => {
@@ -1036,12 +1061,22 @@ describe("runEnvironmentDeletion — AWS", () => {
           policyArn: LOCK_ARN,
           policyId: "LOCK0"
         });
-        expect(stageOf(op)).toBe("warning");
+        expect(stageOf(op)).toBe("succeeded");
         const warning = op.steps.find(
           (step: { warning?: { code: string } }) =>
             step.warning?.code === "aws-lock-release-failed"
         );
         expect(warning?.warning.message).toContain("prints LOCK0");
+
+        // Retry deletion tries only that lock again, never the role.
+        expect(canRetryDeletion(op)).toMatchObject({ ok: true });
+        beginRetryAttempt(op, "deletion");
+        applyDeletionRetry(op);
+        await runEnvironmentDeletion(op, ports);
+        expect(ports.removeAwsEnvironmentAccess).not.toHaveBeenCalled();
+        expect(ports.removeAwsDeployIdentityLock).toHaveBeenCalledTimes(2);
+        expect(stageOf(op)).toBe("succeeded");
+        expect(op.context.awsDeployIdentityLock).not.toBeNull();
       }
     );
   });
@@ -1132,7 +1167,8 @@ describe("runEnvironmentDeletion — AWS", () => {
         message: "not allowed iam:DeletePolicy"
       }
     });
-    expect(stageOf(op)).toBe("warning");
+    // The role cleanup finished, whatever happened to the lock.
+    expect(stageOf(op)).toBe("succeeded");
     expect(ports.deleteGitHubEnvironment).toHaveBeenCalled();
     expect(op.state).toBe("succeeded_with_warnings");
   });

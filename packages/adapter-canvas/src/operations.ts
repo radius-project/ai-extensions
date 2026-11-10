@@ -4438,13 +4438,25 @@ export function canRetryDeletion(op: any): any {
   const stage = op.stages?.find((entry: any) =>
     ["failed", "warning", "skipped"].includes(entry.state)
   );
-  if (!stage) return { ok: false, code: "deletion-retry-nothing-unresolved" };
-  return {
-    ok: true,
-    code: "deletion-retry-allowed",
-    resumeFrom: stage.id,
-    target: stage.id
-  };
+  if (stage) {
+    return {
+      ok: true,
+      code: "deletion-retry-allowed",
+      resumeFrom: stage.id,
+      target: stage.id
+    };
+  }
+  // Every stage finished, but the AWS lock it took is still recorded because
+  // its release failed. A retry releases only that lock.
+  if (readRecordedAwsLock(op.context)) {
+    return {
+      ok: true,
+      code: "deletion-retry-allowed",
+      resumeFrom: STAGE_DELETE_AWS_ROLE_ACCESS,
+      target: STAGE_DELETE_AWS_ROLE_ACCESS
+    };
+  }
+  return { ok: false, code: "deletion-retry-nothing-unresolved" };
 }
 
 /**
@@ -4464,8 +4476,13 @@ export function applyDeletionRetry(op: any): any {
     stage.state = "pending";
     resetStages.add(stage.id);
   }
+  // A recorded lock is released again, so its earlier failure goes with
+  // the other output the retry repeats.
+  const lockRetried = readRecordedAwsLock(op.context) !== null;
   op.steps = (op.steps || []).filter(
-    (step: any) => !resetStages.has(String(step.stage || ""))
+    (step: any) =>
+      !resetStages.has(String(step.stage || "")) &&
+      !(lockRetried && step.warning?.code === "aws-lock-release-failed")
   );
   if (resumeFrom) op.currentStage = resumeFrom;
   delete op.inputRequired;
