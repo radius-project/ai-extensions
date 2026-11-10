@@ -1744,7 +1744,8 @@ describe("runEnvironmentOperationWorkflow", () => {
           ]),
           Tags: [
             { Key: "radius-managed", Value: "true" },
-            { Key: "radius-repository", Value: "octo/web" }
+            { Key: "radius-repository", Value: "octo/web" },
+            { Key: "radius-repository-id", Value: "77" }
           ]
         }
       }
@@ -1825,7 +1826,7 @@ describe("runEnvironmentOperationWorkflow", () => {
         status: 400,
         code: "aws-role-other-repository",
         error:
-          "Radius created IAM role radius-deploy-octo-web for octo/web, so it cannot be used for octo/app. Nothing was changed. Pick another role or let Radius create one. Nothing was created in AWS."
+          "Radius created IAM role radius-deploy-octo-web for octo/web (repository ID 77), so it cannot be used for octo/app (repository ID 42). Nothing was changed. Pick another role or let Radius create one. Nothing was created in AWS."
       })
     ]);
     // The lock is the only write, and the refused setup releases it.

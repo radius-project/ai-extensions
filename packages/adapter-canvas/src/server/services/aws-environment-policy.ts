@@ -34,7 +34,7 @@ function detail(result: AwsCommandResult): string {
 
 export async function readLegacyEnvironmentPolicy(
   request: {
-    repo: string;
+    repoId: number;
     environment: string;
     roleName: string;
     accountId: string;

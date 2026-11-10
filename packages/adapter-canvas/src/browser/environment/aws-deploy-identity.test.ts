@@ -182,6 +182,25 @@ describe("initializeAwsDeployIdentity", () => {
     });
   });
 
+  it("says in the picker why roles Radius created were left out", async () => {
+    const view = page();
+    view.handle.setProfile({ accountId: "123456789012", region: "us-west-2" });
+    view.browser.net.handle(rolesUrl("123456789012"), () =>
+      json({
+        roles: [{ arn: ROLE_ARN, name: "platform-deploy" }],
+        hiddenReason: "Radius left out 1 role it created."
+      })
+    );
+    view.use.dispatch("click");
+    await flush();
+    expect(view.promptRoleSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intro:
+          "Select an IAM role in account 123456789012. Radius adds this repository's trust, this environment's permissions, and cluster access to it, and never deletes it. Radius left out 1 role it created."
+      })
+    );
+  });
+
   it("unpins a role when the profile moves to another account", async () => {
     const view = page();
     view.handle.setProfile({ accountId: "123456789012", region: "us-west-2" });
@@ -202,6 +221,16 @@ describe("initializeAwsDeployIdentity", () => {
       "no roles",
       () => json({ roles: [] }),
       "No IAM role in this account can be used for this repository."
+    ],
+    [
+      "no roles because Radius couldn't tell whose its roles are",
+      () =>
+        json({
+          roles: [],
+          hiddenReason:
+            "Radius left out 1 role it created, because GitHub didn't return the ID of octo/shop (HTTP 404)."
+        }),
+      "No IAM role in this account can be used for this repository. Radius left out 1 role it created, because GitHub didn't return the ID of octo/shop (HTTP 404)."
     ],
     [
       "a network failure",

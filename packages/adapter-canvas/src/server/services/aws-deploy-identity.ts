@@ -2,6 +2,7 @@ import {
   isAwsEnvironmentPolicyName,
   AWS_EKS_CLUSTER_ADMIN_POLICY_ARN,
   AWS_MANAGED_TAG,
+  AWS_REPOSITORY_ID_TAG,
   AWS_REPOSITORY_TAG,
   GITHUB_OIDC_AUDIENCE,
   GITHUB_OIDC_PROVIDER_URL,
@@ -14,6 +15,7 @@ import {
   eksAcceptsAccessEntries,
   eksAuthenticationMode,
   createGitHubOidcProviderCommand,
+  describeRadiusRoleOwner,
   githubOidcProviderArn,
   isAwsCommercialRegion,
   acceptedGitHubSubjects,
@@ -21,7 +23,7 @@ import {
   mergeGitHubTrustSubject,
   parseAwsRoleArn,
   parsePolicyDocument,
-  radiusRoleRepository,
+  radiusRoleRepositoryId,
   removeGitHubTrustSubject,
   namesOneEnvironment,
   trustAllowsOnlySubjects,
@@ -91,6 +93,8 @@ export const AWS_OPERATION_TAG = "radius-operation";
 
 export interface AwsDeployIdentityRequest {
   repo: string;
+  // GitHub's ID for the repository, which proves a role Radius created is its.
+  repoId: number;
   // The setup operation, tagged on the role and access entry it creates.
   operationId?: string;
   environment: string;
@@ -471,19 +475,24 @@ export async function setupAwsDeployIdentity(
   const roleRecord = parseJson(getRole.stdout);
   const role =
     isRecord(roleRecord) && isRecord(roleRecord.Role) ? roleRecord.Role : null;
-  if (!pickedArn && role && !isRadiusManagedRole(role, request.repo)) {
+  if (!pickedArn && role && !isRadiusManagedRole(role, request.repoId)) {
+    // A role Radius created for another repository can't be picked either.
+    const createdFor = describeRadiusRoleOwner(role);
     return fail(
       "aws-role-not-radius-managed",
-      `An IAM role named ${roleName} already exists, but Radius did not create it for ${request.repo}. No change was made. Either select that role deliberately with "use an existing role…", or choose a different name.`
+      createdFor ?
+        `An IAM role named ${roleName} already exists, but Radius created it for ${createdFor}, not for ${request.repo} (repository ID ${request.repoId}). That can be a repository that used this name before. No change was made. Choose a different name.`
+      : `An IAM role named ${roleName} already exists, but Radius did not create it for ${request.repo}. No change was made. Either select that role deliberately with "use an existing role…", or choose a different name.`
     );
   }
-  // A role Radius created belongs to the repository in its tags, and that
-  // repository's own setup and cleanup assume no other repository uses it.
-  const owner = pickedArn ? radiusRoleRepository(role) : null;
-  if (owner !== null && owner.toLowerCase() !== request.repo.toLowerCase()) {
+  // A role Radius created belongs to the repository whose ID is in its tags,
+  // and that repository's own setup and cleanup assume no other repository
+  // uses it. A name tag doesn't count: another repository can take the name.
+  const owner = pickedArn ? radiusRoleRepositoryId(role) : null;
+  if (owner !== null && owner !== request.repoId) {
     return fail(
       "aws-role-other-repository",
-      `Radius created IAM role ${roleName} for ${owner}, so it cannot be used for ${request.repo}. Nothing was changed. Pick another role or let Radius create one.`
+      `Radius created IAM role ${roleName} for ${describeRadiusRoleOwner(role)}, so it cannot be used for ${request.repo} (repository ID ${request.repoId}). Nothing was changed. Pick another role or let Radius create one.`
     );
   }
 
@@ -654,6 +663,7 @@ export async function setupAwsDeployIdentity(
         "--tags",
         `Key=${AWS_MANAGED_TAG},Value=true`,
         `Key=${AWS_REPOSITORY_TAG},Value=${request.repo}`,
+        `Key=${AWS_REPOSITORY_ID_TAG},Value=${request.repoId}`,
         ...(request.operationId ?
           [`Key=${AWS_OPERATION_TAG},Value=${request.operationId}`]
         : []),
@@ -966,6 +976,8 @@ async function signedInAccountProblem(
 
 export interface AwsDeployIdentityRemovalRequest {
   repo: string;
+  // GitHub's ID for the repository, which proves a role Radius created is its.
+  repoId: number;
   roleArn: string;
   environment: string;
   subjects: readonly string[];
@@ -1120,8 +1132,14 @@ async function deleteAccessEntry(
   };
 }
 
+// GitHub's ID for the repository, or why Radius couldn't read it.
+export type AwsRepositoryIdLookup =
+  | { readonly ok: true; readonly repoId: number }
+  | { readonly ok: false; readonly reason: string };
+
 interface AccessEntryRequest extends AccessEntryTarget {
   repo: string;
+  repository: AwsRepositoryIdLookup;
   role: Record<string, unknown>;
   accountId: string;
   // The role's trust after this environment's subjects are removed.
@@ -1139,11 +1157,21 @@ async function removeUnusedAccessEntry(
   request: AccessEntryRequest,
   ports: AwsDeployIdentityRemovalPorts
 ): Promise<AccessEntryOutcome> {
-  const { roleName, accountId, region, cluster } = request;
-  if (!isRadiusManagedRole(request.role, request.repo)) {
+  const { roleName, accountId, region, cluster, repository } = request;
+  const onCluster = cluster ? ` on ${cluster}` : "";
+  // The repository's ID only matters for a role tagged with one. A role
+  // without the tag is never this repository's, so a retry can't change it.
+  const owner = radiusRoleRepositoryId(request.role);
+  if (owner !== null && !repository.ok) {
+    return {
+      kind: "warning",
+      text: `Kept any access entry for ${roleName}${onCluster}, because Radius couldn't read ${request.repo}'s repository ID from GitHub (${repository.reason}), so it can't tell whether Radius created this role for it. Retry deletion to try again.`
+    };
+  }
+  if (!repository.ok || owner !== repository.repoId) {
     return {
       kind: "kept",
-      text: `any access entry for ${roleName}${cluster ? ` on ${cluster}` : ""}, because Radius didn't create this role for ${request.repo}, and other repositories may use it`
+      text: `any access entry for ${roleName}${onCluster}, because Radius didn't create this role for ${request.repo}, and other repositories may use it`
     };
   }
   if (!cluster || !region) {
@@ -1450,6 +1478,7 @@ export async function removeAwsEnvironmentFromRole(
     {
       ...entryTarget,
       repo: request.repo,
+      repository: { ok: true, repoId: request.repoId },
       role,
       roleArn: role.Arn,
       accountId,
@@ -1565,6 +1594,9 @@ function entryOutcome(
 export async function rollbackAwsSetupChanges(
   request: {
     repo: string;
+    // Proves a role Radius created is this repository's. Only the access
+    // entry needs it, so a failed read keeps just that entry.
+    repository: AwsRepositoryIdLookup;
     // The environment setup was for. Only a subject naming it is its own.
     environment: string;
     roleArn: string;
@@ -1711,6 +1743,7 @@ export async function rollbackAwsSetupChanges(
             ...entry,
             roleName,
             repo: request.repo,
+            repository: request.repository,
             role,
             accountId,
             remainingTrust: policy
@@ -1862,6 +1895,8 @@ async function deleteCreatedRole(
 export interface AwsTrustRepairRequest {
   // The repository whose deploy failed.
   repo: string;
+  // GitHub's ID for the repository, which proves a role Radius created is its.
+  repoId: number;
   // The environment whose deploy failed, as GitHub stores its name.
   environment: string;
   // AWS_ROLE_ARN as the GitHub environment states it. Untrusted: anyone who
@@ -1888,12 +1923,12 @@ async function repairEvidenceProblem(
   roleName: string,
   request: AwsTrustRepairRequest
 ): Promise<{ code: string; message: string } | null> {
-  const owner = radiusRoleRepository(role);
+  const owner = radiusRoleRepositoryId(role);
   const setUpHint = `If environment ${request.environment} should deploy with this role, set it up on the Environments page, which adds its trust and permissions.`;
-  if (owner !== null && owner.toLowerCase() !== request.repo.toLowerCase()) {
+  if (owner !== null && owner !== request.repoId) {
     return {
       code: "aws-role-not-this-repository",
-      message: `Radius created IAM role ${roleName} for ${owner}, not ${request.repo}, so Repair will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role.`
+      message: `Radius created IAM role ${roleName} for ${describeRadiusRoleOwner(role)}, not ${request.repo} (repository ID ${request.repoId}), so Repair will not add trust to it. Nothing was changed. Check that the environment's AWS_ROLE_ARN names the right role.`
     };
   }
   // Setup refuses a role Radius created for another repository, so on one

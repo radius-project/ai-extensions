@@ -13,6 +13,7 @@ import type { CanvasServerEntry } from "../types.js";
 const LIST_ROLES = "aws iam list-roles --output json";
 const GET_ROLE =
   "aws iam get-role --role-name radius-deploy-octo-api --output json";
+const READ_REPO_ID = "gh api /repos/octo/api --jq .id";
 
 function rolesCli(script: Record<string, string | Error>) {
   const calls: string[] = [];
@@ -92,10 +93,12 @@ describe("aws-discovery routes", () => {
         Role: {
           Tags: [
             { Key: "radius-managed", Value: "true" },
-            { Key: "radius-repository", Value: "octo/api" }
+            { Key: "radius-repository", Value: "octo/api" },
+            { Key: "radius-repository-id", Value: "44" }
           ]
         }
-      })
+      }),
+      [READ_REPO_ID]: "44"
     });
 
     expect(
@@ -115,7 +118,7 @@ describe("aws-discovery routes", () => {
         ]
       }
     });
-    expect(cli.calls).toEqual([LIST_ROLES, GET_ROLE]);
+    expect(cli.calls).toEqual([LIST_ROLES, GET_ROLE, READ_REPO_ID]);
   });
 
   it.each([new Error("AccessDenied"), "AccessDenied"])(
