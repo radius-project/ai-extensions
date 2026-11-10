@@ -228,6 +228,74 @@ describe("deployment target admission", () => {
     ).toMatchObject({ status: 409 });
   });
 
+  it("inherits across repository and environment case without rewriting requested values", () => {
+    const prior = {
+      ...previous,
+      environment: "prod",
+      provider: "aws",
+      appFile: "custom.bicep"
+    };
+    const base = {
+      ...options(),
+      awsEnabled: true,
+      previous: prior,
+      previousAppFile: "custom.bicep",
+      workspace: { repo: "FIXTURE/APP", branch: "workspace" }
+    };
+    expect(
+      resolveDeploymentTarget(
+        { repo: "FIXTURE/App", environment: "Prod" },
+        base
+      )
+    ).toEqual({
+      target: { ...prior, repo: "FIXTURE/App", environment: "Prod" }
+    });
+    expect(
+      resolveDeploymentTarget(
+        {
+          repo: "FIXTURE/App",
+          environment: "Prod",
+          branch: "Topic",
+          provider: "azure",
+          appFile: "chosen.bicep"
+        },
+        base
+      )
+    ).toEqual({
+      target: {
+        repo: "FIXTURE/App",
+        environment: "Prod",
+        branch: "Topic",
+        provider: "azure",
+        appFile: "chosen.bicep"
+      }
+    });
+    expect(
+      resolveDeploymentTarget({ environment: "Prod", branch: "Topic" }, base)
+    ).toMatchObject({
+      target: { branch: "Topic", appFile: ".radius/app.bicep" }
+    });
+    expect(
+      resolveDeploymentTarget({ environment: "Other" }, base)
+    ).toMatchObject({
+      target: {
+        environment: "Other",
+        branch: "workspace",
+        provider: "azure",
+        appFile: ".radius/app.bicep"
+      }
+    });
+    expect(resolveDeploymentTarget({ attemptId: "repair" }, base)).toEqual({
+      target: prior
+    });
+    expect(
+      resolveDeploymentTarget(
+        { attemptId: "repair", environment: "Prod" },
+        base
+      )
+    ).toMatchObject({ status: 409 });
+  });
+
   it("resolves branch as explicit, eligible prior, matching workspace, then unresolved repository default", () => {
     const workspace = { repo: previous.repo, branch: "workspace" };
     const base = { ...options(), previous, workspace };

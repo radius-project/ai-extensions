@@ -39,7 +39,8 @@ export function resolveDeploymentTarget(
   const sameRepository = prior?.repo.toLowerCase() === repo.toLowerCase();
   const eligiblePrior =
     sameRepository &&
-    (!input.environment || input.environment === prior?.environment);
+    (!input.environment ||
+      input.environment.toLowerCase() === prior?.environment.toLowerCase());
   const branch =
     input.branch ||
     (eligiblePrior ? prior?.branch : "") ||
