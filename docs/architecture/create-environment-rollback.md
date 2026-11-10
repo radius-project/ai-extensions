@@ -454,7 +454,7 @@ Admission-blocking records are not pruned by age or by the terminal-record cap. 
 Each run that changes a deploy role takes the lock as an IAM policy that names the run's operation. A run that keeps a record saves the lock's policy ID on it before its first change, so a restart finds the lock named and the next attempt of that operation takes it back by itself:
 
 - AWS setup and its rollback record the lock on the setup operation. **Exit setup** and **Abandon setup** release it.
-- Environment delete records the lock on the delete operation. **Retry deletion** takes it back, including after an attempt that finished its changes but stopped before the release.
+- Environment delete records the lock on the delete operation. **Retry deletion** takes it back. When the earlier attempt finished its changes and stopped only before the release, the retry removes that lock by its policy ID and does not check the role again, because the environment may have been created again since.
 
 Two gaps remain. A crash between the `create-policy` that takes the lock and the save that records it leaves a lock no record names. The lock still names the operation, so that operation's next attempt offers **Remove lock** at once. Repair keeps no record, so a crashed Repair leaves a lock that names no operation, and another run offers **Remove lock** once the lock is 10 minutes old.
 

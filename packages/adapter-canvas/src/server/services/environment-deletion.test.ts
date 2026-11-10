@@ -139,6 +139,9 @@ function makePorts(
     removeAwsEnvironmentAccess: vi.fn(async () => {
       throw new Error("unexpected AWS role cleanup");
     }),
+    removeAwsDeployIdentityLock: vi.fn(async () => {
+      throw new Error("unexpected AWS lock removal");
+    }),
     withCredentialProvenanceLock: async (work) => work(),
     readAzureIdentity: vi.fn(async () => ({
       tenantId: "tenant-1",
@@ -954,7 +957,9 @@ describe("runEnvironmentDeletion — AWS", () => {
       expect(op.context.awsDeployIdentityLock).toBeNull();
     });
 
-    it("takes back and releases a lock an attempt left after it finished the role and the GitHub environment", async () => {
+    // An earlier attempt finished the role and the GitHub environment and
+    // stopped before its release, so only the recorded lock is left.
+    function finishedButLocked() {
       const op = makeAwsOp();
       for (const stage of [
         STAGE_DELETE_RADIUS_ENV,
@@ -966,22 +971,79 @@ describe("runEnvironmentDeletion — AWS", () => {
       op.context = {
         awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
       };
-      const removeAwsEnvironmentAccess = locking("released");
-      const ports = makePorts({ removeAwsEnvironmentAccess });
+      return op;
+    }
 
-      await runEnvironmentDeletion(op, ports);
+    it.each([
+      ["removed", { ok: true as const, removed: true }],
+      ["already gone", { ok: true as const, removed: false }],
+      [
+        "replaced by another run's",
+        {
+          ok: false as const,
+          code: "aws-lock-changed",
+          message: "The lock changed since it was shown."
+        }
+      ]
+    ])(
+      "releases only that lock, by its policy ID, without touching the role, when it is %s",
+      async (_label, answer) => {
+        const op = finishedButLocked();
+        const removeAwsDeployIdentityLock = vi.fn(async () => answer);
+        const ports = makePorts({ removeAwsDeployIdentityLock });
 
-      expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
-        expect.objectContaining({ adopt: "LOCK0" })
-      );
-      expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
-      expect(op.steps.map((step: { label: string }) => step.label)).toContain(
-        "Checking the deploy identity again to release the lock an earlier attempt left on it"
-      );
-      expect(stageOf(op)).toBe("succeeded");
-      expect(op.context.awsDeployIdentityLock).toBeNull();
-      expect(op.state).toBe("succeeded");
-    });
+        await runEnvironmentDeletion(op, ports);
+
+        expect(removeAwsDeployIdentityLock).toHaveBeenCalledExactlyOnceWith({
+          policyArn: LOCK_ARN,
+          policyId: "LOCK0"
+        });
+        expect(ports.removeAwsEnvironmentAccess).not.toHaveBeenCalled();
+        expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+        expect(op.context.awsDeployIdentityLock).toBeNull();
+        expect(stageOf(op)).toBe("succeeded");
+        expect(op.state).toBe("succeeded");
+      }
+    );
+
+    it.each([
+      [
+        "fails",
+        async () => ({
+          ok: false as const,
+          code: "aws-lock-denied",
+          message: "Not allowed iam:DeletePolicy."
+        })
+      ],
+      [
+        "throws",
+        async () => {
+          throw new Error("aws exited");
+        }
+      ]
+    ])(
+      "keeps the lock recorded, with a warning naming it, when its removal %s",
+      async (_label, removal) => {
+        const op = finishedButLocked();
+        const ports = makePorts({
+          removeAwsDeployIdentityLock: vi.fn(removal)
+        });
+
+        await runEnvironmentDeletion(op, ports);
+
+        expect(ports.removeAwsEnvironmentAccess).not.toHaveBeenCalled();
+        expect(op.context.awsDeployIdentityLock).toEqual({
+          policyArn: LOCK_ARN,
+          policyId: "LOCK0"
+        });
+        expect(stageOf(op)).toBe("warning");
+        const warning = op.steps.find(
+          (step: { warning?: { code: string } }) =>
+            step.warning?.code === "aws-lock-release-failed"
+        );
+        expect(warning?.warning.message).toContain("prints LOCK0");
+      }
+    );
   });
 
   it.each([
@@ -1815,6 +1877,9 @@ describe("runEnvironmentDeletion — fallbacks and optional ports", () => {
       deleteRadiusEnvironment: vi.fn(async () => ({
         outcome: "deleted" as const
       })),
+      removeAwsDeployIdentityLock: async () => {
+        throw new Error("Unexpected lock removal");
+      },
       removeAwsEnvironmentAccess: vi.fn(async () => {
         throw new Error("unexpected AWS role cleanup");
       }),

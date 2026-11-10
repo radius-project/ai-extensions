@@ -456,6 +456,8 @@ export async function runDelete(
     removeCredentialProvenance: unexpected("provenance removal"),
     clearEnvironmentCredentialProvenance: unexpected("provenance clear"),
     removeAwsEnvironmentAccess: scenario.access.remove,
+    removeAwsDeployIdentityLock: (lock) =>
+      removeAwsDeployIdentityLock(lock, outside.runAws),
     persist: () => operations.persist(),
     errorMessage
   });

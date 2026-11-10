@@ -67,7 +67,11 @@ import {
   type CredentialRetentionReason
 } from "../../credential-provenance.js";
 import type { GitHubEnvDeletionOutcome } from "./github-environment.js";
-import type { AwsLockWait } from "./aws-deploy-identity-lock.js";
+import {
+  awsLockRecoveryCommand,
+  type AwsLockRemovalResult,
+  type AwsLockWait
+} from "./aws-deploy-identity-lock.js";
 
 export type { GitHubEnvDeletionOutcome };
 
@@ -172,6 +176,12 @@ export interface EnvironmentDeletionPorts {
       })
     | { ok: false; message: string }
   >;
+  // AWS only: remove exactly the lock a deletion recorded, by its policy ID,
+  // when an earlier attempt finished its changes but not its release.
+  removeAwsDeployIdentityLock(lock: {
+    policyArn: string;
+    policyId: string;
+  }): Promise<AwsLockRemovalResult>;
   // Durably record the operation after each state transition.
   persist(): Promise<void>;
   errorMessage(error: unknown): string;
@@ -415,17 +425,23 @@ export async function runEnvironmentDeletion(
   // lock, so if the lock were released between the two steps, Repair could
   // still see the environment and add its subjects back. For the same reason,
   // a retry whose GitHub environment delete is still pending removes the
-  // subjects again first. The removal is idempotent. So is a retry whose
-  // earlier attempt stopped before its lock was released: it takes the
-  // recorded lock back, checks the role again, and releases it.
+  // subjects again first. The removal is idempotent.
   const awsStageState = stageState(op, STAGE_DELETE_AWS_ROLE_ACCESS);
   const awsStagePending = stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS);
   const githubStagePending = stagePending(op, STAGE_DELETE_GITHUB_ENV);
   const recordedLock = readRecordedAwsLock(op.context);
   if (
     awsStageState !== null &&
-    (awsStagePending || githubStagePending || recordedLock)
+    !awsStagePending &&
+    !githubStagePending &&
+    recordedLock
   ) {
+    // An earlier attempt finished the role and the GitHub environment but not
+    // the release. Only that lock goes: by now the environment may have been
+    // created again, and checking the role again would remove its new grant.
+    await releaseLeftoverAwsLock(op, ports, recordedLock);
+  }
+  if (awsStageState !== null && (awsStagePending || githubStagePending)) {
     enterStage(op, STAGE_DELETE_AWS_ROLE_ACCESS);
     addStep(op, {
       stage: STAGE_DELETE_AWS_ROLE_ACCESS,
@@ -433,9 +449,7 @@ export async function runEnvironmentDeletion(
       label:
         awsStagePending ?
           "Removing this environment's trust, policy, and unused cluster access from the deploy identity"
-        : githubStagePending ?
-          "Checking the deploy identity again before deleting the GitHub environment"
-        : "Checking the deploy identity again to release the lock an earlier attempt left on it",
+        : "Checking the deploy identity again before deleting the GitHub environment",
       state: "running"
     });
     await ports.persist();
@@ -819,6 +833,45 @@ function recordAwsRoleAccessRemoval(
     });
   }
   setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "succeeded");
+}
+
+// Remove the lock an earlier attempt recorded and left, by its policy ID, so a
+// newer lock another run took stays. Kept recorded when the removal fails.
+async function releaseLeftoverAwsLock(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts,
+  lock: { policyArn: string; policyId: string; roleName: string }
+): Promise<void> {
+  let result: AwsLockRemovalResult;
+  try {
+    result = await ports.removeAwsDeployIdentityLock({
+      policyArn: lock.policyArn,
+      policyId: lock.policyId
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      code: "aws-lock-remove-failed",
+      message: ports.errorMessage(error)
+    };
+  }
+  if (result.ok || result.code === "aws-lock-changed") {
+    setContext(op, { awsDeployIdentityLock: null });
+  } else {
+    addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "warning",
+      label: "Could not release the lock on the IAM role",
+      warning: {
+        code: "aws-lock-release-failed",
+        message: `This deletion is done with IAM role ${lock.roleName}, but Radius could not release the lock an earlier attempt left on it: ${result.message} ${awsLockRecoveryCommand(lock.policyArn, lock.policyId)}`,
+        impact:
+          "Other Radius runs that change this IAM role wait until the lock is removed."
+      }
+    });
+    setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "warning");
+  }
+  await ports.persist();
 }
 
 async function deleteGitHubEnvironmentStage(

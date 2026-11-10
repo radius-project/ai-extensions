@@ -18,6 +18,7 @@ import {
   createAwsScenario,
   createDeleteOperation,
   createSetupOperation,
+  ENVIRONMENT,
   ROLE,
   runAwsRollback,
   runDelete,
@@ -85,6 +86,9 @@ async function discover(
   await configureOperationStore(disabledOperationStore());
   return points;
 }
+
+// The environment policy every setup of dev in octo/shop attaches.
+const SETUP_POLICY = "radius-deploy-dev-f5fb7acf8f59";
 
 // The account's GitHub identity provider is never removed, by design.
 function withoutProvider(snapshot: FakeAwsSnapshot) {
@@ -332,6 +336,40 @@ describe.each(["new", "reused"] as const)(
         expect(recordedLocks()).toEqual(new Set());
       }
     );
+  }
+);
+
+describe.each(["new", "reused"] as const)(
+  "environment delete on a %s role whose lock release landed but was never saved",
+  (role) => {
+    it("releases only the lock on Retry deletion, keeping an environment created again since", async () => {
+      const s = await createAwsScenario(role);
+      await completedSetup(s, "succeeded");
+      const op = createDeleteOperation(s);
+      await operations.persist();
+      s.outside.armWhen(
+        (call) =>
+          call.command === "iam delete-policy" &&
+          call.args.join(" ").includes(":policy/radius-lock-"),
+        "crash-after"
+      );
+      expect(await s.outside.until(() => runDelete(s, op))).toBe("crashed");
+      await restart(s.outside);
+      expect(recordedLocks()).toEqual(new Set([expect.any(String)]));
+
+      // Another setup creates the environment again before the retry.
+      s.github.addEnvironment(ENVIRONMENT);
+      const again = createSetupOperation(s, "op_setup_again");
+      await runSetup(s, again);
+      const recreated = withoutProvider(s.aws.snapshot());
+      expect(recreated.roles[0]?.inline).toContain(SETUP_POLICY);
+
+      await runDelete(s, operations.get(op.operationId));
+
+      expect(withoutProvider(s.aws.snapshot())).toEqual(recreated);
+      expect(recordedLocks()).toEqual(new Set());
+      expect(operations.get(op.operationId).state).toBe("succeeded");
+    });
   }
 );
 

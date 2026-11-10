@@ -4081,6 +4081,8 @@ function productionEnvironmentDeletionPorts(
       };
     },
     removeAwsEnvironmentAccess: awsEnvironmentAccess.remove,
+    removeAwsDeployIdentityLock: (lock) =>
+      removeAwsDeployIdentityLock(lock, runAwsCli),
     deleteGitHubEnvironment: (input) =>
       deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
     deleteStatePackage: createStatePackageDeletion({
