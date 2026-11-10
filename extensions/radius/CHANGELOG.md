@@ -1,5 +1,121 @@
 # radius
 
+## 0.5.0
+
+### Minor Changes
+
+- [#1073](https://github.com/radius-project/ai-extensions/pull/1073) [@nellshamrell](https://github.com/nellshamrell) - **Added:** Configure and verify Azure or AWS environments without opening Canvas using `radius_setup_environment`, inspect saved setup and verification with `radius_environment_status`, and resume or control that same operation with `radius_environment_control`. Setup never deploys; account choices and sensitive commands require trusted host interaction, and cleanup remains limited to proven-owned setup resources.
+
+  Cooperative Stop remains available while setup holds its GitHub account lease, credentials are unavailable or another tool interaction is pending. Concurrent Stop requests stay bound to the same target and account rather than being refused because an earlier Stop changed progress. Stop rechecks its original target and runtime immediately before recording the request, without an intervening asynchronous wait. Setup trims surrounding whitespace from environment names and returns the canonical target with its operation ID for subsequent status and control calls.
+
+  AWS remains behind the default-off startup developer switch. Supply account, region, cluster, VPC, subnet IDs and either `roleName` or `existingRoleArn`; an existing role takes precedence when both selectors are supplied. Disabled AWS setup does not ask for a GitHub account. Continue/Retry refuses a missing or invalid role selector instead of authorizing a default role. AWS setup requests are not retained across runtime restarts; start a new setup after restarting.
+
+  Input prompts refresh after setup finishes settling, and application-selection prompts include bounded, redacted choices with IDs, creation dates and the saved default. Verification reports the required setup pull request merge with a validated link to the saved repository's pull request when available. Runtime shutdown preserves uncertain verification dispatch evidence without starting further reconciliation or reporting a false terminal failure.
+
+  Resume keeps the original request's authority through answer reads and saves without requiring a panel. Controls report temporary task-busy guidance separately from failed durable correction. Verification bypass rechecks the saved target and runtime immediately before writing its marker, including after GitHub identity verification; already-issued writes retain their actual result.
+
+  An inconclusive GitHub Packages check reports unavailable access and asks you to retry the same account, rather than silently selecting another account or suggesting a scope grant. Confirmed push access remains valid if empty-upload cleanup fails. Workflow status observations that were saved successfully remain intact if authority is lost immediately afterward.
+
+  Runtime shutdown prevents new account-access probes and includes pending upload cleanup and account restoration in the existing bounded drain.
+
+- [#1171](https://github.com/radius-project/ai-extensions/pull/1171) [@nicolejms](https://github.com/nicolejms) - **Added:** Offer an issue draft after a terminal Radius failure, with sanitized diagnostics, session settings, user review, and separate permission before submission to the Radius team.
+
+- [#1162](https://github.com/radius-project/ai-extensions/pull/1162) [@nicolejms](https://github.com/nicolejms) - **Added:** Ask for approval at session start before updating the Radius plugin from its current marketplace, then wait 7 days after any answer before asking again for that marketplace. Unavailable approval and preference-storage errors do not show session warnings. Start a new session to load installed changes, or set `COPILOT_AUTO_UPDATE=false` to turn off the request.
+
+### Patch Changes
+
+- [#1164](https://github.com/radius-project/ai-extensions/pull/1164) [@nithyatsu](https://github.com/nithyatsu) - **Security:** Update the deploy progress artifact uploader to undici 6.29.1. Existing generated provider workflows need to be refreshed to pick up this fix.
+
+- [#1176](https://github.com/radius-project/ai-extensions/pull/1176) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Check the AWS CLI version and account before credential verification, profile saves, setup, environment removal, and lock removal. Use noninteractive verification, distinguish credential failures from other errors, and invalidate verification when AWS account or region fields change.
+
+  Restore verification controls and dismiss the pending dialog when a credential form changes provider, including an interrupted Azure verification.
+
+  Keep credential fields locked while Save is pending, then restore their state on success or failure.
+
+- [#1177](https://github.com/radius-project/ai-extensions/pull/1177) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Isolate regional AWS grants by repository and environment, retain exact policy names for deletion after repository renames, and migrate unambiguous legacy policies on picked roles. Recover inline-policy space during migration without deleting another environment's grant. Deployment and deletion workflows use setup-granted EKS access, and Canvas blocks stale AWS workflow templates before dispatch.
+
+  Persist policy identity before attachment so failed or paused setup can reuse it. Refuse unreconciled grants on fresh attempts, use the saved provider for workflow checks, and repair trust against the recorded policy name.
+
+- [#1189](https://github.com/radius-project/ai-extensions/pull/1189) [@AzureMike](https://github.com/AzureMike) - **Fixed:** While AWS setup waits for another run to release the deploy identity lock, the original GitHub CLI account stays active. GitHub readiness checks and verification workflow inspection and cancellation can switch accounts during the wait instead of failing because the account is in use. Before it configures the GitHub environment, AWS setup waits for any other GitHub CLI account work to finish and selects its account again.
+
+- [#1166](https://github.com/radius-project/ai-extensions/pull/1166) [@AzureMike](https://github.com/AzureMike) - **Fixed:** The AWS environment form now offers only EKS clusters that Radius can use and says why each other cluster can't be used. The VPC comes from the selected cluster, and Create Environment stays disabled until the selected subnets cover two standard availability zones. Refresh keeps the selected cluster, namespace, and subnets when they're still available. The namespace list follows the selected cluster, and Create Environment stays disabled while the list loads. If the cluster's namespaces can't be read, the list shows only `default`, and a note says why. Setup waits for an `UPDATING` cluster to be `ACTIVE` before it changes anything.
+
+- [#1073](https://github.com/radius-project/ai-extensions/pull/1073) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep workflow cancellation bound to the confirmed GitHub account and exact run, refusing a new cancellation if setup changes or the runtime shuts down while it waits. Preserve the original run's result when an already-issued cancellation settles, and report results that cannot be saved without overwriting a replacement setup.
+
+  Keep a recorded Stop separate from a delayed workflow-status read: refuse stale results without changing a replacement run or announcing its completion, and report a failed status save without discarding the known result. Cancel remains available while the stopped setup task settles; an unissued cancellation restores only its own unchanged command and workflow status.
+
+- [#1190](https://github.com/radius-project/ai-extensions/pull/1190) [@kachawla](https://github.com/kachawla) - **Fixed:** When a deployment fails before Radius runs, show the failing workflow step's own error message first in the failure details, instead of losing it among error lines from the cleanup steps that run afterward.
+
+- [#1201](https://github.com/radius-project/ai-extensions/pull/1201) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Check peer hostnames built into container images during application modeling, use proven configuration or compatible names, and stop with a clear report when the selected Recipe cannot supply the required DNS name.
+
+- [#1144](https://github.com/radius-project/ai-extensions/pull/1144) [@kachawla](https://github.com/kachawla) - **Fixed:** The progress chips and the setup panel's dismiss button are now named by the text they show, so speech-input users can activate them by saying what they see. The full status sentence remains available as the accessible description.
+
+- [#1069](https://github.com/radius-project/ai-extensions/pull/1069) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Stop setup rollback when removal of a recovered setup branch is not confirmed, rather than reporting the branch removed and deleting remaining setup resources. Keep branch-review instructions alongside provider error details after restarting Radius.
+
+- [#1203](https://github.com/radius-project/ai-extensions/pull/1203) [@kachawla](https://github.com/kachawla) - **Fixed:** Pausing an environment setup that the extension restarted before it committed the deploy workflows now offers **Delete setup** and **Exit setup**. Before, Radius treated the verification workflow as unknown even though none could have run, so **Abandon setup** was the only way out.
+
+- [#1202](https://github.com/radius-project/ai-extensions/pull/1202) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep authored custom-type recipe sources when publishing a model, including recipes named with the lowerCamelCase type name.
+
+- [#1027](https://github.com/radius-project/ai-extensions/pull/1027) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Delete credential profiles safely when stored profile data contains malformed entries.
+
+- [#1070](https://github.com/radius-project/ai-extensions/pull/1070) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Refuse a credential-verification retry when its saved GitHub account or operation changes while checking whether the setup pull request merged or saving the accepted command. A previous account's merge confirmation cannot authorize a replacement operation.
+
+  Reject setup answers when the original operation or panel attachment is removed, replaced, or retargeted while reading or saving the answer. Restore and save an unchanged, unstarted prompt when its panel closes before admission, without overwriting a competing prompt or operation. Report failed corrective saves with inspection guidance instead of suggesting an unsafe retry.
+
+  Refuse setup controls when their operation or original coordinator changes during admission. Wait for pending saves to settle before recovery, restore only an unchanged and unstarted request, and report a failed durable undo instead of accepting or starting stale work. Recheck only the affected operation after its admission settles, without restarting recovery for unrelated operations.
+
+  Keep controls retryable when a previous task is still settling: return a temporary busy response instead of permanently blocking recovery, while preserving duplicate-command acceptance.
+
+  Honor Stop while a setup answer is being saved without starting more setup work or leaving the operation running without a task. Report completion only after saving the stopped state; if that save fails, block further admission and show inspection guidance rather than claiming Stop was durable.
+
+  Keep agent-callable controls bound to their authorized setup target, account, configuration and resource ownership while allowing the shared service to save its own command progress. Preserve diagnostic guidance to inspect the saved operation when admission cannot be durably undone.
+
+- [#1071](https://github.com/radius-project/ai-extensions/pull/1071) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep a replacement setup or verification task connected to its GitHub account when an older task finishes.
+
+- [#1169](https://github.com/radius-project/ai-extensions/pull/1169) [@kachawla](https://github.com/kachawla) - **Fixed:** The setup progress panel now shows a paused setup as paused when the pause lands right after you continue the setup or reopen the panel, instead of staying on the running stages.
+
+- [#1071](https://github.com/radius-project/ai-extensions/pull/1071) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep environment setup running when its panel closes, reuse the same operation when it reopens, and stop local verification and further Azure/GitHub setup work safely when the session shuts down without claiming to cancel remote work.
+
+  AWS setup retains its selected GitHub account and cooperative Stop behavior without an open panel. Stop records partial AWS progress and prevents configuration after a pause; nested AWS runtime-shutdown fencing remains deferred.
+
+  Session shutdown also stops cleanup between deletions and configuration between individual variable writes. Writes already in flight retain their account until their acknowledged results are recorded; interrupted cleanup and verification discovery remain resumable instead of reporting completion.
+
+  Shutdown during recovery-record persistence prevents unsent Azure, GitHub environment, branch and workflow writes. Radius records that those requests were not applied and does not start failure cleanup.
+
+  Shutdown before rereading an unresolved request preserves its original evidence and reconciliation-attempt count instead of consuming retries or escalating to manual recovery.
+
+  Shutdown after a lost write response or while a provider read fails also preserves unresolved evidence without consuming recovery attempts. GHCR bootstrap stops before the next HTTP request, upload step or retry, while responses already issued retain their actual outcome.
+
+  Azure owner and provenance-tag propagation retries stop issuing writes and reads after shutdown, including when shutdown interrupts a read delay. Incomplete or failed late reads preserve unresolved evidence instead of triggering failure cleanup or manual recovery; positive responses already in flight can still confirm the request. Rejected attempts retain their diagnostics, while user Stop still completes the current logical mutation.
+
+  Service-principal, GitHub environment and workflow recovery also stop nested retries, commit-history pages and branch-absence reads after shutdown. Incomplete evidence stays unresolved rather than claiming absence or requiring manual recovery. Complete proof from a request already in flight can still settle; matching workflow content alone cannot authorize another history read.
+
+  Verification dispatch and automatic run discovery stop further reads and monitoring after shutdown, without turning a late response into a setup failure. Sent requests retain their actual outcome; uncertain dispatches require inspection before another run can be sent, including after restart. Storage failures remain explicit.
+
+  Session shutdown waits up to two seconds for detached setup tasks, acknowledgement saves and account restoration alongside closing panels. Incomplete settlement or teardown failures are reported and exit nonzero; external work that exceeds the deadline can still be interrupted and requires recovery inspection.
+
+  Late absent or mismatched Azure recovery reads preserve unresolved evidence after shutdown. Caller-identity retries stop before another Azure invocation, and retrying an accepted verification dispatch after a save failure reuses its confirmed run rather than dispatching again.
+
+  Initial and resumed Azure setup stop identity reads, nested repository checks and preflight work after shutdown without turning late reads into failure cleanup or overwriting saved checkpoints. An OIDC retry wait already in progress may finish, but it cannot start another request.
+
+- [#1167](https://github.com/radius-project/ai-extensions/pull/1167) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Stop repository-access checks from starting another request after the session begins shutting down.
+
+- [#1071](https://github.com/radius-project/ai-extensions/pull/1071) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Share in-progress environment setup recovery across panel attachments, and prevent old tasks or delayed updates from clearing newer work or overwriting a reopened panel.
+
+  Queued tasks and delayed reconciliation cannot run against a replaced, removed or retargeted operation. A replacement can register its own reconciliation without an old timer consuming it.
+
+- [#1137](https://github.com/radius-project/ai-extensions/pull/1137) [@kachawla](https://github.com/kachawla) - **Changed:** Azure deploys and deletes now retry a failed GitHub token refresh every 15 seconds instead of waiting 2 minutes, so a brief outage is less likely to fail a long operation.
+
+- [#1070](https://github.com/radius-project/ai-extensions/pull/1070) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Redact credentials and limit diagnostic text in credential-verification progress and failures. Keep a confirmed workflow failure visible with an explicit warning when its log cannot be read, instead of replacing the known outcome with an unknown status.
+
+  Include that warning in both the response and saved failure evidence when GitHub returns no logs, as well as when the log request throws an error.
+
+- [#1070](https://github.com/radius-project/ai-extensions/pull/1070) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep credential verification pending while its run is being acquired, preserve uncertainty for unsupported workflow conclusions, and prevent late verification results from replacing a stopped operation or a changed account's outcome.
+
+- [#1069](https://github.com/radius-project/ai-extensions/pull/1069) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Clarify that environment setup only verifies credentials and cluster access; deploying an application requires a separate explicit action.
+
+- [#1205](https://github.com/radius-project/ai-extensions/pull/1205) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep looking for a delayed environment-delete workflow run within the existing 30-minute completion limit, without starting another deletion or removing its credentials early.
+
 ## 0.4.0
 
 ### Minor Changes
