@@ -3693,6 +3693,31 @@ describe("rollbackAwsSetupChanges", () => {
     expect(aws.find("eks describe-access-entry")).toBeUndefined();
   });
 
+  it("keeps the access entry of a role without the ID tag for its real reason when the repository's ID can't be read", async () => {
+    const aws = fakeAws({
+      ...fullRollback,
+      "iam get-role": ok({
+        Role: {
+          ...managedRole([DEV]).Role,
+          RoleId: "AROA1",
+          Tags: radiusTags("octo/shop", null)
+        }
+      })
+    });
+    const result = await rollback(aws, [targets.entry], unexpectedListing, {
+      ok: false,
+      reason: "HTTP 502"
+    });
+    expect(result).toEqual([
+      expect.objectContaining({
+        key: "entry",
+        outcome: "skipped",
+        detail: `Kept any access entry for ${ROLE} on shop, because Radius didn't create this role for octo/shop, and other repositories may use it.`
+      })
+    ]);
+    expect(aws.calls.some((args) => args[0] === "eks")).toBe(false);
+  });
+
   it("keeps the access entry of a role tagged with this repository's name but another repository's ID", async () => {
     const aws = fakeAws({
       ...fullRollback,

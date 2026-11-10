@@ -1159,13 +1159,16 @@ async function removeUnusedAccessEntry(
 ): Promise<AccessEntryOutcome> {
   const { roleName, accountId, region, cluster, repository } = request;
   const onCluster = cluster ? ` on ${cluster}` : "";
-  if (!repository.ok) {
+  // The repository's ID only matters for a role tagged with one. A role
+  // without the tag is never this repository's, so a retry can't change it.
+  const owner = radiusRoleRepositoryId(request.role);
+  if (owner !== null && !repository.ok) {
     return {
       kind: "warning",
       text: `Kept any access entry for ${roleName}${onCluster}, because Radius couldn't read ${request.repo}'s repository ID from GitHub (${repository.reason}), so it can't tell whether Radius created this role for it. Retry deletion to try again.`
     };
   }
-  if (!isRadiusManagedRole(request.role, repository.repoId)) {
+  if (!repository.ok || owner !== repository.repoId) {
     return {
       kind: "kept",
       text: `any access entry for ${roleName}${onCluster}, because Radius didn't create this role for ${request.repo}, and other repositories may use it`
