@@ -198,6 +198,9 @@ printf 'kubectl %s\n' "$*" >>"${CALLS}"
 if [[ "${1:-}" == "--kubeconfig" ]]; then
     shift 2
 fi
+if [[ "${1:-}" == --request-timeout=* ]]; then
+    shift
+fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "--dry-run=client" ]]; then
     printf '%s\n' "${CRD_LIST_JSON}"
@@ -563,6 +566,7 @@ run_action() {
         export BICEP_BIN="${BICEP}" RADIUS_ROUTES_WAIT_TIMEOUT="1s"
         export RADIUS_ROUTES_RETRY_DELAY="0"
         export TARGET_KUBECONFIG="${TARGET_KUBECONFIG_OVERRIDE}"
+        export REQUEST_TIMEOUT="${REQUEST_TIMEOUT_OVERRIDE:-}"
         bash "${SCRIPT}"
     ) >"${OUTPUT}" 2>&1
     ACTION_EXIT=$?
@@ -925,6 +929,7 @@ export GATEWAYCLASS_STATE GATEWAY_STATE TARGET_KUBECONFIG_OVERRIDE
 run_action ensure
 assert_success "first managed install"
 assert_call "kubectl --kubeconfig ${TARGET_KUBECONFIG_OVERRIDE} create --dry-run=client"
+assert_no_call "--request-timeout"
 assert_call "gateway-api/releases/download/v1.2.1/experimental-install.yaml"
 assert_call "version 0.1.0"
 assert_call "gatewayAPI.manageCRDs=false"
@@ -1271,6 +1276,30 @@ assert_success "BYO cleanup"
 assert_output "BYO Gateway is never deleted"
 assert_no_call "kubectl"
 assert_no_call "helm "
+
+# A request timeout applies to every kubectl call and to no Helm call.
+reset_case
+CRDS_STATE='missing'
+NAMESPACE_STATE='missing'
+COMPONENTS_STATE='missing'
+GATEWAYCLASS_STATE='missing'
+GATEWAY_STATE='missing'
+TARGET_KUBECONFIG_OVERRIDE="${TEST_ROOT}/target-kubeconfig"
+REQUEST_TIMEOUT_OVERRIDE="10s"
+export CRDS_STATE NAMESPACE_STATE COMPONENTS_STATE
+export GATEWAYCLASS_STATE GATEWAY_STATE TARGET_KUBECONFIG_OVERRIDE
+run_action ensure
+REQUEST_TIMEOUT_OVERRIDE=""
+assert_success "managed install with a request timeout"
+assert_call "kubectl --kubeconfig ${TARGET_KUBECONFIG_OVERRIDE} --request-timeout=10s create --dry-run=client"
+if grep '^kubectl ' "${CALLS}" | grep -vqF -- "--request-timeout=10s"; then
+    fail "a kubectl call has no request timeout
+$(cat "${CALLS}")"
+fi
+if grep '^helm ' "${CALLS}" | grep -qF -- "--request-timeout"; then
+    fail "a Helm call received the kubectl request timeout
+$(cat "${CALLS}")"
+fi
 
 # Both provider workflows invoke ensure after recipe setup and before app deploy.
 for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do

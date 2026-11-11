@@ -143,6 +143,10 @@ function containsWorkflowReference(value: unknown, fileName: string): boolean {
   );
 }
 
+// The upstream action runs the same upload-session probe as the inline step
+// that configureVerifyGhcrProbe writes.
+const UPSTREAM_GHCR_PROBE = `${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR}/actions/verify-ghcr-push@${RADIUS_REF}`;
+
 function assertTrustedGeneratedWorkflow(
   workflow: string,
   artifact: GeneratedWorkflowArtifact,
@@ -299,10 +303,13 @@ function assertTrustedGeneratedWorkflow(
         (step) =>
           isMapping(step) &&
           step.name === "Verify GHCR package push permission" &&
-          isMapping(step.env) &&
-          step.env.GHCR_TOKEN === "${{ secrets.GITHUB_TOKEN }}" &&
-          typeof step.run === "string" &&
-          step.run.includes("/blobs/uploads/")
+          ((isMapping(step.env) &&
+            step.env.GHCR_TOKEN === "${{ secrets.GITHUB_TOKEN }}" &&
+            typeof step.run === "string" &&
+            step.run.includes("/blobs/uploads/")) ||
+            (step.uses === UPSTREAM_GHCR_PROBE &&
+              isMapping(step.with) &&
+              step.with["github-token"] === "${{ secrets.GITHUB_TOKEN }}"))
       )
   );
   if (!hasTrustedGhcrProbe) {
@@ -410,9 +417,18 @@ export async function generateVerifyWorkflow(
   }
   const triggerConfigured =
     pushMarker ? rendered : stripSetupPushTrigger(rendered);
-  const workflow = configureVerifyGhcrProbe(
-    configureVerifyOperationMarker(triggerConfigured, env, pushMarker)
+
+  const marked = configureVerifyOperationMarker(
+    triggerConfigured,
+    env,
+    pushMarker
   );
+
+  // AWS keeps the upstream verify-ghcr-push step, which runs the same probe
+  // with coded errors that match deploy and delete.
+  const workflow =
+    platform.id === "aws" ? marked : configureVerifyGhcrProbe(marked);
+
   assertTrustedGeneratedWorkflow(
     workflow,
     "verify",

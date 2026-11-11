@@ -268,7 +268,8 @@ describe("runSetupCoordinator", () => {
             provider,
             data: {
               clientId: forwarded.clientId,
-              roleArn: forwarded.roleArn === undefined ? undefined : "role"
+              roleArn: forwarded.roleArn === undefined ? undefined : "role",
+              cluster: "cluster"
             }
           },
           environment.ports

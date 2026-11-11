@@ -3,11 +3,13 @@
 # Tests the two steps that write the EKS kubeconfig in the AWS workflows,
 # "Connect to EKS cluster" and "Refresh external deployment target
 # credentials", by running each one's real script with fake aws and kubectl.
-# In run-rad-commands-aws.yml and delete-aws.yml, the refresh step must write a
+# In the deploy and both delete workflows, the refresh step must write a
 # kubeconfig that carries the EKS token inline and names the pods' token file,
 # and store that token under the target-kubeconfig Secret's `token` key, which
-# the token refresher keeps current. In every workflow, a step that cannot mint
-# an EKS token must fail before it writes the kubeconfig or the Secret.
+# the token refresher keeps current. A step that cannot mint an EKS token must
+# fail before it writes the kubeconfig or the Secret. Both
+# steps take the cluster endpoint and certificate authority from Preflight EKS
+# access, so neither calls describe-cluster.
 
 set -euo pipefail
 
@@ -48,8 +50,9 @@ readonly POD_TOKEN_FILE
     fail "expected the refresher to write the token mounted at /etc/radius/target-kubeconfig/token, got '${POD_TOKEN_FILE}'"
 
 # Writes a step's script as GitHub runs it: each `${{ vars.NAME }}` replaced by
-# the value of the environment variable VARS_NAME, and the step's `env:` values
-# exported first.
+# the value of the environment variable VARS_NAME, each
+# `${{ steps.eks-preflight.outputs.NAME }}` by PREFLIGHT_NAME (upper case, with
+# underscores), and the step's `env:` values exported first.
 extract_step() {
     local workflow="$1"
     local step="$2"
@@ -76,9 +79,14 @@ def indent_of(line):
 
 
 def substitute(text):
-    return re.sub(
+    text = re.sub(
         r"\$\{\{\s*vars\.([A-Z_]+)\s*\}\}",
         lambda match: os.environ.get("VARS_" + match.group(1), ""),
+        text,
+    )
+    return re.sub(
+        r"\$\{\{\s*steps\.eks-preflight\.outputs\.([a-z-]+)\s*\}\}",
+        lambda match: os.environ.get("PREFLIGHT_" + match.group(1).upper().replace("-", "_"), ""),
         text,
     )
 
@@ -126,8 +134,6 @@ cat >"${STUB_BIN}/aws" <<'EOF'
 #!/bin/bash
 printf 'aws %s\n' "$*" >>"${CALLS}"
 case "$*" in
-    "eks describe-cluster "*"cluster.endpoint"*) echo "https://eks.example" ;;
-    "eks describe-cluster "*"cluster.certificateAuthority.data"*) echo "Q0EtREFUQQ==" ;;
     "eks get-token "*)
         case "${GET_TOKEN:-}" in
             fail)
@@ -176,8 +182,12 @@ case "$1" in
         ;;
     rollout) printf 'kubectl %s\n' "$*" >>"${CALLS}" ;;
     --kubeconfig)
-        [[ "$2" == "${RADIUS_TARGET_KUBECONFIG}" && "$3" == "cluster-info" ]] || exit 1
+        [[ "$2" == "${RADIUS_TARGET_KUBECONFIG}" && "$3" == "--request-timeout=10s" && "$4" == "cluster-info" ]] || exit 1
         printf 'kubectl cluster-info with the target kubeconfig\n' >>"${CALLS}"
+        if [[ -n "${CLUSTER_INFO_FAIL:-}" ]]; then
+            echo "Unable to connect to the server: dial tcp 192.0.2.1:443: i/o timeout" >&2
+            exit 1
+        fi
         ;;
     *) exit 1 ;;
 esac
@@ -185,8 +195,6 @@ EOF
 chmod +x "${STUB_BIN}/aws" "${STUB_BIN}/kubectl"
 
 readonly OLD_KUBECONFIG=$'apiVersion: v1\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: old-token'
-readonly DESCRIBE_CLUSTER="aws eks describe-cluster --name demo-cluster --region us-west-2 --query cluster.endpoint --output text
-aws eks describe-cluster --name demo-cluster --region us-west-2 --query cluster.certificateAuthority.data --output text"
 readonly GET_TOKEN_CALL="aws eks get-token --cluster-name demo-cluster --region us-west-2 --output json"
 readonly STORE_AND_RESTART="kubectl create secret target-kubeconfig
 kubectl apply -f -
@@ -287,31 +295,30 @@ expect_get_token_failure_stops() {
     done
 }
 
+# The preflight outputs of a passing run.
+export PREFLIGHT_ENDPOINT="https://eks.example"
+export PREFLIGHT_CERTIFICATE_AUTHORITY="Q0EtREFUQQ=="
+
 for workflow in run-rad-commands-aws.yml delete-aws.yml delete-environment-aws.yml; do
     connect="${TEST_ROOT}/${workflow%.yml}-connect.sh"
     refresh="${TEST_ROOT}/${workflow%.yml}-refresh.sh"
-    no_cluster="${TEST_ROOT}/${workflow%.yml}-no-cluster.sh"
-    no_role="${TEST_ROOT}/${workflow%.yml}-no-role.sh"
+    no_endpoint="${TEST_ROOT}/${workflow%.yml}-no-endpoint.sh"
     VARS_AWS_ROLE_ARN="${ROLE}" VARS_AWS_EKS_CLUSTER_NAME="demo-cluster" \
         VARS_AWS_REGION="us-west-2" extract_step "${workflow}" "${CONNECT_STEP}" "${connect}"
     VARS_AWS_ROLE_ARN="${ROLE}" VARS_AWS_EKS_CLUSTER_NAME="demo-cluster" \
         VARS_AWS_REGION="us-west-2" extract_step "${workflow}" "${REFRESH_STEP}" "${refresh}"
-    VARS_AWS_ROLE_ARN="${ROLE}" VARS_AWS_EKS_CLUSTER_NAME="" \
-        VARS_AWS_REGION="us-west-2" extract_step "${workflow}" "${REFRESH_STEP}" "${no_cluster}"
-    VARS_AWS_ROLE_ARN="" VARS_AWS_EKS_CLUSTER_NAME="demo-cluster" \
-        VARS_AWS_REGION="us-west-2" extract_step "${workflow}" "${REFRESH_STEP}" "${no_role}"
+    VARS_AWS_ROLE_ARN="${ROLE}" VARS_AWS_EKS_CLUSTER_NAME="demo-cluster" \
+        VARS_AWS_REGION="us-west-2" PREFLIGHT_ENDPOINT="" \
+        extract_step "${workflow}" "${CONNECT_STEP}" "${no_endpoint}"
 
-    # delete-environment-aws.yml checks no cluster access and runs no refresher,
-    # so its kubeconfig has no tokenFile and its Secret no token key.
+    token_file="${POD_TOKEN_FILE}"
+    expected_secret="$(printf 'kubeconfig<<\n%s\n>>\ntoken<<\neks-token-1\n>>' \
+        "$(expected_kubeconfig "${token_file}")")"
+    # delete-environment-aws.yml does not run cluster-info when connecting.
     if [[ "${workflow}" == delete-environment-aws.yml ]]; then
         cluster_info=""
-        token_file=""
-        expected_secret="$(printf 'kubeconfig<<\n%s\n>>' "$(expected_kubeconfig)")"
     else
         cluster_info=$'\nkubectl cluster-info with the target kubeconfig'
-        token_file="${POD_TOKEN_FILE}"
-        expected_secret="$(printf 'kubeconfig<<\n%s\n>>\ntoken<<\neks-token-1\n>>' \
-            "$(expected_kubeconfig "${token_file}")")"
     fi
 
     # Connecting writes a kubeconfig with the EKS token.
@@ -319,19 +326,37 @@ for workflow in run-rad-commands-aws.yml delete-aws.yml delete-environment-aws.y
     mkdir -p "$(dirname "${KUBECONFIG_PATH}")"
     status="$(run_step "${connect}")"
     [[ "${status}" == "0" ]] || fail "${workflow}: expected connecting to succeed, got ${status}"
-    expect_calls "${DESCRIBE_CLUSTER}
-${GET_TOKEN_CALL}${cluster_info}" "${workflow}: connecting"
+    expect_calls "${GET_TOKEN_CALL}${cluster_info}" "${workflow}: connecting"
     expect_kubeconfig "$(expected_kubeconfig)" "${workflow}: connecting"
     rm -f "${KUBECONFIG_PATH}"
-    expect_get_token_failure_stops "${connect}" "${DESCRIBE_CLUSTER}"$'\n' "${workflow}: connecting"
+    expect_get_token_failure_stops "${connect}" "" "${workflow}: connecting"
+
+    # Without the preflight's endpoint, connecting stops with a coded error
+    # before it asks AWS for a token.
+    status="$(run_step "${no_endpoint}")"
+    [[ "${status}" != "0" ]] || fail "${workflow}: expected connecting without an endpoint to fail"
+    expect_calls "" "${workflow}: connecting without an endpoint"
+    grep -qF "::error title=Preflight script error::[PREFLIGHT_ERROR] Preflight EKS access passed but returned no API server endpoint or certificate authority for 'demo-cluster'." "${STEP_LOG}" ||
+        fail "${workflow}: connecting without an endpoint did not report PREFLIGHT_ERROR"
+    [[ ! -f "${KUBECONFIG_PATH}" ]] || fail "${workflow}: expected no kubeconfig without an endpoint"
+
+    # A cluster-info failure after the preflight passed is coded too, below the
+    # kubectl error.
+    if [[ -n "${cluster_info}" ]]; then
+        status="$(CLUSTER_INFO_FAIL=1 run_step "${connect}")"
+        [[ "${status}" != "0" ]] || fail "${workflow}: expected a cluster-info failure to fail the step"
+        grep -qF "i/o timeout" "${STEP_LOG}" || fail "${workflow}: the kubectl error was not shown"
+        grep -qF "::error title=EKS API server unreachable::[EKS_ENDPOINT_UNREACHABLE] kubectl cluster-info failed for 'demo-cluster', although Preflight EKS access passed." "${STEP_LOG}" ||
+            fail "${workflow}: a cluster-info failure did not report EKS_ENDPOINT_UNREACHABLE"
+        rm -f "${KUBECONFIG_PATH}"
+    fi
 
     # Refreshing mints a new token and stores it, then restarts the three
     # consumers and waits for them.
     reset_kubeconfig
     status="$(run_step "${refresh}")"
     [[ "${status}" == "0" ]] || fail "${workflow}: expected the refresh to succeed, got ${status}"
-    expect_calls "${DESCRIBE_CLUSTER}
-${GET_TOKEN_CALL}
+    expect_calls "${GET_TOKEN_CALL}
 ${STORE_AND_RESTART}" "${workflow}: refreshing"
     expect_kubeconfig "$(expected_kubeconfig "${token_file}")" "${workflow}: refreshing"
     [[ "$(cat "${APPLIED}")" == "${expected_secret}" ]] ||
@@ -344,33 +369,18 @@ $(cat "${APPLIED}")"
         fail "${workflow}: the EKS token leaked to the step log"
     fi
     reset_kubeconfig
-    expect_get_token_failure_stops "${refresh}" "${DESCRIBE_CLUSTER}"$'\n' "${workflow}: refreshing"
+    expect_get_token_failure_stops "${refresh}" "" "${workflow}: refreshing"
 
-    # Without a target kubeconfig, the refresh leaves the control plane alone.
+    # Validate inputs requires the role and cluster in every AWS workflow, so
+    # no workflow falls back to the control plane when the kubeconfig is
+    # missing: the refresh still mints a token and stores a new kubeconfig.
     rm -f "${KUBECONFIG_PATH}"
     status="$(run_step "${refresh}")"
     [[ "${status}" == "0" ]] ||
-        fail "${workflow}: expected the refresh without a kubeconfig to succeed, got ${status}"
-    expect_calls "" "${workflow}: refreshing without a kubeconfig"
-    [[ ! -f "${APPLIED}" ]] || fail "${workflow}: expected no Secret update without a kubeconfig"
-
-    [[ "${workflow}" != delete-environment-aws.yml ]] || continue
-
-    # Without a cluster or a deploy role, the refresh stores the existing
-    # kubeconfig unchanged and calls no AWS API.
-    for missing in cluster "deploy role"; do
-        script="${no_cluster}"
-        [[ "${missing}" == cluster ]] || script="${no_role}"
-        context="${workflow}: refreshing without a ${missing}"
-        reset_kubeconfig
-        status="$(run_step "${script}")"
-        [[ "${status}" == "0" ]] || fail "${context}: expected success, got ${status}"
-        expect_calls "${STORE_AND_RESTART}" "${context}"
-        expect_kubeconfig "${OLD_KUBECONFIG}" "${context}"
-        [[ "$(cat "${APPLIED}")" == "$(printf 'kubeconfig<<\n%s\n>>' "${OLD_KUBECONFIG}")" ]] ||
-            fail "${context}: expected only the kubeconfig key, got:
-$(cat "${APPLIED}")"
-    done
+        fail "${workflow}: expected the refresh without a kubeconfig to write one, got ${status}"
+    expect_calls "${GET_TOKEN_CALL}
+${STORE_AND_RESTART}" "${workflow}: refreshing without a kubeconfig"
+    expect_kubeconfig "$(expected_kubeconfig "${token_file}")" "${workflow}: refreshing without a kubeconfig"
 done
 
 echo "refresh-target-credentials-aws tests passed"

@@ -14,8 +14,10 @@ readonly COMMAND_ACTION="${REPO_ROOT}/.github/extension/actions/run-rad-commands
 readonly DELETE_ACTION="${REPO_ROOT}/.github/extension/actions/delete-resource/action.yml"
 readonly AWS_COMMAND_WORKFLOW="${REPO_ROOT}/.github/extension/run-rad-commands-aws.yml"
 readonly AWS_DELETE_WORKFLOW="${REPO_ROOT}/.github/extension/delete-aws.yml"
+readonly AWS_ENV_DELETE_WORKFLOW="${REPO_ROOT}/.github/extension/delete-environment-aws.yml"
 readonly AZURE_COMMAND_WORKFLOW="${REPO_ROOT}/.github/extension/run-rad-commands-azure.yml"
 readonly AZURE_DELETE_WORKFLOW="${REPO_ROOT}/.github/extension/delete-azure.yml"
+readonly AZURE_ENV_DELETE_WORKFLOW="${REPO_ROOT}/.github/extension/delete-environment-azure.yml"
 readonly POD_TOKEN_FILE="/etc/radius/target-kubeconfig/token"
 TEMP_DIR="$(mktemp -d)"
 readonly TEMP_DIR
@@ -284,17 +286,6 @@ CURL_FAILURES="1" bash "${SCRIPT}" --watch 2 >/dev/null 2>&1
 [[ "$(cat "${AWS_COUNT_FILE}")" == "1" ]] ||
     fail "expected no EKS refresh without a new GitHub token"
 
-# Without an EKS cluster only the GitHub token is refreshed.
-reset
-before="$(cat "${RADIUS_TARGET_KUBECONFIG}")"
-RADIUS_AWS_EKS_CLUSTER_NAME="" RADIUS_TARGET_KUBECONFIG="" \
-    bash "${SCRIPT}" --prepare >/dev/null
-[[ "$(cat "${KUBECTL_APPLY_FILE}")" == $'secret=aws-oidc-token\ntoken<<\noidc-token-1\n>>' ]] ||
-    fail "expected only the OIDC Secret without an EKS cluster"
-[[ ! -f "${AWS_COUNT_FILE}" ]] || fail "expected no EKS token without an EKS cluster"
-[[ "$(cat "${RADIUS_TARGET_KUBECONFIG}")" == "${before}" ]] ||
-    fail "expected the kubeconfig to stay unchanged without an EKS cluster"
-
 # A failed prepare explains what to check, and leaves the kubeconfig and the
 # target-kubeconfig Secret alone.
 reset
@@ -365,7 +356,8 @@ check_runner_files_removed
 
 # Missing configuration fails before any request.
 reset
-for variable in RADIUS_AWS_ROLE_ARN RADIUS_AWS_REGION RADIUS_TARGET_KUBECONFIG; do
+for variable in RADIUS_AWS_ROLE_ARN RADIUS_AWS_REGION RADIUS_AWS_EKS_CLUSTER_NAME \
+    RADIUS_TARGET_KUBECONFIG; do
     if output="$(env "${variable}=" bash "${SCRIPT}" --prepare 2>&1)"; then
         fail "expected prepare to fail without ${variable}"
     fi
@@ -503,7 +495,7 @@ for action in "${COMMAND_ACTION}" "${DELETE_ACTION}"; do
 done
 
 # The AWS workflows pass the deploy role, cluster, and region to the actions.
-for workflow in "${AWS_COMMAND_WORKFLOW}" "${AWS_DELETE_WORKFLOW}"; do
+for workflow in "${AWS_COMMAND_WORKFLOW}" "${AWS_DELETE_WORKFLOW}" "${AWS_ENV_DELETE_WORKFLOW}"; do
     name="$(basename "${workflow}")"
     grep -Fq 'aws-role-arn: ${{ vars.AWS_ROLE_ARN }}' "${workflow}" ||
         fail "expected ${name} to enable the AWS token refresh"
@@ -513,7 +505,7 @@ for workflow in "${AWS_COMMAND_WORKFLOW}" "${AWS_DELETE_WORKFLOW}"; do
         fail "expected ${name} to pass the region"
 done
 
-for workflow in "${AZURE_COMMAND_WORKFLOW}" "${AZURE_DELETE_WORKFLOW}"; do
+for workflow in "${AZURE_COMMAND_WORKFLOW}" "${AZURE_DELETE_WORKFLOW}" "${AZURE_ENV_DELETE_WORKFLOW}"; do
     if grep -q 'aws-role-arn:' "${workflow}"; then
         fail "expected $(basename "${workflow}") not to start the AWS refresher"
     fi

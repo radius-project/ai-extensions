@@ -126,7 +126,10 @@ with tempfile.TemporaryDirectory(prefix="delete-env-test-") as directory:
         if count is None:
             assert result.returncode != 0, f"{name}: listing unexpectedly passed"
             assert contents == "", f"{name}: failure published guard inputs"
-            assert "::error::" in result.stdout, f"{name}: missing diagnostic"
+            assert (
+                "::error title=Could not list applications::[STATE_APP_LIST_FAILED]"
+                in result.stdout
+            ), f"{name}: missing STATE_APP_LIST_FAILED"
             if exit_code:
                 assert "synthetic read failure" in result.stderr, name
         else:
@@ -146,7 +149,10 @@ with tempfile.TemporaryDirectory(prefix="delete-env-test-") as directory:
                 f"{name}: wrong guard result: {checked.stdout}{checked.stderr}"
             )
             if count:
-                assert "::error::" in checked.stdout, name
+                assert (
+                    "::error title=Environment has applications::"
+                    "[STATE_ENVIRONMENT_HAS_APPS]" in checked.stdout
+                ), f"{name}: missing STATE_ENVIRONMENT_HAS_APPS"
                 assert names in checked.stdout, name
         assert not (root / "unexpected").exists(), f"{name}: executed app name"
         print(f"PASS: {name}")

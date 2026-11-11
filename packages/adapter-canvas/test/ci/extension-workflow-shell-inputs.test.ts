@@ -52,16 +52,7 @@ const EXTENSION_DIRECTORY = path.resolve(
 // Files known to still interpolate, each tracked to be fixed. Listing one here
 // is a deliberate, reviewable act: the entry says the vulnerability is present
 // and accepted for now, rather than letting it pass unnoticed.
-//
-// The AWS provider workflows carry the same pattern the Azure ones just shed.
-// They are a separate change because the fix cannot be verified from this
-// repository, and doing both at once would put two unverifiable rewrites in one
-// diff.
-const KNOWN_UNHARDENED = new Set([
-  "delete-aws.yml",
-  "run-rad-commands-aws.yml",
-  "verify-aws.yml"
-]);
+const KNOWN_UNHARDENED = new Set<string>();
 
 interface Step {
   readonly name?: string;

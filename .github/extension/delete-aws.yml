@@ -52,6 +52,8 @@ jobs:
   delete:
     name: Delete with Radius
     runs-on: ubuntu-24.04
+    # Budget: the longest step limit plus Teardown's limit, with a margin.
+    timeout-minutes: 75
     environment: ${{ inputs.environment }}
     # OCI-backed Radius control-plane state, provisioned per-environment by the
     # deploy tooling (canvas extension) as environment variables. Set at job
@@ -64,43 +66,46 @@ jobs:
       RADIUS_STATE_BACKEND: ${{ vars.RADIUS_STATE_BACKEND }}
       RADIUS_STATE_REGISTRY: ${{ vars.RADIUS_STATE_REGISTRY }}
       RADIUS_STATE_ARCHIVE: ${{ vars.RADIUS_STATE_ARCHIVE }}
-      RADIUS_TARGET_KUBECONFIG: ${{ vars.AWS_EKS_CLUSTER_NAME != '' && format('{0}/.radius-target-kubeconfig', github.workspace) || '' }}
+      RADIUS_TARGET_KUBECONFIG: ${{ github.workspace }}/.radius-target-kubeconfig
     steps:
       - name: Checkout
+        timeout-minutes: 2
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Deleting needs the EKS cluster the application runs on, so a missing or
+      # malformed target fails here, before state is restored or anything changes.
+      - name: Validate inputs
+        timeout-minutes: 1
+        uses: radius-project/ai-extensions/.github/extension/actions/validate-aws-inputs@{{RADIUS_REF}}
+        with:
+          role-arn: ${{ vars.AWS_ROLE_ARN }}
+          account-id: ${{ vars.AWS_ACCOUNT_ID }}
+          region: ${{ vars.AWS_REGION }}
+          cluster-name: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+
       - name: Configure AWS Credentials (OIDC)
-        if: ${{ vars.AWS_ROLE_ARN != '' }}
+        timeout-minutes: 3
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Check the deploy role's AWS account
-        # Radius makes every AWS call with this role and reads only the region
-        # from the environment, so a role in another account would act there
-        # while Radius records the resources under AWS_ACCOUNT_ID.
-        if: ${{ vars.AWS_ROLE_ARN != '' }}
-        env:
-          ENVIRONMENT_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-        run: |
-          if ! [[ "$ENVIRONMENT_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-            echo "::error::AWS_ACCOUNT_ID is not a 12-digit AWS account ID. Set it in this GitHub environment's variables to the account of AWS_ROLE_ARN."
-            exit 1
-          fi
-          # No pipe, so under bash -e a failed call fails this assignment and the step.
-          ROLE_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          if ! [[ "$ROLE_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-            echo "::error::aws sts get-caller-identity returned no account for AWS_ROLE_ARN."
-            exit 1
-          fi
-          if [ "$ROLE_ACCOUNT_ID" != "$ENVIRONMENT_ACCOUNT_ID" ]; then
-            echo "::error::AWS_ROLE_ARN is in AWS account $ROLE_ACCOUNT_ID, but AWS_ACCOUNT_ID is $ENVIRONMENT_ACCOUNT_ID. Fix AWS_ROLE_ARN or AWS_ACCOUNT_ID in this GitHub environment's variables so both name the same account."
-            exit 1
-          fi
-          echo "AWS_ROLE_ARN is in AWS account $ROLE_ACCOUNT_ID, matching AWS_ACCOUNT_ID."
+        timeout-minutes: 1
+        uses: radius-project/ai-extensions/.github/extension/actions/aws-account-check@{{RADIUS_REF}}
+        with:
+          account-id: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Preflight EKS access
+        id: eks-preflight
+        timeout-minutes: 2
+        uses: radius-project/ai-extensions/.github/extension/actions/eks-preflight@{{RADIUS_REF}}
+        with:
+          region: ${{ vars.AWS_REGION }}
+          cluster-name: ${{ vars.AWS_EKS_CLUSTER_NAME }}
 
       - name: Log in to GHCR for the state archive
+        timeout-minutes: 2
         # The OCI-backed Radius state archive authenticates to GHCR using the
         # runner's Docker credential store (~/.docker/config.json). rad startup
         # (restore-state) and rad shutdown (teardown) open that archive, so the
@@ -115,33 +120,44 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get target cluster kubeconfig
-        run: |
-          if [ -z "$RADIUS_TARGET_KUBECONFIG" ]; then
-            echo "No external EKS cluster configured; using the control-plane cluster."
-            exit 0
-          fi
-          mkdir -p "$(dirname "$RADIUS_TARGET_KUBECONFIG")"
+      - name: Verify GHCR package push permission
+        # Teardown pushes the state after the delete changed resources, so check
+        # the permission before any change.
+        timeout-minutes: 2
+        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}
+        with:
+          state-registry: ${{ vars.RADIUS_STATE_REGISTRY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          coded-messages: "true"
 
       - name: Connect to EKS cluster
-        if: ${{ vars.AWS_EKS_CLUSTER_NAME != '' }}
+        timeout-minutes: 2
+        env:
+          CLUSTER: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+          REGION: ${{ vars.AWS_REGION }}
+          ENDPOINT: ${{ steps.eks-preflight.outputs.endpoint }}
+          CA_DATA: ${{ steps.eks-preflight.outputs.certificate-authority }}
         run: |
-          CLUSTER="${{ vars.AWS_EKS_CLUSTER_NAME }}"
-          REGION="${{ vars.AWS_REGION }}"
           TARGET="$RADIUS_TARGET_KUBECONFIG"
+          # Preflight EKS access read the endpoint and certificate authority,
+          # so an empty value here is a bug in the preflight.
+          if [ -z "$ENDPOINT" ] || [ -z "$CA_DATA" ]; then
+            echo "::error title=Preflight script error::[PREFLIGHT_ERROR] Preflight EKS access passed but returned no API server endpoint or certificate authority for '$CLUSTER'. Fix: Rerun the workflow. If it fails again, report the run to the Radius maintainers."
+            exit 1
+          fi
 
           # Build a static kubeconfig with a bearer token instead of exec-based auth.
-          ENDPOINT=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.endpoint' --output text)
-          CA_DATA=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.certificateAuthority.data' --output text)
           TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -er '.status.token | strings | select(length > 0)')
           printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: %s\n' "$CA_DATA" "$ENDPOINT" "$TOKEN" > "$TARGET"
           echo "EKS kubeconfig saved with static token"
-          if ! kubectl --kubeconfig "$TARGET" cluster-info; then
-            echo "::error::Could not access EKS. Check runner reachability and rerun environment setup to grant the deployment role cluster access."
+          if ! kubectl --kubeconfig "$TARGET" --request-timeout=10s cluster-info; then
+            echo "::error title=EKS API server unreachable::[EKS_ENDPOINT_UNREACHABLE] kubectl cluster-info failed for '$CLUSTER', although Preflight EKS access passed. Fix: Read the kubectl error above, then rerun the workflow."
             exit 1
           fi
 
       - name: Set up control plane
+        id: setup-control-plane
+        timeout-minutes: 10
         uses: radius-project/ai-extensions/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
         # AWS-only default: Radius edge at a pinned installer and catalog commit,
         # because no Radius release yet has the fix that keeps request secrets out
@@ -155,69 +171,73 @@ jobs:
           allow-edge: "true"
 
       - name: Project cloud OIDC tokens into Radius pods
+        timeout-minutes: 10
         run: |
           # Mint GitHub OIDC tokens and mount them where Radius expects them, so the
           # recipe deletes triggered by the delete can authenticate to AWS exactly as
           # the deploy workflow does. GitHub Actions is already a trusted OIDC issuer
           # for AWS via the IAM role trust policy.
-          if [ -n "${{ vars.AWS_ROLE_ARN }}" ]; then
-            echo "Projecting AWS OIDC token..."
-            AWS_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
-            kubectl create secret generic aws-oidc-token -n radius-system \
-              --from-literal=token="$AWS_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
-
-            # AWS IRSA: the UCP AWS proxy (ucp) and the Terraform AWS provider
-            # (dynamic-rp) both read the token from the hard-coded path
-            # /var/run/secrets/eks.amazonaws.com/serviceaccount/token.
-            AWS_PATCH='[
-              {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"aws-oidc-token","secret":{"secretName":"aws-oidc-token"}}},
-              {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"aws-oidc-token","mountPath":"/var/run/secrets/eks.amazonaws.com/serviceaccount","readOnly":true}}
-            ]'
-            for deploy in applications-rp dynamic-rp ucp; do
-              kubectl patch deployment $deploy -n radius-system --type=json -p="$AWS_PATCH" 2>/dev/null || true
-            done
+          echo "Projecting AWS OIDC token..."
+          # Assign before use, so under bash -e a failed request or a response
+          # without a token stops the step instead of storing "null".
+          OIDC_RESPONSE=$(curl -fsS --connect-timeout 5 --max-time 20 \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
+          if ! AWS_TOKEN=$(jq -er '.value | strings | select(length > 0)' <<<"$OIDC_RESPONSE"); then
+            echo "GitHub returned no OIDC token for the sts.amazonaws.com audience." >&2
+            exit 1
           fi
+          kubectl create secret generic aws-oidc-token -n radius-system \
+            --from-literal=token="$AWS_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 
+          # AWS IRSA: the UCP AWS proxy (ucp) and the Terraform AWS provider
+          # (dynamic-rp) both read the token from the hard-coded path
+          # /var/run/secrets/eks.amazonaws.com/serviceaccount/token.
+          AWS_PATCH='[
+            {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"aws-oidc-token","secret":{"secretName":"aws-oidc-token"}}},
+            {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"aws-oidc-token","mountPath":"/var/run/secrets/eks.amazonaws.com/serviceaccount","readOnly":true}}
+          ]'
+          # Each run patches a new control plane, so a failed patch is a real
+          # error, not a repeat.
+          for deploy in applications-rp dynamic-rp ucp; do
+            kubectl patch deployment $deploy -n radius-system --type=json -p="$AWS_PATCH"
+          done
+
+          # A pod that never becomes ready fails here instead of as an AWS error
+          # later.
           for deploy in applications-rp dynamic-rp bicep-de ucp; do
-            kubectl rollout status deployment/$deploy -n radius-system --timeout=300s || true
+            kubectl rollout status deployment/$deploy -n radius-system --timeout=300s
           done
           echo "✅ Cloud OIDC tokens projected into Radius pods."
 
       - name: Refresh external deployment target credentials
+        timeout-minutes: 10
+        env:
+          CLUSTER: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+          REGION: ${{ vars.AWS_REGION }}
+          ENDPOINT: ${{ steps.eks-preflight.outputs.endpoint }}
+          CA_DATA: ${{ steps.eks-preflight.outputs.certificate-authority }}
         run: |
           TARGET_KUBECONFIG="$RADIUS_TARGET_KUBECONFIG"
 
-          if [ ! -f "$TARGET_KUBECONFIG" ]; then
-            echo "No target kubeconfig found, resources are on the k3d control plane"
-            exit 0
-          fi
-
           # Refresh the EKS token right before delete (EKS tokens are short-lived and
           # the one minted earlier may have expired during install).
-          SECRET_FILES=(--from-file=kubeconfig="$TARGET_KUBECONFIG")
-          if [ -n "${{ vars.AWS_ROLE_ARN }}" ] && [ -n "${{ vars.AWS_EKS_CLUSTER_NAME }}" ]; then
-            echo "Generating fresh EKS token..."
-            CLUSTER="${{ vars.AWS_EKS_CLUSTER_NAME }}"
-            REGION="${{ vars.AWS_REGION }}"
-            ENDPOINT=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.endpoint' --output text)
-            CA_DATA=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.certificateAuthority.data' --output text)
-            TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -er '.status.token | strings | select(length > 0)')
-            # tokenFile is where the pods see this Secret's token key. The delete
-            # action's token refresher keeps both the key and the inline token
-            # current: the Go clients re-read tokenFile, and the Deployment Engine
-            # re-reads the kubeconfig.
-            printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: %s\n    tokenFile: /etc/radius/target-kubeconfig/token\n' "$CA_DATA" "$ENDPOINT" "$TOKEN" > "$TARGET_KUBECONFIG"
-            TOKEN_FILE=$(mktemp "$RUNNER_TEMP/eks-token.XXXXXX")
-            printf '%s' "$TOKEN" > "$TOKEN_FILE"
-            SECRET_FILES+=(--from-file=token="$TOKEN_FILE")
-          fi
+          echo "Generating fresh EKS token..."
+          TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -er '.status.token | strings | select(length > 0)')
+          # tokenFile is where the pods see this Secret's token key. The delete
+          # action's token refresher keeps both the key and the inline token
+          # current: the Go clients re-read tokenFile, and the Deployment Engine
+          # re-reads the kubeconfig.
+          printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: %s\n    tokenFile: /etc/radius/target-kubeconfig/token\n' "$CA_DATA" "$ENDPOINT" "$TOKEN" > "$TARGET_KUBECONFIG"
+          TOKEN_FILE=$(mktemp "$RUNNER_TEMP/eks-token.XXXXXX")
+          printf '%s' "$TOKEN" > "$TOKEN_FILE"
 
           # Update the secret the chart mounted at install with the refreshed
           # kubeconfig, then restart the recipe-executing pods so they re-read it.
           kubectl create secret generic target-kubeconfig --namespace radius-system \
-            "${SECRET_FILES[@]}" --dry-run=client -o yaml | kubectl apply -f -
-          rm -f "${TOKEN_FILE:-}"
+            --from-file=kubeconfig="$TARGET_KUBECONFIG" --from-file=token="$TOKEN_FILE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          rm -f "$TOKEN_FILE"
           for deploy in applications-rp dynamic-rp bicep-de; do
             kubectl rollout restart deployment/$deploy -n radius-system
           done
@@ -230,21 +250,26 @@ jobs:
 
       - name: Restore Radius state
         id: restore-state
+        timeout-minutes: 10
         uses: radius-project/ai-extensions/.github/extension/actions/restore-state@{{RADIUS_REF}}
         with:
           namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
+          request-timeout: 10s
+          coded-messages: "true"
 
       - name: Register cloud credentials with Radius
+        timeout-minutes: 2
+        env:
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
         run: |
           # Register the AWS identity so the recipe deletes can authenticate,
           # reading the projected OIDC token at runtime.
-          if [ -n "${{ vars.AWS_ROLE_ARN }}" ]; then
-            echo "Registering AWS IRSA credential..."
-            rad credential register aws irsa --iam-role "${{ vars.AWS_ROLE_ARN }}"
-          fi
+          echo "Registering AWS IRSA credential..."
+          rad credential register aws irsa --iam-role "$AWS_ROLE_ARN"
           echo "✅ Cloud credentials registered with Radius."
 
       - name: Delete Radius resource
+        timeout-minutes: 45
         uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
         with:
           resource-type: ${{ inputs.resource_type }}
@@ -256,6 +281,7 @@ jobs:
 
       - name: Discard the deleted application's deployed graph
         if: ${{ inputs.resource_type == 'application' }}
+        timeout-minutes: 5
         uses: radius-project/ai-extensions/.github/extension/actions/discard-deploy-status@{{RADIUS_REF}}
         with:
           environment: ${{ inputs.environment }}
@@ -264,6 +290,7 @@ jobs:
 
       - name: Clean up unused routes Gateway infrastructure
         if: ${{ inputs.resource_type == 'application' }}
+        timeout-minutes: 10
         uses: radius-project/ai-extensions/.github/extension/actions/manage-routes-gateway@{{RADIUS_REF}}
         with:
           mode: cleanup
@@ -274,9 +301,13 @@ jobs:
           gateway-namespace: ${{ vars.RADIUS_ROUTES_GATEWAY_NAMESPACE }}
           gateway-explicit: "${{ vars.RADIUS_ROUTES_GATEWAY_NAME != '' }}"
           exposure: ${{ vars.RADIUS_ROUTES_EXPOSURE }}
+          request-timeout: 10s
 
+      # Teardown does not run when the job failed before the control plane
+      # setup started, because nothing exists yet to save.
       - name: Teardown
-        if: always()
+        if: ${{ always() && steps.setup-control-plane.outcome != 'skipped' }}
+        timeout-minutes: 10
         uses: radius-project/ai-extensions/.github/extension/actions/teardown@{{RADIUS_REF}}
         with:
           state-restored: ${{ steps.restore-state.outputs.state-restored }}

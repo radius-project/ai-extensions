@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+# Read-only EKS check shared by the AWS workflows. It runs before the
+# control-plane install, so a runner the cluster's endpoint does not allow, a
+# missing access entry, or a cluster that is not ACTIVE or UPDATING fails in
+# seconds with a coded error instead of minutes later inside a Radius step. It
+# changes nothing.
+#
+# The checks live in eks-preflight.sh and run from a one-line `run:`. GitHub
+# prints each `run:` body into the job log, and Canvas classifies verify
+# failures by matching words such as "Forbidden" or "timed out" in that log.
+name: Radius - EKS preflight
+description: Check that this runner can reach and authenticate to the target EKS cluster, without changing anything.
+
+inputs:
+  region:
+    description: AWS Region of the cluster (vars.AWS_REGION).
+    required: true
+  cluster-name:
+    description: EKS cluster name (vars.AWS_EKS_CLUSTER_NAME).
+    required: true
+  subnet-ids:
+    description: Comma-separated subnet IDs the recipes use (vars.RADIUS_SUBNET_IDS). When set, each must exist in the cluster's VPC.
+    required: false
+    default: ""
+
+outputs:
+  endpoint:
+    description: The cluster's API server URL, set when the preflight passed.
+    value: ${{ steps.preflight.outputs.endpoint }}
+  certificate-authority:
+    description: The cluster's base64 certificate authority data, set when the preflight passed.
+    value: ${{ steps.preflight.outputs.certificate-authority }}
+
+runs:
+  using: composite
+  steps:
+    - name: Preflight EKS access
+      id: preflight
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.region }}
+        AWS_EKS_CLUSTER_NAME: ${{ inputs.cluster-name }}
+        RADIUS_SUBNET_IDS: ${{ inputs.subnet-ids }}
+      run: bash "$GITHUB_ACTION_PATH/eks-preflight.sh"

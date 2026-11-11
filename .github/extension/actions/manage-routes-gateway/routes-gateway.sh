@@ -64,6 +64,7 @@ GATEWAY_NAME="${GATEWAY_NAME-}"
 GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE-}"
 GATEWAY_EXPLICIT="${GATEWAY_EXPLICIT:-false}"
 EXPOSURE="${EXPOSURE:-}"
+REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-}"
 
 declare -a KUBE_ARGS=()
 declare -a HELM_KUBE_ARGS=()
@@ -157,6 +158,9 @@ validate_gateway_inputs() {
         fi
         KUBE_ARGS=(--kubeconfig "${TARGET_KUBECONFIG}")
         HELM_KUBE_ARGS=(--kubeconfig "${TARGET_KUBECONFIG}")
+    fi
+    if [[ -n "${REQUEST_TIMEOUT}" ]]; then
+        KUBE_ARGS+=("--request-timeout=${REQUEST_TIMEOUT}")
     fi
 }
 

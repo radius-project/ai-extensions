@@ -21,61 +21,68 @@ permissions:
   # check below tests the same token capability the deploy will rely on.
   packages: write
 
+# The steps only read AWS and the cluster. The GHCR check starts an upload
+# that it never completes, so it creates no package version.
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     environment: ${{ inputs.environment || '{{ENV}}' }}
     steps:
+      - name: Validate inputs
+        timeout-minutes: 1
+        uses: radius-project/ai-extensions/.github/extension/actions/validate-aws-inputs@{{RADIUS_REF}}
+        with:
+          role-arn: ${{ vars.AWS_ROLE_ARN }}
+          account-id: ${{ vars.AWS_ACCOUNT_ID }}
+          region: ${{ vars.AWS_REGION }}
+          cluster-name: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+          subnet-ids: ${{ vars.RADIUS_SUBNET_IDS }}
+          require-subnets: "true"
+
       - name: Configure AWS Credentials
+        timeout-minutes: 3
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Verify AWS Credentials
+        timeout-minutes: 1
         run: |
           aws sts get-caller-identity
           echo "✅ AWS OIDC login successful"
 
       - name: Check the deploy role's AWS account
-        # Radius makes every AWS call with this role and reads only the region
-        # from the environment, so a role in another account would act there
-        # while Radius records the resources under AWS_ACCOUNT_ID.
-        if: ${{ vars.AWS_ROLE_ARN != '' }}
-        env:
-          ENVIRONMENT_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-        run: |
-          if ! [[ "$ENVIRONMENT_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-            echo "::error::AWS_ACCOUNT_ID is not a 12-digit AWS account ID. Set it in this GitHub environment's variables to the account of AWS_ROLE_ARN."
-            exit 1
-          fi
-          # No pipe, so under bash -e a failed call fails this assignment and the step.
-          ROLE_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          if ! [[ "$ROLE_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-            echo "::error::aws sts get-caller-identity returned no account for AWS_ROLE_ARN."
-            exit 1
-          fi
-          if [ "$ROLE_ACCOUNT_ID" != "$ENVIRONMENT_ACCOUNT_ID" ]; then
-            echo "::error::AWS_ROLE_ARN is in AWS account $ROLE_ACCOUNT_ID, but AWS_ACCOUNT_ID is $ENVIRONMENT_ACCOUNT_ID. Fix AWS_ROLE_ARN or AWS_ACCOUNT_ID in this GitHub environment's variables so both name the same account."
-            exit 1
-          fi
-          echo "AWS_ROLE_ARN is in AWS account $ROLE_ACCOUNT_ID, matching AWS_ACCOUNT_ID."
+        timeout-minutes: 1
+        uses: radius-project/ai-extensions/.github/extension/actions/aws-account-check@{{RADIUS_REF}}
+        with:
+          account-id: ${{ vars.AWS_ACCOUNT_ID }}
 
+      # Canvas classifies a failure by this step name and the words in the log,
+      # so keep the name.
       - name: Verify EKS Access
-        run: |
-          aws eks update-kubeconfig --name "${{ vars.AWS_EKS_CLUSTER_NAME }}" --region "${{ vars.AWS_REGION }}"
-          kubectl cluster-info
-          echo "✅ EKS cluster accessible"
+        timeout-minutes: 3
+        uses: radius-project/ai-extensions/.github/extension/actions/eks-preflight@{{RADIUS_REF}}
+        with:
+          region: ${{ vars.AWS_REGION }}
+          cluster-name: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+          subnet-ids: ${{ vars.RADIUS_SUBNET_IDS }}
 
       - name: Verify GHCR package push permission
+        timeout-minutes: 2
         uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}
         with:
           state-registry: ${{ vars.RADIUS_STATE_REGISTRY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          coded-messages: "true"
 
       - name: Summary
+        timeout-minutes: 1
+        env:
+          ENVIRONMENT: ${{ inputs.environment || '{{ENV}}' }}
         run: |
           echo "## ✅ Credentials Verified" >> $GITHUB_STEP_SUMMARY
-          echo "Environment: ${{ inputs.environment || '{{ENV}}' }}" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: $ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
           echo "Provider: aws" >> $GITHUB_STEP_SUMMARY
           echo "GHCR package push: ${GHCR_PUSH_CHECK:-unknown}" >> $GITHUB_STEP_SUMMARY

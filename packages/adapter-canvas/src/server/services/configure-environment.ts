@@ -516,13 +516,24 @@ async function runConfigureEnvironmentService(
       if (!saved) return false;
       return stopBoundary(boundary);
     };
+
+    // A continuation after a stop or restart resumes the latest retry's attempt.
+    const latestRetry =
+      provider === "aws" ?
+        operation.control?.commands
+          .filter((command) => command.kind === "retry_setup")
+          .at(-1)
+      : undefined;
+
     const result = await configureSetupEnvironment(
       {
         operationId: operation.operationId,
         targetRepo,
         provider,
         envName,
-        data
+        data,
+        verificationAttempt:
+          latestRetry ? `retry-${latestRetry.attempt}` : undefined
       },
       createSetupEnvironmentPorts({
         dependencies,

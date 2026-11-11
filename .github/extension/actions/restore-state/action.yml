@@ -11,6 +11,19 @@ inputs:
     description: Target Kubernetes namespace (vars.KUBERNETES_NAMESPACE, defaults to default).
     required: false
     default: default
+  request-timeout:
+    description: >-
+      kubectl --request-timeout for the namespace calls to the target cluster,
+      for example 10s. Empty keeps kubectl's default, which waits for the
+      connection with no limit.
+    required: false
+    default: ""
+  coded-messages:
+    description: >-
+      Set to true to write a titled STATE_RESTORE_FAILED error. The default
+      keeps the original output.
+    required: false
+    default: "false"
 
 outputs:
   state-restored:
@@ -30,13 +43,24 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
+        REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
+        CODED_MESSAGES: ${{ inputs.coded-messages }}
       run: |
         # Ensure namespace exists on target cluster before Radius deploys into it.
         TARGET_KUBECONFIG="$RADIUS_TARGET_KUBECONFIG"
         if [ -f "$TARGET_KUBECONFIG" ]; then
           echo "Ensuring namespace $NAMESPACE exists on target cluster..."
-          kubectl --kubeconfig "$TARGET_KUBECONFIG" get namespace "$NAMESPACE" 2>/dev/null || \
-            kubectl --kubeconfig "$TARGET_KUBECONFIG" create namespace "$NAMESPACE"
+          KUBECTL_ARGS=(--kubeconfig "$TARGET_KUBECONFIG")
+          [ -z "$REQUEST_TIMEOUT" ] || KUBECTL_ARGS+=("--request-timeout=$REQUEST_TIMEOUT")
+          if ! kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" 2>/dev/null; then
+            kubectl "${KUBECTL_ARGS[@]}" create namespace "$NAMESPACE" || {
+              rc=$?
+              bash "$GITHUB_ACTION_PATH/state-restore-failed.sh" \
+                "Could not create the namespace $NAMESPACE on the target cluster." \
+                "Read the kubectl error above, fix the cluster access it names, then rerun the workflow."
+              exit "$rc"
+            }
+          fi
         fi
 
         # The Radius.Core/environments resource (with its recipe pack and cloud
@@ -52,6 +76,8 @@ runs:
     - name: Restore Radius state (rad startup)
       id: startup
       shell: bash
+      env:
+        CODED_MESSAGES: ${{ inputs.coded-messages }}
       run: |
         # rad startup restores the control-plane PostgreSQL databases and the
         # Terraform recipe-state Secrets saved by the previous run's `rad shutdown`
@@ -62,7 +88,13 @@ runs:
         # so that any git operation rad performs has one available.
         git config --global user.email "radius-deploy@users.noreply.github.com"
         git config --global user.name "radius-deploy"
-        rad startup
+        rad startup || {
+          rc=$?
+          bash "$GITHUB_ACTION_PATH/state-restore-failed.sh" \
+            "rad startup could not restore the control plane from the state package." \
+            "Read the rad startup output above, fix the cause it names, then rerun the workflow."
+          exit "$rc"
+        }
 
         # Record that the control-plane databases were successfully restored, for
         # the teardown action to gate `rad shutdown` on (see the `state-restored`

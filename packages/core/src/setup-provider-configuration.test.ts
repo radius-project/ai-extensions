@@ -220,6 +220,7 @@ describe("setup provider configuration", () => {
             roleArn: "",
             region: "",
             accountId: "",
+            cluster: "eks",
             trustSubjects: []
           },
           ports
@@ -229,7 +230,7 @@ describe("setup provider configuration", () => {
         ["write", "AWS_ROLE_ARN", ""],
         ["write", "AWS_REGION", "ap-south-1"],
         ["write", "AWS_ACCOUNT_ID", "stored-account"],
-        ["write", "AWS_EKS_CLUSTER_NAME", ""],
+        ["write", "AWS_EKS_CLUSTER_NAME", "eks"],
         ["write", "RADIUS_VPC_ID", undefined],
         ["write", "RADIUS_SUBNET_IDS", undefined],
         ["write", "KUBERNETES_NAMESPACE", undefined]
@@ -243,8 +244,32 @@ describe("setup provider configuration", () => {
 
   it("uses the AWS default region after a non-string stored region", async () => {
     const { calls, ports } = recorder({ awsCredential: () => ({ region: 7 }) });
-    await applySetupProviderConfiguration("aws", {}, ports);
+    await applySetupProviderConfiguration("aws", { cluster: "eks" }, ports);
     expect(calls).toContainEqual(["write", "AWS_REGION", "us-east-1"]);
+  });
+
+  it.each([undefined, "", " eks", "-eks", "eks.prod", "e".repeat(101)])(
+    "rejects AWS cluster %j before writing any AWS variable",
+    async (cluster) => {
+      const { calls, ports } = recorder();
+      await expect(
+        applySetupProviderConfiguration("aws", { ...awsInput, cluster }, ports)
+      ).rejects.toThrow(
+        "AWS setup requires a valid EKS cluster name, so Radius did not write the AWS environment variables."
+      );
+      expect(calls.filter(([kind]) => kind === "write")).toEqual([]);
+    }
+  );
+
+  it("writes an AWS cluster name at the EKS length limit", async () => {
+    const cluster = `9${"_-a".repeat(33)}`;
+    const { calls, ports } = recorder();
+    await applySetupProviderConfiguration(
+      "aws",
+      { ...awsInput, cluster },
+      ports
+    );
+    expect(calls).toContainEqual(["write", "AWS_EKS_CLUSTER_NAME", cluster]);
   });
 
   for (const [provider, input, writes] of [

@@ -9,7 +9,10 @@ import {
   ProviderMutationRecoveryError
 } from "./setup-recovery-error.js";
 import { createWorkflowFileCommitter } from "./setup-workflow-committer.js";
-import { publishSetupWorkflowFiles } from "./setup-workflow-publication.js";
+import {
+  publishSetupWorkflowFiles,
+  VERIFY_WORKFLOW_PATH
+} from "./setup-workflow-publication.js";
 import {
   applySetupProviderConfiguration,
   setupProviderCredentialStatus,
@@ -28,11 +31,29 @@ type AcknowledgedPullRequest = Omit<SetupPullRequestResult, "ok"> & {
   ok: true;
 };
 
+function hasOperationMarker(
+  verification: unknown,
+  operationMarker: string
+): verification is { operationMarker: string } {
+  return (
+    typeof verification === "object" &&
+    verification !== null &&
+    "operationMarker" in verification &&
+    verification.operationMarker === operationMarker
+  );
+}
+
 export async function configureSetupEnvironment(
   input: SetupEnvironmentInput,
   ports: SetupEnvironmentPorts
 ): Promise<SetupEnvironmentResult> {
-  const { targetRepo, provider, data } = input;
+  const { targetRepo, provider, data, verificationAttempt } = input;
+
+  const verificationMarker =
+    verificationAttempt ?
+      `${input.operationId}:${verificationAttempt}`
+    : input.operationId;
+
   let envName = input.envName;
   const runMutationAttempt = async <T>(
     failureBoundary: string,
@@ -367,7 +388,7 @@ export async function configureSetupEnvironment(
   }
   const setupPushOperationMarker =
     credentialsComplete && automaticPolicy.state === "enabled" ?
-      input.operationId
+      verificationMarker
     : undefined;
   const existingVerification =
     (
@@ -380,7 +401,7 @@ export async function configureSetupEnvironment(
   const existingAutomaticIdentity =
     (
       existingVerification?.event === "push" &&
-      existingVerification.operationMarker === input.operationId &&
+      existingVerification.operationMarker === verificationMarker &&
       typeof existingVerification.ref === "string" &&
       existingVerification.ref &&
       Number.isFinite(Number(existingVerification.dispatchedAt))
@@ -399,7 +420,8 @@ export async function configureSetupEnvironment(
     const outcome = await committer.commitWorkflowFileSmart(
       path,
       contentB64,
-      message
+      message,
+      path === VERIFY_WORKFLOW_PATH ? verificationAttempt : undefined
     );
     const fallback = committer.pullRequestState();
     if (
@@ -407,7 +429,11 @@ export async function configureSetupEnvironment(
       outcome.ok &&
       outcome.viaPr &&
       fallback &&
-      !ports.verification()
+      // A retry replaces the identity an earlier attempt recorded; a resumed
+      // attempt keeps its own.
+      !(verificationAttempt ?
+        hasOperationMarker(ports.verification(), verificationMarker)
+      : ports.verification())
     ) {
       ports.setVerification({
         dispatchedAt: automaticStartedAt,
@@ -700,7 +726,7 @@ export async function configureSetupEnvironment(
         workflow: ports.verifyWorkflowFile,
         ref: verificationRef,
         environment: envName,
-        operationMarker: input.operationId,
+        operationMarker: verificationMarker,
         startedAt: automaticStartedAt
       },
       listRuns: () =>
@@ -742,7 +768,7 @@ export async function configureSetupEnvironment(
       ref: verificationRef,
       environment: envName,
       event: "push",
-      operationMarker: input.operationId,
+      operationMarker: verificationMarker,
       baselineRunId: null,
       runId: automatic.runId,
       runUrl: automatic.runUrl
@@ -760,9 +786,14 @@ export async function configureSetupEnvironment(
       return { kind: "stopped" };
     const supportsOperationMarker =
       verifyPlan.supportsOperationMarker !== false;
-    const operationMarker = supportsOperationMarker ? input.operationId : "";
+
+    const operationMarker = supportsOperationMarker ? verificationMarker : "";
     const dispatchMutationKind = "github_workflow.dispatch";
-    const dispatchMutationTarget = `${targetRepo}:${ports.verifyWorkflowFile}:${verificationRef}:${envName}`;
+
+    const dispatchMutationTarget = `${targetRepo}:${ports.verifyWorkflowFile}:${verificationRef}:${envName}${
+      verificationAttempt ? `:${verificationAttempt}` : ""
+    }`;
+
     const dispatch = await ports.runVerificationDispatch({
       kind: dispatchMutationKind,
       target: dispatchMutationTarget,
@@ -855,7 +886,7 @@ export async function configureSetupEnvironment(
           environment: envName,
           operationMarker:
             verifyPlan.supportsOperationMarker !== false ?
-              input.operationId
+              verificationMarker
             : null,
           provider,
           repo: targetRepo,
@@ -884,7 +915,7 @@ export async function configureSetupEnvironment(
       ref: verificationRef,
       event: verifyPlan.trigger === "push" ? "push" : "workflow_dispatch",
       operationMarker:
-        priorOperationMarker || (prState ? input.operationId : null),
+        priorOperationMarker || (prState ? verificationMarker : null),
       baselineRunId,
       environment: envName,
       runId: verifyRunId == null ? null : String(verifyRunId),

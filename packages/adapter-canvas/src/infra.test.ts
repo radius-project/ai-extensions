@@ -40,7 +40,7 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
     "verify-azure.yml":
       "name: verify\non:\n  push:\n    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "verify-aws.yml":
-      "name: verify\non:\n  push:\n    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  push:\n    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n        with:\n          github-token: ${{ secrets.GITHUB_TOKEN }}\n          coded-messages: 'true'\n",
     "run-rad-commands.yml":
       "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
     "run-rad-commands-azure.yml":
@@ -404,6 +404,36 @@ describe("generated workflow YAML validation", () => {
     );
   });
 
+  it.each([
+    [
+      "another action",
+      "ai-extensions/.github/extension/actions/verify-ghcr-push@",
+      "ai-extensions/.github/extension/actions/other@"
+    ],
+    [
+      "another ref",
+      "verify-ghcr-push@{{RADIUS_REF}}",
+      "verify-ghcr-push@untrusted-ref"
+    ],
+    [
+      "another token",
+      "github-token: ${{ secrets.GITHUB_TOKEN }}",
+      "github-token: ${{ secrets.OTHER }}"
+    ]
+  ])(
+    "rejects an AWS verify GHCR step that uses %s",
+    async (_case, from, to) => {
+      h.upstream["verify-aws.yml"] = BASE_UPSTREAM["verify-aws.yml"].replace(
+        from,
+        to
+      );
+
+      await expect(generateVerifyWorkflow("prod", "aws")).rejects.toThrow(
+        /trusted non-mutating GHCR push-permission probe is required/u
+      );
+    }
+  );
+
   it("rejects a provider workflow missing its reusable workflow contract", async () => {
     h.upstream["run-rad-commands-azure.yml"] = BASE_UPSTREAM[
       "run-rad-commands-azure.yml"
@@ -710,6 +740,19 @@ describe("generateDeleteWorkflow", () => {
 });
 
 describe("GHCR verification probe", () => {
+  beforeEach(() => {
+    h.upstream = { ...BASE_UPSTREAM };
+    expireTemplateCache();
+  });
+
+  it("replaces the Azure check and keeps the upstream AWS action", async () => {
+    const action =
+      "uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@";
+
+    expect(await generateVerifyWorkflow("dev", "azure")).not.toContain(action);
+    expect(await generateVerifyWorkflow("dev", "aws")).toContain(action);
+  });
+
   it("checks push permission with a non-mutating upload session", () => {
     const workflow = configureVerifyGhcrProbe(
       "steps:\n  - name: Verify GHCR package push permission\n    uses: action\n  - name: Summary\n    run: echo done\n"

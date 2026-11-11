@@ -34,10 +34,8 @@ readonly REQUEST_TIMEOUT_SECONDS=20
 readonly CLUSTER="${RADIUS_AWS_EKS_CLUSTER_NAME:-}"
 
 required=(ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
-    RADIUS_AWS_ROLE_ARN RADIUS_AWS_REGION)
-if [[ -n "${CLUSTER}" ]]; then
-    required+=(RADIUS_TARGET_KUBECONFIG)
-fi
+    RADIUS_AWS_ROLE_ARN RADIUS_AWS_REGION RADIUS_AWS_EKS_CLUSTER_NAME
+    RADIUS_TARGET_KUBECONFIG)
 for variable in "${required[@]}"; do
     if [[ -z "${!variable:-}" ]]; then
         echo "Missing required environment variable: ${variable}" >&2
@@ -65,23 +63,19 @@ readonly OIDC_TOKEN_FILE="${TOKEN_DIR}/oidc-token"
 readonly EKS_TOKEN_FILE="${TOKEN_DIR}/eks-token"
 readonly KUBECONFIG_FILE="${TOKEN_DIR}/kubeconfig"
 
-CLUSTER_SERVER=""
-CLUSTER_CA_DATA=""
-if [[ -n "${CLUSTER}" ]]; then
-    if [[ ! -f "${RADIUS_TARGET_KUBECONFIG}" ]]; then
-        echo "No EKS kubeconfig at RADIUS_TARGET_KUBECONFIG; the Connect to EKS cluster step creates it." >&2
-        exit 1
-    fi
-    CLUSTER_SERVER="$(kubectl config view --raw \
-        --kubeconfig "${RADIUS_TARGET_KUBECONFIG}" \
-        -o jsonpath='{.clusters[0].cluster.server}')"
-    CLUSTER_CA_DATA="$(kubectl config view --raw \
-        --kubeconfig "${RADIUS_TARGET_KUBECONFIG}" \
-        -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
-    if [[ -z "${CLUSTER_SERVER}" || -z "${CLUSTER_CA_DATA}" ]]; then
-        echo "The EKS kubeconfig at RADIUS_TARGET_KUBECONFIG has no cluster server or certificate authority." >&2
-        exit 1
-    fi
+if [[ ! -f "${RADIUS_TARGET_KUBECONFIG}" ]]; then
+    echo "No EKS kubeconfig at RADIUS_TARGET_KUBECONFIG; the Connect to EKS cluster step creates it." >&2
+    exit 1
+fi
+CLUSTER_SERVER="$(kubectl config view --raw \
+    --kubeconfig "${RADIUS_TARGET_KUBECONFIG}" \
+    -o jsonpath='{.clusters[0].cluster.server}')"
+CLUSTER_CA_DATA="$(kubectl config view --raw \
+    --kubeconfig "${RADIUS_TARGET_KUBECONFIG}" \
+    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
+if [[ -z "${CLUSTER_SERVER}" || -z "${CLUSTER_CA_DATA}" ]]; then
+    echo "The EKS kubeconfig at RADIUS_TARGET_KUBECONFIG has no cluster server or certificate authority." >&2
+    exit 1
 fi
 
 apply_secret() {
@@ -143,9 +137,7 @@ refresh_eks_token() {
 
 refresh_tokens() {
     refresh_oidc_token || return 1
-    if [[ -n "${CLUSTER}" ]]; then
-        refresh_eks_token || return 1
-    fi
+    refresh_eks_token
 }
 
 case "${MODE}" in
