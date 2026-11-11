@@ -50,7 +50,7 @@ The host owns loading, retrieval failures, connection selection, permissions, an
 ## Input semantics
 
 | Input kind            | Contract                                                                                                                                                                                             |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|-----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `live`                | Normalized UCP resources identified by full IDs; raw optional provisioning status; no diff hashes, inferred deployment success, modeled source links, Canvas visibility filter, or output expansion. |
 | `modeled`             | Canvas modeled resources; hide visualization-only image/registry-secret nodes and expand concrete outputs.                                                                                           |
 | `planned`             | Preserve modeled resource identity/topology, show representative resolved types, and use planned styling.                                                                                            |
@@ -125,7 +125,7 @@ The qualified target is the official Headlamp v0.45.0 web host, React 18.3.1, SD
 Choose one CSS entry point. Neither is imported automatically by JavaScript or downloaded at runtime:
 
 | Entry point                              | Ownership                                                                                                                                                  |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `@radius-project/graph-react/styles.css` | Required base styles plus the existing default skin. Existing consumers and Canvas need no change.                                                         |
 | `@radius-project/graph-react/base.css`   | Required graph geometry, hit testing, and the pinned React Flow vendor CSS, without the Radius skin. Use with `appearance="custom"` and a host stylesheet. |
 
@@ -203,7 +203,7 @@ import "./application-graph.css";
 This is a starting palette, not a complete design system. The host owns readable contrast, visible focus, disabled/error styling, and distinguishable semantic states. Customize these stable `data-radius-part` values rather than depending on private markup:
 
 | Surface       | Parts                                                                                                                                                 |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Graph         | `viewport`, `legend`, `legend-item`, `legend-icon`, `warning`, `empty`, `error`, `retry`                                                              |
 | Resource card | `node`, `node-title`, `node-type`, `icon`, `badge`, `source`, `navigate`, `status`, `details-toggle`                                                  |
 | Details panel | `details`, `details-summary`, `details-status`, `details-row`, `details-link`, `details-icon`, `details-subtitle`, `details-message`, `details-empty` |
