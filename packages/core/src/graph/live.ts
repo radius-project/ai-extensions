@@ -51,12 +51,13 @@ export function graphContextKey(context: GraphContext): string {
   if (
     !application?.plane ||
     application.segments.length !== 1 ||
-    application.type.toLowerCase() !== "radius.core/applications" ||
+    (application.type.toLowerCase() !== "radius.core/applications" &&
+      application.type.toLowerCase() !== "applications.core/applications") ||
     !sameUcpSegment(application.plane.type, context.plane.type) ||
     !sameUcpSegment(application.plane.name, context.plane.name)
   ) {
     throw new TypeError(
-      "Live graph applicationId must be a Radius.Core/applications resource on the selected plane."
+      "Live graph applicationId must be a Radius.Core/applications or Applications.Core/applications resource on the selected plane."
     );
   }
   return JSON.stringify([
@@ -81,6 +82,16 @@ export function normalizeLiveGraph(
   context: GraphContext
 ): LiveGraph {
   graphContextKey(context);
+  return {
+    kind: "live",
+    context: { ...context, plane: { ...context.plane } },
+    ...normalizeLiveResources(value)
+  };
+}
+
+export function normalizeLiveResources(
+  value: unknown
+): Pick<LiveGraph, "resources" | "warnings"> {
   if (!record(value) || !Array.isArray(value.resources)) {
     throw new TypeError("Live graph resources must be an array.");
   }
@@ -185,8 +196,6 @@ export function normalizeLiveGraph(
     else targetsBySource.set(source, [target]);
   }
   return {
-    kind: "live",
-    context: { ...context, plane: { ...context.plane } },
     resources: resources.map((resource) => ({
       ...resource,
       connections: (targetsBySource.get(resource.id) ?? []).map((target) => ({

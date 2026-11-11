@@ -140,6 +140,7 @@ describe("options", () => {
     const resolved = settings();
     expect(resolved).toEqual({
       liveMode: false,
+      legacyMode: false,
       diffMode: false,
       deployMode: false,
       plannedMode: false,

@@ -56,12 +56,33 @@ The host owns loading, retrieval failures, connection selection, permissions, an
 | `planned`             | Preserve modeled resource identity/topology, show representative resolved types, and use planned styling.                                                                                            |
 | `deployed-projection` | Preserve modeled topology and explicit workflow deployment status; this is not a live UCP inventory.                                                                                                 |
 | `diff`                | Preserve explicit node/connection changes, output expansion, and base/head source provenance.                                                                                                        |
+| `legacy-live`         | Explicit context-free legacy data with the shared legacy direction policy and compact presentation; no invented query context.                                                                       |
 
 The public component's discriminant selects the mode. Legacy boolean mode flags are confined to presentation helpers and the thin Canvas compatibility adapter.
 
 `normalizeLiveGraph(payload, context)` accepts an unknown payload and validates essential fields. UCP `Outbound` is presented as owner-to-target, and `Inbound` as target-to-owner, matching the modeled graph. Connection directions must be `Outbound` or `Inbound`; any other value throws. Direction comes from the payload alone — no resource type is special-cased. Any resource type renders, so Azure, AWS and other non-`Radius.*` resources appear as generic cards. A resource whose ID cannot be parsed is dropped with a warning rather than failing the graph. `parseResourceId` accepts UCP IDs (`/planes/...`, including AWS `accounts/.../regions/...` scopes) and Azure Resource Manager IDs (`/subscriptions/...`). Each entry in `warnings` is an object with a stable `code` (`duplicate-resource`, `invalid-resource-id`, `invalid-connection` or `unresolved-connection`), a `severity` (`info` or `warning`), the owning `resourceId` and an English `message`; hosts should branch on `code` and `severity`, not on the message text. Normalization never mutates the original payload or changes the meaning of its connection records.
 
 Identical duplicate resource records are coalesced with a diagnostic. Conflicting duplicate records fail explicitly. Malformed, missing-target, and self-referential connections are omitted with actionable diagnostics; surviving resources remain visible. The no-self-loop rule follows the authoritative dashboard plan's GU-06 intended invariant, which records the incumbent self-loop as a known defect. Reciprocal connections producing the same presentation edge are deduplicated.
+
+## Legacy compatibility entries
+
+`@radius-project/graph-react/compat` exports `AppGraph` and the `AppGraphData` type. Its only prop is `{ graph: { name: string, resources: LegacyResource[] } }`; it needs no connection, plane, application ID, callback, or mode. `LegacyResource` has `id`, `name`, `type`, `provider`, and `provisioningState` strings, optional nested `resources`, and optional `connections`. A connection has `id`, `name`, `type`, `provider`, and direction `"Outbound" | "Inbound"`. These shared input types are available from `@radius-project/core/graph`. The graph name is not an identity.
+
+AppGraph uses the one canonical Flow 12 renderer and Dagre layout. It fills its sized parent with no fixed minimum height, fits on initial render, and provides keyboard/mouse interaction plus Zoom In, Zoom Out, and Fit View controls. It has no interactive-toggle control, legend, details panel, resource icon, or status badge. Its compact card shows an h3 name and h6 full type with top target and bottom source handles. Raw provisioning state remains in the input and semantic DOM but is not shown as a badge. Import the normal graph stylesheet once.
+
+The shared core legacy adapter owns the exact gateway/route policy documented in [core's legacy contracts](../core/README.md#legacy-public-contracts). AppGraph does not mutate connections or apply a second direction policy. Self/dangling connections are omitted with visible warnings, duplicate edges are coalesced, and empty data shows an explicit empty state. These deliberate corrections address the old invalid-edge, mutation, and blank-canvas defects; they are not claims of unchanged defective output.
+
+`@radius-project/graph-react/compat/reactflow11` separately exports the data-only `ResourceNode`: `{ data: LegacyResource }`. This entry requires the optional `reactflow` 11 peer and a real Flow 11 `ReactFlowProvider`. It passes Flow 11 handles to the same canonical card; it does not need Flow 12 context or a second layout. The root and `/compat` entries neither import nor require Flow 11. Do not combine these entries into a forwarding barrel that makes AppGraph-only hosts resolve Flow 11.
+
+```tsx
+export { AppGraph } from "@radius-project/graph-react/compat";
+export type { AppGraphData } from "@radius-project/graph-react/compat";
+export { ResourceNode } from "@radius-project/graph-react/compat/reactflow11";
+export { parseLegacyResourceId as parseResourceId } from "@radius-project/core/domain";
+export type { LegacyResourceId as ResourceId } from "@radius-project/core/domain";
+```
+
+These are independently implemented public compatibility contracts, not transferred host source. Private presentation/build/layout modules remain unavailable in packed exports. Renderer-dependent checks must observe the real rendered component, not a copied layout or private builder.
 
 ## Host capabilities
 
@@ -72,6 +93,8 @@ Identical duplicate resource records are coalesced with a diagnostic. Conflictin
 The component fills a sized container. The default skin retains its existing 450px minimum height; custom appearance has no minimum container height. Canvas continues to own its normal-flow legend and 450px drawing area. `.radius-graph` and `.radius-graph__viewport` are supported geometry hooks.
 
 Each component has independent layout, viewport, overlay, and timer state. Status-only updates preserve the viewport; changed node membership refits it. Details controls work by keyboard, Escape closes the overlay and restores focus, and teardown releases roots/listeners/timers. The details overlay is a React-rendered element: it is anchored beside the card it describes, follows that card when a relayout or drag moves it, closes when its node leaves the data, and stays mounted while closed if the graph is non-empty. A partial layout preserves valid placements and the unplaced nodes' prior positions, with a visible diagnostic. A wholly missing, non-finite, or failed layout produces readable stacked cards and a degraded-layout message.
+
+The canonical layout inserts nodes and directed edges in stable identity order without reordering the host's arrays. Reversing resource or connection order does not change positions, including on a fresh mount. Degraded stacked layouts use the same node identity order.
 
 Inline `options` and `callbacks` objects are safe. A host render that reallocates them keeps an open details overlay, its restorable focus, and any dragged node positions, and the newest callback closures still receive events. Replace `graph` only when the data itself changes, because new node membership intentionally refits the viewport.
 
@@ -180,6 +203,12 @@ This is a starting palette, not a complete design system. The host owns readable
 | Details panel | `details`, `details-summary`, `details-status`, `details-row`, `details-link`, `details-icon`, `details-subtitle`, `details-message`, `details-empty` |
 
 The root exposes `data-radius-kind`; cards expose `data-radius-diff`, `data-radius-deploy`, and optional `data-radius-provisioning`; details messages expose `data-radius-failure`. These are raw model states, not new status classifications. `aria-disabled` still marks unavailable source actions. CSS can select these attributes without changing graph data or callbacks. Built-in resource and deploy glyphs remain image assets: CSS can size or hide them but cannot recolor the internals of a data-URI image. Do not hide the only status indicator without supplying an accessible alternative.
+
+### Rendered observation
+
+Cards have role `group`, an accessible name equal to the resource name, and `data-node-id` equal to the original full resource ID. `data-radius-resource-type` carries the full type. `data-radius-icon` carries the actual selected icon source when an icon is rendered; absence means no icon. `data-radius-badge` carries the rendered deployment badge kind when present. These attributes describe the canonical rendered card, not an independent semantic mapping. The title/type parts expose their visible text; `data-radius-provisioning` retains raw state without implying a badge.
+
+Directed edges expose `.react-flow__edge[data-id]`; the ID is JSON `[sourceFullId, targetFullId]`. Nodes expose `.react-flow__node[data-id]` for bounds and layout positions through browser geometry. Wait for actual node measurement and edges before recording geometry. Use independent fixture expectations for edge direction and render semantics; input acceptance alone is not rendering evidence. Controls have accessible labels `Zoom In`, `Zoom Out`, and `Fit View`. The legend uses `data-radius-part="legend"` and details use `data-radius-details`; their absence in compact legacy mode is intentional.
 
 The supported vendor hooks are `.radius-graph__edge .react-flow__edge-path`, `.react-flow__controls`, `.react-flow__controls-button`, and `.react-flow__background` beneath your root class. These class names come from React Flow, which graph-react pins to an exact version; graph-react keeps them working across React Flow updates, and any React Flow upgrade that removes or renames one ships as a graph-react major release. Color the background dots by setting React Flow's `--xy-background-pattern-color` custom property on `.react-flow` beneath your root class; a direct `circle { fill }` rule loses to the scoped vendor rule. Keep node positioning, transforms, handles, hit testing, and the fixed 220px node width intact: Dagre owns those contracts. Arbitrarily sized/replaced nodes are not supported. Custom appearance releases automatic type-label shrinking so the host can choose typography and wrapping; default appearance retains it. Details positioning and hidden state remain inline because they are behavior, not appearance. All other node, edge, legend, and details paint comes from CSS.
 

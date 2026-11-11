@@ -51,7 +51,7 @@ export interface RadiusGraphProps {
   graph: RadiusGraphData;
   options?: Omit<
     GraphOptions,
-    "liveMode" | "diffMode" | "deployMode" | "plannedMode"
+    "liveMode" | "legacyMode" | "diffMode" | "deployMode" | "plannedMode"
   >;
   theme?: GraphTheme;
   /** Use the default skin or let the host stylesheet own appearance. */
@@ -103,7 +103,8 @@ function GraphContent({
     () =>
       resolveGraphSettings({
         ...options,
-        liveMode: graph.kind === "live",
+        liveMode: graph.kind === "live" || graph.kind === "legacy-live",
+        legacyMode: graph.kind === "legacy-live",
         diffMode: graph.kind === "diff",
         plannedMode: graph.kind === "planned",
         deployMode: graph.kind === "deployed-projection"
@@ -299,7 +300,10 @@ function GraphContent({
         built.warning
       )
     : null,
-    graph.kind === "live" && graph.warnings.length > 0 ?
+    (
+      (graph.kind === "live" || graph.kind === "legacy-live") &&
+        graph.warnings.length > 0
+    ) ?
       h(
         "div",
         {

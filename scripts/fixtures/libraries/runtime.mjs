@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { createElement, version } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { RadiusGraph, mountRadiusGraph } from "@radius-project/graph-react";
+import { AppGraph } from "@radius-project/graph-react/compat";
 
 import {
   RADIUS_BRAND_MARK,
@@ -12,7 +13,11 @@ import {
   normalizeLiveGraph,
   graphContextKey
 } from "@radius-project/core/graph";
-import { parseResourceId } from "@radius-project/core/domain";
+import {
+  parseResourceId,
+  createRadiusQueryClient,
+  aggregateRecipes
+} from "@radius-project/core/domain";
 
 const require = createRequire(import.meta.url);
 const context = {
@@ -28,6 +33,49 @@ assert.equal(parseResourceId(context.applicationId).name, "demo");
 assert.equal(typeof graphContextKey(context), "string");
 assert.throws(() => normalizeLiveGraph({}, context), /resources/);
 assert.equal(typeof mountRadiusGraph, "function");
+assert.throws(() => require.resolve("reactflow"), { code: "MODULE_NOT_FOUND" });
+assert.match(
+  renderToStaticMarkup(
+    createElement(AppGraph, { graph: { name: "context-free", resources: [] } })
+  ),
+  /legacy-live/
+);
+const requests = [];
+const client = createRadiusQueryClient(
+  {
+    async request(request) {
+      requests.push(request);
+      if (request.path.includes("/resourceTypes/")) {
+        return {
+          Name: "applications",
+          APIVersions: { preview: {} },
+          APIVersionList: ["preview"]
+        };
+      }
+      return { name: "legacy", resources: [] };
+    }
+  },
+  context
+);
+const legacyId = context.applicationId.replace(
+  "Radius.Core",
+  "Applications.Core"
+);
+assert.deepEqual(
+  await client.getApplicationGraph({ applicationId: legacyId }),
+  { name: "legacy", resources: [] }
+);
+assert.equal(requests.at(-1).method, "POST");
+assert.equal(
+  requests.at(-1).path,
+  `/apis/api.ucp.dev/v1alpha3${legacyId}/getGraph?api-version=preview`
+);
+assert.equal(
+  normalizeLiveGraph({ resources: [] }, { ...context, applicationId: legacyId })
+    .context.applicationId,
+  legacyId
+);
+assert.deepEqual(aggregateRecipes({}, {}), []);
 // The brand mark ships without the renderer so a host can register it as a
 // navigation icon: geometry for an icon registry, markup for inline use.
 assert.equal(RADIUS_BRAND_MARK.width, 128);

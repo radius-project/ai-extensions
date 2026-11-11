@@ -15,6 +15,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import {
   delimiter,
   dirname,
@@ -38,7 +39,7 @@ import {
 const require = createRequire(import.meta.url);
 const artifacts = join(repoRoot, ".artifacts", "libraries");
 mkdirSync(artifacts, { recursive: true });
-const runDirectory = mkdtempSync(join(artifacts, "consumer-"));
+const runDirectory = mkdtempSync(join(tmpdir(), "radius-library-consumer-"));
 const graphRoot = join(repoRoot, "packages", "graph-react");
 const coreRoot = join(repoRoot, "packages", "core");
 const candidates = join(artifacts, "packages");
@@ -205,11 +206,13 @@ function assertInstalledLibrary(consumer, directory, tarball, coreVersion) {
   return root;
 }
 
-async function exerciseBrowser(consumer) {
+async function exerciseBrowser(consumer, legacyNodeOnly = false) {
   const pages = {
     "/": "browser",
     "/host-styling": "host-styling",
-    "/base-only": "base-only"
+    "/base-only": "base-only",
+    "/legacy-app": "legacy-app",
+    "/legacy-node": "legacy-node"
   };
   const files = {
     "/browser.js": "text/javascript",
@@ -218,14 +221,18 @@ async function exerciseBrowser(consumer) {
     "/host-styling.css": "text/css",
     "/base-only.js": "text/javascript",
     "/base-only.css": "text/css",
-    "/host-alternate.css": "text/css"
+    "/host-alternate.css": "text/css",
+    "/legacy-app.js": "text/javascript",
+    "/legacy-app.css": "text/css",
+    "/legacy-node.js": "text/javascript",
+    "/legacy-node.css": "text/css"
   };
   const server = createServer((request, response) => {
     if (Object.hasOwn(pages, request.url)) {
       const entry = pages[request.url];
       response.setHeader("Content-Type", "text/html");
       response.end(
-        `<!doctype html><html lang="en"><title>Packed Radius graph candidate</title><link rel="stylesheet" href="/${entry}.css"><div id="root"${entry === "browser" ? ' style="width:850px;height:650px"' : ""}></div><script type="module" src="/${entry}.js"></script></html>`
+        `<!doctype html><html lang="en"><title>Packed Radius graph candidate</title><link rel="stylesheet" href="/${entry}.css"><div id="root"${entry === "browser" || entry === "legacy-app" ? ' style="width:850px;height:650px"' : ""}></div><script type="module" src="/${entry}.js"></script></html>`
       );
       return;
     }
@@ -265,6 +272,34 @@ async function exerciseBrowser(consumer) {
         route.continue()
       : route.abort()
     );
+    if (legacyNodeOnly) {
+      await page.goto(`${origin}/legacy-node`);
+      await page
+        .getByRole("heading", { name: "standalone-legacy-web", level: 3 })
+        .waitFor();
+      await page
+        .getByRole("heading", {
+          name: "Applications.Core/containers",
+          level: 6
+        })
+        .waitFor();
+      assert.equal(
+        await page.locator(".target[data-handlepos=top]").count(),
+        1
+      );
+      assert.equal(
+        await page.locator(".source[data-handlepos=bottom]").count(),
+        1
+      );
+      assert.equal(
+        await page
+          .locator(".rad-node__badge,.rad-node__icon,.rad-node__status")
+          .count(),
+        0
+      );
+      assert.deepEqual(errors, []);
+      return;
+    }
     await page.goto(origin);
     const web = page.getByRole("group", { name: "web", exact: true });
     const db = page.getByRole("group", { name: "db", exact: true });
@@ -335,6 +370,34 @@ async function exerciseBrowser(consumer) {
         );
       }
     }
+    await page.goto(`${origin}/legacy-app`);
+    await page.getByRole("heading", { name: "legacy-web", level: 3 }).waitFor();
+    await page
+      .getByRole("heading", { name: "Applications.Core/containers", level: 6 })
+      .waitFor();
+    await page.waitForFunction(
+      () =>
+        globalThis.document.querySelectorAll(".react-flow__edge").length === 1
+    );
+    assert.equal(
+      await page.locator("[data-radius-kind=legacy-live]").count(),
+      1
+    );
+    assert.equal(
+      await page.locator(".react-flow__edge").getAttribute("data-id"),
+      JSON.stringify([
+        "/planes/radius/local/resourceGroups/demo/providers/Applications.Core/gateways/edge",
+        "/planes/radius/local/resourceGroups/demo/providers/Applications.Core/containers/web"
+      ])
+    );
+    assert.equal(
+      await page
+        .locator(
+          ".rad-node__badge,.rad-node__icon,.rad-node__status,[data-radius-details]"
+        )
+        .count(),
+      0
+    );
     for (const url of requests) {
       const request = new URL(url);
       assert.equal(request.origin, origin, `Unexpected remote asset: ${url}`);
@@ -391,6 +454,21 @@ try {
   assert.ok(existsSync(coreTarball));
   assert.ok(existsSync(graphTarball));
   const packedDependencies = new Map();
+  function packDependency({ root, manifest }) {
+    const key = `${manifest.name}@${manifest.version}`;
+    if (!packedDependencies.has(key)) {
+      run(
+        pnpmCommand,
+        [...pnpmArgs, "pack", "--pack-destination", dependencyTarballs],
+        root
+      );
+      packedDependencies.set(
+        key,
+        join(dependencyTarballs, tarballName(manifest))
+      );
+    }
+    return pathToFileURL(packedDependencies.get(key)).href;
+  }
   for (const major of [18, 19]) {
     const consumer = join(runDirectory, `react-${major}`);
     mkdirSync(consumer);
@@ -418,22 +496,8 @@ try {
       [coreManifest.name]: pathToFileURL(coreTarball).href,
       [graphManifest.name]: pathToFileURL(graphTarball).href
     };
-    for (const { root, manifest } of dependencies.values()) {
-      const key = `${manifest.name}@${manifest.version}`;
-      if (!packedDependencies.has(key)) {
-        run(
-          pnpmCommand,
-          [...pnpmArgs, "pack", "--pack-destination", dependencyTarballs],
-          root
-        );
-        packedDependencies.set(
-          key,
-          join(dependencyTarballs, tarballName(manifest))
-        );
-      }
-      consumerDependencies[manifest.name] = pathToFileURL(
-        packedDependencies.get(key)
-      ).href;
+    for (const installed of dependencies.values()) {
+      consumerDependencies[installed.manifest.name] = packDependency(installed);
     }
     writeJson(join(consumer, "package.json"), {
       name: `radius-packed-consumer-react-${major}`,
@@ -522,6 +586,8 @@ try {
       "host-renderer.mjs",
       "host-styling.mjs",
       "base-only.mjs",
+      "legacy-app.mjs",
+      "legacy-node.mjs",
       "host.css",
       "host-alternate.css"
     ]) {
@@ -588,7 +654,12 @@ try {
         `Workspace declarations leaked into consumer: ${file}`
       );
     }
-    for (const entry of ["browser", "host-styling", "base-only"]) {
+    for (const entry of [
+      "browser",
+      "host-styling",
+      "base-only",
+      "legacy-app"
+    ]) {
       const bundled = await build({
         absWorkingDir: consumer,
         entryPoints: [`${entry}.mjs`],
@@ -600,6 +671,15 @@ try {
         metafile: true
       });
       const inputs = Object.keys(bundled.metafile.inputs);
+      assert.equal(
+        inputs.some((input) =>
+          /node_modules\/(?:reactflow|@reactflow)\//.test(
+            input.replaceAll("\\", "/")
+          )
+        ),
+        false,
+        "Native and AppGraph-only consumers must not resolve the optional Flow11 peer"
+      );
       for (const input of inputs) {
         assert.ok(
           resolve(consumer, input).startsWith(`${consumer}${sep}`),
@@ -632,10 +712,58 @@ try {
       }
     }
     await exerciseBrowser(consumer);
+    const legacyDependencies = dependencyClosure(
+      [installedPackage("reactflow", graphRoot)],
+      overrides
+    );
+    for (const installed of legacyDependencies.values()) {
+      consumerDependencies[installed.manifest.name] = packDependency(installed);
+    }
+    writeJson(join(consumer, "package.json"), {
+      name: `radius-packed-consumer-react-${major}`,
+      private: true,
+      type: "module",
+      dependencies: consumerDependencies
+    });
+    run(
+      process.execPath,
+      [
+        npm,
+        "install",
+        "--offline",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund"
+      ],
+      consumer
+    );
+    run(process.execPath, [npm, "ls", "--all", "--json"], consumer);
+    const legacyBundle = await build({
+      absWorkingDir: consumer,
+      entryPoints: ["legacy-node.mjs"],
+      outdir: join(consumer, "browser-dist"),
+      bundle: true,
+      format: "esm",
+      platform: "browser",
+      target: "es2022",
+      metafile: true
+    });
+    assert.ok(
+      Object.keys(legacyBundle.metafile.inputs).some((input) =>
+        input.includes("node_modules/reactflow/")
+      )
+    );
+    await exerciseBrowser(consumer, true);
     writeJson(join(artifacts, `react-${major}-smoke.json`), {
       react: overrides.get("react").manifest.version,
       core: coreManifest.version,
       graphReact: graphManifest.version,
+      coreTarballSha256: createHash("sha256")
+        .update(readFileSync(coreTarball))
+        .digest("hex"),
+      graphTarballSha256: createHash("sha256")
+        .update(readFileSync(graphTarball))
+        .digest("hex"),
       runtime: "passed",
       declarations: "passed",
       browserBundle: "passed",
@@ -643,6 +771,9 @@ try {
       css: "passed",
       hostStylesheetIsolation: "passed",
       baseOnlyRenderer: "passed",
+      contextFreeLegacyAppGraph: "passed",
+      optionalLegacyResourceNode: "passed",
+      nativeWithoutFlow11: "passed",
       peers: "passed",
       installedTarballIntegrity: "verified",
       offline: true

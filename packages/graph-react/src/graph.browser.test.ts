@@ -291,43 +291,121 @@ describe("public host-neutral React API", () => {
     expect(element.querySelector(".host-class")).not.toBeNull();
   });
 
-  it("renders live UCP without hashes, source controls or synthesized deployment success", async () => {
-    const { root, element } = host();
-    const selected: string[] = [];
-    const navigated: string[] = [];
-    root.render(
-      h(RadiusGraph, {
-        graph: normalizeLiveGraph({ resources: [resource] }, context),
-        theme: { background: "#101010", text: "#ffffff", colorScheme: "dark" },
-        callbacks: {
-          onSelect: (node) => selected.push(node.id),
-          onNavigate: (node) => navigated.push(node.id)
-        }
-      })
-    );
-    const node = await within(element).findByRole("group", {
-      name: "live-web"
-    });
-    expect(
-      within(node).getByLabelText("Provisioning status: CustomPending")
-    ).toBeTruthy();
-    expect(within(node).queryByText("View source code")).toBeNull();
-    expect(within(node).queryByAltText("Deployed")).toBeNull();
-    await userEvent.click(
-      within(node).getByRole("button", { name: "Show details" })
-    );
-    expect(selected).toEqual([resource.id]);
-    expect(
-      await within(element).findByText("Provisioning status: CustomPending")
-    ).toBeTruthy();
-    await userEvent.click(
-      within(node).getByRole("button", { name: "Open live-web" })
-    );
-    expect(navigated).toEqual([resource.id]);
-    expect(
-      element.querySelector(".radius-graph")?.getAttribute("style")
-    ).toContain("color-scheme: dark");
-  });
+  it.each(["Radius.Core", "Applications.Core"])(
+    "renders %s live UCP without hashes, source controls or synthesized deployment success",
+    async (namespace) => {
+      const { root, element } = host();
+      const selected: string[] = [];
+      const navigated: string[] = [];
+      root.render(
+        h(RadiusGraph, {
+          graph: normalizeLiveGraph(
+            { resources: [resource] },
+            {
+              ...context,
+              applicationId: prefix + namespace + "/applications/app"
+            }
+          ),
+          theme: {
+            background: "#101010",
+            text: "#ffffff",
+            colorScheme: "dark"
+          },
+          callbacks: {
+            onSelect: (node) => selected.push(node.id),
+            onNavigate: (node) => navigated.push(node.id)
+          }
+        })
+      );
+      const node = await within(element).findByRole("group", {
+        name: "live-web"
+      });
+
+      expect(
+        within(node).getByLabelText("Provisioning status: CustomPending")
+      ).toBeTruthy();
+      expect(within(node).queryByText("View source code")).toBeNull();
+      expect(within(node).queryByAltText("Deployed")).toBeNull();
+      await userEvent.click(
+        within(node).getByRole("button", { name: "Show details" })
+      );
+      expect(selected).toEqual([resource.id]);
+      expect(
+        await within(element).findByText("Provisioning status: CustomPending")
+      ).toBeTruthy();
+      await userEvent.click(
+        within(node).getByRole("button", { name: "Open live-web" })
+      );
+      expect(navigated).toEqual([resource.id]);
+      expect(
+        element.querySelector(".radius-graph")?.getAttribute("style")
+      ).toContain("color-scheme: dark");
+    }
+  );
+
+  it.each([
+    "Other.Core/applications",
+    "Applications.Core.Other/applications",
+    "Applications.Core/environments",
+    "Radius.Core/environments"
+  ])(
+    "reports invalid live context %s at the renderer boundary",
+    async (type) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { root, element } = host();
+      const errors: unknown[] = [];
+      root.render(
+        h(RadiusGraph, {
+          graph: {
+            kind: "live",
+            context: { ...context, applicationId: prefix + type + "/app" },
+            resources: [{ ...resource, connections: [] }],
+            warnings: []
+          },
+          callbacks: { onError: (error) => errors.push(error) }
+        })
+      );
+      await within(element).findByRole("alert");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(TypeError);
+      expect(
+        within(element).queryByRole("group", { name: "live-web" })
+      ).toBeNull();
+    }
+  );
+
+  it.each(["Radius.Core", "Applications.Core"])(
+    "reports wrong plane and nested %s application contexts",
+    async (namespace) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      for (const applicationId of [
+        prefix.replace("/radius/local/", "/radius/other/") +
+          namespace +
+          "/applications/app",
+        prefix.replace("/radius/local/", "/other/local/") +
+          namespace +
+          "/applications/app",
+        prefix + namespace + "/applications/app/children/nested"
+      ]) {
+        const { root, element } = host();
+        const errors: unknown[] = [];
+        root.render(
+          h(RadiusGraph, {
+            graph: {
+              kind: "live",
+              context: { ...context, applicationId },
+              resources: [{ ...resource, connections: [] }],
+              warnings: []
+            },
+            callbacks: { onError: (error) => errors.push(error) }
+          })
+        );
+        await within(element).findByRole("alert");
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toBeInstanceOf(TypeError);
+      }
+    }
+  );
 
   it("renders explicit empty and partial states and updates without replacing the React root", async () => {
     const { root, element } = host();
@@ -571,7 +649,7 @@ describe("public host-neutral React API", () => {
     expect(phases).toEqual([
       {
         flowMounted: false,
-        ids: ["app/web", "app/db"]
+        ids: ["app/db", "app/web"]
       }
     ]);
     expect(db.getBoundingClientRect().top).toBeGreaterThan(
@@ -1436,6 +1514,10 @@ describe("graph view in a real browser", () => {
       /^data:image\/svg\+xml/
     );
     expect(web.querySelector(".rad-node__badge")).toBeNull();
+    expect(web.getAttribute("data-radius-icon")).toBe(
+      web.querySelector(".rad-node__icon")?.getAttribute("src")
+    );
+    expect(web.hasAttribute("data-radius-badge")).toBe(false);
     expect(web.querySelector(".rad-node__head")?.className).toBe(
       "rad-node__head"
     );
@@ -1525,12 +1607,12 @@ describe("graph view in a real browser", () => {
   });
 
   it.each([
-    ["in_progress", "In progress"],
-    ["success", "Deployed"],
-    ["failed", "Failed"]
+    ["in_progress", "In progress", "progress"],
+    ["success", "Deployed", "success"],
+    ["failed", "Failed", "failed"]
   ])(
     "labels the %s badge for assistive technology",
-    async (deployStatus, alt) => {
+    async (deployStatus, alt, renderedKind) => {
       mount({
         deployMode: true,
         resources: [{ id: "web", name: "web", deployStatus }]
@@ -1539,6 +1621,7 @@ describe("graph view in a real browser", () => {
       const badge = within(web).getByAltText(alt);
       expect(badge.className).toBe("rad-node__badge");
       expect(badge.getAttribute("src")).toMatch(/^data:image\/svg\+xml/);
+      expect(web.getAttribute("data-radius-badge")).toBe(renderedKind);
       expect(web.querySelector(".rad-node__head")?.className).toBe(
         "rad-node__head rad-node__head--with-badge"
       );
