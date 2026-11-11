@@ -45,6 +45,29 @@ const db: GraphResource = {
   ]
 };
 
+describe("live resource-definition artwork", () => {
+  it.each([false, true])(
+    "uses supplied artwork without changing topology in legacyMode=%s",
+    (legacyMode) => {
+      const options = settings({ liveMode: true, legacyMode });
+      const before = buildGraph(options, [web, db]);
+      const icon =
+        '<svg xmlns="http://www.w3.org/2000/svg"><path fill="currentColor"/></svg>';
+      const after = buildGraph(options, [{ ...web, icon }, db]);
+      expect(after.nodes[0].data.icon).toContain("data:image/svg+xml,");
+      expect(
+        decodeURIComponent(after.nodes[0].data.icon.split(",")[1])
+      ).toContain('fill="currentColor"');
+      expect(after.nodes[0].data.iconMonochrome).toBe(true);
+      expect(after.nodes.map((node) => [node.id, node.position])).toEqual(
+        before.nodes.map((node) => [node.id, node.position])
+      );
+      expect(after.edges).toEqual(before.edges);
+      if (legacyMode) expect(after.nodes[1].data.icon).toBe("");
+    }
+  );
+});
+
 // A diff compares two branches and a worktree holds at most one of them, so
 // "is this file on disk?" is a per-node question there. Getting it wrong is
 // silent: the node renders a github.com URL for a branch that was never pushed,

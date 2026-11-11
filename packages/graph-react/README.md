@@ -50,7 +50,7 @@ The host owns loading, retrieval failures, connection selection, permissions, an
 ## Input semantics
 
 | Input kind            | Contract                                                                                                                                                                                             |
-|-----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `live`                | Normalized UCP resources identified by full IDs; raw optional provisioning status; no diff hashes, inferred deployment success, modeled source links, Canvas visibility filter, or output expansion. |
 | `modeled`             | Canvas modeled resources; hide visualization-only image/registry-secret nodes and expand concrete outputs.                                                                                           |
 | `planned`             | Preserve modeled resource identity/topology, show representative resolved types, and use planned styling.                                                                                            |
@@ -60,15 +60,17 @@ The host owns loading, retrieval failures, connection selection, permissions, an
 
 The public component's discriminant selects the mode. Legacy boolean mode flags are confined to presentation helpers and the thin Canvas compatibility adapter.
 
-`normalizeLiveGraph(payload, context)` accepts an unknown payload and validates essential fields. UCP `Outbound` is presented as owner-to-target, and `Inbound` as target-to-owner, matching the modeled graph. Connection directions must be `Outbound` or `Inbound`; any other value throws. Direction comes from the payload alone — no resource type is special-cased. Any resource type renders, so Azure, AWS and other non-`Radius.*` resources appear as generic cards. A resource whose ID cannot be parsed is dropped with a warning rather than failing the graph. `parseResourceId` accepts UCP IDs (`/planes/...`, including AWS `accounts/.../regions/...` scopes) and Azure Resource Manager IDs (`/subscriptions/...`). Each entry in `warnings` is an object with a stable `code` (`duplicate-resource`, `invalid-resource-id`, `invalid-connection` or `unresolved-connection`), a `severity` (`info` or `warning`), the owning `resourceId` and an English `message`; hosts should branch on `code` and `severity`, not on the message text. Normalization never mutates the original payload or changes the meaning of its connection records.
+`normalizeLiveGraph(payload, context)` accepts an unknown payload and validates essential fields. UCP `Outbound` is presented as owner-to-target, and `Inbound` as target-to-owner, matching the modeled graph. Connection directions must be `Outbound` or `Inbound`; any other value throws. Direction comes from the payload alone — no resource type is special-cased. Any resource type renders, so Azure, AWS and other non-`Radius.*` resources appear as generic cards. A resource whose ID cannot be parsed is dropped with a warning rather than failing the graph. `parseResourceId` accepts UCP IDs (`/planes/...`, including AWS `accounts/.../regions/...` scopes) and Azure Resource Manager IDs (`/subscriptions/...`). Each entry in `warnings` is an object with a stable `code` (`duplicate-resource`, `invalid-resource-id`, `invalid-connection`, `unresolved-connection` or `invalid-icon`), a `severity` (`info` or `warning`), the owning `resourceId` and an English `message`; hosts should branch on `code` and `severity`, not on the message text. Normalization never mutates the original payload or changes the meaning of its connection records.
 
 Identical duplicate resource records are coalesced with a diagnostic. Conflicting duplicate records fail explicitly. Malformed, missing-target, and self-referential connections are omitted with actionable diagnostics; surviving resources remain visible. The no-self-loop rule follows the authoritative dashboard plan's GU-06 intended invariant, which records the incumbent self-loop as a known defect. Reciprocal connections producing the same presentation edge are deduplicated.
+
+Both live normalizers resolve resource-type-definition icons from `resource.iconHash` and `payload.icons` into optional raw SVG `resource.icon`. Invalid references add an `invalid-icon` warning and keep existing fallback behavior. The renderer encodes raw SVG as an isolated image data URL, not inline HTML. Artwork that uses `currentColor` uses the existing theme-aware CSS mask; other artwork retains its colors. Unreadable images fall back to the built-in type glyph. Icon updates do not change node identity, dependency direction, or layout.
 
 ## Legacy compatibility entries
 
 `@radius-project/graph-react/compat` exports `AppGraph` and the `AppGraphData` type. Its only prop is `{ graph: { name: string, resources: LegacyResource[] } }`; it needs no connection, plane, application ID, callback, or mode. `LegacyResource` has `id`, `name`, `type`, `provider`, and `provisioningState` strings, optional nested `resources`, and optional `connections`. A connection has `id`, `name`, `type`, `provider`, and direction `"Outbound" | "Inbound"`. These shared input types are available from `@radius-project/core/graph`. The graph name is not an identity.
 
-AppGraph uses the one canonical Flow 12 renderer and Dagre layout. It fills its sized parent with no fixed minimum height, fits on initial render, and provides keyboard/mouse interaction plus Zoom In, Zoom Out, and Fit View controls. It has no interactive-toggle control, legend, details panel, resource icon, or status badge. Its compact card shows an h3 name and h6 full type with top target and bottom source handles. Raw provisioning state remains in the input and semantic DOM but is not shown as a badge. Import the normal graph stylesheet once.
+AppGraph uses the one canonical Flow 12 renderer and Dagre layout. It fills its sized parent with no fixed minimum height, fits on initial render, and provides keyboard/mouse interaction plus Zoom In, Zoom Out, and Fit View controls. It has no interactive-toggle control, legend, details panel, or status badge. Its compact card shows an h3 name and h6 full type with top target and bottom source handles. Optional `graph.icons` and resource `iconHash` fields add definition artwork through the shared normalizer; without them, the compact card keeps its icon-free appearance. The data-only Flow 11 `ResourceNode` accepts an optional resolved raw SVG `data.icon`. Raw provisioning state remains in the input and semantic DOM but is not shown as a badge. Import the normal graph stylesheet once.
 
 The shared core legacy adapter owns the exact gateway/route policy documented in [core's legacy contracts](../core/README.md#legacy-public-contracts). AppGraph does not mutate connections or apply a second direction policy. Self/dangling connections are omitted with visible warnings, duplicate edges are coalesced, and empty data shows an explicit empty state. These deliberate corrections address the old invalid-edge, mutation, and blank-canvas defects; they are not claims of unchanged defective output.
 
@@ -123,7 +125,7 @@ The qualified target is the official Headlamp v0.45.0 web host, React 18.3.1, SD
 Choose one CSS entry point. Neither is imported automatically by JavaScript or downloaded at runtime:
 
 | Entry point                              | Ownership                                                                                                                                                  |
-|------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@radius-project/graph-react/styles.css` | Required base styles plus the existing default skin. Existing consumers and Canvas need no change.                                                         |
 | `@radius-project/graph-react/base.css`   | Required graph geometry, hit testing, and the pinned React Flow vendor CSS, without the Radius skin. Use with `appearance="custom"` and a host stylesheet. |
 
@@ -157,7 +159,11 @@ import "@radius-project/graph-react/base.css";
 import "./application-graph.css";
 
 <div style={{ height: 600 }}>
-  <RadiusGraph graph={graph} appearance="custom" className="application-graph" />
+  <RadiusGraph
+    graph={graph}
+    appearance='custom'
+    className='application-graph'
+  />
 </div>;
 ```
 
@@ -197,7 +203,7 @@ import "./application-graph.css";
 This is a starting palette, not a complete design system. The host owns readable contrast, visible focus, disabled/error styling, and distinguishable semantic states. Customize these stable `data-radius-part` values rather than depending on private markup:
 
 | Surface       | Parts                                                                                                                                                 |
-|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Graph         | `viewport`, `legend`, `legend-item`, `legend-icon`, `warning`, `empty`, `error`, `retry`                                                              |
 | Resource card | `node`, `node-title`, `node-type`, `icon`, `badge`, `source`, `navigate`, `status`, `details-toggle`                                                  |
 | Details panel | `details`, `details-summary`, `details-status`, `details-row`, `details-link`, `details-icon`, `details-subtitle`, `details-message`, `details-empty` |
@@ -219,7 +225,10 @@ Changing `appearance`, `theme`, `className`, or a stylesheet does not rebuild gr
 Hosts that place Radius navigation entries beside the graph need the same mark the graph's own chrome uses. `@radius-project/graph-react/brand` is a React-free, DOM-free subpath so a host can register the icon without loading the renderer:
 
 ```ts
-import { RADIUS_BRAND_MARK, radiusBrandMarkSvg } from "@radius-project/graph-react/brand";
+import {
+  RADIUS_BRAND_MARK,
+  radiusBrandMarkSvg
+} from "@radius-project/graph-react/brand";
 
 // Icon registries take a body plus a viewBox size.
 addIcon("radius:mark", RADIUS_BRAND_MARK);

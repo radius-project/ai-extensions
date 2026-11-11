@@ -10,7 +10,10 @@ import { screen, waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { createElement as h, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { normalizeLiveGraph } from "@radius-project/core/graph";
+import {
+  normalizeLiveGraph,
+  normalizeLegacyLiveGraph
+} from "@radius-project/core/graph";
 import { RadiusGraph } from "./graph.js";
 import { buildGraph, resolveGraphSettings } from "./build.js";
 import { mountRadiusGraph } from "./mount.js";
@@ -141,6 +144,87 @@ describe("public host-neutral React API", () => {
     type: "Radius.Core/containers",
     provisioningState: "CustomPending"
   };
+
+  it.each(["live", "legacy-live"] as const)(
+    "renders %s definition SVG only in an isolated image, with no executable DOM or external loads",
+    async (kind) => {
+      const { root, element } = host();
+      const hash = "c".repeat(64);
+      const svg =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" onload="document.body.dataset.iconExecuted = 1"><script>document.body.dataset.iconExecuted = 1</script><image href="https://icons.example.test/beacon"/><rect width="16" height="16" fill="#126789"/></svg>';
+      const payload = {
+        resources: [{ ...resource, iconHash: hash }],
+        icons: { [hash]: svg }
+      };
+      const graph =
+        kind === "live" ?
+          normalizeLiveGraph(payload, context)
+        : normalizeLegacyLiveGraph(payload);
+      root.render(h(RadiusGraph, { graph }));
+      await within(element).findByRole("group", { name: resource.name });
+      const image = element.querySelector<HTMLImageElement>(
+        "[data-radius-part=icon]"
+      );
+      if (!image) throw new Error("Missing definition icon.");
+      await waitFor(() => {
+        expect(image.complete).toBe(true);
+        expect(image.naturalWidth).toBeGreaterThan(0);
+      });
+      expect(
+        decodeURIComponent(image.src.slice("data:image/svg+xml,".length))
+      ).toContain(svg.slice(svg.indexOf("<script>"), svg.indexOf("</svg>")));
+      expect(
+        element.querySelector(".rad-node svg,.rad-node script,.rad-node image")
+      ).toBeNull();
+      expect(document.body.dataset.iconExecuted).toBeUndefined();
+      expect(
+        element.querySelector("[data-node-id]")?.getAttribute("data-node-id")
+      ).toBe(resource.id);
+    }
+  );
+
+  it.each([false, true])(
+    "falls back after an unreadable definition image with currentColor=%s and accepts later artwork",
+    async (monochrome) => {
+      const { root, element } = host();
+      const hash = "d".repeat(64);
+      const render = (svg: string) =>
+        root.render(
+          h(RadiusGraph, {
+            graph: normalizeLiveGraph(
+              {
+                resources: [{ ...resource, iconHash: hash }],
+                icons: { [hash]: svg }
+              },
+              context
+            )
+          })
+        );
+      render(
+        `<svg xmlns="http://www.w3.org/2000/svg"${monochrome ? ' fill="currentColor"' : ""}><broken>`
+      );
+      await within(element).findByRole("group", { name: resource.name });
+      await waitFor(() => {
+        const image = element.querySelector<HTMLImageElement>(
+          "img[data-radius-part=icon]"
+        );
+        expect(image?.src).not.toContain("broken");
+        expect(image?.naturalWidth).toBeGreaterThan(0);
+      });
+      render(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="9" height="9"><rect width="9" height="9" fill="#123456"/></svg>'
+      );
+      await waitFor(() => {
+        const image = element.querySelector<HTMLImageElement>(
+          "img[data-radius-part=icon]"
+        );
+        expect(decodeURIComponent(image?.src || "")).toContain(
+          'fill="#123456"'
+        );
+        expect(image?.naturalWidth).toBeGreaterThan(0);
+      });
+    }
+  );
 
   it("rejects a non-DOM mount target", () => {
     expect(() =>

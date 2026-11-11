@@ -418,7 +418,7 @@ export function radiusNormalizeIconSource(icon: unknown): ResolvedIcon {
   ) {
     return { src: s, monochrome: false };
   }
-  if (s.indexOf("<svg") === 0) {
+  if (/^(?:<\?xml[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*<svg/.test(s)) {
     const monochrome = svgUsesCurrentColor(s);
     if (s.indexOf("width=") === -1) {
       s = s.replace("<svg ", '<svg width="64" height="64" ');

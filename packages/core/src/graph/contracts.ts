@@ -43,6 +43,8 @@ export interface LiveGraphResource {
   readonly id: string;
   readonly name: string;
   readonly type: string;
+  /** Untrusted SVG from the resource-type definition; render as an image, not HTML. */
+  readonly icon?: string;
   readonly provider?: string;
   readonly provisioningState?: string;
   readonly connections: readonly {
@@ -56,6 +58,7 @@ export type LiveGraphWarningCode =
   | "duplicate-resource"
   | "invalid-resource-id"
   | "invalid-connection"
+  | "invalid-icon"
   | "unresolved-connection";
 
 /**
@@ -98,6 +101,8 @@ export interface LegacyResource {
   name: string;
   type: string;
   provider: string;
+  icon?: string;
+  iconHash?: string | null;
   provisioningState: string;
   resources?: LegacyResource[];
   connections?: LegacyConnection[];
@@ -106,6 +111,7 @@ export interface LegacyResource {
 export interface LegacyAppGraphData {
   name: string;
   resources: LegacyResource[];
+  icons?: Record<string, string | null>;
 }
 
 export interface ModeledGraph {

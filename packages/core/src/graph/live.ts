@@ -100,12 +100,37 @@ export function normalizeLiveResources(
   const ids = new Set<string>();
   const signatures = new Map<string, string>();
   const warnings: LiveGraphWarning[] = [];
+  const icons = record(value.icons) ? value.icons : {};
   for (const raw of value.resources) {
     if (!record(raw))
       throw new TypeError("Live graph resource must be an object.");
     const id = text(raw.id, "resource id");
     if (raw.connections !== undefined && !Array.isArray(raw.connections)) {
       throw new TypeError(`Live graph connections must be an array: ${id}`);
+    }
+    let resolvedIcon: string | undefined;
+    if (raw.iconHash !== undefined && raw.iconHash !== null) {
+      const hash = raw.iconHash;
+      const icon =
+        (
+          typeof hash === "string" &&
+          /^[0-9a-f]{64}$/.test(hash) &&
+          Object.hasOwn(icons, hash)
+        ) ?
+          icons[hash]
+        : undefined;
+      if (
+        typeof icon === "string" &&
+        /^(?:<\?xml[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*<svg(?:\s|\/?>)/.test(
+          icon.trim()
+        )
+      ) {
+        resolvedIcon = icon;
+      } else {
+        warnings.push(
+          warning("invalid-icon", id, `Unresolved resource icon ignored: ${id}`)
+        );
+      }
     }
     const resource: LiveGraphResource = {
       id,
@@ -116,6 +141,7 @@ export function normalizeLiveResources(
         raw.provisioningState,
         "provisioningState"
       ),
+      ...(resolvedIcon ? { icon: resolvedIcon } : {}),
       connections: []
     };
     // One unreadable ID must not blank the whole graph: drop that resource

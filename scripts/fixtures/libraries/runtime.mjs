@@ -11,6 +11,7 @@ import {
 } from "@radius-project/graph-react/brand";
 import {
   normalizeLiveGraph,
+  normalizeLegacyLiveGraph,
   graphContextKey
 } from "@radius-project/core/graph";
 import {
@@ -75,6 +76,40 @@ assert.equal(
     .context.applicationId,
   legacyId
 );
+assert.equal(Object.hasOwn(requests.at(-1), "body"), false);
+const hash = "e".repeat(64);
+const icon = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+const iconPayload = {
+  resources: [
+    {
+      id: context.applicationId,
+      name: "definition-icon",
+      type: "Radius.Core/applications",
+      iconHash: hash
+    }
+  ],
+  icons: { [hash]: icon }
+};
+const iconClient = createRadiusQueryClient(
+  {
+    async request(request) {
+      requests.push(request);
+      return request.method === "POST" ?
+          iconPayload
+        : {
+            APIVersions: { "2025-08-01-preview": {} },
+            APIVersionList: ["2025-08-01-preview"]
+          };
+    }
+  },
+  context
+);
+const rawIcons = await iconClient.getApplicationGraph({
+  applicationId: context.applicationId
+});
+assert.deepEqual(requests.at(-1).body, { includeIcons: true });
+assert.equal(normalizeLiveGraph(rawIcons, context).resources[0].icon, icon);
+assert.equal(normalizeLegacyLiveGraph(rawIcons).resources[0].icon, icon);
 assert.deepEqual(aggregateRecipes({}, {}), []);
 // The brand mark ships without the renderer so a host can register it as a
 // navigation icon: geometry for an icon registry, markup for inline use.

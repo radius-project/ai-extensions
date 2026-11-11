@@ -1,15 +1,17 @@
 import {
   createContext,
   createElement as h,
+  useEffect,
   useLayoutEffect,
-  useRef
+  useRef,
+  useState
 } from "react";
 import type { CSSProperties, ReactElement, ReactNode, MouseEvent } from "react";
 import { consoleNameForUrl } from "@radius-project/core/domain";
 import { isLocalSourceNode } from "./build.js";
 import { safeExternalUrl } from "./external-url.js";
 import { browserCssMaskUrl } from "./html.js";
-import { githubSourceReferenceUrl } from "./model.js";
+import { githubSourceReferenceUrl, radiusGetIconSvg } from "./model.js";
 import type { GraphNodeData, GraphSettings } from "./build.js";
 import type { GraphCallbacks } from "./callbacks.js";
 
@@ -64,6 +66,22 @@ export function ResourceNodeCard({
   const { settings, callbacks, showDetails, appearance } = interaction;
   const cardRef = useRef<HTMLDivElement>(null);
   const typeRef = useRef<HTMLDivElement>(null);
+  const [failedIcon, setFailedIcon] = useState("");
+  const icon =
+    failedIcon && failedIcon === data.icon ?
+      radiusGetIconSvg(data.resourceType)
+    : data.icon;
+  const monochrome = data.iconMonochrome && failedIcon !== data.icon;
+  useEffect(() => {
+    if (!data.iconMonochrome || !data.icon) return;
+    // CSS masks have no error event. Probe the same isolated image for fallback.
+    const probe = new Image();
+    probe.onerror = () => setFailedIcon(data.icon);
+    probe.src = data.icon;
+    return () => {
+      probe.onerror = null;
+    };
+  }, [data.icon, data.iconMonochrome]);
   useLayoutEffect(() => {
     if (typeRef.current) {
       if (appearance === "custom") typeRef.current.style.fontSize = "";
@@ -148,34 +166,34 @@ export function ResourceNodeCard({
           : "In progress"
       })
     : null;
+  // SVG images and masks are isolated image documents; never insert API SVG into the DOM.
+  const artwork =
+    icon ?
+      monochrome ?
+        h("span", {
+          className: "rad-node__icon rad-node__icon--themed",
+          "aria-hidden": "true",
+          "data-radius-part": "icon",
+          style: {
+            WebkitMaskImage: browserCssMaskUrl(icon),
+            maskImage: browserCssMaskUrl(icon)
+          }
+        })
+      : h("img", {
+          className: "rad-node__icon",
+          src: icon,
+          alt: "",
+          "data-radius-part": "icon",
+          onError: () => setFailedIcon(data.icon)
+        })
+    : null;
   const head = h(
     "div",
     {
       className:
         badge ? "rad-node__head rad-node__head--with-badge" : "rad-node__head"
     },
-    data.icon ?
-      // A monochrome icon draws itself in `currentColor`, but inside an <img>
-      // the SVG is a separate document and would always paint black. Painting
-      // it through a CSS mask fills its alpha channel with the theme token, so
-      // it stays legible in light and dark. Multi-color artwork keeps the <img>.
-      data.iconMonochrome ?
-        h("span", {
-          className: "rad-node__icon rad-node__icon--themed",
-          "aria-hidden": "true",
-          "data-radius-part": "icon",
-          style: {
-            WebkitMaskImage: browserCssMaskUrl(data.icon),
-            maskImage: browserCssMaskUrl(data.icon)
-          }
-        })
-      : h("img", {
-          className: "rad-node__icon",
-          src: data.icon,
-          alt: "",
-          "data-radius-part": "icon"
-        })
-    : null,
+    artwork,
     h(
       "span",
       {
@@ -191,6 +209,7 @@ export function ResourceNodeCard({
       h(
         "div",
         { style: { padding: "2px", fontSize: "0.6rem" } },
+        artwork,
         h(
           "h3",
           { style: { textAlign: "center" }, "data-radius-part": "node-title" },

@@ -52,6 +52,24 @@ const graph: AppGraphData = {
 };
 
 describe("public legacy compatibility components", () => {
+  it("uses definition SVG on the shared card inside Flow11 without changing headings or handles", async () => {
+    const { element, root } = mount();
+    const icon =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#123456"/></svg>';
+    root.render(
+      h(ReactFlowProvider, null, h(ResourceNode, { data: { ...web, icon } }))
+    );
+    await within(element).findByRole("heading", { name: "web", level: 3 });
+    const image = element.querySelector<HTMLImageElement>(
+      "img[data-radius-part=icon]"
+    );
+    await waitFor(() => expect(image?.naturalWidth).toBe(8));
+    expect(decodeURIComponent(image?.src || "")).toContain(icon);
+    expect(element.querySelectorAll(".react-flow__handle")).toHaveLength(2);
+    expect(
+      within(element).getByRole("heading", { name: web.type, level: 6 })
+    ).toBeTruthy();
+  });
   it.each([false, true])(
     "keeps actual %s connected graph positions stable across reversed input and fresh roots",
     async (connected) => {

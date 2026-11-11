@@ -22,6 +22,112 @@ const db = {
 };
 
 describe("live UCP graph normalization", () => {
+  const hash = "a".repeat(64);
+  const icon =
+    '<svg xmlns="http://www.w3.org/2000/svg"><path fill="#123456" d="M0 0h8v8z"/></svg>';
+
+  it("preserves XML declarations and metadata comments in definition artwork", () => {
+    const raw = `<?xml version="1.0"?>\n<!-- registered icon -->\n${icon}`;
+    expect(
+      normalizeLiveGraph(
+        {
+          resources: [{ ...web, iconHash: hash }],
+          icons: { [hash]: raw }
+        },
+        context
+      ).resources[0].icon
+    ).toBe(raw);
+  });
+
+  it("resolves definition icons without changing identity, topology, or source objects", () => {
+    const input = {
+      resources: [
+        {
+          ...web,
+          iconHash: hash,
+          connections: [{ id: db.id, direction: "Outbound" }]
+        },
+        { ...db, iconHash: hash }
+      ],
+      icons: { [hash]: icon }
+    };
+    const before = structuredClone(input);
+    const normalized = normalizeLiveGraph(input, context);
+    expect(normalized.resources.map((resource) => resource.icon)).toEqual([
+      icon,
+      icon
+    ]);
+    expect(
+      normalized.resources.map(({ icon: _icon, ...resource }) => resource)
+    ).toEqual(
+      normalizeLiveGraph(
+        {
+          resources: input.resources.map(
+            ({ iconHash: _hash, ...resource }) => resource
+          )
+        },
+        context
+      ).resources
+    );
+    expect(normalized.warnings).toEqual([]);
+    expect(input).toEqual(before);
+  });
+
+  it.each([
+    ["missing map", hash, undefined],
+    ["null map", hash, null],
+    ["array map", hash, []],
+    ["unknown reference", "b".repeat(64), { [hash]: icon }],
+    ["invalid hash", "sha256:" + hash, { ["sha256:" + hash]: icon }],
+    ["non-string hash", 1, { "1": icon }],
+    ["null entry", hash, { [hash]: null }],
+    ["non-string entry", hash, { [hash]: 1 }],
+    ["empty entry", hash, { [hash]: " " }],
+    ["URL entry", hash, { [hash]: "https://example.test/icon.svg" }],
+    ["invalid entry", hash, { [hash]: "not SVG" }],
+    ["inherited entry", hash, Object.create({ [hash]: icon })]
+  ])(
+    "drops %s with a warning and keeps the resource",
+    (_label, iconHash, icons) => {
+      const result = normalizeLiveGraph(
+        { resources: [{ ...web, iconHash }], icons },
+        context
+      );
+      expect(result.resources[0]).not.toHaveProperty("icon");
+      expect(result.resources[0].id).toBe(web.id);
+      expect(result.warnings).toEqual([
+        {
+          code: "invalid-icon",
+          severity: "warning",
+          resourceId: web.id,
+          message: `Unresolved resource icon ignored: ${web.id}`
+        }
+      ]);
+    }
+  );
+
+  it("ignores absent and null icon hashes without warnings", () => {
+    const result = normalizeLiveGraph(
+      { resources: [web, { ...db, iconHash: null }], icons: { [hash]: icon } },
+      context
+    );
+    expect(
+      result.resources.every((resource) => resource.icon === undefined)
+    ).toBe(true);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("rejects duplicate records with different resolved artwork", () => {
+    expect(() =>
+      normalizeLiveGraph(
+        {
+          resources: [{ ...web, iconHash: hash }, web],
+          icons: { [hash]: icon }
+        },
+        context
+      )
+    ).toThrow("Conflicting live graph resource");
+  });
   it.each([
     "Radius.Core/applications",
     "Applications.Core/applications",

@@ -10,6 +10,8 @@ export interface RadiusQueryRequest extends RadiusQueryContext {
   readonly method: "GET" | "POST";
   /** UCP path including the API prefix and encoded api-version query. */
   readonly path: string;
+  /** JSON request value; the host owns serialization and Content-Type. */
+  readonly body?: unknown;
   readonly signal?: AbortSignal;
 }
 

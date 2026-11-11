@@ -407,14 +407,16 @@ export function buildGraph(
         settings.baseBranch
       : settings.branch;
     const badgeKind = radiusDeployBadgeKind(resource.deployStatus);
-    const resourceIcon = radiusResolveIconSource(resource);
+    const resourceIcon = radiusResolveIconSource(
+      settings.legacyMode ? { icon: resource.icon } : resource
+    );
     const cloudOutputs = cloudOutputsOf(resource);
     pushNode(id, {
       borderColor: colors.border,
       borderWidth: 2.5,
       borderStyle: settings.plannedMode ? "dashed" : "solid",
       bgColor: colors.bg,
-      icon: settings.legacyMode ? "" : resourceIcon.src,
+      icon: resourceIcon.src,
       iconMonochrome: resourceIcon.monochrome,
       nodeName: resource.name || id,
       typeLabel: shortType,

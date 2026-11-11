@@ -65,7 +65,8 @@ export class QuerySession {
     path: string,
     version: string,
     signal?: AbortSignal,
-    method: "GET" | "POST" = "GET"
+    method: "GET" | "POST" = "GET",
+    body?: unknown
   ): Promise<T> {
     signal?.throwIfAborted();
     while (this.active >= this.concurrency) {
@@ -91,6 +92,7 @@ export class QuerySession {
         ...this.context,
         plane: { ...this.context.plane },
         method,
+        ...(body === undefined ? {} : { body }),
         path: `/apis/api.ucp.dev/v1alpha3${path}?api-version=${encodeURIComponent(version)}`,
         signal
       });

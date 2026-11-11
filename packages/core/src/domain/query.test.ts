@@ -296,6 +296,43 @@ describe("public Radius query operations", () => {
     }
     expect(calls).toEqual([]);
   });
+  it.each([
+    ["Radius.Core/applications", "2025-08-01-preview", true],
+    ["radius.core/applications", "2025-08-01", true],
+    ["Radius.Core/applications", "2026-01-01-preview", true],
+    ["Radius.Core/applications", "2025-07-31-preview", false],
+    ["Radius.Core/applications", "newer", false],
+    ["Applications.Core/applications", "2025-08-01-preview", false],
+    ["Applications.Core/applications", "2025-01-01", false]
+  ])(
+    "requests inline icons only for supported %s %s",
+    async (type, version, supported) => {
+      const graph = {
+        resources: [{ ...resource(type), iconHash: "a".repeat(64) }],
+        icons: { ["a".repeat(64)]: "<svg/>" }
+      };
+      const controller = new AbortController();
+      const { client, calls } = harness(({ path }) =>
+        path.includes("/resourceTypes/") ?
+          { ...discovery, APIVersionList: [version] }
+        : graph
+      );
+      expect(
+        await client.getApplicationGraph({
+          applicationId: id(type),
+          signal: controller.signal
+        })
+      ).toBe(graph);
+      expect(calls.at(-1)).toEqual({
+        ...context,
+        method: "POST",
+        path: `${prefix}${id(type)}/getGraph?api-version=${version}`,
+        signal: controller.signal,
+        ...(supported ? { body: { includeIcons: true } } : {})
+      });
+      expect(calls[0]).not.toHaveProperty("body");
+    }
+  );
   it("propagates pre-abort, discovery abort and queued cancellation without fallback calls", async () => {
     const before = new AbortController();
     before.abort(new Error("cancelled"));

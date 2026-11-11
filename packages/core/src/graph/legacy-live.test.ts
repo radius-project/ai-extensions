@@ -16,6 +16,37 @@ const context = {
 };
 
 describe("explicit legacy live graph adaptation", () => {
+  it("retains response icons through both legacy overloads and keeps edge direction", () => {
+    const hash = "b".repeat(64);
+    const icon = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+    const dependency = {
+      ...web,
+      id: prefix + "Contoso/widgets/dependency",
+      name: "dependency"
+    };
+    const input = {
+      resources: [
+        {
+          ...web,
+          iconHash: hash,
+          connections: [{ id: dependency.id, direction: "Outbound" }]
+        },
+        dependency
+      ],
+      icons: { [hash]: icon }
+    };
+    const before = structuredClone(input);
+    for (const result of [
+      normalizeLegacyLiveGraph(input),
+      normalizeLegacyLiveGraph(input, context)
+    ]) {
+      expect(result.resources[0].icon).toBe(icon);
+      expect(result.resources[1].connections).toEqual([
+        { id: web.id, direction: "Outbound" }
+      ]);
+    }
+    expect(input).toEqual(before);
+  });
   it.each([
     ["Applications.Core/gateways", undefined, false],
     ["Radius.Compute/routes", undefined, false],

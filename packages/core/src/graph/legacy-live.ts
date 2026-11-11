@@ -51,7 +51,7 @@ export function normalizeLegacyLiveGraph(
       })
     };
   });
-  const normalized = normalizeLiveResources({ resources });
+  const normalized = normalizeLiveResources({ resources, icons: value.icons });
   return context ?
       {
         kind: "live",

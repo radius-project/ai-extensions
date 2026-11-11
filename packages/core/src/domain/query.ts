@@ -25,7 +25,8 @@ import type {
 
 export interface ApplicationGraphResponse {
   name?: string;
-  resources: GraphResource[];
+  resources: Array<GraphResource & { iconHash?: string | null }>;
+  icons?: Record<string, string | null>;
 }
 
 function list<T>(value: ResourceList<T>): Resource<T>[] {
@@ -253,15 +254,19 @@ export function createRadiusQueryClient(
     input: { applicationId: string } & QueryOptions
   ): Promise<ApplicationGraphResponse> {
     graphContextKey({ ...session.context, applicationId: input.applicationId });
-    const version = await discovery.bestVersion(
-      session.resource(input.applicationId).type,
-      input.signal
-    );
+    const type = session.resource(input.applicationId).type;
+    const version = await discovery.bestVersion(type, input.signal);
+    // includeIcons was added to the Radius.Core 2025-08-01 graph action.
+    const includeIcons =
+      type.toLowerCase() === "radius.core/applications" &&
+      /^\d{4}-\d{2}-\d{2}(?:-preview)?$/.test(version) &&
+      version.slice(0, 10) >= "2025-08-01";
     const graph = await session.request<ApplicationGraphResponse>(
       `${input.applicationId}/getGraph`,
       version,
       input.signal,
-      "POST"
+      "POST",
+      includeIcons ? { includeIcons: true } : undefined
     );
     if (!object(graph) || !Array.isArray(graph.resources))
       throw new TypeError("Radius graph resources must be an array.");

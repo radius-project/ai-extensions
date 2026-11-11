@@ -36,6 +36,11 @@ import type {
 } from "@radius-project/core/domain";
 
 function queries(port: RadiusQueryPort, request: RadiusQueryRequest) {
+  const withBody: RadiusQueryRequest = {
+    ...request,
+    body: { includeIcons: true }
+  };
+  void withBody;
   const client = createRadiusQueryClient(port, request);
   const applications: Promise<QueryResult<ApplicationProperties>> =
     client.listApplications();
@@ -62,6 +67,8 @@ const context: GraphContext = {
     "/planes/radius/local/resourceGroups/demo/providers/Radius.Core/applications/demo"
 };
 const graph: RadiusGraphData = normalizeLiveGraph({ resources: [] }, context);
+const icon: string | undefined = graph.resources[0]?.icon;
+void icon;
 const identity: ResourceId | undefined = parseResourceId(context.applicationId);
 const legacyIdentity: LegacyResourceId | undefined = parseLegacyResourceId(
   context.applicationId

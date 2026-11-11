@@ -305,6 +305,17 @@ async function exerciseBrowser(consumer, legacyNodeOnly = false) {
     const db = page.getByRole("group", { name: "db", exact: true });
     await web.waitFor();
     await db.waitFor();
+    await page.waitForFunction(() => {
+      const image = globalThis.document.querySelector(
+        '[data-node-id$="/containers/web"] img[data-radius-part="icon"]'
+      );
+      return image?.naturalWidth === 13;
+    });
+    assert.equal(
+      await page.locator("body").getAttribute("data-icon-executed"),
+      null
+    );
+    assert.equal(await web.locator("svg,script,image").count(), 0);
     await page.waitForFunction(
       () =>
         globalThis.document.querySelectorAll(".react-flow__edge").length === 1
