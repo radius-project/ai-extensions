@@ -24,9 +24,13 @@ export const AWS_EKS_CLUSTER_ADMIN_POLICY_ARN =
   "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
 
 // Tags Radius writes on a role it creates. A same-named role without them is
-// not Radius-managed and is never modified.
+// not Radius-managed and is never modified. The repository ID tag proves which
+// repository the role belongs to, because a rename keeps the ID and a new
+// repository at the old name gets another. The repository name tag is only a
+// readable label.
 export const AWS_MANAGED_TAG = "radius-managed";
 export const AWS_REPOSITORY_TAG = "radius-repository";
+export const AWS_REPOSITORY_ID_TAG = "radius-repository-id";
 
 const ROLE_NAME_MAX = 64;
 const ROLE_NAME_HASH_LENGTH = 6;
@@ -219,7 +223,7 @@ export function isAwsEnvironmentPolicyName(
 }
 
 export function legacyAwsPolicyOwnershipError(input: {
-  repo: string;
+  repoId: number;
   environment: string;
   accountId: string;
   subjects: readonly string[];
@@ -253,7 +257,7 @@ export function legacyAwsPolicyOwnershipError(input: {
   if (ambiguous) return `The legacy policy may also belong to ${ambiguous}.`;
   if (
     !subjects.some((subject) => input.subjects.includes(subject)) &&
-    !isRadiusManagedRole(input.role, input.repo)
+    !isRadiusManagedRole(input.role, input.repoId)
   ) {
     return "Neither the role's trust subjects nor its ownership tags identify this environment as the legacy policy's owner.";
   }
@@ -929,22 +933,32 @@ function roleTag(role: unknown, key: string): string {
 }
 
 /**
- * The repository Radius created this role for, or null when Radius did not
- * tag it as one of its own.
+ * GitHub's ID for the repository Radius created this role for, or null when
+ * Radius did not tag it with one. Roles from builds before the ID tag have
+ * none, so no repository can claim them.
  */
-export function radiusRoleRepository(role: unknown): string | null {
+export function radiusRoleRepositoryId(role: unknown): number | null {
   if (roleTag(role, AWS_MANAGED_TAG) !== "true") return null;
-  return roleTag(role, AWS_REPOSITORY_TAG) || null;
+  const value = roleTag(role, AWS_REPOSITORY_ID_TAG);
+  const id = /^[1-9]\d*$/.test(value) ? Number(value) : NaN;
+  return Number.isSafeInteger(id) ? id : null;
 }
 
-/** Whether Radius created this role for this repository. */
-export function isRadiusManagedRole(
-  role: unknown,
-  repoFullName: string
-): boolean {
-  return (
-    radiusRoleRepository(role)?.toLowerCase() === repoFullName.toLowerCase()
-  );
+/** Whether Radius created this role for the repository with this GitHub ID. */
+export function isRadiusManagedRole(role: unknown, repoId: number): boolean {
+  return radiusRoleRepositoryId(role) === repoId;
+}
+
+/**
+ * Names the repository Radius created this role for, such as
+ * `octo/shop (repository ID 42)`, or null when the role has no repository ID
+ * tag. The name is the one tagged at creation and may be out of date.
+ */
+export function describeRadiusRoleOwner(role: unknown): string | null {
+  const id = radiusRoleRepositoryId(role);
+  if (id === null) return null;
+  const name = roleTag(role, AWS_REPOSITORY_TAG);
+  return name ? `${name} (repository ID ${id})` : `repository ID ${id}`;
 }
 
 /** The exact command an IAM administrator runs to add the GitHub provider. */

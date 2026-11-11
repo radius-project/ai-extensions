@@ -165,8 +165,8 @@ settings:
 catalogs:
   default:
     '@github/copilot-sdk':
-      specifier: 1.0.26
-      version: 1.0.26
+      specifier: 1.0.28
+      version: 1.0.28
     '@types/node':
       specifier: ^24.13.3
       version: 24.13.3
@@ -198,14 +198,14 @@ importers:
         specifier: ^4.14.0
         version: 4.14.0(playwright-core@1.64.1)
       '@babel/core':
-        specifier: ^8.0.7
-        version: 8.0.7
+        specifier: ^8.0.10
+        version: 8.0.10
       '@babel/eslint-parser':
         specifier: ^8.0.7
-        version: 8.0.7(@babel/core@8.0.7)(eslint@10.13.0(supports-color@7.2.0))
+        version: 8.0.7(@babel/core@8.0.10)(eslint@10.14.0(supports-color@7.2.0))
       '@babel/plugin-syntax-typescript':
         specifier: ^8.0.3
-        version: 8.0.3(@babel/core@8.0.7)
+        version: 8.0.3(@babel/core@8.0.10)
       '@changesets/changelog-github':
         specifier: 1.0.1
         version: 1.0.1
@@ -214,7 +214,7 @@ importers:
         version: 3.0.3
       '@eslint/js':
         specifier: ^10.0.1
-        version: 10.0.1(eslint@10.13.0(supports-color@7.2.0))
+        version: 10.0.1(eslint@10.14.0(supports-color@7.2.0))
       '@playwright/test':
         specifier: ^1.64.1
         version: 1.64.1
@@ -234,14 +234,14 @@ importers:
         specifier: ^0.28.2
         version: 0.28.2
       eslint:
-        specifier: ^10.13.0
-        version: 10.13.0(supports-color@7.2.0)
+        specifier: ^10.14.0
+        version: 10.14.0(supports-color@7.2.0)
       globals:
-        specifier: ^17.13.0
-        version: 17.13.0
+        specifier: ^17.14.0
+        version: 17.14.0
       markdown-table-formatter:
-        specifier: 1.7.0
-        version: 1.7.0(supports-color@7.2.0)
+        specifier: 2.1.0
+        version: 2.1.0
       markdownlint-cli2:
         specifier: 0.24.0
         version: 0.24.0(supports-color@7.2.0)
@@ -265,7 +265,7 @@ importers:
     dependencies:
       '@github/copilot-sdk':
         specifier: 'catalog:'
-        version: 1.0.26
+        version: 1.0.28
     devDependencies:
       '@radius-project/adapter-canvas':
         specifier: workspace:*
@@ -291,7 +291,7 @@ importers:
         version: 5.3.0
       '@github/copilot-sdk':
         specifier: 'catalog:'
-        version: 1.0.26
+        version: 1.0.28
       '@testing-library/dom':
         specifier: ^10.4.2
         version: 10.4.2
@@ -411,8 +411,8 @@ packages:
     resolution: {integrity: sha512-YLsYoQMvL8l8WrGpN3Zj7O1wK5LEBN+cQtux7BcuHyxIXve724XG+zuJ1n3U1cUweRtTzQOA4IHbuQw3N34SZw==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
-  '@babel/core@8.0.7':
-    resolution: {integrity: sha512-ZIsZWBG6Y1oa+8fkQVp0xeCdjCHBkXFCCIWrmg9SvejVvfcVQgKKRmGrBDWfM7rilhvnRoEuaqa5dkK7KB3pHA==}
+  '@babel/core@8.0.10':
+    resolution: {integrity: sha512-T6dEcoMJ3L1hyLuNfRXcVlqQrN79kU/SB5bDygVgQNIOUgStdyEGzigtRA9K+9Coh7SZUSt543oWRBxvqYdyuQ==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/eslint-parser@8.0.7':
@@ -422,8 +422,8 @@ packages:
       '@babel/core': ^8.0.0
       eslint: ^9.0.0 || ^10.0.0
 
-  '@babel/generator@8.0.6':
-    resolution: {integrity: sha512-/pcanjdRsonCexCuxgGD8fKnBLLzk2i9uM4kmcmGyyev2R5YDs+rafMYZ89RvaGY1mW8T7C5au0TyYaEeHBGng==}
+  '@babel/generator@8.0.10':
+    resolution: {integrity: sha512-iC9p3U4Y3vp0qKjRcfFeNzpj+kkK8BVYZTbQepBWVD7vOBLH6ji0drNzKPTPtumFd2w2r/hbEKYjG4pscKa4bg==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/helper-compilation-targets@8.0.7':
@@ -444,8 +444,8 @@ packages:
     resolution: {integrity: sha512-Pb5ijPrZ89GDH8223L4UP8i6QApWxs04RbPQJTeWDV0/keR2E36MeKnyr6LYmUUvqRRI+Iv87SuF1W6ErINzYw==}
     engines: {node: '>=6.9.0'}
 
-  '@babel/helper-string-parser@8.0.6':
-    resolution: {integrity: sha512-+6HYEBnsDRZHJtUTAEfMQd0zMDqdFHS7C+5vAsEZqBUr3vEMWOWlHJ0Jz1gS8jJIlCvLsuA6ivmeoqzH936YcA==}
+  '@babel/helper-string-parser@8.0.8':
+    resolution: {integrity: sha512-fVM+gSuKbdv9cpmyRNh5EvsDHUZCdxQH3FdnFKSkNYHpbsn95bbrxm+ES3MVeQjcqwi2O5ur/DjLfmTQaO60ng==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/helper-validator-identifier@7.29.7':
@@ -460,8 +460,8 @@ packages:
     resolution: {integrity: sha512-U4Dybxh4WESWHt5XhBeExi4DrY0/DNK1aHpQbsrQXCUbFHuMweT0TpLEWKvaraV2Y6fS+ZXunsZ8zIuZIgvF2Q==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
-  '@babel/helpers@8.0.7':
-    resolution: {integrity: sha512-5dMj5kFwS2AY7Dt4PZp4px3c5ThMbbEa7tZfuHTncCGSFYq8uoA1ufDE1IS/lYpQedE+3+GQ3cPZUiplIu195w==}
+  '@babel/helpers@8.0.10':
+    resolution: {integrity: sha512-tBG9yuaR26JJWFafcl/Dk4eib6bkRJ9H5e6lENcwZqFudA9ImNCuMXLjB3/t+Ub7/DOZv2Rmi5LCOi8q2DCekQ==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/parser@7.29.8':
@@ -469,8 +469,8 @@ packages:
     engines: {node: '>=6.0.0'}
     hasBin: true
 
-  '@babel/parser@8.0.7':
-    resolution: {integrity: sha512-UkDwEbPO1px2JQSrdh4qIgaH1JgG7GO/pFeJkpxhDxIETkT/QvGpnigXIw75ViHYPtIgKITmVUJqLjiO+JuWjA==}
+  '@babel/parser@8.0.10':
+    resolution: {integrity: sha512-h+ah2Kg0ne1Vii892dShj9gky9I5jPzkd8x4s/3xgN/P2bMWmHS3qq59tum3mCVjCBXI8uqfYyYtrfp1Mz6+1w==}
     engines: {node: ^22.18.0 || >=24.11.0}
     hasBin: true
 
@@ -488,16 +488,16 @@ packages:
     resolution: {integrity: sha512-eAD0QW/AlbamBbw0FeGiwasbCVPq5ncW0HNVyLP3B9czqLyh4gvw+5JTSNt6le9+ziAU7mqDZsKTHf3jTb4chQ==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
-  '@babel/traverse@8.0.7':
-    resolution: {integrity: sha512-bVV0brinsTWgc6ptSIoQo3GbITtl0VZAqEUJbHHcyfDPEu+q/fEvlYEa+6H85HoK8IdksKBFtKJbJFZ6Kff+zg==}
+  '@babel/traverse@8.0.10':
+    resolution: {integrity: sha512-t5DaGzMi9WlhMSFT2YavI8gl8yGihoQymSQUkIq9+MUh5tO3Vx9KHwr5gMCzeBdYkvs00xNvr18PxtQTRayucA==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@babel/types@8.0.6':
-    resolution: {integrity: sha512-c+xgSWboV2pdwXP67BUWDVRHi2BO5Q3KwxyFVs7taVTY+fsK47/L51ZXQoV9rozHJDNHvJ4v4WEsI/IlxV2l2A==}
+  '@babel/types@8.0.10':
+    resolution: {integrity: sha512-KV8Y+teoRsmXeEPS4sCJY1kwV+hcPzHP1qQqgCxrjKOehLdBaxpsFBfoJ8MXWFV80y6Jw56+TM95wR0Per8dYw==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
   '@bcoe/v8-coverage@1.0.2':
@@ -788,52 +788,52 @@ packages:
   '@fontsource-variable/inter@5.3.0':
     resolution: {integrity: sha512-OupL48va4JNofb97w6NYeF9S7W/kHNKM0Er8Dem5nqi4jeOLrVJDoE8tZEpnMJmtkvNbB1EIPPwHcdkF6b1oUA==}
 
-  '@github/copilot-sdk-darwin-arm64@1.0.26':
-    resolution: {integrity: sha512-mrEEEo82COE5AfbC+Ijo6bhe51fNTLL+GrlxFCxjW+pr2kzYqwx1KTDBBsZNNEWesZCo94N1xC38RKjnWrF4Jg==}
+  '@github/copilot-sdk-darwin-arm64@1.0.28':
+    resolution: {integrity: sha512-R15W4SUS12DyGiWEX/hxsSWTtvyo+Cxrn4SAbU0NeB1kBb+IzkvKmc85gOefh7QzuRZnSn2Wnch7oOmfoYMuPQ==}
     cpu: [arm64]
     os: [darwin]
 
-  '@github/copilot-sdk-darwin-x64@1.0.26':
-    resolution: {integrity: sha512-MeIgQiesVSSluULCPOUWZ9M+B2lcwXsWejVYtDdj92Z2gstL3BaEJEzja26kDEH6waBTYEaR+82PKHggxNrjbw==}
+  '@github/copilot-sdk-darwin-x64@1.0.28':
+    resolution: {integrity: sha512-b4haZ9J0G1BDg2gtNHW8yAEyddulrUZkGcnP7Dm7Ue1uNiO35qAqS+Q5jdadYj+cwhlBnNqXscO5l19tpaPyrw==}
     cpu: [x64]
     os: [darwin]
 
-  '@github/copilot-sdk-linux-arm64@1.0.26':
-    resolution: {integrity: sha512-hguGgZ9C60lP8zpzwhowfwHNQY/nNaIi6iCnKhE7NRQTlUoF69EwKVrdLe7n2u6qdyw1OiU2jd4+YzPTjBIBEQ==}
+  '@github/copilot-sdk-linux-arm64@1.0.28':
+    resolution: {integrity: sha512-41G/pQajhEz6rCeUSDOooFPrKSpgE8aOetH0y4a3zIJNKybr+1QfJJkia9O49LQpzQBAgn0AkEF/h6qrYdUnQQ==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@github/copilot-sdk-linux-x64@1.0.26':
-    resolution: {integrity: sha512-6bXv+sBf80m7GnSvfdtpMqFqXhp8flLC3+HAVNxzONBb+jEqH1hypvtO5Q1OO3oe9wmOUWcUHoT6x00Gw9BEzQ==}
+  '@github/copilot-sdk-linux-x64@1.0.28':
+    resolution: {integrity: sha512-yAsoTZfP//a1oirpdXc4oIX1m69ePP4ef3Yasmm3iT+hM7mpQLTxWWaDD6C2vuIJk1tPZLK0jndFVoFYr/d7yw==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@github/copilot-sdk-linuxmusl-arm64@1.0.26':
-    resolution: {integrity: sha512-amcznr+Ol8n6AVoUjwsep4YcMz0FlHy1e7fFBx2D9n2WT8D7CjJ/wXEP1FTmBfs5xixuPJNn6QpSrWHyWsZ7BQ==}
+  '@github/copilot-sdk-linuxmusl-arm64@1.0.28':
+    resolution: {integrity: sha512-ixerQJEpCDhsFKM/ct6JVUepczY+aISb9oygq4BWAoC1cxutsA3hIRY28UGH5yOGlCinw7Ig6MEoLA0pyEK+CQ==}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@github/copilot-sdk-linuxmusl-x64@1.0.26':
-    resolution: {integrity: sha512-UMN9bzdAFFojldzIrEbZrMenU8p4ZVbDZAJGbUgYTm0g8Nw7i6Ot9qndI5frJshLsdQ8qxBiKt/mD+9rTL3RKg==}
+  '@github/copilot-sdk-linuxmusl-x64@1.0.28':
+    resolution: {integrity: sha512-8vFhwdmy8mYswNBqkWqbuaKG833DbnZRctk7WL5cw5UjXqipEMMt6XKeadmdZihwLwPiDoZnG5ymmCslaFbpoA==}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@github/copilot-sdk-win32-arm64@1.0.26':
-    resolution: {integrity: sha512-JKaD2mj81mXntHJnHOA93hHOP2Bu9sQ5N4Z+WQq+c/cU2aTEtJXQjFraPf1m8q6sV4fQ2D6s62EisPx9qGbjcg==}
+  '@github/copilot-sdk-win32-arm64@1.0.28':
+    resolution: {integrity: sha512-jG18fJN20P5fm8pWkpvKcFzH8XupSj8cPo0ZULFJkmYDnV4UcMceGAJrIA8L/iNFu9vabfIP3cmOmWDPNyMP+A==}
     cpu: [arm64]
     os: [win32]
 
-  '@github/copilot-sdk-win32-x64@1.0.26':
-    resolution: {integrity: sha512-j580HTGCmfzTCRmMO1Un3MiyhhHYfUH5P/AtvbO105lk0+u4ymnIuxxo/TxL5wG5lyEuRbBDmi3acSRJxtzwcw==}
+  '@github/copilot-sdk-win32-x64@1.0.28':
+    resolution: {integrity: sha512-pzlzyuBHcF3TrgBue0w9cypmZ+1BpCKL1VdVO98SlXqOhOBJ2aHXAY42gI0ZVbZuCfkv4T+EUHAriyv0PJIidw==}
     cpu: [x64]
     os: [win32]
 
-  '@github/copilot-sdk@1.0.26':
-    resolution: {integrity: sha512-H3yQjF6f3/xodnZgD7CWL8NNmmNs0U/7iivqjDE689fLbF4hC25G9EnQ+xEGiWrNX+tXOnmYqLLVIbPJWdGg9Q==}
+  '@github/copilot-sdk@1.0.28':
+    resolution: {integrity: sha512-FCbSH9R0j9Wg2BYRAdurw2rncmXV9YTwdUzL75W561uqm3grSXwcJnYjCpc1nlDCa84lJriFC634Luigg4yqOg==}
     engines: {node: ^20.19.0 || >=22.12.0}
 
   '@humanfs/core@0.19.2':
@@ -1601,8 +1601,8 @@ packages:
     resolution: {integrity: sha512-tD40eHxA35h0PEIZNeIjkHoDR4YjjJp34biM0mDvplBe//mB+IHCqHDGV7pxF+7MklTvighcCPPZC7ynWyjdTA==}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
-  eslint@10.13.0:
-    resolution: {integrity: sha512-UohDjD4zSzEwhf58M3O7vc/ycc8O1I7dNlhtD0WxE8Px8EHNJKtUwzBqrzeGhisRuv2ag4sAYswszCJRgKXYUg==}
+  eslint@10.14.0:
+    resolution: {integrity: sha512-T0pNsxkb9IKmtQjhpK3d7nWOpFv+YHuMbTJnSVMoQblF0onvXfErrtp4V1jHtsQPan7dKaGVD0q1WCXnzMF31A==}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
     hasBin: true
     peerDependencies:
@@ -1682,9 +1682,6 @@ packages:
     resolution: {integrity: sha512-YsGpe3WHLK8ZYi4tWDg2Jy3ebRz2rXowDxnld4bkQB00cc/1Zw9AWnC0i9ztDJitivtQvaI9KaLyKrc+hBW0yg==}
     engines: {node: '>=8'}
 
-  find-package-json@1.2.0:
-    resolution: {integrity: sha512-+SOGcLGYDJHtyqHd87ysBhmaeQ95oWspDKnMXBrnQ9Eq4OkLNqejgoaD8xVWu6GPa0B6roa6KinCMEMcVeqONw==}
-
   find-up@5.0.0:
     resolution: {integrity: sha512-78/PXT1wlLLDgTzDs7sjq9hzz0vXD+zn+7wypEe4fXQxCmdmqfGsEPQxmiCSQI3ajFV91bVSsvNtrJRiW6nGng==}
     engines: {node: '>=10'}
@@ -1698,10 +1695,6 @@ packages:
   flru@1.0.2:
     resolution: {integrity: sha512-kWyh8ADvHBFz6ua5xYOPnUroZTT/bwWfrCeL0Wj1dzG4/YOmOcfJ99W8dOVyyynJN35rZ9aCOtHChqQovV7yog==}
     engines: {node: '>=6'}
-
-  fs-extra@11.4.0:
-    resolution: {integrity: sha512-EQsFzMUJkCKGr1ePqlYADkIUmHW1s3ZXr5Yqy6wbGrfUCphpl2maM/kyOIRA2HpP3AaFQTZXD4ldjek+nccddA==}
-    engines: {node: '>=14.14'}
 
   fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
@@ -1724,20 +1717,13 @@ packages:
     resolution: {integrity: sha512-XxwI8EOhVQgWp6iDL+3b0r86f4d6AX6zSU55HfB4ydCEuXLXc5FcYeOu+nnGftS4TEju/11rt4KJPTMgbfmv4A==}
     engines: {node: '>=10.13.0'}
 
-  glob@13.0.6:
-    resolution: {integrity: sha512-Wjlyrolmm8uDpm/ogGyXZXb1Z+Ca2B8NbJwqBVg0axK9GbBeoS7yGV6vjXnYdGm6X53iehEuxxbyiKp8QmN4Vw==}
-    engines: {node: 18 || 20 || >=22}
-
-  globals@17.13.0:
-    resolution: {integrity: sha512-RwMTC61u7hrG3ZJMkZQOK4JLJrKS8QtoTii63EmWvFXHqycY9FObBJQCbsLxSO8kjKhWE5kV1GC+Vb1g3RI0Zg==}
+  globals@17.14.0:
+    resolution: {integrity: sha512-UtdkTVyAJePQv0J2M9Xe4L0ruNSDV314XiIJsADI2Zf40bcdAonE/D/OhAU8AT99oij9mhLByb+NvA3QWZYgCg==}
     engines: {node: '>=18'}
 
   globby@16.2.4:
     resolution: {integrity: sha512-c8B/VNLmxRcmqqenRA9t+9IyOjf9+V6lTxPaUJLqOCONdQkWZ0ETYgX0qbtJqPsgCNusT9MZ5Jeidw8Eb9tn2g==}
     engines: {node: '>=20'}
-
-  graceful-fs@4.2.11:
-    resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
 
   graphlib@2.1.8:
     resolution: {integrity: sha512-jcLLfkpoVGmH7/InMC/1hIvOPSUh38oJtGhvrOFGzioE1DZ+0YW16RgmOJhHiuWTvGiJQ9Z1Ik43JvkRPRvE+A==}
@@ -1837,9 +1823,6 @@ packages:
 
   jsonc-parser@3.3.1:
     resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
-
-  jsonfile@6.2.1:
-    resolution: {integrity: sha512-zwOTdL3rFQ/lRdBnntKVOX6k5cKJwEc1HdilT71BWEu7J41gXIB2MRp+vxduPSwZJPWBxEzv4yH1wYLJGUHX4Q==}
 
   jsonpointer@5.0.1:
     resolution: {integrity: sha512-p/nXbhSEcu3pZRdkW1OfJhpsVtW1gd4Wa1fnQc9YLiTfAjn0312eMKimbdIQzuZl9aa9xUGaRlP9T/CJE/ditQ==}
@@ -1950,10 +1933,6 @@ packages:
     resolution: {integrity: sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==}
     hasBin: true
 
-  lru-cache@11.5.2:
-    resolution: {integrity: sha512-4pfM1Ff0x50o0tQwb5ucw/RzNyD0/YJME6IVcStalZuMWxdt3sR3huStTtxz4PUmvZfRguvDejasvQ2kifR11g==}
-    engines: {node: 20 || >=22}
-
   lz-string@1.5.0:
     resolution: {integrity: sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ==}
     hasBin: true
@@ -1968,14 +1947,9 @@ packages:
     resolution: {integrity: sha512-+Az7Ojz3iRGu8KYMvJ6xVhvrxP3eE+vEtJX75Ow88XBpcQNV/0lGX5ZynIIBftREo4DC2jsveAMDaeltmm8QvQ==}
     hasBin: true
 
-  markdown-table-formatter@1.7.0:
-    resolution: {integrity: sha512-/yddr66lbp5N1HESvkJoFIQq2VUUdFoBEJ+jAU/Mm/H2xaK80Nq2e0ugkJPWCRrix4GXhTUAccbsg1tQg5jiew==}
-    engines: {node: '>=18.0.0'}
-    hasBin: true
-
-  markdown-table-prettify@3.7.0:
-    resolution: {integrity: sha512-woZ1X+u0HsTygXL5kcptMSDwnjU//3UKTOH6fGdaABSSLOxTdWjr2P6i7dVrru5t/pxyEOT48/skv/8m8/VqdA==}
-    engines: {vscode: ^1.103.0}
+  markdown-table-formatter@2.1.0:
+    resolution: {integrity: sha512-hW41wosKWFBEyc+R4TZLnD6fxfr/Yusc+CmXvcrds+6GyyJHptvY6xTAVCkQqMEYE8rqm96JrSx4cgkB72oUjg==}
+    engines: {node: '>=22.17.0'}
     hasBin: true
 
   markdownlint-cli2-formatter-default@0.0.6:
@@ -2085,10 +2059,6 @@ packages:
     resolution: {integrity: sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==}
     engines: {node: 18 || 20 || >=22}
 
-  minipass@7.1.3:
-    resolution: {integrity: sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A==}
-    engines: {node: '>=16 || 14 >=14.17'}
-
   mrmime@2.0.1:
     resolution: {integrity: sha512-Y3wQdFg2Va6etvQ5I82yUhGdsKrcYox6p7FfL1LbK2J4V01F9TGlepTIhnK24t7koZibmg82KGglhA1XK5IsLQ==}
     engines: {node: '>=10'}
@@ -2137,10 +2107,6 @@ packages:
   path-key@3.1.1:
     resolution: {integrity: sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==}
     engines: {node: '>=8'}
-
-  path-scurry@2.0.2:
-    resolution: {integrity: sha512-3O/iVVsJAPsOnpwWIeD+d6z/7PmqApyQePUtCndjatj/9I5LylHvt5qluFaBT3I5h3r1ejfR056c+FCv+NnNXg==}
-    engines: {node: 18 || 20 || >=22}
 
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
@@ -2339,10 +2305,6 @@ packages:
     resolution: {integrity: sha512-lzlXPoVB0Uy/FvTaUgX39RbixYiSKoc3JSoSf01+0c2B6FR3qdYIPN7Qjo/AV7n6sqLCk0509cT3LRj1oSZ1+A==}
     engines: {node: '>=20'}
 
-  universalify@2.0.1:
-    resolution: {integrity: sha512-gptHNQghINnc/vTGIk0SOFGFNXw7JVrlRUtConJRlvaw6DuX0wO5Jeko9sWrMBhh+PsYAZ7oXAiOnf/UKogyiw==}
-    engines: {node: '>= 10.0.0'}
-
   update-browserslist-db@1.3.4:
     resolution: {integrity: sha512-t8wonIOdQyOjtPd2VktlBu6QjTVTks6v8bSi7kd0r2Vll8TK1JYDZtRRdbmCHOAMphkZgrzK+L+vXK4pyZ8t4A==}
     hasBin: true
@@ -2522,16 +2484,16 @@ snapshots:
 
   '@babel/compat-data@8.0.5': {}
 
-  '@babel/core@8.0.7':
+  '@babel/core@8.0.10':
     dependencies:
       '@babel/code-frame': 8.0.6
-      '@babel/generator': 8.0.6
+      '@babel/generator': 8.0.10
       '@babel/helper-compilation-targets': 8.0.7
-      '@babel/helpers': 8.0.7
-      '@babel/parser': 8.0.7
+      '@babel/helpers': 8.0.10
+      '@babel/parser': 8.0.10
       '@babel/template': 8.0.0
-      '@babel/traverse': 8.0.7
-      '@babel/types': 8.0.6
+      '@babel/traverse': 8.0.10
+      '@babel/types': 8.0.10
       '@types/gensync': 1.0.5
       convert-source-map: 2.0.0
       empathic: 2.1.0
@@ -2541,18 +2503,18 @@ snapshots:
       obug: 3.0.0
       verkit: 0.5.0
 
-  '@babel/eslint-parser@8.0.7(@babel/core@8.0.7)(eslint@10.13.0(supports-color@7.2.0))':
+  '@babel/eslint-parser@8.0.7(@babel/core@8.0.10)(eslint@10.14.0(supports-color@7.2.0))':
     dependencies:
-      '@babel/core': 8.0.7
-      eslint: 10.13.0(supports-color@7.2.0)
+      '@babel/core': 8.0.10
+      eslint: 10.14.0(supports-color@7.2.0)
       eslint-scope: 9.1.2
       eslint-visitor-keys: 5.0.1
       verkit: 0.5.0
 
-  '@babel/generator@8.0.6':
+  '@babel/generator@8.0.10':
     dependencies:
-      '@babel/parser': 8.0.7
-      '@babel/types': 8.0.6
+      '@babel/parser': 8.0.10
+      '@babel/types': 8.0.10
       '@jridgewell/gen-mapping': 0.4.0-beta.0
       '@jridgewell/trace-mapping': 0.3.31
       '@types/jsesc': 2.5.1
@@ -2568,13 +2530,13 @@ snapshots:
 
   '@babel/helper-globals@8.0.6': {}
 
-  '@babel/helper-plugin-utils@8.0.1(@babel/core@8.0.7)':
+  '@babel/helper-plugin-utils@8.0.1(@babel/core@8.0.10)':
     dependencies:
-      '@babel/core': 8.0.7
+      '@babel/core': 8.0.10
 
   '@babel/helper-string-parser@7.29.7': {}
 
-  '@babel/helper-string-parser@8.0.6': {}
+  '@babel/helper-string-parser@8.0.8': {}
 
   '@babel/helper-validator-identifier@7.29.7': {}
 
@@ -2582,40 +2544,40 @@ snapshots:
 
   '@babel/helper-validator-option@8.0.0': {}
 
-  '@babel/helpers@8.0.7':
+  '@babel/helpers@8.0.10':
     dependencies:
       '@babel/template': 8.0.0
-      '@babel/types': 8.0.6
+      '@babel/types': 8.0.10
 
   '@babel/parser@7.29.8':
     dependencies:
       '@babel/types': 7.29.8
 
-  '@babel/parser@8.0.7':
+  '@babel/parser@8.0.10':
     dependencies:
-      '@babel/types': 8.0.6
+      '@babel/types': 8.0.10
 
-  '@babel/plugin-syntax-typescript@8.0.3(@babel/core@8.0.7)':
+  '@babel/plugin-syntax-typescript@8.0.3(@babel/core@8.0.10)':
     dependencies:
-      '@babel/core': 8.0.7
-      '@babel/helper-plugin-utils': 8.0.1(@babel/core@8.0.7)
+      '@babel/core': 8.0.10
+      '@babel/helper-plugin-utils': 8.0.1(@babel/core@8.0.10)
 
   '@babel/runtime@7.29.7': {}
 
   '@babel/template@8.0.0':
     dependencies:
       '@babel/code-frame': 8.0.6
-      '@babel/parser': 8.0.7
-      '@babel/types': 8.0.6
+      '@babel/parser': 8.0.10
+      '@babel/types': 8.0.10
 
-  '@babel/traverse@8.0.7':
+  '@babel/traverse@8.0.10':
     dependencies:
       '@babel/code-frame': 8.0.6
-      '@babel/generator': 8.0.6
+      '@babel/generator': 8.0.10
       '@babel/helper-globals': 8.0.6
-      '@babel/parser': 8.0.7
+      '@babel/parser': 8.0.10
       '@babel/template': 8.0.0
-      '@babel/types': 8.0.6
+      '@babel/types': 8.0.10
       obug: 3.0.0
 
   '@babel/types@7.29.8':
@@ -2623,9 +2585,9 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@babel/types@8.0.6':
+  '@babel/types@8.0.10':
     dependencies:
-      '@babel/helper-string-parser': 8.0.6
+      '@babel/helper-string-parser': 8.0.8
       '@babel/helper-validator-identifier': 8.0.6
 
   '@bcoe/v8-coverage@1.0.2': {}
@@ -2847,9 +2809,9 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
-  '@eslint-community/eslint-utils@4.10.1(eslint@10.13.0(supports-color@7.2.0))':
+  '@eslint-community/eslint-utils@4.10.1(eslint@10.14.0(supports-color@7.2.0))':
     dependencies:
-      eslint: 10.13.0(supports-color@7.2.0)
+      eslint: 10.14.0(supports-color@7.2.0)
       eslint-visitor-keys: 3.4.3
 
   '@eslint-community/regexpp@4.12.2': {}
@@ -2870,9 +2832,9 @@ snapshots:
     dependencies:
       '@types/json-schema': 7.0.15
 
-  '@eslint/js@10.0.1(eslint@10.13.0(supports-color@7.2.0))':
+  '@eslint/js@10.0.1(eslint@10.14.0(supports-color@7.2.0))':
     optionalDependencies:
-      eslint: 10.13.0(supports-color@7.2.0)
+      eslint: 10.14.0(supports-color@7.2.0)
 
   '@eslint/object-schema@3.0.5': {}
 
@@ -2883,44 +2845,44 @@ snapshots:
 
   '@fontsource-variable/inter@5.3.0': {}
 
-  '@github/copilot-sdk-darwin-arm64@1.0.26':
+  '@github/copilot-sdk-darwin-arm64@1.0.28':
     optional: true
 
-  '@github/copilot-sdk-darwin-x64@1.0.26':
+  '@github/copilot-sdk-darwin-x64@1.0.28':
     optional: true
 
-  '@github/copilot-sdk-linux-arm64@1.0.26':
+  '@github/copilot-sdk-linux-arm64@1.0.28':
     optional: true
 
-  '@github/copilot-sdk-linux-x64@1.0.26':
+  '@github/copilot-sdk-linux-x64@1.0.28':
     optional: true
 
-  '@github/copilot-sdk-linuxmusl-arm64@1.0.26':
+  '@github/copilot-sdk-linuxmusl-arm64@1.0.28':
     optional: true
 
-  '@github/copilot-sdk-linuxmusl-x64@1.0.26':
+  '@github/copilot-sdk-linuxmusl-x64@1.0.28':
     optional: true
 
-  '@github/copilot-sdk-win32-arm64@1.0.26':
+  '@github/copilot-sdk-win32-arm64@1.0.28':
     optional: true
 
-  '@github/copilot-sdk-win32-x64@1.0.26':
+  '@github/copilot-sdk-win32-x64@1.0.28':
     optional: true
 
-  '@github/copilot-sdk@1.0.26':
+  '@github/copilot-sdk@1.0.28':
     dependencies:
       koffi: 3.2.1
       vscode-jsonrpc: 8.2.1
       zod: 4.3.6
     optionalDependencies:
-      '@github/copilot-sdk-darwin-arm64': 1.0.26
-      '@github/copilot-sdk-darwin-x64': 1.0.26
-      '@github/copilot-sdk-linux-arm64': 1.0.26
-      '@github/copilot-sdk-linux-x64': 1.0.26
-      '@github/copilot-sdk-linuxmusl-arm64': 1.0.26
-      '@github/copilot-sdk-linuxmusl-x64': 1.0.26
-      '@github/copilot-sdk-win32-arm64': 1.0.26
-      '@github/copilot-sdk-win32-x64': 1.0.26
+      '@github/copilot-sdk-darwin-arm64': 1.0.28
+      '@github/copilot-sdk-darwin-x64': 1.0.28
+      '@github/copilot-sdk-linux-arm64': 1.0.28
+      '@github/copilot-sdk-linux-x64': 1.0.28
+      '@github/copilot-sdk-linuxmusl-arm64': 1.0.28
+      '@github/copilot-sdk-linuxmusl-x64': 1.0.28
+      '@github/copilot-sdk-win32-arm64': 1.0.28
+      '@github/copilot-sdk-win32-x64': 1.0.28
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -3562,9 +3524,9 @@ snapshots:
 
   eslint-visitor-keys@5.0.1: {}
 
-  eslint@10.13.0(supports-color@7.2.0):
+  eslint@10.14.0(supports-color@7.2.0):
     dependencies:
-      '@eslint-community/eslint-utils': 4.10.1(eslint@10.13.0(supports-color@7.2.0))
+      '@eslint-community/eslint-utils': 4.10.1(eslint@10.14.0(supports-color@7.2.0))
       '@eslint-community/regexpp': 4.12.2
       '@eslint/config-array': 0.23.5(supports-color@7.2.0)
       '@eslint/config-helpers': 0.7.0
@@ -3663,8 +3625,6 @@ snapshots:
     dependencies:
       to-regex-range: 5.0.1
 
-  find-package-json@1.2.0: {}
-
   find-up@5.0.0:
     dependencies:
       locate-path: 6.0.0
@@ -3679,12 +3639,6 @@ snapshots:
   flatted@3.4.4: {}
 
   flru@1.0.2: {}
-
-  fs-extra@11.4.0:
-    dependencies:
-      graceful-fs: 4.2.11
-      jsonfile: 6.2.1
-      universalify: 2.0.1
 
   fsevents@2.3.3:
     optional: true
@@ -3701,13 +3655,7 @@ snapshots:
     dependencies:
       is-glob: 4.0.3
 
-  glob@13.0.6:
-    dependencies:
-      minimatch: 10.2.6
-      minipass: 7.1.3
-      path-scurry: 2.0.2
-
-  globals@17.13.0: {}
+  globals@17.14.0: {}
 
   globby@16.2.4:
     dependencies:
@@ -3718,8 +3666,6 @@ snapshots:
       micromatch: 4.0.8
       slash: 5.1.0
       unicorn-magic: 0.4.1
-
-  graceful-fs@4.2.11: {}
 
   graphlib@2.1.8:
     dependencies:
@@ -3788,12 +3734,6 @@ snapshots:
   json5@2.2.3: {}
 
   jsonc-parser@3.3.1: {}
-
-  jsonfile@6.2.1:
-    dependencies:
-      universalify: 2.0.1
-    optionalDependencies:
-      graceful-fs: 4.2.11
 
   jsonpointer@5.0.1: {}
 
@@ -3899,8 +3839,6 @@ snapshots:
     dependencies:
       js-tokens: 4.0.0
 
-  lru-cache@11.5.2: {}
-
   lz-string@1.5.0: {}
 
   magic-string@1.4.3:
@@ -3922,18 +3860,7 @@ snapshots:
       punycode.js: 2.3.1
       uc.micro: 3.0.0
 
-  markdown-table-formatter@1.7.0(supports-color@7.2.0):
-    dependencies:
-      debug: 4.4.3(supports-color@7.2.0)
-      find-package-json: 1.2.0
-      fs-extra: 11.4.0
-      glob: 13.0.6
-      markdown-table-prettify: 3.7.0
-      optionator: 0.9.4
-    transitivePeerDependencies:
-      - supports-color
-
-  markdown-table-prettify@3.7.0: {}
+  markdown-table-formatter@2.1.0: {}
 
   markdownlint-cli2-formatter-default@0.0.6(markdownlint-cli2@0.24.0(supports-color@7.2.0)):
     dependencies:
@@ -4159,8 +4086,6 @@ snapshots:
     dependencies:
       brace-expansion: 5.0.12
 
-  minipass@7.1.3: {}
-
   mrmime@2.0.1: {}
 
   ms@2.1.3: {}
@@ -4205,11 +4130,6 @@ snapshots:
   path-exists@4.0.0: {}
 
   path-key@3.1.1: {}
-
-  path-scurry@2.0.2:
-    dependencies:
-      lru-cache: 11.5.2
-      minipass: 7.1.3
 
   pathe@2.0.3: {}
 
@@ -4395,8 +4315,6 @@ snapshots:
   undici-types@7.18.2: {}
 
   unicorn-magic@0.4.1: {}
-
-  universalify@2.0.1: {}
 
   update-browserslist-db@1.3.4(browserslist@4.29.3):
     dependencies:

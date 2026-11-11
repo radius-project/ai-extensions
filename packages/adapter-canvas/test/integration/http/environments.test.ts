@@ -1278,7 +1278,8 @@ describe("the async delete route through its background runner", () => {
           ]),
           Tags: [
             { Key: "radius-managed", Value: "true" },
-            { Key: "radius-repository", Value: "octo/app" }
+            { Key: "radius-repository", Value: "octo/app" },
+            { Key: "radius-repository-id", Value: "42" }
           ]
         }
       },

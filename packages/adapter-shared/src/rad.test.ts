@@ -1530,7 +1530,7 @@ describe("runRadAppGraph artifact completion", () => {
         "    return;",
         "  }",
         '  if (process.env.FAKE_RAD_SCENARIO === "success-no-descendant") {',
-        '    fs.writeFileSync("app-graph.json", JSON.stringify({ resources: [] }));',
+        '    fs.writeFileSync("app-graph.json", process.env.FAKE_RAD_GRAPH || JSON.stringify({ resources: [] }));',
         "    process.exit(0);",
         "    return;",
         "  }",
@@ -1744,6 +1744,7 @@ describe("runRadAppGraph artifact completion", () => {
 
   it("does not expose malformed graph content through the parse failure", async () => {
     const sentinel = "fixture-plaintext-value";
+    process.env.FAKE_RAD_SCENARIO = "success-no-descendant";
     process.env.FAKE_RAD_GRAPH = `{"password":${sentinel}`;
     const bicepFile = path.join(binDir, "app.bicep");
     const saved = path.join(binDir, ".radius", "app-graph.json");
@@ -1751,6 +1752,7 @@ describe("runRadAppGraph artifact completion", () => {
 
     const failure = await runRadAppGraph(bicepFile, {
       radPath: bin,
+      timeout: 4000,
       saveGraphJsonTo: saved
     }).catch((error: unknown) => error);
 

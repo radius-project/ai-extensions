@@ -928,11 +928,12 @@ describe("AWS environment access setup", () => {
         }
       ]);
       // No role name was given, so the repository's default role is created,
-      // tagged with this operation.
+      // tagged with this operation and the ID GitHub returned.
       expect(h.find("iam create-role")).toEqual(
         expect.arrayContaining([
           "--role-name",
           ROLE,
+          "Key=radius-repository-id,Value=42",
           "Key=radius-operation,Value=op-1"
         ])
       );
@@ -1634,7 +1635,8 @@ describe("AWS environment access removal of the cluster's access entry", () => {
         AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects),
         Tags: [
           { Key: "radius-managed", Value: "true" },
-          { Key: "radius-repository", Value: "octo/shop" }
+          { Key: "radius-repository", Value: "octo/shop" },
+          { Key: "radius-repository-id", Value: "42" }
         ]
       }
     }),
@@ -2797,7 +2799,8 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
                 AssumeRolePolicyDocument: trust,
                 Tags: [
                   { Key: "radius-managed", Value: "true" },
-                  { Key: "radius-repository", Value: "octo/shop" }
+                  { Key: "radius-repository", Value: "octo/shop" },
+                  { Key: "radius-repository-id", Value: "42" }
                 ]
               }
             })
@@ -3848,6 +3851,68 @@ describe("AWS environment access rollback", () => {
     ]);
     expect(h.commands()).not.toContain("eks delete-access-entry");
   });
+
+  it.each([
+    ["this repository's ID", "42", "deleted"],
+    ["this repository's name but another repository's ID", "99", "skipped"]
+  ])(
+    "decides a role tagged with %s by the ID GitHub returns, reading it once",
+    async (_label, id, outcome) => {
+      const h = harness(
+        {
+          ...rollbackScript({
+            "iam create-policy": lockPolicy("LOCK1"),
+            "iam get-policy": lockPolicy("LOCK1")
+          }),
+          "iam get-role": ok({
+            Role: {
+              Arn: ROLE_ARN,
+              RoleId: "AROA1",
+              AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, []),
+              Tags: [
+                { Key: "radius-managed", Value: "true" },
+                { Key: "radius-repository", Value: "octo/shop" },
+                { Key: "radius-repository-id", Value: id }
+              ]
+            }
+          }),
+          "eks describe-access-entry": ok({
+            accessEntry: { tags: { "radius-managed": "true" } }
+          }),
+          "eks delete-access-entry": ok()
+        },
+        defaultSubject,
+        undefined,
+        undefined,
+        {}
+      );
+
+      const result = await h.access.rollback({
+        repo: "octo/shop",
+        environment: "dev",
+        operationId: "op-1",
+        roleArn: ROLE_ARN,
+        targets: [
+          {
+            key: "entry",
+            artifactType: "aws_access_entry",
+            roleArn: ROLE_ARN,
+            roleName: ROLE,
+            roleId: "AROA1",
+            cluster: "shop",
+            region: "us-west-2"
+          }
+        ]
+      });
+
+      expect(result.outcomes).toEqual([
+        expect.objectContaining({ key: "entry", outcome })
+      ]);
+      expect(
+        h.githubCalls.filter((call) => call.path === "/repos/octo/shop")
+      ).toHaveLength(1);
+    }
+  );
 });
 
 function managedRoleFor(subjects: string[]): string {
@@ -3855,7 +3920,8 @@ function managedRoleFor(subjects: string[]): string {
     AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects),
     Tags: [
       { Key: "radius-managed", Value: "true" },
-      { Key: "radius-repository", Value: "octo/shop" }
+      { Key: "radius-repository", Value: "octo/shop" },
+      { Key: "radius-repository-id", Value: "42" }
     ]
   });
 }

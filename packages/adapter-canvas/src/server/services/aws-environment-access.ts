@@ -38,6 +38,7 @@ import {
   type AwsDeployIdentityRemovalResult,
   type AwsEnvironmentListing,
   type AwsLockResult,
+  type AwsRepositoryIdLookup,
   type AwsSetupRollbackOutcome,
   type AwsSetupRollbackTarget,
   type AwsTrustRepairResult
@@ -741,6 +742,7 @@ export function createAwsEnvironmentAccess<Operation>(
         result = await setupAwsDeployIdentity(
           {
             repo,
+            repoId,
             operationId: dependencies.operationId(operation),
             environment,
             accountId,
@@ -1005,6 +1007,7 @@ export function createAwsEnvironmentAccess<Operation>(
           const removal = await removeAwsEnvironmentFromRole(
             {
               repo: policyRepository,
+              repoId: oidc.repoId,
               roleArn,
               environment,
               subjects,
@@ -1064,9 +1067,23 @@ export function createAwsEnvironmentAccess<Operation>(
         },
         null,
         async (ports) => {
+          // Read once, for the access entry's ownership check and its listing
+          // of the other environments.
+          let identity: Promise<ResolveOidcSubjectResult> | undefined;
+          const readIdentity = () =>
+            (identity ??= resolveOidc(repo, environment));
           try {
+            let repository: AwsRepositoryIdLookup;
+            try {
+              repository = { ok: true, repoId: (await readIdentity()).repoId };
+            } catch (error) {
+              repository = {
+                ok: false,
+                reason: dependencies.errorMessage(error)
+              };
+            }
             await rollbackAwsSetupChanges(
-              { repo, environment, roleArn, targets },
+              { repo, repository, environment, roleArn, targets },
               {
                 ...ports,
                 acquireLock: async (role) => {
@@ -1078,7 +1095,7 @@ export function createAwsEnvironmentAccess<Operation>(
                 listOtherEnvironments: async () => {
                   active();
                   try {
-                    const oidc = await resolveOidc(repo, environment);
+                    const oidc = await readIdentity();
                     return await listOtherAwsEnvironments(
                       repo,
                       environment,
@@ -1138,7 +1155,7 @@ export function createAwsEnvironmentAccess<Operation>(
       const environment = stored;
       // Always from GitHub: AWS_TRUST_SUBJECTS is editable by anyone with
       // admin on the repository, so it cannot decide what Repair trusts.
-      const { subjects, subjectConfig } = await resolveIdentity(
+      const { repoId, subjects, subjectConfig } = await resolveIdentity(
         repo,
         environment
       );
@@ -1147,7 +1164,15 @@ export function createAwsEnvironmentAccess<Operation>(
         null,
         (ports) =>
           repairAwsEnvironmentTrust(
-            { repo, environment, roleArn, subjects, subjectConfig, policyName },
+            {
+              repo,
+              repoId,
+              environment,
+              roleArn,
+              subjects,
+              subjectConfig,
+              policyName
+            },
             {
               ...ports,
               // A delete can run between the first read of the environment and

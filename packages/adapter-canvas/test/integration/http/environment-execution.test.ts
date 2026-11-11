@@ -770,7 +770,7 @@ describe("production environment owner HTTP binding", () => {
           );
         }
       } finally {
-        owner.shutdown();
+        await owner.shutdown();
         await runtime.stopServer("aws-cleanup", true);
         await aws.restore();
       }
@@ -977,8 +977,7 @@ describe("production environment owner HTTP binding", () => {
         expect.arrayContaining(["continue-setup", "rollback", "exit-setup"])
       );
     } finally {
-      await runtime.stopServer("aws-panel", true);
-      await aws.restore();
+      await restoreAwsSetup(runtime, aws);
     }
   });
 
@@ -1097,8 +1096,7 @@ describe("production environment owner HTTP binding", () => {
         expect.arrayContaining(["continue-setup", "rollback", "exit-setup"])
       );
     } finally {
-      await runtime.stopServer("aws-panel", true);
-      await aws.restore();
+      await restoreAwsSetup(runtime, aws);
     }
   });
   it("rolls back what an AWS setup created, under the lock, then its GitHub environment", async () => {
@@ -1247,7 +1245,7 @@ describe("production environment owner HTTP binding", () => {
         expect.anything()
       );
     } finally {
-      owner.shutdown();
+      await owner.shutdown();
       await runtime.stopServer("aws-rollback", true);
       await aws.restore();
     }
@@ -1370,6 +1368,9 @@ describe("production environment owner HTTP binding", () => {
         (await aws.calls()).some((call) => call.startsWith("iam delete-role "))
       ).toBe(false);
 
+      await vi.waitFor(() => expect(owner.pendingOperationIds()).toEqual([]), {
+        timeout: 15000
+      });
       await aws.restore();
       aws = await fakeAwsOnPath(answers({ stdout: "" }));
       expect((await post("retry-cleanup")).status).toBe(202);
@@ -1392,7 +1393,7 @@ describe("production environment owner HTTP binding", () => {
       expect(retried).toContain("iam delete-role");
       expect(retried.at(-1)).toBe("iam delete-policy");
     } finally {
-      owner.shutdown();
+      await owner.shutdown();
       await runtime.stopServer("aws-retry", true);
       await aws.restore();
     }
@@ -1513,7 +1514,7 @@ describe("production environment owner HTTP binding", () => {
           )
         ).toEqual(stopAtLock === 1 ? [] : ["aws_role_policy deleted"]);
       } finally {
-        owner.shutdown();
+        await owner.shutdown();
         await runtime.stopServer("aws-replaced", true);
         await aws.restore();
       }
@@ -1888,8 +1889,7 @@ describe("production environment owner HTTP binding", () => {
         "includes only the claims repository_owner, context."
       );
     } finally {
-      await runtime.stopServer("aws-panel", true);
-      await aws.restore();
+      await restoreAwsSetup(runtime, aws);
     }
   });
 
@@ -1912,8 +1912,7 @@ describe("production environment owner HTTP binding", () => {
       expect(op.failure.message).not.toContain("fake aws: refused");
       expect(op.failure.message).toContain("Nothing was created in AWS.");
     } finally {
-      await runtime.stopServer("aws-panel", true);
-      await aws.restore();
+      await restoreAwsSetup(runtime, aws);
     }
   });
 
@@ -1943,8 +1942,7 @@ describe("production environment owner HTTP binding", () => {
       expect(op.failure.message).toContain("not allowed iam:CreatePolicy");
       expect(op.failure.message).toContain("Nothing was created in AWS.");
     } finally {
-      await runtime.stopServer("aws-panel", true);
-      await aws.restore();
+      await restoreAwsSetup(runtime, aws);
     }
   });
 
@@ -1983,7 +1981,97 @@ describe("production environment owner HTTP binding", () => {
         expect.stringMatching(/^iam get-role /)
       );
     } finally {
-      await runtime.stopServer("aws-panel", true);
+      await restoreAwsSetup(runtime, aws);
+    }
+  });
+
+  it("keeps the AWS fixture until a terminal setup releases its lock after panel close", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout:
+          '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
+      },
+      "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
+      "iam get-role": { stderr: "AccessDenied", code: 254 },
+      "iam delete-policy": { stdout: "" }
+    });
+    const runtime = awsSetupRuntime();
+    const finalizing = deferred();
+    const release = deferred();
+    await configureOperationStore({
+      load: async () => null,
+      save: async (envelope) => {
+        if (
+          envelope.operations.some((saved) => {
+            const op = fromPersistedOperation(saved);
+            return op.endedAt && op.context.awsDeployIdentityLock === null;
+          })
+        ) {
+          finalizing.resolve();
+          await release.promise;
+        }
+      }
+    });
+    const log = process.env.FAKE_AWS_LOG;
+    const shutdown = vi.spyOn(runtime, "shutdown");
+    const restore = vi.spyOn(aws, "restore");
+    let cleanup: Promise<void> | undefined;
+    try {
+      const op = await runAwsSetup(runtime, "op_aws_delayed_release");
+      await finalizing.promise;
+      expect(op.state).toBe("failed");
+      let restored = false;
+      cleanup = restoreAwsSetup(runtime, aws).then(() => {
+        restored = true;
+      });
+      await vi.waitFor(() => expect(shutdown).toHaveBeenCalledOnce(), {
+        timeout: 15000
+      });
+      expect(runtime.servers.size).toBe(0);
+      expect(restore).not.toHaveBeenCalled();
+      expect(restored).toBe(false);
+      expect(process.env.FAKE_AWS_LOG).toBe(log);
+      expect(await aws.calls()).toContainEqual(
+        expect.stringMatching(/^iam delete-policy /)
+      );
+
+      release.resolve();
+      await cleanup;
+      expect(op.context.awsDeployIdentityLock).toBeNull();
+      expect(restored).toBe(true);
+      await expect(aws.calls()).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      release.resolve();
+      await (cleanup ?? restoreAwsSetup(runtime, aws));
+      await runtime.shutdown();
+    }
+  });
+
+  it("restores the AWS fixture before reporting a failed execution drain", async () => {
+    const originalPath = process.env.PATH;
+    const originalLog = process.env.FAKE_AWS_LOG;
+    const aws = await fakeAwsOnPath({});
+    const runtime = awsSetupRuntime();
+    const shutdown = runtime.shutdown;
+    vi.spyOn(runtime, "shutdown").mockImplementationOnce(async () => {
+      await shutdown();
+      return {
+        complete: false,
+        failures: ["GitHub account restoration failed"]
+      };
+    });
+    try {
+      await expect(restoreAwsSetup(runtime, aws)).rejects.toMatchObject({
+        name: "AssertionError"
+      });
+      expect(process.env.PATH).toBe(originalPath);
+      expect(process.env.FAKE_AWS_LOG).toBe(originalLog);
+      await expect(aws.calls()).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await runtime.shutdown();
       await aws.restore();
     }
   });
@@ -2163,8 +2251,7 @@ describe("production environment owner HTTP binding", () => {
         expect(op.context.awsDeployIdentityLock).toBeNull()
       );
     } finally {
-      await runtime.stopServer("aws-panel", true);
-      await aws.restore();
+      await restoreAwsSetup(runtime, aws);
     }
   });
 
@@ -2231,8 +2318,7 @@ describe("production environment owner HTTP binding", () => {
           )
         ).toEqual([]);
       } finally {
-        await runtime.stopServer("aws-panel", true);
-        await aws.restore();
+        await restoreAwsSetup(runtime, aws);
       }
     }
   );
@@ -2778,6 +2864,7 @@ async function fakeAwsOnPath(
 // reads AWS setup makes for fixture/app. `subjectCustomization` is GitHub's
 // OIDC subject customization for it; by default it has none.
 function awsSetupRuntime(subjectCustomization?: unknown) {
+  const owner = createEnvironmentExecutionOwner();
   const run = vi.fn(async (args: string[]) => {
     const command = args.join(" ");
     if (command === "api user") {
@@ -2819,8 +2906,8 @@ function awsSetupRuntime(subjectCustomization?: unknown) {
     requiresKeyringSwitch: false,
     run
   });
-  return createTestCanvasServerRuntime({
-    executionOwner: createEnvironmentExecutionOwner(),
+  const runtime = createTestCanvasServerRuntime({
+    executionOwner: owner,
     accountContext: createEnvironmentAccountContext(
       "runtime-aws-cli",
       createGitHubAccountCoordinator({
@@ -2834,6 +2921,17 @@ function awsSetupRuntime(subjectCustomization?: unknown) {
     ),
     awsEnabled: true
   });
+  return { ...runtime, shutdown: owner.shutdown };
+}
+
+async function restoreAwsSetup(
+  runtime: ReturnType<typeof awsSetupRuntime>,
+  aws: Awaited<ReturnType<typeof fakeAwsOnPath>>
+) {
+  await runtime.stopServer("aws-panel", true);
+  const outcome = await runtime.shutdown();
+  await aws.restore();
+  expect(outcome).toEqual({ complete: true, failures: [] });
 }
 
 // Schedule a saved AWS setup through the server and wait for it to end.
