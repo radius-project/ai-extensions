@@ -9,7 +9,7 @@
 #   AWS_EKS_CLUSTER_NAME                      required
 #   RADIUS_SUBNET_IDS                         checked when set, required when REQUIRE_SUBNETS=true
 #   RECIPE_PACK_URL, RECIPE_PACK_REF          checked when either is set
-#   RAD_COMMANDS                              optional; a command or a JSON array of commands
+#   RAD_COMMANDS                              optional; a command or exactly one JSON array of commands
 #   APP_FILE                                  checked when set and RAD_COMMANDS is blank
 #   RADIUS_DEPLOY_PARAMS                      optional; must be exactly one JSON object, and is never printed
 #
@@ -64,8 +64,10 @@ fi
 rad_commands="${RAD_COMMANDS:-}"
 commands=()
 if [[ -n "${rad_commands//[[:space:]]/}" ]]; then
-  # Parsed the way run-rad-commands parses it: a JSON array, or one command string.
-  if printf '%s' "$rad_commands" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  # Exactly one JSON array, or one command string. run-rad-commands would run
+  # every array in a stream such as '[] []', so a stream is checked as one
+  # command string, which no allowed verb starts.
+  if printf '%s' "$rad_commands" | jq -se 'length == 1 and (.[0] | type) == "array"' >/dev/null 2>&1; then
     while IFS= read -r cmd; do
       commands+=("$cmd")
     done < <(printf '%s' "$rad_commands" | jq -r '.[]')

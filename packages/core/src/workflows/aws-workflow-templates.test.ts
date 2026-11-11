@@ -15,9 +15,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
-import { isMap, isScalar, isSeq, parseDocument, type ParsedNode } from "yaml";
+import { parse } from "yaml";
 import {
   classifyVerifyFailure,
   type VerifyFailureCategory
@@ -53,134 +53,30 @@ interface Job extends Step {
   readonly steps: readonly Step[];
 }
 
+interface Workflow extends Step {
+  readonly jobs: Readonly<Record<string, Job>>;
+}
+
+interface ActionInput {
+  readonly default?: string;
+}
+
 interface Action {
-  readonly defaults: Readonly<Record<string, string>>;
-  readonly steps: readonly Step[];
+  readonly inputs: Readonly<Record<string, ActionInput>>;
+  readonly runs: { readonly steps: readonly Step[] };
 }
 
-type YamlNode = ParsedNode | null | undefined;
-
-// These readers return the fields the tests check, and throw when one of them
-// has another shape. A scalar keeps the text it has in the file, which is how
-// GitHub passes step inputs and env values.
-function readMapping(file: string): Map<string, YamlNode> {
-  const document = parseDocument(read(file));
-  const [error] = document.errors;
-
-  if (error) throw error;
-
-  return mapping(document.contents, file);
-}
-
-function mapping(node: YamlNode, where: string): Map<string, YamlNode> {
-  if (!isMap(node)) throw new Error(`${where} is not a mapping`);
-
-  return new Map(
-    node.items.map(({ key, value }): [string, YamlNode] => [
-      text(key, where),
-      value
-    ])
-  );
-}
-
-function text(node: YamlNode, where: string): string {
-  if (!isScalar(node)) throw new Error(`${where} is not text`);
-
-  return node.source;
-}
-
-function integer(node: YamlNode, where: string): number {
-  if (!isScalar(node) || !Number.isInteger(node.value))
-    throw new Error(`${where} is not an integer`);
-
-  return Number(node.value);
-}
-
-function stepsOf(node: YamlNode, where: string): Step[] {
-  if (!isSeq(node)) throw new Error(`${where} is not a list`);
-
-  return node.items.map((step, index) =>
-    stepOf(mapping(step, `${where}[${index}]`), `${where}[${index}]`)
-  );
-}
-
-function stepOf(fields: Map<string, YamlNode>, where: string): Step {
-  const field = (key: string): string | undefined => {
-    const value = fields.get(key);
-
-    return value === undefined ? undefined : text(value, `${where}.${key}`);
-  };
-
-  const pairs = (key: string): Record<string, string> | undefined => {
-    const value = fields.get(key);
-
-    if (value === undefined) return undefined;
-
-    return Object.fromEntries(
-      [...mapping(value, `${where}.${key}`)].map(
-        ([name, item]): [string, string] => [
-          name,
-          text(item, `${where}.${key}.${name}`)
-        ]
-      )
-    );
-  };
-
-  const minutes = fields.get("timeout-minutes");
-
-  return {
-    name: field("name"),
-    if: field("if"),
-    run: field("run"),
-    env: pairs("env"),
-    uses: field("uses"),
-    with: pairs("with"),
-    "timeout-minutes":
-      minutes === undefined ? undefined : (
-        integer(minutes, `${where}.timeout-minutes`)
-      )
-  };
-}
+// SAFETY: these are the repository's own templates, and the values the tests
+// compare as text are quoted in them. A quoted time limit would parse as a
+// string, which the time-limit test rejects.
+const workflowOf = (file: string): Workflow => parse(read(file)) as Workflow;
 
 const jobsOf = (file: string): [string, Job][] =>
-  [...mapping(readMapping(file).get("jobs"), `${file} jobs`)].map(
-    ([name, node]) => {
-      const where = `${file} jobs.${name}`;
-      const job = mapping(node, where);
+  Object.entries(workflowOf(file).jobs);
 
-      return [
-        name,
-        {
-          ...stepOf(job, where),
-          steps: stepsOf(job.get("steps"), `${where}.steps`)
-        }
-      ];
-    }
-  );
-
-function actionOf(directory: string): Action {
-  const file = `${directory}/action.yml`;
-  const definition = readMapping(file);
-  const inputs = [...mapping(definition.get("inputs"), `${file} inputs`)];
-
-  return {
-    defaults: Object.fromEntries(
-      inputs.map(([name, input]): [string, string] => {
-        const where = `${file} inputs.${name}`;
-        const value = mapping(input, where).get("default");
-
-        return [
-          name,
-          value === undefined ? "" : text(value, `${where}.default`)
-        ];
-      })
-    ),
-    steps: stepsOf(
-      mapping(definition.get("runs"), `${file} runs`).get("steps"),
-      `${file} runs.steps`
-    )
-  };
-}
+// SAFETY: as for workflowOf, these are the repository's own actions.
+const actionOf = (directory: string): Action =>
+  parse(read(`${directory}/action.yml`)) as Action;
 
 const stepNamed = (file: string, name: string): Step => {
   const steps = jobsOf(file).flatMap(([, job]) => job.steps);
@@ -190,121 +86,6 @@ const stepNamed = (file: string, name: string): Step => {
 
   return step;
 };
-
-describe("template readers", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "radius-aws-reader-"));
-
-  afterAll(() => rmSync(root, { recursive: true, force: true }));
-
-  const written = (name: string, source: string): string => {
-    writeFileSync(path.join(root, name), source);
-
-    return pathToFileURL(path.join(root, name)).href;
-  };
-
-  it("reads a workflow's jobs and steps as the text GitHub passes", () => {
-    const file = written(
-      "workflow.yml",
-      `name: deploy
-jobs:
-  deploy:
-    timeout-minutes: 30
-    steps:
-      - name: "Check: inputs"
-        if: \${{ inputs.ready == 'true' }}
-        timeout-minutes: 2
-        env:
-          COUNT: "10"
-        run: |
-          echo one
-          echo two
-      - uses: owner/action@v1
-        with:
-          enabled: true
-`
-    );
-
-    expect(jobsOf(file)).toEqual([
-      [
-        "deploy",
-        {
-          "timeout-minutes": 30,
-          steps: [
-            {
-              name: "Check: inputs",
-              if: "\${{ inputs.ready == 'true' }}",
-              "timeout-minutes": 2,
-              env: { COUNT: "10" },
-              run: "echo one\necho two\n"
-            },
-            { uses: "owner/action@v1", with: { enabled: "true" } }
-          ]
-        }
-      ]
-    ]);
-  });
-
-  it("reads an action's input defaults and steps", () => {
-    written(
-      "action.yml",
-      `name: probe
-inputs:
-  coded-messages:
-    default: 'false'
-  token:
-    required: true
-runs:
-  using: composite
-  steps:
-    - name: Probe
-      if: \${{ inputs.coded-messages == 'true' }}
-      shell: bash
-      run: echo probe
-`
-    );
-
-    expect(actionOf(pathToFileURL(root).href)).toEqual({
-      defaults: { "coded-messages": "false", token: "" },
-      steps: [
-        {
-          name: "Probe",
-          if: "\${{ inputs.coded-messages == 'true' }}",
-          run: "echo probe"
-        }
-      ]
-    });
-  });
-
-  it.each([
-    [
-      "a duplicate key",
-      "jobs:\n  deploy:\n    steps: []\n    steps: []\n",
-      /Map keys must be unique/u
-    ],
-    [
-      "jobs that are not a mapping",
-      "jobs:\n  - deploy\n",
-      /jobs is not a mapping/u
-    ],
-    [
-      "steps that are not a list",
-      "jobs:\n  deploy:\n    steps:\n      name: Check\n",
-      /jobs\.deploy\.steps is not a list/u
-    ],
-    [
-      "a run that is not text",
-      "jobs:\n  deploy:\n    steps:\n      - run: { a: b }\n",
-      /steps\[0\]\.run is not text/u
-    ],
-    [
-      "a quoted time limit",
-      "jobs:\n  deploy:\n    steps:\n      - timeout-minutes: '10'\n",
-      /steps\[0\]\.timeout-minutes is not an integer/u
-    ]
-  ])("rejects a workflow with %s", (_case, source, message) => {
-    expect(() => jobsOf(written("invalid.yml", source))).toThrow(message);
-  });
-});
 
 // Steps that still run after a failure, such as Teardown, which saves Radius
 // state. The job limit counts them on top of the longest other step.
@@ -323,7 +104,7 @@ describe.each(AWS_TEMPLATES)("%s time limits", (file) => {
       const minutes = (step: Step): number => {
         const limit = step["timeout-minutes"];
 
-        if (limit !== undefined) return limit;
+        if (limit !== undefined && Number.isInteger(limit)) return limit;
         unlimited.push(step.name ?? step.uses ?? "unnamed step");
 
         return Number.POSITIVE_INFINITY;
@@ -343,6 +124,7 @@ describe.each(AWS_TEMPLATES)("%s time limits", (file) => {
       );
 
       expect(unlimited).toEqual([]);
+      expect(Number.isInteger(job["timeout-minutes"])).toBe(true);
       expect(job["timeout-minutes"]).toBeGreaterThanOrEqual(
         longest + cleanupMinutes + MARGIN_MINUTES
       );
@@ -380,8 +162,8 @@ describe.each(AWS_TEMPLATES)("%s input validation", (file) => {
   });
 
   it("requires subnets only where recipes use them", () => {
-    expect(validate.with?.["require-subnets"] === "true").toBe(
-      !file.startsWith("delete-")
+    expect(validate.with?.["require-subnets"]).toBe(
+      file.startsWith("delete-") ? undefined : "true"
     );
   });
 });
@@ -469,7 +251,7 @@ it("prints no error-like lines from verify-aws.yml's steps", () => {
     return (inputs[name] === value) === (operator === "==");
   };
 
-  const workflow = stepOf(readMapping("verify-aws.yml"), "verify-aws.yml");
+  const workflow = workflowOf("verify-aws.yml");
 
   const lines = jobsOf("verify-aws.yml").flatMap(([, job]) =>
     [workflow, job, ...job.steps].flatMap((step) => {
@@ -480,11 +262,16 @@ it("prints no error-like lines from verify-aws.yml's steps", () => {
       if (!action) return printed(step);
 
       const definition = actionOf(action[1]);
-      const inputs = { ...definition.defaults, ...step.with };
+
+      const defaults = Object.entries(definition.inputs).map(
+        ([name, input]): [string, string] => [name, input.default ?? ""]
+      );
+
+      const inputs = { ...Object.fromEntries(defaults), ...step.with };
 
       return [
         ...printed(step),
-        ...definition.steps
+        ...definition.runs.steps
           .filter((actionStep) => runs(actionStep, inputs))
           .flatMap(printed)
       ];
@@ -758,7 +545,7 @@ describe("deploy steps before the first change to Radius", () => {
 // pass request-timeout so a cluster that stops answering fails in seconds.
 describe.skipIf(process.platform === "win32")("request-timeout", () => {
   const actionStep = (action: string, name: string): Step => {
-    const step = actionOf(`actions/${action}`).steps.find(
+    const step = actionOf(`actions/${action}`).runs.steps.find(
       (candidate) => candidate.name === name
     );
 

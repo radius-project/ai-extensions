@@ -55,6 +55,7 @@ expect_pass "deploy inputs pass"
 expect_pass "delete without subnets passes" "${delete[@]}"
 expect_pass "allowed rad commands pass, app file not needed" 'RAD_COMMANDS=["app list", "", "resource list Radius.Data/redisCaches"]' APP_FILE=missing.bicep
 expect_pass "one allowed command string passes" 'RAD_COMMANDS=deploy .radius/app.bicep'
+expect_pass "one array with surrounding whitespace passes" $'RAD_COMMANDS= ["app list"]\n'
 expect_pass "deploy params object passes" $'RADIUS_DEPLOY_PARAMS= {"password": "s3cret"}\n'
 expect_pass "unset deploy params pass" RADIUS_DEPLOY_PARAMS=
 expect_pass "100-character cluster name passes" "AWS_EKS_CLUSTER_NAME=a$(printf 'b%.0s' {1..99})"
@@ -76,6 +77,9 @@ expect_code "pack URL from another commit" INPUT_INVALID 1 RECIPE_PACK_URL=https
 expect_code "short pack commit" INPUT_INVALID 1 RECIPE_PACK_REF=0123456
 expect_code "disallowed command in an array" INPUT_COMMAND_NOT_ALLOWED 1 'RAD_COMMANDS=["app list", "install kubernetes --set token=s3cret"]'
 expect_code "disallowed single command" INPUT_COMMAND_NOT_ALLOWED 1 'RAD_COMMANDS=workspace switch prod'
+for commands in '[] []' '["app list"] ["deploy .radius/app.bicep"]'; do
+  expect_code "rad command stream ${commands@Q} rejected" INPUT_COMMAND_NOT_ALLOWED 1 "RAD_COMMANDS=$commands"
+done
 expect_code "missing app file" INPUT_APP_FILE_MISSING 1 APP_FILE=.radius/missing.bicep
 for params in '["s3cret-value"]' '"s3cret-value"' 42 null '  ' $'\n' '{"password": "s3cret"' \
   '{} {}' '[] {}' '{"a": "s3cret"} {"b": 1}'; do
