@@ -135,6 +135,7 @@ describe("rollbackAwsSetupArtifacts", () => {
       operationId: "op_rollback",
       roleArn: ROLE_ARN,
       onLocked: expect.any(Function),
+      onOutcome: expect.any(Function),
       targets: [
         expect.objectContaining({
           artifactType: "aws_access_entry",
@@ -553,5 +554,78 @@ describe("rollbackAwsSetupArtifacts", () => {
         (target: { artifactType: string }) => target.artifactType
       )
     ).toEqual(["aws_trust_subject"]);
+  });
+
+  describe("an outcome AWS answers during the rollback", () => {
+    // Hands over each target's outcome as it is answered, then returns them.
+    function answering(outcome: (key: string) => AwsSetupRollbackOutcome) {
+      return {
+        rollback: vi.fn(
+          async (input: {
+            targets: readonly { key: string }[];
+            onOutcome?(outcome: AwsSetupRollbackOutcome): Promise<void>;
+          }) => {
+            const outcomes = input.targets.map((target) => outcome(target.key));
+            for (const entry of outcomes) await input.onOutcome?.(entry);
+            await input.onOutcome?.(deleted("not-selected"));
+            return { outcomes, warnings: [], released: true };
+          }
+        )
+      };
+    }
+
+    it("is recorded removed and saved before the next one", async () => {
+      const op = setupWithChanges();
+      const saved: string[][] = [];
+      const pass = await rollbackAwsSetupArtifacts(op, {
+        persist: async () => {
+          saved.push(
+            [
+              ...op.setupArtifacts.awsAccessEntries,
+              ...op.setupArtifacts.awsTrustSubjects,
+              op.setupArtifacts.awsRole
+            ].map((entry: { state: string }) => entry.state)
+          );
+        },
+        attempt: 1,
+        awsEnabled: true,
+        selected: provenOwnedCleanupTargets(op),
+        access: answering(deleted),
+        steps: []
+      });
+
+      expect(saved).toEqual([
+        ["deleted", "created", "created"],
+        ["deleted", "deleted", "created"],
+        ["deleted", "deleted", "deleted"]
+      ]);
+      // Recorded once each, though the rollback returns them again.
+      expect(pass.results.map((result) => result.artifactType)).toEqual([
+        "aws_access_entry",
+        "aws_trust_subject",
+        "aws_role"
+      ]);
+    });
+
+    it("is recorded without a save when Radius kept the change", async () => {
+      const op = setupWithChanges();
+      const persisted = vi.fn(async () => {});
+      const pass = await rollbackAwsSetupArtifacts(op, {
+        persist: persisted,
+        attempt: 1,
+        awsEnabled: true,
+        selected: provenOwnedCleanupTargets(op),
+        access: answering((key) => ({
+          key,
+          outcome: "warning",
+          detail: `Could not remove ${key}.`
+        })),
+        steps: []
+      });
+
+      expect(persisted).not.toHaveBeenCalled();
+      expect(pass.warnings).toHaveLength(3);
+      expect(op.setupArtifacts.awsRole.state).toBe("created");
+    });
   });
 });

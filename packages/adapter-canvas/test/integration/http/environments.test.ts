@@ -779,6 +779,9 @@ describe("the async delete route through its background runner", () => {
             readAzureIdentity: unexpectedCleanup,
             removeCredentialProvenance: unexpectedCleanup,
             clearEnvironmentCredentialProvenance: unexpectedCleanup,
+            removeAwsDeployIdentityLock: async () => {
+              throw new Error("Unexpected lock removal");
+            },
             removeAwsEnvironmentAccess: unexpectedCleanup,
             persist: async () => {},
             errorMessage: (error) =>
@@ -893,6 +896,9 @@ describe("the async delete route through its background runner", () => {
         operations.push(op);
         void runEnvironmentDeletion(deletions.scheduled(op), {
           deleteRadiusEnvironment: workflow.run,
+          removeAwsDeployIdentityLock: async () => {
+            throw new Error("Unexpected lock removal");
+          },
           removeAwsEnvironmentAccess: async () => {
             throw new Error("unexpected AWS role cleanup");
           },
@@ -1106,6 +1112,9 @@ describe("the async delete route through its background runner", () => {
         capturedOp = deletions.scheduled(op);
         void runEnvironmentDeletion(capturedOp, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          removeAwsDeployIdentityLock: async () => {
+            throw new Error("Unexpected lock removal");
+          },
           removeAwsEnvironmentAccess: async () => {
             throw new Error("unexpected AWS role cleanup");
           },
@@ -1376,6 +1385,9 @@ describe("the async delete route through its background runner", () => {
         capturedOp = deletions.scheduled(op);
         void runEnvironmentDeletion(capturedOp, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          removeAwsDeployIdentityLock: async () => {
+            throw new Error("Unexpected lock removal");
+          },
           removeAwsEnvironmentAccess: access.remove,
           deleteStatePackage: async () => "deleted",
           reportStatePackageDeletionFailure: async () => {},

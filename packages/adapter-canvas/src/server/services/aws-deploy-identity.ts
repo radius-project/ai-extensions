@@ -1605,9 +1605,16 @@ export async function rollbackAwsSetupChanges(
   ports: AwsDeployIdentityRemovalPorts,
   // Each outcome is added as soon as AWS answers, so a caller whose run is
   // cut short still holds every change that finished.
-  outcomes: AwsSetupRollbackOutcome[] = []
+  outcomes: AwsSetupRollbackOutcome[] = [],
+  // Awaited after each outcome AWS answered, before the next command, so the
+  // caller can save it. A crash then loses no change AWS confirmed.
+  onOutcome?: (outcome: AwsSetupRollbackOutcome) => Promise<void>
 ): Promise<AwsSetupRollbackOutcome[]> {
   const { targets } = request;
+  const add = async (outcome: AwsSetupRollbackOutcome): Promise<void> => {
+    outcomes.push(outcome);
+    await onOutcome?.(outcome);
+  };
   const everyTarget = (outcome: "skipped" | "warning", detail: string) => {
     for (const target of targets) {
       outcomes.push(rollbackOutcome(target.key, outcome, detail));
@@ -1653,7 +1660,7 @@ export async function rollbackAwsSetupChanges(
   // replaced, only an entry older than the new role is the old role's.
   const removeOrphanedEntries = async (replacedAt?: unknown) => {
     for (const entry of entries) {
-      outcomes.push(
+      await add(
         entryOutcome(
           entry.key,
           await removeOrphanedAccessEntry(
@@ -1675,7 +1682,7 @@ export async function rollbackAwsSetupChanges(
     await removeOrphanedEntries();
     for (const target of targets) {
       if (target.artifactType !== "aws_access_entry") {
-        outcomes.push(rollbackOutcome(target.key, "not_found"));
+        await add(rollbackOutcome(target.key, "not_found"));
       }
     }
     return outcomes;
@@ -1695,7 +1702,7 @@ export async function rollbackAwsSetupChanges(
     const replaced = `IAM role ${roleName} was deleted and created again after this setup, so Radius left the new role and its policies as they are.`;
     for (const target of targets) {
       if (target.artifactType !== "aws_access_entry") {
-        outcomes.push(rollbackOutcome(target.key, "skipped", replaced));
+        await add(rollbackOutcome(target.key, "skipped", replaced));
       }
     }
     return outcomes;
@@ -1719,7 +1726,7 @@ export async function rollbackAwsSetupChanges(
     // `repository_id:<id>` from a custom OIDC template is presented by other
     // environments too, and a later setup may rely on it.
     if (!namesOneEnvironment(target.subject, request.environment)) {
-      outcomes.push(
+      await add(
         rollbackOutcome(
           target.key,
           "skipped",
@@ -1731,11 +1738,11 @@ export async function rollbackAwsSetupChanges(
     const removal = removeGitHubTrustSubject(policy, accountId, target.subject);
     policy = removal.policy;
     if (removal.removed) removedSubjects.push(target);
-    else outcomes.push(rollbackOutcome(target.key, "not_found"));
+    else await add(rollbackOutcome(target.key, "not_found"));
   }
 
   for (const entry of entries) {
-    outcomes.push(
+    await add(
       entryOutcome(
         entry.key,
         await removeUnusedAccessEntry(
@@ -1766,12 +1773,12 @@ export async function rollbackAwsSetupChanges(
       target.policyName
     ]);
     if (succeeded(deletion)) {
-      outcomes.push(rollbackOutcome(target.key, "deleted"));
+      await add(rollbackOutcome(target.key, "deleted"));
     } else if (NO_SUCH_ENTITY.test(deletion.stderr)) {
-      outcomes.push(rollbackOutcome(target.key, "not_found"));
+      await add(rollbackOutcome(target.key, "not_found"));
     } else {
       policiesKept = true;
-      outcomes.push(
+      await add(
         rollbackOutcome(
           target.key,
           "warning",
@@ -1797,7 +1804,7 @@ export async function rollbackAwsSetupChanges(
       : `Could not update the trust policy of IAM role ${roleName} (${detail(update)}).`;
     trustUpdated = !failure;
     for (const target of removedSubjects) {
-      outcomes.push(
+      await add(
         failure ?
           rollbackOutcome(target.key, "warning", failure)
         : rollbackOutcome(target.key, "deleted")
@@ -1806,7 +1813,7 @@ export async function rollbackAwsSetupChanges(
   }
 
   if (roleTarget) {
-    outcomes.push(
+    await add(
       await deleteCreatedRole(roleTarget.key, roleName, policy, {
         ...ports,
         accountId,

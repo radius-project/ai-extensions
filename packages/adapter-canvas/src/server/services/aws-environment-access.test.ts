@@ -2549,6 +2549,121 @@ describe("the deploy identity lock during removal", () => {
     expect(h.commands().at(-1)).toBe("iam delete-policy");
   });
 
+  describe("the lock the deletion records", () => {
+    const MINE = JSON.stringify({
+      repo: "octo/shop",
+      environment: "dev",
+      action: "delete",
+      operationId: "del-1"
+    });
+    // What the deletion hears, with the AWS commands sent by then.
+    const listen = (h: ReturnType<typeof harness>) => {
+      const heard: Array<[string, unknown, string[]]> = [];
+      return {
+        heard,
+        onLocked: async (lock: unknown) => {
+          heard.push(["locked", lock, h.commands()]);
+        },
+        onReleased: () => {
+          heard.push(["released", null, h.commands()]);
+        }
+      };
+    };
+
+    it("hands over the lock before the first change, and says once it is released", async () => {
+      const h = harness(signedIn);
+      const { heard, ...listeners } = listen(h);
+
+      expect(await h.access.remove({ ...removal, ...listeners })).toMatchObject(
+        { ok: true }
+      );
+
+      expect(heard.map(([event, lock]) => [event, lock])).toEqual([
+        ["locked", { policyArn: LOCK_ARN, policyId: "LOCK1" }],
+        ["released", null]
+      ]);
+      expect(heard[0]?.[2]).not.toContain("iam delete-role-policy");
+      expect(heard[1]?.[2].at(-1)).toBe("iam delete-policy");
+    });
+
+    it("says the lock is released when it was already gone", async () => {
+      const h = harness({
+        ...signedIn,
+        "iam get-policy": [
+          lockPolicy("LOCK1"),
+          lockPolicy("LOCK1"),
+          lockPolicy("LOCK1"),
+          fail("NoSuchEntity: gone")
+        ]
+      });
+      const { heard, ...listeners } = listen(h);
+
+      await h.access.remove({ ...removal, ...listeners });
+
+      expect(heard.map(([event]) => event)).toEqual(["locked", "released"]);
+    });
+
+    it("keeps the lock its own when the release fails", async () => {
+      const h = harness({
+        ...signedIn,
+        "iam delete-policy": fail("AccessDenied")
+      });
+      const { heard, ...listeners } = listen(h);
+
+      await h.access.remove({ ...removal, ...listeners });
+
+      expect(heard.map(([event]) => event)).toEqual(["locked"]);
+    });
+
+    it("says nothing when it took no lock", async () => {
+      const h = harness({
+        ...signedIn,
+        "iam create-policy": fail("AccessDenied")
+      });
+      const { heard, ...listeners } = listen(h);
+
+      expect((await h.access.remove({ ...removal, ...listeners })).ok).toBe(
+        false
+      );
+
+      expect(heard).toEqual([]);
+    });
+
+    it("takes back the lock an earlier attempt of this deletion recorded", async () => {
+      const h = harness({
+        ...signedIn,
+        "iam create-policy": [
+          fail("EntityAlreadyExists: radius-lock exists"),
+          lockPolicy("LOCK1")
+        ],
+        "iam get-policy": [
+          lockPolicy("LOCK0", { Description: MINE }),
+          lockPolicy("LOCK1")
+        ]
+      });
+      const waits: unknown[] = [];
+
+      expect(
+        await h.access.remove({
+          ...removal,
+          adopt: "LOCK0",
+          waiting: (wait) => {
+            waits.push(wait);
+          }
+        })
+      ).toMatchObject({ ok: true });
+
+      expect(waits).toEqual([]);
+      expect(h.commands().slice(2, 7)).toEqual([
+        "iam create-policy",
+        "iam get-policy",
+        "iam delete-policy",
+        "iam create-policy",
+        "iam get-policy"
+      ]);
+    });
+  });
+
   describe("work the deletion runs before the lock is released", () => {
     it("runs it with the removal, after confirming the lock, before releasing", async () => {
       const h = harness(signedIn);
@@ -3346,6 +3461,32 @@ describe("AWS environment access rollback", () => {
       })
     );
     expect(h.commands().at(-1)).toBe("iam delete-policy");
+  });
+
+  it("hands over each outcome AWS answered before the next command", async () => {
+    const h = harness(
+      rollbackScript({
+        "iam create-policy": lockPolicy("LOCK1"),
+        "iam get-policy": lockPolicy("LOCK1")
+      })
+    );
+    const heard: Array<[unknown, string[]]> = [];
+
+    await h.access.rollback({
+      repo: "octo/shop",
+      environment: "dev",
+      operationId: "op-1",
+      roleArn: ROLE_ARN,
+      targets: [target],
+      onOutcome: async (outcome) => {
+        heard.push([outcome, h.commands()]);
+      }
+    });
+
+    expect(heard).toEqual([
+      [{ key: "policy", outcome: "deleted", detail: null }, expect.any(Array)]
+    ]);
+    expect(heard[0]?.[1].at(-1)).toBe("iam delete-role-policy");
   });
 
   it("hands over the lock it takes before changing anything", async () => {

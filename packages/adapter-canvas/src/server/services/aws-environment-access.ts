@@ -154,6 +154,14 @@ export interface AwsEnvironmentAccess<Operation> {
     whileLocked?(
       removal: Extract<AwsDeployIdentityRemovalResult, { ok: true }>
     ): Promise<void>;
+    // The policy ID of the lock this deletion recorded in an earlier attempt,
+    // to take back rather than wait on.
+    adopt?: string;
+    // Called with the lock once it is held and before the first change, so
+    // the deletion can record it in case the release never happens.
+    onLocked?(lock: { policyArn: string; policyId: string }): Promise<void>;
+    // Called once the lock this run took is released or known gone.
+    onReleased?(): void;
   }): Promise<AwsEnvironmentRemovalResult>;
   // Undo the AWS changes a setup recorded on one role, under the deploy
   // identity lock. Does not wait for a lock another run holds: every target
@@ -172,6 +180,9 @@ export interface AwsEnvironmentAccess<Operation> {
     // Called with the lock once it is held and before the first change, so the
     // operation can record it in case the release never happens.
     onLocked?(lock: { policyArn: string; policyId: string }): Promise<void>;
+    // Awaited with each outcome AWS answered, before the next command, so the
+    // operation can save it.
+    onOutcome?(outcome: AwsSetupRollbackOutcome): Promise<void>;
   }): Promise<{
     outcomes: AwsSetupRollbackOutcome[];
     // Sentences about the lock, such as one that could not be released.
@@ -950,7 +961,10 @@ export function createAwsEnvironmentAccess<Operation>(
       policyName,
       operationId = "",
       waiting,
-      whileLocked
+      whileLocked,
+      adopt,
+      onLocked,
+      onReleased
     }) {
       // The recorded list covers a repository renamed since setup. The
       // current subjects cover what Repair added after an OIDC subject
@@ -979,8 +993,15 @@ export function createAwsEnvironmentAccess<Operation>(
         };
       }
       const policyRepository = [...policyRepositories][0] ?? oidc.fullName;
+      let locked = false;
       const { result, lost, released } = await runUnderLock(
-        { repo, environment, action: "delete", operationId },
+        {
+          repo,
+          environment,
+          action: "delete",
+          operationId,
+          ...(adopt ? { adopt } : {})
+        },
         waiting ?? (() => undefined),
         async (ports) => {
           const removal = await removeAwsEnvironmentFromRole(
@@ -1004,8 +1025,16 @@ export function createAwsEnvironmentAccess<Operation>(
             await whileLocked(removal);
           }
           return removal;
+        },
+        async (lock) => {
+          locked = true;
+          await onLocked?.({
+            policyArn: lock.policyArn,
+            policyId: lock.policyId
+          });
         }
       );
+      if (locked && (released.ok || released.gone)) onReleased?.();
       if (lost) return { ok: false, message: lost };
       if (released.ok) return result;
       return result.ok ?
@@ -1021,7 +1050,8 @@ export function createAwsEnvironmentAccess<Operation>(
       targets,
       adopt,
       isStopped,
-      onLocked
+      onLocked,
+      onOutcome
     }) {
       const active = () => assertSetupExecutionActive(isStopped);
       active();
@@ -1079,7 +1109,8 @@ export function createAwsEnvironmentAccess<Operation>(
                   }
                 }
               },
-              outcomes
+              outcomes,
+              onOutcome
             );
           } catch (error) {
             // The changes that finished stay in `outcomes`, and the lock is

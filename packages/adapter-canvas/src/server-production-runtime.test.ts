@@ -34,6 +34,7 @@ const accountContext = () =>
 const deletionPorts: EnvironmentDeletionCoordinatorPorts = {
   deleteRadiusEnvironment: unexpectedDeletion,
   removeAwsEnvironmentAccess: unexpectedDeletion,
+  removeAwsDeployIdentityLock: unexpectedDeletion,
   runAz: unexpectedDeletion,
   readAzureIdentity: unexpectedDeletion,
   deleteGitHubEnvironment: unexpectedDeletion,

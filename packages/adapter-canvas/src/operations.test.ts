@@ -71,6 +71,7 @@ import {
   canContinueSetup,
   canDismissOperation,
   canRetryDeletion,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
   canRetryCleanup,
   canRetrySetup,
   legacyRecoveryQuarantine,
@@ -6402,6 +6403,73 @@ describe("action projection", () => {
       "Radius environment deleted"
     ]);
     expect(op.control.attempts.deletion).toBe(1);
+  });
+
+  describe("a deletion that finished everything but its AWS lock release", () => {
+    const LOCK = {
+      policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
+      policyId: "LOCK1"
+    };
+    function finishedWithLock() {
+      const op = newDeleteOp();
+      for (const stage of op.stages) stage.state = "succeeded";
+      setContext(op, { awsDeployIdentityLock: LOCK });
+      addStep(op, {
+        stage: op.stages[0].id,
+        kind: "mutation",
+        label: "Radius environment deleted",
+        state: "succeeded"
+      });
+      addStep(op, {
+        stage: op.stages[0].id,
+        kind: "warning",
+        label: "Could not release the lock on the IAM role",
+        warning: { code: "aws-lock-release-failed", message: "denied" }
+      });
+      finish(op, "succeeded_with_warnings");
+      return op;
+    }
+
+    it("offers a retry of only the lock, reopening no stage", () => {
+      const op = finishedWithLock();
+
+      expect(canRetryDeletion(op)).toMatchObject({
+        ok: true,
+        resumeFrom: STAGE_DELETE_AWS_ROLE_ACCESS
+      });
+      beginRetryAttempt(op, "deletion");
+      applyDeletionRetry(op);
+
+      expect(op.stages.every((stage) => stage.state === "succeeded")).toBe(
+        true
+      );
+      // The release is repeated, so its old failure goes; the rest stays.
+      expect(op.steps.map((step) => step.label)).toEqual([
+        "Radius environment deleted"
+      ]);
+    });
+
+    it("offers no retry once the lock is no longer recorded", () => {
+      const op = finishedWithLock();
+      setContext(op, { awsDeployIdentityLock: null });
+
+      expect(canRetryDeletion(op)).toMatchObject({
+        ok: false,
+        code: "deletion-retry-nothing-unresolved"
+      });
+    });
+
+    it("keeps a lock release failure when no lock is recorded to retry", () => {
+      const op = finishedWithLock();
+      op.stages[1].state = "failed";
+      setContext(op, { awsDeployIdentityLock: null });
+      beginRetryAttempt(op, "deletion");
+      applyDeletionRetry(op);
+
+      expect(op.steps.map((step) => step.label)).toContain(
+        "Could not release the lock on the IAM role"
+      );
+    });
   });
 
   it("explains the immediate stop while a prompt is open", () => {

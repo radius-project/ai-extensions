@@ -6538,6 +6538,9 @@ describe("environment deletion session reporting coordinator", () => {
         deleteRadiusEnvironment: vi.fn(async () => ({
           outcome: "deleted" as const
         })),
+        removeAwsDeployIdentityLock: async () => {
+          throw new Error("Unexpected lock removal");
+        },
         removeAwsEnvironmentAccess: async () => {
           throw new Error("unexpected AWS role cleanup");
         },

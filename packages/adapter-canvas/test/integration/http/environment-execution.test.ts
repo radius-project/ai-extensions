@@ -1374,10 +1374,17 @@ describe("production environment owner HTTP binding", () => {
       await aws.restore();
       aws = await fakeAwsOnPath(answers({ stdout: "" }));
       expect((await post("retry-cleanup")).status).toBe(202);
+      // The ledger records each removal as AWS answers it, before the lock
+      // is released, so wait for the whole retry to finish.
       await vi.waitFor(
-        () => expect(op.setupArtifacts.awsRole.state).toBe("deleted"),
+        () =>
+          expect(op.setupArtifacts.cleanup).toMatchObject({
+            attempts: 2,
+            state: "succeeded"
+          }),
         { timeout: 15000 }
       );
+      expect(op.setupArtifacts.awsRole.state).toBe("deleted");
       expect(op.setupArtifacts.awsRolePolicies[0].state).toBe("deleted");
       const retried = (await aws.calls()).map((call) =>
         call.split(" ").slice(0, 2).join(" ")
@@ -1447,14 +1454,15 @@ describe("production environment owner HTTP binding", () => {
         finish(op, "failed");
         operations.put(op);
         let locks = 0;
+        let counted: unknown = null;
         // Each rollback saves its lock before its first change. Replacing the
         // record then ends this execution, as a restart or a new setup does.
+        // Saves of a lock already counted, such as a removal's, don't count.
         vi.spyOn(operations, "persist").mockImplementation(async () => {
-          if (
-            op.context.awsDeployIdentityLock &&
-            ++locks === stopAtLock &&
-            operations.get(op.operationId) === op
-          ) {
+          const lock = op.context.awsDeployIdentityLock;
+          if (!lock || lock === counted) return;
+          counted = lock;
+          if (++locks === stopAtLock && operations.get(op.operationId) === op) {
             operations.put(structuredClone(op));
           }
         });

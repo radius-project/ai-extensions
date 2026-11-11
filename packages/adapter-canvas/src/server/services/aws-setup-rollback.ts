@@ -206,6 +206,17 @@ export async function rollbackAwsSetupArtifacts(
       continue;
     }
     let locked = false;
+    // Targets whose outcome was recorded as AWS answered it.
+    const answered = new Set<string>();
+    const recordOnce = (
+      target: (typeof targets)[number],
+      outcome: AwsSetupRollbackOutcome
+    ): boolean => {
+      if (answered.has(target.key)) return false;
+      answered.add(target.key);
+      result(target, outcome);
+      return true;
+    };
     let rolledBack: Awaited<ReturnType<typeof access.rollback>>;
     try {
       assertSetupExecutionActive(isStopped);
@@ -223,6 +234,18 @@ export async function rollbackAwsSetupArtifacts(
           locked = true;
           setContext(operation, { awsDeployIdentityLock: lock });
           await persist();
+        },
+        // Saved before the next change, so a crash loses no removal AWS
+        // confirmed, and a retry does not try it again.
+        onOutcome: async (outcome) => {
+          const target = forRole.find((item) => item.key === outcome.key);
+          if (
+            target &&
+            recordOnce(target, outcome) &&
+            outcome.detail === null
+          ) {
+            await persist();
+          }
         }
       });
     } catch (error) {
@@ -242,7 +265,7 @@ export async function rollbackAwsSetupArtifacts(
         const outcome = rolledBack.outcomes.find(
           (entry) => entry.key === target.key
         );
-        if (outcome) result(target, outcome);
+        if (outcome) recordOnce(target, outcome);
       }
       // Saved here, so the lock's state is kept even when no change finished
       // and the cleanup pass has nothing to record.
@@ -253,7 +276,7 @@ export async function rollbackAwsSetupArtifacts(
       const outcome = rolledBack.outcomes.find(
         (entry) => entry.key === target.key
       );
-      result(
+      recordOnce(
         target,
         outcome ?? {
           key: target.key,
