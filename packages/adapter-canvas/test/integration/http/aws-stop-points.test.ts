@@ -3,13 +3,19 @@ import { readRecordedAwsLock } from "@radius-project/core";
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
+import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
 import {
   configureOperationStore,
   createOperation,
+  finish,
   onOperationTerminal,
   operations,
   requireInput,
-  STAGE_AUTHORIZE_IDENTITY
+  setStageState,
+  STAGE_AUTHORIZE_IDENTITY,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
 import { disabledOperationStore } from "../../../src/operation-store.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
@@ -20,6 +26,7 @@ import {
   CLUSTER,
   completedSetup,
   createAwsScenario,
+  createDeleteOperation,
   ENVIRONMENT,
   LOGIN,
   REGION,
@@ -448,4 +455,75 @@ describe("Exit setup through the production runtime, crashed as it releases the 
       );
     }
   );
+});
+
+// A deletion whose first attempt deleted the Radius environment and then
+// stopped at the deploy identity, saved before the extension starts.
+async function failedAwsDeletion(s: AwsScenario): Promise<string> {
+  await completedSetup(s, "succeeded");
+  const op = createDeleteOperation(s);
+  setStageState(op, STAGE_DELETE_RADIUS_ENV, "succeeded");
+  setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "failed");
+  // Marked done so the retry sends nothing to GHCR, which no fake answers.
+  setStageState(op, STAGE_DELETE_STATE_PACKAGE, "succeeded");
+  finish(op, "failed_partial");
+  await operations.persist();
+  return op.operationId;
+}
+
+describe("Retry deletion through the production runtime, confirming the repository with GitHub", () => {
+  it("removes the environment's AWS access when GitHub returns the saved repository ID", async () => {
+    const s = await createAwsScenario("new");
+    const operationId = await failedAwsDeletion(s);
+    await shim(s);
+    const extension = await startExtension(s, "panel-1");
+
+    await act(extension, operationId, "retry-deletion");
+    await vi.waitFor(
+      () => expect(operations.get(operationId)?.state).toBe("succeeded"),
+      { timeout: 15000 }
+    );
+    await settled(extension, operationId);
+
+    expect(s.outside.calls.map((call) => call.command)).toContain(
+      `gh api /repos/${REPO}`
+    );
+    expect(s.aws.snapshot().roles[0]?.inline).not.toContain(
+      awsEnvironmentPolicyName(s.github.repoId, ENVIRONMENT)
+    );
+    expect(s.github.environment(ENVIRONMENT)).toBeUndefined();
+  });
+
+  it("stops before any AWS call when GitHub can't return the repository", async () => {
+    const s = await createAwsScenario("new");
+    const operationId = await failedAwsDeletion(s);
+    const aws = s.aws.snapshot();
+    installed = await installCliShim({
+      aws: s.outside.runAws,
+      gh: async (args) =>
+        args[0] === "api" && args[1] === `/repos/${REPO}` ?
+          { code: 1, stdout: "", stderr: "gh: Bad credentials (HTTP 401)" }
+        : s.outside.gh(args)
+    });
+    const extension = await startExtension(s, "panel-1");
+    const from = s.outside.calls.length;
+
+    await act(extension, operationId, "retry-deletion");
+    await vi.waitFor(
+      () =>
+        expect(operations.get(operationId)?.failure).toMatchObject({
+          code: "aws-repository-unconfirmed",
+          stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+          message: expect.stringContaining("gh: Bad credentials (HTTP 401)")
+        }),
+      { timeout: 15000 }
+    );
+    await settled(extension, operationId);
+
+    expect(
+      s.outside.calls.slice(from).filter((call) => call.service === "aws")
+    ).toEqual([]);
+    expect(s.aws.snapshot()).toEqual(aws);
+    expect(s.github.environment(ENVIRONMENT)).toBeDefined();
+  });
 });

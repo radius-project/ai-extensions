@@ -35,7 +35,7 @@ export const AWS_REPOSITORY_ID_TAG = "radius-repository-id";
 const ROLE_NAME_MAX = 64;
 const ROLE_NAME_HASH_LENGTH = 6;
 const INLINE_POLICY_NAME_MAX = 128;
-const INLINE_POLICY_HASH_LENGTH = 12;
+const INLINE_POLICY_HASH_LENGTH = 8;
 const SUB_CLAIM = `${GITHUB_OIDC_HOST}:sub`;
 const AUD_CLAIM = `${GITHUB_OIDC_HOST}:aud`;
 const NO_SUBJECTS_SID = "RadiusNoTrustedEnvironments";
@@ -181,87 +181,25 @@ export function isAwsRoleName(value: string): boolean {
   return /^[A-Za-z0-9+=,.@_-]{1,64}$/.test(value);
 }
 
-/** Only for recognizing policies written before repository-scoped names. */
-export function buildLegacyAwsEnvironmentPolicyName(
-  environment: string
-): string {
-  return iamSafe(`radius-deploy-${environment}`).slice(
-    0,
-    INLINE_POLICY_NAME_MAX
-  );
-}
-
+/**
+ * The permission policy one environment adds to a deploy role. Repository IDs
+ * survive renames. A hash distinguishes environment names IAM cannot retain.
+ */
 export function buildAwsEnvironmentPolicyName(
-  repo: string,
+  repoId: number,
   environment: string,
   sha256Hex: (text: string) => string
 ): string {
-  const identity = [repo.toLowerCase(), environment.toLowerCase()];
-  const suffix = sha256Hex(JSON.stringify(identity)).slice(
-    0,
-    INLINE_POLICY_HASH_LENGTH
-  );
-  return `${awsEnvironmentPolicyPrefix(environment)}${suffix}`;
-}
-
-function awsEnvironmentPolicyPrefix(environment: string): string {
-  const prefix = iamSafe(`radius-deploy-${environment.toLowerCase()}`).slice(
-    0,
-    INLINE_POLICY_NAME_MAX - INLINE_POLICY_HASH_LENGTH - 1
-  );
-  return `${prefix}-`;
-}
-
-export function isAwsEnvironmentPolicyName(
-  name: string,
-  environment: string
-): boolean {
-  const prefix = awsEnvironmentPolicyPrefix(environment);
-  return (
-    name.startsWith(prefix) && /^[a-f0-9]{12}$/.test(name.slice(prefix.length))
-  );
-}
-
-export function legacyAwsPolicyOwnershipError(input: {
-  repoId: number;
-  environment: string;
-  accountId: string;
-  subjects: readonly string[];
-  role: unknown;
-}): string | null {
-  const policy = parsePolicyDocument(
-    isRecord(input.role) ? input.role.AssumeRolePolicyDocument : null
-  );
-  if (
-    policy.Statement.some(
-      (statement) =>
-        statement.Effect === "Allow" &&
-        isGitHubStatement(statement, githubOidcProviderArn(input.accountId)) &&
-        !acceptsGitHubAudience(statement)
-    )
-  ) {
-    return "The role has GitHub trust conditions Radius cannot interpret.";
+  const prefix = "radius-deploy-";
+  const suffix = `-${repoId}`;
+  const normalized = environment.toLowerCase();
+  const safe = iamSafe(normalized);
+  const available = INLINE_POLICY_NAME_MAX - prefix.length - suffix.length;
+  if (safe === normalized && safe.length <= available) {
+    return `${prefix}${safe}${suffix}`;
   }
-  const name = buildLegacyAwsEnvironmentPolicyName(input.environment);
-  const subjects = trustedGitHubSubjects(policy, input.accountId);
-  const ambiguous = subjects.find((subject) => {
-    if (/[*?]/.test(subject)) return true;
-    if (input.subjects.includes(subject)) return false;
-    const environment = /:environment:(.+)$/.exec(subject)?.[1];
-    return (
-      !environment ||
-      buildLegacyAwsEnvironmentPolicyName(environment.replace(/%3A/gi, ":")) ===
-        name
-    );
-  });
-  if (ambiguous) return `The legacy policy may also belong to ${ambiguous}.`;
-  if (
-    !subjects.some((subject) => input.subjects.includes(subject)) &&
-    !isRadiusManagedRole(input.role, input.repoId)
-  ) {
-    return "Neither the role's trust subjects nor its ownership tags identify this environment as the legacy policy's owner.";
-  }
-  return null;
+  const hash = sha256Hex(normalized).slice(0, INLINE_POLICY_HASH_LENGTH);
+  return `${prefix}${safe.slice(0, available - INLINE_POLICY_HASH_LENGTH - 1)}-${hash}${suffix}`;
 }
 
 export function githubOidcProviderArn(accountId: string): string {
@@ -588,6 +526,24 @@ export interface GitHubRepositoryIdentity {
   readonly repoId: number;
 }
 
+// `owner/name`, each part optionally followed by its immutable `@id`.
+const REPOSITORY_SLUG =
+  /^([a-z0-9_.-]+)(?:@[1-9]\d*)?\/([a-z0-9_.-]+)(?:@([1-9]\d*))?$/i;
+
+/**
+ * The `owner/name` that a subject's one `repo` or `repository` claim names,
+ * without `@id` suffixes. Returns null when the subject has no such claim,
+ * more than one, or a malformed one.
+ */
+export function subjectRepositoryName(subject: string): string | null {
+  const repositories = (subjectClaims(subject) ?? []).filter(
+    ([key]) => key === "repo" || key === "repository"
+  );
+  const match =
+    repositories.length === 1 ? REPOSITORY_SLUG.exec(repositories[0][1]) : null;
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+
 // Unlike repository names, IDs still distinguish owners after a rename.
 export function immutableEnvironmentRepository(
   subject: string,
@@ -599,10 +555,7 @@ export function immutableEnvironmentRepository(
     ([key]) => key === "repo" || key === "repository"
   );
   if (repositories.length !== 1) return null;
-  const match =
-    /^([a-z0-9_.-]+)(?:@[1-9]\d*)?\/([a-z0-9_.-]+)(?:@([1-9]\d*))?$/i.exec(
-      repositories[0][1]
-    );
+  const match = REPOSITORY_SLUG.exec(repositories[0][1]);
   if (!match) return null;
   const ids = claims
     .filter(([key]) => key === "repository_id")

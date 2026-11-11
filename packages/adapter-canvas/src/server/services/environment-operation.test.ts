@@ -96,8 +96,7 @@ function awsIdentityReady(): Partial<EnvironmentOperationWorkflowDependencies> {
     setupAwsDeployIdentity: async () => ({
       ok: true,
       roleArn: AWS_ROLE_ARN,
-      subjects: AWS_SUBJECTS,
-      policyName: "radius-deploy-production-111111111111"
+      subjects: AWS_SUBJECTS
     })
   };
 }
@@ -1299,8 +1298,7 @@ describe("runEnvironmentOperationWorkflow", () => {
           return {
             ok: true,
             roleArn: AWS_ROLE_ARN,
-            subjects: AWS_SUBJECTS,
-            policyName: "radius-deploy-production-111111111111"
+            subjects: AWS_SUBJECTS
           };
         }
       });
@@ -1917,8 +1915,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       setupAwsDeployIdentity: async () => ({
         ok: true,
         roleArn: AWS_ROLE_ARN,
-        subjects: AWS_SUBJECTS,
-        policyName: "radius-deploy-production-111111111111"
+        subjects: AWS_SUBJECTS
       })
     });
 

@@ -127,7 +127,6 @@ export interface EnvironmentOperationWorkflowDependencies {
         ok: true;
         roleArn: string;
         subjects: readonly string[];
-        policyName: string;
       }
     | { ok: false; status: number; error: string; code: string }
     | { ok: false; stopped: true }
@@ -436,8 +435,7 @@ export function createSetupCoordinatorPorts(
           {
             kind: "completed",
             roleArn: result.roleArn,
-            trustSubjects: result.subjects,
-            policyName: result.policyName
+            trustSubjects: result.subjects
           }
         : {
             kind: "failed",

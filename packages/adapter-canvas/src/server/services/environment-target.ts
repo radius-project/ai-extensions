@@ -1,7 +1,4 @@
-import {
-  AWS_TRUST_SUBJECTS_VARIABLE,
-  AWS_PERMISSION_POLICY_NAME_VARIABLE
-} from "@radius-project/core";
+import { AWS_TRUST_SUBJECTS_VARIABLE } from "@radius-project/core";
 import {
   classifyProvider,
   parseGitHubEnvironmentVariables,
@@ -18,18 +15,18 @@ export interface EnvironmentTarget {
   // AWS only: the shared deploy role the environment's trust lives on.
   roleArn: string;
   // AWS only: the subjects setup added to that role's trust. Empty for an
-  // environment created before setup recorded them, or when the variable is
-  // unreadable; deletion then resolves them from the repository.
-  trustSubjects: string[];
+  // environment created before setup recorded them; deletion then resolves
+  // them from the repository. Null when the variable is not a JSON list of
+  // subjects, which deletion refuses rather than lose them.
+  trustSubjects: string[] | null;
   // AWS only: the cluster whose access entry deletion may remove. Empty for an
   // environment that did not record it.
   region: string;
   cluster: string;
-  policyName?: string;
 }
 
-export function parseTrustSubjects(value: string | undefined): string[] {
-  if (!value) return [];
+// Null when `value` is not a JSON list of subjects.
+export function readTrustSubjects(value: string): string[] | null {
   try {
     const parsed: unknown = JSON.parse(value);
     return (
@@ -37,10 +34,15 @@ export function parseTrustSubjects(value: string | undefined): string[] {
           parsed.every((subject) => typeof subject === "string" && subject)
       ) ?
         parsed
-      : [];
+      : null;
   } catch {
-    return [];
+    return null;
   }
+}
+
+export function parseTrustSubjects(value: string | undefined): string[] {
+  if (!value) return [];
+  return readTrustSubjects(value) ?? [];
 }
 
 export type EnvironmentTargetCommandRunner = (
@@ -101,8 +103,9 @@ export function createEnvironmentTargetReader(
     // every variable name, and share that logic with the environment listing so
     // the two paths never disagree about the same environment.
     const provider = classifyProvider(vars);
+    // Cleanup targets this repository by ID, which a rename doesn't change.
     let repoId = 0;
-    if (provider === "azure") {
+    if (provider === "azure" || provider === "aws") {
       const repoIdOutput = await runCommand(
         "gh",
         ["api", `/repos/${repo}`, "--jq", ".id"],
@@ -119,12 +122,12 @@ export function createEnvironmentTargetReader(
       tenantId: vars.AZURE_TENANT_ID || "",
       repoId,
       roleArn: vars.AWS_ROLE_ARN || "",
-      trustSubjects: parseTrustSubjects(vars[AWS_TRUST_SUBJECTS_VARIABLE]),
+      trustSubjects:
+        vars[AWS_TRUST_SUBJECTS_VARIABLE] === undefined ?
+          []
+        : readTrustSubjects(vars[AWS_TRUST_SUBJECTS_VARIABLE]),
       region: vars.AWS_REGION || "",
-      cluster: vars.AWS_EKS_CLUSTER_NAME || "",
-      ...(vars[AWS_PERMISSION_POLICY_NAME_VARIABLE] !== undefined ?
-        { policyName: vars[AWS_PERMISSION_POLICY_NAME_VARIABLE] }
-      : {})
+      cluster: vars.AWS_EKS_CLUSTER_NAME || ""
     };
   };
 }

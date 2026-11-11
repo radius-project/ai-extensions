@@ -19,8 +19,8 @@ export function defaultAwsDeployRoleName(repoFullName: string): string {
 }
 
 export function awsEnvironmentPolicyName(
-  repo: string,
+  repoId: number,
   environment: string
 ): string {
-  return buildAwsEnvironmentPolicyName(repo, environment, sha256Hex);
+  return buildAwsEnvironmentPolicyName(repoId, environment, sha256Hex);
 }

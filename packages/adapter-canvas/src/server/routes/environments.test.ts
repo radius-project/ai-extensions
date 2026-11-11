@@ -853,11 +853,7 @@ describe("environments — delete-environment refusal ladder", () => {
     const { recording, ctx } = context(
       "POST",
       "/api/delete-environment",
-      JSON.stringify({
-        repo: "o/r",
-        environment: "dev",
-        policyName: "untrusted-client-name"
-      })
+      JSON.stringify({ repo: "o/r", environment: "dev" })
     );
     await handleDeleteEnvironment(
       ctx,
@@ -874,8 +870,7 @@ describe("environments — delete-environment refusal ladder", () => {
             roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r",
             trustSubjects: ["repo:o/r:environment:dev"],
             region: "us-west-2",
-            cluster: "shop",
-            policyName: "radius-deploy-dev-111111111111"
+            cluster: "shop"
           }),
         createOperation,
         buildDeleteStages,
@@ -909,8 +904,7 @@ describe("environments — delete-environment refusal ladder", () => {
       roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r",
       trustSubjects: ["repo:o/r:environment:dev"],
       region: "us-west-2",
-      cluster: "shop",
-      policyName: "radius-deploy-dev-111111111111"
+      cluster: "shop"
     });
     expect(recording.status).toBe(202);
     expect(JSON.parse(recording.body).operationId).toBe("op-del-aws");

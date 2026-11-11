@@ -4791,6 +4791,11 @@ test.describe("Radius Canvas in Chromium", () => {
       scenario.commands.unshift(
         {
           tool: "gh",
+          args: ["api", `/repos/${REPOSITORY}`, "--jq", ".id"],
+          stdout: "42"
+        },
+        {
+          tool: "gh",
           args: [
             "api",
             `/repos/${REPOSITORY}/environments/${environment}`,

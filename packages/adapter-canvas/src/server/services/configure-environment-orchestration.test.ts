@@ -1134,8 +1134,7 @@ describe("matched headless and panel-bound setup service parity", () => {
       setupAwsDeployIdentity: async (_op, request) => ({
         ok: true,
         roleArn: String(request.existingRoleArn),
-        subjects: [],
-        policyName: "radius-deploy-dev-111111111111"
+        subjects: []
       }),
       releaseAwsDeployIdentity: async () => {},
       getOperation: (id) =>

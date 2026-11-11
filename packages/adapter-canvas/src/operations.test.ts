@@ -4362,7 +4362,7 @@ describe("startup reconciliation", () => {
     expect(toPersistedOperation(create).deleteRecovery).toBeUndefined();
   });
 
-  it("persists the AWS role, cluster, exact policy name and trust subjects for delete recovery", () => {
+  it("persists the AWS role, cluster and trust subjects for delete recovery", () => {
     const subjects = [
       "repo:contoso/store:environment:dev",
       "repo:contoso@1/store@2:environment:dev"
@@ -4370,14 +4370,12 @@ describe("startup reconciliation", () => {
     const del = newDeleteOp({
       provider: "aws",
       roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
-      policyName: "radius-deploy-dev-111111111111",
       trustSubjects: subjects,
       region: "us-west-2",
       cluster: "store"
     });
     expect(toPersistedOperation(del).deleteRecovery).toMatchObject({
       roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
-      policyName: "radius-deploy-dev-111111111111",
       trustSubjects: subjects,
       region: "us-west-2",
       cluster: "store"
@@ -4386,11 +4384,18 @@ describe("startup reconciliation", () => {
       toPersistedOperation(newDeleteOp({ region: 1, cluster: null }))
         .deleteRecovery
     ).not.toHaveProperty("cluster");
-    for (const damaged of [[], [""], ["repo:x", 7], "repo:x"]) {
-      expect(
-        toPersistedOperation(newDeleteOp({ trustSubjects: damaged }))
-          .deleteRecovery
-      ).not.toHaveProperty("trustSubjects");
+    expect(
+      toPersistedOperation(newDeleteOp({})).deleteRecovery
+    ).not.toHaveProperty("trustSubjects");
+    for (const damaged of [null, [""], ["repo:x", 7], "repo:x"]) {
+      const persisted = toPersistedOperation(
+        newDeleteOp({ trustSubjects: damaged })
+      );
+      expect(persisted.deleteRecovery).toHaveProperty("trustSubjects", null);
+      // Resuming keeps the list damaged, so deletion still refuses it.
+      const restored = fromPersistedOperation(persisted);
+      reconcileRestoredOperation(restored);
+      expect(restored.request.trustSubjects).toBeNull();
     }
   });
 

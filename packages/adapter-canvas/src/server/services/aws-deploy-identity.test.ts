@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildGitHubTrustPolicy,
-  buildAwsEnvironmentPermissionPolicy,
   trustedGitHubSubjects,
   parsePolicyDocument,
   repositoryLessSubjectMessage
@@ -22,6 +21,7 @@ import {
   type AwsLockResult,
   type AwsRepositoryIdLookup
 } from "./aws-deploy-identity.js";
+import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
 
 const ACCOUNT = "123456789012";
 const ROLE = "radius-deploy-octo-shop";
@@ -40,6 +40,7 @@ const radiusTags = (repo: string, repoId: number | null) => [
     []
   : [{ Key: "radius-repository-id", Value: String(repoId) }])
 ];
+const POLICY = awsEnvironmentPolicyName(REPO_ID, "dev");
 
 const ok = (stdout: unknown = ""): AwsCommandResult => ({
   code: 0,
@@ -119,27 +120,12 @@ function fakeAws(
   const sleeps: number[] = [];
   // The roles locked, and how many AWS commands had run before each lock.
   const locks: Array<{ roleName: string; after: number }> = [];
-  const identities: Array<{
-    roleArn: string;
-    policyName: string;
-    after: number;
-  }> = [];
   return {
     calls,
     steps,
     sleeps,
     locks,
-    identities,
     ports: {
-      async recordPolicyIdentity(identity: {
-        roleArn: string;
-        policyName: string;
-      }) {
-        identities.push({ ...identity, after: calls.length });
-      },
-      async isRecordedForeignPolicy(): Promise<never> {
-        throw new Error("unexpected foreign policy lookup");
-      },
       listOtherEnvironments: unexpectedListing,
       async acquireLock(role: { accountId: string; roleName: string }) {
         expect(role.accountId).toBe(ACCOUNT);
@@ -191,10 +177,6 @@ function fakeAws(
 }
 
 const freeChecks: Script = {
-  "iam get-role-policy": fail("NoSuchEntity"),
-  "iam list-role-policies": ok({
-    PolicyNames: ["radius-deploy-dev-f5fb7acf8f59"]
-  }),
   "--version": ok("aws-cli/2.17.0 Python/3.11 Darwin/23"),
   "sts get-caller-identity": ok({ Account: ACCOUNT }),
   "eks describe-cluster": ok({
@@ -227,305 +209,34 @@ const happyPath: Script = {
   "eks associate-access-policy": ok()
 };
 
-describe("legacy environment policy migration", () => {
-  it.each(["iam get-role-policy", "iam list-role-policies"])(
-    "retains trust and policies when %s is denied",
-    async (command) => {
-      const aws = fakeAws({ ...legacy, [command]: fail("AccessDenied") });
-      expect(
-        await removeAwsEnvironmentFromRole(removalRequest, aws.ports)
-      ).toMatchObject({
-        ok: false,
-        message: expect.stringContaining("AccessDenied")
-      });
-      expect(aws.find("iam delete-role-policy")).toBeUndefined();
-      expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
-    }
-  );
-
-  it("rejects a recorded policy for another environment before calling AWS", async () => {
-    const aws = fakeAws({});
-    expect(
-      await setupAwsDeployIdentity(
-        { ...request, policyName: "radius-deploy-prod-111111111111" },
-        aws.ports
-      )
-    ).toMatchObject({ ok: false, code: "aws-policy-name-invalid" });
-    expect(aws.calls).toEqual([]);
-  });
-
-  const legacyDocument = buildAwsEnvironmentPermissionPolicy("us-west-2");
-  const legacyResponse = ok({
-    PolicyName: "radius-deploy-dev",
-    PolicyDocument: legacyDocument
-  });
-  const legacy: Script = {
-    ...happyPath,
-    ...existingProvider,
-    "iam get-role": ok(managedRole([DEV, PROD])),
-    "iam get-role-policy": legacyResponse,
-    "iam update-assume-role-policy": ok(),
-    "iam delete-role-policy": ok()
-  };
-
-  it("writes the scoped policy before deleting an owned legacy policy", async () => {
-    const aws = fakeAws(legacy);
-    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
-      ok: true
-    });
-    const commands = aws.calls.map((args) => args.slice(0, 2).join(" "));
-    expect(commands.indexOf("iam put-role-policy")).toBeLessThan(
-      commands.indexOf("iam delete-role-policy")
-    );
-    expect(aws.find("iam delete-role-policy")).toContain("radius-deploy-dev");
-    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
-  });
-
-  it("restores the original policy when a quota migration still cannot fit", async () => {
-    const aws = fakeAws({
-      ...legacy,
-      "iam put-role-policy": [
-        fail("LimitExceeded"),
-        fail("LimitExceeded"),
-        ok()
-      ]
-    });
-    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
-      ok: false
-    });
-    expect(aws.find("iam delete-role-policy")).toContain("radius-deploy-dev");
-    expect(
-      aws.calls.filter((args) => args[1] === "put-role-policy").at(-1)
-    ).toContain(JSON.stringify(legacyDocument));
-    expect(aws.find("eks create-access-entry")).toBeUndefined();
-  });
-
-  it("reports a remaining broad legacy grant when its deletion is denied", async () => {
-    const aws = fakeAws({
-      ...legacy,
-      "iam delete-role-policy": fail("AccessDenied: DeleteRolePolicy")
-    });
-    const result = await setupAwsDeployIdentity(request, aws.ports);
-    expect(result).toMatchObject({ ok: false });
-    expect(!result.ok && result.message).toContain("AccessDenied");
-    expect(aws.find("eks create-access-entry")).toBeUndefined();
-  });
-
+describe("setupAwsDeployIdentity", () => {
   it.each([
+    ["create", happyPath],
     [
-      "picked role without evidence of this environment",
-      ok({ Role: { ...managedRole([PROD]).Role, Tags: [] } }),
-      legacyResponse
-    ],
-    [
-      "ambiguous environment",
-      ok(managedRole([DEV, "repo:octo/shop:environment:dev!"])),
-      legacyResponse
-    ],
-    [
-      "other repository",
-      ok(managedRole([DEV, "repo:octo/other:environment:dev"])),
-      legacyResponse
-    ],
-    [
-      "wildcard trust",
-      ok(managedRole([DEV, "repo:octo/shop:environment:*"])),
-      legacyResponse
-    ],
-    [
-      "unreadable trust",
-      ok({
-        Role: {
-          ...managedRole([DEV]).Role,
-          AssumeRolePolicyDocument: "invalid"
-        }
-      }),
-      legacyResponse
-    ],
-    [
-      "denied read",
-      ok(managedRole([DEV])),
-      fail("AccessDenied: GetRolePolicy")
-    ],
-    [
-      "malformed response",
-      ok(managedRole([DEV])),
-      ok({ PolicyName: "different" })
+      "update",
+      {
+        ...happyPath,
+        ...existingProvider,
+        "iam get-role": ok(managedRole([PROD])),
+        "iam update-assume-role-policy": ok()
+      }
     ]
   ])(
-    "stops a legacy migration before writes for %s",
-    async (_label, role, policy) => {
-      const aws = fakeAws({
-        ...legacy,
-        "iam get-role": role,
-        "iam get-role-policy": policy
-      });
-      const result = await setupAwsDeployIdentity(
-        { ...request, existingRoleArn: ROLE_ARN },
-        aws.ports
-      );
-      expect(result).toMatchObject({ ok: false });
-      expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
-      expect(aws.find("iam put-role-policy")).toBeUndefined();
-      expect(aws.find("iam delete-role-policy")).toBeUndefined();
-    }
-  );
-
-  it("deletes only the owned environment's current and legacy policies", async () => {
-    const aws = fakeAws({
-      ...legacy,
-      "eks describe-access-entry": NO_ACCESS_ENTRY
-    });
-    expect(
-      await removeAwsEnvironmentFromRole(removalRequest, aws.ports)
-    ).toMatchObject({ ok: true });
-    expect(
-      aws.calls
-        .filter((args) => args[1] === "delete-role-policy")
-        .map((args) => args[args.indexOf("--policy-name") + 1])
-    ).toEqual(["radius-deploy-dev-f5fb7acf8f59", "radius-deploy-dev"]);
-    const update = aws.find("iam update-assume-role-policy") ?? [];
-    expect(
-      trustedGitHubSubjects(
-        parsePolicyDocument(update[update.indexOf("--policy-document") + 1]),
-        ACCOUNT
-      )
-    ).toEqual([PROD]);
-  });
-
-  it.each(["setup", "delete"])(
-    "supports legacy %s on a picked role with unambiguous subjects",
-    async (action) => {
-      const aws = fakeAws({
-        ...legacy,
-        "iam get-role": ok({
-          Role: { ...managedRole([DEV, PROD]).Role, Tags: [] }
+    "doesn't %s the trust when the journal can't be saved",
+    async (_label, script) => {
+      const aws = fakeAws(script);
+      await expect(
+        setupAwsDeployIdentity(request, {
+          ...aws.ports,
+          write: async () => {
+            throw new Error("Disk full");
+          }
         })
-      });
-      const result =
-        action === "setup" ?
-          await setupAwsDeployIdentity(
-            { ...request, existingRoleArn: ROLE_ARN },
-            aws.ports
-          )
-        : await removeAwsEnvironmentFromRole(removalRequest, aws.ports);
-      expect(result).toMatchObject({ ok: true });
-      expect(aws.find("iam delete-role-policy")).toBeDefined();
-      expect(aws.find("iam delete-role")).toBeUndefined();
+      ).rejects.toThrow("Disk full");
+      expect(aws.find("iam create-role")).toBeUndefined();
+      expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
     }
   );
-
-  it("preserves trust evidence when legacy deletion fails after removing the new policy, allowing a retry", async () => {
-    const removal = removalRequest;
-    const picked = ok({ Role: { ...managedRole([DEV, PROD]).Role, Tags: [] } });
-    const first = fakeAws({
-      ...legacy,
-      "iam get-role": picked,
-      "iam delete-role-policy": [ok(), fail("AccessDenied")]
-    });
-    expect(
-      await removeAwsEnvironmentFromRole(removal, first.ports)
-    ).toMatchObject({
-      ok: false,
-      message: expect.stringContaining(
-        "Removed policy radius-deploy-dev-f5fb7acf8f59."
-      )
-    });
-    expect(first.find("iam update-assume-role-policy")).toBeUndefined();
-    const retry = fakeAws({
-      ...legacy,
-      "iam get-role": picked,
-      "iam delete-role-policy": [fail("NoSuchEntity"), ok()]
-    });
-    expect(
-      await removeAwsEnvironmentFromRole(removal, retry.ports)
-    ).toMatchObject({ ok: true });
-    expect(retry.find("iam update-assume-role-policy")).toBeDefined();
-  });
-
-  it("deletes the recorded hash after a rename without inspecting another repository's legacy policy", async () => {
-    const other = "repo:octo/other:environment:dev";
-    const aws = fakeAws({
-      "--version": freeChecks["--version"],
-      "sts get-caller-identity": ok({ Account: ACCOUNT }),
-      "iam get-role": ok({
-        Role: { ...managedRole([DEV, other]).Role, Tags: [] }
-      }),
-      "iam delete-role-policy": ok(),
-      "iam update-assume-role-policy": ok(),
-      "eks describe-access-entry": NO_ACCESS_ENTRY
-    });
-    expect(
-      await removeAwsEnvironmentFromRole(
-        {
-          ...removalRequest,
-          repo: "renamed/repo",
-          environment: "dev",
-          roleArn: ROLE_ARN,
-          subjects: [DEV],
-          policyName: "radius-deploy-dev-f5fb7acf8f59"
-        },
-        aws.ports
-      )
-    ).toMatchObject({ ok: true });
-    expect(aws.find("iam get-role-policy")).toBeUndefined();
-    expect(aws.find("iam delete-role-policy")).toContain(
-      "radius-deploy-dev-f5fb7acf8f59"
-    );
-    const update = aws.find("iam update-assume-role-policy") ?? [];
-    expect(
-      trustedGitHubSubjects(
-        parsePolicyDocument(update[update.indexOf("--policy-document") + 1]),
-        ACCOUNT
-      )
-    ).toEqual([other]);
-  });
-});
-
-describe("setupAwsDeployIdentity", () => {
-  it("records the exact policy identity before attaching its grant", async () => {
-    const aws = fakeAws(happyPath);
-    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
-      ok: true
-    });
-    expect(aws.identities).toEqual([
-      {
-        roleArn: ROLE_ARN,
-        policyName: "radius-deploy-dev-f5fb7acf8f59",
-        after: aws.calls.findIndex((args) => args[1] === "put-role-policy")
-      }
-    ]);
-  });
-
-  it("does not attach permissions when durable identity recording fails", async () => {
-    const aws = fakeAws(happyPath);
-    await expect(
-      setupAwsDeployIdentity(request, {
-        ...aws.ports,
-        recordPolicyIdentity: async () => {
-          throw new Error("Disk full");
-        }
-      })
-    ).rejects.toThrow("Disk full");
-    expect(aws.find("iam put-role-policy")).toBeUndefined();
-    expect(aws.find("eks create-access-entry")).toBeUndefined();
-  });
-
-  it("refuses a fresh setup when an older grant cannot be reconciled", async () => {
-    const aws = fakeAws({
-      ...happyPath,
-      "iam get-role": ok(managedRole([DEV])),
-      "iam list-role-policies": ok({
-        PolicyNames: ["radius-deploy-dev-111111111111"]
-      })
-    });
-    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
-      ok: false,
-      code: "aws-policy-name-unresolved"
-    });
-    expect(aws.find("iam put-role-policy")).toBeUndefined();
-    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
-  });
 
   it("creates the provider, role, policy, and cluster access on a fresh account", async () => {
     const aws = fakeAws(happyPath);
@@ -533,8 +244,7 @@ describe("setupAwsDeployIdentity", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      roleCreated: true,
-      policyName: "radius-deploy-dev-f5fb7acf8f59"
+      roleCreated: true
     });
     expect(aws.steps).toEqual([
       "✅ AWS CLI 2.17.0 meets the 2.15.3 minimum.",
@@ -542,7 +252,7 @@ describe("setupAwsDeployIdentity", () => {
       `✅ Created the GitHub identity provider in account ${ACCOUNT}.`,
       `ℹ️ Deploy identity will trust ${DEV}`,
       `✅ Created IAM role ${ROLE}.`,
-      "✅ Attached deploy permission policy radius-deploy-dev-f5fb7acf8f59, limited to us-west-2.",
+      `✅ Attached deploy permission policy ${POLICY}, limited to us-west-2.`,
       "✅ Granted the role cluster-admin on shop."
     ]);
     const createRole = aws.find("iam create-role");
@@ -599,8 +309,7 @@ describe("setupAwsDeployIdentity", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      roleCreated: false,
-      policyName: "radius-deploy-dev-f5fb7acf8f59"
+      roleCreated: false
     });
     // The entry is newer than the role, so it is the role's own and stays.
     expect(aws.find("eks delete-access-entry")).toBeUndefined();
@@ -710,8 +419,7 @@ describe("setupAwsDeployIdentity", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      roleCreated: true,
-      policyName: "radius-deploy-dev-f5fb7acf8f59"
+      roleCreated: true
     });
     expect(aws.steps).toContain(
       `ℹ️ Deploy identity will trust ${DEV}, ${DEV_ID}`
@@ -987,7 +695,7 @@ describe("setupAwsDeployIdentity", () => {
       created: [
         `the GitHub identity provider in account ${ACCOUNT}`,
         `IAM role ${ROLE}`,
-        `policy radius-deploy-dev-f5fb7acf8f59 on ${ROLE}`
+        `policy ${POLICY} on ${ROLE}`
       ]
     });
     expect(aws.sleeps).toEqual([2000, 4000, 8000, 15000, 30000]);
@@ -1019,7 +727,7 @@ describe("setupAwsDeployIdentity", () => {
       created: [
         `the GitHub identity provider in account ${ACCOUNT}`,
         `IAM role ${ROLE}`,
-        `policy radius-deploy-dev-f5fb7acf8f59 on ${ROLE}`,
+        `policy ${POLICY} on ${ROLE}`,
         `access entry for ${ROLE} on shop`
       ]
     });
@@ -1304,8 +1012,7 @@ describe("setupAwsDeployIdentity failure paths", () => {
       expect(result).toEqual({
         ok: true,
         roleArn: ROLE_ARN,
-        roleCreated: true,
-        policyName: "radius-deploy-dev-f5fb7acf8f59"
+        roleCreated: true
       });
       expect(aws.find("eks describe-access-entry")).toBeUndefined();
       expect(aws.find("eks delete-access-entry")).toEqual(
@@ -1422,8 +1129,7 @@ describe("setupAwsDeployIdentity failure paths", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      roleCreated: false,
-      policyName: "radius-deploy-dev-f5fb7acf8f59"
+      roleCreated: false
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
@@ -1705,8 +1411,6 @@ describe("removeAwsEnvironmentFromRole", () => {
   const OTHER_REPO = "repo:octo/other:environment:dev";
   const signedIn: Script = {
     "--version": freeChecks["--version"],
-    "iam get-role-policy": freeChecks["iam get-role-policy"],
-    "iam list-role-policies": freeChecks["iam list-role-policies"],
     "sts get-caller-identity": ok({ Account: ACCOUNT }),
     "eks describe-access-entry": NO_ACCESS_ENTRY
   };
@@ -1747,25 +1451,30 @@ describe("removeAwsEnvironmentFromRole", () => {
     );
   }
 
-  it("removes only this environment's subject and policy", async () => {
-    const aws = fakeAws({
-      ...signedIn,
-      "iam get-role": ok(managedRole([DEV, PROD])),
-      "iam update-assume-role-policy": ok(),
-      "iam delete-role-policy": ok()
-    });
-    expect(await remove(aws)).toEqual({
-      ok: true,
-      removed: [
-        `trust subject ${DEV}`,
-        "policy radius-deploy-dev-f5fb7acf8f59"
-      ],
-      kept: KEPT,
-      warnings: []
-    });
-    expect(trustedGitHubSubjects(writtenTrust(aws), ACCOUNT)).toEqual([PROD]);
-    expect(aws.calls.map((args) => args[1])).not.toContain("delete-role");
-  });
+  it.each([REPO_ID, 123456789012])(
+    "removes only this environment's subject and policy for repository %i",
+    async (repoId) => {
+      const policyName = awsEnvironmentPolicyName(repoId, "dev");
+      const { Role: role } = managedRole([DEV, PROD]);
+      const aws = fakeAws({
+        ...signedIn,
+        "iam get-role": ok({
+          Role: { ...role, Tags: radiusTags("octo/shop", repoId) }
+        }),
+        "iam update-assume-role-policy": ok(),
+        "iam delete-role-policy": ok()
+      });
+      expect(await remove(aws, null, { repoId })).toEqual({
+        ok: true,
+        removed: [`trust subject ${DEV}`, `policy ${policyName}`],
+        kept: KEPT,
+        warnings: []
+      });
+      expect(trustedGitHubSubjects(writtenTrust(aws), ACCOUNT)).toEqual([PROD]);
+      expect(aws.calls.map((args) => args[1])).not.toContain("delete-role");
+      expect(aws.find("iam list-role-policies")).toBeUndefined();
+    }
+  );
 
   it("removes every subject the environment recorded in one update", async () => {
     const aws = fakeAws({
@@ -1780,7 +1489,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       removed: [
         `trust subject ${DEV}`,
         `trust subject ${DEV_ID}`,
-        "policy radius-deploy-dev-f5fb7acf8f59"
+        `policy ${POLICY}`
       ]
     });
     expect(
@@ -1789,21 +1498,25 @@ describe("removeAwsEnvironmentFromRole", () => {
     expect(trustedGitHubSubjects(writtenTrust(aws), ACCOUNT)).toEqual([PROD]);
   });
 
-  it("says what is still there when the trust update fails", async () => {
-    const aws = fakeAws({
-      ...signedIn,
-      "iam delete-role-policy": ok(),
-      "iam get-role": ok(managedRole([DEV_ID, PROD])),
-      "iam update-assume-role-policy": fail("AccessDenied")
-    });
-    expect(await remove(aws, null, { subjects: [DEV, DEV_ID] })).toEqual({
-      ok: false,
-      message: `Removed policy radius-deploy-dev-f5fb7acf8f59. Could not update the trust policy of IAM role ${ROLE} (AccessDenied). Trust subjects were retained so deletion can be retried.`
-    });
-    expect(aws.find("iam delete-role-policy")).toContain(
-      "radius-deploy-dev-f5fb7acf8f59"
-    );
-  });
+  it.each([
+    [ok(), `Removed policy ${POLICY}. `],
+    [fail("NoSuchEntity"), ""]
+  ])(
+    "says what is still there when the trust update fails after deleting the policy: %j",
+    async (deletion, prefix) => {
+      const aws = fakeAws({
+        ...signedIn,
+        "iam delete-role-policy": deletion,
+        "iam get-role": ok(managedRole([DEV_ID, PROD])),
+        "iam update-assume-role-policy": fail("AccessDenied")
+      });
+      expect(await remove(aws, null, { subjects: [DEV, DEV_ID] })).toEqual({
+        ok: false,
+        message: `${prefix}Could not update the trust policy of IAM role ${ROLE} (AccessDenied). Trust subjects were retained so deletion can be retried.`
+      });
+      expect(aws.find("iam delete-role-policy")).toContain(POLICY);
+    }
+  );
 
   it("retains trust evidence when the policy delete fails", async () => {
     const aws = fakeAws({
@@ -1814,7 +1527,7 @@ describe("removeAwsEnvironmentFromRole", () => {
     });
     expect(await remove(aws)).toEqual({
       ok: false,
-      message: `Failed to delete policy radius-deploy-dev-f5fb7acf8f59 from ${ROLE}: AccessDenied. Trust subjects were retained so deletion can be retried.`
+      message: `Failed to delete policy ${POLICY} from ${ROLE}: AccessDenied. Trust subjects were retained so deletion can be retried.`
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
@@ -1827,7 +1540,7 @@ describe("removeAwsEnvironmentFromRole", () => {
     });
     expect(await remove(aws)).toMatchObject({
       ok: true,
-      removed: ["policy radius-deploy-dev-f5fb7acf8f59"]
+      removed: [`policy ${POLICY}`]
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
@@ -1941,10 +1654,7 @@ describe("removeAwsEnvironmentFromRole", () => {
         const result = await remove(aws, null, { subjects: [DEV, subject] });
         expect(result).toMatchObject({
           ok: true,
-          removed: [
-            `trust subject ${DEV}`,
-            "policy radius-deploy-dev-f5fb7acf8f59"
-          ],
+          removed: [`trust subject ${DEV}`, `policy ${POLICY}`],
           warnings: [sharedWarning(subject)]
         });
         expect(trustedGitHubSubjects(writtenTrust(aws), ACCOUNT)).toEqual([
@@ -1961,7 +1671,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       });
       expect(await remove(aws, null, { subjects: [SHARED] })).toMatchObject({
         ok: true,
-        removed: ["policy radius-deploy-dev-f5fb7acf8f59"],
+        removed: [`policy ${POLICY}`],
         warnings: []
       });
       expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
@@ -1977,10 +1687,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       });
       expect(await remove(aws, null, { subjects: [renamed] })).toMatchObject({
         ok: true,
-        removed: [
-          `trust subject ${renamed}`,
-          "policy radius-deploy-dev-f5fb7acf8f59"
-        ]
+        removed: [`trust subject ${renamed}`, `policy ${POLICY}`]
       });
     });
 
@@ -1993,7 +1700,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       });
       const result = await remove(aws, null, { subjects: [SHARED] });
       expect(!result.ok && result.message).toMatch(
-        /retry, or by hand delete its policy radius-deploy-dev\.$/
+        new RegExp(`retry, or by hand delete its policy ${POLICY}\\.$`)
       );
     });
   });
@@ -2013,7 +1720,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       )
     );
     expect(!result.ok && result.message).toContain(
-      `by hand remove ${DEV}, ${DEV_ID} from its trust policy and delete its policy radius-deploy-dev.`
+      `by hand remove ${DEV}, ${DEV_ID} from its trust policy and delete its policy ${POLICY}.`
     );
     expect(aws.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
       "--version",
@@ -2125,7 +1832,7 @@ describe("removeAwsEnvironmentFromRole", () => {
         ok: true,
         removed: [
           `trust subject ${DEV}`,
-          "policy radius-deploy-dev-f5fb7acf8f59",
+          `policy ${POLICY}`,
           `access entry for ${ROLE} on shop`
         ],
         kept: KEPT,
@@ -2365,10 +2072,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       });
       expect(await remove(aws)).toEqual({
         ok: true,
-        removed: [
-          `trust subject ${DEV}`,
-          "policy radius-deploy-dev-f5fb7acf8f59"
-        ],
+        removed: [`trust subject ${DEV}`, `policy ${POLICY}`],
         kept: KEPT,
         warnings: []
       });
@@ -2381,10 +2085,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       });
       expect(await remove(aws, { ok: true, environments: [prod] })).toEqual({
         ok: true,
-        removed: [
-          `trust subject ${DEV}`,
-          "policy radius-deploy-dev-f5fb7acf8f59"
-        ],
+        removed: [`trust subject ${DEV}`, `policy ${POLICY}`],
         kept: KEPT,
         warnings: []
       });
@@ -2397,7 +2098,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       });
       expect(await remove(aws, { ok: true, environments: [prod] })).toEqual({
         ok: false,
-        message: `Could not delete ${ENTRY} (AccessDeniedException). Removed trust subject ${DEV}, policy radius-deploy-dev-f5fb7acf8f59. Still there: ${ENTRY}. Retry removes what's still there.`
+        message: `Could not delete ${ENTRY} (AccessDeniedException). Removed trust subject ${DEV}, policy ${POLICY}. Still there: ${ENTRY}. Retry removes what's still there.`
       });
     });
   });
@@ -2485,8 +2186,6 @@ describe("deploy identity lock order", () => {
   it("locks delete after the account check and before reading the role", async () => {
     const aws = fakeAws({
       "--version": freeChecks["--version"],
-      "iam get-role-policy": freeChecks["iam get-role-policy"],
-      "iam list-role-policies": freeChecks["iam list-role-policies"],
       "sts get-caller-identity": ok({ Account: ACCOUNT }),
       "iam get-role": ok(managedRole([DEV, PROD])),
       "iam update-assume-role-policy": ok(),
@@ -2670,8 +2369,6 @@ describe("waiting for IAM to show a trust policy write", () => {
   it("waits on delete too, and stops the deletion when IAM never shows the write", async () => {
     const script: Script = {
       "--version": freeChecks["--version"],
-      "iam get-role-policy": freeChecks["iam get-role-policy"],
-      "iam list-role-policies": freeChecks["iam list-role-policies"],
       "sts get-caller-identity": ok({ Account: ACCOUNT }),
       "iam get-role": ok(managedRole([DEV, PROD])),
       "iam update-assume-role-policy": ok(),
@@ -2691,11 +2388,9 @@ describe("waiting for IAM to show a trust policy write", () => {
     const never = fakeAws(script, { ok: true }, { staleReads: 99 });
     expect(await remove(never)).toEqual({
       ok: false,
-      message: `Removed policy radius-deploy-dev-f5fb7acf8f59. IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped. Retry the deletion.`
+      message: `Removed policy ${POLICY}. IAM did not show the updated trust policy of IAM role ${ROLE} after the update, so Radius stopped. Retry the deletion.`
     });
-    expect(never.find("iam delete-role-policy")).toContain(
-      "radius-deploy-dev-f5fb7acf8f59"
-    );
+    expect(never.find("iam delete-role-policy")).toContain(POLICY);
   });
 });
 
@@ -2715,7 +2410,7 @@ describe("repairAwsEnvironmentTrust", () => {
     }),
     "iam get-role": ok(managedRole([PROD, DEV])),
     // The permission policy setup wrote for this environment.
-    "iam get-role-policy": ok({ PolicyName: "radius-deploy-dev" }),
+    "iam get-role-policy": ok({ PolicyName: POLICY }),
     "iam update-assume-role-policy": ok()
   };
   const written = (aws: ReturnType<typeof fakeAws>) => {
@@ -2724,51 +2419,6 @@ describe("repairAwsEnvironmentTrust", () => {
       JSON.parse(update[update.indexOf("--policy-document") + 1] ?? "{}")
     );
   };
-
-  it.each([undefined, "radius-deploy-dev-111111111111"])(
-    "repairs against the exact saved policy %s",
-    async (policyName) => {
-      const aws = fakeAws({
-        ...ready,
-        "iam get-role-policy": ok({
-          PolicyName: policyName ?? "radius-deploy-dev"
-        })
-      });
-      expect(
-        await repairAwsEnvironmentTrust({ ...repair, policyName }, aws.ports)
-      ).toMatchObject({ ok: true, added: [DEV_ID] });
-      expect(aws.find("iam get-role-policy")).toContain(
-        policyName ?? "radius-deploy-dev"
-      );
-    }
-  );
-
-  it.each(["", "unrelated", "radius-deploy-prod-111111111111"])(
-    "refuses an invalid saved Repair policy %j before writing",
-    async (policyName) => {
-      const aws = fakeAws(ready);
-      expect(
-        await repairAwsEnvironmentTrust({ ...repair, policyName }, aws.ports)
-      ).toMatchObject({ ok: false, code: "aws-policy-name-invalid" });
-      expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
-    }
-  );
-
-  it("does not fall back to a legacy grant when the recorded Repair policy is missing", async () => {
-    const policyName = "radius-deploy-dev-111111111111";
-    const aws = fakeAws({
-      ...ready,
-      "iam get-role-policy": fail("NoSuchEntity")
-    });
-    expect(
-      await repairAwsEnvironmentTrust({ ...repair, policyName }, aws.ports)
-    ).toMatchObject({ ok: false, code: "aws-environment-not-set-up" });
-    expect(
-      aws.calls.filter((args) => args[1] === "get-role-policy")
-    ).toHaveLength(1);
-    expect(aws.find("iam get-role-policy")).toContain(policyName);
-    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
-  });
 
   it("adds back only the missing subjects and keeps everything else", async () => {
     const aws = fakeAws(ready);
@@ -2796,7 +2446,7 @@ describe("repairAwsEnvironmentTrust", () => {
       "--role-name",
       ROLE,
       "--policy-name",
-      "radius-deploy-dev",
+      POLICY,
       "--output",
       "json"
     ]);
@@ -2825,27 +2475,17 @@ describe("repairAwsEnvironmentTrust", () => {
     }
   });
 
-  it.each([undefined, "radius-deploy-dev-111111111111"])(
-    "repairs a picked role with policy %j that still trusts this environment",
-    async (policyName) => {
-      const aws = fakeAws({
-        ...ready,
-        "iam get-role": ok(unmanagedRole([DEV])),
-        "iam get-role-policy": ok({
-          PolicyName: policyName ?? "radius-deploy-dev"
-        })
-      });
-      expect(
-        await repairAwsEnvironmentTrust({ ...repair, policyName }, aws.ports)
-      ).toMatchObject({
-        ok: true,
-        added: [DEV_ID]
-      });
-      expect(aws.find("iam get-role-policy")).toContain(
-        policyName ?? "radius-deploy-dev"
-      );
-    }
-  );
+  it("repairs a picked role that still trusts this environment", async () => {
+    const aws = fakeAws({
+      ...ready,
+      "iam get-role": ok(unmanagedRole([DEV]))
+    });
+    expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toMatchObject({
+      ok: true,
+      added: [DEV_ID]
+    });
+    expect(aws.find("iam get-role-policy")).toContain(POLICY);
+  });
 
   it("adds to a role Radius created for this repository even when it trusts nothing", async () => {
     const role = managedRole([]);
@@ -2927,7 +2567,7 @@ describe("repairAwsEnvironmentTrust", () => {
       expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
         ok: false,
         code: "aws-environment-not-set-up",
-        message: `IAM role ${ROLE} has no permission policy radius-deploy-dev for environment dev, so setup never ran for it on this role, and Repair only restores trust that setup added. Nothing was changed. If environment dev should deploy with this role, set it up on the Environments page, which adds its trust and permissions.`
+        message: `IAM role ${ROLE} has no permission policy ${POLICY} for environment dev, so setup never ran for it on this role, and Repair only restores trust that setup added. Nothing was changed. If environment dev should deploy with this role, set it up on the Environments page, which adds its trust and permissions.`
       });
       expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
     }
@@ -2942,7 +2582,7 @@ describe("repairAwsEnvironmentTrust", () => {
     expect(await repairAwsEnvironmentTrust(repair, aws.ports)).toEqual({
       ok: false,
       code: "aws-role-policy-unreadable",
-      message: `Could not read permission policy radius-deploy-dev on IAM role ${ROLE}, so Radius cannot tell that setup ran for environment dev on it: AccessDenied: iam:GetRolePolicy. Nothing was changed.`
+      message: `Could not read permission policy ${POLICY} on IAM role ${ROLE}, so Radius cannot tell that setup ran for environment dev on it: AccessDenied: iam:GetRolePolicy. Nothing was changed.`
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
@@ -3262,7 +2902,7 @@ describe("the changes setup records", () => {
         roleArn: ROLE_ARN,
         roleName: ROLE,
         roleId: "AROA1",
-        policyName: "radius-deploy-dev-f5fb7acf8f59"
+        policyName: POLICY
       },
       {
         kind: "aws_access_entry.create",
@@ -3276,20 +2916,14 @@ describe("the changes setup records", () => {
     ]);
   });
 
-  it("does not record a policy that replaces a legacy one, so a rollback keeps the grant", async () => {
-    const legacyDocument = buildAwsEnvironmentPermissionPolicy("us-west-2");
+  it("records the environment's policy on a reused role", async () => {
     const aws = fakeAws({
       ...happyPath,
       ...existingProvider,
       "iam get-role": ok({
         Role: { ...managedRole([DEV, PROD]).Role, RoleId: "AROA1" }
       }),
-      "iam get-role-policy": ok({
-        PolicyName: "radius-deploy-dev",
-        PolicyDocument: legacyDocument
-      }),
-      "iam update-assume-role-policy": ok(),
-      "iam delete-role-policy": ok()
+      "iam update-assume-role-policy": ok()
     });
     const recorded = recording(aws);
 
@@ -3297,11 +2931,10 @@ describe("the changes setup records", () => {
       { ok: true }
     );
 
-    // The replacement was written and the legacy policy removed, but only the
-    // access entry is this setup's to undo.
-    expect(aws.find("iam put-role-policy")).toBeDefined();
-    expect(aws.find("iam delete-role-policy")).toContain("radius-deploy-dev");
+    expect(aws.find("iam put-role-policy")).toContain(POLICY);
+    expect(aws.find("iam delete-role-policy")).toBeUndefined();
     expect(recorded.changes.map((change) => change.kind)).toEqual([
+      "aws_role_policy.put",
       "aws_access_entry.create"
     ]);
   });
@@ -3312,7 +2945,6 @@ describe("the changes setup records", () => {
       "iam get-role": ok({
         Role: { ...managedRole([DEV]).Role, RoleId: "AROA7" }
       }),
-      "iam list-role-policies": ok({ PolicyNames: [] }),
       "iam update-assume-role-policy": ok()
     });
     const recorded = recording(aws);
@@ -3351,7 +2983,7 @@ describe("the changes setup records", () => {
     ).toHaveLength(2);
   });
 
-  it("does not record restoring a legacy policy", async () => {
+  it("records exactly one environment policy", async () => {
     const aws = fakeAws(happyPath);
     const recorded = recording(aws);
     await setupAwsDeployIdentity(request, recorded.ports);
