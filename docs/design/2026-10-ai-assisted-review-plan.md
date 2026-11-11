@@ -14,14 +14,14 @@ We already run several review checks. Some use AI and some are through ordinary 
 - [`code-review.prompt.md`](https://github.com/radius-project/ai-extensions/blob/main/.github/prompts/code-review.prompt.md): our most detailed review prompt. Today it runs only when someone invokes it by hand.
 - [`radius-code-quality`](https://github.com/radius-project/ai-extensions/blob/main/.github/skills/radius-code-quality/SKILL.md): a skill that people or agents run while making a change. [`code-quality.instructions.md`](https://github.com/radius-project/ai-extensions/blob/main/.github/instructions/code-quality.instructions.md) points agents to it for TypeScript and JavaScript files. Copilot agents usually load it when they edit those files, and Copilot code review may load it, but the model decides each time.
 - [Copilot code review](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review): the [main ruleset](https://github.com/radius-project/ai-extensions/rules/18178381) requests a review when someone opens a non-draft pull request. The review reads `code-quality.instructions.md` for TypeScript and JavaScript files.
-- [`build.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/build.yml): the build, test, and coverage jobs run in CI but don't block merge.
-- [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml): runs in CI but doesn't block merge.
+- [`build.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/build.yml): the required `CI gate` waits for builds, tests, coverage, Windows, Chromium, and every discovered plugin build to succeed.
+- [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml): `dependency-review / dependency-review` is required. The workflow is synced from `radius-project/.github`, so policy changes belong upstream.
 
 The majority of these checks don't work together:
 
 - Copilot reviews only the first version of a pull request. A later push gets a review only if someone asks for one.
 - Copilot never sees `code-review.prompt.md`, our most detailed list of what to look for.
-- Only `DCO` and `Visual comparisons` block merge, so a broken build or a vulnerable dependency can still merge.
+- Build and Dependency Review failures already block normal merges, alongside the other checks listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#required-merge-checks). CodeQL scanning and its separate severity rule still need the Phase 3 rollout and acceptance evidence below.
 
 Every change also faces the same approval bar. A one-word docs fix needs the same human review as a risky change to shared code.
 
@@ -153,35 +153,93 @@ If reviews keep running unexpectedly, an admin authorized to roll back can resto
 
 ### Phase 3: Blocking security and build checks
 
+Add CodeQL scanning, then require successful analysis and block new high/critical findings. Keep the existing build, dependency, release, and human-review protections.
+
+**Adding the workflow does not change merge rules.** Scanning, merge enforcement, and Autofix each need their own evidence and authorization.
+
 #### Step 3.1: Turn on CodeQL and Copilot Autofix
 
-We need a security reviewer that can block merge. Our review prompt already lists the risks that matter most here: shell strings built from interpolated values, unescaped webview HTML, unpinned actions, and secrets passed as inputs. Today nothing blocks merge on any of them.
+##### Run both language analyses
 
-CodeQL catches several of these risks on every run, and its Actions queries flag the same workflow problems a linter like zizmor would (injection in `run:` steps, unpinned actions, risky triggers). Copilot Autofix proposes a patch for each CodeQL finding.
+The [advanced CodeQL workflow](../../.github/workflows/codeql.yml) runs `security-extended` for `javascript-typescript` and `actions`. Each language gets its own matrix job. `fail-fast: false` lets both finish even if one fails.
 
-We should:
+It runs on every pull request, including stacks and documentation-only changes, pushes to `main`, a weekly schedule, and authorized manual recovery runs. No path, author, or draft filters skip PR analysis.
 
-- Enable CodeQL code scanning for JavaScript and TypeScript, and for GitHub Actions.
-- Turn on Copilot Autofix.
-- Add a rule to the `main` ruleset that blocks merge on any new high or critical alert.
+The workflow keeps execution narrow:
 
-#### Step 3.2: Make Dependency Review and the build jobs required checks
+- Pin actions to reviewed full commit SHAs. `tools: linked` uses the CodeQL bundle tied to that action release.
+- Check out the normal PR merge ref with `persist-credentials: false`.
+- Start with root `permissions: {}`. Grant the analysis job only `contents: read` and `security-events: write`.
+- Do not install application dependencies, run application builds, or use cloud credentials, PATs, OIDC, or `pull_request_target`.
 
-We need failing builds and vulnerable dependencies to block merge. Today the Dependency Review job and the build jobs in [`build.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/build.yml) report failures, but none is required, so a pull request that adds a vulnerable package or breaks the build can still merge.
+Uploads use separate categories, `/language:javascript-typescript` and `/language:actions`, so one language cannot replace the other's results. Initialization, extraction, analysis, and upload errors must fail the job.
 
-We should add these as required status checks in the `main` ruleset, using the check name each job reports:
+##### Separate completion from findings
 
-- `dependency-review` (from [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml))
-- `Static checks`
-- `Windows process integration`
-- `Canvas Chromium (shard 1)` and `Canvas Chromium (shard 2)`
-- `Tests, browser coverage and library candidates`
+**A successful scan can still find a vulnerability.** We need two controls:
 
-Once the tests job is required, violations of the 100% coverage thresholds already in `vitest.config.ts` block merge too.
+| Control                                                                                                               | What it establishes                                                                                                                                      |
+|-----------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Required status: `CodeQL analysis gate`, bound to GitHub Actions                                                      | Both language analyses completed successfully. The gate runs with `always()` and rejects failed, cancelled, skipped, empty, missing, or unknown results. |
+| Native `code_scanning` rule: tool `CodeQL`, security alerts **High or higher**, ordinary non-security alerts **None** | Relevant high/critical findings block merge, independently of scanner completion.                                                                        |
 
-We should require these jobs directly rather than `build-gate`. `build-gate` waits on the same jobs, but when one of them fails GitHub skips the gate instead of failing it, and a skipped required check counts as passed. Requiring the jobs directly avoids changing `build-gate`, which `publish.yml` and `release.yml` rely on. The cost is upkeep: when we rename, add, or reshard one of these jobs, we must update the ruleset to match. [Alternatives considered](#alternatives-considered) covers the other option.
+Add these requirements only after healthy default-branch and PR scans and an authorized rehearsal of enforcement and rollback in an isolated repository. Keep advanced setup as the only CodeQL configuration; do not also enable default setup.
 
-This list leaves out the per-plugin `Build <plugin> dist` jobs. Their check names come from a matrix that grows as we add plugins, so a fixed ruleset can't list them. As it stands, a pull request that breaks one plugin's build can still merge.
+Check the effective `main` ruleset and Code security settings to establish what is active. Source files describe the intended configuration, not proof of activation. The [acceptance sequence](#phase-3-acceptance-evidence) records the evidence.
+
+##### Know what scanning does not cover
+
+CodeQL recognizes supported query patterns, not every shell interpolation, HTML sink, secret flow, or workflow risk. Human review and existing tests still matter.
+
+The selected action release, v4.39.3, links CodeQL bundle 2.27.4. Its [Actions extractor](https://github.com/github/codeql/blob/codeql-cli/v2.27.4/actions/extractor/tools/autobuild.sh) includes these paths by default:
+
+- `.github/workflows/*.yml` and `.github/workflows/*.yaml`
+- `.github/reusable_workflows/**/*.yml` and `.github/reusable_workflows/**/*.yaml`
+- `**/action.yml`, `**/action.yaml`, and `**/actions.lock`
+
+Composite action manifests under `.github/extension` can therefore be included. Arbitrarily named workflow templates there, and YAML embedded in TypeScript, are not automatically analyzed as executable workflows. Confirm actual extraction coverage from hosted results; zero alerts alone do not prove coverage.
+
+Do not exclude source just to silence findings. Any proposed exclusion needs a reason, review, and evidence showing what it removes. Trigger filters decide when a scan runs; extraction filters decide what it reads. This workflow adds neither.
+
+Three limits affect enforcement:
+
+- **PR-diff scope.** GitHub's [native merge protection](https://docs.github.com/en/code-security/concepts/code-scanning/merge-protection) applies only when all relevant alert locations are in the PR diff. It is not a ban on every existing vulnerability. Triage baseline alerts rather than silently dismissing them to enable the rule.
+- **Action pinning.** `security-extended` includes [`actions/unpinned-tag`](https://codeql.github.com/codeql-query-help/actions/actions-unpinned-tag/) with security severity 5.0 and warning severity. The high/critical rule will not make it blocking. Keep the scoped pinning tests for shipped assets and specific workflows; a universal pinning gate remains deferred.
+- **Contributor and queue behavior.** Native protection excludes merge-queue groups and Dependabot PRs analyzed by default setup. Advanced setup avoids the latter exception, but fork and Dependabot behavior still needs hosted evidence. We have no merge queue; adopting one needs a separate trigger and enforcement design.
+
+##### Verify Autofix and authorize hosted work separately
+
+Copilot Autofix can suggest fixes for supported queries, but it may be unavailable or produce no suggestion. Humans review and test any proposed fix. Autofix neither approves nor automatically applies changes, and a missing suggestion never clears an alert.
+
+Verify its effective availability before any separately authorized setting change.
+
+Publishing a PR with this workflow can immediately start CodeQL. Repository preparation alone does not authorize publication, hosted Actions usage, dispatches, live settings changes, or deliberate-failure experiments. Obtain the applicable authorization before each.
+
+#### Step 3.2: Preserve Dependency Review, CI, and release gates
+
+**The plugin-build gap is already closed.** The required `CI gate` runs with `always()` and passes only when every Build dependency succeeds: plugin discovery, static checks, Windows, both Chromium shards, tests/coverage/library candidates, the shared release gate, and every plugin build. The ruleset does not need a fixed list of plugins or shards.
+
+Keep the required checks listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#required-merge-checks), including Dependency Review, with their existing source bindings. GitHub Actions is integration `15368`; DCO is `974774`. Recheck those identities before an authorized rule edit. Dependency Review is synced upstream; do not edit its workflow locally.
+
+Coverage thresholds come from [`vitest.config.ts`](../../vitest.config.ts) and [`coverage-baseline.json`](../../coverage-baseline.json), not a universal 100% rule. Required CI enforces those floors. The code-quality skill separately targets 100% meaningful coverage of changed production paths.
+
+Leave `Shared release gate` and its `build-gate` artifact unchanged. Publish and release workflows consume that artifact. The PR completion gate does not replace it or couple independent plugin releases.
+
+Preserve strict up-to-date checks, signatures, squash-only merges, human/code-owner/latest-push approvals, thread resolution, and bypasses. Stage 3 adds security requirements; it does not relax these protections.
+
+##### Keep PR analyses current
+
+Before requiring CodeQL, find open PRs without current analyses. Authors should update their branches normally so they contain the workflow and receive a `pull_request` run against the intended base and head.
+
+Retargeting alone may not trigger a scan. A default-branch dispatch does not establish analysis of a PR's current revision.
+
+##### Keep required checks connected to their producers
+
+Never delete or rename a required check's producer first:
+
+- **Withdraw scanning:** obtain authorization, remove the new status and native requirement, then delete the workflow.
+- **Rename the completion check:** report both names, verify the new identity and successful runs, switch the required context, then remove the old name. Keep the native CodeQL rule if analysis continues unchanged.
+- **Roll back:** compare current settings with the recorded prior values and restore only Stage 3-owned fields. Do not replace the whole ruleset or relax unrelated protections.
 
 ### Phase 4: Scale human approval to risk
 
@@ -292,8 +350,55 @@ Each phase gets one verification:
 
 - **Phase 1.** Open a pull request after Step 1.2 and confirm that Copilot's review applied the `radius-code-review` skill and ended with the summary comment.
 - **Phase 2.** Once the rollout is separately authorized, test it in GitHub. Confirm that Copilot reviews the new commit after a push, skips drafts under the tested settings, handles resolved findings, and uses the requested effort. Test a maintainer's review request, the author's pause after round three, and admin rollback. Record any blocked case or platform limitation. Local reviews cannot establish these results.
-- **Phase 3.** On a scratch branch, break each required check in turn (a failing test, a lint error, a vulnerable dependency, a seeded CodeQL alert) and confirm the pull request can't merge.
+- **Phase 3.** Complete the separately authorized scan, enforcement, and rollback cases in [Phase 3 acceptance evidence](#phase-3-acceptance-evidence). Local workflow tests establish execution contracts, not GitHub merge blocking.
 - **Phase 4.** Run the acceptance cases below on a scratch repository with a copy of the `main` ruleset and the same Copilot settings, before we change anything in ai-extensions.
+
+### Phase 3 acceptance evidence
+
+**Local tests prove the workflow's behavior. Hosted tests must prove scanning and merge enforcement.** Keep those results separate.
+
+#### Check the local contracts
+
+Parse the workflow YAML and execute the actual CodeQL gate shell with successful, failed, cancelled, skipped, empty, missing, and unknown dependency results. Rerun the existing CI-gate tests, keeping their dynamic dependency coverage.
+
+These checks do not need new product, UI, cloud, or deliberately vulnerable production fixtures.
+
+#### Authorize and rehearse hosted tests
+
+Before hosted work, confirm who will act as admin, who owns the evidence, which Actions usage is permitted, the isolated repository and participants, the exact settings changes, and who may roll them back. A named admin or admin access is not authorization.
+
+Rehearse enforcement and rollback in an approved isolated repository **before changing live rules**. Use an identity without bypass rights. Copy only the needed safe workflows and protections, not secrets or publication/deployment jobs. Never merge seeded defects or execute intentionally unsafe steps.
+
+For each case, record **pass, fail, or blocked**, the workflow/action/tool versions, event, language category, matching head/base/merge revisions, analysis URLs, and the specific rule or check that made the decision. Compare with a healthy control.
+
+#### Cover the required cases
+
+- **Healthy scans:** both languages succeed on the default branch and a healthy PR. Verify extraction scope; zero alerts do not prove that the intended files were read.
+- **High and critical findings:** use harmless, non-executed samples in paths the extractor analyzes. First observe the expected query, severity, and PR-diff locations in the actual results. Then verify that the native rule blocks and that correcting the sample clears it on a new revision. If the expected alert is absent, mark the case blocked, even if another rule prevents merge.
+- **Lower-severity control:** a medium-severity finding does not block through the new high/critical rule. Identify any independent blocking control.
+- **Unsuccessful analysis:** either language failing, cancelled, skipped, missing, or incomplete cannot produce a passing completion gate.
+- **Absent or stale results:** disabled analysis and a failed revision following a successful one cannot satisfy requirements with missing or older results.
+- **Contributor variants:** fork, Dependabot, documentation-only, stacked, pre-existing, and retargeted PRs receive current analysis without secrets or privilege escalation. Mark unavailable identities as blocked evidence.
+- **Dependabot pushes:** test PR uploads separately from scans after a Dependabot-authored squash merge. The latter can have read-only-token upload limits. Preserve squash-only policy and document an authorized recovery path.
+- **Existing protections:** static checks, coverage/tests, Chromium, Windows, plugin discovery/build, the shared release artifact, Dependency Review, shell/uploader, registry, visual, and DCO protections still work. Reuse matching checked-in or hosted evidence. Inspect upstream Dependency Review policy before choosing a sample; never install or run a vulnerable package. Visual checks may legitimately skip nonvisual changes.
+- **Autofix:** record effective availability and, where supported, a suggestion, human review, and verification of an accepted fix. No suggestion does not weaken protection.
+- **Rollback:** restore only the new fields and demonstrate safe producer removal/rename ordering. Unresolved new-rule or rollback failures block activation. Other unavailable cases need an explicit decision before proceeding; do not count them as passes.
+
+#### Activate, verify, and record
+
+Once scans are healthy and rehearsal is complete:
+
+1. Obtain separate activation authorization. Capture the full current ruleset and security configuration, and reconcile concurrent changes.
+2. Add only the two Step 3.1 requirements. Read the persisted settings back and compare them with the snapshot.
+3. Repeat safe, approved enforcement cases in the real repository, using current revisions and an identity without bypass rights.
+
+Prove that the specific new rule or check blocks the matching revision. A red job, missing approval, draft restriction, admin's ability to merge, or isolated-repository result is not enough. Never attempt a potentially successful real-repository merge to prove a negative.
+
+Keep a separate acceptance record for each milestone: **repository preparation**, **hosted scans**, **Autofix verified**, **live rules persisted**, and **enforcement accepted**. Each needs its own evidence and responsible operator; source edits do not establish later milestones.
+
+Repository preparation alone leaves the later milestones pending authorization and evidence. Stage 3 is operationally complete only when scans are healthy, authorized settings are persisted, enforcement and rollback cases pass, and remaining platform limitations have explicit disposition.
+
+### Phase 4 acceptance cases
 
 In each case, "blocked" means GitHub won't allow the merge.
 
@@ -340,31 +445,29 @@ Step 4.5 asks for four weeks, 30 low-tier pull requests, and zero false approval
 Step 4.5 trusts an agent's pull request only when GitHub's records show a team member started the agent. The alternative is to require a human approval on every agent pull request. Proposed: keep the Step 4.5 rule, since the check fails closed when it can't tell.
 
 **Q: What happens when a required check is flaky?**
-Step 3.2 makes the Canvas Chromium and Windows jobs required. If one fails at random, it blocks merges that are otherwise ready. Proposed: rerun a failed job once, and if it fails at random again, quarantine the test with a tracking issue rather than drop the required check.
+Step 3.2 preserves `CI gate`, which requires the Canvas Chromium and Windows jobs to succeed. If one fails at random, it blocks merges that are otherwise ready. Diagnose it under the code-quality skill's retry and no-quarantine rules; never quarantine safety-critical coverage or drop the required check to clear a merge.
 
-**Q: Should we close the plugin build gap now?**
-Step 3.2 leaves the per-plugin `Build <plugin> dist` jobs unrequired, so a pull request that breaks one plugin's build can still merge. A separate `pr-gate` job (see [Alternatives considered](#alternatives-considered)) would close the gap without touching the release path. Proposed: decide whether to build it in Phase 3 or wait until ruleset upkeep forces it.
+**Q: Is the plugin build gap still open?**
+No. The required `CI gate` fails if plugin discovery or any plugin build fails. Step 3.2 preserves it and the separate release artifact.
 
 **Q: Are the suspension window and audit size right?**
 Step 4.7 sends us back to the full trial after a second suspension within 90 days, and has a maintainer sample up to five Copilot-approved merges each month. A longer window or a larger sample catches more but costs more maintainer time. Proposed: start with these numbers and revisit them after the first three months of approvals.
 
 ## Alternatives considered
 
-### Require a fixed `build-gate` instead of the individual build jobs
+### Require individual build jobs or reuse the release gate
 
-We could fix `build-gate` and require it instead of the individual jobs. The fix would add `if: ${{ !cancelled() }}` so the gate runs when a job it needs fails, plus a step, before the artifact upload, that fails the gate unless every needed job succeeded.
+Requiring individual jobs would make us update the ruleset whenever we reshard Chromium or add a plugin. Reusing the shared release gate for every plugin could couple independent releases or change the artifact contract that publish and release workflows consume.
 
-Advantages:
+Instead, `CI gate` handles PRs and `Shared release gate` supplies the `build-gate` publication artifact. The CI gate always runs and fails unless every Build dependency succeeds. Its contract test checks that the gate includes every dependency, including the plugin matrix.
 
-- The ruleset lists one check, so renaming, adding, or resharding a build job needs no ruleset change.
-- Adding the plugin build jobs to the gate's `needs` would close the plugin build gap.
+CodeQL uses the same completion pattern, with a separate native rule for alert severity.
 
-Disadvantages:
+### Use default CodeQL setup
 
-- It changes a job that `publish.yml` and `release.yml` depend on. A mistake in the new condition could let a release go out after a failed build, or quietly let broken pull requests merge.
-- Adding the plugin build jobs to `needs` would let one broken plugin block every plugin's release. `publish.yml` deliberately keeps plugins independent of each other.
+We chose checked-in advanced setup so reviewers can inspect the languages, suite, permissions, categories, and completion behavior. It also avoids the documented Dependabot default-setup merge-protection exception. Hosted fork and Dependabot behavior still needs verification.
 
-We chose to require the jobs directly because it leaves the release path untouched. If ruleset upkeep becomes a burden, we can add a separate `pr-gate` job for merges and leave `build-gate` for releases.
+A universal action-pinning gate remains deferred. High/critical CodeQL enforcement does not fill that gap.
 
 ## Design review notes
 
