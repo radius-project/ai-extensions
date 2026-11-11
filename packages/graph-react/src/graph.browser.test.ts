@@ -1756,7 +1756,7 @@ describe("graph view in a real browser", () => {
           id: "app/models",
           name: "models",
           type: "Radius.Compute/containers",
-          icon: '<svg viewBox="0 0 8 8"><rect fill="currentColor" /></svg>'
+          icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect fill="currentColor" /></svg>'
         }
       ]
     });
