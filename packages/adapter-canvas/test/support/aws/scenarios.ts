@@ -120,7 +120,10 @@ export async function createAwsScenario(
       trust: buildGitHubTrustPolicy(ACCOUNT, [OTHER_SUBJECT]),
       tags: [
         { Key: "radius-managed", Value: "true" },
-        { Key: "radius-repository", Value: REPO }
+        { Key: "radius-repository", Value: REPO },
+        // Every Radius setup tags the role it creates with the repository's
+        // GitHub ID, and setup reuses only a role tagged with its own.
+        { Key: "radius-repository-id", Value: String(github.repoId) }
       ],
       inline: { [OTHER_POLICY]: { Version: "2012-10-17", Statement: [] } }
     });
@@ -353,9 +356,28 @@ export async function completedSetup(
 ): Promise<Operation> {
   const op = createSetupOperation(scenario);
   await runSetup(scenario, op);
+  assertSetupFinished(scenario, op);
   finish(op, state);
   await operations.persist();
   return op;
+}
+
+/**
+ * Throws unless a setup ran to the end of Configure environment. A run that
+ * stops early leaves less to stop at and roll back, so a stop-point matrix
+ * built on it would shrink and still pass.
+ */
+export function assertSetupFinished(
+  scenario: AwsScenario,
+  op: Operation
+): void {
+  const variables = scenario.github.environment(ENVIRONMENT)?.variables;
+  if (op.failure || !variables?.has("AWS_PERMISSION_POLICY_NAME")) {
+    const last = op.steps.at(-1)?.label ?? "no step";
+    throw new Error(
+      `Setup did not finish: ${String(op.failure?.message ?? last).replace(/\.$/, "")}. Update the scenario so a clean setup succeeds.`
+    );
+  }
 }
 
 /**

@@ -16,6 +16,7 @@ import { releaseRecordedAwsLock } from "../../../src/server/services/aws-recorde
 import { isAwsCleanupArtifactType } from "../../../src/server/services/aws-setup-rollback.js";
 import type { FakeAwsSnapshot } from "../../support/aws/fake-aws.js";
 import {
+  assertSetupFinished,
   completedSetup,
   createAwsScenario,
   createDeleteOperation,
@@ -155,15 +156,20 @@ async function deleteSetup(
   if (stray.length > 0 && changesAws) await runAwsRollback(scenario, op, 2);
 }
 
+// A clean setup must finish, or the matrix would quietly lose its points.
+const cleanSetup = (s: AwsScenario): Prepared => {
+  const op = createSetupOperation(s);
+  return {
+    run: async () => {
+      await runSetup(s, op);
+      assertSetupFinished(s, op);
+    }
+  };
+};
+
 const setupPoints = {
-  new: await discover("new", async (s) => {
-    const op = createSetupOperation(s);
-    return { run: () => runSetup(s, op) };
-  }),
-  reused: await discover("reused", async (s) => {
-    const op = createSetupOperation(s);
-    return { run: () => runSetup(s, op) };
-  })
+  new: await discover("new", async (s) => cleanSetup(s)),
+  reused: await discover("reused", async (s) => cleanSetup(s))
 };
 
 describe.each(["new", "reused"] as const)(
