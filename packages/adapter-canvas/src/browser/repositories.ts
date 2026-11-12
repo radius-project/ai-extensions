@@ -30,7 +30,6 @@ export const DEPLOYMENTS_PATH = "/api/list-deployments";
 export const DEPLOY_PATH = "/api/deploy";
 export const REPO_RETRY_MS = 1000;
 export const DIFF_BRANCH_TIMEOUT_MS = 8000;
-export const DEFAULT_APP_FILE = ".radius/app.bicep";
 export const WORKTREE_SHA = "worktree";
 
 export interface BranchInfo {
@@ -979,8 +978,7 @@ function dispatchDeploy(
         environment: request.environment,
         provider: request.provider,
         targetRepo: request.repo,
-        branch: request.branch,
-        appFile: DEFAULT_APP_FILE
+        branch: request.branch
       })
     })
     .then((response) =>

@@ -30,7 +30,6 @@ import { DEPLOYING_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   APPLICATIONS_PATH,
   BRANCHES_PATH,
-  DEFAULT_APP_FILE,
   DEPLOYMENTS_PATH,
   DEPLOY_PATH,
   ENVIRONMENTS_PATH,
@@ -1543,8 +1542,7 @@ export function initializeDeployingPage(
           environment,
           provider,
           targetRepo: options.repo,
-          branch: deployBranch,
-          appFile: DEFAULT_APP_FILE
+          branch: deployBranch
         })
       })
       .then((response) =>

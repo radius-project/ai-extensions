@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createDeployRequestService,
   type DeployRequestDependencies,
@@ -7,6 +7,8 @@ import {
 import type { DeployMonitorRequest } from "./deploy-monitor.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
+import { createDeferred } from "../../../test/support/browser/fakes.js";
+import type { DeployModelSource } from "./deploy-model-source.js";
 
 // Every seam throws unless a test opts into it, so a path that reaches for a
 // dependency it should not need fails loudly instead of getting a benign
@@ -17,6 +19,9 @@ function dependencies(
   return {
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
+    },
+    readModelForSelection: () => {
+      throw new Error("readModelForSelection not stubbed");
     },
     resolveDeployRepairLoop: () => ({
       repairLoop: false,
@@ -150,6 +155,7 @@ function entryReader(state: CanvasState = {}) {
 describe("deploy request service construction", () => {
   it.each([
     "readInstanceEntry",
+    "readModelForSelection",
     "resolveDeployRepairLoop",
     "resolveDeploymentEnvironment",
     "activeDeploymentMutation",
@@ -308,6 +314,7 @@ describe("deploy request admission", () => {
         body: JSON.stringify({
           environment: "production",
           branch: "feat",
+          appFile: ".radius/app.bicep",
           ...request
         })
       });
@@ -689,7 +696,344 @@ describe("deploy request branch resolution", () => {
   });
 });
 
+describe("deploy model admission", () => {
+  it.each([
+    { explicit: false, repair: false, reuse: true },
+    { explicit: true, repair: false, reuse: false },
+    { explicit: false, repair: true, reuse: false },
+    { explicit: true, repair: true, reuse: false }
+  ])(
+    "isolates selected-model graphs (explicit: $explicit, repair: $repair)",
+    async ({ explicit, repair, reuse }) => {
+      const state: CanvasState = {
+        plannedResources: [{ id: "cached", name: "cached" }],
+        deployParams: explicit ? { appFile: "app.bicep" } : {},
+        deployAttempt: { id: "attempt", appFile: "app.bicep" }
+      };
+      const { monitor, control } = controllableMonitor();
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: entryReader(state),
+          monitor,
+          readModelForSelection: async () => ({ status: "missing" }),
+          resolveDeployRepairLoop: () => ({
+            repairLoop: repair,
+            attemptId: repair ? "attempt" : "",
+            repairAttempt: repair ? 1 : 0
+          })
+        })
+      );
+      expect(
+        (
+          await service.deploy({
+            instanceId: "a",
+            body: body({
+              appFile: explicit ? "app.bicep" : undefined,
+              attemptId: repair ? "attempt" : undefined
+            })
+          })
+        ).status
+      ).toBe(200);
+      expect(control.calls[0].resources).toEqual(
+        reuse ? [{ id: "cached", name: "cached", deployStatus: "pending" }] : []
+      );
+      expect(state.plannedResources).toEqual([
+        { id: "cached", name: "cached" }
+      ]);
+      await control.settle();
+    }
+  );
+
+  it("reselects a newly available managed model on an ordinary automatic repeat", async () => {
+    const state: CanvasState = {};
+    let managed = false;
+    const { monitor, control } = controllableMonitor();
+    const service = createDeployRequestService(
+      dependencies({
+        readInstanceEntry: entryReader(state),
+        monitor,
+        readModelForSelection: async () =>
+          managed ?
+            {
+              status: "available",
+              content: "managed model",
+              fromWorkspace: true
+            }
+          : { status: "missing" }
+      })
+    );
+    expect(
+      (
+        await service.deploy({
+          instanceId: "a",
+          body: body({ appFile: undefined })
+        })
+      ).status
+    ).toBe(200);
+    expect(state.deployAttempt?.appFile).toBe("app.bicep");
+    await control.settle();
+    managed = true;
+    expect(
+      (
+        await service.deploy({
+          instanceId: "a",
+          body: JSON.stringify(state.deployParams)
+        })
+      ).status
+    ).toBe(200);
+    expect(state.deployAttempt?.appFile).toBe(".radius/app.bicep");
+    expect(state.deployParams).not.toHaveProperty("appFile");
+    await control.settle();
+  });
+
+  it.each([
+    { source: null, expected: "app.bicep" },
+    { source: "", expected: "app.bicep" },
+    { source: "  \n", expected: ".radius/app.bicep" },
+    { source: "managed model", expected: ".radius/app.bicep" }
+  ])(
+    "selects $expected from managed content $source before creating the attempt",
+    async ({ source, expected }) => {
+      const state: CanvasState = {};
+      const { monitor, control } = controllableMonitor();
+      const readModelForSelection = vi.fn(
+        async (): Promise<DeployModelSource> => {
+          expect(state.deployAttempt).toBeUndefined();
+          return source === null ?
+              { status: "missing" }
+            : { status: "available", content: source, fromWorkspace: false };
+        }
+      );
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: entryReader(state),
+          monitor,
+          readModelForSelection
+        })
+      );
+      const result = await service.deploy({
+        instanceId: "a",
+        body: body({ appFile: undefined })
+      });
+      expect(result.status).toBe(200);
+      expect(readModelForSelection).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ state }),
+        "acme/widgets",
+        "feat",
+        ".radius/app.bicep"
+      );
+      expect(state.appFile).toBe(expected);
+      expect(state.deployAttempt?.appFile).toBe(expected);
+      expect(state.deployParams).not.toHaveProperty("appFile");
+      expect(control.calls[0].appFile).toBe(expected);
+      await control.settle();
+    }
+  );
+
+  it.each([
+    null,
+    3,
+    {},
+    "",
+    " ",
+    "../app.bicep",
+    "/app.bicep",
+    "C:\\app.bicep",
+    "-app.bicep",
+    "radius-environment.bicep"
+  ])(
+    "rejects invalid explicit path %j before reserving or reading",
+    async (appFile) => {
+      const reserveDeploymentMutation = vi.fn(() => {
+        throw new Error("Must not reserve");
+      });
+      const state: CanvasState = {};
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: entryReader(state),
+          reserveDeploymentMutation
+        })
+      );
+      const result = await service.deploy({
+        instanceId: "a",
+        body: body({ appFile })
+      });
+      expect(result.status).toBe(400);
+      expect(result.body).toHaveProperty("error");
+      expect(reserveDeploymentMutation).not.toHaveBeenCalled();
+      expect(state).toEqual({});
+    }
+  );
+
+  it("normalizes explicit paths and never probes another model", async () => {
+    const state: CanvasState = {};
+    const { monitor, control } = controllableMonitor();
+    const service = createDeployRequestService(
+      dependencies({
+        readInstanceEntry: entryReader(state),
+        monitor
+      })
+    );
+    expect(
+      (
+        await service.deploy({
+          instanceId: "a",
+          body: body({ appFile: ".\\models\\app.bicep" })
+        })
+      ).status
+    ).toBe(200);
+    expect(control.calls[0].appFile).toBe("models/app.bicep");
+    expect(state.deployParams?.appFile).toBe("models/app.bicep");
+    await control.settle();
+  });
+
+  it.each([false, true])(
+    "fails closed and releases its reservation on unavailable selection (throws: %s)",
+    async (throws) => {
+      const state: CanvasState = {};
+      const releaseDeploymentMutation = vi.fn();
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: entryReader(state),
+          releaseDeploymentMutation,
+          readModelForSelection: async () => {
+            if (throws) throw new Error("GitHub is unavailable");
+            return { status: "unavailable", error: "GitHub is unavailable" };
+          }
+        })
+      );
+      const result = await service.deploy({
+        instanceId: "a",
+        body: body({ appFile: undefined })
+      });
+      expect(result).toEqual({
+        status: 503,
+        body: {
+          error: "Could not select the deployment model: GitHub is unavailable"
+        }
+      });
+      expect(state).toEqual({});
+      expect(releaseDeploymentMutation).toHaveBeenCalledExactlyOnceWith(
+        state,
+        expect.objectContaining({ kind: "deploy" })
+      );
+    }
+  );
+
+  it.each([
+    "removed",
+    "entry",
+    "attempt",
+    "generation",
+    "observation",
+    "stopped"
+  ] as const)(
+    "does not publish stale selection after a changed %s",
+    async (change) => {
+      const state: CanvasState = {
+        deployGeneration: 1,
+        deployAttempt: { id: "original" }
+      };
+      const noReader = () => {
+        throw new Error("No workflow reader expected during admission");
+      };
+      const original = {
+        state,
+        observation: createWorkflowObservationScope(noReader)
+      };
+      let live: typeof original | undefined = original;
+      const reading = createDeferred<void>();
+      const selected = createDeferred<DeployModelSource>();
+      const releaseDeploymentMutation = vi.fn();
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: () => live,
+          releaseDeploymentMutation,
+          readModelForSelection: () => {
+            reading.resolve();
+            return selected.promise;
+          }
+        })
+      );
+      const pending = service.deploy({
+        instanceId: "a",
+        body: body({ appFile: undefined })
+      });
+      await reading.promise;
+      if (change === "removed") live = undefined;
+      else if (change === "entry") live = { ...original };
+      else if (change === "attempt")
+        state.deployAttempt = { id: "replacement" };
+      else if (change === "generation") state.deployGeneration = 2;
+      else if (change === "observation")
+        original.observation = createWorkflowObservationScope(noReader);
+      else original.observation.stop();
+      selected.resolve({ status: "missing" });
+      expect((await pending).status).toBe(409);
+      expect(state.appFile).toBeUndefined();
+      expect(state.deployStatus).toBeUndefined();
+      expect(releaseDeploymentMutation).toHaveBeenCalledExactlyOnceWith(
+        state,
+        expect.objectContaining({ kind: "deploy" })
+      );
+      original.observation.stop();
+    }
+  );
+
+  it.each([undefined, "./app.bicep", ".radius/app.bicep"])(
+    "pins direct repair requests to the immutable model (supplied: %s)",
+    async (appFile) => {
+      const state: CanvasState = {
+        deployAttempt: { id: "repair", appFile: "app.bicep" },
+        deployParams: { targetRepo: "acme/widgets", branch: "feat" }
+      };
+      const { monitor, control } = controllableMonitor();
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: entryReader(state),
+          monitor,
+          resolveDeployRepairLoop: () => ({
+            repairLoop: true,
+            attemptId: "repair",
+            repairAttempt: 1
+          })
+        })
+      );
+      const result = await service.deploy({
+        instanceId: "a",
+        body: body({ appFile, attemptId: "repair" })
+      });
+      if (appFile === ".radius/app.bicep") {
+        expect(result.status).toBe(409);
+        expect(control.calls).toEqual([]);
+      } else {
+        expect(result.status).toBe(200);
+        expect(control.calls[0].appFile).toBe("app.bicep");
+        expect(state.deployAttempt?.id).toBe("repair");
+        expect(state.deployParams).not.toHaveProperty("appFile");
+      }
+      await control.settle();
+    }
+  );
+});
+
 describe("deploy request attempt setup", () => {
+  it("passes an explicitly selected root model to the monitor", async () => {
+    const state: CanvasState = {};
+    const { monitor, control } = controllableMonitor();
+    const service = createDeployRequestService(
+      dependencies({ readInstanceEntry: entryReader(state), monitor })
+    );
+    const result = await service.deploy({
+      instanceId: "a",
+      body: body({ appFile: "app.bicep" })
+    });
+    expect(result.status).toBe(200);
+    expect(control.calls[0].appFile).toBe("app.bicep");
+    expect(state.deployAttempt?.appFile).toBe("app.bicep");
+    await control.settle();
+  });
+
   it("records the deploy parameters, clones the planned graph as pending, and resets the log buffer", async () => {
     const state: CanvasState = {
       deployLogs: ["stale"],
@@ -706,17 +1050,27 @@ describe("deploy request attempt setup", () => {
     };
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
-      dependencies({ readInstanceEntry: entryReader(state), monitor })
+      dependencies({
+        readInstanceEntry: entryReader(state),
+        monitor,
+        readModelForSelection: async () => ({
+          status: "available",
+          content: "managed model",
+          fromWorkspace: true
+        })
+      })
     );
 
-    await service.deploy({ instanceId: "a", body: body() });
+    await service.deploy({
+      instanceId: "a",
+      body: body({ appFile: undefined })
+    });
 
     expect(state.deployParams).toEqual({
       targetRepo: "acme/widgets",
       environment: "production",
       branch: "feat",
-      provider: "azure",
-      appFile: ".radius/app.bicep"
+      provider: "azure"
     });
     expect(state.envName).toBe("production");
     expect(state.deployProvider).toBe("azure");
@@ -746,10 +1100,17 @@ describe("deploy request attempt setup", () => {
     const state: CanvasState = { plannedResources: planned };
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
-      dependencies({ readInstanceEntry: entryReader(state), monitor })
+      dependencies({
+        readInstanceEntry: entryReader(state),
+        monitor,
+        readModelForSelection: async () => ({ status: "missing" })
+      })
     );
 
-    await service.deploy({ instanceId: "a", body: body() });
+    await service.deploy({
+      instanceId: "a",
+      body: body({ appFile: undefined })
+    });
 
     expect(state.deployingResources).toEqual([]);
     expect(control.calls[0].resources).toEqual([]);
@@ -763,10 +1124,17 @@ describe("deploy request attempt setup", () => {
     Object.assign(state, { plannedResources: { nope: true } });
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
-      dependencies({ readInstanceEntry: entryReader(state), monitor })
+      dependencies({
+        readInstanceEntry: entryReader(state),
+        monitor,
+        readModelForSelection: async () => ({ status: "missing" })
+      })
     );
 
-    await service.deploy({ instanceId: "a", body: body() });
+    await service.deploy({
+      instanceId: "a",
+      body: body({ appFile: undefined })
+    });
 
     expect(state.deployingResources).toEqual([]);
     await control.settle();
@@ -778,6 +1146,11 @@ describe("deploy request attempt setup", () => {
     const service = createDeployRequestService(
       dependencies({
         readInstanceEntry: entryReader(),
+        readModelForSelection: async () => ({
+          status: "available",
+          content: "managed model",
+          fromWorkspace: true
+        }),
         beginDeployAttempt: (state, input) => {
           attempts.push(input);
           state.deployAttempt = { id: "attempt-new", targetRepo: input.repo };
@@ -834,7 +1207,9 @@ describe("deploy request attempt setup", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: entryReader(),
+        readInstanceEntry: entryReader({
+          deployAttempt: { id: "attempt-A", appFile: ".radius/app.bicep" }
+        }),
         resolveDeployRepairLoop: () => ({
           repairLoop: true,
           attemptId: "attempt-A",

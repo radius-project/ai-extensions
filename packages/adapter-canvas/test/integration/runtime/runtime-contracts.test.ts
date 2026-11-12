@@ -78,6 +78,7 @@ describe("P0-A Radius runtime registration contract", () => {
         entry: selected,
         repo: "org/app",
         branch: "feature",
+        appFile: ".radius/app.bicep",
         provider: "azure",
         requestedEnvironment: "production",
         resources: [],
@@ -134,6 +135,67 @@ describe("P0-A Radius runtime registration contract", () => {
       );
       expect(observed.reads).toHaveLength(1);
       expect(observed.dispatches).toBe(1);
+      expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+    } finally {
+      await harness.extension.shutdown("test");
+    }
+  });
+
+  it("preserves auto-selection intent and repair pinning through the registered deploy tool", async () => {
+    const harness = await createRuntimeSdkHarness();
+    try {
+      const entry = createFakeServerEntry("selected-panel", "deployed");
+      entry.state = {
+        deployParams: {
+          targetRepo: "acme/widgets",
+          branch: "feature",
+          environment: "production"
+        },
+        deployAttempt: {
+          id: "repair",
+          targetRepo: "acme/widgets",
+          branch: "feature",
+          environment: "production",
+          appFile: "app.bicep"
+        }
+      };
+      harness.servers.set("selected-panel", entry);
+      const bodies: Record<string, unknown>[] = [];
+      vi.mocked(harness.deps.deploy.fetch).mockImplementation(
+        async (url, init) => {
+          expect(url).toBe(`${entry.baseUrl}/api/deploy`);
+          bodies.push(JSON.parse(String(init?.body)));
+          return Response.json({ ok: true });
+        }
+      );
+      const tool = harness.extension.tools.find(
+        ({ name }) => name === "radius_deploy"
+      );
+      if (!tool) throw new Error("Missing deploy tool");
+      expect(await tool.handler({})).toContain("started");
+      expect(bodies[0]).not.toHaveProperty("appFile");
+      expect(await tool.handler({ attemptId: "repair" })).toContain("started");
+      expect(bodies[1].appFile).toBe("app.bicep");
+      expect(
+        await tool.handler({ attemptId: "repair", appFile: "./app.bicep" })
+      ).toContain("started");
+      expect(bodies[2].appFile).toBe("./app.bicep");
+      expect(
+        await tool.handler({
+          attemptId: "repair",
+          appFile: ".radius/app.bicep"
+        })
+      ).toContain("cannot be retargeted");
+      expect(bodies).toHaveLength(3);
+      vi.mocked(harness.deps.deploy.fetch).mockResolvedValue(
+        Response.json(
+          { error: "Could not select the deployment model" },
+          { status: 503 }
+        )
+      );
+      expect(await tool.handler({})).toContain(
+        "Could not select the deployment model"
+      );
       expect(harness.getOrCreateServer).not.toHaveBeenCalled();
     } finally {
       await harness.extension.shutdown("test");

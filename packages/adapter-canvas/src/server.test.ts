@@ -5275,6 +5275,19 @@ describe("planned graph request generations", () => {
 });
 
 describe("triggerDeployRepairHandoff", () => {
+  it.each(["model-preflight-failed", "workflow-preflight-failed"] as const)(
+    "does not start an automatic repair after %s refused dispatch",
+    (deployErrorKind) => {
+      const calls: DeployRepairHandoffInput[] = [];
+      setDeployRepairHandoff((payload) => {
+        calls.push(payload);
+      });
+      expect(triggerDeployRepairHandoff(failedEntry({ deployErrorKind }))).toBe(
+        false
+      );
+      expect(calls).toEqual([]);
+    }
+  );
   afterEach(() => {
     setDeployRepairHandoff(null);
   });

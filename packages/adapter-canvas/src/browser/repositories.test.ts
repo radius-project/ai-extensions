@@ -1631,8 +1631,7 @@ describe("planned deployment dispatch", () => {
       environment: "dev",
       provider: "aws",
       targetRepo: "octo/app",
-      branch: "feature",
-      appFile: ".radius/app.bicep"
+      branch: "feature"
     });
     expect(browser.nav.assigned[0]).toBe(
       "/?page=deploying&application=store&environment=dev"

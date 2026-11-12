@@ -681,10 +681,11 @@ test.describe("Radius Canvas in Chromium", () => {
     await seed(canvas);
   });
 
-  test("production deploy outcome masks host-known credentials through repair publication @safety", async ({
-    page,
-    canvas
-  }, testInfo) => {
+  async function verifyProductionDeploy(
+    { page, canvas }: { page: Page; canvas: CanvasHarness },
+    testInfo: TestInfo,
+    appFile: string
+  ): Promise<void> {
     const environment = "fixture-environment";
     const opaque = "OpaqueBindingWitness92741";
     const named = "UnregisteredNamedWitness63281";
@@ -714,7 +715,32 @@ test.describe("Radius Canvas in Chromium", () => {
       "--method",
       "GET"
     ];
+    const discoveredRuns = command(
+      [
+        "run",
+        "list",
+        "--workflow=run-rad-commands.yml",
+        "--limit",
+        "100",
+        "--json",
+        "databaseId,status,createdAt,displayTitle",
+        "--repo",
+        REPOSITORY
+      ],
+      "[]"
+    );
     const additions: FakeCliCommand[] = [
+      ...[".radius/app.bicep", "app.bicep"].map((file): FakeCliCommand => ({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/${file}?ref=${WORKTREE_BRANCH}`,
+          "--jq",
+          ".content"
+        ],
+        exitCode: 1,
+        stderr: "gh: Not Found (HTTP 404)"
+      })),
       {
         tool: "gh",
         args: repositoryArtifactArgs,
@@ -726,9 +752,7 @@ test.describe("Radius Canvas in Chromium", () => {
         tool: "gh",
         args: [
           "api",
-          `/repos/${REPOSITORY}/contents/app.bicep?ref=${WORKTREE_BRANCH}`,
-          "--jq",
-          ".content"
+          `/repos/${REPOSITORY}/contents/app.bicep?ref=${WORKTREE_BRANCH}`
         ],
         exitCode: 1,
         stderr: "gh: Not Found (HTTP 404)"
@@ -796,31 +820,7 @@ test.describe("Radius Canvas in Chromium", () => {
         ],
         JSON.stringify([{ databaseId: 101, createdAt: "2020-01-01T00:00:00Z" }])
       ),
-      command(
-        [
-          "run",
-          "list",
-          "--workflow=run-rad-commands.yml",
-          "--limit",
-          "5",
-          "--json",
-          "databaseId,status,createdAt",
-          "--repo",
-          REPOSITORY
-        ],
-        JSON.stringify([
-          {
-            databaseId: 101,
-            status: "completed",
-            createdAt: new Date().toISOString()
-          },
-          {
-            databaseId: runId,
-            status: "completed",
-            createdAt: new Date().toISOString()
-          }
-        ])
-      ),
+      discoveredRuns,
       {
         tool: "gh",
         argsPrefix: dispatchPrefix,
@@ -882,23 +882,39 @@ test.describe("Radius Canvas in Chromium", () => {
       ["delete-environment.yml", DELETE_RADIUS_REF],
       ["delete-environment-azure.yml", DELETE_RADIUS_REF]
     ]) {
+      const content = await fs.readFile(
+        path.join(REPOSITORY_ROOT, ".github", "extension", file)
+      );
       additions.push(
         command(
           [
             "api",
-            `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=${ref}`,
-            "--jq",
-            ".content"
+            `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=${ref}`
           ],
-          (
-            await fs.readFile(
-              path.join(REPOSITORY_ROOT, ".github", "extension", file)
-            )
-          ).toString("base64")
+          JSON.stringify({
+            content: content.toString("base64"),
+            encoding: "base64",
+            size: content.length
+          })
         )
       );
     }
     const scenario = defaultFakeCliScenario();
+    if (appFile === "app.bicep") {
+      await fs.rename(
+        path.join(canvas.workspacePath, ".radius", "app.bicep"),
+        path.join(canvas.workspacePath, "app.bicep")
+      );
+      additions.unshift({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`
+        ],
+        exitCode: 1,
+        stderr: "gh: Not Found (HTTP 404)"
+      });
+    }
     scenario.commands = scenario.commands.filter(
       (entry) =>
         entry.tool !== "gh" ||
@@ -922,11 +938,13 @@ test.describe("Radius Canvas in Chromium", () => {
           command(
             [
               "api",
-              `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${branch}`,
-              "--jq",
-              ".content"
+              `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${branch}`
             ],
-            Buffer.from(content).toString("base64")
+            JSON.stringify({
+              content: Buffer.from(content).toString("base64"),
+              encoding: "base64",
+              size: Buffer.byteLength(content)
+            })
           ),
           command(
             [
@@ -963,20 +981,71 @@ test.describe("Radius Canvas in Chromium", () => {
     const nonce = canvas.entry.state.browserMutationNonce;
     if (typeof nonce !== "string" || !nonce)
       throw new Error("Missing mutation nonce.");
-    const admitted = await page.request.post(`${canvas.baseUrl}/api/deploy`, {
-      headers: { "x-radius-mutation-nonce": nonce },
-      data: {
-        repo: REPOSITORY,
-        branch: WORKTREE_BRANCH,
-        provider: "azure",
-        environment,
-        appFile: ".radius/app.bicep"
-      }
-    });
+    const admitted =
+      appFile === "app.bicep" ?
+        await (async () => {
+          await gotoCanvas(page, canvas, "deploying");
+          const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+          await expect(deployNow).toHaveText("Deploy");
+          const response = page.waitForResponse(
+            (response) =>
+              response.url() === `${canvas.baseUrl}/api/deploy` &&
+              response.request().method() === "POST"
+          );
+          await deployNow.click();
+          return response;
+        })()
+      : await page.request.post(`${canvas.baseUrl}/api/deploy`, {
+          headers: { "x-radius-mutation-nonce": nonce },
+          data: {
+            repo: REPOSITORY,
+            branch: WORKTREE_BRANCH,
+            provider: "azure",
+            environment
+          }
+        });
     expect(admitted.status()).toBe(200);
     const attemptId = canvas.entry.state.deployAttempt?.id;
     expect(attemptId).toBeTruthy();
+    expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
+    if (appFile === "app.bicep")
+      expect(await bodyFor(canvas, "/api/deploy")).not.toHaveProperty(
+        "appFile"
+      );
     try {
+      const readCorrelation = async () =>
+        (await canvas.cliCalls())
+          .find(
+            (call) =>
+              call.tool === "gh" &&
+              dispatchPrefix.every((arg, index) => call.args[index] === arg)
+          )
+          ?.args.find((arg) => arg.startsWith("correlation_id="))
+          ?.slice("correlation_id=".length);
+      await expect.poll(readCorrelation).toMatch(/^dep-/);
+      const correlationId = await readCorrelation();
+      const dispatch = (await canvas.cliCalls()).find((call) =>
+        dispatchPrefix.every((arg, index) => call.args[index] === arg)
+      );
+      expect(dispatch?.args).toContain(`app_file=${appFile}`);
+      expect(
+        dispatch?.args.find((arg) => arg.startsWith("rad_commands="))
+      ).toContain(`deploy ${appFile}`);
+      discoveredRuns.stdout = JSON.stringify([
+        {
+          databaseId: 103,
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          displayTitle: "Radius fixture-environment dep-unrelated"
+        },
+        ...[101, runId].map((databaseId) => ({
+          databaseId,
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          displayTitle: `Radius fixture-environment ${correlationId}`
+        }))
+      ]);
+      await canvas.setScenario(scenario);
       await expect
         .poll(() => canvas.entry.state.deployStatus, { timeout: 15_000 })
         .toBe("failed");
@@ -1074,7 +1143,15 @@ test.describe("Radius Canvas in Chromium", () => {
           call.args.join(" ") === `run view ${runId} --log --repo ${REPOSITORY}`
       )
     ).toBe(true);
-  });
+  }
+
+  for (const appFile of [".radius/app.bicep", "app.bicep"]) {
+    test(`production ${appFile} deploy outcome masks host-known credentials through repair publication @safety`, ({
+      page,
+      canvas
+    }, testInfo) =>
+      verifyProductionDeploy({ page, canvas }, testInfo, appFile));
+  }
 
   for (const fixture of pageStateCases()) {
     test(`round-trips hidden page state through the real parser: ${fixture.name} @safety`, async ({
@@ -6871,8 +6948,7 @@ test.describe("Radius Canvas in Chromium", () => {
         environment: "fixture-environment",
         provider: "azure",
         targetRepo: REPOSITORY,
-        branch: WORKTREE_BRANCH,
-        appFile: ".radius/app.bicep"
+        branch: WORKTREE_BRANCH
       });
     await expect(page.locator("body")).toContainText(/could not verify/i);
   });
@@ -7000,6 +7076,45 @@ test.describe("Radius Canvas in Chromium", () => {
     );
     await expect(page.locator("#deploy-progress-subtitle")).toContainText(
       "workflow startup failed"
+    );
+  });
+
+  test("surfaces an incompatible installed workflow without claiming deployment started @safety", async ({
+    page,
+    canvas
+  }) => {
+    const error =
+      'Could not verify deployment workflows on "feat": The dispatcher must accept correlation_id and expose it in its run-name. Update the Radius workflows. No workflow was dispatched.';
+    let statusPolls = 0;
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await page.route("**/api/deploy-status", async (route) => {
+      statusPolls++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          errorKind: "workflow-preflight-failed",
+          error
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deploying");
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
+    await expect.poll(() => statusPolls).toBeGreaterThan(0);
+    await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+      error
+    );
+    await expect(page.locator("#deploy-inline-status")).not.toContainText(
+      "has started"
     );
   });
 
@@ -7356,6 +7471,7 @@ test.describe("Radius Canvas in Chromium", () => {
         if (completed) {
           await createUnconfirmedMonitor("future_conclusion").monitor.run({
             entry: { state: monitorState },
+            appFile: ".radius/app.bicep",
             repo: REPOSITORY,
             branch: WORKTREE_BRANCH,
             provider: "azure",
@@ -7789,6 +7905,7 @@ test.describe("Radius Canvas in Chromium", () => {
       if (unconfirmed) {
         await createUnconfirmedMonitor("future_conclusion").monitor.run({
           entry: { state: monitorState },
+          appFile: ".radius/app.bicep",
           repo: REPOSITORY,
           branch: WORKTREE_BRANCH,
           provider: "azure",

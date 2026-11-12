@@ -5,12 +5,15 @@ import {
   type DeployCommandOptions,
   type DeployCommandResult,
   type DeployDispatchDependencies
-} from "./deploy-dispatch.js";
-import type { BicepParam } from "../../bicep.js";
-import type { CanvasState } from "../../shared.js";
-import type { GitHubJsonResponse, GitHubJsonRunner } from "../../azure-oidc.js";
-import { requireCurrentAwsWorkflows } from "./aws-workflow-compatibility.js";
-import { createEnvironmentProviderReader } from "./environment-target.js";
+} from "./deployment-dispatch.js";
+import type {
+  DeploymentBicepParameter as BicepParam,
+  DeploymentState as CanvasState
+} from "@radius-project/core";
+import type {
+  GitHubJsonResponse,
+  GitHubJsonRunner
+} from "@radius-project/core/platforms";
 
 const OK: DeployCommandResult = { code: 0, stdout: "", stderr: "" };
 
@@ -24,6 +27,7 @@ function dependencies(
   overrides: Partial<DeployDispatchDependencies> = {}
 ): DeployDispatchDependencies {
   return {
+    id: () => "execution",
     deployWorkflowFile: "run-rad-commands.yml",
     deployWorkflowFiles: ["run-rad-commands.yml", "run-rad-commands-azure.yml"],
     branchNotPushedKind: "branch-not-pushed",
@@ -45,7 +49,7 @@ function dependencies(
     },
     readProcessEnv: () => ({}),
     ghCredentialSource: () => "keyring",
-    fetchFileForSelection: () => Promise.resolve(null),
+    fetchFileForSelection: () => Promise.resolve("bicep source"),
     appParams: () => [],
     resolveDeployParams: () => ({}),
     partitionParams: () => ({ public: {}, secret: {} }),
@@ -55,6 +59,7 @@ function dependencies(
     ensureDeployWorkflowsOnBranch: () => Promise.resolve(),
     ensureWorkflowsCurrent: () =>
       Promise.resolve({ created: [], updated: [], failed: [] }),
+    verifyAppFileInput: () => Promise.resolve(),
     sleep: () => Promise.resolve(),
     latestWorkflowRunId: () => Promise.resolve(null),
     classifyDeployDispatchFailure: () => "run-unconfirmed",
@@ -73,6 +78,7 @@ function request(state: CanvasState = {}) {
     logs,
     state,
     input: {
+      appFile: ".radius/app.bicep",
       entry: { state },
       repo: "acme/widgets",
       branch: "feat",
@@ -223,21 +229,57 @@ const PUBLIC_PARAM: BicepParam = {
 };
 
 describe("deploy dispatch construction", () => {
+  it("cancels after workflow verification loses invocation authority, before reading or writing secrets", async () => {
+    let current = true;
+    const gh = recordingGh();
+    const { input, state } = request();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        partitionParams: () => ({
+          public: {},
+          secret: { password: "generated-value" }
+        }),
+        verifyAppFileInput: async () => {
+          current = false;
+        }
+      })
+    );
+    await expect(
+      service.prepareAndDispatch({ ...input, isCurrent: () => current })
+    ).rejects.toMatchObject({ reason: "cancelled" });
+    expect(gh.calls).toEqual([]);
+    expect(state.deployErrorKind).toBeUndefined();
+  });
+
+  it("uses installation guidance when no usable GitHub CLI command can be shown", async () => {
+    const f = request();
+    await createDeployDispatchService(
+      dependencies({
+        ghCommandPresentation: {
+          kind: "unavailable",
+          shell: "posix",
+          installationNote: "Install GitHub CLI on your terminal PATH."
+        },
+        runGh: async () => ({
+          code: 1,
+          stdout: "",
+          stderr: "missing workflow scope"
+        })
+      })
+    ).prepareAndDispatch(f.input);
+    expect(f.state.deployError).toContain(
+      "Install GitHub CLI on your terminal PATH."
+    );
+    expect(f.state.deployError).not.toContain("Run `");
+  });
+
   it.each(["aws", "azure", ""])(
-    "does not dispatch stale AWS templates with provider hint %j",
+    "propagates AWS workflow verification refusal with provider hint %j",
     async (hint) => {
       const { input } = request();
       input.provider = hint;
       const gh = recordingGh();
-      const readProvider = createEnvironmentProviderReader(
-        async (command, args) => {
-          expect(command).toBe("gh");
-          expect(args[1]).toBe(
-            "/repos/acme/widgets/environments/production/variables?per_page=100"
-          );
-          return "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deploy\nAWS_REGION\tus-west-2";
-        }
-      );
       const service = createDeployDispatchService(
         dependencies({
           ...gh,
@@ -259,25 +301,32 @@ describe("deploy dispatch construction", () => {
             files,
             workingBranch
           ) => {
-            await requireCurrentAwsWorkflows(
-              { provider, files, workingBranch },
-              {
-                environmentProvider: () => readProvider(repo, environment),
-                defaultBranch: async () => "main",
-                templates: async () => ({
-                  "run-rad-commands-aws.yml": "current"
-                }),
-                readFile: async () => "old create-access-entry workflow",
-                errorMessage: String
-              }
+            expect({
+              repo,
+              environment,
+              provider,
+              files,
+              workingBranch
+            }).toEqual({
+              repo: "acme/widgets",
+              environment: "production",
+              provider: hint,
+              files: ["run-rad-commands.yml", "run-rad-commands-aws.yml"],
+              workingBranch: "feat"
+            });
+            throw new Error(
+              "AWS workflows are not confirmed current; the branch is protected."
             );
-            return { created: [], updated: [] };
           }
         })
       );
-      await expect(service.prepareAndDispatch(input)).rejects.toThrow(
-        "branch is protected"
+      await expect(service.prepareAndDispatch(input)).resolves.toEqual({
+        dispatched: false
+      });
+      expect(input.entry.state.deployErrorKind).toBe(
+        "workflow-preflight-failed"
       );
+      expect(input.entry.state.deployError).toContain("branch is protected");
       expect(gh.calls).toEqual([]);
     }
   );
@@ -409,6 +458,7 @@ describe("deploy dispatch environment and branch preflight", () => {
       workflowFile: "run-rad-commands.yml",
       dispatchedAt: 1_700_000_000_000,
       environment: "resolved-env",
+      correlationId: "dep-execution",
       baselineRunId: null
     });
   });
@@ -549,8 +599,14 @@ describe("deploy dispatch environment and branch preflight", () => {
       "",
       "-f",
       "environment=production",
+      "-f",
+      "app_file=.radius/app.bicep",
+      "-f",
+      "correlation_id=dep-execution",
       "--repo",
-      "acme/widgets"
+      "acme/widgets",
+      "-f",
+      'rad_commands=["rad deploy"]'
     ]);
   });
 
@@ -1221,6 +1277,84 @@ describe("deploy dispatch environment and branch preflight", () => {
 });
 
 describe("deploy dispatch rad commands and secrets", () => {
+  it.each(["read", "resolve", "partition", "command"] as const)(
+    "stops before publication, secrets and dispatch when model %s fails",
+    async (stage) => {
+      const { input, state } = request();
+      const events: string[] = [];
+      const fail = () => {
+        throw new Error(`failed ${stage}`);
+      };
+      const service = createDeployDispatchService(
+        dependencies({
+          ...(stage === "read" ? { fetchFileForSelection: fail } : {}),
+          ...(stage === "resolve" ? { resolveDeployParams: fail } : {}),
+          ...(stage === "partition" ? { partitionParams: fail } : {}),
+          ...(stage === "command" ? { buildDeployRadCommand: fail } : {}),
+          ensureDeployWorkflowsOnBranch: async () => {
+            events.push("publish");
+          },
+          runGhWithStdin: async () => {
+            events.push("secret");
+            return OK;
+          },
+          runGh: async () => {
+            events.push("dispatch");
+            return OK;
+          }
+        })
+      );
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(state.deployErrorKind).toBe("model-preflight-failed");
+      expect(events).toEqual([]);
+    }
+  );
+
+  it("verifies the input contract before provisioning secrets", async () => {
+    const { input, state } = request();
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        partitionParams: () => ({
+          public: {},
+          secret: { password: "generated" }
+        }),
+        verifyAppFileInput: async () => {
+          throw new Error("old workflow contract");
+        }
+      })
+    );
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployErrorKind).toBe("workflow-preflight-failed");
+    expect(state.deployError).toContain("old workflow contract");
+    expect(gh.calls).toEqual([]);
+  });
+
+  it("reports a thrown secret operation as preflight failure, not remote uncertainty", async () => {
+    const { input, state } = request();
+    const service = createDeployDispatchService(
+      dependencies({
+        partitionParams: () => ({
+          public: {},
+          secret: { password: "generated" }
+        }),
+        runGhWithStdin: async () => {
+          throw new Error("secret unavailable");
+        }
+      })
+    );
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployErrorKind).toBe("model-preflight-failed");
+    expect(state.deployError).toContain("secret unavailable");
+  });
+
   it("computes the rad commands from the branch's app.bicep and records the app name", async () => {
     const { input, state, logs } = request();
     const gh = recordingGh();
@@ -1255,8 +1389,9 @@ describe("deploy dispatch rad commands and secrets", () => {
     );
   });
 
-  it("falls back to a root app.bicep and omits the graph command with no app name", async () => {
+  it("uses an explicitly selected root app.bicep and discards an unverified previous name", async () => {
     const { input, state } = request({ deployAppName: "kept" });
+    input.appFile = "app.bicep";
     const gh = recordingGh();
     const reads: string[] = [];
     const service = createDeployDispatchService(
@@ -1277,30 +1412,33 @@ describe("deploy dispatch rad commands and secrets", () => {
 
     await service.prepareAndDispatch(input);
 
-    expect(reads).toEqual([".radius/app.bicep", "app.bicep"]);
-    // An unresolved name keeps whatever the state already had.
-    expect(state.deployAppName).toBe("kept");
+    expect(reads).toEqual(["app.bicep"]);
+    expect(state.deployAppName).toBe("");
     expect(gh.calls[0].args.slice(-2)).toEqual([
       "-f",
       'rad_commands=["rad deploy app.bicep"]'
     ]);
   });
 
-  it("dispatches without rad commands when no bicep can be read", async () => {
-    const { input, logs } = request();
-    const gh = recordingGh();
-    const service = createDeployDispatchService(dependencies({ ...gh }));
+  it.each([null, "", " \n"])(
+    "refuses an absent or blank selected model %j",
+    async (source) => {
+      const { input, state } = request();
+      const gh = recordingGh();
+      const service = createDeployDispatchService(
+        dependencies({ ...gh, fetchFileForSelection: async () => source })
+      );
 
-    await service.prepareAndDispatch(input);
+      await service.prepareAndDispatch(input);
 
-    expect(gh.calls[0].args).not.toContain("rad_commands");
-    expect(logs).toContain(
-      "⚠ Could not read app.bicep at dispatch; falling back to the environment's RADIUS_RAD_COMMANDS / default deploy."
-    );
-  });
+      expect(gh.calls).toEqual([]);
+      expect(state.deployErrorKind).toBe("model-preflight-failed");
+      expect(state.deployError).toContain("selected model");
+    }
+  );
 
-  it("keeps deploying when the bicep cannot be parsed", async () => {
-    const { input, logs } = request();
+  it("refuses deployment when the selected model cannot be parsed", async () => {
+    const { input, state } = request();
     const gh = recordingGh();
     const service = createDeployDispatchService(
       dependencies({
@@ -1313,11 +1451,11 @@ describe("deploy dispatch rad commands and secrets", () => {
     );
 
     expect(await service.prepareAndDispatch(input)).toMatchObject({
-      dispatched: true
+      dispatched: false
     });
-    expect(logs).toContain(
-      "⚠ Could not compute rad commands from bicep (unbalanced braces); falling back to the environment default."
-    );
+    expect(state.deployErrorKind).toBe("model-preflight-failed");
+    expect(state.deployError).toContain("unbalanced braces");
+    expect(gh.calls).toEqual([]);
   });
 
   it("leaves an existing RADIUS_DEPLOY_PARAMS secret untouched", async () => {
@@ -1455,7 +1593,7 @@ describe("deploy dispatch rad commands and secrets", () => {
     expect(logs.some((line) => line.startsWith("❌"))).toBe(true);
   });
 
-  it("preserves a secret failure when later command construction throws", async () => {
+  it("does not provision secrets when command construction throws", async () => {
     const { input, state } = request();
     const gh = recordingGh([OK, { code: 1, stderr: "forbidden", stdout: "" }]);
     const service = createDeployDispatchService(
@@ -1478,10 +1616,9 @@ describe("deploy dispatch rad commands and secrets", () => {
       dispatched: false
     });
     expect(state.deployStatus).toBe("failed");
-    expect(state.deployError).toContain(
-      'Could not provision RADIUS_DEPLOY_PARAMS on environment "production": forbidden'
-    );
-    expect(gh.calls.map((call) => call.args[0])).toEqual(["api", "secret"]);
+    expect(state.deployError).toContain("invalid application name");
+    expect(state.deployErrorKind).toBe("model-preflight-failed");
+    expect(gh.calls).toEqual([]);
   });
 
   it("reports an unknown error when the secret write gives no reason", async () => {
@@ -1646,7 +1783,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
 
     expect(outcome).toMatchObject({ dispatched: true, baselineRunId: null });
     expect(logs).toContain(
-      "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will fall back to a time window."
+      "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will use the execution correlation."
     );
   });
 
@@ -1961,6 +2098,56 @@ describe("deploy dispatch workflow publication and dispatch", () => {
   // synchronously, so an immediate `gh workflow run` 404s even though the
   // file is genuinely on the branch it dispatches from.
   describe("workflow registration delay (#767)", () => {
+    it("retries only an explicit correlation-input rejection using the same execution marker", async () => {
+      const { input } = request();
+      const gh = recordingGh([
+        {
+          code: 1,
+          stdout: "",
+          stderr: "HTTP 422: Unexpected inputs provided: [correlation_id]"
+        },
+        OK
+      ]);
+      let ids = 0;
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          id: () => `execution-${++ids}`,
+          ensureWorkflowsCurrent: async () => ({
+            created: [],
+            updated: ["run-rad-commands.yml"],
+            failed: []
+          })
+        })
+      );
+      expect(await service.prepareAndDispatch(input)).toMatchObject({
+        dispatched: true,
+        correlationId: "dep-execution-1"
+      });
+      expect(ids).toBe(1);
+      expect(
+        gh.calls.filter((call) => call.args[0] === "workflow")
+      ).toHaveLength(2);
+      for (const call of gh.calls.filter((call) => call.args[0] === "workflow"))
+        expect(call.args).toContain("correlation_id=dep-execution-1");
+    });
+
+    it("rejects an invalid correlation factory result before workflow changes", async () => {
+      const { input } = request();
+      let wrote = false;
+      const service = createDeployDispatchService(
+        dependencies({
+          id: () => "invalid marker!",
+          ensureWorkflowsCurrent: async () => {
+            wrote = true;
+            return { created: [], updated: [] };
+          }
+        })
+      );
+      await expect(service.prepareAndDispatch(input)).rejects.toThrow();
+      expect(wrote).toBe(false);
+    });
+
     it.each([false, true])(
       "refreshes discovery bounds after every wait when other runs start (last read fails: %s)",
       async (lastReadFails) => {
@@ -2018,7 +2205,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
         ]);
         if (lastReadFails) {
           expect(logs).toContain(
-            "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will fall back to a time window."
+            "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will use the execution correlation."
           );
         }
       }
@@ -2273,8 +2460,14 @@ describe("deploy dispatch workflow publication and dispatch", () => {
           "feat",
           "-f",
           "environment=production",
+          "-f",
+          "app_file=.radius/app.bicep",
+          "-f",
+          "correlation_id=dep-execution",
           "--repo",
-          "acme/widgets"
+          "acme/widgets",
+          "-f",
+          'rad_commands=["rad deploy"]'
         ]);
         expect(gh.calls[0].env).toBeUndefined();
         expect(evictions).toEqual([]);

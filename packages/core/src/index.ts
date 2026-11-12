@@ -269,6 +269,7 @@ export {
   STAGING_DIR_PREFIX,
   isStagingDirName,
   fetchBicepFromRepo,
+  fetchBicepSelectionFromRepo,
   fetchRecipePack,
   resolveRecipeOutputs
 } from "./modeling/index.js";
