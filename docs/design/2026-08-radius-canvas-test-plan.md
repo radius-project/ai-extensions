@@ -39,6 +39,18 @@ Start with the status table. Use the phase sections for the work still to come. 
 
 ## Required checks
 
+### Deployment extraction evidence
+
+The Stage 3 replacement stack extends TL-09/TL-10, RU-11/RU-12, RF-07, lifecycle and cancellation coverage. Core/shared units and the independent production factory cover target admission, selected-model commands/workflows, exact execution correlation, monitoring/outcomes, explicit repair, unknown-send refusal, target-wide exclusion and generation/token-safe release. Runtime integration invokes actual registered deploy/status handlers without a panel or loopback server and exercises SDK delivery, duplicate close/reopen, keepalive and bounded shutdown. Status reads cannot trigger repair; observation handles cannot authorize it.
+
+Real HTTP covers shared Canvas admission, managed/root/explicit models on the actual branch, fresh resource progress, repository switching, exact-run application identity and destructive refusal. Accepted delete invalidates only the captured matching invocation before run-URL discovery; missing/throwing discovery retains a bounded lease. Tests preserve replacements, unrelated and unknown evidence, refuse poll resurrection and permit later attachment. Unit/HTTP identity and abandonment suites retain case-insensitive exclusion without changing OIDC spelling. Deletion orchestration itself remains Stage 6, not completed by these guards.
+
+The production-bound Chromium journey uses actual emitted correlation with matching, newer-unrelated and baseline runs. Custom/root/explicit Canvas launches recover planned resources before workflow completion. Direct-tool launches deliberately have no Canvas planned-graph callback or fabricated initial resources; the same journey checks their observed outcome and fenced diagnostic. Unknown deployment rows remain visible with disabled destructive actions, safe links, keyboard and accessibility coverage. A separate incompatible-workflow case refuses dispatch instead of claiming deployment started. Existing visual baselines remain unchanged.
+
+Tool-only mapping is `pending`/`in_progress` to `in_progress`, `complete` to `success`, and `failed` to `failed`. Canvas/resource vocabularies remain unchanged. Missing, stale, inconsistent and malformed results explicitly refuse observation rather than inventing a running or failed execution. Owning suites participate in the existing reliability selectors; scheduled reliability and real-host qualification remain separate. The [migration inventory](./2026-09-github-radius-migration-inventory.md#replacement-stack-qualification) records exact-head hosted results and local platform failures; source #1206 counts do not qualify replacement commits or this documentation head.
+
+### Setup and shared controls
+
 Shared AWS admission extends RF-08 and the registered-tool runtime contracts with default-off refusal before account interaction, HTTP gate ordering, required network fields, role-name/existing-role/both-selector retention on the in-memory operation request and the identity stage. Registered Continue/Retry exercises in-process saved legacy input through the real coordinator and proves explicit refusal before AWS authorization or configuration; valid retry selectors reach the chosen role with existing-role precedence. These complement the existing AWS Chromium journey, provider-conflict/trust tests and cooperative Stop matrices. They do not qualify nested AWS runtime shutdown, mutation recovery or automatic restart authorization; those remain deferred. AWS requests are not durably saved, and restart still refuses Continue/Retry with a missing request. Existing Azure/GitHub/workflow shutdown evidence remains unchanged.
 
 | Check                       | Required when                                                                    | What it protects                                                                                           |
@@ -183,22 +195,22 @@ The full plan is complete when every requirement in the appendices has a passing
 
 #### Accepted tools
 
-| ID    | Tool                                   | Required contract                                                                                                                  |
-|-------|----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery                                |
-| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection                           |
-| TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                                                      |
-| TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                                              |
-| TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                                                |
-| TL-09 | `radius_deploy`                        | Attempt identity, environment/repository/branch/provider mapping, dispatch, repeat-last behavior, errors                           |
-| TL-10 | `radius_deploy_status`                 | In-progress/success/failure, log bounds, workflow URL, diagnostics                                                                 |
-| TL-12 | `radius_setup_environment`             | Panel-free verify-only Azure/AWS admission, strict provider schemas, explicit branch/account target, durable operation identity    |
-| TL-13 | `radius_environment_status`            | Saved operation/repository/environment/account binding, read-only observation, bounded redacted results, live interaction identity |
-| TL-14 | `radius_environment_control`           | Eligible saved-operation controls, trusted host confirmation, typed resume with stale/replay rejection, permissions-only bypass    |
+| ID    | Tool                                   | Required contract                                                                                                                                        |
+|-------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery                                                      |
+| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection                                                 |
+| TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                                                                            |
+| TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                                                                    |
+| TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                                                                      |
+| TL-09 | `radius_deploy`                        | Panel-free shared admission/dispatch, target mapping, strict model/repair path, repeat-last, observation handle versus repair authority, explicit errors |
+| TL-10 | `radius_deploy_status`                 | Read-only panel-free observation, stale/mixed/malformed refusal, `in_progress`/`success`/`failed`, workflow URL and bounded fenced diagnostics           |
+| TL-12 | `radius_setup_environment`             | Panel-free verify-only Azure/AWS admission, strict provider schemas, explicit branch/account target, durable operation identity                          |
+| TL-13 | `radius_environment_status`            | Saved operation/repository/environment/account binding, read-only observation, bounded redacted results, live interaction identity                       |
+| TL-14 | `radius_environment_control`           | Eligible saved-operation controls, trusted host confirmation, typed resume with stale/replay rejection, permissions-only bypass                          |
 
 Every retained action/tool has unit or runtime-integration coverage. Tools reaching a loopback API also have HTTP integration. Path confinement and error propagation are mandatory for both publish tools.
 
-The environment-tool slice (new PR 4/8) adds TL-12 through TL-14 without changing the seven preceding declarations or the existing deploy/status implementations. RU-03 and built-extension smoke require flat root object schemas with nested answer `anyOf`; handlers retain exclusive provider/resume validation. Runtime integration invokes the registered handlers with real setup-start, status, control, resume and bypass services and no listening server. It covers canonical setup names, exact status/control targets, typed answers without another dialog, replaced/consumed prompts, informational requirement IDs, account selection and host-confirmed permissions-only bypass. Held Azure and GitHub writes exercise SDK shutdown and local Stop while the real account coordinator holds its keyring lease; persistence and acknowledged provenance precede executor release. The parent five-state deferred-recovery identity fence and main verification-history lookup tests remain. RF-06/RF-08 retain HTTP admission and bypass behavior through the same services; existing Chromium workflows protect the unchanged wizard. No new browser control or visual state is introduced. Native Windows process, canonical-container/visual, live-cloud and real-host qualification remain distinct from local WSL evidence.
+The historical environment-tool slice added TL-12 through TL-14 without changing the preceding declarations at that revision; Stage 3 subsequently replaces deploy/status execution as described above. RU-03 and built-extension smoke require flat root object schemas with nested answer `anyOf`; handlers retain exclusive provider/resume validation. Runtime integration invokes the registered handlers with real setup-start, status, control, resume and bypass services and no listening server. It covers canonical setup names, exact status/control targets, typed answers without another dialog, replaced/consumed prompts, informational requirement IDs, account selection and host-confirmed permissions-only bypass. Held Azure and GitHub writes exercise SDK shutdown and local Stop while the real account coordinator holds its keyring lease; persistence and acknowledged provenance precede executor release. The parent five-state deferred-recovery identity fence and main verification-history lookup tests remain. RF-06/RF-08 retain HTTP admission and bypass behavior through the same services; existing Chromium workflows protect the unchanged wizard. No new browser control or visual state is introduced. Native Windows process, canonical-container/visual, live-cloud and real-host qualification remain distinct from local WSL evidence.
 
 The PR 4 reviewer remediation adds real Azure multi-application prompt creation through the registered setup handler, holding prompt persistence while polling before and after executor settlement. The returned IDs, identical display names, creation dates and saved default drive a typed resume through the real service and back into selected Azure application lookup; a separately supplied application ID remains supported. Registered status tests cover malformed, empty and oversized projections, and unit tests enforce 20-choice/200-character boundaries, date validation, default retention and redaction. Unsupported, replaced and consumed handles cannot authorize continuation. The actual control service returns `verification-retry-pull-request-open` as merge guidance, while unavailable account proof remains a separate refusal and neither dispatches verification. The inherited held-write matrix keeps all service cases and adds registered shutdown at `RADIUS_MANAGED`, `RADIUS_STATE_BACKEND` and `AZURE_TENANT_ID`, preserving acknowledgements before executor release; resumed Azure lookup also proves shutdown prevents the next identity write. Parent cleanup/recovery rejection and missing-run discovery tests remain required lower-level evidence, not claims that every recovery branch is driven by a tool.
 
@@ -318,6 +330,8 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | LC-16 | Deploy repair handoff preserves attempt identity across tool calls                                                           |
 | LC-17 | Setup state survives navigation and supports safe polling, acknowledgement, and resume without exposing raw failure evidence |
 
+For Stage 3 deployment, LC-08 closes the panel/server and detaches its subscription, not the shared attempt. LC-09/RU-18/RU-21 include runtime-owned monitoring, repair, keepalive and bounded shutdown. Deployment attempts are in-memory and may outlive a panel within the same extension runtime; this is not CN-03 durable restart recovery. Closing a panel or stopping local observation never promises cancellation of its remote Actions workflow.
+
 LC-12 requires explicit branch selection, not a workspace-to-remote fallback or a claim that committed-only PR comparisons are already delivered. The [GitHub migration inventory](2026-09-github-radius-migration-inventory.md#graph-reads-source-references-and-comparison) tracks Stage 4's committed PR comparison policy and removal of silent fallback.
 
 #### Cancellation and abandoned work
@@ -368,29 +382,29 @@ LC-12 requires explicit branch selection, not a workspace-to-remote fallback or 
 
 #### Phase 1 runtime: RU-01–RU-21
 
-| ID    | Unit behavior                                                                                             |
-|-------|-----------------------------------------------------------------------------------------------------------|
-| RU-01 | Canvas ID, display name, description, seven page values, repository/base/head fields, schema immutability |
-| RU-02 | Retained action names/descriptions/required fields/enums and reserved-name exclusion                      |
-| RU-03 | Retained tool names/schemas/descriptions and unique names                                                 |
-| RU-04 | Removed action/tool declarations absent; prior shape recorded                                             |
-| RU-05 | Graph-resources not-ready, active/explicit view, missing/all, filtering, context                          |
-| RU-06 | Source-reference missing/stale input, update/queue/skip, page, reload                                     |
-| RU-07 | Generate-app workspace analysis; compact handoff; candidate order, required assets, and failure           |
-| RU-08 | PR-diff repository/base/head mapping, fetch failure, Markdown result                                      |
-| RU-09 | Custom-type publish confinement, defaults, invocation, errors                                             |
-| RU-10 | Recipe publish confinement, GHCR validation, errors                                                       |
-| RU-11 | Deploy attempt identity, input mapping, dispatch, repeat-last, failure                                    |
-| RU-12 | Deploy status, log bounds, workflow URL, diagnostics                                                      |
-| RU-13 | Default/all pages, active graph view, stable title/URL                                                    |
-| RU-14 | Worktree branch, different-repository fallback, explicit branch                                           |
-| RU-15 | Graph/planned model resolution and explicit diff preload                                                  |
-| RU-16 | Missing-model handoff de-duplicates by repository/branch condition and never blocks open                  |
-| RU-17 | Same-instance reuse; a later instance ID is redirected to the first claim, and release restores it        |
-| RU-18 | Close one instance; shutdown closes all exactly once                                                      |
-| RU-19 | Additional context, permission/session callbacks, host keepalive, failures                                |
-| RU-20 | Production joins once with factory result; factory tests never join                                       |
-| RU-21 | Keepalive remains active during setup, observes terminal state, avoids duplicate cleanup                  |
+| ID    | Unit behavior                                                                                                |
+|-------|--------------------------------------------------------------------------------------------------------------|
+| RU-01 | Canvas ID, display name, description, seven page values, repository/base/head fields, schema immutability    |
+| RU-02 | Retained action names/descriptions/required fields/enums and reserved-name exclusion                         |
+| RU-03 | Retained tool names/schemas/descriptions and unique names                                                    |
+| RU-04 | Removed action/tool declarations absent; prior shape recorded                                                |
+| RU-05 | Graph-resources not-ready, active/explicit view, missing/all, filtering, context                             |
+| RU-06 | Source-reference missing/stale input, update/queue/skip, page, reload                                        |
+| RU-07 | Generate-app workspace analysis; compact handoff; candidate order, required assets, and failure              |
+| RU-08 | PR-diff repository/base/head mapping, fetch failure, Markdown result                                         |
+| RU-09 | Custom-type publish confinement, defaults, invocation, errors                                                |
+| RU-10 | Recipe publish confinement, GHCR validation, errors                                                          |
+| RU-11 | Deploy attempt identity, input mapping, dispatch, repeat-last, failure                                       |
+| RU-12 | Direct read-only deployment observation, validated identity/status, log bounds, workflow URL and diagnostics |
+| RU-13 | Default/all pages, active graph view, stable title/URL                                                       |
+| RU-14 | Worktree branch, different-repository fallback, explicit branch                                              |
+| RU-15 | Graph/planned model resolution and explicit diff preload                                                     |
+| RU-16 | Missing-model handoff de-duplicates by repository/branch condition and never blocks open                     |
+| RU-17 | Same-instance reuse; a later instance ID is redirected to the first claim, and release restores it           |
+| RU-18 | Close one instance; shutdown closes all exactly once                                                         |
+| RU-19 | Additional context, permission/session callbacks, host keepalive, failures                                   |
+| RU-20 | Production joins once with factory result; factory tests never join                                          |
+| RU-21 | Keepalive remains active during setup, observes terminal state, avoids duplicate cleanup                     |
 
 #### Phase 2 server: SU-01–SU-18
 

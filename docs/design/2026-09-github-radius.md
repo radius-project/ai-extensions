@@ -3,7 +3,7 @@
 - **Author**: Nell Shamrell-Harrington (@nellshamrell)
 - **Date**: 2026-09
 
-**Example implementation:** See the [source at revision `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) for example API designs, module layout, and integration details. This is not the final implementation, just an example that will change based on review and will be implemented in stages.
+**Implementation assessment, November 9, 2026:** Shared deployment, runtime ownership, Canvas adoption and direct deploy/status tools are implemented in the replacement stack for [#1206](https://github.com/radius-project/ai-extensions/pull/1206). These branches are not merged. The [migration inventory](./2026-09-github-radius-migration-inventory.md#current-delivery-and-reuse-limits) records current ownership, exact-revision qualification and remaining work. The [prototype at `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) are historical references, not the implementation contract.
 
 ## Overview
 
@@ -15,7 +15,7 @@ GitHub Radius currently creates GitHub environments, coordinates Radius applicat
 
 That coupling makes another frontend expensive to build. A VSCode integration, for example, would have to reproduce the Canvas implementation's decisions about environment setup, command execution, workflow dispatch, progress, and failures, or depend on Canvas being open. Copies of this logic would drift: a deployment fix in Canvas would not necessarily fix the same problem in another frontend.
 
-Note - this proposal is not a competing proposal to [docs: design common Radius graph libraries](https://github.com/nicolejms/ai-extensions/pull/2). These would both work quite well together.
+This proposal complements the [common graph libraries design](./2026-09-common-graph-libraries.md): graph algorithms and presentation do not replace application and environment coordination.
 
 ## Terms and definitions
 
@@ -84,7 +84,7 @@ Canvas retains its supported workflows and presentation. The new boundary is int
 
 #### Current Architecture
 
-This section describes the source baseline before extraction: `radius-project/radius` at `c8ad9211a25699c377c45268890e4f67070aa114` and `radius-project/ai-extensions` at `6f1fec8f282f96100e58f780987f6a697b65056f`. Its source links remain pinned to those revisions.
+This diagram and table describe the historical source baseline before extraction: `radius-project/radius` at `c8ad9211a25699c377c45268890e4f67070aa114` and `radius-project/ai-extensions` at `6f1fec8f282f96100e58f780987f6a697b65056f`. Their source links remain pinned to those revisions; the current assessment follows the table.
 
 ```mermaid
 graph TD
@@ -116,6 +116,24 @@ The system is already partly separated. [`packages/core`](https://github.com/rad
 | [Environment deletion](https://github.com/radius-project/ai-extensions/blob/6f1fec8f282f96100e58f780987f6a697b65056f/packages/adapter-canvas/src/server/services/environment-deletion.ts)                                                                                                                                                                  | Coordinate teardown through already separated execution interfaces.                                                     | The service is still packaged in the Canvas adapter and must be checked for host-specific dependencies before reuse. |
 
 Simply moving these files to a different folder would not be enough. The extracted code must accept repository, environment, source, and execution context directly rather than looking them up through a Canvas instance.
+
+#### Current implementation and remaining target
+
+Core owns shared setup and deployment policy; `adapter-shared` owns reusable Node execution and the [production deployment factory](../../packages/adapter-shared/src/production-deployment.ts). Canvas and the registered deployment tools use that same runtime. One extension-local owner retains attempts, reservations, monitoring and repair delivery. Canvas panels subscribe to projections; closing or resetting a view does not stop deployment or repair. Shutdown ends local observation and uses bounded draining, not remote cancellation, rollback or restart recovery.
+
+| Capability                       | Delivered                                                                                       | Remaining work                                                                       |
+|----------------------------------|-------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
+| Workflow observation             | Shared reads, diagnostics, artifacts and bounded read retries                                   | Authoritative state-save and protection rejection/expiry evidence                    |
+| Environment setup                | Core policy, runtime-owned execution and panel-free setup/status/control tools                  | Production bindings independent of Canvas services and operation contracts           |
+| Deployment and repair            | Shared commands/workflows/dispatch/monitor/outcome, ownership, explicit repair and direct tools | Preserve qualified contracts; no full second frontend or new public coordination API |
+| Graphs, authoring and inspection | Existing core algorithms and shared execution helpers                                           | Stage 4 source/orchestration and Stage 5 interaction/inspection extraction           |
+| Deletion                         | Canvas admission, identity and teardown safeguards                                              | Stage 6 shared application/environment deletion and confirmed tools                  |
+
+Setup is **verify-only** and does not require deployment-attempt ownership. Its tools still use `adapter-canvas` services through `server.ts::environmentServices`: running without a panel is not proof of an independent reusable production binding. Deployment already has that independent shared factory, with Canvas supplying credentials, workspace authorization, execution and SDK delivery through host ports.
+
+Deployment keeps one admitted model path through parameters, workflow input, commands and artifacts. Canvas resolves managed then root models on the actual selected branch; explicit paths and repair selections never fall back. The selected branch's dispatcher/provider input, forwarding, `APP_FILE` consumption and correlation run-name contract must pass before parameter secrets are read or written. An incompatible contract refuses dispatch rather than sending undeclared inputs or adopting an uncorrelated run. Existing known-run observation remains supported.
+
+Deployment rows require identity from the exact recorded run, not current source. Unknown identities remain visible but cannot authorize Delete, Force Delete, Abandon or environment cleanup. Accepted application deletion invalidates only the captured matching invocation before run-URL discovery; missing discovery retains a bounded lease, not permission to resurrect old evidence. These safeguards do not complete Stage 6 deletion extraction. See the [workflow usage contract](../../.github/extension/README.md#deployment-input-and-observation-contract).
 
 ### Architecture diagram
 
@@ -246,15 +264,15 @@ Canvas supplies account selection, workspace access, state ownership, and user o
 
 Reuse shared helpers for managed `rad` execution, GitHub commands, and deployment artifacts. Preserve the selected account and authorized target throughout an operation. Callers connect these helpers to their execution environment; the extraction does not require a complete adapter for every provider or frontend.
 
-#### Plugin - plugins/radius
+#### Plugin - extensions/radius
 
 Preserve the user-facing plugin entry points and authoring skill behavior while their backing coordination moves to the library. Reuse the existing application-definition promotion and deployment paths; this proposal does not introduce a new plugin or require a second frontend to ship.
 
-Follow the `radius-deploy` pattern for `radius-environment` and `radius-delete`: skills should request operations through tools backed by the shared library rather than require `open_canvas` or Canvas actions. The frontend decides how to collect input and present results; Canvas remains a supported presentation, not a prerequisite for performing the operation. Preserve existing authorization, confirmation, and progress reporting, including explicit confirmation for destructive actions.
+`radius-environment` uses setup/status/control tools and offers Canvas as an optional wizard. `radius_deploy` and `radius_deploy_status` call the shared runtime without a panel, server or HTTP fetch. Deletion orchestration and its confirmed tool path remain Stage 6 work; preserve authorization, explicit destructive confirmation and partial-completion guidance when extracting them.
 
 #### Build & packaging
 
-Keep the shared packages internal and bundle them through the existing Radius plugin build. The plugin remains the release unit; this proposal does not require a separately published library product, service, or new plugin.
+Application/environment coordination remains workspace-only and bundled into the Radius plugin. Core's source root barrel is not a public npm coordination API: its packed exports are `/graph`, `/domain` and `/package.json`. Those graph/domain libraries and graph-react are separate release surfaces. This extraction introduces no new published coordination product, service or plugin.
 
 #### Creating Environments and Applications
 
@@ -329,7 +347,7 @@ Preserve the existing command allow-list and workflow input compatibility. Resol
 
 Keep deployment requests, status observation, and repair policy separately callable. Reading status must not initiate repair. Canvas can explicitly combine observation and repair to preserve its experience, while supplying agent interactions and notifications. Callers invoke the shared coordination directly rather than needing a Canvas server; frontend-specific scheduling and presentation remain outside the library.
 
-Similarly, the existing dispatcher can start deployment after credential verification. Preserve an intentionally requested composite flow; do not silently reinterpret it as a configuration-only call. A new configuration-only operation or a new workflow result schema would be a separate feature, not a requirement of this library extraction.
+Setup is verify-only: successful credential verification never automatically dispatches application deployment. Each deployment requires an explicit action with its own authorized target and execution reference. This corrects the original composite-flow assumption without removing intentionally composed authoring/deployment/repair experiences.
 
 ### Error handling
 
@@ -364,9 +382,9 @@ Error fixtures should cover rejected and ambiguous dispatches, status API outage
 
 Exercise actual frontend bindings as well as controlled dependencies, especially source selection and authorization.
 
-Test the tool result fields and status values that existing skills depend on, not just the library's internal results. For example, verify that `radius-deploy` continues polling while deployment status is `in_progress` and stops when it is `success` or `failed`. Changes to internal library results must not silently change these tool-facing contracts.
+Test the tool result fields and status values that existing skills depend on, not just internal results. The direct status tool maps admitted `pending` and `in_progress` to `in_progress`, and Canvas terminal `complete` to `success`; `failed` remains `failed`. Missing, stale, inconsistent or malformed evidence is an explicit observation error, never a fabricated running deployment. `observationId` is read-only and cannot authorize repair; `attemptId` retains the repair loop. Status reads initiate no repair. Direct tool starts have no Canvas planned-graph callback and do not fabricate initial resources.
 
-Verify that environment setup and deletion can run through their tool entry points without opening Canvas, while preserving required user interactions and safeguards.
+Retain panel-free setup/deployment tool tests and trusted-interaction safeguards. Add independent production callers for the remaining setup bindings and Stage 6 deletion tools. A full second frontend is not required.
 
 ## Security
 
@@ -380,7 +398,7 @@ Keep GitHub identity and workspace authorization in trusted execution context ra
 
 ## Compatibility
 
-Preserve existing Canvas tool and route contracts, workflow inputs, and intended composite authoring, verification, deployment, and repair flows. Keep graph reads and status observation separately callable without silently removing those composite experiences. Corrections such as distinguishing source read failures from confirmed absence require explicit behavior tests, not an assumption that relocation provides new guarantees.
+Preserve supported Canvas contracts, verify-only setup and intentionally composed authoring/deployment/repair flows. Do not recreate retired internal setup endpoints. Keep graph reads and status observation independently callable. Corrections such as distinguishing source read failures from confirmed absence require explicit behavior tests; Stage 4 still owns source provenance and committed PR comparisons.
 
 Document and test necessary behavior corrections separately from mechanical extraction. Neither should introduce a new workflow protocol or imply stronger durable-execution guarantees.
 
@@ -390,7 +408,7 @@ Use the existing workflow run/job outcomes, execution references, and bounded, r
 
 ## Development plan
 
-Migrate one complete capability at a time.
+Continue from the delivered observation, setup tools and implemented deployment stack. Historical steps below describe the migration method, not a claim that the entire extraction is complete. Remaining work includes independent setup bindings, Stage 4 graphs/source provenance, Stage 5 authoring/inspection, Stage 6 deletion and Stage 7 final compatibility/reuse evidence.
 
 1. **Inventory and characterize existing behavior.** Map each Canvas use case to shared helpers, side effects, inputs, results, and host dependencies. Add tests around successful, failed, cancelled, and partially completed flows before moving code. Use the current extension revision at implementation time.
 2. **Extract one complete use case.** Start with environment setup or another bounded flow. Move its coordination behind typed inputs and dependency interfaces, reuse existing execution helpers, and replace its Canvas implementation with a library call. Keep the old user-facing tool/route contract during migration.
