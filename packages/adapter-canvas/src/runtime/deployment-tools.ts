@@ -41,7 +41,8 @@ export function createDeploymentTools(ports: DeploymentToolsPorts) {
           environment: optionalText(args, "environment"),
           provider: optionalText(args, "provider"),
           appFile: optionalText(args, "appFile"),
-          attemptId: optionalText(args, "attemptId")
+          attemptId:
+            args.attemptId === "" ? undefined : optionalText(args, "attemptId")
         };
         if (args.observationId !== undefined)
           throw new Error(

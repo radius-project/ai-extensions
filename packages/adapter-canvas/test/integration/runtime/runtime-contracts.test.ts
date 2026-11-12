@@ -165,8 +165,16 @@ describe("P0-A Radius runtime registration contract", () => {
         status: "success",
         deployRunUrl: "https://github.com/org/app/actions/runs/42"
       });
-      await deploy.handler({});
+      expect(await deploy.handler({ attemptId: "" })).toContain("started");
       await vi.waitFor(() => expect(monitor).toHaveBeenCalledTimes(2));
+      const repeated = harness.deps.deployment.owner.lookup();
+      if (repeated.kind !== "found")
+        throw new Error("Fresh deployment was not admitted");
+      expect(repeated.invocation.attemptId).not.toBe(attemptId);
+      expect(repeated.invocation.state.deployRepairAttempts).toBe(0);
+      expect(await status.handler({ attemptId: "" })).toContain(
+        "non-empty string"
+      );
       expect(await status.handler({ observationId })).toContain("No matching");
       expect(readTarget).toHaveBeenCalledTimes(2);
       expect(readTarget).toHaveBeenLastCalledWith(

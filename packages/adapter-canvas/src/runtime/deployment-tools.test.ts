@@ -266,6 +266,47 @@ describe("direct deployment tools", () => {
     expect(await tools.status({ logLines: "40" })).toContain("finite number");
   });
 
+  it("normalizes an exactly empty start attempt ID to a fresh attempt, not a repair", async () => {
+    const { tools, runtime } = fixture();
+    await tools.start(target);
+    await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
+    const prior = runtime.owner.lookup();
+    if (prior.kind !== "found") throw new Error("Missing first deployment");
+    expect(await tools.start({ attemptId: "" })).toContain("started");
+    const current = runtime.owner.lookup();
+    if (current.kind !== "found") throw new Error("Missing fresh deployment");
+    expect(current.invocation.attemptId).not.toBe(prior.invocation.attemptId);
+    expect(current.invocation.state.deployRepairAttempts).toBe(0);
+    expect(await tools.status({ attemptId: "" })).toContain("non-empty string");
+  });
+
+  it.each([null, false, 0, [], {}, " ", "\t\n"])(
+    "refuses invalid start attempt identity %j before workspace resolution",
+    async (attemptId) => {
+      const { tools, runtime, workspace } = fixture();
+      expect(await tools.start({ ...target, attemptId })).toContain(
+        "attemptId must be a non-empty string"
+      );
+      expect(await tools.status({ attemptId })).toContain(
+        "attemptId must be a non-empty string"
+      );
+      expect(workspace).not.toHaveBeenCalled();
+      expect(runtime.owner.lookup().kind).toBe("missing");
+    }
+  );
+
+  it("does not let empty start identity relax model or observation guards", async () => {
+    const { tools, runtime, workspace } = fixture();
+    expect(
+      await tools.start({ ...target, attemptId: "", appFile: "" })
+    ).toContain("appFile must be a non-empty string");
+    expect(
+      await tools.start({ ...target, attemptId: "", observationId: "foreign" })
+    ).toContain("cannot authorize");
+    expect(workspace).not.toHaveBeenCalled();
+    expect(runtime.owner.lookup().kind).toBe("missing");
+  });
+
   it("returns ambiguous-repeat guidance rather than choosing the newest panel", async () => {
     const { tools, runtime } = fixture();
     await tools.start(target);
