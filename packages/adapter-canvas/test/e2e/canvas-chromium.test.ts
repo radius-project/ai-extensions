@@ -1136,8 +1136,11 @@ test.describe("Radius Canvas in Chromium", () => {
   }
 
   for (const appFile of [".radius/app.bicep", "app.bicep"]) {
-    test(`production ${appFile} deploy outcome masks host-known credentials through repair publication @safety`, (fixtures, testInfo) =>
-      verifyProductionDeploy(fixtures, testInfo, appFile));
+    test(`production ${appFile} deploy outcome masks host-known credentials through repair publication @safety`, ({
+      page,
+      canvas
+    }, testInfo) =>
+      verifyProductionDeploy({ page, canvas }, testInfo, appFile));
   }
 
   for (const fixture of pageStateCases()) {
