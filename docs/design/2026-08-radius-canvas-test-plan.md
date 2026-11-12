@@ -33,7 +33,7 @@ Start with the status table. Use the phase sections for the work still to come. 
 - Show external failures as failures. If identity or state cannot be confirmed, deployment and deletion must stop.
 - For the session repository, graph and plan views use the current worktree branch, not an assumed `main`.
 - Close servers, streams, processes, timers, browser sessions, and temporary workspaces after success or failure.
-- Every long-running workflow states whether close cancels it or leaves a durable, resumable operation running. Late work from a closed or superseded context must not mutate newer state.
+- Every long-running workflow distinguishes panel-bound cancellation, session-owned in-memory continuation and durable, restart-resumable work. Closing a deployment panel detaches its view; the shared runtime continues monitoring and delivery without promising persistence or restart recovery. Runtime shutdown suppresses subsequent subscriber callbacks and stops new work, while already-issued work remains tracked and holds target exclusion until settlement under a bounded drain. Late work must not mutate a replacement view or invocation, and local shutdown does not guarantee remote cancellation.
 - For local API changes, test cross-site mutation attempts, malformed bodies, approved request-size boundaries, path traversal, workspace confinement, and destructive actions that must stop safely.
 - Preserve the seven page values, retained action and tool contracts, declared route table, branch behavior, and the single packaged extension unless a separate approved change says otherwise.
 
@@ -336,16 +336,16 @@ LC-12 requires explicit branch selection, not a workspace-to-remote fallback or 
 
 #### Cancellation and abandoned work
 
-| ID    | Requirement                                                                                                                                          |
-|-------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| CN-01 | Every long-running workflow declares whether page, instance, session, and process close cancel it or leave a durable operation running               |
-| CN-02 | Browser teardown aborts browser requests, timers, and polling; late callbacks cannot update the closed or superseded page                            |
-| CN-03 | Durable work may outlive a canvas only when its operation identity and state are persisted, resumable, and shown as continuing                       |
-| CN-04 | Cancellable GitHub, cloud, command-line, and filesystem calls receive a cancellation signal; uncancellable late results are fenced off               |
-| CN-05 | Multi-step mutations check cancellation before irreversible steps and after external waits, then record any partial result without reporting success |
-| CN-06 | Cancelling command-line work terminates only its child process tree and waits for bounded cleanup                                                    |
-| CN-07 | Instance generation, operation identity, and graph context tokens prevent closed or superseded work from committing late results                     |
-| CN-08 | Completion, cancellation, close, and shutdown races produce one terminal outcome and exactly-once cleanup                                            |
+| ID    | Requirement                                                                                                                                                                                                                                                                          |
+|-------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| CN-01 | Every long-running workflow distinguishes panel-bound cancellation, session-owned in-memory continuation after panel close, and durable restart-resumable work; runtime shutdown suppresses subscriber callbacks while tracking issued work and retaining exclusion until settlement |
+| CN-02 | Browser teardown aborts browser requests, timers, and polling; late callbacks cannot update the closed or superseded page                                                                                                                                                            |
+| CN-03 | Durable work may outlive a canvas only when its operation identity and state are persisted, resumable, and shown as continuing                                                                                                                                                       |
+| CN-04 | Cancellable GitHub, cloud, command-line, and filesystem calls receive a cancellation signal; uncancellable late results are fenced off                                                                                                                                               |
+| CN-05 | Multi-step mutations check cancellation before irreversible steps and after external waits, then record any partial result without reporting success                                                                                                                                 |
+| CN-06 | Cancelling command-line work terminates only its child process tree and waits for bounded cleanup                                                                                                                                                                                    |
+| CN-07 | Instance generation, operation identity, and graph context tokens prevent closed or superseded work from committing late results                                                                                                                                                     |
+| CN-08 | Completion, cancellation, close, and shutdown races produce one terminal outcome and exactly-once cleanup                                                                                                                                                                            |
 
 #### GitHub CLI authentication
 
