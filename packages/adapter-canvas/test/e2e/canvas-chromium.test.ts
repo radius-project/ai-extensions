@@ -1192,10 +1192,13 @@ test.describe("Radius Canvas in Chromium", () => {
         );
         expect(await progress.json()).toMatchObject({
           status: "in_progress",
-          resources: [
-            { name: "web", deployStatus: "pending" },
-            { name: "db", deployStatus: "pending" }
-          ]
+          resources:
+            launch === "tool" ?
+              []
+            : [
+                { name: "web", deployStatus: "pending" },
+                { name: "db", deployStatus: "pending" }
+              ]
         });
         expect(canvas.entry.state.plannedResources).toEqual([]);
         const graphCall = (await canvas.cliCalls()).find(
@@ -1203,12 +1206,19 @@ test.describe("Radius Canvas in Chromium", () => {
             call.tool === "rad" &&
             call.args.slice(0, 2).join(" ") === "app graph"
         );
-        expect(graphCall).toBeDefined();
-        expect(canvas.entry.state.deployLogs?.join("\n")).toContain(
-          "Planned 2 resource(s)."
-        );
-        await gotoCanvas(page, canvas, "deployed");
-        await expect(page.locator(".react-flow__node")).toHaveCount(2);
+        if (launch === "tool") {
+          expect(graphCall).toBeUndefined();
+          expect(canvas.entry.state.deployLogs?.join("\n")).not.toContain(
+            "Planned 2 resource(s)."
+          );
+        } else {
+          expect(graphCall).toBeDefined();
+          expect(canvas.entry.state.deployLogs?.join("\n")).toContain(
+            "Planned 2 resource(s)."
+          );
+          await gotoCanvas(page, canvas, "deployed");
+          await expect(page.locator(".react-flow__node")).toHaveCount(2);
+        }
       }
       const correlation = dispatched?.args
         .find((arg) => arg.startsWith("correlation_id="))
@@ -1290,9 +1300,11 @@ test.describe("Radius Canvas in Chromium", () => {
       expect(status.logs.join("\n")).not.toContain(
         "Could not verify Azure federated credential coverage"
       );
-      expect(status.resources[0].deployMessage).toContain(
-        "opaque-witness=[REDACTED]"
-      );
+      if (launch === "tool") expect(status.resources).toEqual([]);
+      else
+        expect(status.resources[0].deployMessage).toContain(
+          "opaque-witness=[REDACTED]"
+        );
       expect(status.logs.join("\n")).toContain("opaque-witness=[REDACTED]");
       await expect
         .poll(() => canvas.entry.state.deployHandoffState)
