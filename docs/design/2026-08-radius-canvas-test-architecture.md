@@ -210,9 +210,10 @@ The source release-unit manifest is [`extensions/radius/package.json`](../../ext
 
 ## Cancellation and abandoned work
 
-- Every long-running workflow declares who owns it and what closing the page, canvas instance, session, or process means: cancel the work or leave a durable operation running.
+- Every long-running workflow declares its owner and distinguishes panel-bound cancellation, session-owned in-memory continuation and durable, restart-resumable work.
 - Browser teardown cancels timers, polling, and browser requests and ignores late callbacks. It does not claim that server or external work stopped.
-- Instance-scoped work receives a cancellation request when its instance closes or the extension shuts down. Work may continue after close only when it has a persisted operation identity, can be resumed safely, and is shown as continuing rather than cancelled.
+- Panel-bound work receives a cancellation request when its instance closes. Closing a deployment panel instead detaches that view: the session-owned runtime may continue monitoring and delivery in memory, and reopening attaches to the same invocation without creating another monitor. This continuation requires neither persistence nor a restart-recovery guarantee. Genuinely durable work retains CN-03's persisted identity and safe-resumption requirements.
+- Runtime shutdown stops admission and suppresses subsequent subscriber callbacks. Already-issued work remains tracked and holds target exclusion until it settles; bounded draining does not guarantee completion before process exit, recovery after restart or remote workflow cancellation.
 - GitHub, cloud, command-line, and filesystem adapters receive a cancellation signal when they support one. When an external call cannot be interrupted, its late result is fenced off and cannot start another mutation or overwrite newer state.
 - Multi-step mutations check for cancellation before each irreversible step and after each awaited external call. If earlier work cannot be undone, the operation records the partial result and reports cancellation separately from success or failure.
 - Command cancellation targets the specific child process tree, waits for exit within a bounded deadline, and never uses a name-wide process kill.
