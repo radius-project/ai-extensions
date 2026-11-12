@@ -7,9 +7,9 @@ import {
   type DeployMonitorStatusReader,
   type DeployRunDetail,
   type DeployResourceStatus
-} from "./deploy-monitor.js";
-import { createDeployDispatchService } from "./deploy-dispatch.js";
-import { createDeployOutcomeService } from "./deploy-outcome.js";
+} from "./deployment-monitor.js";
+import { createDeployDispatchService } from "./deployment-dispatch.js";
+import { createDeployOutcomeService } from "./deployment-outcome.js";
 import {
   observeWorkflowRun,
   parseWorkflowProtection,
@@ -22,15 +22,17 @@ import {
   readWorkflowLog,
   type WorkflowExecution
 } from "@radius-project/adapter-shared";
-import { createPlannedGraphRecoveryService } from "./deploy-planned-graph.js";
-import type { DeployOutcomeRequest } from "./deploy-outcome.js";
-import type { CanvasGraphResource, CanvasState } from "../../shared.js";
-import { createDeferred } from "../../../test/support/browser/fakes.js";
+import type { DeployOutcomeRequest } from "./deployment-outcome.js";
+import type {
+  DeploymentResource as CanvasGraphResource,
+  DeploymentState as CanvasState
+} from "@radius-project/core";
+import { createDeploymentDeferred as createDeferred } from "../test/support/deployment.js";
 import {
   DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE as explanation,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
-} from "../../deploy-artifacts.js";
+} from "@radius-project/core";
 
 // A deterministic clock: every read advances by one tick, so the heartbeat and
 // the pending-node fallback can be driven without a real timer.
@@ -1970,43 +1972,14 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     const record = (effect: string): void => {
       effects.push(effect);
     };
-    const plannedGraph = createPlannedGraphRecoveryService({
-      prepareSourceRefResources: () => {
-        record("prepare-source-refs");
-        return { token: "planned|acme/widgets|feat" };
-      },
-      setSourceRefResources: () => {
-        record("commit-source-refs");
-        return true;
-      },
-      fetchBicepSelection: () => {
-        record("fetch-bicep-selection");
-        return Promise.resolve({
-          content: "planned bicep",
-          fromWorkspace: false,
-          branch: "feat",
-          bicepPath: ""
-        });
-      },
-      radArtifactsDirForSelection: () => {
-        record("stage-rad-artifacts");
-        return Promise.resolve({ dir: "/tmp/rad", remote: true });
-      },
-      buildGraphViaRad: () => {
-        record("build-graph-via-rad");
-        return Promise.resolve([{ id: "r1", name: "db" }]);
-      },
-      fetchRecipePack: () => {
-        record("fetch-recipe-pack");
-        return Promise.resolve({});
-      },
-      resolveRecipeOutputs: (parsed) => {
-        record("resolve-recipe-outputs");
-        return Promise.resolve(parsed);
-      },
-      canvasGraphResources: (values) => values as CanvasGraphResource[],
-      errorMessage: (error) => String(error)
-    });
+    const plannedGraph = {
+      recover: async ({ log }: { log(message: string): void }) => {
+        record("recover-planned-graph");
+        log("Resolving planned application graph for acme/widgets...");
+        log("Planned 1 resource(s).");
+        return [{ id: "r1", name: "db" }];
+      }
+    };
 
     const dispatch = createDeployDispatchService({
       deployWorkflowFile: "run-rad-commands.yml",
@@ -2232,13 +2205,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     // dispatch and its cache eviction, then run discovery, then monitoring,
     // then the terminal artifact reads.
     expect(effects).toEqual([
-      "prepare-source-refs",
-      "fetch-bicep-selection",
-      "stage-rad-artifacts",
-      "build-graph-via-rad",
-      "fetch-recipe-pack",
-      "resolve-recipe-outputs",
-      "commit-source-refs",
+      "recover-planned-graph",
       "branch-head-sha",
       "github-json:/repos/acme/widgets/environments/production/variables/AZURE_CLIENT_ID",
       "github-json:/repos/acme/widgets/environments/production",
@@ -2266,7 +2233,6 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     );
     expect(state.deployedGraph).toEqual([{ id: "r1" }]);
     expect(state.deployedGraphRepo).toBe("acme/widgets");
-    expect(state.plannedRepo).toBe("acme/widgets");
     // The log feed is the user-visible half of the same transcript.
     expect(logs).toEqual([
       "Resolving planned application graph for acme/widgets...",

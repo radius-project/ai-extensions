@@ -84,3 +84,14 @@ export {
 export * as ghcrBootstrap from "./ghcr-bootstrap.js";
 
 export * from "./setup-workflow-content.js";
+export * from "./deployment-command-bindings.js";
+export * from "./deployment-repository.js";
+export * from "./deployment-workspace.js";
+export * from "./deployment-observation-bindings.js";
+export * from "./deployment-templates.js";
+export * from "./deployment-parameters.js";
+export * from "./deployment-dispatch.js";
+export * from "./deployment-monitor.js";
+export * from "./deployment-outcome.js";
+export * from "./deployment-service-dependencies.js";
+export * from "./workflow-observation-scope.js";

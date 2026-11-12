@@ -5,12 +5,17 @@ import {
   type DeployCommandOptions,
   type DeployCommandResult,
   type DeployDispatchDependencies
-} from "./deploy-dispatch.js";
-import type { BicepParam } from "../../bicep.js";
-import type { CanvasState } from "../../shared.js";
-import type { GitHubJsonResponse, GitHubJsonRunner } from "../../azure-oidc.js";
-import { requireCurrentAwsWorkflows } from "./aws-workflow-compatibility.js";
-import { createEnvironmentProviderReader } from "./environment-target.js";
+} from "./deployment-dispatch.js";
+import type {
+  BicepParam,
+  DeploymentState as CanvasState
+} from "@radius-project/core";
+import type {
+  GitHubJsonResponse,
+  GitHubJsonRunner
+} from "@radius-project/core/platforms";
+import { requireCurrentAwsWorkflows } from "@radius-project/core";
+import { createDeploymentRepository } from "./deployment-repository.js";
 
 const OK: DeployCommandResult = { code: 0, stdout: "", stderr: "" };
 
@@ -229,15 +234,21 @@ describe("deploy dispatch construction", () => {
       const { input } = request();
       input.provider = hint;
       const gh = recordingGh();
-      const readProvider = createEnvironmentProviderReader(
-        async (command, args) => {
+      const readProvider = createDeploymentRepository({
+        redactDiagnostic: (value) => value,
+        execute: (command, args, _options, callback) => {
           expect(command).toBe("gh");
           expect(args[1]).toBe(
             "/repos/acme/widgets/environments/production/variables?per_page=100"
           );
-          return "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deploy\nAWS_REGION\tus-west-2";
+          callback(
+            null,
+            "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deploy\nAWS_REGION\tus-west-2",
+            ""
+          );
+          return {};
         }
-      );
+      }).environmentProvider;
       const service = createDeployDispatchService(
         dependencies({
           ...gh,
