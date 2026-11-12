@@ -25,7 +25,7 @@ The environment tools and Canvas wizard share one operation owner: collect the e
 AWS setup remains disabled by default. Enable the developer switch at extension startup; it is not a tool argument.
 
 1. **Form inputs**: env name, IAM role name or existing role ARN, AWS region, account ID, EKS cluster name, the cluster's VPC ID, and comma-separated subnet IDs in that VPC that cover at least two standard availability zones. Both role selectors may be supplied; the existing role ARN takes precedence. Setup authorizes the deploy identity and records its resolved role ARN and cloud settings as GitHub Environment variables.
-2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-aws.yml` and dispatches it. The workflow logs into AWS via OIDC and runs `aws sts get-caller-identity`, then runs `aws eks update-kubeconfig` for the EKS cluster and `kubectl cluster-info` to confirm cluster access. Status is polled and shown live in the canvas.
+2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-aws.yml` and dispatches it. The workflow first checks the shape of the AWS variables, then logs into AWS via OIDC, runs `aws sts get-caller-identity`, and checks that the role is in `AWS_ACCOUNT_ID`. Its EKS preflight fails unless the cluster is `ACTIVE` or `UPDATING`, and warns when it is `UPDATING`. It also checks that the subnets are in the cluster's VPC, that the runner can reach the API server, and that the role can authenticate and make the Kubernetes writes a deploy needs. Last, it checks GHCR push access to the state package. Each failure writes one coded error annotation that says how to fix it. Status is polled and shown live in the canvas.
 
 ### Azure
 
@@ -107,9 +107,10 @@ The managed Contour Gateway supports HTTP and TLS routes. TCP and UDP routes req
 - `AWS_ACCOUNT_ID` — the 12-digit account of `AWS_ROLE_ARN`. Verification, deploys, and deletes fail when the role signs in to a different account.
 - `AWS_EKS_CLUSTER_NAME` — name of the EKS cluster the workflow verifies access to
 
-**AWS** — also set from the form for deploys (not read by verification):
+**AWS** — also set from the form for deploys:
 
-- `RADIUS_VPC_ID` (the EKS cluster's VPC), `RADIUS_SUBNET_IDS`
+- `RADIUS_VPC_ID` (the EKS cluster's VPC), not read by verification
+- `RADIUS_SUBNET_IDS`, which verification and deploys require and check against the cluster's VPC
 
 **AWS**, recorded for environment deletion (not read by any workflow):
 

@@ -1,3 +1,5 @@
+import { isEksClusterName } from "./platforms/aws-identity.js";
+
 export const AWS_TRUST_SUBJECTS_VARIABLE = "AWS_TRUST_SUBJECTS";
 
 export interface SetupProviderConfigurationInput {
@@ -149,10 +151,17 @@ export async function applySetupProviderConfiguration(
   }
 
   const roleArn = data.roleArn || "";
+  const k8s = data.cluster || "";
+
+  if (!isEksClusterName(k8s)) {
+    throw new Error(
+      "AWS setup requires a valid EKS cluster name, so Radius did not write the AWS environment variables. Start a new setup and select an EKS cluster."
+    );
+  }
+
   const region =
     data.region || ports.optionalString(awsCreds.region) || "us-east-1";
   const accountId = data.accountId || ports.optionalString(awsCreds.accountId);
-  const k8s = data.cluster || "";
 
   await ports.setEnvironmentVariable("AWS_ROLE_ARN", roleArn);
   await ports.setEnvironmentVariable("AWS_REGION", region);

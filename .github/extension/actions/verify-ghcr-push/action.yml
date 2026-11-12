@@ -1,14 +1,20 @@
 # yaml-language-server: $schema=https://www.schemastore.org/github-action.json
 ---
-# Provider-agnostic GHCR package push-permission check shared by verify-aws.yml
-# and verify-azure.yml. Radius stores its control-plane state as an OCI archive
-# in GHCR (RADIUS_STATE_REGISTRY); `rad startup` / `rad shutdown` push to that
-# package during a deploy, and GHCR rejects the push with a 403 Forbidden when
-# the workflow's GITHUB_TOKEN lacks write access to it -- a permission that is
-# not granted by default for packages that are not linked to the repository.
-# This action surfaces that early, during credential verification, instead of
-# mid-deploy. Kept as a shared composite action so the two verify templates do
-# not drift.
+# Provider-agnostic GHCR package push-permission check, shared by the verify
+# templates and by the AWS deploy and delete templates. Radius stores its
+# control-plane state as an OCI archive in GHCR (RADIUS_STATE_REGISTRY); `rad
+# startup` / `rad shutdown` push to that package during a deploy, and GHCR
+# rejects the push with a 403 Forbidden when the workflow's GITHUB_TOKEN lacks
+# write access to it -- a permission that is not granted by default for
+# packages that are not linked to the repository. This action surfaces that
+# before a run changes cloud or Radius resources, instead of in Teardown.
+#
+# With coded-messages set to true, as the AWS templates set it, the check runs
+# from verify-ghcr-push.sh through a one-line `run:` and writes coded errors.
+# GitHub prints each `run:` body into the job log, and Canvas classifies a
+# failure here as a permissions problem when that log has "401" or "403", so
+# only a real denial prints those words. The default keeps the original inline
+# check, so the Azure verify template's output does not change.
 name: Radius - Verify GHCR package push permission
 description: Check that the workflow token can push to the Radius OCI state archive package in GHCR.
 
@@ -20,11 +26,18 @@ inputs:
   github-token:
     description: A token with packages:write for the state package (typically secrets.GITHUB_TOKEN).
     required: true
+  coded-messages:
+    description: >-
+      Set to true to write titled, coded errors. The default keeps the original
+      messages.
+    required: false
+    default: "false"
 
 runs:
   using: composite
   steps:
     - name: Verify GHCR package push permission
+      if: ${{ inputs.coded-messages != 'true' }}
       shell: bash
       env:
         GH_ACTOR: ${{ github.actor }}
@@ -84,3 +97,12 @@ runs:
           echo "::error::GHCR push-permission probe for ghcr.io/${repo_path} returned HTTP ${status}; this does not prove whether push access is allowed."
           exit 1
         fi
+
+    - name: Verify GHCR package push permission (coded)
+      if: ${{ inputs.coded-messages == 'true' }}
+      shell: bash
+      env:
+        GH_ACTOR: ${{ github.actor }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        STATE_REGISTRY: ${{ inputs.state-registry }}
+      run: bash "$GITHUB_ACTION_PATH/verify-ghcr-push.sh"

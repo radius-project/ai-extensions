@@ -84,6 +84,7 @@ extract_step run-rad-commands "Run rad commands"
 extract_step delete-resource "Delete Radius resource"
 mkdir -p "${EXT}/actions/deploy-progress" "${EXT}/scripts" "${TEST_ROOT}/bin"
 cp "${ACTIONS_DIR}/deploy-progress/progress.sh" "${EXT}/actions/deploy-progress/"
+cp "${ACTIONS_DIR}/run-rad-commands/allowed-commands.sh" "${EXT}/actions/run-rad-commands/"
 # The fake parameter loader records the app file it reads, so the default
 # deploy's calls show whether it stopped at the refresh. With WAIT_FOR_WATCHER
 # set, it first waits for the watcher, so the order of the calls is fixed.
@@ -217,10 +218,18 @@ export REGISTRY_USERNAME="" REGISTRY_PASSWORD="" RADIUS_DEPLOY_PARAMS=""
 export RAD_COMMANDS='["env list"]'
 readonly COMMANDS_RESULT="rad-commands-result.json"
 
-status="$(RADIUS_AWS_ROLE_ARN="" run_step run-rad-commands)"
-[[ "${status}" == "0" ]] || fail "commands without a deploy role: expected success, got ${status}"
-expect_calls "rad env list" "commands without a deploy role"
-expect_result "${COMMANDS_RESULT}" succeeded 0 "commands without a deploy role"
+# Azure passes no AWS inputs, so no AWS refresh runs.
+status="$(RADIUS_AWS_ROLE_ARN="" RADIUS_AWS_EKS_CLUSTER_NAME="" RADIUS_AWS_REGION="" run_step run-rad-commands)"
+[[ "${status}" == "0" ]] || fail "commands without AWS inputs: expected success, got ${status}"
+expect_calls "rad env list" "commands without AWS inputs"
+expect_result "${COMMANDS_RESULT}" succeeded 0 "commands without AWS inputs"
+
+# An AWS caller whose role is empty still runs the refresher, which rejects the
+# missing role, so the commands do not run without target credentials.
+status="$(RADIUS_AWS_ROLE_ARN="" PREPARE_STATUS=1 run_step run-rad-commands)"
+[[ "${status}" == "1" ]] || fail "commands without a deploy role: expected exit 1, got ${status}"
+expect_calls "refresher --prepare role= cluster=demo-cluster region=us-west-2" "commands without a deploy role"
+expect_result "${COMMANDS_RESULT}" command_failed 1 "commands without a deploy role"
 
 status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" WAIT_FOR_WATCHER=1 run_step run-rad-commands)"
 [[ "${status}" == "0" ]] || fail "commands with a deploy role: expected success, got ${status}"
@@ -264,10 +273,10 @@ status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" WAIT_FOR_WATCHER=1 RAD_STATUS=1 RAD_COMM
 expect_watcher_stopped "a failed default deploy"
 expect_result "${COMMANDS_RESULT}" command_failed 1 "a failed default deploy"
 
-status="$(RADIUS_AWS_ROLE_ARN="" RAD_COMMANDS="" run_step run-rad-commands)"
-[[ "${status}" == "0" ]] || fail "the default deploy without a deploy role: expected success, got ${status}"
+status="$(RADIUS_AWS_ROLE_ARN="" RADIUS_AWS_EKS_CLUSTER_NAME="" RADIUS_AWS_REGION="" RAD_COMMANDS="" run_step run-rad-commands)"
+[[ "${status}" == "0" ]] || fail "the default deploy without AWS inputs: expected success, got ${status}"
 expect_calls "load parameters .radius/app.bicep
-rad deploy .radius/app.bicep --environment dev" "the default deploy without a deploy role"
+rad deploy .radius/app.bicep --environment dev" "the default deploy without AWS inputs"
 
 status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" PREPARE_STATUS=1 RAD_COMMANDS="" run_step run-rad-commands)"
 [[ "${status}" == "1" ]] || fail "a failed token refresh before the default deploy: expected exit 1, got ${status}"
@@ -279,10 +288,15 @@ expect_result "${COMMANDS_RESULT}" command_failed 1 "a failed token refresh befo
 export RESOURCE_TYPE="application" RESOURCE_NAME="todo" FORCE_DELETE="false"
 readonly DELETE_RESULT="rad-delete-result.json"
 
-status="$(RADIUS_AWS_ROLE_ARN="" run_step delete-resource)"
-[[ "${status}" == "0" ]] || fail "a delete without a deploy role: expected success, got ${status}"
-expect_calls "rad app delete todo --yes" "a delete without a deploy role"
-expect_result "${DELETE_RESULT}" succeeded 0 "a delete without a deploy role"
+status="$(RADIUS_AWS_ROLE_ARN="" RADIUS_AWS_EKS_CLUSTER_NAME="" RADIUS_AWS_REGION="" run_step delete-resource)"
+[[ "${status}" == "0" ]] || fail "a delete without AWS inputs: expected success, got ${status}"
+expect_calls "rad app delete todo --yes" "a delete without AWS inputs"
+expect_result "${DELETE_RESULT}" succeeded 0 "a delete without AWS inputs"
+
+status="$(RADIUS_AWS_ROLE_ARN="" RADIUS_AWS_REGION="" PREPARE_STATUS=1 run_step delete-resource)"
+[[ "${status}" == "1" ]] || fail "a delete with only a cluster: expected exit 1, got ${status}"
+expect_calls "refresher --prepare role= cluster=demo-cluster region=" "a delete with only a cluster"
+expect_result "${DELETE_RESULT}" failed 1 "a delete with only a cluster"
 
 status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" WAIT_FOR_WATCHER=1 run_step delete-resource)"
 [[ "${status}" == "0" ]] || fail "a delete with a deploy role: expected success, got ${status}"
@@ -303,6 +317,23 @@ status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" PREPARE_STATUS=1 run_step delete-resourc
 expect_calls "refresher --prepare ${REFRESHER_ARGS}" "a failed token refresh before a delete"
 [[ ! -f "${WATCH_PID_FILE}" ]] || fail "a failed token refresh before a delete: expected no watcher"
 expect_result "${DELETE_RESULT}" failed 1 "a failed token refresh before a delete"
+
+status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" RESOURCE_TYPE="environment" RESOURCE_NAME="dev" \
+    WAIT_FOR_WATCHER=1 run_step delete-resource)"
+[[ "${status}" == "0" ]] || fail "an environment delete: expected success, got ${status}"
+expect_calls "refresher --prepare ${REFRESHER_ARGS}
+refresher --watch ${REFRESHER_ARGS}
+watcher running
+rad env delete dev --yes" "an environment delete"
+expect_watcher_stopped "an environment delete"
+expect_result "${DELETE_RESULT}" succeeded 0 "an environment delete"
+
+status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" RESOURCE_TYPE="environment" RESOURCE_NAME="dev" \
+    PREPARE_STATUS=1 run_step delete-resource)"
+[[ "${status}" == "1" ]] || fail "a failed token refresh before an environment delete: expected exit 1, got ${status}"
+expect_calls "refresher --prepare ${REFRESHER_ARGS}" "a failed token refresh before an environment delete"
+[[ ! -f "${WATCH_PID_FILE}" ]] || fail "a failed token refresh before an environment delete: expected no watcher"
+expect_result "${DELETE_RESULT}" failed 1 "a failed token refresh before an environment delete"
 
 status="$(RADIUS_AWS_ROLE_ARN="${ROLE}" RESOURCE_TYPE="volume" run_step delete-resource)"
 [[ "${status}" == "2" ]] || fail "an unsupported resource type: expected exit 2, got ${status}"

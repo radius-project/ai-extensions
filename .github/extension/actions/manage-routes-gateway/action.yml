@@ -40,6 +40,12 @@ inputs:
     description: Managed Gateway exposure; empty/private or public.
     required: false
     default: ""
+  request-timeout:
+    description: >-
+      kubectl --request-timeout for each call to the target cluster, for
+      example 10s. Empty keeps kubectl's default.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -56,5 +62,6 @@ runs:
         GATEWAY_NAMESPACE: ${{ inputs.gateway-namespace }}
         GATEWAY_EXPLICIT: ${{ inputs.gateway-explicit }}
         EXPOSURE: ${{ inputs.exposure }}
+        REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
       run: |
         bash "${GITHUB_ACTION_PATH}/routes-gateway.sh"

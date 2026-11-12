@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Tests the AWS provider recipe-pack setup by extracting and executing the
-# workflow's real run block with deterministic rad, curl, and contrib-catalog
-# stubs. The pack it downloads is the pinned aws-eks pack snapshot.
+# Tests the AWS provider recipe-pack download and setup by extracting and
+# executing the workflow's real run blocks with deterministic rad, curl, and
+# contrib-catalog stubs. The pack is the pinned aws-eks pack snapshot.
 
 set -euo pipefail
 
@@ -18,6 +18,7 @@ readonly TEST_ROOT
 trap 'rm -rf "${TEST_ROOT}"' EXIT
 
 readonly BODY_SCRIPT="${TEST_ROOT}/provider-setup.sh"
+readonly FETCH_SCRIPT="${TEST_ROOT}/fetch-pack.sh"
 readonly STUB_BIN="${TEST_ROOT}/bin"
 readonly CATALOG_HELPER="${TEST_ROOT}/contrib-catalog.sh"
 readonly CALLS="${TEST_ROOT}/calls.log"
@@ -37,14 +38,14 @@ if ! command -v python3 >/dev/null 2>&1; then
     fail "python3 is required to parse run-rad-commands-aws.yml"
 fi
 
-extract_provider_setup_step() {
-    python3 - "${WORKFLOW_FILE}" "${BODY_SCRIPT}" <<'PYTHON'
+# extract_step <step name> <out file> <RECIPE_PACK_FILE env value or "">
+extract_step() {
+    python3 - "${WORKFLOW_FILE}" "$2" "$1" "$3" <<'PYTHON'
 import re
 import sys
 
-workflow_file, out_file = sys.argv[1], sys.argv[2]
+workflow_file, out_file, step, want_pack_file = sys.argv[1:5]
 lines = open(workflow_file, encoding="utf-8").read().splitlines()
-step = "Create Radius environment and deploy provider recipe pack"
 
 names = [
     i for i, line in enumerate(lines)
@@ -56,6 +57,7 @@ if len(names) != 1:
 run_at = None
 pack_url = None
 pack_ref = None
+pack_file = None
 step_indent = len(lines[names[0]]) - len(lines[names[0]].lstrip(" "))
 for i in range(names[0] + 1, len(lines)):
     line = lines[i]
@@ -68,16 +70,21 @@ for i in range(names[0] + 1, len(lines)):
     match = re.match(r"^\s*RECIPE_PACK_REF:\s*(.+?)\s*$", line)
     if match:
         pack_ref = match.group(1)
+    match = re.match(r"^\s*RECIPE_PACK_FILE:\s*(.+?)\s*$", line)
+    if match:
+        pack_file = match.group(1)
     if re.match(r"^\s*run:\s*\|\s*$", line):
         run_at = i
         break
 
 if pack_url != "'{{AWS_EKS_RECIPE_PACK_URL}}'":
     sys.exit("RECIPE_PACK_URL must come from the generator's pinned pack, got %r" % pack_url)
-if pack_ref != "'{{AWS_EKS_RECIPE_PACK_REF}}'":
+if want_pack_file and pack_ref != "'{{AWS_EKS_RECIPE_PACK_REF}}'":
     sys.exit("RECIPE_PACK_REF must come from the generator's pinned pack, got %r" % pack_ref)
+if want_pack_file and pack_file != want_pack_file:
+    sys.exit("RECIPE_PACK_FILE must be %r, got %r" % (want_pack_file, pack_file))
 if run_at is None:
-    sys.exit("provider setup step has no 'run: |' block")
+    sys.exit("'%s' has no 'run: |' block" % step)
 
 body, base = [], None
 for line in lines[run_at + 1:]:
@@ -93,6 +100,8 @@ for line in lines[run_at + 1:]:
 
 while body and not body[-1]:
     body.pop()
+if any("${{" in line for line in body):
+    sys.exit("the run block of '%s' must not interpolate expressions" % step)
 open(out_file, "w", encoding="utf-8").write("\n".join(body) + "\n")
 PYTHON
 }
@@ -106,6 +115,10 @@ STUB
     cat >"${STUB_BIN}/curl" <<'STUB'
 #!/bin/bash
 echo "curl $*" >>"${CALLS}"
+if [ -n "${CURL_FAIL:-}" ]; then
+    echo "curl: (22) The requested URL returned error: 404" >&2
+    exit 22
+fi
 out=""
 while [ "$#" -gt 0 ]; do
     if [ "$1" = "-o" ]; then
@@ -139,8 +152,8 @@ radius_contrib_kube_recipe_source() {
 STUB
 }
 
-# Run the extracted step in a fresh workspace. Extra arguments are NAME=value
-# overrides for the environment the step reads.
+# Run the extracted setup step in a fresh workspace. Extra arguments are
+# NAME=value overrides for the environment the step reads.
 run_step() {
     rm -rf "${TEST_ROOT}/work" "${CALLS}" "${OUTPUT}"
     mkdir -p "${TEST_ROOT}/work"
@@ -165,16 +178,60 @@ run_step() {
             RADIUS_SUBNET_IDS=subnet-0a1,subnet-0b2 \
             RECIPE_PACK_URL="${PACK_URL}" \
             RECIPE_PACK_REF="${PACK_REF}" \
+            RECIPE_PACK_FILE="${PACK_FIXTURE}" \
             "$@" \
             bash -e "${BODY_SCRIPT}"
     ) >"${OUTPUT}" 2>&1
 }
 
+# Run the extracted fetch step. Extra arguments are NAME=value overrides.
+run_fetch() {
+    rm -rf "${TEST_ROOT}/runner-temp" "${CALLS}" "${OUTPUT}"
+    mkdir -p "${TEST_ROOT}/runner-temp"
+    : >"${CALLS}"
+    : >"${TEST_ROOT}/fetch-output"
+    env \
+        PATH="${STUB_BIN}:${PATH}" \
+        CALLS="${CALLS}" \
+        PACK_FIXTURE="${PACK_FIXTURE}" \
+        RUNNER_TEMP="${TEST_ROOT}/runner-temp" \
+        GITHUB_OUTPUT="${TEST_ROOT}/fetch-output" \
+        RECIPE_PACK_URL="${PACK_URL}" \
+        "$@" \
+        bash -e "${FETCH_SCRIPT}" >"${OUTPUT}" 2>&1
+}
+
+test_fetch_downloads_the_pinned_pack() {
+    run_fetch || fail "the pack download should succeed"
+    grep -qxF "curl -fsSL --connect-timeout 5 --max-time 60 --retry 2 ${PACK_URL} -o ${TEST_ROOT}/runner-temp/radius-recipe-pack.bicep" "${CALLS}" ||
+        fail "the pack was not downloaded from the pinned URL with bounded retries"
+    grep -qxF "path=${TEST_ROOT}/runner-temp/radius-recipe-pack.bicep" "${TEST_ROOT}/fetch-output" ||
+        fail "the step did not expose the downloaded pack's path"
+    cmp -s "${PACK_FIXTURE}" "${TEST_ROOT}/runner-temp/radius-recipe-pack.bicep" ||
+        fail "the downloaded pack differs from the served pack"
+}
+
+test_fetch_failure_is_coded() {
+    if run_fetch CURL_FAIL=1; then
+        fail "a failed pack download should fail the step"
+    fi
+    grep -qE '^::error title=Recipe pack unavailable::\[RECIPE_PACK_UNAVAILABLE\] Could not download the provider recipe pack from .* Fix: ' "${OUTPUT}" ||
+        fail "a failed pack download did not report RECIPE_PACK_UNAVAILABLE"
+    grep -qF "404" "${OUTPUT}" || fail "the curl error was not shown"
+    if grep -q '^path=' "${TEST_ROOT}/fetch-output"; then
+        fail "a failed download still exposed a pack path"
+    fi
+}
+
 test_deploys_the_pinned_pack_with_its_parameters() {
     run_step || fail "valid AWS inputs should deploy the recipe pack"
     local work="${TEST_ROOT}/work"
-    grep -qxF "curl -fsSL ${PACK_URL} -o .radius/radius-recipe-pack.bicep" "${CALLS}" ||
-        fail "the pack was not downloaded from the pinned URL"
+    # Fetch provider recipe pack already downloaded it, before any change.
+    if grep -q "^curl" "${CALLS}"; then
+        fail "the setup step downloaded the pack again"
+    fi
+    grep -qF "Using the recipe pack downloaded from ${PACK_URL}" "${OUTPUT}" ||
+        fail "the setup step did not name the pack it uses"
     grep -qxF "rad deploy .radius/radius-environment.bicep" "${CALLS}" ||
         fail "the environment was not deployed"
     grep -qxF "rad deploy .radius/radius-recipe-pack.bicep --environment dev --parameters eksClusterName=dev-cluster --parameters subnetIds=subnet-0a1,subnet-0b2 --parameters routesGatewayName=radius --parameters routesGatewayNamespace=radius-system --parameters containerImagesRegistry=ghcr.io/octo/app --parameters containerImagesRegistrySecretName=radius-ghcr-registry-creds" "${CALLS}" ||
@@ -199,23 +256,12 @@ test_deploys_the_pinned_pack_with_its_parameters() {
         fail "the provider pack name was not exposed"
 }
 
-test_refuses_invalid_input_before_any_change() {
-    local name="$1" value="$2" message="$3"
-    if run_step "${name}=${value}"; then
-        fail "${name}=${value} should be refused"
-    fi
-    grep -qF "${message}" "${OUTPUT}" || fail "${name}=${value} did not explain: ${message}"
-    if [ -s "${CALLS}" ]; then
-        fail "${name}=${value} reached rad or curl"
-    fi
-}
-
 # A pack whose aws-eks recipe carries some other tag cannot be pinned to the
 # pack's commit, so the deploy stops before deploying the pack.
 test_refuses_an_aws_recipe_on_another_tag() {
     local pack="${TEST_ROOT}/edge-pack.bicep"
     sed "s|aws-eks-recipes/mysqldatabases:latest|aws-eks-recipes/mysqldatabases:edge|" "${PACK_FIXTURE}" >"${pack}"
-    if run_step PACK_FIXTURE="${pack}"; then
+    if run_step RECIPE_PACK_FILE="${pack}"; then
         fail "an aws-eks recipe on the edge tag should be refused"
     fi
     grep -qF "aws-eks-recipes/mysqldatabases:edge" "${OUTPUT}" ||
@@ -225,21 +271,14 @@ test_refuses_an_aws_recipe_on_another_tag() {
     fi
 }
 
-extract_provider_setup_step
+extract_step "Fetch provider recipe pack" "${FETCH_SCRIPT}" ""
+# The step reads the fetched pack's path from the fetch step's output.
+# shellcheck disable=SC2016
+extract_step "Create Radius environment and deploy provider recipe pack" "${BODY_SCRIPT}" '${{ steps.fetch-pack.outputs.path }}'
 write_stubs
+test_fetch_downloads_the_pinned_pack
+test_fetch_failure_is_coded
 test_deploys_the_pinned_pack_with_its_parameters
-test_refuses_invalid_input_before_any_change AWS_ACCOUNT_ID 12345678901 "AWS_ACCOUNT_ID must be"
-test_refuses_invalid_input_before_any_change AWS_ACCOUNT_ID "123456789012'" "AWS_ACCOUNT_ID must be"
-test_refuses_invalid_input_before_any_change AWS_REGION "us-west-2'}" "AWS_REGION must be"
-test_refuses_invalid_input_before_any_change AWS_REGION "" "AWS_REGION must be"
-test_refuses_invalid_input_before_any_change AWS_EKS_CLUSTER_NAME "dev cluster" "AWS_EKS_CLUSTER_NAME must be"
-test_refuses_invalid_input_before_any_change AWS_EKS_CLUSTER_NAME "" "AWS_EKS_CLUSTER_NAME must be"
-test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS "subnet-0a1, subnet-0b2" "RADIUS_SUBNET_IDS must be"
-test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS '["subnet-0a1"]' "RADIUS_SUBNET_IDS must be"
-test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS "" "RADIUS_SUBNET_IDS must be"
-test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "main" "RECIPE_PACK_REF must be"
-test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "" "RECIPE_PACK_REF must be"
-test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "fedcba9876543210fedcba9876543210fedcba98" "RECIPE_PACK_REF must be"
 test_refuses_an_aws_recipe_on_another_tag
 
 echo "AWS provider recipe-pack setup tests passed"

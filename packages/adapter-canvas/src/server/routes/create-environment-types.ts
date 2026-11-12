@@ -1,4 +1,7 @@
-import type { ProviderMutationRecord } from "../../operations.js";
+import type {
+  OperationControlRecord,
+  ProviderMutationRecord
+} from "../../operations.js";
 import type {
   SetupOperationSnapshot,
   SetupStartResult
@@ -102,6 +105,9 @@ export interface CreateEnvironmentOperation extends SetupOperationSnapshot {
     mutations?: ProviderMutationRecord[];
   };
   context?: Record<string, unknown>;
+  // Read to tell an AWS setup retry, which verifies with a new workflow run,
+  // from a continuation of the attempt already recorded.
+  control?: Pick<OperationControlRecord, "commands">;
   request?: unknown;
   resumeRequest?: unknown;
   setupArtifacts?: {

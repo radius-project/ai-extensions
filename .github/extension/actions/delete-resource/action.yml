@@ -26,12 +26,12 @@ inputs:
     default: "false"
   aws-role-arn:
     description: >-
-      AWS deploy role. When set, the GitHub OIDC token, and the EKS token when
-      aws-eks-cluster-name is set, are refreshed while deletion runs.
+      AWS deploy role. When any AWS input is set, the GitHub OIDC token and the
+      EKS token are refreshed while deletion runs, and all three AWS inputs are required.
     required: false
     default: ""
   aws-eks-cluster-name:
-    description: EKS cluster whose token is refreshed. Requires aws-role-arn.
+    description: EKS cluster whose token is refreshed. Required with aws-role-arn.
     required: false
     default: ""
   aws-region:
@@ -155,7 +155,7 @@ runs:
           OIDC_REFRESH_PID=$!
         fi
 
-        if [ -n "$RADIUS_AWS_ROLE_ARN" ]; then
+        if [ -n "$RADIUS_AWS_ROLE_ARN$RADIUS_AWS_EKS_CLUSTER_NAME$RADIUS_AWS_REGION" ]; then
           AWS_TOKEN_REFRESH_SCRIPT="$GITHUB_ACTION_PATH/../../scripts/refresh-aws-tokens.sh"
           if ! bash "$AWS_TOKEN_REFRESH_SCRIPT" --prepare; then
             OUTCOME="failed"

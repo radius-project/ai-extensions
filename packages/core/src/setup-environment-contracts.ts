@@ -18,6 +18,10 @@ export interface SetupEnvironmentInput {
   envName: string;
   provider: string;
   data: SetupProviderConfigurationInput & { profileName?: string };
+  // The setup retry this run belongs to. When set, verification uses a new
+  // workflow commit, dispatch, and run marker instead of resuming the run an
+  // earlier attempt recorded.
+  verificationAttempt?: string;
 }
 
 export type SetupPullRequestNextStep =

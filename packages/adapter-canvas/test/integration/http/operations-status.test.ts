@@ -557,6 +557,40 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     }
   );
 
+  it.each([" eks", "eks.prod", "e".repeat(101)])(
+    "rejects AWS cluster %j before claiming an account or registering setup work",
+    async (cluster) => {
+      const harness = start(false, true);
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/operations`, {
+        method: "POST",
+        body: JSON.stringify({
+          repo: "octo/app",
+          provider: "aws",
+          roleName: "radius-deploy-octo-app",
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster,
+          vpcId: "vpc-1",
+          subnetIds: "subnet-a,subnet-b",
+          selectionHandle: "selected-account"
+        })
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error:
+          "AWS setup requires a valid accountId, region, cluster, vpcId, subnetIds, and either an IAM role name or an existing role ARN.",
+        code: "invalid-aws-operation-input"
+      });
+      expect(harness.claims).toEqual([]);
+      expect(harness.running.size).toBe(0);
+      expect(harness.persistCalls).toEqual([]);
+      expect(harness.scheduled).toEqual([]);
+    }
+  );
+
   it("serves latest and by-id operation status over a real socket", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");

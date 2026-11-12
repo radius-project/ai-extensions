@@ -1087,6 +1087,8 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     ["region has no zone number", { region: "us-west" }],
     ["cluster is blank", { cluster: "  " }],
     ["cluster is missing", { cluster: "" }],
+    ["cluster has a period", { cluster: "eks.prod" }],
+    ["cluster exceeds 100 characters", { cluster: "e".repeat(101) }],
     ["vpcId is blank", { vpcId: " " }],
     ["subnetIds is blank", { subnetIds: "" }],
     ["both role inputs are missing", { roleName: "", existingRoleArn: "" }],

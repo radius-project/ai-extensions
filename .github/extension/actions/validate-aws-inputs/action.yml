@@ -1,0 +1,71 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+# Offline input checks for the AWS workflows. They run first, so a malformed
+# GitHub environment variable fails in about a second, before any AWS call or
+# control-plane install. The checks live in validate-aws-inputs.sh, called from
+# a one-line `run:`, because GitHub prints each `run:` body into the job log.
+name: Radius - Validate AWS workflow inputs
+description: Check the AWS workflow's variables, rad commands, and deploy parameters without network calls.
+
+inputs:
+  role-arn:
+    description: The deploy role (vars.AWS_ROLE_ARN). Required.
+    required: true
+  account-id:
+    description: The environment's AWS account (vars.AWS_ACCOUNT_ID). Required.
+    required: true
+  region:
+    description: The environment's AWS Region (vars.AWS_REGION). Required.
+    required: true
+  cluster-name:
+    description: The target EKS cluster (vars.AWS_EKS_CLUSTER_NAME). Required.
+    required: true
+  subnet-ids:
+    description: Comma-separated subnet IDs for recipes (vars.RADIUS_SUBNET_IDS). Checked when set.
+    required: false
+    default: ""
+  require-subnets:
+    description: >-
+      Set to true when subnet-ids must be set, as deploy and verify need. The
+      delete workflows leave it false, because deletion does not use subnets.
+    required: false
+    default: "false"
+  recipe-pack-url:
+    description: The pinned provider recipe pack URL. Checked when it or recipe-pack-ref is set.
+    required: false
+    default: ""
+  recipe-pack-ref:
+    description: The 40-character commit the recipe pack URL reads from.
+    required: false
+    default: ""
+  app-file:
+    description: The application file. When set and rad-commands is blank, it must exist in the checkout.
+    required: false
+    default: ""
+  rad-commands:
+    description: A rad command, or a JSON array of rad commands, without the rad prefix. Each first word must be allowed.
+    required: false
+    default: ""
+  deploy-params:
+    description: The RADIUS_DEPLOY_PARAMS secret. When set, it must be exactly one JSON object. It is never printed.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        AWS_ROLE_ARN: ${{ inputs.role-arn }}
+        AWS_ACCOUNT_ID: ${{ inputs.account-id }}
+        AWS_REGION: ${{ inputs.region }}
+        AWS_EKS_CLUSTER_NAME: ${{ inputs.cluster-name }}
+        RADIUS_SUBNET_IDS: ${{ inputs.subnet-ids }}
+        REQUIRE_SUBNETS: ${{ inputs.require-subnets }}
+        RECIPE_PACK_URL: ${{ inputs.recipe-pack-url }}
+        RECIPE_PACK_REF: ${{ inputs.recipe-pack-ref }}
+        APP_FILE: ${{ inputs.app-file }}
+        RAD_COMMANDS: ${{ inputs.rad-commands }}
+        RADIUS_DEPLOY_PARAMS: ${{ inputs.deploy-params }}
+      run: bash "$GITHUB_ACTION_PATH/validate-aws-inputs.sh"

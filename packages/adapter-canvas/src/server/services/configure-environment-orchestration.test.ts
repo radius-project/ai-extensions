@@ -3354,7 +3354,8 @@ describe("environment configuration service: the seven-step workflow", () => {
     await configure({
       repo: "octo/app",
       provider: "aws",
-      roleArn: "arn:aws:iam::1"
+      roleArn: "arn:aws:iam::1",
+      cluster: "eks"
     });
 
     expect(harness.ghCalls).toContain(
@@ -3386,7 +3387,8 @@ describe("environment configuration service: the seven-step workflow", () => {
         repo: "octo/app",
         provider,
         roleArn: "arn:aws:iam::1",
-        accountId: "1"
+        accountId: "1",
+        cluster: "eks"
       });
       expect(response.status).toBe(200);
       expect(response.body).toMatchObject({
@@ -5217,5 +5219,318 @@ describe("environment configuration service: the cancellation gates", () => {
     expect(
       harness.ghCalls.filter((call) => call.startsWith("workflow run "))
     ).toHaveLength(1);
+  });
+});
+
+describe("environment configuration service: setup retry verification", () => {
+  const verifyPath = ".github/workflows/radius-verify-credentials.yml";
+  const setupBranch = "radius/setup-dev-workflows-op-http";
+  const earlierDispatch = "octo/app:radius-verify-credentials.yml:main:dev";
+  const retryDispatch = `${earlierDispatch}:retry-2`;
+
+  const setupRequest = (provider: string) => ({
+    repo: "octo/app",
+    environment: "dev",
+    provider,
+    roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+    accountId: "123456789012",
+    region: "us-west-2",
+    cluster: "cluster"
+  });
+
+  const retrySetup = (operation: CreateEnvironmentOperation) => {
+    operation.state = "running";
+    operation.control = {
+      commands: [
+        {
+          commandId: "op-http:retry_setup:2:setup",
+          kind: "retry_setup",
+          attempt: 2,
+          target: "setup",
+          state: "running",
+          acceptedAt: "2023-11-14T22:13:00.000Z",
+          completedAt: null,
+          outcome: null
+        }
+      ]
+    };
+  };
+
+  const recordDispatch = (
+    operation: CreateEnvironmentOperation,
+    target: string,
+    marker: string,
+    runId: string | null
+  ) => {
+    const dispatched = prepareProviderMutation(operation, {
+      kind: "github_workflow.dispatch",
+      target,
+      providerIdempotencyKey: marker,
+      intent: {}
+    });
+
+    settleProviderMutation(
+      operation,
+      dispatched.mutationId,
+      runId ? "confirmed" : "outcome_unknown",
+      runId ?
+        "GitHub CLI returned the created workflow run URL."
+      : "The provider request ended without a response.",
+      runId ?? undefined
+    );
+
+    if (!runId) return;
+    operation.verification = {
+      dispatchedAt: 1699999990000,
+      dispatchMutationTarget: target,
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      event: "workflow_dispatch",
+      operationMarker: marker,
+      baselineRunId: null,
+      runId,
+      runUrl: `https://github.com/octo/app/actions/runs/${runId}`
+    };
+  };
+
+  const listedRun = (databaseId: number, marker: string, event: string) => ({
+    databaseId,
+    createdAt: "2023-11-14T22:13:21.000Z",
+    displayTitle: `Radius verify dev [${marker}]`,
+    event,
+    headBranch: event === "push" ? setupBranch : "main",
+    status: "queued",
+    url: "ignored"
+  });
+
+  const dispatches = (harness: Harness) =>
+    harness.ghCalls.filter((call) => call.startsWith("workflow run "));
+
+  const verifyWrites = (harness: Harness) =>
+    providerMutationsByKind(harness.operation, "github_workflow.put")
+      .map((mutation) => mutation.target)
+      .filter((target) => target.includes(verifyPath));
+
+  it.each([
+    {
+      name: "dispatches a new AWS run for a setup retry",
+      provider: "aws",
+      recorded: { target: earlierDispatch, marker: "op-http", runId: "4100" },
+      marker: "op-http:retry-2",
+      target: retryDispatch,
+      runId: "4242",
+      dispatched: 1
+    },
+    {
+      name: "resumes the AWS run the same setup retry dispatched",
+      provider: "aws",
+      recorded: {
+        target: retryDispatch,
+        marker: "op-http:retry-2",
+        runId: "4300"
+      },
+      marker: "op-http:retry-2",
+      target: retryDispatch,
+      runId: "4300",
+      dispatched: 0
+    },
+    {
+      name: "resumes the recorded Azure run for a setup retry",
+      provider: "azure",
+      recorded: { target: earlierDispatch, marker: "op-http", runId: "4100" },
+      marker: "op-http",
+      target: earlierDispatch,
+      runId: "4100",
+      dispatched: 0
+    }
+  ])(
+    "$name",
+    async ({ provider, recorded, marker, target, runId, dispatched }) => {
+      const harness = start({
+        runListResults: [
+          { stdout: JSON.stringify([{ databaseId: 4100 }]) },
+          {
+            stdout: JSON.stringify([
+              listedRun(4242, "op-http:retry-2", "workflow_dispatch"),
+              listedRun(4100, "op-http", "workflow_dispatch")
+            ])
+          }
+        ]
+      });
+
+      recordDispatch(
+        harness.operation,
+        recorded.target,
+        recorded.marker,
+        recorded.runId
+      );
+      retrySetup(harness.operation);
+
+      const response = await configure(setupRequest(provider));
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        verifyRunUrl: `https://github.com/octo/app/actions/runs/${runId}`
+      });
+      expect(harness.operation.verification).toMatchObject({
+        runId,
+        operationMarker: marker,
+        dispatchMutationTarget: target
+      });
+      expect(dispatches(harness)).toHaveLength(dispatched);
+
+      if (dispatched) {
+        expect(dispatches(harness)[0]).toContain(`radius_operation=${marker}`);
+      }
+
+      expect(verifyWrites(harness)).toEqual([
+        `octo/app:<default>:${verifyPath}${provider === "aws" ? ":retry-2" : ""}`
+      ]);
+    }
+  );
+
+  it("does not dispatch again after the AWS retry's dispatch outcome was lost", async () => {
+    const harness = start();
+    recordDispatch(harness.operation, earlierDispatch, "op-http", "4100");
+    recordDispatch(harness.operation, retryDispatch, "op-http:retry-2", null);
+    retrySetup(harness.operation);
+
+    await configure(setupRequest("aws"));
+
+    expect(dispatches(harness)).toEqual([]);
+    expect(
+      providerMutationsByKind(harness.operation, "github_workflow.dispatch")
+    ).toMatchObject([
+      { target: earlierDispatch, status: "confirmed" },
+      { target: retryDispatch, status: "manual_required" }
+    ]);
+    expect(harness.operation.verification).toMatchObject({ runId: "4100" });
+  });
+
+  describe("on a protected default branch", () => {
+    const protectedRetry = (
+      listed: ReturnType<typeof listedRun>[]
+    ): Script => ({
+      gh: [
+        {
+          match:
+            /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
+          result: { code: 1, stderr: "protected branch" }
+        },
+        {
+          match: /^run list /,
+          result: { stdout: JSON.stringify(listed) }
+        }
+      ],
+      headSha: "sha-base",
+      createBranch: { ok: true, stderr: "" },
+      pullRequest: {
+        ok: true,
+        url: "https://github.com/octo/app/pull/7",
+        number: 7
+      }
+    });
+
+    const recordPushRun = (
+      operation: CreateEnvironmentOperation,
+      marker = "op-http",
+      runId: string | null = "4100"
+    ) => {
+      operation.verification = {
+        dispatchedAt: 1699999990000,
+        workflow: "radius-verify-credentials.yml",
+        ref: setupBranch,
+        environment: "dev",
+        event: "push",
+        operationMarker: marker,
+        baselineRunId: null,
+        runId,
+        runUrl: runId && `https://github.com/octo/app/actions/runs/${runId}`
+      };
+    };
+
+    it.each([
+      {
+        provider: "aws",
+        marker: "op-http:retry-2",
+        runId: "4300",
+        startedAt: 1700000000000
+      },
+      {
+        provider: "azure",
+        marker: "op-http",
+        runId: "4100",
+        startedAt: 1699999990000
+      }
+    ])(
+      "discovers the $provider setup retry's push run $runId",
+      async ({ provider, marker, runId, startedAt }) => {
+        const harness = start(
+          protectedRetry([
+            listedRun(4300, "op-http:retry-2", "push"),
+            listedRun(4100, "op-http", "push")
+          ])
+        );
+
+        recordPushRun(harness.operation);
+        retrySetup(harness.operation);
+
+        const response = await configure(setupRequest(provider));
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          verifyRunUrl: `https://github.com/octo/app/actions/runs/${runId}`
+        });
+        expect(harness.journal).toContain(`setupPushOperationMarker:${marker}`);
+        expect(harness.operation.verification).toMatchObject({
+          event: "push",
+          ref: setupBranch,
+          operationMarker: marker,
+          dispatchedAt: startedAt,
+          runId
+        });
+        expect(dispatches(harness)).toEqual([]);
+        const attempt = provider === "aws" ? ":retry-2" : "";
+        expect(verifyWrites(harness)).toEqual([
+          `octo/app:<default>:${verifyPath}${attempt}`,
+          `octo/app:${setupBranch}:${verifyPath}${attempt}`
+        ]);
+      }
+    );
+
+    it("does not adopt the earlier failed push run for an AWS setup retry", async () => {
+      const harness = start(
+        protectedRetry([listedRun(4100, "op-http", "push")])
+      );
+
+      recordPushRun(harness.operation);
+      retrySetup(harness.operation);
+
+      await configure(setupRequest("aws"));
+
+      expect(harness.operation.verification).toMatchObject({
+        operationMarker: "op-http:retry-2",
+        runId: null
+      });
+      expect(dispatches(harness)).toEqual([]);
+    });
+
+    it("keeps the AWS setup retry's push identity when the retry resumes", async () => {
+      const harness = start(
+        protectedRetry([listedRun(4300, "op-http:retry-2", "push")])
+      );
+
+      recordPushRun(harness.operation, "op-http:retry-2", null);
+      retrySetup(harness.operation);
+
+      await configure(setupRequest("aws"));
+
+      expect(harness.operation.verification).toMatchObject({
+        operationMarker: "op-http:retry-2",
+        dispatchedAt: 1699999990000,
+        runId: "4300"
+      });
+    });
   });
 });

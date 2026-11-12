@@ -73,10 +73,13 @@ export function setupWorkflowBranchName(
 export interface WorkflowFileCommitter {
   // The lazily created PR branch, or undefined while commits still go direct.
   pullRequestState(): PullRequestBranchState | undefined;
+  // `attempt` gives the write its own journal entry, so a deliberate rewrite of
+  // an already committed path is not reconciled as the earlier write.
   commitWorkflowFileSmart(
     path: string,
     contentB64: string,
-    message: string
+    message: string,
+    attempt?: string
   ): Promise<WorkflowCommitOutcome>;
 }
 
@@ -463,7 +466,8 @@ export function createWorkflowFileCommitter(
     path: string,
     contentB64: string,
     message: string,
-    branch = ""
+    branch = "",
+    attempt?: string
   ): Promise<
     SetupWorkflowCommandResult & {
       changed?: boolean;
@@ -490,7 +494,11 @@ export function createWorkflowFileCommitter(
         `${shaRes.stderr || ""}\n${shaRes.stdout || ""}`
       );
     const mutationKind = "github_workflow.put";
-    const mutationTarget = `${target.targetRepo}:${branch || "<default>"}:${path}`;
+
+    const mutationTarget = `${target.targetRepo}:${branch || "<default>"}:${path}${
+      attempt ? `:${attempt}` : ""
+    }`;
+
     const mutationRecovery = ports.mutationRecovery;
     const recoveryOperation = mutationRecovery;
     const existingMutation =
@@ -826,7 +834,8 @@ export function createWorkflowFileCommitter(
   const commitWorkflowFileSmart = async (
     path: string,
     contentB64: string,
-    message: string
+    message: string,
+    attempt?: string
   ): Promise<WorkflowCommitOutcome> => {
     if (
       !prState &&
@@ -847,7 +856,8 @@ export function createWorkflowFileCommitter(
         path,
         contentB64,
         message,
-        prState.branch
+        prState.branch,
+        attempt
       );
       if (r.cancelled) {
         return {
@@ -862,7 +872,15 @@ export function createWorkflowFileCommitter(
           succeeded(r, contentB64, true)
         : { ok: false, changed: false, stderr: r.stderr, viaPr: true };
     }
-    const direct = await putWorkflowContent(path, contentB64, message, "");
+
+    const direct = await putWorkflowContent(
+      path,
+      contentB64,
+      message,
+      "",
+      attempt
+    );
+
     if (direct.cancelled) {
       return {
         ok: false,
@@ -908,7 +926,8 @@ export function createWorkflowFileCommitter(
           path,
           contentB64,
           message,
-          fallback.branch
+          fallback.branch,
+          attempt
         );
       } finally {
         atomicFallbackWrite = false;

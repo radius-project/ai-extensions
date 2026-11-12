@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { configureSetupEnvironment } from "./setup-environment.js";
+import type { SetupEnvironmentPorts } from "./setup-environment-contracts.js";
 import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
 import { setupEnvironmentHarness } from "../test/support/setup-environment.js";
 
@@ -78,6 +79,7 @@ describe("configureSetupEnvironment", () => {
       const h = setupEnvironmentHarness();
       h.input.provider = provider;
       h.input.data.roleArn = "role";
+      h.input.data.cluster = "cluster";
       h.input.data.profileName = "profile";
       const result = await configureSetupEnvironment(h.input, h.ports);
       expect(result).toEqual({
@@ -519,4 +521,96 @@ describe("configureSetupEnvironment", () => {
       });
     }
   );
+
+  it("commits and dispatches a setup retry's verification under the attempt", async () => {
+    const h = setupEnvironmentHarness();
+    h.input.verificationAttempt = "retry-2";
+
+    expect((await configureSetupEnvironment(h.input, h.ports)).kind).toBe(
+      "configured"
+    );
+    expect(h.mutations.map((mutation) => mutation.target)).toEqual([
+      "octo/app:<default>:.github/workflows/radius-verify-credentials.yml:retry-2",
+      "octo/app:<default>:.github/workflows/deploy.yml",
+      "octo/app:<default>:.github/workflows/delete.yml"
+    ]);
+    expect(h.transcript).toContainEqual([
+      "dispatch",
+      "trunk",
+      "op_setup:retry-2"
+    ]);
+    expect(h.ports.verification()).toMatchObject({
+      dispatchMutationTarget:
+        "octo/app:radius-verify-credentials.yml:trunk:dev:retry-2",
+      operationMarker: "op_setup:retry-2",
+      runId: "10"
+    });
+  });
+
+  it("replaces an earlier attempt's push identity once for a setup retry", async () => {
+    const earlierAttempt = {
+      dispatchedAt: 50,
+      ref: "radius/setup-dev-workflows-setup",
+      event: "push",
+      operationMarker: "op_setup"
+    };
+
+    const recorded: unknown[] = [];
+
+    let discovered:
+      | Parameters<
+          SetupEnvironmentPorts["discoverAutomaticVerificationRun"]
+        >[0]["identity"]
+      | undefined;
+
+    const h = setupEnvironmentHarness({
+      verification: () => recorded.at(-1) ?? earlierAttempt,
+      setVerification: (value) => {
+        recorded.push(value);
+      },
+      planCredentialVerification: async ({ prState, defaultBranch }) => {
+        if (!prState) throw new Error("Expected protected-branch publication");
+
+        return {
+          shouldDispatch: false,
+          trigger: "push",
+          ref: prState.branch,
+          defaultBranch,
+          pullRequestUrl: "",
+          skipReason: ""
+        };
+      },
+      discoverAutomaticVerificationRun: async ({ identity }) => {
+        discovered = identity;
+
+        return {
+          state: "discovered",
+          runId: "10",
+          runUrl: "https://github.test/run/10"
+        };
+      }
+    });
+
+    h.input.verificationAttempt = "retry-2";
+    h.protectDefaultBranch();
+
+    expect((await configureSetupEnvironment(h.input, h.ports)).kind).toBe(
+      "configured"
+    );
+    const discoveredRun = { operationMarker: "op_setup:retry-2", runId: "10" };
+    expect(recorded).toMatchObject([
+      {
+        dispatchedAt: 100,
+        event: "push",
+        operationMarker: "op_setup:retry-2",
+        runId: null
+      },
+      discoveredRun,
+      discoveredRun
+    ]);
+    expect(discovered).toMatchObject({
+      operationMarker: "op_setup:retry-2",
+      startedAt: 100
+    });
+  });
 });

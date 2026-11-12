@@ -4,6 +4,7 @@ import {
   isAwsRegion,
   isAwsRoleName,
   isAwsSetupNetworkInput,
+  isEksClusterName,
   parseAwsRoleArn
 } from "@radius-project/core";
 import type {
@@ -14,6 +15,7 @@ import type { SelectionHandleClaim } from "./github-account-readiness.js";
 import type { OperationControlResult } from "./operation-control.js";
 import { finishSchedulingFailure } from "./operation-resume.js";
 import { setupStartConflictResponse } from "../routes/operation-start-conflict.js";
+import { optionalString } from "../../runtime/util.js";
 
 export type SetupStartDependencies = Omit<
   CreateOperationDependencies,
@@ -114,7 +116,7 @@ export function createSetupStartService(dependencies: SetupStartDependencies) {
     } else if (
       !isAwsAccountId(String(data.accountId || "")) ||
       !isAwsRegion(String(data.region || "")) ||
-      !String(data.cluster || "").trim() ||
+      !isEksClusterName(optionalString(data.cluster)) ||
       !String(data.vpcId || "").trim() ||
       !String(data.subnetIds || "").trim() ||
       (!isAwsRoleName(String(data.roleName || "")) &&

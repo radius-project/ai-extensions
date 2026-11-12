@@ -61,16 +61,23 @@ inputs:
     default: "false"
   aws-role-arn:
     description: >-
-      AWS deploy role. When set, the GitHub OIDC token, and the EKS token when
-      aws-eks-cluster-name is set, are refreshed while commands run.
+      AWS deploy role. When any AWS input is set, the GitHub OIDC token and the
+      EKS token are refreshed while commands run, and all three AWS inputs are required.
     required: false
     default: ""
   aws-eks-cluster-name:
-    description: EKS cluster whose token is refreshed. Requires aws-role-arn.
+    description: EKS cluster whose token is refreshed. Required with aws-role-arn.
     required: false
     default: ""
   aws-region:
     description: Region of the EKS cluster. Required with aws-role-arn.
+    required: false
+    default: ""
+  request-timeout:
+    description: >-
+      kubectl --request-timeout for the calls to the target cluster before the
+      commands run, for example 10s. Empty keeps kubectl's default, which waits
+      for the connection with no limit.
     required: false
     default: ""
 
@@ -81,9 +88,12 @@ runs:
       shell: bash
       env:
         APP_FILE: ${{ inputs.app-file }}
+        REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
       run: |
         TARGET_KUBECONFIG="$RADIUS_TARGET_KUBECONFIG"
         if [ -f "$TARGET_KUBECONFIG" ]; then
+          KUBECTL_ARGS=(--kubeconfig "$TARGET_KUBECONFIG")
+          [ -z "$REQUEST_TIMEOUT" ] || KUBECTL_ARGS+=("--request-timeout=$REQUEST_TIMEOUT")
           # Tolerate a missing app file or no name match here: `grep` exits
           # non-zero on both, and with `set -e -o pipefail` (the composite
           # bash default) that would kill this step with a bare exit code and
@@ -98,8 +108,8 @@ runs:
           fi
           APP_NS="default-$BICEP_APP_NAME"
           echo "Ensuring namespace $APP_NS exists on target cluster..."
-          kubectl --kubeconfig "$TARGET_KUBECONFIG" get namespace "$APP_NS" 2>/dev/null || \
-            kubectl --kubeconfig "$TARGET_KUBECONFIG" create namespace "$APP_NS"
+          kubectl "${KUBECTL_ARGS[@]}" get namespace "$APP_NS" 2>/dev/null || \
+            kubectl "${KUBECTL_ARGS[@]}" create namespace "$APP_NS"
         fi
 
     - name: Compute container build platforms from target cluster architecture
@@ -107,6 +117,7 @@ runs:
       env:
         BUILD_ARCH_MODE: ${{ inputs.build-arch-mode }}
         BUILD_FALLBACK_PLATFORMS: ${{ inputs.build-fallback-platforms }}
+        REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
       run: |
         set -euo pipefail
 
@@ -129,7 +140,9 @@ runs:
           if [ -n "$TARGET_KUBECONFIG" ] && [ -f "$TARGET_KUBECONFIG" ]; then
             # One architecture token per node; failures degrade to empty, which the
             # helper treats as "undetermined" and resolves to the fallback list.
-            ARCHES=$(kubectl --kubeconfig "$TARGET_KUBECONFIG" get nodes \
+            KUBECTL_ARGS=(--kubeconfig "$TARGET_KUBECONFIG")
+            [ -z "$REQUEST_TIMEOUT" ] || KUBECTL_ARGS+=("--request-timeout=$REQUEST_TIMEOUT")
+            ARCHES=$(kubectl "${KUBECTL_ARGS[@]}" get nodes \
               -o jsonpath='{range .items[*]}{.status.nodeInfo.architecture}{"\n"}{end}' \
               2>/dev/null || true)
             echo "Detected target cluster node architectures: $(echo "$ARCHES" | tr '\n' ' ')"
@@ -230,16 +243,10 @@ runs:
         }
         trap cleanup EXIT
 
-        # Allowed-command set. Each command's leading verb must be in this list, so
-        # commands that do not fit the ephemeral, per-run model — managing or
-        # upgrading a control plane, switching workspaces, or changing install state —
-        # cannot run. Validation happens before any command runs, so a disallowed
-        # command fails fast (exit 2) without deploying anything.
-        ALLOWED_VERBS="deploy app resource env recipe group credential resource-type version bicep"
-        is_allowed() {
-          local verb="${1%% *}"
-          case " $ALLOWED_VERBS " in *" $verb "*) return 0 ;; *) return 1 ;; esac
-        }
+        # Allowed-command set, shared with validate-aws-inputs. Validation happens
+        # before any command runs, so a disallowed command fails fast (exit 2)
+        # without deploying anything.
+        source "$GITHUB_ACTION_PATH/allowed-commands.sh"
 
         # Record one command's result into the combined artifact. Keeps live console
         # output via tee while capturing it for the artifact.
@@ -380,7 +387,7 @@ runs:
         }
 
         start_aws_token_refresh() {
-          [ -n "$RADIUS_AWS_ROLE_ARN" ] || return 0
+          [ -n "$RADIUS_AWS_ROLE_ARN$RADIUS_AWS_EKS_CLUSTER_NAME$RADIUS_AWS_REGION" ] || return 0
           AWS_TOKEN_REFRESH_SCRIPT="$GITHUB_ACTION_PATH/../../scripts/refresh-aws-tokens.sh"
           bash "$AWS_TOKEN_REFRESH_SCRIPT" --prepare || return 1
           bash "$AWS_TOKEN_REFRESH_SCRIPT" --watch &

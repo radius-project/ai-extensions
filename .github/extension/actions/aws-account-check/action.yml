@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+# Checks that the deploy role is in the environment's AWS account. Radius makes
+# every AWS call with this role and reads only the region from the environment,
+# so a role in another account would act there while Radius records the
+# resources under AWS_ACCOUNT_ID.
+#
+# The check lives in aws-account-check.sh and runs from a one-line `run:`.
+# GitHub prints each `run:` body into the job log, and Canvas shows the log
+# lines that contain words such as "error" as the failure's evidence, so an
+# inline body would add the text of every error the check can raise.
+name: Radius - Check the deploy role's AWS account
+description: Fail when the signed-in deploy role is not in the environment's AWS account.
+
+inputs:
+  account-id:
+    description: The environment's AWS account (vars.AWS_ACCOUNT_ID).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check the deploy role's AWS account
+      shell: bash
+      env:
+        ENVIRONMENT_ACCOUNT_ID: ${{ inputs.account-id }}
+      run: bash "$GITHUB_ACTION_PATH/aws-account-check.sh"
