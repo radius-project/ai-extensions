@@ -176,6 +176,29 @@ describe("direct deployment tools", () => {
     }
   );
 
+  it("does not copy another environment's explicit repeat model into a fresh target", async () => {
+    const { tools, runtime, readModel } = fixture();
+    await tools.start({ ...target, appFile: "models/development.bicep" });
+    await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
+    expect(
+      await tools.start({
+        repo: target.repo,
+        environment: "production"
+      })
+    ).toContain("started");
+    const current = runtime.owner.lookupTarget({
+      repo: target.repo,
+      environment: "production"
+    });
+    if (current.kind !== "found") throw new Error("Missing fresh target");
+    expect(current.invocation.target).toMatchObject({
+      branch: target.branch,
+      appFile: ".radius/app.bicep"
+    });
+    expect(current.invocation.state.deployParams).not.toHaveProperty("appFile");
+    expect(readModel).toHaveBeenCalledOnce();
+  });
+
   it("selects an explicit repository model without inventing trusted workspace context", async () => {
     const { tools, workspace, readModel } = fixture();
     workspace.mockResolvedValue(undefined);

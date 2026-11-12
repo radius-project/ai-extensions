@@ -38,10 +38,12 @@ import {
 } from "../../../src/server.js";
 import type { CanvasGraphResource } from "../../../src/shared.js";
 import {
+  createDeploymentRepository,
   createWorkflowArtifactReader,
   normalizeDeploymentAppFile,
   type WorkflowRunner
 } from "@radius-project/adapter-shared";
+import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
 
 const ACTION_NAMES = ["get_graph_resources", "update_source_refs"];
 
@@ -96,6 +98,153 @@ function registerDeploymentStatus(
 }
 
 describe("P0-A Radius runtime registration contract", () => {
+  it.each([0, 1, 2])(
+    "resolves an explicit target without a branch independently of %i unrelated prior deployments",
+    async (priorCount) => {
+      const defaultBranch = vi.fn(async () => "remote-default");
+      const harness = await createRuntimeSdkHarness({}, (deps) => {
+        deps.deployment = createFakeDeploymentRuntime({
+          resolveDeployment: async () => null,
+          resolveDefaultBranch: defaultBranch,
+          createExecution: () => ({
+            monitor: {
+              run: async ({ entry }) => {
+                entry.state.deployStatus = "complete";
+              }
+            },
+            observation: createWorkflowObservationScope(() => {
+              throw new Error("No artifact reads expected");
+            })
+          })
+        });
+      });
+      try {
+        const deploy = harness.extension.tools.find(
+          ({ name }) => name === "radius_deploy"
+        );
+        if (!deploy) throw new Error("Missing registered deploy tool");
+        for (let index = 0; index < priorCount; index++) {
+          expect(
+            await deploy.handler({
+              repo: `unrelated/app-${index}`,
+              environment: "production",
+              branch: "unrelated-branch",
+              appFile: "models/unrelated.bicep"
+            })
+          ).toContain("started");
+          await expect
+            .poll(() => harness.deps.deployment.owner.hasActiveWork())
+            .toBe(false);
+        }
+        const started = await deploy.handler({
+          repo: "explicit/app",
+          environment: "production"
+        });
+        expect(started).toContain("started");
+        expect(defaultBranch).toHaveBeenCalledExactlyOnceWith("explicit/app");
+        const selected = harness.deps.deployment.owner.lookupTarget({
+          repo: "explicit/app",
+          environment: "production"
+        });
+        if (selected.kind !== "found")
+          throw new Error("Expected explicit target");
+        expect(selected.invocation.target).toMatchObject({
+          repo: "explicit/app",
+          branch: "remote-default",
+          appFile: ".radius/app.bicep"
+        });
+        expect(selected.invocation.state.deployParams).not.toHaveProperty(
+          "appFile"
+        );
+        expect(selected.invocation.state.deployingResources).toEqual([]);
+        expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+      } finally {
+        await harness.extension.shutdown("test");
+      }
+    }
+  );
+
+  it.each([
+    [{ content: "", encoding: "base64", size: 0 }, "app.bicep"],
+    [
+      {
+        content: Buffer.from(" \n").toString("base64"),
+        encoding: "base64",
+        size: 2
+      },
+      ".radius/app.bicep"
+    ],
+    [{ content: "", encoding: "none", size: 2_000_000 }, null],
+    [{ encoding: "base64", size: 20 }, null]
+  ] as const)(
+    "uses validated remote model metadata %j through the registered direct tool",
+    async (metadata, expectedModel) => {
+      const execute = vi.fn<
+        Parameters<typeof createDeploymentRepository>[0]["execute"]
+      >((command, args, _options, callback) => {
+        expect(command).toBe("gh");
+        expect(args).toEqual([
+          "api",
+          "/repos/explicit/app/contents/.radius/app.bicep?ref=feature"
+        ]);
+        callback(null, JSON.stringify(metadata), "");
+        return {};
+      });
+      const repository = createDeploymentRepository({
+        execute,
+        redactDiagnostic: redactCredentials
+      });
+      const harness = await createRuntimeSdkHarness({}, (deps) => {
+        deps.deployment = createFakeDeploymentRuntime({
+          resolveDeployment: async () => null,
+          createExecution: () => ({
+            monitor: {
+              run: async ({ entry }) => {
+                entry.state.deployStatus = "complete";
+              }
+            },
+            observation: createWorkflowObservationScope(() => {
+              throw new Error("No artifact reads expected");
+            })
+          })
+        });
+        deps.readDeploymentModel = createDeployModelSource({
+          readWorkspace: async () => null,
+          readRepository: repository.readFileResult,
+          redactDiagnostic: redactCredentials
+        });
+      });
+      try {
+        const deploy = harness.extension.tools.find(
+          ({ name }) => name === "radius_deploy"
+        );
+        if (!deploy) throw new Error("Missing registered deploy tool");
+        const result = await deploy.handler({
+          repo: "explicit/app",
+          branch: "feature",
+          environment: "production"
+        });
+        if (expectedModel) {
+          expect(result).toContain("started");
+          const current = harness.deps.deployment.owner.lookup();
+          if (current.kind !== "found") throw new Error("Missing deployment");
+          expect(current.invocation.target.appFile).toBe(expectedModel);
+          expect(current.invocation.state.deployParams).not.toHaveProperty(
+            "appFile"
+          );
+        } else {
+          expect(result).toContain("Could not resolve the application model");
+          expect(harness.deps.deployment.owner.lookup().kind).toBe("missing");
+          expect(harness.deps.deployment.owner.hasActiveWork()).toBe(false);
+        }
+        expect(execute).toHaveBeenCalledOnce();
+        expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+      } finally {
+        await harness.extension.shutdown("test");
+      }
+    }
+  );
+
   it("starts, observes and repeats through the shared runtime without Canvas or loopback HTTP", async () => {
     let finish: () => void = () => {};
     const workflow = new Promise<void>((resolve) => {

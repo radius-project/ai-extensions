@@ -872,8 +872,9 @@ test.describe("Radius Canvas in Chromium", () => {
               "gh: Not Found (HTTP 404)"
             : "",
           stdout:
-            launch === "explicit" || launch === "tool" ? "" : (
-              JSON.stringify({
+            launch === "explicit" || launch === "tool" ?
+              ""
+            : JSON.stringify({
                 content: (
                   await fs.readFile(path.join(canvas.workspacePath, appFile))
                 ).toString("base64"),
@@ -881,7 +882,6 @@ test.describe("Radius Canvas in Chromium", () => {
                 size: (await fs.stat(path.join(canvas.workspacePath, appFile)))
                   .size
               })
-            )
         },
         command(["api", "user", "--jq", ".login"], "acting-user\n"),
         command(

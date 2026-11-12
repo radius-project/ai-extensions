@@ -53,18 +53,6 @@ export function createDeploymentTools(ports: DeploymentToolsPorts) {
           detectedWorkspace ?
             Object.freeze({ ...detectedWorkspace })
           : undefined;
-        if (!input.attemptId && input.appFile === undefined) {
-          const previous = ports.runtime.owner.lookup();
-          if (previous.kind === "found") {
-            const { target, state } = previous.invocation;
-            if (
-              (input.repo || target.repo).toLowerCase() ===
-                target.repo.toLowerCase() &&
-              (input.branch || target.branch) === target.branch
-            )
-              input.appFile = state.deployParams?.appFile;
-          }
-        }
         const result: unknown = await ports.runtime.start(input, {
           workspace,
           ...(!input.attemptId && input.appFile === undefined ?
