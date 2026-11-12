@@ -78,6 +78,7 @@ export default defineConfig({
       "../core/src/deployment-{command-result,lookup-policy,observation-policy,progress,parameters,graph}.test.ts",
       "../core/src/workflows/generated-policy.test.ts",
       "../core/src/deploy-admission.test.ts",
+      "src/runtime/deployment-tools.test.ts",
       "src/runtime/production-deployment.test.ts",
       "src/server/services/deploy-request.test.ts",
       "src/server/services/{deployment-views,deployment-abandonment,deployment-abandonment-view,deployed-view-state}.test.ts",

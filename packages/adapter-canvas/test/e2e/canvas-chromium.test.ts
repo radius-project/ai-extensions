@@ -745,6 +745,7 @@ test.describe("Radius Canvas in Chromium", () => {
 
   for (const launch of [
     "explicit",
+    "tool",
     "deploying",
     "planned",
     "managed"
@@ -755,7 +756,8 @@ test.describe("Radius Canvas in Chromium", () => {
     }, testInfo) => {
       const environment = "fixture-environment";
       const appFile =
-        launch === "explicit" ? "models/custom.bicep"
+        launch === "explicit" || launch === "tool" ?
+          "models/custom.bicep"
         : launch === "managed" ? ".radius/app.bicep"
         : "app.bicep";
       await fs.mkdir(path.join(canvas.workspacePath, "models"), {
@@ -772,7 +774,7 @@ test.describe("Radius Canvas in Chromium", () => {
         ),
         "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'different-default'\n}\n"
       );
-      if (launch !== "explicit" && launch !== "managed")
+      if (launch !== "explicit" && launch !== "tool" && launch !== "managed")
         await fs.rm(path.join(canvas.workspacePath, ".radius", "app.bicep"));
       const opaque = "OpaqueBindingWitness92741";
       const named = "UnregisteredNamedWitness63281";
@@ -858,10 +860,13 @@ test.describe("Radius Canvas in Chromium", () => {
             "api",
             `/repos/${REPOSITORY}/contents/app.bicep?ref=${WORKTREE_BRANCH}`
           ],
-          exitCode: launch === "explicit" ? 1 : 0,
-          stderr: launch === "explicit" ? "gh: Not Found (HTTP 404)" : "",
+          exitCode: launch === "explicit" || launch === "tool" ? 1 : 0,
+          stderr:
+            launch === "explicit" || launch === "tool" ?
+              "gh: Not Found (HTTP 404)"
+            : "",
           stdout:
-            launch === "explicit" ? "" : (
+            launch === "explicit" || launch === "tool" ? "" : (
               JSON.stringify({
                 content: (
                   await fs.readFile(path.join(canvas.workspacePath, appFile))
@@ -1109,7 +1114,23 @@ test.describe("Radius Canvas in Chromium", () => {
       const nonce = canvas.entry.state.browserMutationNonce;
       if (typeof nonce !== "string" || !nonce)
         throw new Error("Missing mutation nonce.");
+      let toolObservationId: string | undefined;
       const admitted = await (async () => {
+        if (launch === "tool") {
+          const started = await canvas.deploymentTools.start({
+            environment,
+            appFile
+          });
+          const status = JSON.parse(await canvas.deploymentTools.status());
+          expect(status.status).toBe("in_progress");
+          expect(status.observationId).toEqual(expect.any(String));
+          toolObservationId = status.observationId;
+          expect(started).toContain(`observationId "${toolObservationId}"`);
+          expect(
+            canvas.requests.filter(({ path }) => path === "/api/deploy")
+          ).toEqual([]);
+          return null;
+        }
         if (launch === "explicit")
           return page.request.post(`${canvas.baseUrl}/api/deploy`, {
             headers: { "x-radius-mutation-nonce": nonce },
@@ -1146,12 +1167,14 @@ test.describe("Radius Canvas in Chromium", () => {
         expect(admitted.request().postDataJSON()).not.toHaveProperty("appFile");
         return admitted;
       })();
-      expect(admitted.status()).toBe(200);
+      if (admitted) expect(admitted.status()).toBe(200);
       expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
-      if (launch !== "explicit")
-        expect(await bodyFor(canvas, "/api/deploy")).not.toHaveProperty(
-          "appFile"
-        );
+      if (launch !== "tool") {
+        if (launch !== "explicit")
+          expect(await bodyFor(canvas, "/api/deploy")).not.toHaveProperty(
+            "appFile"
+          );
+      }
       await expect
         .poll(async () =>
           (await canvas.cliCalls()).some(
@@ -1244,6 +1267,19 @@ test.describe("Radius Canvas in Chromium", () => {
       const status = await statusResponse.json();
       expect(status.attempt.id).toBe(attemptId);
       expect(status.deployRunUrl).toBe(runUrl);
+      if (toolObservationId) {
+        expect(
+          JSON.parse(
+            await canvas.deploymentTools.status({
+              observationId: toolObservationId
+            })
+          )
+        ).toMatchObject({
+          status: "failed",
+          deployRunUrl: runUrl,
+          diagnostic: expect.stringContaining("binding-regression-witness")
+        });
+      }
       expect(canvas.entry.state.deployRunId).toBe(runId);
       expect(status.error).toContain("binding-regression-witness");
       expect(status.error).toContain("client_secret=[REDACTED]");
@@ -1265,7 +1301,7 @@ test.describe("Radius Canvas in Chromium", () => {
       expect(deliveries[0]).toMatchObject({
         appFile,
         attemptId,
-        instanceId: canvas.instanceId,
+        instanceId: launch === "tool" ? "" : canvas.instanceId,
         repo: REPOSITORY,
         branch: WORKTREE_BRANCH,
         deployRunUrl: runUrl
@@ -1484,6 +1520,13 @@ test.describe("Radius Canvas in Chromium", () => {
       const deleted = await accepted;
       expect(deleted.status(), await deleted.text()).toBe(200);
       expect(await deleted.json()).toMatchObject({ success: true });
+      if (toolObservationId) {
+        expect(
+          await canvas.deploymentTools.status({
+            observationId: toolObservationId
+          })
+        ).toContain("No matching deployment");
+      }
       for (let poll = 0; poll < 3; poll++) {
         const current = await (
           await page.request.get(`${canvas.baseUrl}/api/deploy-status`)

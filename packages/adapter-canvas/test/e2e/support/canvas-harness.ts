@@ -12,6 +12,7 @@ import type { CanvasState, SharedCredentials } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { EnvironmentOperationRunner } from "../../../src/server.js";
 import type { EnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
+import { createDeploymentTools } from "../../../src/runtime/deployment-tools.js";
 
 // Resolved from this module rather than the process directory so the suite
 // behaves identically whether it is launched from the workspace root or from
@@ -1401,6 +1402,7 @@ export async function unwindHarnessConstruction(
 }
 
 export class CanvasHarness {
+  readonly deploymentTools: ReturnType<typeof createDeploymentTools>;
   readonly accountContext: EnvironmentAccountContext;
   entry: CanvasServerEntry;
   readonly instanceId: string;
@@ -1450,6 +1452,14 @@ export class CanvasHarness {
     this.originalEnv = input.originalEnv;
     this.originalFetch = input.originalFetch;
     this.serverModule = input.serverModule;
+    this.deploymentTools = createDeploymentTools({
+      runtime: input.serverModule.deploymentRuntime,
+      workspace: async () => ({
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        workspacePath: input.workspacePath
+      })
+    });
     this.ghModule = input.ghModule;
   }
 

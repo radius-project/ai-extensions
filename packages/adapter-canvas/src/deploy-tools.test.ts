@@ -1,9 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
   summarizeDeployStatus,
   describeDeployStarted,
   DEPLOY_LOG_TAIL_DEFAULT,
@@ -11,322 +7,15 @@ import {
 } from "./deploy-tools.js";
 import { DEPLOY_DIAGNOSTIC_CHAR_CAP } from "./deploy-diagnostics.js";
 
-describe("selectDeployEntry", () => {
-  const older = {
-    baseUrl: "http://127.0.0.1:1",
-    state: {
-      deployStatus: "failed",
-      deployStartedAt: 10,
-      deployAttempt: { id: "attempt-A" }
-    }
-  };
-  const newer = {
-    baseUrl: "http://127.0.0.1:2",
-    state: {
-      deployStatus: "failed",
-      deployStartedAt: 20,
-      deployAttempt: { id: "attempt-B" }
-    }
-  };
-
-  it("finds the instance running the named attempt", () => {
-    const servers = new Map([
-      ["a", older],
-      ["b", newer]
-    ]);
-    expect(selectDeployEntry(servers, "attempt-A")).toBe(older);
-    expect(selectDeployEntry(servers, "attempt-B")).toBe(newer);
-  });
-
-  it("falls back to the most recently started deploy when no attempt is named", () => {
-    const servers = new Map([
-      ["a", older],
-      ["b", newer]
-    ]);
-    expect(selectDeployEntry(servers)).toBe(newer);
-  });
-
-  it("fails closed when the named attempt has been replaced in the same panel", () => {
-    // The panel is reused, so a stale repair must not act on the new deploy.
-    const panel = {
-      baseUrl: "http://127.0.0.1:1",
-      state: { deployAttempt: { id: "attempt-B" } }
-    };
-    expect(
-      selectDeployEntry(new Map([["radius-panel", panel]]), "attempt-A")
-    ).toBeNull();
-  });
-
-  it("fails closed when the named attempt is gone entirely", () => {
-    expect(selectDeployEntry(new Map([["b", newer]]), "missing")).toBeNull();
-    expect(selectDeployEntry(new Map(), "missing")).toBeNull();
-  });
-
-  it("uses any open instance when none has deploy state", () => {
-    const idle = { baseUrl: "http://127.0.0.1:3", state: {} };
-    expect(selectDeployEntry(new Map([["a", idle]]))).toBe(idle);
-  });
-
-  it("returns null when no canvas instance is usable", () => {
-    expect(selectDeployEntry(new Map())).toBeNull();
-    expect(selectDeployEntry(new Map([["a", { state: {} }]]))).toBeNull();
-  });
-});
-
-describe("validateDeployAttempt", () => {
-  const state = {
-    deployAttempt: {
-      id: "attempt-A",
-      targetRepo: "octo/app",
-      environment: "dev",
-      branch: "feat",
-      provider: "aws",
-      appFile: ".radius/app.bicep"
-    }
-  };
-
-  it("accepts a repair call that names the current attempt", () => {
-    expect(validateDeployAttempt({ attemptId: "attempt-A" }, state)).toBeNull();
-  });
-
-  it("ignores unbound manual calls", () => {
-    expect(validateDeployAttempt({}, state)).toBeNull();
-  });
-
-  it("rejects a stale attempt after a newer deploy replaced it", () => {
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A" },
-        { deployAttempt: { id: "attempt-B" } }
-      )
-    ).toMatch(/not the current attempt/);
-    expect(validateDeployAttempt({ attemptId: "attempt-A" }, {})).toMatch(
-      /not the current attempt/
-    );
-  });
-
-  it("refuses to retarget an attempt to a different repo, environment, or branch", () => {
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", repo: "octo/other" },
-        state
-      )
-    ).toMatch(/cannot be retargeted/);
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", environment: "prod" },
-        state
-      )
-    ).toMatch(/cannot be retargeted/);
-    expect(
-      validateDeployAttempt({ attemptId: "attempt-A", branch: "main" }, state)
-    ).toMatch(/cannot be retargeted/);
-  });
-
-  it("allows arguments that restate the attempt's own target", () => {
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", repo: "octo/app", branch: "feat" },
-        state
-      )
-    ).toBeNull();
-  });
-
-  it("normalizes equivalent repair paths before comparing the snapshot", () => {
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", appFile: ".\\.radius\\app.bicep" },
-        state
-      )
-    ).toBeNull();
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", appFile: "../app.bicep" },
-        state
-      )
-    ).toMatch(/path/);
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", appFile: "app.bicep" },
-        state
-      )
-    ).toMatch(/cannot be retargeted/);
-  });
-});
-
-describe("buildDeployPayload", () => {
-  const state = {
-    deployParams: {
-      environment: "dev",
-      provider: "aws",
-      targetRepo: "octo/app",
-      branch: "feat",
-      appFile: ".radius/app.bicep"
-    }
-  };
-
-  it("repeats automatic selection without pinning its previously resolved root", () => {
-    const payload = buildDeployPayload(
-      {},
-      {
-        deployParams: { targetRepo: "octo/app", branch: "feat" },
-        deployAttempt: { id: "previous", appFile: "app.bicep" }
-      }
-    );
-    expect(payload).not.toHaveProperty("appFile");
-  });
-
-  it("preserves explicit intent from a legacy last deploy without a stored branch", () => {
-    expect(
-      buildDeployPayload(
-        {},
-        {
-          deployParams: { targetRepo: "octo/app", appFile: "app.bicep" }
-        }
-      ).appFile
-    ).toBe("app.bicep");
-  });
-
-  it.each([{ repo: "octo/other" }, { branch: "other" }])(
-    "does not reuse a model path after retargeting %j",
-    (args) =>
-      expect(buildDeployPayload(args, state)).not.toHaveProperty("appFile")
-  );
-
-  it.each(["app.bicep", ""])(
-    "preserves supplied paths for server validation (%j)",
-    (appFile) => {
-      expect(buildDeployPayload({ appFile }, state).appFile).toBe(appFile);
-    }
-  );
-
-  it("pins a bound repair to its resolved root even when the last selection was automatic", () => {
-    expect(
-      buildDeployPayload(
-        { attemptId: "repair" },
-        {
-          deployParams: { targetRepo: "octo/app", branch: "feat" },
-          deployAttempt: { id: "repair", appFile: "app.bicep" }
-        }
-      ).appFile
-    ).toBe("app.bicep");
-  });
-
-  it("repeats the last deploy so a post-repair redeploy matches the original", () => {
-    expect(buildDeployPayload({}, state)).toEqual({
-      environment: "dev",
-      provider: "aws",
-      targetRepo: "octo/app",
-      branch: "feat",
-      appFile: ".radius/app.bicep",
-      agentInitiated: true,
-      attemptId: ""
-    });
-  });
-
-  it("replays the attempt snapshot rather than whatever the panel deployed last", () => {
-    const withAttempt = {
-      deployParams: {
-        environment: "prod",
-        provider: "azure",
-        targetRepo: "octo/newer",
-        branch: "main"
-      },
-      deployAttempt: {
-        id: "attempt-A",
-        targetRepo: "octo/app",
-        environment: "dev",
-        branch: "feat",
-        provider: "aws",
-        appFile: ".radius/app.bicep"
-      }
-    };
-    expect(
-      buildDeployPayload({ attemptId: "attempt-A" }, withAttempt)
-    ).toMatchObject({
-      targetRepo: "octo/app",
-      environment: "dev",
-      branch: "feat",
-      provider: "aws"
-    });
-  });
-
-  it("always marks the deploy as agent-initiated so loop ownership is kept", () => {
-    expect(buildDeployPayload({}, {}).agentInitiated).toBe(true);
-  });
-
-  it("forwards the attempt ID so the route can re-check the repair loop", () => {
-    // An unbound call carries no attempt: it is an ordinary deploy that must
-    // stay eligible for a handoff when it fails. A bound call forwards the ID
-    // so the route can validate it and keep the loop addressable.
-    expect(buildDeployPayload({}, {}).attemptId).toBe("");
-    expect(
-      buildDeployPayload(
-        { attemptId: "attempt-A" },
-        {
-          deployAttempt: {
-            id: "attempt-A",
-            targetRepo: "octo/app",
-            environment: "dev"
-          }
-        }
-      ).attemptId
-    ).toBe("attempt-A");
-  });
-
-  it("lets explicit arguments override the last deploy", () => {
-    const payload = buildDeployPayload(
-      {
-        environment: "prod",
-        repo: "octo/other",
-        branch: "main",
-        provider: "azure"
-      },
-      state
-    );
-    expect(payload).toMatchObject({
-      environment: "prod",
-      targetRepo: "octo/other",
-      branch: "main",
-      provider: "azure"
-    });
-  });
-
-  it("falls back to the canvas context repo and defaults", () => {
-    const payload = buildDeployPayload(
-      { environment: "dev" },
-      { contextRepo: "octo/ctx" }
-    );
-    expect(payload).toMatchObject({
-      targetRepo: "octo/ctx",
-      provider: "azure",
-      branch: ""
-    });
-    expect(payload).not.toHaveProperty("appFile");
-  });
-});
-
-describe("validateDeployPayload", () => {
-  it("accepts a payload that names a repository and environment", () => {
-    expect(
-      validateDeployPayload({ targetRepo: "octo/app", environment: "dev" })
-    ).toBeNull();
-  });
-
-  it("refuses to guess a missing repository or environment", () => {
-    expect(
-      validateDeployPayload({ targetRepo: "", environment: "dev" })
-    ).toMatch(/repository/i);
-    expect(
-      validateDeployPayload({ targetRepo: "octo/app", environment: "" })
-    ).toMatch(/environment/i);
-  });
-});
-
 describe("summarizeDeployStatus", () => {
-  it.each(["pending", "in_progress", "complete", "failed"])(
-    "passes through the Canvas attempt status %s without normalizing it",
-    (status) => {
+  it.each([
+    ["pending", "in_progress"],
+    ["in_progress", "in_progress"],
+    ["complete", "success"],
+    ["failed", "failed"]
+  ])(
+    "maps admitted attempt status %s to tool status %s",
+    (status, expected) => {
       expect(
         summarizeDeployStatus({
           status,
@@ -335,7 +24,7 @@ describe("summarizeDeployStatus", () => {
           finishedAt: 1700000060000
         })
       ).toEqual({
-        status,
+        status: expected,
         errorKind: null,
         deployRunUrl: "https://github.com/octo/app/actions/runs/42",
         startedAt: 1700000000000,
@@ -423,11 +112,16 @@ describe("summarizeDeployStatus", () => {
     );
   });
 
-  it("tolerates an empty or malformed status response", () => {
-    expect(summarizeDeployStatus({})).toMatchObject({ status: "pending" });
-    expect(summarizeDeployStatus({}).diagnostic).toBeUndefined();
+  it("rejects an empty or malformed status response", () => {
+    expect(() => summarizeDeployStatus({})).toThrow(
+      "missing or invalid status"
+    );
+    expect(() => summarizeDeployStatus({ status: "unknown" })).toThrow(
+      "missing or invalid status"
+    );
     expect(
-      summarizeDeployStatus({ logs: "not-an-array" }).diagnostic
+      summarizeDeployStatus({ status: "in_progress", logs: "not-an-array" })
+        .diagnostic
     ).toBeUndefined();
   });
 });

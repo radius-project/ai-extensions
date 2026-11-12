@@ -16,6 +16,23 @@ import {
 
 afterEach(() => vi.useRealTimers());
 
+async function startDeployment(
+  sdk: Awaited<ReturnType<typeof createRuntimeSdkHarness>>
+) {
+  const tool = sdk.extension.tools.find(({ name }) => name === "radius_deploy");
+  if (!tool) throw new Error("Missing registered deployment tool");
+  const started = await tool.handler({
+    repo: "acme/app",
+    environment: "production",
+    branch: "feature",
+    appFile: "models/custom.bicep"
+  });
+  const current = sdk.deps.deployment.owner.lookup();
+  if (current.kind !== "found") throw new Error(String(started));
+  expect(started).toContain(current.invocation.observationId);
+  return current.invocation;
+}
+
 async function harness(
   kind: "repair" | "notice" | DeploymentErrorKind,
   error = "Model failed"
@@ -152,22 +169,17 @@ describe("deployment delivery through registered SDK handlers", () => {
         branch: "feature",
         page: "deploying"
       };
+      const invocation = await startDeployment(sdk);
+      expect(sdk.getOrCreateServer).not.toHaveBeenCalled();
       await sdk.host.open("panel", input);
-      const result = await runtime.start({
-        repo: input.repo,
-        branch: input.branch,
-        environment: "production",
-        appFile: "models/custom.bicep"
-      });
-      if (!result.ok) throw new Error(result.error);
       await entered.promise;
       await sdk.host.close("panel");
       await sdk.host.close("panel");
       expect(sdk.servers.size).toBe(0);
       expect(runtime.owner.hasActiveWork()).toBe(true);
-      expect(result.invocation.signal.aborted).toBe(false);
+      expect(invocation.signal.aborted).toBe(false);
       await sdk.host.open("panel", input);
-      expect(runtime.owner.isCurrent(result.invocation)).toBe(true);
+      expect(runtime.owner.isCurrent(invocation)).toBe(true);
       await sdk.host.close("panel");
       finished.resolve();
       await vi.waitFor(() => expect(runtime.owner.hasActiveWork()).toBe(false));
@@ -176,7 +188,7 @@ describe("deployment delivery through registered SDK handlers", () => {
           error: "Model failed",
           deployRunUrl: "",
           appFile: "models/custom.bicep",
-          attemptId: result.invocation.attemptId
+          attemptId: invocation.attemptId
         })
       );
     } finally {
@@ -190,13 +202,7 @@ describe("deployment delivery through registered SDK handlers", () => {
     async (kind) => {
       const { sdk, runtime } = await harness(kind);
       try {
-        const result = await runtime.start({
-          repo: "acme/app",
-          environment: "production",
-          branch: "feature",
-          appFile: "models/custom.bicep"
-        });
-        if (!result.ok) throw new Error(result.error);
+        const invocation = await startDeployment(sdk);
         await vi.waitFor(() =>
           expect(runtime.owner.hasActiveWork()).toBe(false)
         );
@@ -209,12 +215,12 @@ describe("deployment delivery through registered SDK handlers", () => {
             deployRepairHandoffMessage("acme/app", "feature", {
               ...evidence,
               appFile: "models/custom.bicep",
-              attemptId: result.invocation.attemptId
+              attemptId: invocation.attemptId
             })
           : deployFailureNoticeMessage("acme/app", "feature", evidence)
         );
         expect(sdk.servers.size).toBe(0);
-        expect(result.invocation.state.deployRepairing).toBe(kind === "repair");
+        expect(invocation.state.deployRepairing).toBe(kind === "repair");
       } finally {
         await sdk.extension.shutdown("test");
       }
@@ -228,20 +234,14 @@ describe("deployment delivery through registered SDK handlers", () => {
         new Error("SDK unavailable")
       );
       vi.useFakeTimers();
-      const result = await runtime.start({
-        repo: "acme/app",
-        environment: "production",
-        branch: "feature",
-        appFile: "models/custom.bicep"
-      });
-      if (!result.ok) throw new Error(result.error);
+      const invocation = await startDeployment(sdk);
       await vi.runAllTimersAsync();
       expect(sdk.session.send).toHaveBeenCalledTimes(2);
       expect(vi.mocked(sdk.session.send).mock.calls[0]).toEqual(
         vi.mocked(sdk.session.send).mock.calls[1]
       );
-      expect(result.invocation.state.deployHandoffAttempts).toBe(2);
-      expect(result.invocation.state.deployHandoffState).toBe("delivered");
+      expect(invocation.state.deployHandoffAttempts).toBe(2);
+      expect(invocation.state.deployHandoffState).toBe("delivered");
       expect(runtime.owner.hasActiveWork()).toBe(false);
     } finally {
       vi.useRealTimers();

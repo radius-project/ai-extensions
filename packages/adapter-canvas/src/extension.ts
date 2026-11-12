@@ -63,14 +63,6 @@ import {
 } from "./workspace.js";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
 import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
-  summarizeDeployStatus,
-  describeDeployStarted
-} from "./deploy-tools.js";
-import {
   createProductionCanvasServerRuntime,
   invalidateDeployListCache,
   setAppBicepHandoff,
@@ -243,14 +235,6 @@ const dependencies: RadiusExtensionDependencies = {
     runRadBicepPublish,
     radArtifactsDirForSelection
   },
-  deployTools: {
-    selectDeployEntry,
-    buildDeployPayload,
-    validateDeployPayload,
-    validateDeployAttempt,
-    summarizeDeployStatus,
-    describeDeployStarted
-  },
   sourceRefs: {
     getSourceRefResources,
     prepareSourceRefResources,
@@ -273,9 +257,6 @@ const dependencies: RadiusExtensionDependencies = {
   process: {
     existsSync,
     execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
-  },
-  deploy: {
-    fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
   },
   operations: {
     setupInFlight
