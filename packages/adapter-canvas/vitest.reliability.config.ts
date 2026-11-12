@@ -74,6 +74,8 @@ export default defineConfig({
       "src/server/services/discovery.test.ts",
       "../adapter-shared/src/workflow-observation-scope.test.ts",
       "../adapter-shared/src/deployment-{dispatch,monitor,outcome}.test.ts",
+      "../adapter-shared/src/deployment-{owner,repair,coordination}.test.ts",
+      "../adapter-shared/src/{runtime,production}-deployment.test.ts",
       "../adapter-shared/src/deployment-{bindings,command-bindings,identity,lookup,observation-*,repository,templates,workflows,workspace}.test.ts",
       "src/server/services/deploy-{monitor,request}.test.ts",
       "test/integration/runtime/runtime-contracts.test.ts",

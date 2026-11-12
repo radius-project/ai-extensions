@@ -1,4 +1,8 @@
-import { redactCredentials } from "@radius-project/core";
+import {
+  applyDeployMessages,
+  applyDeployStatusToResources,
+  redactCredentials
+} from "@radius-project/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDeployMonitorService,
@@ -149,6 +153,78 @@ function settleRecorder() {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe("complete monitor progress notifications", () => {
+  it("publishes message-only updates and fully propagated output statuses before transition logs", async () => {
+    const resource: CanvasGraphResource = {
+      name: "api",
+      deployStatus: "in_progress",
+      outputResources: [{ name: "container", type: "container" }]
+    };
+    const snapshots: CanvasGraphResource[] = [];
+    const loggedSnapshots: CanvasGraphResource[] = [];
+    let poll = 0;
+    const f = request({
+      resources: [resource],
+      onProgress: () => snapshots.push(structuredClone(resource)),
+      log: (message) => {
+        if (message.includes("api") && message.endsWith("success"))
+          loggedSnapshots.push(structuredClone(resource));
+      }
+    });
+    await createDeployMonitorService(
+      dependencies({
+        applyDeployMessages,
+        applyDeployStatusToResources,
+        buildDeployStatusMap: () =>
+          new Map([["api", poll >= 3 ? "success" : "in_progress"]]),
+        now: clock(10_000).now,
+        buildDeployMessageMap: () =>
+          new Map([["api", poll === 1 ? "Starting" : "Still provisioning"]]),
+        getRunDetail: async () => {
+          poll++;
+          return poll > 3 ? completedRun() : (
+              {
+                status: "in_progress",
+                conclusion: null,
+                steps: [{ name: "Run rad commands", status: "in_progress" }]
+              }
+            );
+        },
+        outcome: settleRecorder().outcome
+      })
+    ).run(f.request);
+    expect(snapshots).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ deployMessage: "Starting" }),
+        expect.objectContaining({
+          deployMessage: "Still provisioning",
+          deployStatus: "in_progress"
+        }),
+        expect.objectContaining({
+          deployStatus: "success",
+          outputResources: [
+            expect.objectContaining({
+              deployStatus: "success",
+              portalUrl: "https://portal.test/azure/container"
+            })
+          ]
+        })
+      ])
+    );
+    expect(loggedSnapshots).toEqual([
+      expect.objectContaining({
+        deployStatus: "success",
+        outputResources: [
+          expect.objectContaining({
+            deployStatus: "success",
+            portalUrl: "https://portal.test/azure/container"
+          })
+        ]
+      })
+    ]);
+  });
+});
 
 describe("protection observation narration", () => {
   const waiting: DeployRunDetail = {
