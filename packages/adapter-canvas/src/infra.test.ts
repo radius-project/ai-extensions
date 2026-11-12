@@ -91,7 +91,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-vi.mock("./gh.js", () => ({
+vi.mock("./gh.js", async () => ({
+  redactGhCredentials: (await import("@radius-project/core")).redactCredentials,
   // Answers `gh api .../contents/<path>?ref=<branch> --jq .sha` from the
   // committed files, the way the branch publisher checks for a workflow.
   cliExec: (
@@ -150,7 +151,8 @@ const {
   deleteApplicationWorkflowFiles,
   deleteEnvironmentWorkflowFiles,
   workflowTemplates,
-  ensureDeployWorkflowsOnBranch
+  ensureDeployWorkflowsOnBranch,
+  verifyDeploymentWorkflowInputs
 } = await import("./infra.js");
 const { hasVerificationOperationMarker } =
   await import("./verification-run-identity.js");
@@ -1438,6 +1440,40 @@ describe("with the AWS switch on", () => {
 });
 
 describe("publishing deploy workflows to a working branch", () => {
+  it.each([false, true])(
+    "reads back the selected branch's input contract without writing (AWS %s)",
+    async (includeAws) => {
+      for (const file of deployWorkflowFiles(includeAws)) {
+        h.upstream[file] = readFileSync(
+          new URL(`../../../.github/extension/${file}`, import.meta.url),
+          "utf8"
+        );
+      }
+      const generated = await generateDeployWorkflow(
+        "dev",
+        ".radius/app.bicep",
+        { includeAws }
+      );
+      h.committed.topic = Object.fromEntries(
+        Object.entries(generated).map(([file, source]) => [
+          `.github/workflows/${file}`,
+          source
+        ])
+      );
+      await expect(
+        verifyDeploymentWorkflowInputs(includeAws, "owner/app", "topic")
+      ).resolves.toBeUndefined();
+      const path = ".github/workflows/run-rad-commands.yml";
+      h.committed.topic[path] = h.committed.topic[path].replace(
+        "app_file:",
+        "legacy_input:"
+      );
+      await expect(
+        verifyDeploymentWorkflowInputs(includeAws, "owner/app", "topic")
+      ).rejects.toThrow();
+      expect(h.commits).toEqual([]);
+    }
+  );
   beforeEach(() => {
     h.committed = {};
     h.commits = [];

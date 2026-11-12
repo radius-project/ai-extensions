@@ -28,8 +28,8 @@ import type {
   DeploymentState as CanvasState
 } from "@radius-project/core";
 import { createDeploymentDeferred as createDeferred } from "../test/support/deployment.js";
+import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE as explanation } from "@radius-project/core";
 import {
-  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE as explanation,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
 } from "@radius-project/core";
@@ -118,6 +118,7 @@ function request(overrides: Partial<DeployMonitorRequest> = {}): {
     logs,
     state,
     request: {
+      appFile: ".radius/app.bicep",
       entry: { state },
       repo: "acme/widgets",
       branch: "feat",
@@ -886,7 +887,6 @@ describe("deploy monitor construction", () => {
   });
 
   it.each([
-    ["plannedGraph", "plannedGraph.recover"],
     ["dispatch", "dispatch.prepareAndDispatch"],
     ["outcome", "outcome.settle"]
   ] as const)(
@@ -899,6 +899,12 @@ describe("deploy monitor construction", () => {
       );
     }
   );
+
+  it("constructs without optional graph enrichment", () => {
+    const input = dependencies();
+    delete input.plannedGraph;
+    expect(() => createDeployMonitorService(input)).not.toThrow();
+  });
 
   it.each([
     ["plannedGraph", "recover", "plannedGraph.recover"],
@@ -944,6 +950,45 @@ describe("deploy monitor construction", () => {
 });
 
 describe("deploy monitor stage sequencing", () => {
+  it("observes an existing correlated execution without dispatching or recovering a frontend graph", async () => {
+    const settle = settleRecorder();
+    const { request: input, state } = request();
+    const findWorkflowRun = vi.fn(async () => 102);
+    const service = createDeployMonitorService(
+      dependencies({
+        plannedGraph: {
+          recover: () => {
+            throw new Error("Observation must not rebuild a frontend graph");
+          }
+        },
+        dispatch: {
+          prepareAndDispatch: () => {
+            throw new Error("Observation must not dispatch again");
+          }
+        },
+        findWorkflowRun,
+        outcome: settle.outcome
+      })
+    );
+    await service.observe(input, {
+      correlationId: "dep-original",
+      workflowFile: "run-rad-commands.yml",
+      dispatchedAt: 10,
+      environment: "production",
+      baselineRunId: 101
+    });
+    expect(findWorkflowRun).toHaveBeenCalledExactlyOnceWith(
+      "acme/widgets",
+      "run-rad-commands.yml",
+      10,
+      null,
+      101,
+      "dep-original"
+    );
+    expect(state.deployRunId).toBe(102);
+    expect(settle.calls[0]).toMatchObject({ runId: 102, resources: [] });
+  });
+
   it("refuses to run without a target repository", async () => {
     const { request: input, state, logs } = request({ repo: "" });
     const service = createDeployMonitorService(
@@ -969,12 +1014,14 @@ describe("deploy monitor stage sequencing", () => {
     const recovered: CanvasGraphResource[] = [{ id: "r1", name: "db" }];
     const recoveries: unknown[] = [];
     const settle = settleRecorder();
-    const { request: input } = request();
+    const { request: input, state } = request({
+      appFile: "models/custom.bicep"
+    });
     const service = createDeployMonitorService(
       dependencies({
         plannedGraph: {
           recover: (call) => {
-            recoveries.push(call.repo);
+            recoveries.push([call.repo, call.appFile]);
             return Promise.resolve(recovered);
           }
         },
@@ -984,8 +1031,29 @@ describe("deploy monitor stage sequencing", () => {
 
     await service.run(input);
 
-    expect(recoveries).toEqual(["acme/widgets"]);
+    expect(recoveries).toEqual([["acme/widgets", "models/custom.bicep"]]);
     expect(settle.calls[0].resources).toBe(recovered);
+    expect(state.deployingResources).toBe(recovered);
+  });
+
+  it("discards graph recovery when the invocation stops being current", async () => {
+    const graph = createDeferred<CanvasGraphResource[]>();
+    let current = true;
+    const f = request({ isCurrent: () => current });
+    const dispatch = vi.fn(async () => ({ dispatched: false as const }));
+    const monitor = createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: () => graph.promise },
+        dispatch: { prepareAndDispatch: dispatch }
+      })
+    );
+    const pending = monitor.run(f.request);
+    const rejected = expect(pending).rejects.toThrow();
+    current = false;
+    graph.resolve([{ name: "stale" }]);
+    await rejected;
+    expect(f.state.deployingResources).toBeUndefined();
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("keeps the request's graph when one was already snapshotted", async () => {
@@ -1120,8 +1188,9 @@ describe("deploy monitor run discovery", () => {
     );
   });
 
-  it("passes the dispatch baseline run id to run discovery", async () => {
+  it("passes the dispatch baseline and correlation to run discovery", async () => {
     const afterRunIds: (number | string | null | undefined)[] = [];
+    const correlations: (string | undefined)[] = [];
     const settle = settleRecorder();
     const { request: input } = request({ resources: [] });
     const service = createDeployMonitorService(
@@ -1134,7 +1203,8 @@ describe("deploy monitor run discovery", () => {
               workflowFile: "run-rad-commands.yml",
               dispatchedAt: 10,
               environment: "production",
-              baselineRunId: 101
+              baselineRunId: 101,
+              correlationId: "dep-this-execution"
             })
         },
         findWorkflowRun: (
@@ -1142,9 +1212,11 @@ describe("deploy monitor run discovery", () => {
           _workflowFile,
           _sinceMs,
           _knownId,
-          afterRunId
+          afterRunId,
+          correlationId
         ) => {
           afterRunIds.push(afterRunId);
+          correlations.push(correlationId);
           return Promise.resolve(102);
         },
         outcome: settle.outcome
@@ -1154,6 +1226,7 @@ describe("deploy monitor run discovery", () => {
     await service.run(input);
 
     expect(afterRunIds).toEqual([101]);
+    expect(correlations).toEqual(["dep-this-execution"]);
   });
 
   it("marks a run it never found as unconfirmed rather than failed", async () => {
@@ -1962,11 +2035,10 @@ describe("deploy monitor settlement", () => {
 // ── Composed-pipeline parity ────────────────────────────────────────────────
 // The suites above each exercise one stage against fakes of its neighbours,
 // which cannot catch a seam that was wired in the wrong order. This one
-// composes the four real services and records every external effect and state
-// write in the order they happen, then compares that recording against a
-// transcript written out by hand from the legacy `/api/deploy` arm. The two
-// sides come from different places: one is produced by the code, the other was
-// read off the arm this slice removed.
+// composes the three shared services with an optional graph-enrichment port.
+// It records their external effects and terminal writes against the legacy
+// transcript. Source-token and graph-preparation internals remain covered by
+// the Canvas graph service's own tests rather than becoming shared dependencies.
 describe("deploy pipeline parity with the legacy arm transcript", () => {
   function composed(effects: string[], conclusion = "success") {
     const record = (effect: string): void => {
@@ -1982,6 +2054,8 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     };
 
     const dispatch = createDeployDispatchService({
+      id: () => "execution",
+      verifyAppFileInput: async () => {},
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [
         "run-rad-commands.yml",

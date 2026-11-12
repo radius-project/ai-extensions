@@ -20,7 +20,8 @@ const { ghMock } = vi.hoisted(() => {
   };
 });
 
-vi.mock("./gh.js", () => ({
+vi.mock("./gh.js", async () => ({
+  redactGhCredentials: (await import("@radius-project/core")).redactCredentials,
   cliExec: (
     _cmd: string,
     args: string[],

@@ -5,14 +5,12 @@ import {
   type RadDeployResourceError,
   type WorkflowReadContext,
   type WorkflowRunDetail,
-  type WorkflowStep
+  type WorkflowStep,
+  type DeploymentResource,
+  type DeploymentState
 } from "@radius-project/core";
 import { WorkflowArtifactReadError } from "./workflow-artifacts.js";
 import type { WorkflowReadRequest } from "./workflow-reads.js";
-import type {
-  DeploymentResource as CanvasGraphResource,
-  DeploymentState as CanvasState
-} from "@radius-project/core";
 import { assertDeployDependencies } from "./deployment-service-dependencies.js";
 
 // Final runtime stage of a background deploy: turn a completed workflow run
@@ -25,7 +23,7 @@ import { assertDeployDependencies } from "./deployment-service-dependencies.js";
 // decides when this runs.
 
 export interface DeployOutcomeInstanceEntry {
-  state: CanvasState;
+  state: DeploymentState;
 }
 
 export type DeployRunStep = WorkflowStep;
@@ -44,9 +42,9 @@ export interface DeployOutcomeStatusReader {
 }
 
 export interface DeployOutcomeDependencies {
-  projectSafeGraphResources(graph: unknown): CanvasGraphResource[];
+  projectSafeGraphResources(graph: unknown): DeploymentResource[];
   settleDeployStatuses(
-    resources: CanvasGraphResource[],
+    resources: DeploymentResource[],
     conclusion: string | null | undefined,
     radiusError?: string,
     resourceErrors?: readonly RadDeployResourceError[]
@@ -59,7 +57,7 @@ export interface DeployOutcomeDependencies {
   redactDiagnostic(value: string): string;
   // The deployErrorKind stamped on an auth-drift failure so the repair guard
   // leaves it for the user to re-verify rather than auto-redeploying it.
-  cloudAuthDriftKind: CanvasState["deployErrorKind"];
+  cloudAuthDriftKind: DeploymentState["deployErrorKind"];
   sleep(milliseconds: number): Promise<void>;
   now(): number;
 }
@@ -69,7 +67,7 @@ export interface DeployOutcomeRequest {
   repo: string;
   runId: number | string;
   provider: string;
-  resources: CanvasGraphResource[];
+  resources: DeploymentResource[];
   status: WorkflowRunDetail["status"];
   conclusion: string | null | undefined;
   steps: readonly DeployRunStep[];
@@ -80,7 +78,7 @@ export interface DeployOutcomeRequest {
   deployStepStartedAt: number;
   log(message: string): void;
   setStatus(
-    resource: CanvasGraphResource,
+    resource: DeploymentResource,
     status: "pending" | "in_progress" | "success" | "failed"
   ): void;
   pollDeployStatus(force: boolean): Promise<void>;
@@ -159,11 +157,11 @@ export function createDeployOutcomeService(
     statusReader: DeployOutcomeStatusReader,
     context?: WorkflowReadContext
   ): Promise<{
-    deployed: unknown;
+    deployed: DeploymentResource[] | null;
     graphStatus: string | null;
     note?: string;
   }> => {
-    let deployed: unknown = null;
+    let deployed: DeploymentResource[] | null = null;
     let graphStatus: string | null = null;
     for (let g = 0; g < 3; g++) {
       let gr: DeployGraphRead;
@@ -285,7 +283,7 @@ export function createDeployOutcomeService(
       }
 
       if (deployed) {
-        entry.state.deployedGraph = deployed as CanvasState["deployedGraph"];
+        entry.state.deployedGraph = deployed;
         entry.state.deployedGraphRepo = repo;
         log("  ✓ Deployed graph saved (from workflow artifact).");
       } else if (graphStatus === "auth") {

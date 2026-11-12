@@ -59,6 +59,7 @@ import {
   readWorkflowRun,
   readWorkflowLog,
   createWorkflowArtifactReader,
+  createDeploymentWorkflows,
   type WorkflowExecution
 } from "@radius-project/adapter-shared";
 import { createDeployOutcomeService } from "../../../src/server/services/deploy-outcome.js";
@@ -72,6 +73,7 @@ import { createWorkflowObservationScope } from "../../../src/server/services/wor
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 import { createFakeServerEntry } from "../../support/runtime/fakes.js";
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
+import { deploymentTemplates } from "../../../../adapter-shared/test/fixtures/deployment-workflows.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -2338,6 +2340,100 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
 });
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
+  it.each(["run-rad-commands.yml", "run-rad-commands-azure.yml"])(
+    "refuses an installed pre-upgrade %s contract before parameter-secret writes",
+    async (legacyFile) => {
+      const unexpected = () => {
+        throw new Error(
+          "Incompatible workflows must stop before external execution"
+        );
+      };
+      const workflows = createDeploymentWorkflows(false, {
+        readRepositoryFile: unexpected,
+        now: () => 0,
+        ghOrThrow: unexpected,
+        readFile: async (_repo, path, branch) => {
+          expect(branch).toBe("feat");
+          const file = path.slice(path.lastIndexOf("/") + 1);
+          const source = deploymentTemplates[file];
+          if (!source) throw new Error(`Unexpected workflow ${path}`);
+          return file === legacyFile ?
+              source.replaceAll("app_file", "legacy_input")
+            : source;
+        },
+        defaultBranch: unexpected,
+        branchHead: unexpected,
+        commitFile: unexpected,
+        environmentProvider: unexpected,
+        reportDiagnostic: unexpected
+      });
+      const runGh = vi.fn(unexpected);
+      const runGhWithStdin = vi.fn(unexpected);
+      const dispatch = createDeployDispatchService({
+        id: () => "legacy-contract",
+        deployWorkflowFile: "run-rad-commands.yml",
+        deployWorkflowFiles: workflows.files,
+        branchNotPushedKind: "branch-not-pushed",
+        oidcSubjectMissingKind: "oidc-subject-missing",
+        oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
+        getBranchHeadSha: async () => "head",
+        getDefaultBranch: unexpected,
+        runGh,
+        runGhWithStdin,
+        runAz: unexpected,
+        runGitHubJson: unexpected,
+        readProcessEnv: () => ({}),
+        ghCredentialSource: () => "keyring",
+        fetchFileForSelection: async () => "model with a secure parameter",
+        appParams: () => [],
+        resolveDeployParams: () => ({ password: "generated-value" }),
+        partitionParams: () => ({
+          public: {},
+          secret: { password: "generated-value" }
+        }),
+        extractAppName: () => "app",
+        buildDeployRadCommand: () => "rad deploy",
+        buildAppGraphRadCommand: () => "rad app graph",
+        ensureDeployWorkflowsOnBranch: async () => {},
+        ensureWorkflowsCurrent: async () => ({ created: [], updated: [] }),
+        verifyAppFileInput: workflows.verifyAppFileInput,
+        sleep: unexpected,
+        latestWorkflowRunId: unexpected,
+        classifyDeployDispatchFailure: unexpected,
+        uncommittedGeneratedPaths: unexpected,
+        invalidateDeployListCache: unexpected,
+        errorMessage: String,
+        now: () => 0
+      });
+      const observed = createUnconfirmedMonitor(null, dispatch);
+      const harness = startDeploy(observed.monitor, {
+        triggerDeployRepairHandoff
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const state = harness.stateOf("panel-a");
+      const response = await post(
+        entry.baseUrl,
+        "/api/deploy",
+        deployBody({ provider: "aws" })
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+      await expect.poll(() => state.deployStatus).toBe("failed");
+      await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
+      const status = await fetch(`${entry.baseUrl}/api/deploy-status`);
+      expect(status.status).toBe(200);
+      expect(await status.json()).toMatchObject({
+        status: "failed",
+        errorKind: "workflow-preflight-failed",
+        error: expect.stringContaining("No workflow was dispatched.")
+      });
+      expect(runGh).not.toHaveBeenCalled();
+      expect(runGhWithStdin).not.toHaveBeenCalled();
+      expect(observed.reads).toEqual([]);
+      expect(state.deployHandoffState).not.toBe("pending");
+    }
+  );
+
   it.each([
     { change: "created", exhausted: false },
     { change: "updated", exhausted: false },
@@ -2357,6 +2453,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         );
       };
       const dispatch = createDeployDispatchService({
+        id: () => "registration",
+        verifyAppFileInput: async () => {},
         deployWorkflowFile: "run-rad-commands.yml",
         deployWorkflowFiles: [
           "run-rad-commands.yml",
@@ -2387,7 +2485,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         runGitHubJson: unexpected,
         readProcessEnv: () => ({}),
         ghCredentialSource: () => "keyring",
-        fetchFileForSelection: () => Promise.resolve(null),
+        fetchFileForSelection: () => Promise.resolve("bicep source"),
         appParams: () => [],
         resolveDeployParams: () => ({}),
         partitionParams: () => ({ public: {}, secret: {} }),
@@ -2642,6 +2740,12 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   function oidcRefusalHarness(subjects: string[]) {
     const workflowDispatches: string[][] = [];
     const dispatch = createDeployDispatchService({
+      id: () => "oidc",
+      verifyAppFileInput: () => {
+        throw new Error(
+          "OIDC refusal must happen before workflow verification"
+        );
+      },
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [
         "run-rad-commands.yml",

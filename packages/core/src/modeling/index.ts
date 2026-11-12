@@ -75,5 +75,5 @@ export {
 } from "./app-source.js";
 export type { AppSourceEvaluation, AppSourceStatus } from "./app-source.js";
 
-export { fetchBicepFromRepo } from "./repo.js";
+export { fetchBicepFromRepo, fetchBicepSelectionFromRepo } from "./repo.js";
 export { fetchRecipePack, resolveRecipeOutputs } from "./recipe-resolver.js";

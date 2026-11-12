@@ -80,7 +80,7 @@ run_generated_params_case() {
 readonly FAKE_ARM_TEMPLATE="${TEST_ROOT}/app.json"
 readonly BICEP_CALLS="${TEST_ROOT}/bicep-calls"
 readonly BICEP_BIN="${TEST_ROOT}/bicep"
-readonly APP_FILE="${TEST_ROOT}/app.bicep"
+readonly APP_FILE="${TEST_ROOT}/models/custom.bicep"
 
 cat >"${BICEP_BIN}" <<'EOF'
 #!/bin/bash
@@ -95,7 +95,8 @@ fi
 cp "${FAKE_ARM_TEMPLATE}" "$4"
 EOF
 chmod +x "${BICEP_BIN}"
-touch "${APP_FILE}" "${BICEP_CALLS}"
+mkdir -p "${TEST_ROOT}/models"
+touch "${APP_FILE}" "${TEST_ROOT}/app.bicep" "${BICEP_CALLS}"
 export BICEP_BIN BICEP_CALLS FAKE_ARM_TEMPLATE
 
 # The production helper is sourced by the composite action.
@@ -162,6 +163,8 @@ load_declared_app_params "${APP_FILE}"
 load_declared_app_params "${APP_FILE}"
 [[ "$(wc -l <"${BICEP_CALLS}" | tr -d ' ')" == "1" ]] ||
     fail "expected the app template to compile once"
+grep -Fq "build ${APP_FILE} --outfile" "${BICEP_CALLS}" ||
+    fail "expected parameter discovery to compile the selected nested model"
 
 reset_discovery
 export BICEP_SHOULD_FAIL=true

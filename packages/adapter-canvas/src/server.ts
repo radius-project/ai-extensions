@@ -1,4 +1,7 @@
-import { workflowTempFile } from "@radius-project/adapter-shared";
+import {
+  workflowTempFile,
+  createDeploymentCommandBindings
+} from "@radius-project/adapter-shared";
 import {
   ensureAzureServicePrincipal,
   assertSetupExecutionActive,
@@ -255,6 +258,7 @@ import {
   deleteEnvironmentWorkflowFiles,
   workflowTemplates,
   ensureDeployWorkflowsOnBranch,
+  verifyDeploymentWorkflowInputs,
   LEGACY_DEPLOY_WORKFLOW_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
@@ -549,18 +553,14 @@ export function endChildInput(child: ChildProcessInput): void {
   }
 }
 
-function runCliCommand(
-  cmd: string,
-  args: string[],
-  timeout = 60000
-): Promise<CommandResult> {
-  return new Promise((resolve) => {
-    const child = cliExec(cmd, args, { timeout }, (err, stdout, stderr) => {
-      resolve(toGhCommandResult(err, stdout, stderr));
-    });
-    endChildInput(child);
-  });
-}
+const {
+  runCliCommand,
+  runGh: runGhForDeploy,
+  runGhWithStdin: runGhWithStdinForDeploy,
+  ghOrThrow
+} = createDeploymentCommandBindings({
+  execute: (...args) => cliExec(...args)
+});
 
 function runAwsCli(args: string[]): Promise<CommandResult> {
   return runCliCommand("aws", args);
@@ -1663,6 +1663,8 @@ export function triggerDeployRepairHandoff(
     const state = entry?.state;
     if (!state || state.deployStatus !== "failed") return false;
     if (
+      state.deployErrorKind === "model-preflight-failed" ||
+      state.deployErrorKind === "workflow-preflight-failed" ||
       state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
       // Refused before dispatch because no federated credential can match the
       // token GitHub would mint. Repairing the model cannot change that.
@@ -1856,44 +1858,6 @@ export { DEPLOY_RAD_COMMANDS_STEP } from "@radius-project/core";
 // cache and the instance container above are all `const` and would otherwise be
 // in the temporal dead zone at the family's composition site.
 
-// The deploy's own gh runner: 30s timeout, resolves (never rejects) on a
-// non-zero exit so the dispatch path can read stderr and choose its message.
-function runGhForDeploy(
-  args: string[],
-  options: { env?: NodeJS.ProcessEnv } = {}
-): Promise<CommandResult> {
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      args,
-      { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
-      (err, stdout, stderr) => {
-        resolve(toGhCommandResult(err, stdout, stderr));
-      }
-    );
-  });
-}
-
-// Like runGhForDeploy but feeds a value (e.g. a secret JSON) over stdin so it
-// never lands on the argv/process list.
-function runGhWithStdinForDeploy(
-  args: string[],
-  stdin: string,
-  options: { env?: NodeJS.ProcessEnv } = {}
-): Promise<CommandResult> {
-  return new Promise((resolve) => {
-    const child = cliExec(
-      "gh",
-      args,
-      { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
-      (err, stdout, stderr) => {
-        resolve(toGhCommandResult(err, stdout, stderr));
-      }
-    );
-    if (stdin !== undefined) child.stdin?.end(stdin);
-  });
-}
-
 // Delete the GitHub Environment. Idempotent: a 404 (already gone) is reported as
 // `not_found`, not a failure, so a re-run after a partial deletion converges.
 // The classification and cache-invalidation logic is the shared cleanup
@@ -1950,6 +1914,7 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
 });
 
 const deployDispatchDependencies = {
+  id: randomUUID,
   ghCommandPresentation: GH_COMMAND_PRESENTATION,
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
@@ -1999,6 +1964,7 @@ const deployDispatchDependencies = {
   | "deployWorkflowFiles"
   | "ensureDeployWorkflowsOnBranch"
   | "ensureWorkflowsCurrent"
+  | "verifyAppFileInput"
 >;
 
 // A deploy needs the dispatcher and every provider workflow the switch publishes.
@@ -2010,7 +1976,11 @@ function productionDeployDispatchService(includeAws: boolean) {
       undefined,
       includeAws
     ),
-    ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, includeAws)
+    ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, includeAws),
+    verifyAppFileInput: verifyDeploymentWorkflowInputs.bind(
+      undefined,
+      includeAws
+    )
   });
 }
 
@@ -2026,19 +1996,6 @@ const deployOutcomeService = createDeployOutcomeService({
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
   now: () => Date.now()
 });
-
-// gh runner that REJECTS on failure, so callers can fail closed instead of
-// silently treating a GitHub outage or timeout as "no data". Used by the
-// deployment-resolution paths where an empty result must not be mistaken for a
-// definitive answer (e.g. "no app is deployed" → allow environment deletion).
-function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
-  return new Promise((resolve, reject) => {
-    cliExec("gh", args, { timeout }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve((stdout || "").trim());
-    });
-  });
-}
 
 export interface CleanupGitHubContext {
   rollbackCommand: WorkflowRollbackCommand;
@@ -6923,14 +6880,22 @@ export function createProductionCanvasServerRuntime(
     outcome: deployOutcomeService,
     deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
     unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
-    findWorkflowRun: (repo, workflowFile, sinceMs, knownId, afterRunId) =>
+    findWorkflowRun: (
+      repo,
+      workflowFile,
+      sinceMs,
+      knownId,
+      afterRunId,
+      correlationId
+    ) =>
       findWorkflowRun(
         repo,
         workflowFile,
         sinceMs,
         knownId,
         undefined,
-        afterRunId
+        afterRunId,
+        correlationId
       ),
     getRunDetail: (repo, runId, request) =>
       getRunDetail(repo, runId, undefined, request, {

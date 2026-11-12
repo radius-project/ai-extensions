@@ -1,6 +1,6 @@
 import type {
   DeploymentBicepParameter as BicepParam,
-  DeploymentState as CanvasState,
+  DeploymentState,
   DeploymentErrorKind as DeployErrorKind
 } from "@radius-project/core";
 import {
@@ -18,7 +18,9 @@ import {
 import { assertDeployDependencies } from "./deployment-service-dependencies.js";
 import {
   needsWorkflowScope,
-  shouldRetryWithKeyringCredential
+  shouldRetryWithKeyringCredential,
+  WorkflowReadInterruptedError,
+  redactCredentials
 } from "@radius-project/core";
 
 // Second runtime stage of a background deploy: everything between "we have a
@@ -32,7 +34,7 @@ import {
 // monitor's job only begins once a run exists.
 
 export interface DeployDispatchInstanceEntry {
-  state: CanvasState;
+  state: DeploymentState;
 }
 
 // `code` is `string | number` because that is what the legacy runner produced: a
@@ -52,6 +54,7 @@ export interface DeployCommandOptions {
 }
 
 export interface DeployDispatchDependencies {
+  id(): string;
   ghCommandPresentation?: GhCommandPresentation;
   // The workflow that actually runs `rad` commands, injected so the file name
   // stays owned by `server.ts`.
@@ -118,6 +121,7 @@ export interface DeployDispatchDependencies {
     only: string[],
     workingBranch: string
   ): Promise<{ created: readonly string[]; updated: readonly string[] }>;
+  verifyAppFileInput(repo: string, branch: string): Promise<void>;
   // Suspends for `ms` so a dispatch can wait out GitHub's workflow
   // registration delay (#767: a just-authored/updated workflow file 404s on
   // `gh workflow run` for a short window after it is committed, because
@@ -145,6 +149,7 @@ export interface DeployDispatchDependencies {
 }
 
 export interface DeployDispatchRequest {
+  appFile: string;
   entry: DeployDispatchInstanceEntry;
   repo: string;
   branch: string;
@@ -153,6 +158,12 @@ export interface DeployDispatchRequest {
   // already sits on the instance state and wins; this is only the fallback.
   requestedEnvironment: unknown;
   log(message: string): void;
+  isCurrent?(): boolean;
+}
+
+function assertDispatchCurrent(request: DeployDispatchRequest): void {
+  if (request.isCurrent?.() === false)
+    throw new WorkflowReadInterruptedError("cancelled");
 }
 
 export type DeployDispatchOutcome =
@@ -162,10 +173,8 @@ export type DeployDispatchOutcome =
       workflowFile: string;
       dispatchedAt: number;
       environment: string;
-      // Newest run id that existed just before this dispatch, so the run
-      // monitor can identify the run this dispatch created as the first one
-      // whose id exceeds it, rather than matching a prior run by time window.
-      // Null when the baseline could not be read.
+      correlationId?: string;
+      // The baseline bounds discovery; correlation identifies this execution.
       baselineRunId: number | string | null;
     };
 
@@ -176,6 +185,8 @@ export interface DeployDispatchService {
 }
 
 const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
+  "id",
+  "verifyAppFileInput",
   "getBranchHeadSha",
   "getDefaultBranch",
   "runGh",
@@ -309,7 +320,8 @@ export function createDeployDispatchService(
     repo: string,
     environment: string,
     secretParams: Record<string, string>,
-    log: (message: string) => void
+    log: (message: string) => void,
+    assertCurrent: () => void
   ): Promise<string | null> => {
     const deployParamsPresent = async (): Promise<boolean> => {
       const r = await dependencies.runGh([
@@ -325,7 +337,9 @@ export function createDeployDispatchService(
         .map((s) => s.trim())
         .includes("RADIUS_DEPLOY_PARAMS");
     };
-    if (await deployParamsPresent()) return null;
+    const present = await deployParamsPresent();
+    assertCurrent();
+    if (present) return null;
     const names = Object.keys(secretParams).join(", ");
     log(
       'Provisioning RADIUS_DEPLOY_PARAMS for "' +
@@ -350,7 +364,9 @@ export function createDeployDispatchService(
     // produces ("Resource not accessible…", 403, 404) never identify a missing
     // `workflow` scope, so a retry could not be justified by the diagnostic
     // either. The real error is surfaced with the account guidance instead.
+    assertCurrent();
     const setRes = await dependencies.runGhWithStdin(setArgs, payload);
+    assertCurrent();
     if (setRes.code !== 0) {
       const env = dependencies.readProcessEnv();
       const accountHint =
@@ -361,7 +377,7 @@ export function createDeployDispatchService(
         'Could not provision RADIUS_DEPLOY_PARAMS on environment "' +
         environment +
         '": ' +
-        ((setRes.stderr || "").trim() || "unknown error") +
+        (redactCredentials(setRes.stderr || "").trim() || "unknown error") +
         ". The deploy would fail for a missing required parameter (" +
         names +
         "), so it was not started." +
@@ -369,7 +385,9 @@ export function createDeployDispatchService(
       log("❌ " + failure);
       return failure;
     }
-    if (!(await deployParamsPresent())) {
+    const verified = await deployParamsPresent();
+    assertCurrent();
+    if (!verified) {
       const failure =
         'RADIUS_DEPLOY_PARAMS was accepted but is not present on environment "' +
         environment +
@@ -383,80 +401,38 @@ export function createDeployDispatchService(
     return null;
   };
 
-  // Recompute the rad commands from the CURRENT app.bicep at dispatch time
-  // (rather than relying on the RADIUS_RAD_COMMANDS variable captured when the
-  // environment was created) so the deploy always reflects the latest bicep.
-  // `rad app graph` is appended so the deployed application graph is rendered
-  // as part of the run.
-  const appendRadCommands = async (
+  const prepareRadCommands = async (
     request: DeployDispatchRequest,
     environment: string,
     dispatchArgs: string[]
-  ): Promise<string | null> => {
-    const { entry, repo, branch, log } = request;
-    let secretError: string | null = null;
-    try {
-      let bicepPath = ".radius/app.bicep";
-      let bicepSource = await dependencies.fetchFileForSelection(
-        entry,
-        repo,
-        branch,
-        ".radius/app.bicep"
-      );
-      if (!bicepSource) {
-        bicepSource = await dependencies.fetchFileForSelection(
-          entry,
-          repo,
-          branch,
-          "app.bicep"
-        );
-        if (bicepSource) bicepPath = "app.bicep";
-      }
-      if (!bicepSource) {
-        log(
-          "⚠ Could not read app.bicep at dispatch; falling back to the environment's RADIUS_RAD_COMMANDS / default deploy."
-        );
-        return null;
-      }
-      const parsed = dependencies.appParams(bicepSource);
-      const resolved = dependencies.resolveDeployParams(parsed);
-      const { public: publicParams, secret: secretParams } =
-        dependencies.partitionParams(parsed, resolved);
-      // Capture the app name so the deploy-status reader can prefer an artifact
-      // belonging to this application. It is a tiebreaker between artifacts in
-      // the same environment, never a lookup key and never a hard filter, so an
-      // unresolved name costs nothing.
-      entry.state.deployAppName =
-        dependencies.extractAppName(bicepSource) ||
-        entry.state.deployAppName ||
-        "";
-      if (Object.keys(secretParams).length > 0) {
-        secretError = await provisionSecretParams(
-          repo,
-          environment,
-          secretParams,
-          log
-        );
-      }
-      const deployCmd = dependencies.buildDeployRadCommand(
-        bicepPath,
-        environment,
-        publicParams
-      );
-      const appName = dependencies.extractAppName(bicepSource);
-      const commands = [deployCmd];
-      if (appName) commands.push(dependencies.buildAppGraphRadCommand(appName));
-      dispatchArgs.push("-f", "rad_commands=" + JSON.stringify(commands));
-      log("Deploying with rad commands: " + commands.join("  |  "));
-      return secretError;
-    } catch (e) {
-      log(
-        "⚠ Could not compute rad commands from bicep (" +
-          dependencies.errorMessage(e) +
-          "); falling back to the environment default."
-      );
-      return secretError;
-    }
+  ): Promise<Record<string, string>> => {
+    const { entry, repo, branch, appFile, log } = request;
+    entry.state.deployAppName = "";
+    const bicepSource = await dependencies.fetchFileForSelection(
+      entry,
+      repo,
+      branch,
+      appFile
+    );
+    assertDispatchCurrent(request);
+    if (!bicepSource?.trim())
+      throw new Error("The selected model is missing or empty.");
+    const parsed = dependencies.appParams(bicepSource);
+    const resolved = dependencies.resolveDeployParams(parsed);
+    const { public: publicParams, secret: secretParams } =
+      dependencies.partitionParams(parsed, resolved);
+    const appName = dependencies.extractAppName(bicepSource);
+    entry.state.deployAppName = appName;
+    const deployCmd = dependencies.buildDeployRadCommand(
+      appFile,
+      environment,
+      publicParams
+    );
+    const commands = [deployCmd];
+    if (appName) commands.push(dependencies.buildAppGraphRadCommand(appName));
+    dispatchArgs.push("-f", "rad_commands=" + JSON.stringify(commands));
+    log("Deploying with rad commands: " + commands.join("  |  "));
+    return secretParams;
   };
 
   // Fail fast (with clear, actionable guidance) when the selected branch has
@@ -783,13 +759,15 @@ export function createDeployDispatchService(
   // push or a commit-then-push, which is what keeps the two paths from drifting
   // into telling the user different things about the same worktree.
   const reportBranchNotPushed = async (
-    entry: DeployDispatchInstanceEntry,
+    request: DeployDispatchRequest,
     repo: string,
     deployRef: string,
     kind: DeployErrorKind,
     log: (message: string) => void
   ): Promise<void> => {
+    const { entry } = request;
     const paths = await dependencies.uncommittedGeneratedPaths(entry);
+    assertDispatchCurrent(request);
     const dirty = paths.length > 0;
     const remediation = remediationView("git-push-branch", {
       branch: deployRef,
@@ -834,6 +812,12 @@ export function createDeployDispatchService(
 
   return {
     async prepareAndDispatch(request) {
+      const publishLog = request.log;
+      request = {
+        ...request,
+        log: (message) => publishLog(redactCredentials(message))
+      };
+      assertDispatchCurrent(request);
       const { entry, repo, branch, provider, requestedEnvironment, log } =
         request;
       log("━━ Deploying Radius application ━━");
@@ -854,9 +838,11 @@ export function createDeployDispatchService(
       // the selected branch or the repo's real default, so it is never empty.
       const deployRef = branch;
 
-      if (await branchIsMissingOnRemote(repo, deployRef)) {
+      const missingBranch = await branchIsMissingOnRemote(repo, deployRef);
+      assertDispatchCurrent(request);
+      if (missingBranch) {
         await reportBranchNotPushed(
-          entry,
+          request,
           repo,
           deployRef,
           dependencies.branchNotPushedKind,
@@ -873,16 +859,17 @@ export function createDeployDispatchService(
           repo,
           envForDeploy
         );
+        assertDispatchCurrent(request);
         if (validation.status === "missing") {
           log("❌ " + validation.message);
-          entry.state.deployError = validation.message;
+          entry.state.deployError = redactCredentials(validation.message);
           entry.state.deployErrorKind = dependencies.oidcSubjectMissingKind;
           entry.state.deployStatus = "failed";
           return { dispatched: false };
         }
         if (validation.status === "case-mismatch") {
           log("❌ " + validation.message);
-          entry.state.deployError = validation.message;
+          entry.state.deployError = redactCredentials(validation.message);
           entry.state.deployErrorKind =
             dependencies.oidcSubjectCaseMismatchKind;
           entry.state.deployStatus = "failed";
@@ -892,6 +879,11 @@ export function createDeployDispatchService(
         if (validation.status === "skipped") log("• " + validation.message);
       }
 
+      const correlationId = `dep-${dependencies.id()}`;
+      if (!/^dep-[a-zA-Z0-9-]{1,64}$/.test(correlationId))
+        throw new Error(
+          "The deployment correlation generator returned an invalid identifier."
+        );
       const dispatchArgs = [
         "workflow",
         "run",
@@ -900,20 +892,33 @@ export function createDeployDispatchService(
         deployRef,
         "-f",
         "environment=" + envForDeploy,
+        "-f",
+        "app_file=" + request.appFile,
+        "-f",
+        "correlation_id=" + correlationId,
         "--repo",
         repo
       ];
-      const deploySecretError = await appendRadCommands(
-        request,
-        envForDeploy,
-        dispatchArgs
-      );
-      // A required secret param could not be provisioned, so starting the run
-      // would only produce a guaranteed `rad deploy` failure. Surface the
-      // reason and stop before dispatching.
-      if (deploySecretError) {
-        entry.state.deployError = deploySecretError;
+      const failPreflight = (kind: DeployErrorKind, message: string) => {
+        entry.state.deployError = redactCredentials(message);
+        entry.state.deployErrorKind = kind;
         entry.state.deployStatus = "failed";
+        log("❌ " + entry.state.deployError);
+      };
+      let secretParams: Record<string, string>;
+      try {
+        secretParams = await prepareRadCommands(
+          request,
+          envForDeploy,
+          dispatchArgs
+        );
+        assertDispatchCurrent(request);
+      } catch (error) {
+        assertDispatchCurrent(request);
+        failPreflight(
+          "model-preflight-failed",
+          `Could not prepare selected model "${request.appFile}": ${dependencies.errorMessage(error)} No workflow was dispatched.`
+        );
         return { dispatched: false };
       }
 
@@ -931,7 +936,9 @@ export function createDeployDispatchService(
             if (file === deployWorkflowFile) publishedDispatcher = true;
           }
         );
+        assertDispatchCurrent(request);
       } catch (e) {
+        assertDispatchCurrent(request);
         log(
           '⚠ Could not publish deploy workflows to branch "' +
             deployRef +
@@ -945,13 +952,52 @@ export function createDeployDispatchService(
       // upstream Radius templates before running them, so the deploy never
       // executes a drifted copy. Syncs the deploy files on both the default
       // branch and the branch being deployed, which a --ref dispatch checks out.
-      const sync = await dependencies.ensureWorkflowsCurrent(
-        repo,
-        envForDeploy,
-        provider,
-        [...dependencies.deployWorkflowFiles],
-        deployRef
-      );
+      assertDispatchCurrent(request);
+      let sync: Awaited<
+        ReturnType<DeployDispatchDependencies["ensureWorkflowsCurrent"]>
+      >;
+      try {
+        sync = await dependencies.ensureWorkflowsCurrent(
+          repo,
+          envForDeploy,
+          provider,
+          [...dependencies.deployWorkflowFiles],
+          deployRef
+        );
+        assertDispatchCurrent(request);
+        await dependencies.verifyAppFileInput(repo, deployRef);
+        assertDispatchCurrent(request);
+      } catch (error) {
+        assertDispatchCurrent(request);
+        failPreflight(
+          "workflow-preflight-failed",
+          `Could not verify deployment workflows on "${deployRef}": ${dependencies.errorMessage(error)} No workflow was dispatched.`
+        );
+        return { dispatched: false };
+      }
+      if (Object.keys(secretParams).length > 0) {
+        try {
+          const secretError = await provisionSecretParams(
+            repo,
+            envForDeploy,
+            secretParams,
+            log,
+            () => assertDispatchCurrent(request)
+          );
+          assertDispatchCurrent(request);
+          if (secretError) {
+            failPreflight("model-preflight-failed", secretError);
+            return { dispatched: false };
+          }
+        } catch (error) {
+          assertDispatchCurrent(request);
+          failPreflight(
+            "model-preflight-failed",
+            `Could not provision parameters for "${request.appFile}": ${dependencies.errorMessage(error)}`
+          );
+          return { dispatched: false };
+        }
+      }
       // Either publisher can write the dispatcher before GitHub registers it
       // (#767). Keep successful writes even if a later provider write fails.
       const justCreatedDispatcher =
@@ -975,14 +1021,18 @@ export function createDeployDispatchService(
         result: DeployCommandResult;
         credentialSource: "injected" | "keyring";
       }> => {
+        assertDispatchCurrent(request);
         let result = await dependencies.runGh(dispatchArgs);
         let credentialSource = dependencies.ghCredentialSource();
         if (result.code !== 0) {
-          const attempt = await withStrippedToken(result, (env) =>
-            dependencies.runGh(dispatchArgs, { env })
-          );
+          assertDispatchCurrent(request);
+          const attempt = await withStrippedToken(result, (env) => {
+            assertDispatchCurrent(request);
+            return dependencies.runGh(dispatchArgs, { env });
+          });
           result = attempt.result;
           credentialSource = attempt.credentialSource;
+          if (result.code !== 0) assertDispatchCurrent(request);
         }
         return { result, credentialSource };
       };
@@ -991,6 +1041,7 @@ export function createDeployDispatchService(
       // at a single immediate attempt.
       const dispatchDelaysMs = justCreatedDispatcher ? [0, 2000, 5000] : [0];
       if (justCreatedDispatcher) await dependencies.sleep(3000);
+      assertDispatchCurrent(request);
       let dispatchDeployRes: DeployCommandResult = {
         code: 1,
         stdout: "",
@@ -1000,6 +1051,7 @@ export function createDeployDispatchService(
         dependencies.ghCredentialSource();
       for (const delay of dispatchDelaysMs) {
         if (delay > 0) await dependencies.sleep(delay);
+        assertDispatchCurrent(request);
         // Other runs can start during registration waits. Refresh both discovery
         // bounds for this attempt, and discard an earlier baseline if this read fails.
         baselineRunId = null;
@@ -1009,12 +1061,14 @@ export function createDeployDispatchService(
             deployWorkflowFile
           );
         } catch (e) {
+          assertDispatchCurrent(request);
           log(
             "⚠ Could not read the latest run id before dispatch (" +
               dependencies.errorMessage(e) +
-              "); run discovery will fall back to a time window."
+              "); run discovery will use the execution correlation."
           );
         }
+        assertDispatchCurrent(request);
         deployDispatchedAt = dependencies.now();
         const attempt = await dispatchOnce();
         dispatchDeployRes = attempt.result;
@@ -1023,10 +1077,16 @@ export function createDeployDispatchService(
         // Only the not-yet-registered race self-resolves; any other failure
         // (missing scope, Actions disabled, branch unresolved, …) will not, so
         // stop retrying and report it immediately.
-        if (!/not found|HTTP 404/i.test(dispatchDeployRes.stderr || "")) break;
+        if (
+          !/not found|HTTP 404/i.test(dispatchDeployRes.stderr || "") &&
+          !/unexpected inputs?.*correlation_id/i.test(
+            dispatchDeployRes.stderr || ""
+          )
+        )
+          break;
       }
       if (dispatchDeployRes.code !== 0) {
-        const de = (dispatchDeployRes.stderr || "").trim();
+        const de = redactCredentials(dispatchDeployRes.stderr || "").trim();
         log("❌ Failed to dispatch the run rad commands workflow: " + de);
         // A "No ref found" (or unresolved ref) dispatch error means the branch
         // is not on the remote — surface the same clean, actionable "push the
@@ -1035,7 +1095,7 @@ export function createDeployDispatchService(
         const dispatchKind = dependencies.classifyDeployDispatchFailure(de);
         if (dispatchKind === dependencies.branchNotPushedKind) {
           await reportBranchNotPushed(
-            entry,
+            request,
             repo,
             deployRef,
             dispatchKind,
@@ -1108,6 +1168,7 @@ export function createDeployDispatchService(
         workflowFile: deployWorkflowFile,
         dispatchedAt: deployDispatchedAt,
         environment: envForDeploy,
+        correlationId,
         baselineRunId
       };
     }

@@ -7003,6 +7003,43 @@ test.describe("Radius Canvas in Chromium", () => {
     );
   });
 
+  test("surfaces an incompatible installed workflow without claiming deployment started @safety", async ({
+    page,
+    canvas
+  }) => {
+    const error =
+      'Could not verify deployment workflows on "feat": The dispatcher must accept correlation_id and expose it in its run-name. Update the Radius workflows. No workflow was dispatched.';
+    let statusPolls = 0;
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await page.route("**/api/deploy-status", async (route) => {
+      statusPolls++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          errorKind: "workflow-preflight-failed",
+          error
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deploying");
+    await page.locator("#deploy-now-btn:not([disabled])").click();
+    await expect.poll(() => statusPolls).toBeGreaterThan(0);
+    await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+      error
+    );
+    await expect(page.locator("#deploy-inline-status")).not.toContainText(
+      "has started"
+    );
+  });
+
   test("opens destructive deployment confirmation with keyboard focus and returns focus on Escape @safety", async ({
     page,
     canvas

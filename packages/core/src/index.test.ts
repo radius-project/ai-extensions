@@ -163,6 +163,7 @@ const EXPECTED_FUNCTIONS = [
   "findWorkspaceManifests",
   "unsupportedAppSourceReport",
   "fetchBicepFromRepo",
+  "fetchBicepSelectionFromRepo",
   "fetchRecipePack",
   "resolveRecipeOutputs",
   "getPlatform",

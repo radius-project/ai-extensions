@@ -95,3 +95,7 @@ export * from "./deployment-monitor.js";
 export * from "./deployment-outcome.js";
 export * from "./deployment-service-dependencies.js";
 export * from "./workflow-observation-scope.js";
+export * from "./deployment-bindings.js";
+export * from "./deployment-workflows.js";
+export * from "./deployment-lookup.js";
+export * from "./deployment-identity.js";
