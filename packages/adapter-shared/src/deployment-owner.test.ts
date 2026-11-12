@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setImmediate as nextTurn } from "node:timers/promises";
+import { createDeploymentDeferred } from "../test/support/deployment.js";
 import {
   createDeploymentOwner,
   type DeploymentTarget
@@ -36,13 +38,7 @@ function fixture() {
 }
 
 function deferred() {
-  let resolve: () => void = () => {};
-  let reject: (error: Error) => void = () => {};
-  const promise = new Promise<void>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  return createDeploymentDeferred<void>();
 }
 
 afterEach(() => vi.useRealTimers());
@@ -340,21 +336,31 @@ describe("runtime deployment ownership", () => {
     expect(owner.claim(second.invocation, "repair")).toBe(true);
   });
 
-  it("replaces a settled same-target attempt on an ordinary repeat", () => {
-    const { owner, begin } = fixture();
-    const first = begin();
-    owner.release(first.reservation);
-    const second = begin();
-    expect(second.invocation.attemptId).not.toBe(first.invocation.attemptId);
-    expect(second.invocation.generation).toBeGreaterThan(
-      first.invocation.generation
-    );
-    expect(owner.lookup()).toEqual({
-      kind: "found",
-      invocation: second.invocation
-    });
-    expect(owner.isCurrent(first.invocation)).toBe(false);
-  });
+  it.each([undefined, ""])(
+    "generates fresh identities when repeating with attemptId %j",
+    (attemptId) => {
+      const { owner, begin } = fixture();
+      const first = begin(target, attemptId);
+      expect(first.invocation.attemptId).toMatch(/^attempt:.+/);
+      expect(first.invocation.observationId).toMatch(/^observation:.+/);
+      owner.release(first.reservation);
+      const second = begin(target, attemptId);
+      expect(second.invocation.attemptId).toMatch(/^attempt:.+/);
+      expect(second.invocation.attemptId).not.toBe(first.invocation.attemptId);
+      expect(second.invocation.observationId).not.toBe(
+        first.invocation.observationId
+      );
+      expect(second.invocation.generation).toBeGreaterThan(
+        first.invocation.generation
+      );
+      expect(owner.lookup()).toEqual({
+        kind: "found",
+        invocation: second.invocation
+      });
+      expect(owner.isCurrent(first.invocation)).toBe(false);
+      expect(owner.lookup({ attemptId: "" })).toEqual({ kind: "missing" });
+    }
+  );
 
   it("refuses reusing a live reservation to replace or repair active work", async () => {
     const { owner, begin } = fixture();
@@ -437,6 +443,162 @@ describe("runtime deployment ownership", () => {
     expect(reportError).toHaveBeenCalledTimes(2);
   });
 
+  it.each([new Error("view unavailable"), "view unavailable"])(
+    "reports an asynchronous subscriber rejection exactly once: %s",
+    async (error) => {
+      const { owner, begin, reportError } = fixture();
+      const { invocation } = begin();
+      const listener = vi.fn(() => true);
+      owner.subscribe(invocation, async () => {
+        throw error;
+      });
+      owner.subscribe(invocation, listener);
+      owner.publish(invocation);
+      expect(listener).toHaveBeenCalledExactlyOnceWith(invocation);
+      await nextTurn();
+      expect(reportError).toHaveBeenCalledExactlyOnceWith(error);
+      expect(owner.isCurrent(invocation)).toBe(true);
+    }
+  );
+
+  it.each(["getter", "method"] as const)(
+    "reports a subscriber thenable's throwing %s exactly once",
+    async (kind) => {
+      const { owner, begin, reportError } = fixture();
+      const { invocation } = begin();
+      const error = new Error("thenable unavailable");
+      owner.subscribe(invocation, () =>
+        kind === "getter" ?
+          {
+            get then() {
+              throw error;
+            }
+          }
+        : {
+            then() {
+              throw error;
+            }
+          }
+      );
+      const listener = vi.fn();
+      owner.subscribe(invocation, listener);
+      owner.publish(invocation);
+      expect(listener).toHaveBeenCalledOnce();
+      await nextTurn();
+      expect(reportError).toHaveBeenCalledExactlyOnceWith(error);
+    }
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "does not track a held observer that will %s after shutdown",
+    async (outcome) => {
+      const { owner, begin, reportError } = fixture();
+      const { invocation, reservation } = begin();
+      owner.release(reservation);
+      const observer = deferred();
+      const listener = vi.fn(() => observer.promise);
+      const error = new Error("late observer failure");
+      owner.subscribe(invocation, listener);
+      try {
+        await owner.run(invocation, async () => {
+          invocation.state.status = "complete";
+        });
+        expect(listener).toHaveBeenCalledOnce();
+        expect(owner.hasActiveWork()).toBe(false);
+        const deletion = owner.reserve(target, "delete");
+        expect(deletion).not.toBeNull();
+        if (deletion) owner.release(deletion);
+        expect(await owner.shutdown(0)).toEqual({
+          complete: true,
+          pending: []
+        });
+        if (outcome === "reject") observer.reject(error);
+        else observer.resolve();
+        await nextTurn();
+        if (outcome === "reject")
+          expect(reportError).toHaveBeenCalledExactlyOnceWith(error);
+        else expect(reportError).not.toHaveBeenCalled();
+        expect(invocation.state.status).toBe("complete");
+      } finally {
+        observer.resolve();
+        await nextTurn();
+      }
+    }
+  );
+
+  it.each(["invalidate", "retire", "replace", "shutdown"] as const)(
+    "stops publication when an earlier subscriber chooses to %s",
+    async (action) => {
+      const { owner, begin } = fixture();
+      const { invocation, reservation } = begin();
+      owner.release(reservation);
+      owner.subscribe(invocation, () => {
+        if (action === "shutdown") {
+          void owner.shutdown(0);
+        } else if (action === "replace") {
+          const replacement = begin();
+          owner.release(replacement.reservation);
+        } else {
+          expect(owner[action](invocation)).toBe(true);
+        }
+      });
+      const listener = vi.fn();
+      owner.subscribe(invocation, listener);
+      await owner.run(invocation, async () => {
+        invocation.state.status = "complete";
+      });
+      expect(listener).not.toHaveBeenCalled();
+      expect(owner.isCurrent(invocation)).toBe(action === "shutdown");
+      expect(owner.lookup().kind).toBe(
+        action === "replace" || action === "shutdown" ? "found" : "missing"
+      );
+    }
+  );
+
+  it("stops reentrant publication without releasing held issued work", async () => {
+    const { owner, begin } = fixture();
+    const { invocation, reservation } = begin();
+    owner.release(reservation);
+    const issued = deferred();
+    const entered = deferred();
+    const running = owner.run(invocation, () => {
+      entered.resolve();
+      return issued.promise;
+    });
+    await entered.promise;
+    const listener = vi.fn();
+    owner.subscribe(invocation, () => owner.invalidate(invocation));
+    owner.subscribe(invocation, listener);
+    try {
+      owner.publish(invocation);
+      expect(listener).not.toHaveBeenCalled();
+      expect(owner.isCurrent(invocation)).toBe(false);
+      expect(owner.isActive(invocation)).toBe(true);
+      expect(owner.reserve(target, "delete")).toBeNull();
+    } finally {
+      issued.resolve();
+      await running;
+    }
+    expect(listener).not.toHaveBeenCalled();
+    expect(owner.hasActiveWork()).toBe(false);
+    expect(owner.reserve(target, "delete")).not.toBeNull();
+  });
+
+  it("preserves live subscription additions and removals during publication", () => {
+    const { owner, begin } = fixture();
+    const { invocation } = begin();
+    const added = vi.fn();
+    const removed = vi.fn();
+    owner.subscribe(invocation, () => {
+      detach();
+      owner.subscribe(invocation, added);
+    });
+    const detach = owner.subscribe(invocation, removed);
+    owner.publish(invocation);
+    expect(removed).not.toHaveBeenCalled();
+    expect(added).toHaveBeenCalledExactlyOnceWith(invocation);
+  });
+
   it("detaches a subscriber without cancelling background work", async () => {
     const { owner, begin } = fixture();
     const { invocation } = begin();
@@ -450,6 +612,23 @@ describe("runtime deployment ownership", () => {
     work.resolve();
     await running;
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("keeps a replacement subscription set when old cleanup repeats", () => {
+    const { owner, begin } = fixture();
+    const { invocation } = begin();
+    const detached = vi.fn();
+    const detach = owner.subscribe(invocation, detached);
+    detach();
+    const replacement = vi.fn();
+    const detachReplacement = owner.subscribe(invocation, replacement);
+    detach();
+    owner.publish(invocation);
+    expect(detached).not.toHaveBeenCalled();
+    expect(replacement).toHaveBeenCalledExactlyOnceWith(invocation);
+    detachReplacement();
+    owner.publish(invocation);
+    expect(replacement).toHaveBeenCalledOnce();
   });
 
   it("reports each active invocation during bounded shutdown", async () => {
@@ -504,6 +683,7 @@ describe("runtime deployment ownership", () => {
     expect(owner.claim(invocation, "notice")).toBe(false);
     expect(owner.isShuttingDown()).toBe(true);
     expect(invocation.signal.aborted).toBe(true);
+    expect(() => owner.subscribe(invocation, vi.fn())).toThrow("shutting down");
     expect(() =>
       owner.begin(target, { status: "pending" }, reservation)
     ).toThrow("shutting down");
@@ -516,6 +696,8 @@ describe("runtime deployment ownership", () => {
     vi.useFakeTimers();
     const { owner, begin } = fixture();
     const { invocation } = begin();
+    const listener = vi.fn();
+    owner.subscribe(invocation, listener);
     const work = deferred();
     const entered = deferred();
     const running = owner.run(invocation, async () => {
@@ -534,6 +716,7 @@ describe("runtime deployment ownership", () => {
     work.resolve();
     await running;
     expect(invocation.state.status).toBe("complete");
+    expect(listener).not.toHaveBeenCalled();
     await expect(owner.shutdown(0)).resolves.toEqual({
       complete: true,
       pending: []

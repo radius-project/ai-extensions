@@ -54,7 +54,7 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
   const controllers = new Map<DeploymentInvocation<State>, AbortController>();
   const subscribers = new Map<
     DeploymentInvocation<State>,
-    Set<(invocation: DeploymentInvocation<State>) => void>
+    Set<(invocation: DeploymentInvocation<State>) => unknown>
   >();
   const claims = new Map<DeploymentInvocation<State>, Set<string>>();
   const issuedIds = new Set<string>();
@@ -74,10 +74,15 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
   }
 
   function publish(invocation: DeploymentInvocation<State>): void {
-    if (!isCurrent(invocation)) return;
+    if (stopped || invocation.signal.aborted || !isCurrent(invocation)) return;
     for (const subscriber of subscribers.get(invocation) ?? []) {
+      if (stopped || invocation.signal.aborted || !isCurrent(invocation))
+        return;
       try {
-        subscriber(invocation);
+        void Promise.resolve(subscriber(invocation)).then(
+          undefined,
+          ports.reportError
+        );
       } catch (error) {
         ports.reportError(error);
       }
@@ -138,7 +143,7 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
       throw new Error("The repair attempt is no longer current.");
     if (previous && !sameTarget(previous.target, target))
       throw new Error("The repair target changed.");
-    const loopId = attemptId ?? `attempt:${ports.id()}`;
+    const loopId = attemptId || `attempt:${ports.id()}`;
     const observationId = `observation:${ports.id()}`;
     if ((!attemptId && issuedIds.has(loopId)) || issuedIds.has(observationId))
       throw new Error("Deployment identity generation produced a duplicate.");
@@ -265,20 +270,23 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     return promise.finally(() => admissions.delete(promise));
   }
 
+  /** Callbacks run synchronously while current; returned promises are observed, not awaited. */
   function subscribe(
     invocation: DeploymentInvocation<State>,
-    subscriber: (current: DeploymentInvocation<State>) => void
+    subscriber: (current: DeploymentInvocation<State>) => unknown
   ): () => void {
+    if (stopped) throw new Error("Deployment runtime is shutting down.");
     if (!isCurrent(invocation))
       throw new Error("Cannot subscribe to a superseded deployment.");
     const listeners =
       subscribers.get(invocation) ??
-      new Set<(current: DeploymentInvocation<State>) => void>();
+      new Set<(current: DeploymentInvocation<State>) => unknown>();
     listeners.add(subscriber);
     subscribers.set(invocation, listeners);
     return () => {
       listeners.delete(subscriber);
-      if (!listeners.size) subscribers.delete(invocation);
+      if (!listeners.size && subscribers.get(invocation) === listeners)
+        subscribers.delete(invocation);
     };
   }
 

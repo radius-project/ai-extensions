@@ -27,6 +27,9 @@ import {
 } from "./runtime-deployment.js";
 import { createDeploymentRepository } from "./deployment-repository.js";
 import type { DeploymentCommandExecutor } from "./deployment-command-bindings.js";
+import type { DeployCommandResult } from "./deployment-dispatch.js";
+import type { DeploymentInvocation } from "./deployment-owner.js";
+import type { DeploymentState } from "@radius-project/core";
 import { createDeploymentWorkflows } from "./deployment-workflows.js";
 import { createDeploymentLookup } from "./deployment-lookup.js";
 import { createDeploymentIdentityReader } from "./deployment-identity.js";
@@ -101,16 +104,39 @@ export function createProductionDeploymentRuntime(
     deployWorkflowFile: DEPLOY_DISPATCHER_FILE,
     deleteWorkflowFile: DELETE_APP_DISPATCHER_FILE
   });
-  const dispatchListeners = new Set<(repo: string) => void>();
-  function notifyDispatch(repo: string): void {
+  const reportError = (error: unknown): void =>
+    ports.reportDiagnostic(ports.redactDiagnostic(errorMessage(error)));
+  const dispatchListeners = new Set<(repo: string) => unknown>();
+  function notifyDispatch(
+    repo: string,
+    invocation: DeploymentInvocation<DeploymentState>
+  ): void {
     for (const listener of dispatchListeners) {
+      if (
+        runtime.owner.isShuttingDown() ||
+        invocation.signal.aborted ||
+        !runtime.owner.isCurrent(invocation)
+      )
+        return;
       try {
-        listener(repo);
+        void Promise.resolve(listener(repo)).then(undefined, reportError);
       } catch (error) {
-        ports.reportDiagnostic(ports.redactDiagnostic(errorMessage(error)));
+        reportError(error);
       }
     }
   }
+  const commandResult = async (
+    pending: Promise<DeployCommandResult>
+  ): Promise<DeployCommandResult> => {
+    const result = await pending;
+    return result.code === 0 ?
+        result
+      : {
+          ...result,
+          stdout: ports.redactDiagnostic(result.stdout),
+          stderr: ports.redactDiagnostic(result.stderr)
+        };
+  };
   const outcome = createDeployOutcomeService({
     projectSafeGraphResources: projectDeploymentGraph,
     settleDeployStatuses,
@@ -125,8 +151,7 @@ export function createProductionDeploymentRuntime(
     awsEnabled: ports.awsEnabled,
     now: ports.now,
     id: ports.id,
-    reportError: (error) =>
-      ports.reportDiagnostic(ports.redactDiagnostic(errorMessage(error))),
+    reportError,
     normalizeAppFile: normalizeDeploymentAppFile,
     resolveDefaultBranch: async (repo) => {
       const branch = await repository.ghOrThrow([
@@ -151,7 +176,12 @@ export function createProductionDeploymentRuntime(
       redactDiagnostic: ports.redactDiagnostic,
       reportDiagnostic: ports.reportDiagnostic
     },
-    createExecution: (_invocation, workspace, plannedGraph) => {
+    createExecution: (invocation, workspace, plannedGraph) => {
+      const workspacePath = workspace?.workspacePath;
+      const matchingWorkspace =
+        workspace?.repo.toLowerCase() ===
+          invocation.target.repo.toLowerCase() &&
+        workspace.branch === invocation.target.branch;
       const readFile = createDeploymentFileReader(workspace, {
         readWorkspaceFile,
         readRepositoryFile: repository.readFile
@@ -166,9 +196,12 @@ export function createProductionDeploymentRuntime(
         oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
         getBranchHeadSha: repository.branchHead,
         getDefaultBranch: repository.defaultBranch,
-        runGh: repository.runGh,
-        runGhWithStdin: repository.runGhWithStdin,
-        runAz: (args) => repository.runCliCommand("az", args, 15000),
+        runGh: (args, options) =>
+          commandResult(repository.runGh(args, options)),
+        runGhWithStdin: (args, stdin, options) =>
+          commandResult(repository.runGhWithStdin(args, stdin, options)),
+        runAz: (args) =>
+          commandResult(repository.runCliCommand("az", args, 15000)),
         runGitHubJson: async (apiPath) => {
           const result = await repository.readJson(apiPath, {
             headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
@@ -196,14 +229,16 @@ export function createProductionDeploymentRuntime(
         fetchFileForSelection: (_entry, repo, branch, path) =>
           readFile(repo, branch, path),
         uncommittedGeneratedPaths: () =>
-          uncommittedGeneratedPaths(workspace?.workspacePath),
+          uncommittedGeneratedPaths(workspacePath),
+        canRemediateBranch: (_entry, branch) =>
+          matchingWorkspace && branch === invocation.target.branch,
         ensureDeployWorkflowsOnBranch: workflows.ensureOnBranch,
         ensureWorkflowsCurrent: workflows.ensureCurrent,
         verifyAppFileInput: workflows.verifyAppFileInput,
         latestWorkflowRunId: reads.latestWorkflowRunId,
         classifyDeployDispatchFailure,
-        invalidateDeployListCache: notifyDispatch,
-        errorMessage,
+        invalidateDeployListCache: (repo) => notifyDispatch(repo, invocation),
+        errorMessage: (error) => ports.redactDiagnostic(errorMessage(error)),
         sleep: ports.sleep,
         now: ports.now
       });
@@ -247,7 +282,10 @@ export function createProductionDeploymentRuntime(
   });
   return {
     ...runtime,
-    subscribeDispatch(listener: (repo: string) => void): () => void {
+    /** Returned promises report failures without delaying deployment or shutdown. */
+    subscribeDispatch(listener: (repo: string) => unknown): () => void {
+      if (runtime.owner.isShuttingDown())
+        throw new Error("Deployment runtime is shutting down.");
       dispatchListeners.add(listener);
       return () => {
         dispatchListeners.delete(listener);

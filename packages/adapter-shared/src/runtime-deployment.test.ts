@@ -6,6 +6,7 @@ import {
 } from "./runtime-deployment.js";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
 import type { DeployMonitorRequest } from "./deployment-monitor.js";
+import { createDeploymentDeferred } from "../test/support/deployment.js";
 
 const target = {
   repo: "fixture/app",
@@ -18,14 +19,9 @@ const runtimes: DeploymentRuntime[] = [];
 const releaseHeld: (() => void)[] = [];
 
 function held() {
-  let resolve: () => void = () => {
-    throw new Error("uninitialized");
-  };
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  releaseHeld.push(resolve);
-  return { promise, resolve };
+  const deferred = createDeploymentDeferred<void>();
+  releaseHeld.push(() => deferred.resolve());
+  return deferred;
 }
 
 function fixture(
@@ -177,7 +173,15 @@ describe("panel-independent deployment runtime", () => {
     "resolves a new selection without reusing a %s prior model",
     async (state) => {
       const h = fixture();
-      const first = await h.runtime.start(target);
+      const first = await h.runtime.start(
+        { ...target, appFile: undefined },
+        {
+          modelSelection: {
+            isCurrent: () => true,
+            resolve: async () => "models/auto.bicep"
+          }
+        }
+      );
       if (!first.ok) throw new Error(first.error);
       await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
       const second = await h.runtime.start(
@@ -192,12 +196,10 @@ describe("panel-independent deployment runtime", () => {
           }
         }
       );
-      if (state === "retired")
-        expect(second).toMatchObject({ ok: false, status: 409 });
-      else {
-        if (!second.ok) throw new Error(second.error);
-        expect(second.invocation.target.appFile).toBe("app.bicep");
-      }
+      if (!second.ok) throw new Error(second.error);
+      expect(second.invocation.target.appFile).toBe("app.bicep");
+      expect(second.invocation.state.deployParams?.appFile).toBeUndefined();
+      expect(second.invocation.state.deployAttempt?.appFile).toBe("app.bicep");
     }
   );
 
@@ -259,9 +261,153 @@ describe("panel-independent deployment runtime", () => {
     await runtime.start({ ...target, environment: "other" });
     await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
     expect(await runtime.start({})).toMatchObject({ ok: false, status: 400 });
+    expect(await runtime.start({ repo: target.repo })).toMatchObject({
+      ok: false,
+      status: 400
+    });
     expect(resolveDeployment).toHaveBeenCalledTimes(2);
     expect((await runtime.start(target)).ok).toBe(true);
   });
+
+  it.each(["target", "branch", "model"] as const)(
+    "does not fence an unrelated settled attempt during fresh %s resolution",
+    async (boundary) => {
+      const entered = held();
+      const gate = held();
+      const h = fixture({
+        resolveDeployment: async (repo) => {
+          if (repo === "other/app" && boundary === "target") {
+            entered.resolve();
+            await gate.promise;
+          }
+          return null;
+        },
+        resolveDefaultBranch: async () => {
+          entered.resolve();
+          await gate.promise;
+          return "remote-default";
+        }
+      });
+      const first = await h.runtime.start(target);
+      if (!first.ok) throw new Error(first.error);
+      await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+      const second = h.runtime.start(
+        {
+          ...target,
+          repo: "other/app",
+          ...(boundary === "branch" ? { branch: undefined } : {}),
+          ...(boundary === "model" ? { appFile: undefined } : {})
+        },
+        boundary === "model" ?
+          {
+            modelSelection: {
+              isCurrent: () => true,
+              resolve: async () => {
+                entered.resolve();
+                await gate.promise;
+                return "models/other.bicep";
+              }
+            }
+          }
+        : {}
+      );
+      await entered.promise;
+      expect(h.runtime.owner.retire(first.invocation)).toBe(true);
+      gate.resolve();
+      const result = await second;
+      if (!result.ok) throw new Error(result.error);
+      expect(result.invocation.target).toMatchObject({
+        repo: "other/app",
+        branch: boundary === "branch" ? "remote-default" : "topic",
+        appFile: boundary === "model" ? "models/other.bicep" : target.appFile
+      });
+    }
+  );
+
+  it("rejects retirement of genuinely inherited repeat context during admission", async () => {
+    let retirePrior = () => {};
+    const h = fixture({
+      resolveDeployment: async () => {
+        retirePrior();
+        return null;
+      }
+    });
+    const first = await h.runtime.start(target);
+    if (!first.ok) throw new Error(first.error);
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    retirePrior = () => {
+      expect(h.runtime.owner.retire(first.invocation)).toBe(true);
+    };
+    expect(await h.runtime.start({})).toMatchObject({
+      ok: false,
+      status: 409
+    });
+    expect(h.createExecution).toHaveBeenCalledOnce();
+  });
+
+  it.each(["workspace", "remote", "prior"] as const)(
+    "uses %s branch resolution for an explicit target despite unrelated history",
+    async (source) => {
+      const h = fixture();
+      for (const repo of ["one/app", "two/app"]) {
+        expect((await h.runtime.start({ ...target, repo })).ok).toBe(true);
+        await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+      }
+      const result = await h.runtime.start(
+        {
+          repo: source === "prior" ? "one/app" : "three/app",
+          environment: "dev"
+        },
+        source === "workspace" ?
+          { workspace: { repo: "three/app", branch: "workspace-branch" } }
+        : {}
+      );
+      if (!result.ok) throw new Error(result.error);
+      expect(result.invocation.target.branch).toBe(
+        source === "prior" ? "topic"
+        : source === "workspace" ? "workspace-branch"
+        : "release"
+      );
+    }
+  );
+
+  it("retains explicit repeat intent without invoking automatic model selection", async () => {
+    const h = fixture();
+    const first = await h.runtime.start({
+      ...target,
+      appFile: "models/explicit.bicep"
+    });
+    if (!first.ok) throw new Error(first.error);
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    const resolve = vi.fn(async () => "models/auto.bicep");
+    const second = await h.runtime.start(
+      { repo: target.repo, environment: target.environment },
+      { modelSelection: { resolve, isCurrent: () => true } }
+    );
+    if (!second.ok) throw new Error(second.error);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(second.invocation.state.deployParams?.appFile).toBe(
+      "models/explicit.bicep"
+    );
+    expect(second.invocation.target.appFile).toBe("models/explicit.bicep");
+  });
+
+  it.each(["branch", "environment"] as const)(
+    "does not inherit explicit model intent across a different %s",
+    async (field) => {
+      const h = fixture();
+      await h.runtime.start({ ...target, appFile: "models/explicit.bicep" });
+      await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+      const result = await h.runtime.start({
+        ...target,
+        [field]: "other",
+        appFile: undefined
+      });
+      if (!result.ok) throw new Error(result.error);
+      expect(result.invocation.target.appFile).toBe(".radius/app.bicep");
+      expect(result.invocation.state.deployParams?.appFile).toBeUndefined();
+    }
+  );
 
   it("resolves a missing branch from GitHub when no workspace or prior target supplies it", async () => {
     const { runtime } = fixture();
@@ -615,6 +761,58 @@ describe("panel-independent deployment runtime", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("publishes message-only monitor progress without adding logs", async () => {
+    const entered = held();
+    const release = held();
+    const h = fixture({}, async ({ entry, onProgress }) => {
+      entered.resolve();
+      await release.promise;
+      const resource = entry.state.deployingResources?.[0];
+      if (!resource) throw new Error("Missing test resource");
+      resource.deployMessage = "Waiting for provisioning";
+      onProgress?.();
+      entry.state.deployStatus = "complete";
+    });
+    const result = await h.runtime.start(target, {
+      resources: [{ name: "api", deployStatus: "pending" }]
+    });
+    if (!result.ok) throw new Error(result.error);
+    await entered.promise;
+    const snapshots: string[] = [];
+    h.runtime.owner.subscribe(result.invocation, ({ state }) => {
+      if (state.deployStatus === "in_progress")
+        snapshots.push(state.deployingResources?.[0].deployMessage ?? "");
+    });
+    release.resolve();
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    expect(snapshots).toContain("Waiting for provisioning");
+    expect(result.invocation.state.deployLogs).toEqual([]);
+  });
+
+  it("does not deliver repair after a terminal publication invalidates its attempt", async () => {
+    const entered = held();
+    const release = held();
+    const h = fixture({}, async ({ entry }) => {
+      entered.resolve();
+      await release.promise;
+      entry.state.deployStatus = "failed";
+      entry.state.deployError = "Model failure";
+    });
+    const result = await h.runtime.start(target);
+    if (!result.ok) throw new Error(result.error);
+    await entered.promise;
+    const listener = vi.fn(() => {
+      if (result.invocation.state.deployStatus === "failed")
+        h.runtime.owner.invalidate(result.invocation);
+    });
+    h.runtime.owner.subscribe(result.invocation, listener);
+    release.resolve();
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(h.sendRepair).not.toHaveBeenCalled();
+    expect(h.sendNotice).not.toHaveBeenCalled();
+  });
+
   it("reports monitor crashes as unconfirmed notices, never model repair", async () => {
     const { runtime, sendRepair, sendNotice, reportError } = fixture(
       {},
@@ -629,6 +827,7 @@ describe("panel-independent deployment runtime", () => {
       deployStatus: "failed",
       deployErrorKind: "run-unconfirmed"
     });
+
     expect(reportError).toHaveBeenCalledOnce();
     expect(result.invocation.state.deployLogs).toEqual([
       "\u274c Deploy monitor stopped unexpectedly: monitor unavailable"
@@ -640,6 +839,60 @@ describe("panel-independent deployment runtime", () => {
     ).toMatchObject({ ok: false, status: 409 });
   });
 
+  it.each(["invalidate", "shutdown"] as const)(
+    "does not synthesize a failure when an intentionally %s monitor settles",
+    async (action) => {
+      for (const settlement of ["resolve", "reject"] as const) {
+        const entered = held();
+        const gate = held();
+        const h = fixture({}, async () => {
+          entered.resolve();
+          await gate.promise;
+          if (settlement === "reject") throw new Error("Observation stopped");
+        });
+        const result = await h.runtime.start(target);
+        if (!result.ok) throw new Error(result.error);
+        await entered.promise;
+        const listener = vi.fn();
+        h.runtime.owner.subscribe(result.invocation, listener);
+        const stopping =
+          action === "shutdown" ? h.runtime.owner.shutdown(100) : undefined;
+        if (action === "invalidate")
+          h.runtime.owner.invalidate(result.invocation);
+        expect(h.runtime.owner.reserve(target, "delete")).toBeNull();
+        gate.resolve();
+        if (stopping) await stopping;
+        await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+        expect(result.invocation.state).toMatchObject({
+          deployStatus: "in_progress",
+          deployError: null,
+          deployErrorKind: null
+        });
+        expect(h.reportError).not.toHaveBeenCalled();
+        expect(h.sendRepair).not.toHaveBeenCalled();
+        expect(h.sendNotice).not.toHaveBeenCalled();
+        expect(listener).not.toHaveBeenCalled();
+      }
+    }
+  );
+
+  it("preserves a live monitor's existing diagnostic and failure classification", async () => {
+    const h = fixture({}, async ({ entry }) => {
+      entry.state.deployError = "Already recorded actionable diagnostic";
+      entry.state.deployErrorKind = "workflow-preflight-failed";
+      throw new Error("later observation failure");
+    });
+    const result = await h.runtime.start(target);
+    if (!result.ok) throw new Error(result.error);
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    expect(result.invocation.state).toMatchObject({
+      deployStatus: "failed",
+      deployError: "Already recorded actionable diagnostic",
+      deployErrorKind: "workflow-preflight-failed"
+    });
+    expect(h.reportError).toHaveBeenCalledOnce();
+    expect(h.sendRepair).not.toHaveBeenCalled();
+  });
   it.each(["target lookup", "branch lookup", "monitor"] as const)(
     "redacts non-Error rejections from %s",
     async (boundary) => {
@@ -703,31 +956,57 @@ describe("panel-independent deployment runtime", () => {
     expect(sendNotice).not.toHaveBeenCalled();
   });
 
-  it("repairs a confirmed failure with a new observation and the existing loop budget", async () => {
-    const { runtime, sendRepair } = fixture({}, async ({ entry }) => {
-      entry.state.deployStatus = "failed";
-      entry.state.deployError = "model validation failed";
-    });
-    const first = await runtime.start(target);
+  it("treats repeated empty attempt IDs as fresh deployment starts", async () => {
+    const { runtime } = fixture();
+    const first = await runtime.start({ ...target, attemptId: "" });
     if (!first.ok) throw new Error(first.error);
     await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
-    expect(sendRepair).toHaveBeenCalledOnce();
-    const second = await runtime.start({
-      attemptId: first.invocation.attemptId
-    });
+    const second = await runtime.start({ ...target, attemptId: "" });
     if (!second.ok) throw new Error(second.error);
-    expect(second.repairAttempt).toBe(1);
-    expect(second.repairAttemptCap).toBe(5);
-    expect(second.invocation.generation).toBe(2);
+    await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
+    expect(first.invocation.attemptId).toMatch(/^attempt:.+/);
+    expect(second.invocation.attemptId).toMatch(/^attempt:.+/);
+    expect(second.invocation.attemptId).not.toBe(first.invocation.attemptId);
     expect(second.invocation.observationId).not.toBe(
       first.invocation.observationId
     );
-    expect(
-      runtime.owner.lookup({ observationId: first.invocation.observationId })
-    ).toEqual({ kind: "missing" });
-    await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
-    expect(sendRepair).toHaveBeenCalledOnce();
+    expect(second.invocation.state.deployStatus).toBe("complete");
+    expect(second.repairAttempt).toBeUndefined();
   });
+
+  it.each([undefined, ""])(
+    "repairs a failure started with attemptId %j using its generated identity and budget",
+    async (attemptId) => {
+      const { runtime, sendRepair } = fixture({}, async ({ entry }) => {
+        entry.state.deployStatus = "failed";
+        entry.state.deployError = "model validation failed";
+      });
+      const first = await runtime.start({ ...target, attemptId });
+      if (!first.ok) throw new Error(first.error);
+      await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
+      expect(sendRepair).toHaveBeenCalledOnce();
+      expect(first.invocation.attemptId).toMatch(/^attempt:.+/);
+      expect(sendRepair).toHaveBeenCalledWith(
+        expect.objectContaining({ attemptId: first.invocation.attemptId })
+      );
+      const second = await runtime.start({
+        attemptId: first.invocation.attemptId
+      });
+      if (!second.ok) throw new Error(second.error);
+      expect(second.repairAttempt).toBe(1);
+      expect(second.repairAttemptCap).toBe(5);
+      expect(second.invocation.attemptId).toBe(first.invocation.attemptId);
+      expect(second.invocation.generation).toBe(2);
+      expect(second.invocation.observationId).not.toBe(
+        first.invocation.observationId
+      );
+      expect(
+        runtime.owner.lookup({ observationId: first.invocation.observationId })
+      ).toEqual({ kind: "missing" });
+      await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
+      expect(sendRepair).toHaveBeenCalledOnce();
+    }
+  );
 
   it("preserves optional display resources and bounded logs without sharing the view's arrays", async () => {
     const { runtime } = fixture({}, async ({ entry, log }) => {

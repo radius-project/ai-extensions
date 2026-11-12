@@ -139,6 +139,7 @@ export interface DeployMonitorRequest {
   requestedEnvironment: unknown;
   resources: DeploymentResource[];
   log(message: string): void;
+  onProgress?(): void;
   isCurrent?(): boolean;
 }
 
@@ -236,6 +237,10 @@ export function createDeployMonitorService(
       if (entry.observation?.stopped || request.isCurrent?.() === false)
         throw new WorkflowReadInterruptedError("cancelled");
     };
+    const publishProgress = () => {
+      assertCurrent();
+      request.onProgress?.();
+    };
     const sleep = async (milliseconds: number) => {
       if (entry.observation) await entry.observation.delay(milliseconds);
       else await dependencies.sleep(milliseconds);
@@ -289,6 +294,7 @@ export function createDeployMonitorService(
       if (planned) {
         resources = planned;
         entry.state.deployingResources = planned;
+        publishProgress();
       }
     }
 
@@ -356,6 +362,7 @@ export function createDeployMonitorService(
     );
     if (resources.length > 0 && resources[0].deployStatus === "pending")
       setStatus(resources[0], "in_progress");
+    publishProgress();
 
     const seenD = new Set<string>();
     const startedD = new Set<string>();
@@ -411,6 +418,12 @@ export function createDeployMonitorService(
         resources,
         statusMap
       );
+      if (changes.length > 0) {
+        for (const resource of resources) {
+          if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+        }
+      }
+      publishProgress();
       for (const change of changes) {
         const line =
           (change.to === "failed" ? "✗"
@@ -423,11 +436,6 @@ export function createDeployMonitorService(
         if (statusAnnounced.has(line)) continue;
         statusAnnounced.add(line);
         log("  " + line);
-      }
-      if (changes.length > 0) {
-        for (const resource of resources) {
-          if (resource.deployStatus) setStatus(resource, resource.deployStatus);
-        }
       }
     };
 
@@ -459,6 +467,7 @@ export function createDeployMonitorService(
         dRunId;
       entry.state.deployErrorKind = dependencies.unconfirmedRunKind;
       entry.state.deployStatus = "failed";
+      publishProgress();
     };
 
     for (let p = 0; p < RUN_POLL_ATTEMPTS; p++) {
@@ -597,6 +606,7 @@ export function createDeployMonitorService(
         ) {
           pendingFallbackApplied = true;
           advancePendingNodes(resources);
+          publishProgress();
         }
       }
 
@@ -625,6 +635,7 @@ export function createDeployMonitorService(
           observation,
           isCurrent: request.isCurrent
         });
+        publishProgress();
         return;
       }
       await sleep(POLL_INTERVAL_MS);

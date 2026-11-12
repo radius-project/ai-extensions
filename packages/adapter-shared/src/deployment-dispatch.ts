@@ -143,6 +143,10 @@ export interface DeployDispatchDependencies {
   uncommittedGeneratedPaths(
     entry: DeployDispatchInstanceEntry
   ): Promise<readonly string[]>;
+  canRemediateBranch?(
+    entry: DeployDispatchInstanceEntry,
+    branch: string
+  ): boolean;
   invalidateDeployListCache(repo: string): void;
   errorMessage(error: unknown): string;
   now(): number;
@@ -766,14 +770,27 @@ export function createDeployDispatchService(
     log: (message: string) => void
   ): Promise<void> => {
     const { entry } = request;
-    const paths = await dependencies.uncommittedGeneratedPaths(entry);
+    const workspaceMatches =
+      dependencies.canRemediateBranch?.(entry, deployRef) !== false;
+    const paths =
+      workspaceMatches ?
+        await dependencies.uncommittedGeneratedPaths(entry)
+      : [];
     assertDispatchCurrent(request);
     const dirty = paths.length > 0;
-    const remediation = remediationView("git-push-branch", {
-      branch: deployRef,
-      currentBranch: entry.state.workspaceBranch ?? "",
-      paths: paths.join(",")
-    });
+    const remediation =
+      workspaceMatches ?
+        remediationView("git-push-branch", {
+          branch: deployRef,
+          currentBranch: entry.state.workspaceBranch ?? "",
+          paths: paths.join(",")
+        })
+      : {
+          runnable: false,
+          command: "",
+          unsupportedReason:
+            "The local workspace repository and branch have not been verified for this deployment. Publish the selected branch from the correct repository, then redeploy."
+        };
     const steps = remediation.runnable ? remediation.command : "";
     log('❌ Branch "' + deployRef + '" has not been pushed to ' + repo + ".");
     if (dirty) {

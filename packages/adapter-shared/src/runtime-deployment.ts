@@ -145,36 +145,37 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
     input: DeploymentStartInput,
     context: DeploymentStartContext
   ): Promise<DeploymentStartResult> {
-    const previous = owner.lookup(
-      input.attemptId ? { attemptId: input.attemptId } : {}
-    );
+    const previous =
+      input.attemptId ? owner.lookup({ attemptId: input.attemptId })
+      : input.repo && input.environment ?
+        owner.lookupTarget({ repo: input.repo, environment: input.environment })
+      : owner.lookup();
     if (input.attemptId && previous.kind !== "found")
       return {
         ok: false,
         status: 409,
         error: "The repair attempt is no longer current. Nothing was deployed."
       };
-    if (
-      previous.kind === "ambiguous" &&
-      (!input.repo || !input.environment || !input.branch)
-    )
+    if (previous.kind === "ambiguous" && (!input.repo || !input.environment))
       return {
         ok: false,
         status: 400,
         error:
-          "More than one deployment is known. Specify repo, environment and branch."
+          "More than one deployment is known. Specify repo and environment."
       };
     const prior = previous.kind === "found" ? previous.invocation : undefined;
     const loop = resolveDeployRepairLoop(prior?.state ?? {}, input.attemptId);
     if (loop.error) return { ok: false, status: 409, error: loop.error };
     let resolved: ReturnType<typeof resolveDeploymentTarget>;
     try {
-      resolved = resolveDeploymentTarget(input, {
+      const options = {
         previous: prior?.target,
+        previousAppFile: prior?.state.deployParams?.appFile,
         workspace: context.workspace,
         awsEnabled: ports.awsEnabled,
         normalizeAppFile: ports.normalizeAppFile
-      });
+      };
+      resolved = resolveDeploymentTarget(input, options);
     } catch (error) {
       return {
         ok: false,
@@ -187,6 +188,32 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
     if ("error" in resolved) return { ok: false, ...resolved };
     const { target } = resolved;
     const { repo } = target;
+    const eligiblePrior =
+      prior &&
+      prior.target.repo.toLowerCase() === repo.toLowerCase() &&
+      prior.target.environment === target.environment;
+    const inheritedModel =
+      (
+        input.appFile === undefined &&
+        eligiblePrior &&
+        prior.target.branch === target.branch &&
+        prior.state.deployParams?.appFile !== undefined
+      ) ?
+        prior.state.deployParams.appFile
+      : undefined;
+    const inheritedPrior = Boolean(
+      prior &&
+      (input.attemptId ||
+        !input.repo ||
+        (eligiblePrior &&
+          (!input.environment ||
+            !input.branch ||
+            !input.provider ||
+            inheritedModel !== undefined)))
+    );
+    const admissionCurrent = () =>
+      !owner.isShuttingDown() &&
+      (!inheritedPrior || (prior !== undefined && owner.isCurrent(prior)));
     const reservation = owner.reserve(target, "deploy");
     if (!reservation)
       return {
@@ -214,7 +241,7 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
           )
         };
       }
-      if (owner.isShuttingDown() || (prior && !owner.isCurrent(prior)))
+      if (!admissionCurrent())
         return {
           ok: false,
           status: 409,
@@ -244,19 +271,21 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
           };
         }
       }
-      if (owner.isShuttingDown() || (prior && !owner.isCurrent(prior)))
+      if (!admissionCurrent())
         return {
           ok: false,
           status: 409,
           error:
             "The deployment context changed while checking its branch. Nothing was deployed."
         };
-      if (context.modelSelection && !input.appFile && !input.attemptId) {
+      if (
+        context.modelSelection &&
+        input.appFile === undefined &&
+        inheritedModel === undefined &&
+        !input.attemptId
+      ) {
         const selection = context.modelSelection;
-        const current = () =>
-          !owner.isShuttingDown() &&
-          (!prior || owner.isCurrent(prior)) &&
-          selection.isCurrent();
+        const current = () => admissionCurrent() && selection.isCurrent();
         if (!current())
           return {
             ok: false,
@@ -300,10 +329,25 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
           };
         }
       }
+      const { appFile: _selectedAppFile, ...repeatTarget } = target;
+      const repeatAppFile =
+        loop.repairLoop ?
+          prior?.state.deployParams?.appFile
+        : (input.appFile ?? inheritedModel);
       const state: DeploymentState = {
         envName: target.environment,
-        workspaceBranch: context.workspace?.branch,
-        deployParams: { ...target, targetRepo: repo },
+        workspaceBranch:
+          (
+            context.workspace?.repo.toLowerCase() === repo.toLowerCase() &&
+            context.workspace.branch === target.branch
+          ) ?
+            context.workspace.branch
+          : undefined,
+        deployParams: {
+          ...repeatTarget,
+          targetRepo: repo,
+          ...(repeatAppFile !== undefined ? { appFile: target.appFile } : {})
+        },
         deployingRepo: repo,
         deployingBranch: target.branch,
         deployingProvider: target.provider,
@@ -332,7 +376,11 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
         reservation,
         input.attemptId
       );
-      state.deployAttempt = { ...state.deployParams, id: invocation.attemptId };
+      state.deployAttempt = {
+        ...target,
+        targetRepo: repo,
+        id: invocation.attemptId
+      };
       state.deployGeneration = invocation.generation;
       const isCurrent = () =>
         owner.isCurrent(invocation) && !invocation.signal.aborted;
@@ -374,18 +422,21 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
               appFile: target.appFile,
               resources: state.deployingResources ?? [],
               log,
+              onProgress: () => owner.publish(invocation),
               isCurrent
             });
+            if (!isCurrent()) return;
             if (state.deployStatus === "in_progress")
               throw new Error(
                 "Monitoring ended without confirming the workflow outcome."
               );
           } catch (error) {
+            if (!isCurrent()) return;
             state.deployStatus = "failed";
-            state.deployErrorKind = "run-unconfirmed";
+            state.deployErrorKind ??= "run-unconfirmed";
             const reason =
               error instanceof Error ? error.message : String(error);
-            state.deployError = ports.delivery.redactDiagnostic(
+            state.deployError ??= ports.delivery.redactDiagnostic(
               `Deploy monitoring stopped unexpectedly: ${reason}`
             );
             log(`\u274c Deploy monitor stopped unexpectedly: ${reason}`);
@@ -441,6 +492,7 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
           context.resources ? clonePending(context.resources) : undefined
       };
       const capturedInput = { ...input };
+      if (capturedInput.attemptId === "") delete capturedInput.attemptId;
       return owner.trackAdmission(() => admit(capturedInput, capturedContext));
     }
   };
