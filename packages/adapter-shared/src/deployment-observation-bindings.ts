@@ -1,7 +1,7 @@
 import {
   observeWorkflowRun,
   selectLatestWorkflowRunId,
-  selectWorkflowRunId,
+  selectDeploymentWorkflowRunId,
   type ListArtifacts,
   type DownloadArtifact
 } from "@radius-project/core";
@@ -139,7 +139,12 @@ export function createDeploymentObservationBindings({
           selected.value
         : []
       : await ghJson(args, []);
-    return selectWorkflowRunId(runs, sinceMs, correlationId, afterRunId);
+    return selectDeploymentWorkflowRunId(
+      runs,
+      sinceMs,
+      correlationId,
+      afterRunId
+    );
   }
 
   function getRunDetail(

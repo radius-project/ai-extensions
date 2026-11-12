@@ -45,6 +45,7 @@ const { findWorkflowRun, ghJson, latestWorkflowRunId } =
 interface RunListEntry {
   databaseId?: number;
   createdAt?: string;
+  displayTitle?: string;
 }
 
 function replyWith(runs: RunListEntry[] | string): void {
@@ -116,6 +117,57 @@ describe("findWorkflowRun known-id shortcut", () => {
     expect(ghMock.calls).toHaveLength(0);
   });
 });
+
+describe.each(["deploy.yml", "delete-environment.yml"])(
+  "%s correlated discovery",
+  (workflow) => {
+    it("uses the exact trailing correlation token even with a baseline and an old creation time", async () => {
+      replyWith([
+        { databaseId: 101, displayTitle: "Radius dep-own-suffix" },
+        { databaseId: 102, displayTitle: "Radius dep-own another-token" },
+        {
+          databaseId: 103,
+          createdAt: "2000-01-01T00:00:00Z",
+          displayTitle: "Radius dep-own"
+        }
+      ]);
+      await expect(
+        findWorkflowRun(
+          "acme/widgets",
+          workflow,
+          DISPATCH_AT,
+          null,
+          undefined,
+          100,
+          "dep-own"
+        )
+      ).resolves.toBe(103);
+      expect(ghMock.calls[0]).toContain(`--workflow=${workflow}`);
+      expect(ghMock.calls[0]).toContain("100");
+      expect(ghMock.calls[0]).toContain(
+        "databaseId,status,createdAt,displayTitle"
+      );
+    });
+
+    it("refuses ambiguous matches instead of selecting the first run", async () => {
+      replyWith([
+        { databaseId: 101, displayTitle: "Radius dep-own" },
+        { databaseId: 102, displayTitle: "Radius dep-own" }
+      ]);
+      await expect(
+        findWorkflowRun(
+          "acme/widgets",
+          workflow,
+          DISPATCH_AT,
+          null,
+          undefined,
+          100,
+          "dep-own"
+        )
+      ).resolves.toBeNull();
+    });
+  }
+);
 
 describe("findWorkflowRun with a monotonic baseline", () => {
   it("returns the first run above the baseline when a later run is also visible", async () => {

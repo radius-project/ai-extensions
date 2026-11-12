@@ -1,5 +1,5 @@
 import { createDeploymentObservationBindings } from "@radius-project/adapter-shared";
-export { selectWorkflowRunId } from "@radius-project/core";
+export { selectDeploymentWorkflowRunId } from "@radius-project/core";
 export {
   SelectedGhAuthorizationError,
   isSelectedGhAuthorizationError,

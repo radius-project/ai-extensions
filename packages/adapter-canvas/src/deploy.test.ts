@@ -4,10 +4,7 @@ import {
   readWorkflowRun,
   type WorkflowRunner
 } from "@radius-project/adapter-shared";
-import {
-  observeWorkflowRun,
-  selectDeploymentWorkflowRunId
-} from "@radius-project/core";
+import { observeWorkflowRun } from "@radius-project/core";
 import { workflowObservationCases } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -21,7 +18,7 @@ import {
   getRunDetail,
   isSelectedGhAuthorizationError,
   latestWorkflowRunId,
-  selectWorkflowRunId
+  selectDeploymentWorkflowRunId
 } from "./deploy.js";
 import * as gh from "./gh.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
@@ -975,13 +972,13 @@ describe("isRepoNotFoundError", () => {
   });
 });
 
-describe("selectWorkflowRunId", () => {
+describe("selectDeploymentWorkflowRunId", () => {
   const at = (iso: string) => Date.parse(iso);
   const since = at("2026-08-20T10:00:00Z");
 
   it("returns null for a non-array payload", () => {
-    expect(selectWorkflowRunId(null, since)).toBeNull();
-    expect(selectWorkflowRunId({}, since)).toBeNull();
+    expect(selectDeploymentWorkflowRunId(null, since)).toBeNull();
+    expect(selectDeploymentWorkflowRunId({}, since)).toBeNull();
   });
 
   it("picks the newest run created within the skew window", () => {
@@ -989,17 +986,17 @@ describe("selectWorkflowRunId", () => {
       { databaseId: 3, createdAt: "2026-08-20T10:00:05Z" },
       { databaseId: 2, createdAt: "2026-08-20T09:59:59Z" }
     ];
-    expect(selectWorkflowRunId(runs, since)).toBe(3);
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBe(3);
   });
 
   it("ignores stale runs created before the ~60s cutoff", () => {
     const runs = [{ databaseId: 9, createdAt: "2026-08-20T09:58:00Z" }];
-    expect(selectWorkflowRunId(runs, since)).toBeNull();
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBeNull();
   });
 
   it("tolerates ~60s of clock skew before dispatch", () => {
     const runs = [{ databaseId: 7, createdAt: "2026-08-20T09:59:10Z" }];
-    expect(selectWorkflowRunId(runs, since)).toBe(7);
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBe(7);
   });
 
   it("matches only the run whose display title carries the correlation id", () => {
@@ -1015,7 +1012,7 @@ describe("selectWorkflowRunId", () => {
         displayTitle: "Radius - Delete Environment prod del-abc-123"
       }
     ];
-    expect(selectWorkflowRunId(runs, since, "del-abc-123")).toBe(4);
+    expect(selectDeploymentWorkflowRunId(runs, since, "del-abc-123")).toBe(4);
   });
 
   it("returns null when no run carries the requested correlation id", () => {
@@ -1026,7 +1023,9 @@ describe("selectWorkflowRunId", () => {
         displayTitle: "Radius - Delete Environment prod other-id"
       }
     ];
-    expect(selectWorkflowRunId(runs, since, "del-missing")).toBeNull();
+    expect(
+      selectDeploymentWorkflowRunId(runs, since, "del-missing")
+    ).toBeNull();
   });
 
   it("skips entries missing a databaseId", () => {
@@ -1034,39 +1033,6 @@ describe("selectWorkflowRunId", () => {
       { createdAt: "2026-08-20T10:00:06Z" },
       { databaseId: 8, createdAt: "2026-08-20T10:00:05Z" }
     ];
-    expect(selectWorkflowRunId(runs, since)).toBe(8);
-  });
-});
-describe("staged deployment discovery is not the legacy Canvas selector", () => {
-  const since = Date.parse("2026-08-20T10:00:00Z");
-  it("keeps baseline-only Canvas behavior distinct from strict correlation", () => {
-    const runs = [
-      { databaseId: 11, displayTitle: "other marker" },
-      { databaseId: 12, displayTitle: "Radius dep-a" }
-    ];
-    expect(selectWorkflowRunId(runs, since, "dep-a", 10)).toBe(11);
-    expect(selectDeploymentWorkflowRunId(runs, since, "dep-a", 10)).toBe(12);
-  });
-  it("retains legacy substring/time filtering without hiding the strict switch", () => {
-    const partial = [
-      {
-        databaseId: 11,
-        displayTitle: "Radius dep-a-suffix",
-        createdAt: "2026-08-20T10:00:00Z"
-      }
-    ];
-    expect(selectWorkflowRunId(partial, since, "dep-a")).toBe(11);
-    expect(selectDeploymentWorkflowRunId(partial, since, "dep-a")).toBeNull();
-    const old = [
-      {
-        databaseId: 12,
-        displayTitle: "Radius dep-a",
-        createdAt: "2026-08-19T10:00:00Z"
-      }
-    ];
-    expect(selectWorkflowRunId(old, since, "dep-a")).toBeNull();
-    expect(selectDeploymentWorkflowRunId(old, since, "dep-a")).toBe(12);
-    const ambiguous = [old[0], { ...old[0], databaseId: 13 }];
-    expect(selectDeploymentWorkflowRunId(ambiguous, since, "dep-a")).toBeNull();
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBe(8);
   });
 });
