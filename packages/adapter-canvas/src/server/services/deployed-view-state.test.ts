@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { CanvasState } from "../../shared.js";
-import { discardDeployedApplicationState } from "./deployed-view-state.js";
+import {
+  captureDeployedApplicationState,
+  discardDeployedApplicationState
+} from "./deployed-view-state.js";
 
 function deployedState(over: Partial<CanvasState> = {}): CanvasState {
   return {
@@ -16,6 +19,107 @@ function deployedState(over: Partial<CanvasState> = {}): CanvasState {
 }
 
 describe("discardDeployedApplicationState", () => {
+  const target = {
+    repo: "OCTO/shop",
+    environment: "prod",
+    application: "billing"
+  };
+
+  it("captures ownerless evidence and discards it only after acceptance", () => {
+    const state = deployedState();
+    const discard = captureDeployedApplicationState(state, target);
+    expect(state.deployStatus).toBe("complete");
+    discard();
+    discard();
+    expect(state.deployedGraph).toBeNull();
+    expect(state.deployRunId).toBeNull();
+  });
+
+  it.each(["id", "targetRepo", "environment"] as const)(
+    "preserves an attempt whose %s changed in place",
+    (key) => {
+      const attempt = {
+        id: "original",
+        targetRepo: "octo/shop",
+        environment: "prod"
+      };
+      const state = deployedState({ deployAttempt: attempt });
+      const discard = captureDeployedApplicationState(state, target);
+      attempt[key] = "replacement";
+      const expected = structuredClone(state);
+      discard();
+      expect(state).toEqual(expected);
+    }
+  );
+
+  it("clears an unchanged captured attempt", () => {
+    const state = deployedState({
+      deployAttempt: {
+        id: "original",
+        targetRepo: "octo/shop",
+        environment: "prod"
+      }
+    });
+    captureDeployedApplicationState(state, target)();
+    expect(state.deployedGraph).toBeNull();
+    expect(state.deployRunId).toBeNull();
+  });
+
+  it.each<Partial<CanvasState>>([
+    {
+      deployAttempt: {
+        id: "new",
+        targetRepo: "octo/shop",
+        environment: "prod"
+      }
+    },
+    { deployGeneration: 2 },
+    { deployRunId: 99 },
+    { deployedGraph: [{ name: "replacement" }] },
+    { deployingResources: [] },
+    { deployingRepo: "octo/other" },
+    { deployAppName: "other" },
+    { envName: "staging" }
+  ])(
+    "preserves replacement evidence even without an original generation: %j",
+    (replacement) => {
+      const state = deployedState();
+      const discard = captureDeployedApplicationState(state, target);
+      Object.assign(state, replacement);
+      const expected = structuredClone(state);
+      discard();
+      expect(state).toEqual(expected);
+    }
+  );
+
+  it.each<Partial<CanvasState>>([
+    { deployedGraphRepo: "octo/other" },
+    { deployedGraphRepo: undefined },
+    { deployAppName: undefined },
+    { deployAppName: " " },
+    { deployEnvName: "staging" }
+  ])(
+    "does not capture unrelated or unidentified legacy evidence: %j",
+    (override) => {
+      const state = deployedState(override);
+      const expected = structuredClone(state);
+      captureDeployedApplicationState(state, target)();
+      expect(state).toEqual(expected);
+    }
+  );
+
+  it.each(["deployingRepo", "contextRepo", "workspaceRepo"] as const)(
+    "uses the available legacy repository identity from %s",
+    (key) => {
+      const state = deployedState({
+        deployedGraphRepo: undefined,
+        [key]: "octo/shop"
+      });
+      captureDeployedApplicationState(state, target)();
+      expect(state.deployedGraph).toBeNull();
+    }
+  );
+
   it("forgets the deployed graph of the application being deleted", () => {
     const state = deployedState();
 

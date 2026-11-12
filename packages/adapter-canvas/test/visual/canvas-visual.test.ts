@@ -347,6 +347,10 @@ async function routeDeployments(
               [
                 {
                   app: "radius-app",
+                  identity: {
+                    state: "known",
+                    application: "radius-app"
+                  },
                   environment: "fixture-environment",
                   status,
                   runUrl: `https://github.com/${REPOSITORY}/actions/runs/1`

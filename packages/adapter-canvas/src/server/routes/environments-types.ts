@@ -45,6 +45,7 @@ export interface EnvironmentVerifyRun {
 // the handler only reads `app` and `status`, but pinning the full contract keeps
 // a real `DeploymentRow` representable in tests.
 export interface EnvironmentActiveDeployment {
+  identity?: import("@radius-project/core").DeploymentApplicationIdentity;
   app: string;
   environment: string;
   provider: string;

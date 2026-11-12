@@ -37,6 +37,7 @@ import {
 import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
 import { createSessionHolder } from "../../../src/runtime/session.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createFakeDeploymentRuntime } from "./deployment.js";
 import type { SessionPort } from "../../../src/runtime/session.js";
 import type {
   RadiusExtensionDependencies,
@@ -168,6 +169,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           error: string;
           deployRunUrl: string;
           attemptId: string;
+          appFile?: string;
           instanceId: string;
         }) => unknown)
       | null;
@@ -316,6 +318,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         remote: false
       }))
     },
+    deployment: createFakeDeploymentRuntime(),
     deployTools: {
       selectDeployEntry,
       buildDeployPayload,

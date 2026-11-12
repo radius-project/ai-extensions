@@ -22,6 +22,7 @@ import type {
   DeployStatusSummary
 } from "../deploy-tools.js";
 import type { SessionHolder } from "./session.js";
+import type { DeploymentRuntime } from "@radius-project/adapter-shared";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import type { EnvironmentTools } from "./environment-tools.js";
 import type { PluginUpdatePreferences } from "./plugin-update-preferences.js";
@@ -240,6 +241,7 @@ export interface HostCallbackDependencies {
           error: string;
           deployRunUrl: string;
           attemptId: string;
+          appFile?: string;
           instanceId: string;
         }) => unknown)
       | null
@@ -351,6 +353,7 @@ export interface OperationsDependencies {
 // here, so a test can construct a complete fake without importing any adapter
 // module (server.ts/gh.ts/workspace.ts/...) or performing real I/O.
 export interface RadiusExtensionDependencies {
+  deployment: DeploymentRuntime;
   logError(message: string): void;
   automaticPluginUpdates: boolean;
   pluginUpdatePreferences: PluginUpdatePreferences;

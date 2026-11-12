@@ -13,7 +13,7 @@
 
 import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
 import { hasClassToken } from "./html.js";
-import { isRecord, readArray, readString } from "./json.js";
+import { isRecord, readArray, readRecord, readString } from "./json.js";
 import type { EntryScope } from "./lifecycle.js";
 import type {
   BrowserContext,
@@ -69,6 +69,8 @@ export interface DeploymentInfo {
   environment: string;
   status: string;
   runUrl: string;
+  deploymentId?: string;
+  identity?: { state: "known" } | { state: "unavailable"; reason: string };
 }
 
 export interface DeploymentListing {
@@ -162,13 +164,32 @@ export function parseEnvironmentListing(payload: unknown): EnvironmentListing {
 
 export function parseDeploymentListing(payload: unknown): DeploymentInfo[] {
   return readArray(payload, "deployments")
-    .map((entry) => ({
-      app: readString(entry, "app"),
-      environment: readString(entry, "environment"),
-      status: readString(entry, "status"),
-      runUrl: readString(entry, "runUrl")
-    }))
-    .filter((entry) => entry.app !== "" && entry.environment !== "");
+    .map((entry): DeploymentInfo => {
+      const app = readString(entry, "app");
+      const identity = readRecord(entry, "identity");
+      const known =
+        readString(identity, "state") === "known" &&
+        app.trim() !== "" &&
+        readString(identity, "application").trim().toLowerCase() ===
+          app.trim().toLowerCase();
+      return {
+        app: known ? app : "",
+        environment: readString(entry, "environment"),
+        status: readString(entry, "status"),
+        runUrl: readString(entry, "runUrl"),
+        deploymentId: readString(entry, "deploymentId"),
+        identity:
+          known ?
+            { state: "known" }
+          : {
+              state: "unavailable",
+              reason:
+                readString(identity, "reason") ||
+                "Application identity is unavailable."
+            }
+      };
+    })
+    .filter((entry) => entry.environment !== "");
 }
 
 export function parseRequiredDeploymentListing(
@@ -702,9 +723,17 @@ export function populatePlannedSelectors(
           state.deploymentsStale = false;
           state.deploymentStatuses = {};
           for (const deployment of listing.deployments) {
-            state.deploymentStatuses[
-              deploymentKey(deployment.app, deployment.environment)
-            ] = deployment.status;
+            if (deployment.app)
+              state.deploymentStatuses[
+                deploymentKey(deployment.app, deployment.environment)
+              ] = deployment.status;
+            const environmentKey = deploymentKey("", deployment.environment);
+            if (
+              !deploymentStatusBlocksMutation(
+                state.deploymentStatuses[environmentKey] ?? ""
+              )
+            )
+              state.deploymentStatuses[environmentKey] = deployment.status;
           }
         })
         .catch(() => {
@@ -781,7 +810,9 @@ export function applyPlanEnvState(
   const application = selectValue(appSelect);
   const environmentStatus = state.environmentStatuses[environment] ?? "";
   const deploymentStatus =
-    state.deploymentStatuses[deploymentKey(application, environment)] ?? "";
+    state.deploymentStatuses[deploymentKey("", environment)] ??
+    state.deploymentStatuses[deploymentKey(application, environment)] ??
+    "";
   const deploymentBlocked = deploymentStatusBlocksMutation(deploymentStatus);
 
   if (button) {

@@ -56,6 +56,9 @@ export const VERIFICATION_WORKFLOW_CONTENT_SHA256 = createHash("sha256")
 type ServerModule = typeof import("../../../src/server.js");
 type HarnessServerRuntime = ServerModule &
   ReturnType<ServerModule["createProductionCanvasServerRuntime"]> & {
+    deploymentRuntime: ReturnType<
+      ServerModule["createProductionDeploymentRuntime"]
+    >;
     setEnvironmentOperationRunner(
       runner: EnvironmentOperationRunner | null
     ): void;
@@ -145,6 +148,7 @@ export interface FakeCliCommand {
   stdout?: string;
   stderr?: string;
   writeFiles?: Array<{ path: string; content: string; executable?: boolean }>;
+  writeFilesDirectoryArg?: string;
   /**
    * Answers at most this many calls. Later calls fall through to the next
    * matching command, so a scenario can answer one command differently the
@@ -162,6 +166,18 @@ export function fakeCliCommandAvailable(
   answered: number
 ): boolean {
   return command.times === undefined || answered < command.times;
+}
+
+export function fakeCliWriteDirectory(
+  command: Pick<FakeCliCommand, "writeFilesDirectoryArg">,
+  args: readonly string[],
+  cwd: string
+): string {
+  if (!command.writeFilesDirectoryArg) return cwd;
+  const index = args.indexOf(command.writeFilesDirectoryArg);
+  if (index < 0 || !args[index + 1])
+    throw new Error("Missing fake CLI output directory argument.");
+  return args[index + 1];
 }
 
 /**
@@ -645,9 +661,10 @@ if (!command) {
   process.exit(127);
 }
 
+const writeDirectory = (${fakeCliWriteDirectory.toString()})(command, args, process.cwd());
 for (const file of command.writeFiles || []) {
   const expanded = file.path.replace(/\\$([A-Z0-9_]+)/g, (_match, name) => process.env[name] || "");
-  const target = path.isAbsolute(expanded) ? expanded : path.resolve(process.cwd(), expanded);
+  const target = path.isAbsolute(expanded) ? expanded : path.resolve(writeDirectory, expanded);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, file.content, "utf8");
   if (file.executable && process.platform !== "win32") await fs.chmod(target, 0o755);
@@ -1009,6 +1026,53 @@ export function defaultFakeCliScenario(): FakeCliScenario {
           '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
         ],
         stdout: ".github/workflows/run-rad-commands.yml\tcompleted\tsuccess"
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/actions/runs/1/artifacts?per_page=100`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            artifacts: [
+              {
+                id: 1,
+                name: "radius-deploy-status-fixture",
+                workflow_run: { id: 1 }
+              }
+            ]
+          })
+      },
+      {
+        tool: "gh",
+        argsPrefix: [
+          "run",
+          "download",
+          "1",
+          "--name",
+          "radius-deploy-status-fixture",
+          "--dir"
+        ],
+        argsSuffix: ["--repo", REPOSITORY],
+        writeFilesDirectoryArg: "--dir",
+        writeFiles: [
+          {
+            path: "deploy-progress.json",
+            content: JSON.stringify({
+              schemaVersion: 1,
+              application: "radius-app",
+              environment: "fixture-environment",
+              runId: 1,
+              sequence: 1,
+              resources: []
+            })
+          }
+        ]
       },
       appBicep404,
       missingGhContent(
@@ -1413,6 +1477,8 @@ export class CanvasHarness {
     );
     const originalFetch = globalThis.fetch;
     let serverModule: HarnessServerRuntime | undefined;
+    let deploymentRuntime:
+      HarnessServerRuntime["deploymentRuntime"] | undefined;
     let ghModule: GhModule | undefined;
     let sharedModule: SharedModule | undefined;
     let entry: CanvasServerEntry | undefined;
@@ -1498,6 +1564,10 @@ export class CanvasHarness {
       const accountContext = createProductionGitHubAccountContext();
       const { createTestCanvasServerRuntime } =
         await import("../../support/server/production-runtime.js");
+      deploymentRuntime = production.createProductionDeploymentRuntime({
+        awsEnabled: options.awsEnabled ?? false
+      });
+      deploymentRuntime.subscribeDispatch(production.invalidateDeployListCache);
       let environmentOperationRunner: EnvironmentOperationRunner | undefined;
       serverModule = {
         ...production,
@@ -1505,10 +1575,14 @@ export class CanvasHarness {
           executionOwner: createEnvironmentExecutionOwner(),
           accountContext,
           awsEnabled: options.awsEnabled ?? false,
+          deploymentRuntime,
           get environmentOperationRunner() {
             return environmentOperationRunner;
           }
         }),
+        deploymentRuntime,
+        setDeployRepairHandoff: deploymentRuntime.setDeployRepairHandoff,
+        setDeployFailureNotice: deploymentRuntime.setDeployFailureNotice,
         setEnvironmentOperationRunner: (runner) => {
           environmentOperationRunner = runner ?? undefined;
         }
@@ -1619,7 +1693,8 @@ export class CanvasHarness {
                   cleanupServerModule
                 )
             : undefined,
-          resetState: () => {
+          resetState: async () => {
+            await deploymentRuntime?.owner.shutdown(2000);
             cleanupServerModule?.resetListingCaches();
             ghModule?.resetGhIdentityCache();
             if (sharedModule)
@@ -2111,25 +2186,27 @@ export class CanvasHarness {
     await captureCleanupError(errors, () => closePage(this.page));
     const stop = () =>
       stopHarnessServer(this.entry, this.instanceId, this.serverModule);
-    if (this.repairHandoffRegistered) {
-      const lease = this.entry.state.deploymentMutation;
-      // The detached monitor releases its lease in finally. Shutdown revokes
-      // its scope, but credentials and the host port must outlive that release.
-      await stopAndDrainHarnessDeployment(
-        stop,
-        async () => {
+    const lease = this.entry.state.deploymentMutation;
+    await stopAndDrainHarnessDeployment(
+      stop,
+      async () => {
+        const drained =
+          await this.serverModule.deploymentRuntime.owner.shutdown(2000);
+        if (!drained.complete)
+          throw new Error(
+            `Deployment tasks did not drain: ${drained.pending.join(", ")}`
+          );
+        if (this.repairHandoffRegistered) {
           await expect
             .poll(() => harnessDeploymentSettled(this.entry.state, lease), {
               timeout: 5_000
             })
             .toBe(true);
-        },
-        () => this.setDeployRepairHandoff(null),
-        errors
-      );
-    } else {
-      await captureCleanupError(errors, stop);
-    }
+        }
+      },
+      () => this.serverModule.setDeployRepairHandoff(null),
+      errors
+    );
     // Drain any identity probe this test started before restoring the
     // environment: a probe that settled after the next test reset the cache
     // would publish this test's identity into that test's page.
