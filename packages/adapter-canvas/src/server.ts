@@ -3637,8 +3637,7 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 async function fetchBicepSelection(
   entry: { state: CanvasState },
   repo: string,
-  branch: string,
-  appFile?: string
+  branch: string
 ): Promise<{
   content: string | null;
   fromWorkspace: boolean;
@@ -3646,22 +3645,6 @@ async function fetchBicepSelection(
   bicepPath: string;
 }> {
   const access = accessForSelection(entry, repo, branch);
-  if (appFile) {
-    const local =
-      access.useWorkspace ?
-        await readWorkspaceFile(entry.state.workspacePath, appFile)
-      : null;
-    return {
-      content:
-        local ??
-        (await github.getContent(
-          `/repos/${repo}/contents/${appFile}?ref=${encodeURIComponent(access.branch)}`
-        )),
-      fromWorkspace: local !== null,
-      branch: access.branch,
-      bicepPath: appFile
-    };
-  }
   if (access.useWorkspace) {
     const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
     if (local)
