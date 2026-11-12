@@ -4,6 +4,7 @@ import { redactCredentials } from "@radius-project/core";
 import { createDeploymentDelivery } from "../../../src/server/services/deployment-delivery.js";
 import { createTestDeploymentRuntime } from "../../support/server/deployment-runtime.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
+import { createDeferred } from "../../support/browser/fakes.js";
 import {
   deployFailureNoticeMessage,
   deployRepairHandoffMessage
@@ -45,6 +46,79 @@ async function harness(kind: "repair" | "notice") {
 }
 
 describe("deployment delivery through registered SDK handlers", () => {
+  it("keeps owned execution across duplicate registered close and reopen events", async () => {
+    const finished = createDeferred<void>();
+    const entered = createDeferred<void>();
+    const delivery = createDeploymentDelivery();
+    const runtime = createTestDeploymentRuntime({
+      resolveDeployment: async () => null,
+      createExecution: () => ({
+        observation: createWorkflowObservationScope(() => {
+          throw new Error("Unexpected artifact read");
+        }),
+        monitor: {
+          async run({ entry }) {
+            entered.resolve();
+            await finished.promise;
+            entry.state.deployStatus = "failed";
+            entry.state.deployError = "Model failed";
+          }
+        }
+      }),
+      delivery: {
+        ...delivery.ports,
+        redactDiagnostic: redactCredentials,
+        reportDiagnostic: () => {}
+      }
+    });
+    const sdk = await createRuntimeSdkHarness({}, (deps) => {
+      deps.deployment = runtime;
+      deps.hostCallbacks.setDeployRepairHandoff =
+        delivery.setDeployRepairHandoff;
+      deps.hostCallbacks.setDeployFailureNotice =
+        delivery.setDeployFailureNotice;
+    });
+    try {
+      const input = {
+        repo: "acme/app",
+        branch: "feature",
+        page: "deploying"
+      };
+      await sdk.host.open("panel", input);
+      const result = await runtime.start({
+        repo: input.repo,
+        branch: input.branch,
+        environment: "production",
+        appFile: "models/custom.bicep"
+      });
+      if (!result.ok) throw new Error(result.error);
+      await entered.promise;
+      await sdk.host.close("panel");
+      await sdk.host.close("panel");
+      expect(sdk.servers.size).toBe(0);
+      expect(runtime.owner.hasActiveWork()).toBe(true);
+      expect(result.invocation.signal.aborted).toBe(false);
+      await sdk.host.open("panel", input);
+      expect(runtime.owner.isCurrent(result.invocation)).toBe(true);
+      await sdk.host.close("panel");
+      finished.resolve();
+      await vi.waitFor(() =>
+        expect(runtime.owner.hasActiveWork()).toBe(false)
+      );
+      expect(sdk.session.send).toHaveBeenCalledExactlyOnceWith(
+        deployRepairHandoffMessage(input.repo, input.branch, {
+          error: "Model failed",
+          deployRunUrl: "",
+          appFile: "models/custom.bicep",
+          attemptId: result.invocation.attemptId
+        })
+      );
+    } finally {
+      finished.resolve();
+      await sdk.extension.shutdown("test");
+    }
+  });
+
   it.each(["repair", "notice"] as const)(
     "delivers a %s through runtime-local callbacks without a Canvas entry",
     async (kind) => {
