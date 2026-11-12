@@ -714,6 +714,20 @@ test.describe("Radius Canvas in Chromium", () => {
       "--method",
       "GET"
     ];
+    const discoveredRuns = command(
+      [
+        "run",
+        "list",
+        "--workflow=run-rad-commands.yml",
+        "--limit",
+        "100",
+        "--json",
+        "databaseId,status,createdAt,displayTitle",
+        "--repo",
+        REPOSITORY
+      ],
+      "[]"
+    );
     const additions: FakeCliCommand[] = [
       {
         tool: "gh",
@@ -796,31 +810,7 @@ test.describe("Radius Canvas in Chromium", () => {
         ],
         JSON.stringify([{ databaseId: 101, createdAt: "2020-01-01T00:00:00Z" }])
       ),
-      command(
-        [
-          "run",
-          "list",
-          "--workflow=run-rad-commands.yml",
-          "--limit",
-          "5",
-          "--json",
-          "databaseId,status,createdAt",
-          "--repo",
-          REPOSITORY
-        ],
-        JSON.stringify([
-          {
-            databaseId: 101,
-            status: "completed",
-            createdAt: new Date().toISOString()
-          },
-          {
-            databaseId: runId,
-            status: "completed",
-            createdAt: new Date().toISOString()
-          }
-        ])
-      ),
+      discoveredRuns,
       {
         tool: "gh",
         argsPrefix: dispatchPrefix,
@@ -977,6 +967,32 @@ test.describe("Radius Canvas in Chromium", () => {
     const attemptId = canvas.entry.state.deployAttempt?.id;
     expect(attemptId).toBeTruthy();
     try {
+      const readCorrelation = async () =>
+        (await canvas.cliCalls())
+          .find(
+            (call) =>
+              call.tool === "gh" &&
+              dispatchPrefix.every((arg, index) => call.args[index] === arg)
+          )
+          ?.args.find((arg) => arg.startsWith("correlation_id="))
+          ?.slice("correlation_id=".length);
+      await expect.poll(readCorrelation).toMatch(/^dep-/);
+      const correlationId = await readCorrelation();
+      discoveredRuns.stdout = JSON.stringify([
+        {
+          databaseId: 103,
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          displayTitle: "Radius fixture-environment dep-unrelated"
+        },
+        ...[101, runId].map((databaseId) => ({
+          databaseId,
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          displayTitle: `Radius fixture-environment ${correlationId}`
+        }))
+      ]);
+      await canvas.setScenario(scenario);
       await expect
         .poll(() => canvas.entry.state.deployStatus, { timeout: 15_000 })
         .toBe("failed");
@@ -7030,7 +7046,9 @@ test.describe("Radius Canvas in Chromium", () => {
       });
     });
     await gotoCanvas(page, canvas, "deploying");
-    await page.locator("#deploy-now-btn:not([disabled])").click();
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
     await expect.poll(() => statusPolls).toBeGreaterThan(0);
     await expect(page.locator("#deploy-progress-subtitle")).toContainText(
       error
