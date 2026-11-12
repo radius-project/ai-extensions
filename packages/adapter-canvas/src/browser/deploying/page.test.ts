@@ -1812,8 +1812,7 @@ describe("deploy flow", () => {
       environment: "dev",
       provider: "azure",
       targetRepo: "octo/app",
-      branch: "feature",
-      appFile: ".radius/app.bicep"
+      branch: "feature"
     });
     expect(inlineMessage(page.inlineStatus)).toBe("");
     page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);

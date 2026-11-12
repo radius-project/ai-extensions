@@ -131,6 +131,27 @@ describe("validateDeployAttempt", () => {
       )
     ).toBeNull();
   });
+
+  it("normalizes equivalent repair paths before comparing the snapshot", () => {
+    expect(
+      validateDeployAttempt(
+        { attemptId: "attempt-A", appFile: ".\\.radius\\app.bicep" },
+        state
+      )
+    ).toBeNull();
+    expect(
+      validateDeployAttempt(
+        { attemptId: "attempt-A", appFile: "../app.bicep" },
+        state
+      )
+    ).toMatch(/path/);
+    expect(
+      validateDeployAttempt(
+        { attemptId: "attempt-A", appFile: "app.bicep" },
+        state
+      )
+    ).toMatch(/cannot be retargeted/);
+  });
 });
 
 describe("buildDeployPayload", () => {
@@ -143,6 +164,53 @@ describe("buildDeployPayload", () => {
       appFile: ".radius/app.bicep"
     }
   };
+
+  it("repeats automatic selection without pinning its previously resolved root", () => {
+    const payload = buildDeployPayload(
+      {},
+      {
+        deployParams: { targetRepo: "octo/app", branch: "feat" },
+        deployAttempt: { id: "previous", appFile: "app.bicep" }
+      }
+    );
+    expect(payload).not.toHaveProperty("appFile");
+  });
+
+  it("preserves explicit intent from a legacy last deploy without a stored branch", () => {
+    expect(
+      buildDeployPayload(
+        {},
+        {
+          deployParams: { targetRepo: "octo/app", appFile: "app.bicep" }
+        }
+      ).appFile
+    ).toBe("app.bicep");
+  });
+
+  it.each([{ repo: "octo/other" }, { branch: "other" }])(
+    "does not reuse a model path after retargeting %j",
+    (args) =>
+      expect(buildDeployPayload(args, state)).not.toHaveProperty("appFile")
+  );
+
+  it.each(["app.bicep", ""])(
+    "preserves supplied paths for server validation (%j)",
+    (appFile) => {
+      expect(buildDeployPayload({ appFile }, state).appFile).toBe(appFile);
+    }
+  );
+
+  it("pins a bound repair to its resolved root even when the last selection was automatic", () => {
+    expect(
+      buildDeployPayload(
+        { attemptId: "repair" },
+        {
+          deployParams: { targetRepo: "octo/app", branch: "feat" },
+          deployAttempt: { id: "repair", appFile: "app.bicep" }
+        }
+      ).appFile
+    ).toBe("app.bicep");
+  });
 
   it("repeats the last deploy so a post-repair redeploy matches the original", () => {
     expect(buildDeployPayload({}, state)).toEqual({
@@ -232,9 +300,9 @@ describe("buildDeployPayload", () => {
     expect(payload).toMatchObject({
       targetRepo: "octo/ctx",
       provider: "azure",
-      appFile: ".radius/app.bicep",
       branch: ""
     });
+    expect(payload).not.toHaveProperty("appFile");
   });
 });
 

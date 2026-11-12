@@ -681,10 +681,11 @@ test.describe("Radius Canvas in Chromium", () => {
     await seed(canvas);
   });
 
-  test("production deploy outcome masks host-known credentials through repair publication @safety", async ({
-    page,
-    canvas
-  }, testInfo) => {
+  async function verifyProductionDeploy(
+    { page, canvas }: { page: Page; canvas: CanvasHarness },
+    testInfo: TestInfo,
+    appFile: string
+  ): Promise<void> {
     const environment = "fixture-environment";
     const opaque = "OpaqueBindingWitness92741";
     const named = "UnregisteredNamedWitness63281";
@@ -889,6 +890,23 @@ test.describe("Radius Canvas in Chromium", () => {
       );
     }
     const scenario = defaultFakeCliScenario();
+    if (appFile === "app.bicep") {
+      await fs.rename(
+        path.join(canvas.workspacePath, ".radius", "app.bicep"),
+        path.join(canvas.workspacePath, "app.bicep")
+      );
+      additions.unshift({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`,
+          "--jq",
+          ".content"
+        ],
+        exitCode: 1,
+        stderr: "gh: Not Found (HTTP 404)"
+      });
+    }
     scenario.commands = scenario.commands.filter(
       (entry) =>
         entry.tool !== "gh" ||
@@ -953,19 +971,37 @@ test.describe("Radius Canvas in Chromium", () => {
     const nonce = canvas.entry.state.browserMutationNonce;
     if (typeof nonce !== "string" || !nonce)
       throw new Error("Missing mutation nonce.");
-    const admitted = await page.request.post(`${canvas.baseUrl}/api/deploy`, {
-      headers: { "x-radius-mutation-nonce": nonce },
-      data: {
-        repo: REPOSITORY,
-        branch: WORKTREE_BRANCH,
-        provider: "azure",
-        environment,
-        appFile: ".radius/app.bicep"
-      }
-    });
+    const admitted =
+      appFile === "app.bicep" ?
+        await (async () => {
+          await gotoCanvas(page, canvas, "deploying");
+          const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+          await expect(deployNow).toHaveText("Deploy");
+          const response = page.waitForResponse(
+            (response) =>
+              response.url() === `${canvas.baseUrl}/api/deploy` &&
+              response.request().method() === "POST"
+          );
+          await deployNow.click();
+          return response;
+        })()
+      : await page.request.post(`${canvas.baseUrl}/api/deploy`, {
+          headers: { "x-radius-mutation-nonce": nonce },
+          data: {
+            repo: REPOSITORY,
+            branch: WORKTREE_BRANCH,
+            provider: "azure",
+            environment
+          }
+        });
     expect(admitted.status()).toBe(200);
     const attemptId = canvas.entry.state.deployAttempt?.id;
     expect(attemptId).toBeTruthy();
+    expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
+    if (appFile === "app.bicep")
+      expect(await bodyFor(canvas, "/api/deploy")).not.toHaveProperty(
+        "appFile"
+      );
     try {
       const readCorrelation = async () =>
         (await canvas.cliCalls())
@@ -978,6 +1014,13 @@ test.describe("Radius Canvas in Chromium", () => {
           ?.slice("correlation_id=".length);
       await expect.poll(readCorrelation).toMatch(/^dep-/);
       const correlationId = await readCorrelation();
+      const dispatch = (await canvas.cliCalls()).find((call) =>
+        dispatchPrefix.every((arg, index) => call.args[index] === arg)
+      );
+      expect(dispatch?.args).toContain(`app_file=${appFile}`);
+      expect(
+        dispatch?.args.find((arg) => arg.startsWith("rad_commands="))
+      ).toContain(`deploy ${appFile}`);
       discoveredRuns.stdout = JSON.stringify([
         {
           databaseId: 103,
@@ -1090,7 +1133,12 @@ test.describe("Radius Canvas in Chromium", () => {
           call.args.join(" ") === `run view ${runId} --log --repo ${REPOSITORY}`
       )
     ).toBe(true);
-  });
+  }
+
+  for (const appFile of [".radius/app.bicep", "app.bicep"]) {
+    test(`production ${appFile} deploy outcome masks host-known credentials through repair publication @safety`, (fixtures, testInfo) =>
+      verifyProductionDeploy(fixtures, testInfo, appFile));
+  }
 
   for (const fixture of pageStateCases()) {
     test(`round-trips hidden page state through the real parser: ${fixture.name} @safety`, async ({
@@ -6887,8 +6935,7 @@ test.describe("Radius Canvas in Chromium", () => {
         environment: "fixture-environment",
         provider: "azure",
         targetRepo: REPOSITORY,
-        branch: WORKTREE_BRANCH,
-        appFile: ".radius/app.bicep"
+        branch: WORKTREE_BRANCH
       });
     await expect(page.locator("body")).toContainText(/could not verify/i);
   });
@@ -7411,6 +7458,7 @@ test.describe("Radius Canvas in Chromium", () => {
         if (completed) {
           await createUnconfirmedMonitor("future_conclusion").monitor.run({
             entry: { state: monitorState },
+            appFile: ".radius/app.bicep",
             repo: REPOSITORY,
             branch: WORKTREE_BRANCH,
             provider: "azure",
@@ -7844,6 +7892,7 @@ test.describe("Radius Canvas in Chromium", () => {
       if (unconfirmed) {
         await createUnconfirmedMonitor("future_conclusion").monitor.run({
           entry: { state: monitorState },
+          appFile: ".radius/app.bicep",
           repo: REPOSITORY,
           branch: WORKTREE_BRANCH,
           provider: "azure",

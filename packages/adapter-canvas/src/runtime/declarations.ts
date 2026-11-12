@@ -359,7 +359,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         appFile: {
           type: "string",
           description:
-            "Path to the application Bicep file. Defaults to .radius/app.bicep."
+            "Repository-relative application model path. When omitted, select .radius/app.bicep first, then app.bicep at the repository root. Explicit paths never fall back to another model."
         }
       }
     }

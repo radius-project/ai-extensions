@@ -5,6 +5,7 @@ import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
 } from "./deploy-diagnostics.js";
+import { normalizeDeploymentAppFile } from "@radius-project/adapter-shared";
 import type {
   CanvasDeployAttempt,
   CanvasDeployParams,
@@ -30,7 +31,7 @@ export interface DeployPayload extends CanvasDeployParams {
   provider: string;
   targetRepo: string;
   branch: string;
-  appFile: string;
+  appFile?: string;
   agentInitiated: true;
   // Empty unless this call is bound to a repair loop. The route — not the
   // client — decides what it means: it validates the ID against the attempt it
@@ -114,6 +115,13 @@ export function validateDeployAttempt(
   if (!snapshot || snapshot.id !== args.attemptId) {
     return `Deploy attempt "${args.attemptId}" is not the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`;
   }
+  if (args.appFile !== undefined) {
+    try {
+      args = { ...args, appFile: normalizeDeploymentAppFile(args.appFile) };
+    } catch (error) {
+      return String(error);
+    }
+  }
   const mismatched = ATTEMPT_FIELDS.filter(
     ([arg, snap]) => args[arg] && args[arg] !== snapshot[snap]
   ).map(
@@ -135,19 +143,26 @@ export function buildDeployPayload(
   const snapshot: Partial<CanvasDeployAttempt> =
     (args.attemptId && state.deployAttempt) || {};
   const last = state.deployParams || {};
+  const targetRepo =
+    args.repo ||
+    snapshot.targetRepo ||
+    last.targetRepo ||
+    state.contextRepo ||
+    "";
+  const branch = args.branch || snapshot.branch || last.branch || "";
+  const appFile =
+    args.appFile !== undefined ? args.appFile
+    : args.attemptId ? snapshot.appFile
+    : targetRepo === last.targetRepo && branch === (last.branch || "") ?
+      last.appFile
+    : undefined;
   return {
     environment:
       args.environment || snapshot.environment || last.environment || "",
     provider: args.provider || snapshot.provider || last.provider || "azure",
-    targetRepo:
-      args.repo ||
-      snapshot.targetRepo ||
-      last.targetRepo ||
-      state.contextRepo ||
-      "",
-    branch: args.branch || snapshot.branch || last.branch || "",
-    appFile:
-      args.appFile || snapshot.appFile || last.appFile || ".radius/app.bicep",
+    targetRepo,
+    branch,
+    ...(appFile !== undefined ? { appFile } : {}),
     agentInitiated: true,
     // Forward the attempt this call belongs to so the route can re-check it
     // atomically and keep the redeploy inside the same repair loop. An

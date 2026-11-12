@@ -4,9 +4,7 @@ import {
   type DeployMonitorRequest as SharedMonitorRequest
 } from "@radius-project/adapter-shared";
 
-export type DeployMonitorRequest = Omit<SharedMonitorRequest, "appFile"> & {
-  appFile?: string;
-};
+export type DeployMonitorRequest = SharedMonitorRequest;
 
 export interface DeployMonitorService {
   run(request: DeployMonitorRequest): Promise<void>;
@@ -15,14 +13,7 @@ export interface DeployMonitorService {
 export function createDeployMonitorService(
   dependencies: DeployMonitorDependencies
 ): DeployMonitorService {
-  const monitor = createSharedMonitor(dependencies);
-  return {
-    run: (request) =>
-      monitor.run({
-        ...request,
-        appFile: request.appFile ?? ".radius/app.bicep"
-      })
-  };
+  return createSharedMonitor(dependencies);
 }
 
 export {

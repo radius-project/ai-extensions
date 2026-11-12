@@ -5,7 +5,7 @@ import {
 } from "./deploy-monitor.js";
 
 describe("Canvas deployment monitor compatibility", () => {
-  it.each([undefined, "models/application.bicep"])(
+  it.each(["app.bicep", ".radius/app.bicep", "models/application.bicep"])(
     "forwards execution with model %s without constructing a new owner",
     async (appFile) => {
       const unexpected = () => {
@@ -42,11 +42,11 @@ describe("Canvas deployment monitor compatibility", () => {
         requestedEnvironment: "dev",
         resources: [],
         log: () => {},
-        ...(appFile ? { appFile } : {})
+        appFile
       });
       expect(prepareAndDispatch).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({
-          appFile: appFile ?? ".radius/app.bicep",
+          appFile,
           repo: "owner/app",
           branch: "topic"
         })

@@ -391,6 +391,7 @@ import {
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import type { EnvironmentsDependencies } from "./server/routes/environments-types.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
+import { createDeployModelSource } from "./server/services/deploy-model-source.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import {
   createDeployDispatchService,
@@ -1885,8 +1886,7 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
     prepareSourceRefResources(entry, view, context),
   setSourceRefResources: (entry, view, resources, context, expectedToken) =>
     setSourceRefResources(entry, view, resources, context, expectedToken),
-  fetchBicepSelection: (entry, repo, branch) =>
-    fetchBicepSelection(entry as CanvasServerEntry, repo, branch),
+  readModelForSelection: (...args) => readDeployModelForSelection(...args),
   radArtifactsDirForSelection: ({
     isLocal,
     state,
@@ -3940,8 +3940,15 @@ async function fetchFileForSelection(
     );
     if (local !== null) return local;
   }
+
   return await fetchFileFromRepo(repo, repoPath, access.branch);
 }
+
+const readDeployModelForSelection = createDeployModelSource({
+  readWorkspace: fetchWorkspaceFile,
+  readRepository: fetchFileFromRepoResult,
+  redactDiagnostic: redactGhCredentials
+});
 
 // Every path on a branch, resolved through the same workspace-or-remote access
 // rule as the Bicep selection so the answer describes the tree the graph would
@@ -6918,6 +6925,7 @@ export function createProductionCanvasServerRuntime(
 
   const deployRequestService = createDeployRequestService({
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    readModelForSelection: readDeployModelForSelection,
     resolveDeployRepairLoop,
     resolveDeploymentEnvironment,
     activeDeploymentMutation: (state) => activeDeploymentMutation(state),

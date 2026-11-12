@@ -1,6 +1,9 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { DeployMonitorService } from "./deploy-monitor.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import { normalizeDeploymentAppFile } from "@radius-project/adapter-shared";
+import { redactCredentials } from "@radius-project/core";
+import type { DeployModelSource } from "./deploy-model-source.js";
 
 // Admission half of `POST /api/deploy`: everything that must settle before the
 // route can answer. It resolves the repair loop, refuses every request that
@@ -51,11 +54,17 @@ export interface DeployRequestData {
   environment?: unknown;
   branch?: string;
   provider?: string;
-  appFile?: string;
+  appFile?: unknown;
 }
 
 export interface DeployRequestDependencies {
   readInstanceEntry(instanceId: string): DeployRequestInstanceEntry | undefined;
+  readModelForSelection(
+    entry: DeployRequestInstanceEntry,
+    repo: string,
+    branch: string,
+    path: string
+  ): Promise<DeployModelSource>;
   resolveDeployRepairLoop(
     state: CanvasState,
     requestedAttemptId: unknown
@@ -131,6 +140,7 @@ export interface DeployRequestService {
 
 const REQUIRED_DEPENDENCIES: readonly (keyof DeployRequestDependencies)[] = [
   "readInstanceEntry",
+  "readModelForSelection",
   "resolveDeployRepairLoop",
   "resolveDeploymentEnvironment",
   "activeDeploymentMutation",
@@ -217,6 +227,36 @@ export function createDeployRequestService(
           data.attemptId
         );
         if (loop.error) return { status: 409, body: { error: loop.error } };
+        let explicitAppFile: string | undefined;
+        if (Object.hasOwn(data, "appFile")) {
+          if (typeof data.appFile !== "string" || !data.appFile)
+            throw new Error(
+              "appFile must be a non-empty repository-relative model path."
+            );
+          explicitAppFile = normalizeDeploymentAppFile(data.appFile);
+        }
+        let appFile = explicitAppFile;
+        if (loop.repairLoop) {
+          const pinned = entry.state.deployAttempt?.appFile;
+          if (!pinned || (appFile !== undefined && appFile !== pinned))
+            return {
+              status: 409,
+              body: {
+                error:
+                  "The model does not match the current deployment attempt."
+              }
+            };
+          appFile = normalizeDeploymentAppFile(pinned);
+        }
+        const admissionAttempt = entry.state.deployAttempt?.id;
+        const admissionGeneration = entry.state.deployGeneration;
+        const admissionObservation = entry.observation;
+        const admissionIsCurrent = () =>
+          dependencies.readInstanceEntry(instanceId) === entry &&
+          entry.state.deployAttempt?.id === admissionAttempt &&
+          entry.state.deployGeneration === admissionGeneration &&
+          entry.observation === admissionObservation &&
+          entry.observation?.stopped !== true;
 
         const repo =
           data.targetRepo ||
@@ -330,17 +370,69 @@ export function createDeployRequestService(
           ).trim();
           branch = detectedDefault || "main";
         }
-        entry.state.deployParams = { ...data, environment };
+        if (appFile === undefined) {
+          let selected: DeployModelSource;
+          try {
+            selected = await dependencies.readModelForSelection(
+              entry,
+              repo,
+              branch,
+              ".radius/app.bicep"
+            );
+          } catch (error) {
+            selected = {
+              status: "unavailable",
+              error: redactCredentials(dependencies.errorMessage(error))
+            };
+          }
+          if (selected.status === "unavailable") {
+            releaseReservation();
+            return {
+              status: 503,
+              body: {
+                error: `Could not select the deployment model: ${redactCredentials(selected.error)}`
+              }
+            };
+          }
+          appFile =
+            selected.status === "available" && selected.content ?
+              ".radius/app.bicep"
+            : "app.bicep";
+        }
+        if (!admissionIsCurrent()) {
+          releaseReservation();
+          return {
+            status: 409,
+            body: {
+              error:
+                "The deployment context changed while preparing this request. Retry from the current view."
+            }
+          };
+        }
+        const { appFile: _requestedAppFile, ...parameters } = data;
+        const repeatAppFile =
+          loop.repairLoop ? entry.state.deployParams?.appFile : explicitAppFile;
+        entry.state.deployParams = {
+          ...parameters,
+          targetRepo: repo,
+          branch,
+          environment,
+          ...(repeatAppFile !== undefined ? { appFile: repeatAppFile } : {})
+        };
         entry.state.envName = environment;
         entry.state.deployProvider = data.provider;
         entry.state.deployingRepo = repo;
-        entry.state.appFile = data.appFile;
+        entry.state.appFile = appFile;
 
         // Snapshot the planned graph (nodes start as pending). If the planned
         // graph has not been resolved yet, it is built on the fly inside the
         // monitor so the deploying page always shows it.
         const cloned: unknown = JSON.parse(
-          JSON.stringify(entry.state.plannedResources || [])
+          JSON.stringify(
+            repeatAppFile === undefined && !loop.repairLoop ?
+              entry.state.plannedResources || []
+            : []
+          )
         );
         const resources = dependencies.canvasGraphResources(
           Array.isArray(cloned) ? cloned : []
@@ -361,7 +453,7 @@ export function createDeployRequestService(
           branch,
           provider,
           environment,
-          appFile: data.appFile || ".radius/app.bicep",
+          appFile,
           repairLoop: loop.repairLoop,
           attemptId: loop.attemptId
         });
@@ -390,6 +482,7 @@ export function createDeployRequestService(
             entry,
             repo,
             branch,
+            appFile,
             provider,
             requestedEnvironment: data.environment,
             resources,
