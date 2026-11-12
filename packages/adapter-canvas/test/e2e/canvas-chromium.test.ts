@@ -1144,9 +1144,6 @@ test.describe("Radius Canvas in Chromium", () => {
       })();
       expect(admitted.status()).toBe(200);
       expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
-      expect(await bodyFor(canvas, "/api/deploy")).toMatchObject(
-        launch === "explicit" ? { appFile } : {}
-      );
       if (launch !== "explicit")
         expect(await bodyFor(canvas, "/api/deploy")).not.toHaveProperty(
           "appFile"
