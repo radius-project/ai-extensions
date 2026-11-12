@@ -82,6 +82,61 @@ afterEach(async () => {
 });
 
 describe("panel-independent deployment runtime", () => {
+  it.each([undefined, "models/custom.bicep"])(
+    "keeps repeat intent separate from pinned repair identity (%s)",
+    async (appFile) => {
+      const h = fixture({}, async ({ entry }) => {
+        entry.state.deployStatus = "failed";
+        entry.state.deployError = "Model failed";
+      });
+      const resolve = vi.fn(async () => "app.bicep");
+      const context = {
+        modelSelection: { resolve, isCurrent: () => true }
+      };
+      const first = await h.runtime.start({ ...target, appFile }, context);
+      if (!first.ok) throw new Error(first.error);
+      await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+      const selected = appFile || "app.bicep";
+      expect(first.invocation.state.deployAttempt?.appFile).toBe(selected);
+      expect(first.invocation.state.deployParams?.appFile).toBe(appFile);
+      const repair = await h.runtime.start(
+        { attemptId: first.invocation.attemptId },
+        context
+      );
+      if (!repair.ok) throw new Error(repair.error);
+      expect(repair.invocation.target.appFile).toBe(selected);
+      expect(repair.invocation.state.deployAttempt?.appFile).toBe(selected);
+      expect(repair.invocation.state.deployParams?.appFile).toBe(appFile);
+      expect(repair.invocation.attemptId).toBe(first.invocation.attemptId);
+      expect(resolve).toHaveBeenCalledTimes(appFile ? 0 : 1);
+    }
+  );
+
+  it("reselects an omitted model on repeat instead of pinning the first selection", async () => {
+    const h = fixture();
+    const resolve = vi
+      .fn(async () => "app.bicep")
+      .mockResolvedValueOnce("app.bicep")
+      .mockResolvedValueOnce(".radius/app.bicep");
+    const context = { modelSelection: { resolve, isCurrent: () => true } };
+    const first = await h.runtime.start(
+      { ...target, appFile: undefined },
+      context
+    );
+    if (!first.ok) throw new Error(first.error);
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    const repeated = await h.runtime.start(
+      { ...target, ...first.invocation.state.deployParams, appFile: undefined },
+      context
+    );
+    if (!repeated.ok) throw new Error(repeated.error);
+    expect(repeated.invocation.target.appFile).toBe(".radius/app.bicep");
+    expect(repeated.invocation.state.deployParams).not.toHaveProperty(
+      "appFile"
+    );
+    expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
   it.each([new Error("invalid path"), "invalid path"])(
     "translates explicit model normalization refusal into admission failure: %s",
     async (error) => {

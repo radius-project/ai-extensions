@@ -100,6 +100,16 @@ Workflow observation remains independent of this input upgrade: existing run IDs
 
 Repository model and workflow reads require complete base64 content with valid encoding and byte-size metadata from GitHub. A missing or genuinely empty managed model can select the root model automatically; unsupported encoding, omitted or incomplete content, malformed metadata, and failed reads stop deployment rather than selecting a different file. This also applies when GitHub reports a nonempty file with `encoding: "none"`. Explicit model paths and repairs never fall back to another file.
 
+Parameters, planned graph recovery, workflow commands and artifacts use the admitted model. Model paths must be repository-relative `.bicep` paths without spaces, parent traversal or shell quoting. The basenames `radius-environment.bicep` and `radius-recipe-pack.bicep` are reserved, case-insensitively, because setup generates those files beside the selected model.
+
+One deployment runtime owns admission, monitoring and repair delivery for the extension session. Closing or resetting an active Canvas panel detaches its view without stopping that work; another panel can attach to the same deployment. Shutdown ends local observation, not the remote Actions workflow. Attempts are not restored after an extension restart. The deployment tools still require an open Canvas and use its HTTP routes.
+
+Canvas offers branch-push actions only when the admitted deployment's repository and branch match the verified local workspace. Matching branch names alone do not authorize a push from a different repository; absent workspace identity also disables this action.
+
+Deployment rows obtain their application identity from the exact recorded run's deployment-progress or application-delete result artifact, not current source. Deployment artifacts expire after 30 days and delete-result artifacts after 1 day. Missing, expired, conflicting or unreadable evidence leaves the row visible but disables Delete, Force Delete and Abandon. Retry after correcting a read-permission or connection failure. If evidence has expired, independently verify application, environment and resource ownership through the recorded workflow and Radius control plane before using Radius and GitHub recovery procedures outside Canvas. Never infer a delete target from the current default model or remove tracking as a substitute for resource cleanup.
+
+Accepted application deletion invalidates only the captured matching deployment and its attached views before looking up the delete run URL. A missing URL does not mean dispatch failed: Canvas retains a bounded operation lease and reports acceptance with an empty URL. Newer, unrelated and unidentified deployment evidence remains intact; polling cannot restore invalidated attempts, but later deployments can attach normally.
+
 ### Select a Radius release
 
 By default, `setup-control-plane` installs the checked-in stable Radius pin. AWS workflows are the exception, see below. To test another published release, set the GitHub Environment variable `RADIUS_RELEASE_OVERRIDE` to a JSON object with `tag`, `commit`, and `checksum` fields. Use the exact release tag, its 40-character source commit, and the 64-character SHA-256 checksum of `deploy/install.sh` at that commit. Release candidates are supported.

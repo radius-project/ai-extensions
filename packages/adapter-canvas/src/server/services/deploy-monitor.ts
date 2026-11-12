@@ -1,26 +1,11 @@
-import {
-  createDeployMonitorService as createSharedMonitor,
-  type DeployMonitorDependencies,
-  type DeployMonitorRequest as SharedMonitorRequest
-} from "@radius-project/adapter-shared";
-
-export type DeployMonitorRequest = SharedMonitorRequest;
-
-export interface DeployMonitorService {
-  run(request: DeployMonitorRequest): Promise<void>;
-}
-
-export function createDeployMonitorService(
-  dependencies: DeployMonitorDependencies
-): DeployMonitorService {
-  return createSharedMonitor(dependencies);
-}
-
 export {
+  createDeployMonitorService,
   type DeployMonitorInstanceEntry,
   type DeployRunDetail,
   type DeployMonitorStatusReader,
   type DeployResourceStatus,
   type DeployStatusChange,
-  type DeployMonitorDependencies
+  type DeployMonitorDependencies,
+  type DeployMonitorRequest,
+  type DeployMonitorService
 } from "@radius-project/adapter-shared";

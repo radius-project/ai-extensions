@@ -1,5 +1,6 @@
 import type { CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import { matchesDeployedApplicationState } from "./deployed-view-state.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
@@ -88,37 +89,66 @@ function operationDescription(
   return `${operation} operation for ${reservation.repo} in environment ${reservation.environment}`;
 }
 
-function retireMatchingDeployAttempt(
+function captureMatchingDeployAttempt(
   state: CanvasState,
   repo: string,
-  environment: string
-): void {
-  const attempt = state.deployAttempt;
-  if (
-    !attempt ||
-    attempt.targetRepo !== repo ||
-    attempt.environment !== environment
-  ) {
-    return;
-  }
-  delete state.deployAttempt;
-  delete state.deployResult;
-  delete state.deployStatus;
-  delete state.deployError;
-  delete state.deployErrorKind;
-  delete state.deployErrorBranch;
-  delete state.deployStartedAt;
-  delete state.deployFinishedAt;
-  delete state.deployLogs;
-  delete state.deployLogBase;
-  delete state.deployRunId;
-  delete state.deployRunUrl;
-  delete state.deployRepairing;
-  delete state.deployHandoffState;
-  delete state.deployHandoffAttempts;
-  delete state.deployNoticeState;
-  delete state.deployNoticeAttempts;
-  delete state.deployRepairAttempts;
+  environment: string,
+  application: string
+): () => void {
+  const captured = { ...state };
+  const attempt = captured.deployAttempt;
+  const attemptIdentity = {
+    id: attempt?.id,
+    repo: attempt?.targetRepo,
+    environment: attempt?.environment
+  };
+  const matches =
+    attempt?.targetRepo?.toLowerCase() === repo.toLowerCase() &&
+    matchesDeployedApplicationState(
+      {
+        deployEnvName: attempt.environment,
+        deployAppName: captured.deployAppName
+      },
+      { environment, application }
+    );
+  const identityKeys = [
+    "deployAttempt",
+    "deployGeneration",
+    "deployAppName",
+    "deployRunId",
+    "deployRunUrl",
+    "deployStatus",
+    "deployedGraph",
+    "deployingResources"
+  ] as const;
+  return () => {
+    if (
+      !matches ||
+      identityKeys.some((key) => state[key] !== captured[key]) ||
+      state.deployAttempt?.id !== attemptIdentity.id ||
+      state.deployAttempt?.targetRepo !== attemptIdentity.repo ||
+      state.deployAttempt?.environment !== attemptIdentity.environment
+    )
+      return;
+    delete state.deployAttempt;
+    delete state.deployResult;
+    delete state.deployStatus;
+    delete state.deployError;
+    delete state.deployErrorKind;
+    delete state.deployErrorBranch;
+    delete state.deployStartedAt;
+    delete state.deployFinishedAt;
+    delete state.deployLogs;
+    delete state.deployLogBase;
+    delete state.deployRunId;
+    delete state.deployRunUrl;
+    delete state.deployRepairing;
+    delete state.deployHandoffState;
+    delete state.deployHandoffAttempts;
+    delete state.deployNoticeState;
+    delete state.deployNoticeAttempts;
+    delete state.deployRepairAttempts;
+  };
 }
 
 function isGitHubScopeFailure(error: unknown): boolean {
@@ -197,6 +227,12 @@ export function createDeploymentAbandonmentService(
         };
       }
 
+      const retireCapturedAttempt = captureMatchingDeployAttempt(
+        state,
+        repo,
+        environment,
+        application
+      );
       try {
         let current: DeploymentRow | null;
         try {
@@ -222,6 +258,12 @@ export function createDeploymentAbandonmentService(
             }
           };
         }
+        const identityRefusal = deploymentIdentityRefusal(current, application);
+        if (identityRefusal)
+          return {
+            status: identityRefusal.status,
+            body: { error: identityRefusal.error }
+          };
         if (dependencies.deploymentStatusBlocksMutation(current.status)) {
           return {
             status: 409,
@@ -285,7 +327,7 @@ export function createDeploymentAbandonmentService(
           };
         }
 
-        retireMatchingDeployAttempt(state, repo, environment);
+        retireCapturedAttempt();
         dependencies.invalidateDeployListCache(repo);
         return { status: 200, body: { outcome: "abandoned" } };
       } finally {
@@ -294,3 +336,4 @@ export function createDeploymentAbandonmentService(
     }
   };
 }
+import { deploymentIdentityRefusal } from "@radius-project/core";

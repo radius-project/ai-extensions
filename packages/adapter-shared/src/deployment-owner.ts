@@ -228,6 +228,17 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     return { kind: "missing" };
   }
 
+  function lookupRepository(repo: string): DeploymentLookup<State> {
+    const current = [...attempts.values()].filter(
+      (invocation) =>
+        isCurrent(invocation) &&
+        invocation.target.repo.toLowerCase() === repo.toLowerCase()
+    );
+    return current.length === 1 ?
+        { kind: "found", invocation: current[0] }
+      : { kind: current.length ? "ambiguous" : "missing" };
+  }
+
   function run<Result>(
     invocation: DeploymentInvocation<State>,
     work: () => Promise<Result>
@@ -337,6 +348,7 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     begin,
     lookup,
     lookupTarget,
+    lookupRepository,
     reserve,
     release,
     retire,

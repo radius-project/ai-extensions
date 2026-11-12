@@ -135,6 +135,8 @@ const productionHandlers = {
     resolveEnvDeployment: () => Promise.resolve(null),
     ghOrThrow: () => Promise.resolve(""),
     resetDeploymentViewState: () => {},
+    captureDeletedDeployment: () => () => {},
+    logError: () => {},
     deployListCache: new Map(),
     deployListTtlMs: 0,
     activeDeploymentMutation: () => undefined,

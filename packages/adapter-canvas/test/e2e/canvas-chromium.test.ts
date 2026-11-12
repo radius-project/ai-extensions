@@ -59,6 +59,7 @@ import {
 } from "../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 import { createUnconfirmedMonitor } from "../support/server/unconfirmed-monitor.js";
+import { createDeferred } from "../support/browser/fakes.js";
 import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 import { workspaceSourceRevision } from "../../src/workspace.js";
 import {
@@ -681,477 +682,1047 @@ test.describe("Radius Canvas in Chromium", () => {
     await seed(canvas);
   });
 
-  async function verifyProductionDeploy(
-    { page, canvas }: { page: Page; canvas: CanvasHarness },
-    testInfo: TestInfo,
-    appFile: string
-  ): Promise<void> {
-    const environment = "fixture-environment";
-    const opaque = "OpaqueBindingWitness92741";
-    const named = "UnregisteredNamedWitness63281";
-    const runId = 102;
-    const runUrl = `https://github.com/${REPOSITORY}/actions/runs/${runId}`;
-    const rawLog = `Deploy\tRun rad commands\t2026-01-01T00:00:00Z Error: binding-regression-witness opaque-witness=${opaque} client_secret=${named}\n`;
-    const command = (args: string[], stdout: string): FakeCliCommand => ({
-      tool: "gh",
-      args,
-      stdout
-    });
-    const json = (endpoint: string, value: unknown): FakeCliCommand =>
-      command(
-        ["api", endpoint, "-H", "X-GitHub-Api-Version: 2022-11-28"],
-        JSON.stringify(value)
-      );
-    const included = (endpoint: string, value: unknown): FakeCliCommand =>
-      command(
-        ["api", endpoint, "--include", "--method", "GET"],
-        `HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(value)}`
-      );
-    const dispatchPrefix = ["workflow", "run", "run-rad-commands.yml"];
-    const repositoryArtifactArgs = [
-      "api",
-      `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`,
-      "--include",
-      "--method",
-      "GET"
-    ];
-    const discoveredRuns = command(
-      [
-        "run",
-        "list",
-        "--workflow=run-rad-commands.yml",
-        "--limit",
-        "100",
-        "--json",
-        "databaseId,status,createdAt,displayTitle",
-        "--repo",
-        REPOSITORY
-      ],
-      "[]"
+  test("unknown deployment identity stays visible with disabled destructive controls @safety", async ({
+    page,
+    canvas
+  }) => {
+    const scenario = defaultFakeCliScenario();
+    const artifacts = scenario.commands.find((command) =>
+      command.args?.includes(
+        `/repos/${REPOSITORY}/actions/runs/1/artifacts?per_page=100`
+      )
     );
-    const additions: FakeCliCommand[] = [
-      ...[".radius/app.bicep", "app.bicep"].map((file): FakeCliCommand => ({
+    if (!artifacts) throw new Error("Missing identity artifact fixture");
+    artifacts.stdout = "HTTP/2 200\n\n" + JSON.stringify({ artifacts: [] });
+    for (const file of [
+      "verify-azure.yml",
+      "verify-aws.yml",
+      "run-rad-commands.yml",
+      "delete-application.yml"
+    ]) {
+      scenario.commands.push({
         tool: "gh",
         args: [
           "api",
-          `/repos/${REPOSITORY}/contents/${file}?ref=${WORKTREE_BRANCH}`,
+          `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=main`,
           "--jq",
           ".content"
         ],
         exitCode: 1,
         stderr: "gh: Not Found (HTTP 404)"
-      })),
-      {
-        tool: "gh",
-        args: repositoryArtifactArgs,
-        exitCode: 1,
-        stdout:
-          'HTTP/2.0 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{"message":"Resource not accessible by integration"}'
-      },
-      {
-        tool: "gh",
-        args: [
-          "api",
-          `/repos/${REPOSITORY}/contents/app.bicep?ref=${WORKTREE_BRANCH}`
-        ],
-        exitCode: 1,
-        stderr: "gh: Not Found (HTTP 404)"
-      },
-      command(["api", "user", "--jq", ".login"], "acting-user\n"),
-      command(
-        [
-          "api",
-          `/repos/${REPOSITORY}/git/ref/heads/${encodeURIComponent(WORKTREE_BRANCH)}`,
-          "--jq",
-          ".object.sha"
-        ],
-        "fixture-pushed-head\n"
-      ),
-      json(
-        `/repos/${REPOSITORY}/environments/${environment}/variables/AZURE_CLIENT_ID`,
-        { value: "fixture-client" }
-      ),
-      json(`/repos/${REPOSITORY}/environments/${environment}`, {
-        name: environment
-      }),
-      json(`/repos/${REPOSITORY}`, {
-        full_name: REPOSITORY,
-        id: 123,
-        owner: { id: 456 }
-      }),
-      json(`/repos/${REPOSITORY}/actions/oidc/customization/sub`, {
-        use_default: true,
-        use_immutable_subject: false
-      }),
-      {
-        tool: "az",
-        args: [
-          "ad",
-          "app",
-          "federated-credential",
-          "list",
-          "--id",
-          "fixture-client",
-          "--query",
-          "[].subject",
-          "-o",
-          "json"
-        ],
-        stdout: JSON.stringify([
-          `repo:${REPOSITORY}:environment:${environment}`,
-          `repo:fixture@456/radius-app@123:environment:${environment}`
-        ])
-      },
-      command(
-        ["api", `/repos/${REPOSITORY}`, "--jq", ".default_branch"],
-        "main\n"
-      ),
-      command(
-        [
-          "run",
-          "list",
-          "--workflow=run-rad-commands.yml",
-          "--limit",
-          "20",
-          "--json",
-          "databaseId,createdAt",
-          "--repo",
-          REPOSITORY
-        ],
-        JSON.stringify([{ databaseId: 101, createdAt: "2020-01-01T00:00:00Z" }])
-      ),
-      discoveredRuns,
-      {
-        tool: "gh",
-        argsPrefix: dispatchPrefix,
-        env: { GH_TOKEN: "absent", GITHUB_TOKEN: "absent" },
-        stdout: ""
-      },
-      included(`repos/${REPOSITORY}/actions/runs/${runId}`, {
-        status: "completed",
-        conclusion: "failure"
-      }),
-      included(
-        `repos/${REPOSITORY}/actions/runs/${runId}/jobs?per_page=100&page=1`,
-        {
-          total_count: 1,
-          jobs: [
-            {
-              name: "Deploy",
-              steps: [
-                {
-                  name: "Login to Azure",
-                  status: "completed",
-                  conclusion: "success"
-                },
-                {
-                  name: "Run rad commands",
-                  status: "completed",
-                  conclusion: "failure"
-                }
-              ]
-            }
-          ]
-        }
-      ),
-      {
-        tool: "gh",
-        args: [
-          "api",
-          `/repos/${REPOSITORY}/actions/runs/${runId}/artifacts?per_page=${ARTIFACT_PAGE_SIZE}`,
-          "--include",
-          "--method",
-          "GET"
-        ],
-        exitCode: 1,
-        stdout:
-          'HTTP/2.0 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{"message":"Resource not accessible by integration"}'
-      },
-      command(
-        ["run", "view", String(runId), "--log", "--repo", REPOSITORY],
-        rawLog
+      });
+    }
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "deploying");
+    await expect(page.locator("#deploy-table-body")).toContainText(
+      "Application identity unavailable"
+    );
+    const deletion = page.getByRole("button", { name: "Delete Deployment" });
+    await expect(deletion).toBeDisabled();
+    await expect(page.getByRole("link", { name: "Monitor Graph" })).toHaveCount(
+      0
+    );
+    const run = page.getByRole("link", { name: "View Run" });
+    await expect(run).toHaveAttribute(
+      "href",
+      `https://github.com/${REPOSITORY}/actions/runs/1`
+    );
+    await run.focus();
+    await page.keyboard.press("Tab");
+    await expect(deletion).not.toBeFocused();
+    const accessibility = await new AxeBuilder({ page })
+      .include("#deploy-table-body")
+      .analyze();
+    expect(accessibility.violations).toEqual([]);
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.args.slice(0, 3).join(" ") ===
+          "workflow run delete-application.yml"
       )
-    ];
-    for (const [file, ref] of [
-      ["verify-azure.yml", RADIUS_REF],
-      ["verify-aws.yml", RADIUS_REF],
-      ["run-rad-commands.yml", RADIUS_REF],
-      ["run-rad-commands-azure.yml", RADIUS_REF],
-      ["delete-application.yml", DELETE_RADIUS_REF],
-      ["delete-azure.yml", DELETE_RADIUS_REF],
-      ["delete-environment.yml", DELETE_RADIUS_REF],
-      ["delete-environment-azure.yml", DELETE_RADIUS_REF]
-    ]) {
-      const content = await fs.readFile(
-        path.join(REPOSITORY_ROOT, ".github", "extension", file)
+    ).toBe(false);
+  });
+
+  for (const launch of [
+    "explicit",
+    "deploying",
+    "planned",
+    "managed"
+  ] as const) {
+    test(`production ${launch} deploy masks credentials and accepted deletion cannot resurrect it @safety`, async ({
+      page,
+      canvas
+    }, testInfo) => {
+      const environment = "fixture-environment";
+      const appFile =
+        launch === "explicit" ? "models/custom.bicep"
+        : launch === "managed" ? ".radius/app.bicep"
+        : "app.bicep";
+      await fs.mkdir(path.join(canvas.workspacePath, "models"), {
+        recursive: true
+      });
+      await fs.writeFile(
+        path.join(canvas.workspacePath, appFile),
+        "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'radius-app'\n}\n"
       );
-      additions.push(
+      await fs.writeFile(
+        path.join(
+          canvas.workspacePath,
+          ...(launch === "managed" ? ["app.bicep"] : [".radius", "app.bicep"])
+        ),
+        "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'different-default'\n}\n"
+      );
+      if (launch !== "explicit" && launch !== "managed")
+        await fs.rm(path.join(canvas.workspacePath, ".radius", "app.bicep"));
+      const opaque = "OpaqueBindingWitness92741";
+      const named = "UnregisteredNamedWitness63281";
+      const runId = 102;
+      const runUrl = `https://github.com/${REPOSITORY}/actions/runs/${runId}`;
+      const rawLog = `Deploy\tRun rad commands\t2026-01-01T00:00:00Z Error: binding-regression-witness opaque-witness=${opaque} client_secret=${named}\n`;
+      const command = (args: string[], stdout: string): FakeCliCommand => ({
+        tool: "gh",
+        args,
+        stdout
+      });
+      const json = (endpoint: string, value: unknown): FakeCliCommand =>
+        command(
+          ["api", endpoint, "-H", "X-GitHub-Api-Version: 2022-11-28"],
+          JSON.stringify(value)
+        );
+      const included = (endpoint: string, value: unknown): FakeCliCommand =>
+        command(
+          ["api", endpoint, "--include", "--method", "GET"],
+          `HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(value)}`
+        );
+      const dispatchPrefix = ["workflow", "run", "run-rad-commands.yml"];
+      const repositoryArtifactArgs = [
+        "api",
+        `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`,
+        "--include",
+        "--method",
+        "GET"
+      ];
+      const additions: FakeCliCommand[] = [
+        ...[".radius/app.bicep", "app.bicep"].map((file): FakeCliCommand => ({
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/contents/${file}?ref=${WORKTREE_BRANCH}`,
+            "--jq",
+            ".content"
+          ],
+          exitCode: 1,
+          stderr: "gh: Not Found (HTTP 404)"
+        })),
         command(
           [
             "api",
-            `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=${ref}`
+            "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure-aks/azure-aks.bicep?ref=main"
           ],
           JSON.stringify({
-            content: content.toString("base64"),
+            content: Buffer.from("param environment string\n").toString(
+              "base64"
+            ),
             encoding: "base64",
-            size: content.length
+            size: Buffer.byteLength("param environment string\n")
           })
+        ),
+        command(
+          [
+            "api",
+            `/repos/${REPOSITORY}/environments/${environment}/variables?per_page=100`,
+            "--jq",
+            ".variables[].name"
+          ],
+          "AZURE_CLIENT_ID\n"
+        ),
+        command(
+          [
+            "api",
+            `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`,
+            "--jq",
+            ".[].id"
+          ],
+          ""
+        ),
+        {
+          tool: "gh",
+          args: repositoryArtifactArgs,
+          exitCode: 1,
+          stdout:
+            'HTTP/2.0 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{"message":"Resource not accessible by integration"}'
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/contents/app.bicep?ref=${WORKTREE_BRANCH}`
+          ],
+          exitCode: launch === "explicit" ? 1 : 0,
+          stderr: launch === "explicit" ? "gh: Not Found (HTTP 404)" : "",
+          stdout:
+            launch === "explicit" ? "" : (
+              JSON.stringify({
+                content: (
+                  await fs.readFile(path.join(canvas.workspacePath, appFile))
+                ).toString("base64"),
+                encoding: "base64",
+                size: (await fs.stat(path.join(canvas.workspacePath, appFile)))
+                  .size
+              })
+            )
+        },
+        command(["api", "user", "--jq", ".login"], "acting-user\n"),
+        command(
+          [
+            "api",
+            `/repos/${REPOSITORY}/git/ref/heads/${encodeURIComponent(WORKTREE_BRANCH)}`,
+            "--jq",
+            ".object.sha"
+          ],
+          "fixture-pushed-head\n"
+        ),
+        json(
+          `/repos/${REPOSITORY}/environments/${environment}/variables/AZURE_CLIENT_ID`,
+          { value: "fixture-client" }
+        ),
+        json(`/repos/${REPOSITORY}/environments/${environment}`, {
+          name: environment
+        }),
+        json(`/repos/${REPOSITORY}`, {
+          full_name: REPOSITORY,
+          id: 123,
+          owner: { id: 456 }
+        }),
+        json(`/repos/${REPOSITORY}/actions/oidc/customization/sub`, {
+          use_default: true,
+          use_immutable_subject: false
+        }),
+        {
+          tool: "az",
+          args: [
+            "ad",
+            "app",
+            "federated-credential",
+            "list",
+            "--id",
+            "fixture-client",
+            "--query",
+            "[].subject",
+            "-o",
+            "json"
+          ],
+          stdout: JSON.stringify([
+            `repo:${REPOSITORY}:environment:${environment}`,
+            `repo:fixture@456/radius-app@123:environment:${environment}`
+          ])
+        },
+        command(
+          ["api", `/repos/${REPOSITORY}`, "--jq", ".default_branch"],
+          "main\n"
+        ),
+        command(
+          [
+            "run",
+            "list",
+            "--workflow=run-rad-commands.yml",
+            "--limit",
+            "20",
+            "--json",
+            "databaseId,createdAt",
+            "--repo",
+            REPOSITORY
+          ],
+          JSON.stringify([
+            { databaseId: 101, createdAt: "2020-01-01T00:00:00Z" }
+          ])
+        ),
+        command(
+          [
+            "run",
+            "list",
+            "--workflow=run-rad-commands.yml",
+            "--limit",
+            "100",
+            "--json",
+            "databaseId,status,createdAt,displayTitle",
+            "--repo",
+            REPOSITORY
+          ],
+          JSON.stringify([
+            {
+              databaseId: 101,
+              status: "completed",
+              createdAt: new Date().toISOString()
+            },
+            {
+              databaseId: runId,
+              status: "completed",
+              createdAt: new Date().toISOString()
+            }
+          ])
+        ),
+        {
+          tool: "gh",
+          argsPrefix: dispatchPrefix,
+          env: { GH_TOKEN: "absent", GITHUB_TOKEN: "absent" },
+          stdout: ""
+        },
+        included(`repos/${REPOSITORY}/actions/runs/${runId}`, {
+          status: "completed",
+          conclusion: "failure"
+        }),
+        included(
+          `repos/${REPOSITORY}/actions/runs/${runId}/jobs?per_page=100&page=1`,
+          {
+            total_count: 1,
+            jobs: [
+              {
+                name: "Deploy",
+                steps: [
+                  {
+                    name: "Login to Azure",
+                    status: "completed",
+                    conclusion: "success"
+                  },
+                  {
+                    name: "Run rad commands",
+                    status: "completed",
+                    conclusion: "failure"
+                  }
+                ]
+              }
+            ]
+          }
+        ),
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/actions/runs/${runId}/artifacts?per_page=${ARTIFACT_PAGE_SIZE}`,
+            "--include",
+            "--method",
+            "GET"
+          ],
+          exitCode: 1,
+          stdout:
+            'HTTP/2.0 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{"message":"Resource not accessible by integration"}'
+        },
+        command(
+          ["run", "view", String(runId), "--log", "--repo", REPOSITORY],
+          rawLog
         )
-      );
-    }
-    const scenario = defaultFakeCliScenario();
-    if (appFile === "app.bicep") {
-      await fs.rename(
-        path.join(canvas.workspacePath, ".radius", "app.bicep"),
-        path.join(canvas.workspacePath, "app.bicep")
-      );
-      additions.unshift({
-        tool: "gh",
-        args: [
-          "api",
-          `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`
-        ],
-        exitCode: 1,
-        stderr: "gh: Not Found (HTTP 404)"
-      });
-    }
-    scenario.commands = scenario.commands.filter(
-      (entry) =>
-        entry.tool !== "gh" ||
-        (entry.args || entry.argsPrefix)?.slice(0, 3).join(" ") !==
-          dispatchPrefix.join(" ")
-    );
-    scenario.commands.unshift(...additions);
-    canvas.setGitHubToken(opaque);
-    await canvas.setScenario(scenario);
-    const workflows = {
-      ...(await generateDeployWorkflow(environment, ".radius/app.bicep")),
-      ...(await generateDeleteWorkflow(environment)),
-      "radius-verify-credentials.yml": await generateVerifyWorkflow(
-        environment,
-        "azure"
-      )
-    };
-    for (const [file, content] of Object.entries(workflows)) {
-      for (const branch of ["main", WORKTREE_BRANCH]) {
-        scenario.commands.unshift(
+      ];
+      for (const [file, ref] of [
+        ["verify-azure.yml", RADIUS_REF],
+        ["verify-aws.yml", RADIUS_REF],
+        ["run-rad-commands.yml", RADIUS_REF],
+        ["run-rad-commands-azure.yml", RADIUS_REF],
+        ["delete-application.yml", DELETE_RADIUS_REF],
+        ["delete-azure.yml", DELETE_RADIUS_REF],
+        ["delete-environment.yml", DELETE_RADIUS_REF],
+        ["delete-environment-azure.yml", DELETE_RADIUS_REF]
+      ]) {
+        const content = await fs.readFile(
+          path.join(REPOSITORY_ROOT, ".github", "extension", file)
+        );
+        additions.push(
           command(
             [
               "api",
-              `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${branch}`
+              `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=${ref}`
             ],
             JSON.stringify({
-              content: Buffer.from(content).toString("base64"),
+              content: content.toString("base64"),
               encoding: "base64",
-              size: Buffer.byteLength(content)
+              size: content.length
             })
-          ),
-          command(
-            [
-              "api",
-              `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${encodeURIComponent(branch)}`,
-              "--jq",
-              ".sha"
-            ],
-            "fixture-workflow-sha\n"
           )
         );
       }
-    }
-    await canvas.setScenario(scenario);
-    const deliveries: DeployRepairHandoffInput[] = [];
-    canvas.setDeployRepairHandoff(async (input) => {
-      deliveries.push(input);
-    });
-    // Planned inputs only: admission mints the attempt and the real monitor
-    // discovers, classifies and settles the failed run without state seeding.
-    await canvas.seedState({
-      ...baseCanvasState(canvas.workspacePath),
-      plannedResources: [
-        { id: "web", name: "web", type: "Radius.Compute/containers" }
-      ]
-    });
-    expect(
-      scenario.commands.find(
-        (value) =>
-          value.args?.join(" ") ===
-          `run view ${runId} --log --repo ${REPOSITORY}`
-      )?.stdout
-    ).toBe(rawLog);
-    const nonce = canvas.entry.state.browserMutationNonce;
-    if (typeof nonce !== "string" || !nonce)
-      throw new Error("Missing mutation nonce.");
-    const admitted =
-      appFile === "app.bicep" ?
-        await (async () => {
-          await gotoCanvas(page, canvas, "deploying");
-          const deployNow = page.locator("#deploy-now-btn:not([disabled])");
-          await expect(deployNow).toHaveText("Deploy");
-          const response = page.waitForResponse(
-            (response) =>
-              response.url() === `${canvas.baseUrl}/api/deploy` &&
-              response.request().method() === "POST"
+      const scenario = defaultFakeCliScenario();
+      scenario.commands = scenario.commands.filter(
+        (entry) =>
+          entry.tool !== "gh" ||
+          (entry.args || entry.argsPrefix)?.slice(0, 3).join(" ") !==
+            dispatchPrefix.join(" ")
+      );
+      scenario.commands.unshift(...additions);
+      canvas.setGitHubToken(opaque);
+      await canvas.setScenario(scenario);
+      const workflows = {
+        ...(await generateDeployWorkflow(environment, ".radius/app.bicep")),
+        ...(await generateDeleteWorkflow(environment)),
+        "radius-verify-credentials.yml": await generateVerifyWorkflow(
+          environment,
+          "azure"
+        )
+      };
+      for (const [file, content] of Object.entries(workflows)) {
+        for (const branch of ["main", WORKTREE_BRANCH]) {
+          scenario.commands.unshift(
+            command(
+              [
+                "api",
+                `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${branch}`
+              ],
+              JSON.stringify({
+                content: Buffer.from(content).toString("base64"),
+                encoding: "base64",
+                size: Buffer.byteLength(content)
+              })
+            ),
+            command(
+              [
+                "api",
+                `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${encodeURIComponent(branch)}`,
+                "--jq",
+                ".sha"
+              ],
+              "fixture-workflow-sha\n"
+            )
           );
-          await deployNow.click();
-          return response;
-        })()
-      : await page.request.post(`${canvas.baseUrl}/api/deploy`, {
-          headers: { "x-radius-mutation-nonce": nonce },
-          data: {
-            repo: REPOSITORY,
-            branch: WORKTREE_BRANCH,
-            provider: "azure",
-            environment
-          }
-        });
-    expect(admitted.status()).toBe(200);
-    const attemptId = canvas.entry.state.deployAttempt?.id;
-    expect(attemptId).toBeTruthy();
-    expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
-    if (appFile === "app.bicep")
-      expect(await bodyFor(canvas, "/api/deploy")).not.toHaveProperty(
-        "appFile"
-      );
-    try {
-      const readCorrelation = async () =>
-        (await canvas.cliCalls())
-          .find(
-            (call) =>
-              call.tool === "gh" &&
-              dispatchPrefix.every((arg, index) => call.args[index] === arg)
-          )
-          ?.args.find((arg) => arg.startsWith("correlation_id="))
-          ?.slice("correlation_id=".length);
-      await expect.poll(readCorrelation).toMatch(/^dep-/);
-      const correlationId = await readCorrelation();
-      const dispatch = (await canvas.cliCalls()).find((call) =>
-        dispatchPrefix.every((arg, index) => call.args[index] === arg)
-      );
-      expect(dispatch?.args).toContain(`app_file=${appFile}`);
+        }
+      }
+      await canvas.setScenario(scenario);
+      const deliveries: DeployRepairHandoffInput[] = [];
+      canvas.setDeployRepairHandoff(async (input) => {
+        deliveries.push(input);
+      });
+      // Only the Planned-page launch has a cached graph. The other launches
+      // must recover the admitted model through the production composition.
+      await canvas.seedState({
+        ...baseCanvasState(canvas.workspacePath),
+        appFile,
+        plannedResources:
+          launch === "planned" ?
+            [{ id: "web", name: "web", type: "Radius.Compute/containers" }]
+          : []
+      });
       expect(
-        dispatch?.args.find((arg) => arg.startsWith("rad_commands="))
-      ).toContain(`deploy ${appFile}`);
-      discoveredRuns.stdout = JSON.stringify([
+        scenario.commands.find(
+          (value) =>
+            value.args?.join(" ") ===
+            `run view ${runId} --log --repo ${REPOSITORY}`
+        )?.stdout
+      ).toBe(rawLog);
+      const nonce = canvas.entry.state.browserMutationNonce;
+      if (typeof nonce !== "string" || !nonce)
+        throw new Error("Missing mutation nonce.");
+      const admitted = await (async () => {
+        if (launch === "explicit")
+          return page.request.post(`${canvas.baseUrl}/api/deploy`, {
+            headers: { "x-radius-mutation-nonce": nonce },
+            data: {
+              repo: REPOSITORY,
+              branch: WORKTREE_BRANCH,
+              provider: "azure",
+              environment,
+              appFile
+            }
+          });
+        await gotoCanvas(
+          page,
+          canvas,
+          launch === "managed" ? "deploying" : launch
+        );
+        const button =
+          launch === "deploying" || launch === "managed" ?
+            page.locator("#deploy-now-btn:not([disabled])")
+          : page.getByRole("button", {
+              name: "Deploy Application",
+              exact: true
+            });
+        await expect(button).toBeEnabled();
+        if (launch === "deploying" || launch === "managed")
+          await expect(button).toHaveText("Deploy");
+        const response = page.waitForResponse(
+          (response) =>
+            response.url().endsWith("/api/deploy") &&
+            response.request().method() === "POST"
+        );
+        await button.click();
+        const admitted = await response;
+        expect(admitted.request().postDataJSON()).not.toHaveProperty("appFile");
+        return admitted;
+      })();
+      expect(admitted.status()).toBe(200);
+      expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
+      if (launch !== "explicit")
+        expect(await bodyFor(canvas, "/api/deploy")).not.toHaveProperty(
+          "appFile"
+        );
+      await expect
+        .poll(async () =>
+          (await canvas.cliCalls()).some(
+            (call) =>
+              call.args.slice(0, 3).join(" ") === dispatchPrefix.join(" ")
+          )
+        )
+        .toBe(true);
+      const dispatched = (await canvas.cliCalls()).find(
+        (call) => call.args.slice(0, 3).join(" ") === dispatchPrefix.join(" ")
+      );
+      if (launch !== "planned") {
+        const progress = await page.request.get(
+          `${canvas.baseUrl}/api/deploy-status`
+        );
+        expect(await progress.json()).toMatchObject({
+          status: "in_progress",
+          resources: [
+            { name: "web", deployStatus: "pending" },
+            { name: "db", deployStatus: "pending" }
+          ]
+        });
+        expect(canvas.entry.state.plannedResources).toEqual([]);
+        const graphCall = (await canvas.cliCalls()).find(
+          (call) =>
+            call.tool === "rad" &&
+            call.args.slice(0, 2).join(" ") === "app graph"
+        );
+        expect(graphCall).toBeDefined();
+        expect(canvas.entry.state.deployLogs?.join("\n")).toContain(
+          "Planned 2 resource(s)."
+        );
+        await gotoCanvas(page, canvas, "deployed");
+        await expect(page.locator(".react-flow__node")).toHaveCount(2);
+      }
+      const correlation = dispatched?.args
+        .find((arg) => arg.startsWith("correlation_id="))
+        ?.slice("correlation_id=".length);
+      expect(correlation).toMatch(/^dep-/);
+      const discovery = scenario.commands.find((command) =>
+        command.args?.includes("databaseId,status,createdAt,displayTitle")
+      );
+      if (!discovery) throw new Error("Missing correlated discovery fixture");
+      discovery.stdout = JSON.stringify([
         {
-          databaseId: 103,
+          databaseId: runId + 1,
           status: "completed",
           createdAt: new Date().toISOString(),
-          displayTitle: "Radius fixture-environment dep-unrelated"
+          displayTitle: `Radius - Deploy ${environment} dep-unrelated`
         },
-        ...[101, runId].map((databaseId) => ({
-          databaseId,
+        {
+          databaseId: 101,
           status: "completed",
           createdAt: new Date().toISOString(),
-          displayTitle: `Radius fixture-environment ${correlationId}`
-        }))
+          displayTitle: `Radius - Deploy ${environment} ${correlation}`
+        },
+        {
+          databaseId: runId,
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          displayTitle: `Radius - Deploy ${environment} ${correlation}`
+        }
       ]);
       await canvas.setScenario(scenario);
+      const attemptId = canvas.entry.state.deployAttempt?.id;
+      expect(attemptId).toBeTruthy();
+      try {
+        await expect
+          .poll(() => canvas.entry.state.deployStatus, { timeout: 15_000 })
+          .toBe("failed");
+      } finally {
+        await testInfo.attach("production-deploy-observation", {
+          body: JSON.stringify(
+            {
+              status: canvas.entry.state.deployStatus,
+              error: canvas.entry.state.deployError,
+              logs: canvas.entry.state.deployLogs,
+              calls: await canvas.cliCalls()
+            },
+            null,
+            2
+          ),
+          contentType: "application/json"
+        });
+      }
+      const statusResponse = await page.request.get(
+        `${canvas.baseUrl}/api/deploy-status`
+      );
+      expect(statusResponse.status()).toBe(200);
+      const status = await statusResponse.json();
+      expect(status.attempt.id).toBe(attemptId);
+      expect(status.deployRunUrl).toBe(runUrl);
+      expect(canvas.entry.state.deployRunId).toBe(runId);
+      expect(status.error).toContain("binding-regression-witness");
+      expect(status.error).toContain("client_secret=[REDACTED]");
+      expect(status.error).toContain("opaque-witness=[REDACTED]");
+      expect(status.logs.join("\n")).toContain(
+        "The deploy status artifact could not be read: access denied."
+      );
+      expect(status.logs.join("\n")).not.toContain(
+        "Could not verify Azure federated credential coverage"
+      );
+      expect(status.resources[0].deployMessage).toContain(
+        "opaque-witness=[REDACTED]"
+      );
+      expect(status.logs.join("\n")).toContain("opaque-witness=[REDACTED]");
       await expect
-        .poll(() => canvas.entry.state.deployStatus, { timeout: 15_000 })
-        .toBe("failed");
-    } finally {
-      await testInfo.attach("production-deploy-observation", {
-        body: JSON.stringify(
-          {
-            status: canvas.entry.state.deployStatus,
-            error: canvas.entry.state.deployError,
-            logs: canvas.entry.state.deployLogs,
-            calls: await canvas.cliCalls()
-          },
-          null,
-          2
-        ),
-        contentType: "application/json"
+        .poll(() => canvas.entry.state.deployHandoffState)
+        .toBe("delivered");
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({
+        appFile,
+        attemptId,
+        instanceId: canvas.instanceId,
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        deployRunUrl: runUrl
       });
-    }
-    const statusResponse = await page.request.get(
-      `${canvas.baseUrl}/api/deploy-status`
-    );
-    expect(statusResponse.status()).toBe(200);
-    const status = await statusResponse.json();
-    expect(status.attempt.id).toBe(attemptId);
-    expect(status.deployRunUrl).toBe(runUrl);
-    expect(canvas.entry.state.deployRunId).toBe(runId);
-    expect(status.error).toContain("binding-regression-witness");
-    expect(status.error).toContain("client_secret=[REDACTED]");
-    expect(status.error).toContain("opaque-witness=[REDACTED]");
-    expect(status.logs.join("\n")).toContain(
-      "The deploy status artifact could not be read: access denied."
-    );
-    expect(status.logs.join("\n")).not.toContain(
-      "Could not verify Azure federated credential coverage"
-    );
-    expect(status.resources[0].deployMessage).toContain(
-      "opaque-witness=[REDACTED]"
-    );
-    expect(status.logs.join("\n")).toContain("opaque-witness=[REDACTED]");
-    await expect
-      .poll(() => canvas.entry.state.deployHandoffState)
-      .toBe("delivered");
-    expect(deliveries).toHaveLength(1);
-    expect(deliveries[0]).toMatchObject({
-      attemptId,
-      instanceId: canvas.instanceId,
-      repo: REPOSITORY,
-      branch: WORKTREE_BRANCH,
-      deployRunUrl: runUrl
-    });
-    expect(deliveries[0].error).toContain("opaque-witness=[REDACTED]");
-    const [deployedGraphResponse] = await Promise.all([
-      page.waitForResponse((response) =>
-        response.url().startsWith(`${canvas.baseUrl}/api/deployed-graph?`)
-      ),
-      gotoCanvas(page, canvas, "deployed")
-    ]);
-    expect(deployedGraphResponse.status()).toBe(200);
-    await expect(page.locator("body")).toContainText(
-      "opaque-witness=[REDACTED]"
-    );
-    const publication = JSON.stringify({
-      status,
-      deliveries,
-      body: await page.locator("body").innerText()
-    });
-    expect(publication).not.toContain(opaque);
-    expect(publication).not.toContain(named);
-    await page.request.get(`${canvas.baseUrl}/api/deploy-status`);
-    expect(deliveries).toHaveLength(1);
-    const calls = await canvas.cliCalls();
-    expect(calls.filter((call) => !call.matched)).toEqual([]);
-    expect(
-      calls.filter(
-        (call) => call.args.join(" ") === repositoryArtifactArgs.join(" ")
-      )
-    ).toMatchObject([{ matched: true, exitCode: 1 }]);
-    expect(
-      calls.filter((call) =>
-        call.args.includes(
-          `/repos/${REPOSITORY}/actions/runs/${runId}/artifacts?per_page=${ARTIFACT_PAGE_SIZE}`
+      expect(deliveries[0].error).toContain("opaque-witness=[REDACTED]");
+      const [deployedGraphResponse] = await Promise.all([
+        page.waitForResponse((response) =>
+          response.url().startsWith(`${canvas.baseUrl}/api/deployed-graph?`)
+        ),
+        gotoCanvas(page, canvas, "deployed")
+      ]);
+      expect(deployedGraphResponse.status()).toBe(200);
+      await expect(page.locator("body")).toContainText(
+        "opaque-witness=[REDACTED]"
+      );
+      const publication = JSON.stringify({
+        status,
+        deliveries,
+        body: await page.locator("body").innerText()
+      });
+      expect(publication).not.toContain(opaque);
+      expect(publication).not.toContain(named);
+      await page.request.get(`${canvas.baseUrl}/api/deploy-status`);
+      expect(deliveries).toHaveLength(1);
+      const calls = await canvas.cliCalls();
+      const deploymentCall = calls.find(
+        (call) => call.args.slice(0, 3).join(" ") === dispatchPrefix.join(" ")
+      );
+      expect(deploymentCall?.args).toContain(`app_file=${appFile}`);
+      expect(
+        deploymentCall?.args.find((arg) => arg.startsWith("rad_commands="))
+      ).toContain(`deploy ${appFile}`);
+      expect(canvas.entry.state.deployAppName).toBe("radius-app");
+      expect(calls.filter((call) => !call.matched)).toEqual([]);
+      expect(
+        calls.filter(
+          (call) => call.args.join(" ") === repositoryArtifactArgs.join(" ")
         )
-      )
-    ).toMatchObject([{ matched: true, exitCode: 1 }]);
-    expect(
-      calls
-        .filter(
-          (call) => call.args.slice(0, 3).join(" ") === dispatchPrefix.join(" ")
+      ).toMatchObject([{ matched: true, exitCode: 1 }]);
+      expect(
+        calls.filter((call) =>
+          call.args.includes(
+            `/repos/${REPOSITORY}/actions/runs/${runId}/artifacts?per_page=${ARTIFACT_PAGE_SIZE}`
+          )
         )
-        .map((call) => call.exitCode)
-    ).toEqual([0]);
-    expect(
-      calls.some(
-        (call) =>
-          call.args.join(" ") === `run view ${runId} --log --repo ${REPOSITORY}`
-      )
-    ).toBe(true);
+      ).toMatchObject([{ matched: true, exitCode: 1 }]);
+      expect(
+        calls
+          .filter(
+            (call) =>
+              call.args.slice(0, 3).join(" ") === dispatchPrefix.join(" ")
+          )
+          .map((call) => call.exitCode)
+      ).toEqual([0]);
+      expect(
+        calls.some(
+          (call) =>
+            call.args.join(" ") ===
+            `run view ${runId} --log --repo ${REPOSITORY}`
+        )
+      ).toBe(true);
+
+      scenario.commands.unshift(
+        included(
+          `/repos/${REPOSITORY}/actions/runs/104/artifacts?per_page=100`,
+          {
+            artifacts: [
+              { id: 104, name: "rad-delete-result", workflow_run: { id: 104 } }
+            ]
+          }
+        ),
+        {
+          tool: "gh",
+          argsPrefix: [
+            "run",
+            "download",
+            "104",
+            "--name",
+            "rad-delete-result",
+            "--dir"
+          ],
+          argsSuffix: ["--repo", REPOSITORY],
+          writeFilesDirectoryArg: "--dir",
+          writeFiles: [
+            {
+              path: "rad-delete-result.json",
+              content: JSON.stringify({
+                resourceType: "application",
+                name: "another-app",
+                outcome: "failed"
+              })
+            }
+          ]
+        },
+        command(
+          [
+            "api",
+            `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`,
+            "--jq",
+            ".[].id"
+          ],
+          "failed-other-delete\n"
+        ),
+        {
+          tool: "gh",
+          argsPrefix: [
+            "api",
+            `/repos/${REPOSITORY}/deployments/failed-other-delete/statuses?per_page=1`
+          ],
+          stdout: `failure\thttps://github.com/${REPOSITORY}/actions/runs/104\t`
+        },
+        {
+          tool: "gh",
+          argsPrefix: ["api", `/repos/${REPOSITORY}/actions/runs/104`],
+          stdout: ".github/workflows/delete-application.yml\tcompleted\tfailure"
+        },
+        {
+          tool: "gh",
+          argsPrefix: [
+            "api",
+            "--method",
+            "POST",
+            `/repos/${REPOSITORY}/deployments/failed-other-delete/statuses`
+          ],
+          stdout: ""
+        }
+      );
+      await canvas.setScenario(scenario);
+      const abandoned = await page.request.post(
+        `${canvas.baseUrl}/api/abandon-deployment`,
+        {
+          headers: {
+            "x-radius-mutation-nonce": nonce,
+            origin: canvas.baseUrl,
+            "sec-fetch-site": "same-origin"
+          },
+          data: { repo: REPOSITORY, environment, application: "another-app" }
+        }
+      );
+      expect(abandoned.status(), await abandoned.text()).toBe(200);
+      const afterAbandonment = await (
+        await page.request.get(`${canvas.baseUrl}/api/deploy-status`)
+      ).json();
+      expect(afterAbandonment.attempt.id).toBe(attemptId);
+      expect(afterAbandonment.deployRunUrl).toBe(runUrl);
+      await expect(page.locator("body")).toContainText(
+        "binding-regression-witness"
+      );
+
+      scenario.commands.unshift(
+        command(
+          [
+            "api",
+            `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`,
+            "--jq",
+            ".[].id"
+          ],
+          "dep-1\n"
+        ),
+        command(
+          [
+            "workflow",
+            "run",
+            "delete-application.yml",
+            "-f",
+            `environment=${environment}`,
+            "-f",
+            "application=radius-app",
+            "--repo",
+            REPOSITORY
+          ],
+          ""
+        ),
+        command(
+          [
+            "run",
+            "list",
+            "--workflow=delete-application.yml",
+            "--limit",
+            "5",
+            "--json",
+            "databaseId,status,createdAt",
+            "--repo",
+            REPOSITORY
+          ],
+          JSON.stringify([
+            {
+              databaseId: 103,
+              status: "queued",
+              createdAt: new Date().toISOString()
+            }
+          ])
+        )
+      );
+      await canvas.setScenario(scenario);
+      await page.request.get(
+        `${canvas.baseUrl}/api/list-deployments?repo=${REPOSITORY}&fresh=1`
+      );
+      await gotoCanvas(page, canvas, "deploying");
+      await page.getByRole("button", { name: "Delete Deployment" }).click();
+      await page
+        .getByRole("button", { name: "I want to delete this deployment" })
+        .click();
+      await page
+        .getByRole("button", { name: /have read and understand/i })
+        .click();
+      await page
+        .locator("#del-confirm-input")
+        .fill(`radius-app/${environment}`);
+      const accepted = page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/api/delete-deployment") &&
+          response.request().method() === "POST"
+      );
+      await page.locator("#del-confirm-btn").click();
+      const deleted = await accepted;
+      expect(deleted.status(), await deleted.text()).toBe(200);
+      expect(await deleted.json()).toMatchObject({ success: true });
+      for (let poll = 0; poll < 3; poll++) {
+        const current = await (
+          await page.request.get(`${canvas.baseUrl}/api/deploy-status`)
+        ).json();
+        expect(current.status).toBe("pending");
+        expect(current.attempt).toBeNull();
+        expect(current.deployedGraph).toBeNull();
+        expect(current.deployRunUrl).toBeNull();
+      }
+      await gotoCanvas(page, canvas, "deploying");
+      await gotoCanvas(page, canvas, "deployed");
+      await expect(page.locator("body")).not.toContainText(
+        "binding-regression-witness"
+      );
+      expect(canvas.entry.state.deployRunId).toBeUndefined();
+      expect((await canvas.cliCalls()).filter((call) => !call.matched)).toEqual(
+        []
+      );
+    });
   }
 
-  for (const appFile of [".radius/app.bicep", "app.bicep"]) {
-    test(`production ${appFile} deploy outcome masks host-known credentials through repair publication @safety`, ({
+  for (const workspace of [
+    "matching",
+    "other-repository",
+    "missing"
+  ] as const) {
+    test(`branch-push controls require verified matching workspace identity: ${workspace} @safety`, async ({
       page,
       canvas
-    }, testInfo) =>
-      verifyProductionDeploy({ page, canvas }, testInfo, appFile));
+    }) => {
+      await routeDeployedPage(page, () => "failed");
+      await page.unroute("**/api/deploy-status**");
+      await page.route("**/api/deploy", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ ok: true })
+        })
+      );
+      const target = {
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        environment: "fixture-environment",
+        provider: "azure",
+        appFile: ".radius/app.bicep"
+      };
+      const lease = canvas.deploymentOwner.reserve(target, "deploy");
+      if (!lease) throw new Error("Fixture target is reserved");
+      const invocation = canvas.deploymentOwner.begin(
+        target,
+        {
+          deployStatus: "failed",
+          deployErrorKind: "branch-not-pushed",
+          deployErrorBranch: WORKTREE_BRANCH,
+          deployErrorPaths: ".radius"
+        },
+        lease
+      );
+      invocation.state.deployAttempt = {
+        ...target,
+        targetRepo: target.repo,
+        id: invocation.attemptId
+      };
+      canvas.deploymentOwner.release(lease);
+      canvas.entry.state.workspaceRepo =
+        workspace === "matching" ? REPOSITORY
+        : workspace === "other-repository" ? "acme/another-workspace"
+        : undefined;
+      canvas.entry.state.workspaceBranch =
+        workspace === "missing" ? undefined : WORKTREE_BRANCH;
+
+      await gotoCanvas(page, canvas, "deploying");
+      const deploy = page.getByRole("button", { name: "Deploy", exact: true });
+      await expect(deploy).toBeEnabled();
+      await deploy.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#deploy-progress-title")).toContainText(
+        "Branch not pushed yet"
+      );
+      const action = page.locator("#deploy-push-action");
+      if (workspace === "matching") {
+        const run = action.getByRole("button", { name: COMMAND_RUN_LABEL });
+        await expect(run).toBeVisible();
+        await run.focus();
+        await expect(run).toBeFocused();
+      } else {
+        await expect(action.getByRole("button")).toHaveCount(0);
+        await expect(action).not.toContainText("git push");
+      }
+      const status = await page.request.get(
+        `${canvas.baseUrl}/api/deploy-status`
+      );
+      expect(await status.json()).toMatchObject({
+        errorBranch: workspace === "matching" ? WORKTREE_BRANCH : null,
+        attempt: { targetRepo: REPOSITORY, branch: WORKTREE_BRANCH }
+      });
+      await expectNoWcagViolations(page);
+    });
   }
+
+  test("reset polling stays empty but closing and reopening the same panel resumes owned progress @safety", async ({
+    page,
+    canvas
+  }) => {
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deploy-status**");
+    const target = {
+      repo: REPOSITORY,
+      branch: WORKTREE_BRANCH,
+      environment: "fixture-environment",
+      provider: "azure",
+      appFile: ".radius/app.bicep"
+    };
+    const lease = canvas.deploymentOwner.reserve(target, "deploy");
+    if (!lease) throw new Error("Fixture target is reserved");
+    const invocation = canvas.deploymentOwner.begin(
+      target,
+      { deployStatus: "in_progress", deployLogs: ["before reset"] },
+      lease
+    );
+    invocation.state.deployAttempt = {
+      id: invocation.attemptId,
+      targetRepo: target.repo,
+      environment: target.environment
+    };
+    canvas.deploymentOwner.release(lease);
+    const finished = createDeferred<void>();
+    const work = canvas.deploymentOwner.run(invocation, () => finished.promise);
+    try {
+      await gotoCanvas(page, canvas, "deployed");
+      await expect(page.locator("#deployed-log-output")).toContainText(
+        "before reset"
+      );
+      const reset = await page.request.post(
+        `${canvas.baseUrl}/api/deploy-reset`,
+        {
+          headers: {
+            "x-radius-mutation-nonce": String(
+              canvas.entry.state.browserMutationNonce
+            )
+          },
+          data: { attemptId: invocation.attemptId }
+        }
+      );
+      expect(reset.status()).toBe(200);
+      const status = await page.request.get(
+        `${canvas.baseUrl}/api/deploy-status`
+      );
+      expect(await status.json()).toMatchObject({ attempt: null });
+      const oldState = canvas.entry.state;
+      await canvas.reopenServer();
+      await canvas.seedState(baseCanvasState(canvas.workspacePath));
+      invocation.state.deployLogs = ["after reopen"];
+      canvas.deploymentOwner.publish(invocation);
+      await gotoCanvas(page, canvas, "deployed");
+      await expect(page.locator("#deployed-log-output")).toContainText(
+        "after reopen"
+      );
+      expect(canvas.entry.state.deployAttempt?.id).toBe(invocation.attemptId);
+      expect(oldState.deployAttempt).toBeUndefined();
+      expect(invocation.signal.aborted).toBe(false);
+      await page.locator("#deployed-app-select").focus();
+      await page.keyboard.press("Tab");
+      await expect(page.locator("#deployed-env-select")).toBeFocused();
+      await expectNoWcagViolations(page);
+    } finally {
+      finished.resolve();
+      await work;
+    }
+  });
+
+  test("switching repositories follows the new environment without reusing projected deployment defaults @safety", async ({
+    page,
+    canvas
+  }) => {
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deploy-status**");
+    const begin = (repo: string, environment: string, log: string) => {
+      const target = {
+        repo,
+        environment,
+        branch: WORKTREE_BRANCH,
+        provider: "azure",
+        appFile: "models/selected.bicep"
+      };
+      const lease = canvas.deploymentOwner.reserve(target, "deploy");
+      if (!lease) throw new Error("Fixture target is reserved");
+      const invocation = canvas.deploymentOwner.begin(
+        target,
+        { deployStatus: "in_progress", deployLogs: [log] },
+        lease
+      );
+      invocation.state.deployAttempt = {
+        id: invocation.attemptId,
+        targetRepo: repo,
+        environment
+      };
+      canvas.deploymentOwner.release(lease);
+      return invocation;
+    };
+    const first = begin(REPOSITORY, "production", "repository A progress");
+    const second = begin("fixture/other", "staging", "repository B progress");
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.locator("#deployed-log-output")).toContainText(
+      "repository A progress"
+    );
+    canvas.entry.state.contextRepo = "fixture/other";
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.locator("#deployed-log-output")).toContainText(
+      "repository B progress"
+    );
+    await expect(page.locator("#deployed-log-output")).not.toContainText(
+      "repository A progress"
+    );
+    expect(canvas.entry.state.deployAttempt?.id).toBe(second.attemptId);
+    expect(canvas.entry.state.envName).toBe("staging");
+    first.state.deployLogs = ["late repository A progress"];
+    canvas.deploymentOwner.publish(first);
+    expect(canvas.entry.state.deployLogs).toEqual(["repository B progress"]);
+    canvas.entry.state.contextRepo = "fixture/empty";
+    const response = await page.request.post(`${canvas.baseUrl}/api/deploy`, {
+      headers: {
+        "x-radius-mutation-nonce": String(
+          canvas.entry.state.browserMutationNonce
+        )
+      },
+      data: { branch: WORKTREE_BRANCH }
+    });
+    expect(response.status()).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining("environment")
+    });
+    expect(canvas.deploymentOwner.lookupRepository("fixture/empty")).toEqual({
+      kind: "missing"
+    });
+    expect(canvas.entry.state.envName).toBeUndefined();
+    expect(canvas.entry.state.deployProvider).toBeUndefined();
+    expect(canvas.entry.state.appFile).toBeUndefined();
+  });
 
   for (const fixture of pageStateCases()) {
     test(`round-trips hidden page state through the real parser: ${fixture.name} @safety`, async ({
@@ -7470,8 +8041,8 @@ test.describe("Radius Canvas in Chromium", () => {
         const monitorState: CanvasState = {};
         if (completed) {
           await createUnconfirmedMonitor("future_conclusion").monitor.run({
-            entry: { state: monitorState },
             appFile: ".radius/app.bicep",
+            entry: { state: monitorState },
             repo: REPOSITORY,
             branch: WORKTREE_BRANCH,
             provider: "azure",
@@ -7904,8 +8475,8 @@ test.describe("Radius Canvas in Chromium", () => {
       const monitorState: CanvasState = {};
       if (unconfirmed) {
         await createUnconfirmedMonitor("future_conclusion").monitor.run({
-          entry: { state: monitorState },
           appFile: ".radius/app.bicep",
+          entry: { state: monitorState },
           repo: REPOSITORY,
           branch: WORKTREE_BRANCH,
           provider: "azure",

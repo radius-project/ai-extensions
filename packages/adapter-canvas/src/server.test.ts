@@ -25,7 +25,6 @@ import {
   canReuseModeledGraph,
   DEPLOY_RAD_COMMANDS_STEP,
   deleteNewlyCreatedGitHubEnvironment,
-  deploymentStatusBlocksMutation,
   DEPLOYMENT_MUTATION_LEASE_MS,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
@@ -67,7 +66,7 @@ import {
 } from "./server.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createEnvironmentAccountContext } from "./runtime/environment-account-context.js";
-import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "@radius-project/core";
 import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
   createOperation,
@@ -5084,22 +5083,6 @@ describe("isCrossSiteMutation", () => {
   });
 });
 
-describe("deploymentStatusBlocksMutation", () => {
-  it.each(["pending", "in_progress", "deleting"])(
-    "blocks the non-terminal status %s",
-    (status) => {
-      expect(deploymentStatusBlocksMutation(status)).toBe(true);
-    }
-  );
-
-  it.each(["success", "failed", "unknown", "", undefined])(
-    "allows the terminal status %s",
-    (status) => {
-      expect(deploymentStatusBlocksMutation(status)).toBe(false);
-    }
-  );
-});
-
 describe("deployment mutation reservations", () => {
   it("allows one mutation at a time and releases its owner", () => {
     const state: CanvasState = {};
@@ -5275,19 +5258,6 @@ describe("planned graph request generations", () => {
 });
 
 describe("triggerDeployRepairHandoff", () => {
-  it.each(["model-preflight-failed", "workflow-preflight-failed"] as const)(
-    "does not start an automatic repair after %s refused dispatch",
-    (deployErrorKind) => {
-      const calls: DeployRepairHandoffInput[] = [];
-      setDeployRepairHandoff((payload) => {
-        calls.push(payload);
-      });
-      expect(triggerDeployRepairHandoff(failedEntry({ deployErrorKind }))).toBe(
-        false
-      );
-      expect(calls).toEqual([]);
-    }
-  );
   afterEach(() => {
     setDeployRepairHandoff(null);
   });

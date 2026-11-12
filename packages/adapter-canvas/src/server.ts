@@ -1,12 +1,31 @@
+import { workflowTempFile } from "@radius-project/adapter-shared";
 import {
-  workflowTempFile,
-  createDeploymentCommandBindings
+  createDeploymentLookup,
+  createDeploymentRepository,
+  createDeploymentIdentityReader,
+  createDeploymentObservationBindings,
+  readWorkspaceFile,
+  type DeploymentRuntime
 } from "@radius-project/adapter-shared";
+import { createDeploymentViews } from "./server/services/deployment-views.js";
+import { createDeploymentAbandonmentViewService } from "./server/services/deployment-abandonment-view.js";
 import {
   ensureAzureServicePrincipal,
   assertSetupExecutionActive,
-  isSetupExecutionInterrupted
+  isSetupExecutionInterrupted,
+  classifyDeployDispatchFailure,
+  resolveDeployRepairLoop,
+  deploymentHandoffEligible,
+  deploymentNoticeEligible,
+  DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  DEPLOY_HANDOFF_RETRY_DELAY_MS
 } from "@radius-project/core";
+export {
+  classifyDeployDispatchFailure,
+  resolveDeployRepairLoop,
+  DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  DEPLOY_HANDOFF_RETRY_DELAY_MS
+};
 import { createAzureRecoveryPort } from "./server/services/azure-setup-recovery.js";
 // Canvas adapter — HTTP server host for the webview.
 //
@@ -26,15 +45,13 @@ import { join } from "node:path";
 import {
   buildRemediation,
   computeGraphDiff,
-  DEPLOY_RAD_COMMANDS_STEP,
   deployStatusKeys,
-  fetchBicepFromRepo,
+  fetchBicepSelectionFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
   mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
-  projectSafeApplicationGraph,
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
@@ -69,7 +86,6 @@ import {
   recordGraphBuildEvent
 } from "./shared.js";
 import type {
-  CanvasGraphResource,
   CanvasState,
   DeployErrorKind,
   GraphBuildEvent,
@@ -91,7 +107,6 @@ import {
   ghApiJson,
   getGitHubIdentity,
   getGhPackageCredentials,
-  ghCommandCredentialSource,
   resetGhIdentityCache,
   createSelectedGhExecutor,
   selectedGhApiJson,
@@ -139,35 +154,23 @@ import {
 } from "./server/services/environment-target.js";
 import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
 import { requireCurrentAwsWorkflows } from "./server/services/aws-workflow-compatibility.js";
-import {
-  appParams,
-  resolveDeployParams,
-  partitionParams,
-  buildDeployRadCommand,
-  buildAppGraphRadCommand,
-  extractAppName
-} from "./bicep.js";
+import { appParams } from "./bicep.js";
 import {
   commitWorkspaceBranchResolution,
   createWorkspaceGitHub,
   currentWorkspaceBranch,
   defaultBranchForState,
   resolveWorkspaceBicep,
-  fetchWorkspaceFile,
   isWorkspaceSelection,
   resolveGraphBranchForRequest,
   modelingRunLastActivityAtMs,
   resolveSessionId,
   toSafeRepoRelPath,
-  uncommittedGeneratedPaths,
   workspaceGraphJsonPath,
   workspaceSourceRevision
 } from "./workspace.js";
 import { readSelectedSourceRevision } from "./app-model-authoring-failure.js";
-import {
-  DEFAULT_CANVAS_PAGE,
-  DEPLOY_REPAIR_ATTEMPT_CAP
-} from "./runtime/hooks.js";
+import { DEFAULT_CANVAS_PAGE } from "./runtime/hooks.js";
 import { observeWorkspaceModelingRun } from "./runtime/modeling-activity.js";
 import {
   buildVerifyWorkflowDispatchArgs,
@@ -251,20 +254,15 @@ import {
 } from "./source-refs.js";
 import {
   generateVerifyWorkflow,
-  generatePortalUrl,
   syncRepoWorkflows,
-  deployWorkflowFiles,
   deleteApplicationWorkflowFiles,
   deleteEnvironmentWorkflowFiles,
   workflowTemplates,
-  ensureDeployWorkflowsOnBranch,
-  verifyDeploymentWorkflowInputs,
   LEGACY_DEPLOY_WORKFLOW_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
   findWorkflowRun,
-  latestWorkflowRunId,
   getRunDetail,
   fetchRunLog,
   extractErrorLines,
@@ -278,7 +276,6 @@ import {
 } from "./deploy.js";
 import {
   applyDeployMessages,
-  applyDeployStatusToResources,
   buildDeployMessageMap,
   buildDeployStatusMap,
   createDeployStatusReader,
@@ -392,11 +389,7 @@ import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import type { EnvironmentsDependencies } from "./server/routes/environments-types.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployModelSource } from "./server/services/deploy-model-source.js";
-import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
-import {
-  createDeployDispatchService,
-  type DeployDispatchDependencies
-} from "./server/services/deploy-dispatch.js";
+import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { createRadiusEnvironmentWorkflowDeletion } from "./server/services/radius-environment-workflow-deletion.js";
 import {
@@ -444,8 +437,6 @@ import {
   verificationActionsUrl
 } from "./server/services/recovered-verification-run.js";
 import { planRecoveredCleanup } from "./server/services/recovered-cleanup-command.js";
-import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
-import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import {
   runEnvironmentDeletion,
   statePackageDeletionFailureMessage,
@@ -554,14 +545,18 @@ export function endChildInput(child: ChildProcessInput): void {
   }
 }
 
-const {
-  runCliCommand,
-  runGh: runGhForDeploy,
-  runGhWithStdin: runGhWithStdinForDeploy,
-  ghOrThrow
-} = createDeploymentCommandBindings({
-  execute: (...args) => cliExec(...args)
-});
+function runCliCommand(
+  cmd: string,
+  args: string[],
+  timeout = 60000
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    const child = cliExec(cmd, args, { timeout }, (err, stdout, stderr) => {
+      resolve(toGhCommandResult(err, stdout, stderr));
+    });
+    endChildInput(child);
+  });
+}
 
 function runAwsCli(args: string[]): Promise<CommandResult> {
   return runCliCommand("aws", args);
@@ -593,6 +588,7 @@ interface AppBicepHandoffInput {
 }
 
 export interface DeployRepairHandoffInput {
+  appFile?: string;
   repo: string;
   branch: string;
   error: string;
@@ -701,31 +697,6 @@ async function runGitHubJsonRequest(
 
 function optionalString(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
-  return values.map((value) => {
-    const item = record(value);
-    const connections =
-      Array.isArray(item.connections) ?
-        item.connections.map((connection) => {
-          const fields = record(connection);
-          return {
-            ...fields,
-            id: optionalString(fields.id),
-            name: optionalString(fields.name),
-            direction: optionalString(fields.direction)
-          };
-        })
-      : undefined;
-    return {
-      ...item,
-      id: optionalString(item.id),
-      name: optionalString(item.name),
-      type: optionalString(item.type),
-      ...(connections ? { connections } : {})
-    };
-  });
 }
 
 // Composition root for the cooperative controls in the same `operations-status`
@@ -1003,12 +974,6 @@ export function releaseDeploymentMutation(
   reservation: DeploymentDispatchReservation
 ): void {
   if (state.deploymentMutation === reservation) delete state.deploymentMutation;
-}
-
-export function deploymentStatusBlocksMutation(status: unknown): boolean {
-  return (
-    status === "pending" || status === "in_progress" || status === "deleting"
-  );
 }
 
 export function localDeploymentBlocksMutation(
@@ -1479,25 +1444,11 @@ export const DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND: DeployErrorKind =
 // never opens an automatic repair loop.
 export const DEPLOY_CLOUD_AUTH_DRIFT_KIND: DeployErrorKind = "cloud-auth-drift";
 
-// Ceiling for the preflight's `az` call. The check is advisory — it can only
-// block on a definitive answer — so a slow or hung `az` must not hold up a
-// deploy that authenticates in Actions rather than locally.
-const AZURE_PREFLIGHT_TIMEOUT_MS = 15000;
-
 // Split a failed `gh workflow run` by whether it proves no run was created.
 // GitHub naming the branch as unresolvable is proof: it rejected the request.
 // Anything else is not — the request can be accepted and the answer lost (the
 // CLI timing out, for one), and the token-scope retry can dispatch twice — so
 // it has to be treated as a run that may exist.
-export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
-  if (
-    /no ref found|could not resolve|no commit found for the ref/i.test(
-      stderr || ""
-    )
-  )
-    return DEPLOY_BRANCH_NOT_PUSHED_KIND;
-  return DEPLOY_RUN_UNCONFIRMED_KIND;
-}
 
 // Decide, server-side, whether an incoming deploy continues an existing repair
 // loop, and whether that loop still has budget. The tool validates the attempt
@@ -1506,79 +1457,6 @@ export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
 // overwrite the newer deploy or mark it as already owned (which would suppress
 // its own failure handoff). An unbound request is an ordinary deploy and always
 // proceeds.
-export function resolveDeployRepairLoop(
-  state: CanvasState,
-  requestedAttemptId: unknown
-): {
-  repairLoop: boolean;
-  attemptId: string;
-  repairAttempt: number;
-  error?: string;
-} {
-  const requested =
-    typeof requestedAttemptId === "string" ? requestedAttemptId : "";
-  if (!requested) return { repairLoop: false, attemptId: "", repairAttempt: 0 };
-  const current = state?.deployAttempt?.id || "";
-  if (current !== requested) {
-    return {
-      repairLoop: false,
-      attemptId: "",
-      repairAttempt: 0,
-      error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
-    };
-  }
-  // A repair redeploy only makes sense against a deploy that actually failed.
-  // The attempt stays current after it settles, and the agent was told to keep
-  // passing its id, so without this an attempt-bound call could land on a
-  // deploy that is still running (starting a second workflow run and a second
-  // monitor over the same state) or on one that already succeeded (spending
-  // repair budget on a finished loop, and — because a loop redeploy is marked
-  // agent-owned — silently suppressing the handoff if it fails).
-  const deployStatus = state?.deployStatus || "";
-  if (deployStatus !== "failed") {
-    return {
-      repairLoop: false,
-      attemptId: "",
-      repairAttempt: 0,
-      error:
-        deployStatus === "in_progress" ?
-          `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
-        : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
-    };
-  }
-  // "failed" covers two different things, and only one is safe to redeploy.
-  // A confirmed failure — GitHub refused the dispatch, or the run finished and
-  // reported failure — leaves nothing in flight. The rest do not: the dispatch
-  // may have been accepted without us learning of it, or monitoring may have
-  // stopped before the run reported, in which case a redeploy would race a
-  // second run against the same target — exactly what the in_progress check
-  // above prevents, arriving by a different route. Deciding this from stored
-  // state keeps the resolver synchronous; re-querying the run would put an
-  // await in front of beginDeployAttempt, which must not happen.
-  if ((state?.deployErrorKind || "") === DEPLOY_RUN_UNCONFIRMED_KIND) {
-    const runUrl = state?.deployRunUrl || "";
-    return {
-      repairLoop: false,
-      attemptId: "",
-      repairAttempt: 0,
-      error: `Deploy attempt "${requested}" never confirmed what happened to its workflow, so a run may still be in flight and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the repository's Actions tab"} and tell the user what it shows. To deploy again afterwards, call radius_deploy without an attemptId — this attempt cannot be repaired, because its outcome will never be confirmed.`
-    };
-  }
-  // The cap the handoff prompt states is also enforced here, because prompt
-  // text alone is an instruction the agent can lose track of across a long
-  // repair loop. Refusing before anything is dispatched keeps a runaway loop
-  // from burning CI runs.
-  const repairAttempt = (state.deployRepairAttempts || 0) + 1;
-  if (repairAttempt > DEPLOY_REPAIR_ATTEMPT_CAP) {
-    return {
-      repairLoop: false,
-      attemptId: "",
-      repairAttempt: 0,
-      error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`
-    };
-  }
-  return { repairLoop: true, attemptId: requested, repairAttempt };
-}
 
 // Open a new deploy attempt on a reused canvas state. Deliberately
 // synchronous: the reset and the new attempt id must land together, because
@@ -1651,10 +1529,6 @@ export function beginDeployAttempt(
   };
 }
 
-export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
-// Backoff before re-sending a handoff whose delivery was rejected.
-export const DEPLOY_HANDOFF_RETRY_DELAY_MS = 2000;
-
 export function triggerDeployRepairHandoff(
   entry: { state: CanvasState } | undefined,
   instanceId = ""
@@ -1662,30 +1536,7 @@ export function triggerDeployRepairHandoff(
   try {
     if (typeof deployRepairHandoff !== "function") return false;
     const state = entry?.state;
-    if (!state || state.deployStatus !== "failed") return false;
-    if (
-      state.deployErrorKind === "model-preflight-failed" ||
-      state.deployErrorKind === "workflow-preflight-failed" ||
-      state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
-      // Refused before dispatch because no federated credential can match the
-      // token GitHub would mint. Repairing the model cannot change that.
-      state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
-      state.deployErrorKind === DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND ||
-      // Cloud auth drifted since the environment verified: only re-verifying
-      // (not a model repair + redeploy) can fix it, so keep it out of the loop.
-      state.deployErrorKind === DEPLOY_CLOUD_AUTH_DRIFT_KIND ||
-      // An attempt whose run may still be in flight can never be repaired: the
-      // resolver refuses its redeploy. Opening a loop only to refuse its first
-      // call would spend a cycle and tell the agent two different things.
-      state.deployErrorKind === DEPLOY_RUN_UNCONFIRMED_KIND
-    )
-      return false;
-    if (state.deployRepairing) return false;
-    if (
-      state.deployHandoffState === "pending" ||
-      state.deployHandoffState === "failed"
-    )
-      return false;
+    if (!state || !deploymentHandoffEligible(state)) return false;
     const repo =
       state.deployingRepo || state.plannedRepo || state.contextRepo || "";
     const branch = state.deployingBranch || "";
@@ -1783,14 +1634,7 @@ export function triggerDeployFailureNotice(
   try {
     if (typeof deployFailureNotice !== "function") return false;
     const state = entry?.state;
-    if (!state || state.deployStatus !== "failed") return false;
-    if (state.deployErrorKind !== DEPLOY_RUN_UNCONFIRMED_KIND) return false;
-    if (
-      state.deployNoticeState === "pending" ||
-      state.deployNoticeState === "delivered" ||
-      state.deployNoticeState === "failed"
-    )
-      return false;
+    if (!state || !deploymentNoticeEligible(state)) return false;
     const repo =
       state.deployingRepo || state.plannedRepo || state.contextRepo || "";
     const branch = state.deployingBranch || "";
@@ -1859,6 +1703,24 @@ export { DEPLOY_RAD_COMMANDS_STEP } from "@radius-project/core";
 // cache and the instance container above are all `const` and would otherwise be
 // in the temporal dead zone at the family's composition site.
 
+// The deploy's own gh runner: 30s timeout, resolves (never rejects) on a
+// non-zero exit so the dispatch path can read stderr and choose its message.
+function runGhForDeploy(
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    cliExec(
+      "gh",
+      args,
+      { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
+      (err, stdout, stderr) => {
+        resolve(toGhCommandResult(err, stdout, stderr));
+      }
+    );
+  });
+}
+
 // Delete the GitHub Environment. Idempotent: a 404 (already gone) is reported as
 // `not_found`, not a failure, so a re-run after a partial deletion converges.
 // The classification and cache-invalidation logic is the shared cleanup
@@ -1881,121 +1743,22 @@ function sleepMs(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-const deployPlannedGraphService = createPlannedGraphRecoveryService({
-  prepareSourceRefResources: (entry, view, context) =>
-    prepareSourceRefResources(entry, view, context),
-  setSourceRefResources: (entry, view, resources, context, expectedToken) =>
-    setSourceRefResources(entry, view, resources, context, expectedToken),
-  readModelForSelection: (...args) => readDeployModelForSelection(...args),
-  radArtifactsDirForSelection: ({
-    isLocal,
-    state,
-    repo,
-    branch,
-    bicepRepoPath,
-    log
-  }) =>
-    radArtifactsDirForSelection({
-      isLocal,
-      state,
-      github,
-      repo,
-      branch,
-      bicepRepoPath,
-      log
-    }),
-  buildGraphViaRad: (content, bicepPath, options) =>
-    buildGraphViaRad(content, bicepPath, options),
-  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
-  resolveRecipeOutputs: (parsed, recipes, provider) =>
-    resolveRecipeOutputs(github, parsed, recipes, provider),
-  canvasGraphResources,
-  errorMessage
-});
-
-const deployDispatchDependencies = {
-  id: randomUUID,
-  ghCommandPresentation: GH_COMMAND_PRESENTATION,
-  deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
-  branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
-  oidcSubjectMissingKind: DEPLOY_OIDC_SUBJECT_MISSING_KIND,
-  oidcSubjectCaseMismatchKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
-  getBranchHeadSha,
-  getDefaultBranch,
-  runGh: runGhForDeploy,
-  runGhWithStdin: runGhWithStdinForDeploy,
-  runAz: async (args) => {
-    // Short timeout on purpose: this runs before every Azure deploy, including
-    // redeploys and repair attempts, and an unusable check is only ever a
-    // warning. Waiting out the default 60s would add a minute of dead time to a
-    // deploy that was always going to succeed.
-    const result = await runCliCommand("az", args, AZURE_PREFLIGHT_TIMEOUT_MS);
-    return {
-      code: result.code ?? 1,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? ""
-    };
-  },
-  runGitHubJson: (apiPath) => runGitHubJsonRequest(apiPath),
-  readProcessEnv: () => process.env,
-  ghCredentialSource: ghCommandCredentialSource,
-  fetchFileForSelection: (entry, repo, branch, repoPath) =>
-    fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),
-  appParams,
-  resolveDeployParams: (params) => resolveDeployParams(params),
-  partitionParams,
-  extractAppName,
-  buildDeployRadCommand,
-  buildAppGraphRadCommand,
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  latestWorkflowRunId,
-  classifyDeployDispatchFailure,
-  uncommittedGeneratedPaths: (entry) =>
-    uncommittedGeneratedPaths(
-      (entry as CanvasServerEntry).state?.workspacePath
-    ),
-  invalidateDeployListCache: (repo) => {
-    deployListCache.delete(repo);
-  },
-  errorMessage,
-  now: () => Date.now()
-} satisfies Omit<
-  DeployDispatchDependencies,
-  | "deployWorkflowFiles"
-  | "ensureDeployWorkflowsOnBranch"
-  | "ensureWorkflowsCurrent"
-  | "verifyAppFileInput"
->;
-
-// A deploy needs the dispatcher and every provider workflow the switch publishes.
-function productionDeployDispatchService(includeAws: boolean) {
-  return createDeployDispatchService({
-    ...deployDispatchDependencies,
-    deployWorkflowFiles: deployWorkflowFiles(includeAws),
-    ensureDeployWorkflowsOnBranch: ensureDeployWorkflowsOnBranch.bind(
-      undefined,
-      includeAws
-    ),
-    ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, includeAws),
-    verifyAppFileInput: verifyDeploymentWorkflowInputs.bind(
-      undefined,
-      includeAws
-    )
+// gh runner that REJECTS on failure, so callers can fail closed instead of
+// silently treating a GitHub outage or timeout as "no data". Used by the
+// deployment-resolution paths where an empty result must not be mistaken for a
+// definitive answer (e.g. "no app is deployed" → allow environment deletion).
+function ghOrThrow(
+  args: string[],
+  timeout = 12000,
+  execute: typeof cliExec = cliExec
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execute("gh", args, { timeout }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve((stdout || "").trim());
+    });
   });
 }
-
-const deployOutcomeService = createDeployOutcomeService({
-  projectSafeGraphResources: (graph) =>
-    canvasGraphResources(projectSafeApplicationGraph(graph).resources),
-  settleDeployStatuses,
-  fetchRunLog: (repo, runId, request) =>
-    fetchRunLog(repo, runId, undefined, request),
-  redactDiagnostic: redactGhCredentials,
-  cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
-  sleep: (milliseconds) =>
-    new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  now: () => Date.now()
-});
 
 export interface CleanupGitHubContext {
   rollbackCommand: WorkflowRollbackCommand;
@@ -3713,45 +3476,17 @@ export function explainMissingPackagesScope(
 // record is almost always in the newest handful.
 const DEPLOY_MAX_PARALLEL_RECORDS = 10;
 
-// Resolve the Radius application name for a repo the same way /api/list-applications
-// does: read the name declared in `.radius/app.bicep` (or `app.bicep`) on `branch`,
-// falling back to the repo's short name when it can't be read. A repo hosts a single
-// Radius application in this model. Best-effort — a read failure falls back to the
-// basename rather than throwing, since callers use the name only for display and for
-// targeting the app's deploy/delete, not for the fail-closed deployment check itself.
-async function resolveRepoAppName(
-  repo: string,
-  branch: string
-): Promise<string> {
-  let appName = repo.split("/").pop() || repo;
-  const ref = branch || "main";
-  for (const p of [".radius/app.bicep", "app.bicep"]) {
-    let raw: string;
-    try {
-      raw = await ghOrThrow([
-        "api",
-        `/repos/${repo}/contents/${p}?ref=${ref}`,
-        "--jq",
-        ".content"
-      ]);
-    } catch {
-      raw = "";
-    }
-    if (!raw) continue;
-    let decoded: string;
-    try {
-      decoded = Buffer.from(raw, "base64").toString("utf8");
-    } catch {
-      decoded = "";
-    }
-    const name = extractAppName(decoded);
-    if (name) {
-      appName = name;
-      break;
-    }
-  }
-  return appName;
-}
+const resolveRepoAppName = createDeploymentLookup({
+  readApplicationIdentity: createDeploymentIdentityReader({
+    listWorkflowArtifacts,
+    downloadWorkflowArtifact,
+    redactDiagnostic: redactGhCredentials
+  }),
+  ghOrThrow,
+  deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
+  deleteWorkflowFile: DELETE_WORKFLOW_FILE,
+  maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS
+}).resolveRepoAppName;
 
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
@@ -3760,18 +3495,23 @@ async function resolveRepoAppName(
 // record out of a shared, repo-wide page. Rejects on any GitHub error so callers
 // fail closed rather than mistaking an outage for "nothing deployed".
 //
-// `appName` is the resolved Radius application name (see resolveRepoAppName); it
-// must be passed in so the returned row targets the real app declared in
-// app.bicep, not the repo basename — the environment-deletion guard dispatches a
-// delete for this name and redirects to it, and the deployments list links to it.
-// Returns `{ app, environment, provider, status, deploymentId, runUrl }`.
+// The legacy appName argument is not identity evidence. Each row resolves its
+// application from artifacts belonging to the deployment's own workflow run.
 async function resolveEnvDeployment(
   repo: string,
   environment: string,
-  appName: string
+  appName: string,
+  execute: typeof cliExec = cliExec
 ): Promise<DeploymentRow | null> {
   return resolveEnvironmentDeployment(repo, environment, appName, {
-    ghOrThrow,
+    readApplicationIdentity: createDeploymentIdentityReader({
+      ...createDeploymentObservationBindings({
+        execute,
+        redactDiagnostic: redactGhCredentials
+      }),
+      redactDiagnostic: redactGhCredentials
+    }),
+    ghOrThrow: (args) => ghOrThrow(args, 12000, execute),
     deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
     deleteWorkflowFile: DELETE_WORKFLOW_FILE,
     maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS
@@ -3915,40 +3655,14 @@ async function fetchBicepSelection(
         bicepPath: local.repoPath
       };
   }
-  const remote = await fetchBicepFromRepo(github, repo, access.branch);
+  const remote = await fetchBicepSelectionFromRepo(github, repo, access.branch);
   return {
-    content: remote,
+    content: remote?.content ?? null,
     fromWorkspace: false,
     branch: access.branch,
-    bicepPath: ""
+    bicepPath: remote?.bicepPath ?? ""
   };
 }
-
-async function fetchFileForSelection(
-  entry: CanvasServerEntry,
-  repo: string,
-  branch: string,
-  repoPath: string
-): Promise<string | null> {
-  const access = accessForSelection(entry, repo, branch);
-  if (access.useWorkspace) {
-    const local = await fetchWorkspaceFile(
-      entry.state,
-      repo,
-      access.branch,
-      repoPath
-    );
-    if (local !== null) return local;
-  }
-
-  return await fetchFileFromRepo(repo, repoPath, access.branch);
-}
-
-const readDeployModelForSelection = createDeployModelSource({
-  readWorkspace: fetchWorkspaceFile,
-  readRepository: fetchFileFromRepoResult,
-  redactDiagnostic: redactGhCredentials
-});
 
 // Every path on a branch, resolved through the same workspace-or-remote access
 // rule as the Bicep selection so the answer describes the tree the graph would
@@ -5685,10 +5399,12 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
 
 export interface ProductionCanvasServerRuntimeOptions {
   executionOwner: EnvironmentExecutionOwner;
+  deploymentRuntime: DeploymentRuntime;
   accountContext: EnvironmentAccountContext;
   environmentOperationRunner?: EnvironmentOperationRunner;
   environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
   cliExec?: typeof cliExec;
+  buildGraphViaRad?: typeof buildGraphViaRad;
   // The developer-only AWS switch, read once by the composition root. Off, AWS
   // stays hidden: no AWS provider, no AWS environment create or delete, and no
   // AWS workflows committed to the repository.
@@ -5708,11 +5424,13 @@ export function createProductionCanvasServerRuntime(
 ) {
   const {
     executionOwner,
+    deploymentRuntime,
     accountContext,
     environmentDeletionPorts,
     serverDependencies,
     awsEnabled,
-    cliExec: cliExecPort = cliExec
+    cliExec: cliExecPort = cliExec,
+    buildGraphViaRad: buildGraphPort = buildGraphViaRad
   } = options;
   if (!executionOwner)
     throw new Error("Missing canvas server dependency: executionOwner");
@@ -5720,6 +5438,9 @@ export function createProductionCanvasServerRuntime(
     throw new Error("Missing canvas server dependency: awsEnabled");
   if (!accountContext)
     throw new Error("Missing canvas server dependency: accountContext");
+  if (!deploymentRuntime)
+    throw new Error("Missing canvas server dependency: deploymentRuntime");
+  const deploymentViews = createDeploymentViews(deploymentRuntime);
   const templates = workflowTemplates(awsEnabled);
   const awsEnvironmentAccess =
     createAwsEnvironmentAccess<EnvironmentOperationRecord>({
@@ -6089,15 +5810,20 @@ export function createProductionCanvasServerRuntime(
   const deploymentsRoutes = createDeploymentsRoutes({
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     isValidRepoSlug,
-    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-    triggerDeployRepairHandoff,
-    triggerDeployFailureNotice,
+    readInstanceEntry: (instanceId) => {
+      const entry = canvasServer.instances.get(instanceId);
+      if (entry) deploymentViews.refresh(instanceId, entry.state);
+      return entry;
+    },
+    triggerDeployRepairHandoff: () => false,
+    triggerDeployFailureNotice: () => false,
     deployHandoffStatus,
     resolveRepoAppName,
-    resolveEnvDeployment,
-    ghOrThrow: (args) => ghOrThrow(args),
+    resolveEnvDeployment: (repo, environment, application) =>
+      resolveEnvDeployment(repo, environment, application, cliExecPort),
+    ghOrThrow: (args) => ghOrThrow(args, 12000, cliExecPort),
     resetDeploymentViewState: (state, attemptId) => {
-      resetDeploymentViewState(state, attemptId);
+      deploymentViews.reset(state, attemptId);
     },
     get deployListCache() {
       return deployListCache;
@@ -6105,13 +5831,14 @@ export function createProductionCanvasServerRuntime(
     get deployListTtlMs() {
       return DEPLOY_LIST_TTL_MS;
     },
-    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+    activeDeploymentMutation: () => undefined,
     reserveDeploymentMutation: (state, reservation) =>
-      reserveDeploymentMutation(state, reservation),
-    releaseDeploymentMutation,
+      deploymentViews.reserve(state, reservation),
+    releaseDeploymentMutation: deploymentViews.release,
+    captureDeletedDeployment: deploymentViews.captureDeletion,
+    logError: console.error,
     deploymentStatusBlocksMutation,
-    localDeploymentBlocksMutation: (state) =>
-      localDeploymentBlocksMutation(state),
+    localDeploymentBlocksMutation: () => false,
     ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, awsEnabled),
     deleteApplicationWorkflowFiles: deleteApplicationWorkflowFiles(awsEnabled),
     findWorkflowRun,
@@ -6315,8 +6042,7 @@ export function createProductionCanvasServerRuntime(
       workspaceGraphJsonPath(state, bicepRepoPath),
     radArtifactsDirForSelection: (options) =>
       radArtifactsDirForSelection({ ...options, github }),
-    buildGraphViaRad: (content, bicepPath, options) =>
-      buildGraphViaRad(content, bicepPath, options),
+    buildGraphViaRad: buildGraphPort,
     canvasGraphResources,
     errorMessage,
     logError: (message) => console.error(message)
@@ -6345,8 +6071,7 @@ export function createProductionCanvasServerRuntime(
           fetchBicepSelection(entry, repo, branch),
         resolveRadArtifactsDir: (request) =>
           radArtifactsDirForSelection({ ...request, github }),
-        buildGraphViaRad: (content, definitionFile, options) =>
-          buildGraphViaRad(content, definitionFile, options),
+        buildGraphViaRad: buildGraphPort,
         canvasGraphResources,
         workspaceGraphJsonPath,
         graphDefinitionHash,
@@ -6829,7 +6554,8 @@ export function createProductionCanvasServerRuntime(
             coordinator.start(entry.baseUrl);
           }
         },
-        onStopped: (instanceId) => {
+        onStopped: (instanceId, entry) => {
+          deploymentViews.detach(instanceId, entry.state);
           instanceRequestCoordinators.get(instanceId)?.detach();
           instanceRequestCoordinators.delete(instanceId);
         },
@@ -6840,132 +6566,67 @@ export function createProductionCanvasServerRuntime(
     )
   );
 
-  // deployStatusReaderFromState - build a deployed-graph/status reader for a
-  // canvas instance's state.
-  //
-  // Deploy status and the deployed application graph are published by the deploy
-  // workflow as a workflow artifact (see ./deploy-artifacts.ts). Scope the read to
-  // the run being monitored when there is one, so an in-flight deploy reports its
-  // own status rather than the previous run's; otherwise read the newest matching
-  // artifact repo-wide, which is what a fresh canvas session with no run in flight
-  // needs.
-  //
-  // Repo-wide discovery permits a guessed application name as a tie-breaker.
-  // An active run instead requires matching application and execution evidence;
-  // another application's progress must not paint this deployment's graph.
-  async function deployStatusReaderFromState(
-    state: CanvasState,
-    repo: string,
-    branch: string,
-    runId?: number | string | null
-  ) {
-    const environment = state?.deployEnvName || state?.envName || "";
-    let application = state?.deployAppName || "";
-    if (!application && repo) {
-      application = await resolveRepoAppName(
-        repo,
-        branch || state?.deployingBranch || state?.graphBranch || ""
-      );
-      if (application && state) state.deployAppName = application;
-    }
-    const entry = [...canvasServer.instances.values()].find(
-      (candidate) => candidate.state === state
-    );
-    if (!entry?.observation)
-      throw new Error("Workflow observation instance is unavailable.");
-    return entry.observation.reader({
-      repo,
-      environment,
-      application,
-      runId: runId ?? state?.deployRunId ?? null
-    });
-  }
-
-  const deployMonitorService = createDeployMonitorService({
-    plannedGraph: deployPlannedGraphService,
-    dispatch: productionDeployDispatchService(awsEnabled),
-    outcome: deployOutcomeService,
-    deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
-    unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
-    findWorkflowRun: (
-      repo,
-      workflowFile,
-      sinceMs,
-      knownId,
-      afterRunId,
-      correlationId
-    ) =>
-      findWorkflowRun(
-        repo,
-        workflowFile,
-        sinceMs,
-        knownId,
-        undefined,
-        afterRunId,
-        correlationId
-      ),
-    getRunDetail: (repo, runId, request) =>
-      getRunDetail(repo, runId, undefined, request, {
-        includeProtection: true
-      }),
-    createStatusReader: (state, repo, branch, runId) =>
-      deployStatusReaderFromState(state, repo, branch, runId),
-    buildDeployStatusMap,
-    buildDeployMessageMap,
-    applyDeployMessages,
-    applyDeployStatusToResources,
-    settleDeployStatuses,
-    generatePortalUrl,
-    optionalString,
-    errorMessage,
-    sleep: (milliseconds) =>
-      new Promise((resolve) => setTimeout(resolve, milliseconds)),
-    now: () => Date.now()
+  const readDeployModelForSelection = createDeployModelSource({
+    readWorkspace: async (state, repo, branch, path) =>
+      accessForSelection({ state }, repo, branch).useWorkspace ?
+        readWorkspaceFile(state.workspacePath, path)
+      : null,
+    readRepository: createDeploymentRepository({
+      execute: cliExecPort,
+      redactDiagnostic: redactGhCredentials
+    }).readFileResult,
+    redactDiagnostic: redactGhCredentials
   });
-
   const deployRequestService = createDeployRequestService({
-    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    runtime: deploymentRuntime,
+    plannedGraph: createPlannedGraphRecoveryService({
+      prepareSourceRefResources,
+      setSourceRefResources,
+      readModelForSelection: readDeployModelForSelection,
+      radArtifactsDirForSelection: (request) =>
+        radArtifactsDirForSelection({ ...request, github }),
+      buildGraphViaRad: buildGraphPort,
+      fetchRecipePack: (provider) => fetchRecipePack(github, provider),
+      resolveRecipeOutputs: (parsed, recipes, provider) =>
+        resolveRecipeOutputs(github, parsed, recipes, provider),
+      canvasGraphResources,
+      errorMessage
+    }),
     readModelForSelection: readDeployModelForSelection,
-    resolveDeployRepairLoop,
-    resolveDeploymentEnvironment,
-    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-    localDeploymentBlocksMutation: (state) =>
-      localDeploymentBlocksMutation(state),
-    reserveDeploymentMutation: (state, reservation) =>
-      reserveDeploymentMutation(state, reservation),
-    releaseDeploymentMutation,
-    deploymentStatusBlocksMutation,
-    resolveEnvDeployment,
-    runCommand: (command, args) => runCommand(command, args),
-    canvasGraphResources,
-    beginDeployAttempt,
-    triggerDeployRepairHandoff: (entry, instanceId) =>
-      triggerDeployRepairHandoff(entry, instanceId),
-    triggerDeployFailureNotice: (entry, instanceId) =>
-      triggerDeployFailureNotice(entry, instanceId),
-    monitor: deployMonitorService,
-    unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
-    repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
+    readInstanceEntry: (instanceId) => {
+      const entry = canvasServer.instances.get(instanceId);
+      if (entry) deploymentViews.refresh(instanceId, entry.state);
+      return entry;
+    },
+    attach: deploymentViews.attach,
+    readDeploymentDefaults: deploymentViews.defaults,
+    reportError: (error) =>
+      console.error(redactGhCredentials(errorMessage(error))),
     errorMessage
   });
 
-  const deploymentAbandonmentService = createDeploymentAbandonmentService({
+  const abandonment = createDeploymentAbandonmentService({
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     isValidRepoSlug,
     readInstanceState: (instanceId) =>
       canvasServer.instances.get(instanceId)?.state,
-    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-    localDeploymentBlocksMutation: (state) =>
-      localDeploymentBlocksMutation(state),
+    activeDeploymentMutation: () => undefined,
+    localDeploymentBlocksMutation: () => false,
     reserveDeploymentMutation: (state, reservation) =>
-      reserveDeploymentMutation(state, reservation),
-    releaseDeploymentMutation,
+      deploymentViews.reserve(state, reservation),
+    releaseDeploymentMutation: deploymentViews.release,
     deploymentStatusBlocksMutation,
-    resolveEnvDeployment,
-    ghOrThrow: (args) => ghOrThrow(args),
+    resolveEnvDeployment: (repo, environment, application) =>
+      resolveEnvDeployment(repo, environment, application, cliExecPort),
+    ghOrThrow: (args) => ghOrThrow(args, 12000, cliExecPort),
     invalidateDeployListCache: (repo) => {
       deployListCache.delete(repo);
     }
+  });
+  const deploymentAbandonmentService = createDeploymentAbandonmentViewService({
+    service: abandonment,
+    owner: deploymentRuntime.owner,
+    retire: deploymentViews.retire
   });
 
   function getLastWebviewActivityAt(): number {
@@ -7064,6 +6725,8 @@ export function createProductionCanvasServerRuntime(
 
   return {
     servers: canvasServer.instances,
+    deploymentRuntime,
+    detachDeploymentView: deploymentViews.detach,
     setupExecution,
     verificationStatus,
     operationControl,
@@ -7083,3 +6746,13 @@ import {
   preflightSetupRepository,
   selectedSetupPackageIdentity
 } from "@radius-project/core";
+import {
+  deploymentStatusBlocksMutation,
+  deploymentGraphResources as canvasGraphResources
+} from "@radius-project/core";
+export { deploymentStatusBlocksMutation } from "@radius-project/core";
+export { createProductionDeploymentRuntime } from "./runtime/production-deployment.js";
+
+export function invalidateDeployListCache(repo: string): void {
+  deployListCache.delete(repo);
+}
