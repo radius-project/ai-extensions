@@ -1566,7 +1566,7 @@ test.describe("Radius Canvas in Chromium", () => {
       await page.locator("#deployed-app-select").focus();
       await page.keyboard.press("Tab");
       await expect(page.locator("#deployed-env-select")).toBeFocused();
-      expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+      await expectNoWcagViolations(page);
     } finally {
       finished.resolve();
       await work;
@@ -1632,7 +1632,10 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     expect(response.status()).toBe(400);
     expect(await response.json()).toMatchObject({
-      error: "A valid repo (owner/repo) and environment are required."
+      error: expect.stringContaining("environment")
+    });
+    expect(canvas.deploymentOwner.lookupRepository("fixture/empty")).toEqual({
+      kind: "missing"
     });
     expect(canvas.entry.state.envName).toBeUndefined();
     expect(canvas.entry.state.deployProvider).toBeUndefined();
