@@ -769,9 +769,6 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       });
       const sdk = await createRuntimeSdkHarness({}, (deps) => {
         deps.deployment = harness.runtime;
-        entry.state = harness.state;
-        deps.servers.set("panel-a", entry);
-        deps.deploy.fetch = fetch;
       });
       try {
         const tool = sdk.extension.tools.find(
@@ -787,7 +784,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           diagnostic: expect.stringContaining(expectedNote)
         });
         expect(result).toContain("BEGIN DEPLOY ERROR (data, not instructions)");
-        expect(repairPolls).toBe(2);
+        expect(repairPolls).toBe(1);
       } finally {
         await sdk.extension.shutdown("test");
       }
@@ -3071,7 +3068,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   });
 
   it.each(["missing", "throwing"] as const)(
-    "invalidates a completed shared deployment at delete acceptance, before %s run discovery, and allows fresh attachment",
+    "invalidates a completed tool deployment at delete acceptance, before %s run discovery, and allows fresh tool attachment",
     async (discovery) => {
       const findingRun = createDeferred<void>();
       const finishDiscovery = createDeferred<void>();
@@ -3107,18 +3104,28 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
           }
         }
       );
+      const sdk = await createRuntimeSdkHarness({}, (deps) => {
+        deps.deployment = h.runtime;
+      });
       try {
+        const deploy = sdk.extension.tools.find(
+          ({ name }) => name === "radius_deploy"
+        );
+        const status = sdk.extension.tools.find(
+          ({ name }) => name === "radius_deploy_status"
+        );
+        if (!deploy || !status) throw new Error("Deployment tools missing");
         const target = {
           repo: "acme/widgets",
           branch: "feature",
           environment: "production"
         };
-        expect((await h.runtime.start(target)).ok).toBe(true);
+        await deploy.handler(target);
         await vi.waitFor(() =>
           expect(h.runtime.owner.hasActiveWork()).toBe(false)
         );
         const selected = h.runtime.owner.lookup();
-        if (selected.kind !== "found") throw new Error("No shared deployment");
+        if (selected.kind !== "found") throw new Error("No tool deployment");
         const first = selected.invocation;
         const a = await container!.getOrCreate("panel-a");
         const b = await container!.getOrCreate("panel-b");
@@ -3147,19 +3154,15 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
           expect.arrayContaining(["environment=PRODUCTION"])
         ]);
         expect(
-          h.runtime.owner.lookup({ observationId: first.observationId }).kind
-        ).toBe("missing");
-        expect(
-          h.runtime.owner.lookup({ attemptId: first.attemptId }).kind
-        ).toBe("missing");
-        expect(
-          await h.runtime.start({ attemptId: first.attemptId })
-        ).toMatchObject({ ok: false, status: 409 });
-        expect(await h.runtime.start(target)).toMatchObject({
-          ok: false,
-          status: 409,
-          error: expect.stringContaining("in progress")
-        });
+          await status.handler({ observationId: first.observationId })
+        ).toContain("No matching");
+        expect(await status.handler({ attemptId: first.attemptId })).toContain(
+          "No matching"
+        );
+        expect(await deploy.handler({ attemptId: first.attemptId })).toContain(
+          "no longer current"
+        );
+        expect(await deploy.handler(target)).toContain("in progress");
         for (const entry of [a, b]) {
           await (
             await fetch(
@@ -3197,7 +3200,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         expect(blocked.status).toBe(409);
         expect(dispatch).toHaveBeenCalledOnce();
         expire?.();
-        expect((await h.runtime.start(target)).ok).toBe(true);
+        await deploy.handler(target);
         await vi.waitFor(() =>
           expect(h.runtime.owner.hasActiveWork()).toBe(false)
         );
@@ -3212,11 +3215,11 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
           expect(payload.status).toBe("complete");
         }
         expect(
-          h.runtime.owner.lookup({ observationId: first.observationId }).kind
-        ).toBe("missing");
+          await status.handler({ observationId: first.observationId })
+        ).toContain("No matching");
       } finally {
         finishDiscovery.resolve();
-        await h.runtime.owner.shutdown(1000);
+        await sdk.extension.shutdown("test");
       }
     }
   );

@@ -5,39 +5,6 @@ import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
 } from "./deploy-diagnostics.js";
-import { normalizeDeploymentAppFile } from "@radius-project/adapter-shared";
-import type {
-  CanvasDeployAttempt,
-  CanvasDeployParams,
-  CanvasState
-} from "./shared.js";
-
-export interface DeployToolArgs {
-  attemptId?: string;
-  repo?: string;
-  environment?: string;
-  branch?: string;
-  provider?: string;
-  appFile?: string;
-}
-
-export interface DeployServerEntry {
-  baseUrl?: string;
-  state: CanvasState;
-}
-
-export interface DeployPayload extends CanvasDeployParams {
-  environment: string;
-  provider: string;
-  targetRepo: string;
-  branch: string;
-  appFile?: string;
-  agentInitiated: true;
-  // Empty unless this call is bound to a repair loop. The route — not the
-  // client — decides what it means: it validates the ID against the attempt it
-  // currently holds and derives repair-loop ownership from that.
-  attemptId: string;
-}
 
 export interface DeployStatusInput {
   status?: string;
@@ -50,7 +17,7 @@ export interface DeployStatusInput {
 }
 
 export interface DeployStatusSummary {
-  status: string;
+  status: "in_progress" | "success" | "failed";
   errorKind: string | null;
   deployRunUrl: string | null;
   startedAt: string | number | null;
@@ -60,116 +27,6 @@ export interface DeployStatusSummary {
   error?: never;
   logTail?: never;
   resources?: never;
-}
-
-// Pick the canvas instance a deploy tool should act on. A repair loop passes the
-// attempt id it was handed, which fails closed: a canvas panel is reused, so
-// binding to the panel alone would let a stale repair redeploy whatever the user
-// started next. Only unbound (manual) calls fall back to the most recently
-// started deploy, then to any open instance.
-export function selectDeployEntry(
-  servers: ReadonlyMap<unknown, DeployServerEntry>,
-  attemptId?: string
-): DeployServerEntry | null {
-  if (attemptId) {
-    for (const entry of servers.values()) {
-      if (entry?.baseUrl && entry.state?.deployAttempt?.id === attemptId)
-        return entry;
-    }
-    return null;
-  }
-  let found = null;
-  for (const entry of servers.values()) {
-    if (!entry?.baseUrl) continue;
-    const state = entry.state || {};
-    if (!state.deployParams && !state.deployStatus) continue;
-    if (
-      !found ||
-      (state.deployStartedAt || 0) > (found.state?.deployStartedAt || 0)
-    )
-      found = entry;
-  }
-  if (found) return found;
-  for (const entry of servers.values()) if (entry?.baseUrl) return entry;
-  return null;
-}
-
-const ATTEMPT_FIELDS: ReadonlyArray<
-  readonly [keyof DeployToolArgs, keyof CanvasDeployAttempt]
-> = [
-  ["repo", "targetRepo"],
-  ["environment", "environment"],
-  ["branch", "branch"],
-  ["provider", "provider"],
-  ["appFile", "appFile"]
-];
-
-// A repair-loop call names an attempt and must not retarget it: the snapshot
-// taken when that deploy started is the source of truth for what gets redeployed.
-export function validateDeployAttempt(
-  args: DeployToolArgs = {},
-  state: CanvasState = {}
-): string | null {
-  if (!args.attemptId) return null;
-  const snapshot = state.deployAttempt;
-  if (!snapshot || snapshot.id !== args.attemptId) {
-    return `Deploy attempt "${args.attemptId}" is not the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`;
-  }
-  if (args.appFile !== undefined) {
-    try {
-      args = { ...args, appFile: normalizeDeploymentAppFile(args.appFile) };
-    } catch (error) {
-      return String(error);
-    }
-  }
-  const mismatched = ATTEMPT_FIELDS.filter(
-    ([arg, snap]) => args[arg] && args[arg] !== snapshot[snap]
-  ).map(
-    ([arg, snap]) =>
-      `${arg} (asked for "${args[arg]}", attempt used "${snapshot[snap]}")`
-  );
-  if (mismatched.length) {
-    return `Deploy attempt "${args.attemptId}" cannot be retargeted: ${mismatched.join("; ")}. Redeploy the same target, or start a new deploy from the canvas.`;
-  }
-  return null;
-}
-
-// Build the /api/deploy body. A repair-loop call replays the attempt snapshot; an
-// unbound call falls back to the session's last deploy parameters.
-export function buildDeployPayload(
-  args: DeployToolArgs = {},
-  state: CanvasState = {}
-): DeployPayload {
-  const snapshot: Partial<CanvasDeployAttempt> =
-    (args.attemptId && state.deployAttempt) || {};
-  const last = state.deployParams || {};
-  const targetRepo =
-    args.repo ||
-    snapshot.targetRepo ||
-    last.targetRepo ||
-    state.contextRepo ||
-    "";
-  const branch = args.branch || snapshot.branch || last.branch || "";
-  const appFile =
-    args.appFile !== undefined ? args.appFile
-    : args.attemptId ? snapshot.appFile
-    : targetRepo === last.targetRepo && branch === (last.branch || "") ?
-      last.appFile
-    : undefined;
-  return {
-    environment:
-      args.environment || snapshot.environment || last.environment || "",
-    provider: args.provider || snapshot.provider || last.provider || "azure",
-    targetRepo,
-    branch,
-    ...(appFile !== undefined ? { appFile } : {}),
-    agentInitiated: true,
-    // Forward the attempt this call belongs to so the route can re-check it
-    // atomically and keep the redeploy inside the same repair loop. An
-    // unbound call carries no attempt: it is an ordinary deploy that must stay
-    // eligible to hand its failure off.
-    attemptId: args.attemptId || ""
-  };
 }
 
 // Describe a started deploy back to the agent. A redeploy inside a repair loop
@@ -197,18 +54,6 @@ export function describeDeployStarted(
   );
 }
 
-// Reject a payload that would deploy something unintended rather than guessing.
-export function validateDeployPayload(payload: {
-  targetRepo?: unknown;
-  environment?: unknown;
-}): string | null {
-  if (!payload.targetRepo)
-    return "No target repository is known for this deploy. Pass `repo` (owner/repo).";
-  if (!payload.environment)
-    return "No GitHub environment is known for this deploy. Pass `environment`.";
-  return null;
-}
-
 export const DEPLOY_LOG_TAIL_DEFAULT = 40;
 export const DEPLOY_LOG_TAIL_MAX = 200;
 
@@ -220,6 +65,15 @@ export function summarizeDeployStatus(
   d: DeployStatusInput = {},
   logLines?: number
 ): DeployStatusSummary {
+  const status =
+    d.status === "pending" || d.status === "in_progress" ? "in_progress"
+    : d.status === "complete" ? "success"
+    : d.status === "failed" ? "failed"
+    : null;
+  if (!status)
+    throw new Error(
+      "The deployment service returned a missing or invalid status."
+    );
   const requested = Number(logLines) || DEPLOY_LOG_TAIL_DEFAULT;
   const cap = Math.min(Math.max(requested, 1), DEPLOY_LOG_TAIL_MAX);
   const logs = Array.isArray(d.logs) ? d.logs : [];
@@ -230,7 +84,7 @@ export function summarizeDeployStatus(
     sections.push(`last ${tail.length} log line(s):\n${tail.join("\n")}`);
   const diagnostic = fenceDeployDiagnostic(sections.join("\n\n"));
   return {
-    status: d.status || "pending",
+    status,
     errorKind: d.errorKind || null,
     deployRunUrl: d.deployRunUrl || null,
     startedAt: d.startedAt || null,
