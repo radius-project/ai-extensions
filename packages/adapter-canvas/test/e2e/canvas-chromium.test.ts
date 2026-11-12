@@ -730,6 +730,17 @@ test.describe("Radius Canvas in Chromium", () => {
       "[]"
     );
     const additions: FakeCliCommand[] = [
+      ...[".radius/app.bicep", "app.bicep"].map((file): FakeCliCommand => ({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/${file}?ref=${WORKTREE_BRANCH}`,
+          "--jq",
+          ".content"
+        ],
+        exitCode: 1,
+        stderr: "gh: Not Found (HTTP 404)"
+      })),
       {
         tool: "gh",
         args: repositoryArtifactArgs,
