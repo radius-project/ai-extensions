@@ -89,7 +89,11 @@ function harness(
         : source === null ? new Error("Not Found")
         : null,
         typeof source === "string" ?
-          Buffer.from(source).toString("base64")
+          JSON.stringify({
+            content: Buffer.from(source).toString("base64"),
+            encoding: "base64",
+            size: Buffer.byteLength(source)
+          })
         : "",
         source === null ? "gh: Not Found (HTTP 404)" : ""
       );

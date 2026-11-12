@@ -671,6 +671,8 @@ describe("deployments routes (SU-06)", () => {
         deployLogs: ["one", "two"],
         deployLogBase: 10,
         deployStatus: "in_progress",
+        workspaceRepo: "octo/todolist",
+        workspaceBranch: "feature/x",
         deployError: "boom",
         deployErrorKind: "branch-not-pushed",
         deployErrorBranch: "feature/x",
@@ -679,7 +681,11 @@ describe("deployments routes (SU-06)", () => {
         deployFinishedAt: 222,
         deployedGraph: [{ id: "g", name: "g", type: "t" }],
         deployRunUrl: "https://example.test/run",
-        deployAttempt: { id: "attempt-1" } as CanvasState["deployAttempt"]
+        deployAttempt: {
+          id: "attempt-1",
+          targetRepo: "octo/todolist",
+          branch: "feature/x"
+        }
       };
       const { recording, context: ctx } = context("GET", "/api/deploy-status");
       handleDeployStatus(ctx, statusDependencies(state));
@@ -703,6 +709,58 @@ describe("deployments routes (SU-06)", () => {
         active: true
       });
     });
+
+    it.each([
+      { workspaceRepo: undefined, workspaceBranch: "feature", expected: null },
+      {
+        workspaceRepo: "acme/other",
+        workspaceBranch: "feature",
+        expected: null
+      },
+      {
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: undefined,
+        expected: null
+      },
+      { workspaceRepo: "acme/widgets", workspaceBranch: "", expected: null },
+      {
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: "other",
+        expected: null
+      },
+      {
+        workspaceRepo: "ACME/WIDGETS",
+        workspaceBranch: "feature",
+        expected: "feature"
+      }
+    ])(
+      "offers branch remediation only for the verified workspace $workspaceRepo@$workspaceBranch",
+      ({ workspaceRepo, workspaceBranch, expected }) => {
+        const state: CanvasState = {
+          workspaceRepo,
+          workspaceBranch,
+          deployErrorKind: "branch-not-pushed",
+          deployErrorBranch: "feature",
+          deployAttempt: {
+            id: "attempt",
+            targetRepo: "acme/widgets",
+            branch: "feature"
+          }
+        };
+        const { recording, context: ctx } = context(
+          "GET",
+          "/api/deploy-status"
+        );
+
+        handleDeployStatus(ctx, statusDependencies(state));
+
+        expect(JSON.parse(recording.body)).toMatchObject({
+          errorKind: "branch-not-pushed",
+          errorBranch: expected,
+          attempt: state.deployAttempt
+        });
+      }
+    );
 
     it.each([
       ["success", false],

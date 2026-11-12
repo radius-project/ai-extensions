@@ -257,7 +257,19 @@ export function handleDeployStatus(
   const status = entry?.state?.deployStatus || "pending";
   const error = entry?.state?.deployError || null;
   const errorKind = entry?.state?.deployErrorKind || null;
-  const errorBranch = entry?.state?.deployErrorBranch || null;
+  const state = entry?.state;
+  const attempt = state?.deployAttempt || null;
+  const errorBranch =
+    (
+      state?.workspaceRepo &&
+      state.workspaceBranch &&
+      state.workspaceRepo.toLowerCase() ===
+        attempt?.targetRepo?.toLowerCase() &&
+      state.workspaceBranch === attempt.branch &&
+      state.deployErrorBranch === attempt.branch
+    ) ?
+      state.deployErrorBranch
+    : null;
   const errorPaths = entry?.state?.deployErrorPaths || null;
   const startedAt = entry?.state?.deployStartedAt || null;
   const finishedAt = entry?.state?.deployFinishedAt || null;
@@ -274,7 +286,6 @@ export function handleDeployStatus(
     }
   }
   const deployRunUrl = entry?.state?.deployRunUrl || null;
-  const attempt = entry?.state?.deployAttempt || null;
   // Advanced on every deploy, so an action on a failure names which one.
   const generation = entry?.state?.deployGeneration || 0;
   const active = status === "in_progress";

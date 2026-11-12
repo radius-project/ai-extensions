@@ -2311,6 +2311,33 @@ describe("deploy flow", () => {
     expect(fakeText(page.pushActionHost)).toContain("Run with Copilot");
   });
 
+  it("removes a previously mounted push action when a later status cannot authorize it", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    let branch = "feature";
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "branch-not-pushed",
+        errorBranch: branch,
+        handoff: { pending: true, state: "pending" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(fakeText(page.pushActionHost)).toContain("Run with Copilot");
+
+    branch = "";
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(fakeText(page.pushActionHost)).toBe("");
+  });
+
   it("offers commit-then-push when the server reports uncommitted generated files", async () => {
     const page = fixture({ branch: "feature" });
     init(page);
@@ -2340,31 +2367,36 @@ describe("deploy flow", () => {
     expect(offered).toContain("git push -u origin feature");
   });
 
-  it("does not mount commit-then-push for a branch other than the worktree branch", async () => {
-    const page = fixture({ branch: "feature/worktree" });
-    init(page);
-    await flushPromises();
-    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
-    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({
-        status: "failed",
-        errorKind: "branch-not-pushed",
-        errorBranch: "feature/selected",
-        errorPaths: ".radius",
-        handoff: { pending: false, state: "idle" }
-      })
-    );
+  it.each(["", "feature/worktree"])(
+    "does not mount commit-then-push with absent or mismatched workspace branch %s",
+    async (branch) => {
+      const page = fixture({ branch });
+      init(page);
+      await flushPromises();
+      page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "branch-not-pushed",
+          errorBranch: "feature/selected",
+          errorPaths: ".radius",
+          handoff: { pending: false, state: "idle" }
+        })
+      );
 
-    page.deployBtn.dispatch("click");
-    await flushPromises();
-    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
-    await flushPromises();
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
 
-    expect(fakeText(page.pushActionHost)).toContain(
-      "checked-out branch feature/worktree, not the selected branch feature/selected"
-    );
-    expect(fakeText(page.pushActionHost)).not.toContain("Run with Copilot");
-  });
+      if (branch)
+        expect(fakeText(page.pushActionHost)).toContain(
+          "checked-out branch feature/worktree, not the selected branch feature/selected"
+        );
+      else expect(fakeText(page.pushActionHost)).toBe("");
+      expect(fakeText(page.pushActionHost)).not.toContain("Run with Copilot");
+    }
+  );
 
   it("ignores uncommitted paths reported for a failure that is not a missing push", async () => {
     const page = fixture();

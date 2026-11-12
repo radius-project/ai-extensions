@@ -77,6 +77,7 @@ import { createDeferred } from "../../support/browser/fakes.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
+import { deploymentTemplates } from "../../../../adapter-shared/test/fixtures/deployment-workflows.js";
 import {
   appParams,
   resolveDeployParams,
@@ -396,6 +397,48 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
+  it.each([
+    {
+      workspaceRepo: "acme/workspace",
+      workspaceBranch: "feature",
+      expected: null
+    },
+    { workspaceRepo: undefined, workspaceBranch: undefined, expected: null },
+    { workspaceRepo: "acme/target", workspaceBranch: "other", expected: null },
+    {
+      workspaceRepo: "ACME/TARGET",
+      workspaceBranch: "feature",
+      expected: "feature"
+    }
+  ])(
+    "publishes push eligibility only for matching workspace identity $workspaceRepo@$workspaceBranch",
+    async ({ workspaceRepo, workspaceBranch, expected }) => {
+      const harness = start();
+      Object.assign(harness.state, {
+        workspaceRepo,
+        workspaceBranch,
+        deployStatus: "failed",
+        deployErrorKind: "branch-not-pushed",
+        deployErrorBranch: "feature",
+        deployAttempt: {
+          id: "cross-repository",
+          targetRepo: "acme/target",
+          branch: "feature"
+        }
+      });
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        errorKind: "branch-not-pushed",
+        errorBranch: expected,
+        attempt: { targetRepo: "acme/target", branch: "feature" }
+      });
+    }
+  );
+
   it("returns the same sanitized diagnostics as the direct caller without publishing raw credentials", async () => {
     const credential = "opaque-http-diagnostic-fixture";
     const namedCredential = "unregistered-http-workflow-fixture";
@@ -2760,9 +2803,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         expect(reads).toEqual([".radius/app.bicep"]);
         expect(calls).toEqual([]);
         expect(h.stateOf("panel-a").deployAttempt).toBeUndefined();
-        expect(
-          activeDeploymentMutation(h.stateOf("panel-a"))
-        ).toBeUndefined();
+        expect(activeDeploymentMutation(h.stateOf("panel-a"))).toBeUndefined();
         return;
       }
       expect(response.status).toBe(200);
@@ -2925,9 +2966,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         now: () => 0
       });
       const observed = createUnconfirmedMonitor(null, dispatch);
-      const harness = startDeploy(observed.monitor, {
-        triggerDeployRepairHandoff
-      });
+      const harness = startDeploy(observed.monitor);
       const entry = await container!.getOrCreate("panel-a");
       const state = harness.stateOf("panel-a");
       const response = await post(

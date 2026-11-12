@@ -817,11 +817,15 @@ test.describe("Radius Canvas in Chromium", () => {
         command(
           [
             "api",
-            "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure-aks/azure-aks.bicep?ref=main",
-            "--jq",
-            ".content"
+            "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure-aks/azure-aks.bicep?ref=main"
           ],
-          Buffer.from("param environment string\n").toString("base64")
+          JSON.stringify({
+            content: Buffer.from("param environment string\n").toString(
+              "base64"
+            ),
+            encoding: "base64",
+            size: Buffer.byteLength("param environment string\n")
+          })
         ),
         command(
           [
@@ -863,9 +867,8 @@ test.describe("Radius Canvas in Chromium", () => {
                   await fs.readFile(path.join(canvas.workspacePath, appFile))
                 ).toString("base64"),
                 encoding: "base64",
-                size: (
-                  await fs.stat(path.join(canvas.workspacePath, appFile))
-                ).size
+                size: (await fs.stat(path.join(canvas.workspacePath, appFile)))
+                  .size
               })
             )
         },
@@ -1499,6 +1502,85 @@ test.describe("Radius Canvas in Chromium", () => {
       expect((await canvas.cliCalls()).filter((call) => !call.matched)).toEqual(
         []
       );
+    });
+  }
+
+  for (const workspace of [
+    "matching",
+    "other-repository",
+    "missing"
+  ] as const) {
+    test(`branch-push controls require verified matching workspace identity: ${workspace} @safety`, async ({
+      page,
+      canvas
+    }) => {
+      await routeDeployedPage(page, () => "failed");
+      await page.unroute("**/api/deploy-status**");
+      await page.route("**/api/deploy", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ ok: true })
+        })
+      );
+      const target = {
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        environment: "fixture-environment",
+        provider: "azure",
+        appFile: ".radius/app.bicep"
+      };
+      const lease = canvas.deploymentOwner.reserve(target, "deploy");
+      if (!lease) throw new Error("Fixture target is reserved");
+      const invocation = canvas.deploymentOwner.begin(
+        target,
+        {
+          deployStatus: "failed",
+          deployErrorKind: "branch-not-pushed",
+          deployErrorBranch: WORKTREE_BRANCH,
+          deployErrorPaths: ".radius"
+        },
+        lease
+      );
+      invocation.state.deployAttempt = {
+        ...target,
+        targetRepo: target.repo,
+        id: invocation.attemptId
+      };
+      canvas.deploymentOwner.release(lease);
+      canvas.entry.state.workspaceRepo =
+        workspace === "matching" ? REPOSITORY
+        : workspace === "other-repository" ? "acme/another-workspace"
+        : undefined;
+      canvas.entry.state.workspaceBranch =
+        workspace === "missing" ? undefined : WORKTREE_BRANCH;
+
+      await gotoCanvas(page, canvas, "deploying");
+      const deploy = page.getByRole("button", { name: "Deploy", exact: true });
+      await expect(deploy).toBeEnabled();
+      await deploy.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#deploy-progress-title")).toContainText(
+        "Branch not pushed yet"
+      );
+      const action = page.locator("#deploy-push-action");
+      if (workspace === "matching") {
+        const run = action.getByRole("button", { name: COMMAND_RUN_LABEL });
+        await expect(run).toBeVisible();
+        await run.focus();
+        await expect(run).toBeFocused();
+      } else {
+        await expect(action.getByRole("button")).toHaveCount(0);
+        await expect(action).not.toContainText("git push");
+      }
+      const status = await page.request.get(
+        `${canvas.baseUrl}/api/deploy-status`
+      );
+      expect(await status.json()).toMatchObject({
+        errorBranch: workspace === "matching" ? WORKTREE_BRANCH : null,
+        attempt: { targetRepo: REPOSITORY, branch: WORKTREE_BRANCH }
+      });
+      await expectNoWcagViolations(page);
     });
   }
 

@@ -1014,9 +1014,10 @@ export function initializeDeployingPage(
   const mountPushAction = (branch: string, paths: string): void => {
     pushAction?.dispose();
     pushAction = null;
-    if (branch === "") return;
     const host = context.dom.byId("deploy-push-action");
     if (!host) return;
+    host.textContent = "";
+    if (branch === "" || options.branch === "") return;
     // `paths` names the generated files the server found uncommitted. Passing
     // it through turns the offer into commit-then-push, because pushing alone
     // would publish the branch without the model the deploy reads.
