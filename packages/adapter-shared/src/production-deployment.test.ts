@@ -242,7 +242,11 @@ function fixture(
         );
         return {};
       }
-      stdout = Buffer.from(source).toString("base64");
+      stdout = JSON.stringify({
+        content: Buffer.from(source).toString("base64"),
+        encoding: "base64",
+        size: Buffer.byteLength(source)
+      });
     } else if (
       options.dispatch &&
       endpoint.includes("/contents/") &&
@@ -256,7 +260,11 @@ function fixture(
       if (!content) throw new Error(`Unexpected workflow ${endpoint}`);
       stdout =
         args.includes(".sha") ? "workflow-sha" : (
-          Buffer.from(content).toString("base64")
+          JSON.stringify({
+            content: Buffer.from(content).toString("base64"),
+            encoding: "base64",
+            size: Buffer.byteLength(content)
+          })
         );
     } else if (
       options.dispatch &&
