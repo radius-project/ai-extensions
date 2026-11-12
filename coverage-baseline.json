@@ -22,10 +22,10 @@
       "lines": 53.61
     },
     "core": {
-      "statements": 99.9,
-      "branches": 99.7,
+      "statements": 99.98,
+      "branches": 99.74,
       "functions": 100,
-      "lines": 99.9
+      "lines": 99.98
     },
     "graph-react": {
       "statements": 100,

@@ -4,6 +4,12 @@ export default defineConfig({
   test: {
     include: [
       "src/deploy-artifacts.test.ts",
+      "../core/src/deployment-progress.test.ts",
+      "../core/src/deployment-resource-status.test.ts",
+      "../core/src/deployment-observation-policy.test.ts",
+      "../core/src/workflow-readback.test.ts",
+      "../core/src/workflow-synchronization.test.ts",
+      "../core/src/aws-workflow-compatibility.test.ts",
       "src/promote-app-model.test.ts",
       "../core/src/modeling/app-staging.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",

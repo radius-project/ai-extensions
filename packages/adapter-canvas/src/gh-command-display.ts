@@ -6,35 +6,22 @@ import type {
   Remediation,
   RemediationView
 } from "@radius-project/core/remediations";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  displayShellCommand,
+  type GhCommandPresentation
+} from "@radius-project/core/deployment-command-display";
+export {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "@radius-project/core/deployment-command-display";
 
 export type GhCommandShell = "powershell" | "posix";
 
-export type GhCommandPresentation =
-  | {
-      readonly kind: "bare";
-      readonly shell: GhCommandShell;
-      readonly installationNote: "";
-    }
-  | {
-      readonly kind: "absolute";
-      readonly shell: GhCommandShell;
-      readonly executablePath: string;
-      readonly installationNote: string;
-    }
-  | {
-      readonly kind: "unavailable";
-      readonly shell: GhCommandShell;
-      readonly installationNote: string;
-    };
-
 export const GH_SYSTEM_INSTALL_ALTERNATIVE =
   "Alternatively, install GitHub CLI system-wide so `gh` is available on your terminal PATH.";
-export const BARE_GH_COMMAND_PRESENTATION: GhCommandPresentation = {
-  kind: "bare",
-  shell: "posix",
-  installationNote: ""
-};
-
 export function parseGhCommandPresentation(
   value: unknown
 ): GhCommandPresentation {
@@ -77,37 +64,6 @@ export function parseGhCommandPresentation(
   return BARE_GH_COMMAND_PRESENTATION;
 }
 
-function quotePowerShell(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
-}
-
-function quotePosix(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function executableInvocation(presentation: GhCommandPresentation): string {
-  if (presentation.kind === "bare") return "gh";
-  if (presentation.kind === "unavailable") return "";
-  const quoted =
-    presentation.shell === "powershell" ?
-      quotePowerShell(presentation.executablePath)
-    : quotePosix(presentation.executablePath);
-  return presentation.shell === "powershell" ? `& ${quoted}` : quoted;
-}
-
-function displayToken(token: string): string {
-  return token.includes(" ") ? `"${token}"` : token;
-}
-
-export function displayGhCommand(
-  presentation: GhCommandPresentation,
-  args: readonly string[]
-): string {
-  const executable = executableInvocation(presentation);
-  if (executable === "") return "";
-  return [executable, ...args.map(displayToken)].join(" ");
-}
-
 export function displayGhCommands(
   presentation: GhCommandPresentation,
   commands: readonly (readonly string[])[]
@@ -117,7 +73,7 @@ export function displayGhCommands(
       const [executable, ...args] = command;
       return executable === "gh" ?
           displayGhCommand(presentation, args)
-        : command.map(displayToken).join(" ");
+        : displayShellCommand(presentation.shell, executable, args);
     })
     .join("\n");
 }

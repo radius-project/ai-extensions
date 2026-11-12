@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { parseGhHttpStatus, toGhCommandResult } from "./gh-command-result.js";
+import {
+  commandTimedOut,
+  parseGhHttpStatus,
+  toGhCommandResult
+} from "./deployment-command-result.js";
+
+describe("commandTimedOut", () => {
+  it.each([null, undefined, {}, { killed: false, signal: null }])(
+    "does not infer termination from %j",
+    (error) => expect(commandTimedOut(error)).toBe(false)
+  );
+  it.each([{ killed: true }, { signal: "SIGTERM" }])(
+    "recognizes an uncertain terminated command: %j",
+    (error) => expect(commandTimedOut(error)).toBe(true)
+  );
+});
 
 describe("toGhCommandResult", () => {
   it("reports a successful command with exit code 0 and no timeout flag", () => {
