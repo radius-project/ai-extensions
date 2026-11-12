@@ -256,6 +256,18 @@ describe("extractAppName", () => {
     expect(extractAppName(`${headers} name: 'selected'`)).toBe("selected");
   });
 
+  it("bounds header whitespace scans at the next non-whitespace character", () => {
+    const spaces = " ".repeat(100_000);
+    expect(
+      extractAppName(`applications@v1'${spaces}=${spaces}{ name: 'app' }`)
+    ).toBe("app");
+    expect(extractAppName(`applications@v1'${spaces}`)).toBe("");
+    expect(extractAppName(`applications@v1'=${spaces}`)).toBe("");
+    expect(extractAppName(`name: 'fallback' applications@v1'=${spaces}x`)).toBe(
+      "fallback"
+    );
+  });
+
   it.each([
     ["name: 'backing' applications@v1' = { name: 'app'", "app"],
     ['applications@bad"x applications@good\' = { name: "app"', "app"],
