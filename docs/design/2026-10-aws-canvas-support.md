@@ -209,7 +209,7 @@ Discovery runs the developer's `aws` CLI with `--region` set to the profile's re
 - **VPC:** always the cluster's VPC. Other VPCs aren't offered.
 - **Subnets:** from `ec2 describe-subnets` and `describe-route-tables` for the cluster's VPC. Each subnet shows its availability zone, and is labeled public if its route table reaches an internet gateway. Private subnets are checked by default. Picking a public subnet shows a warning.
 
-A selection must span at least two availability zones, because RDS and other VPC-based services require it. A single-zone selection is an error on the Subnets field, and keeps **Create Environment** disabled. If the cluster's private subnets don't span two zones, the form says so and leaves Subnets empty.
+A selection must span at least two standard availability zones, because RDS and other VPC-based services require it. Local Zone, Wavelength Zone, and Outpost subnets are listed but can't be selected, and don't count toward the two zones: RDS doesn't accept them in a subnet group that spans zones. A selection in fewer than two standard zones is an error on the Subnets field, and keeps **Create Environment** disabled. If the cluster's private subnets don't span two standard zones, the form says so and leaves Subnets empty.
 
 ### Creating an environment
 
