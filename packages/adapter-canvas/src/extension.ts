@@ -30,12 +30,14 @@ import {
   ensureRadBinary,
   resolveInstalledRadiusVersion,
   runRadBicepPublishExtension,
-  runRadBicepPublish
+  runRadBicepPublish,
+  createDeploymentRepository
 } from "@radius-project/adapter-shared";
 import { createRadiusCliVersionReader } from "./radius-cli-version.js";
 import { readAwsSwitch } from "./aws-switch.js";
 import {
   github,
+  cliExec,
   fetchFileFromRepo,
   getBranchHeadSha,
   getGitHubIdentity,
@@ -70,6 +72,7 @@ import {
   setOpenSourceHandler
 } from "./server.js";
 import { createProductionDeploymentRuntime } from "./runtime/production-deployment.js";
+import { createDeployModelSource } from "./server/services/deploy-model-source.js";
 import {
   getSourceRefResources,
   prepareSourceRefResources,
@@ -131,6 +134,14 @@ const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
 const awsEnabled = readAwsSwitch(process.env);
 const deploymentRuntime = createProductionDeploymentRuntime({ awsEnabled });
+const readDeploymentModel = createDeployModelSource({
+  readWorkspace: fetchWorkspaceFile,
+  readRepository: createDeploymentRepository({
+    execute: cliExec,
+    redactDiagnostic: redactGhCredentials
+  }).readFileResult,
+  redactDiagnostic: redactGhCredentials
+});
 deploymentRuntime.subscribeDispatch(invalidateDeployListCache);
 const deploymentAccount = createDeploymentAccountResolver({
   readinessOwner: executionOwner,
@@ -175,6 +186,7 @@ const dependencies: RadiusExtensionDependencies = {
   ),
   session: sessionHolder,
   deployment: deploymentRuntime,
+  readDeploymentModel,
   executionOwner,
   environment: createEnvironmentTools({
     ...environmentServices,

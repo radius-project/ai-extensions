@@ -39,6 +39,7 @@ import {
 import type { CanvasGraphResource } from "../../../src/shared.js";
 import {
   createWorkflowArtifactReader,
+  normalizeDeploymentAppFile,
   type WorkflowRunner
 } from "@radius-project/adapter-shared";
 
@@ -248,60 +249,93 @@ describe("P0-A Radius runtime registration contract", () => {
   });
 
   it("preserves auto-selection intent and repair pinning through the registered deploy tool", async () => {
-    const harness = await createRuntimeSdkHarness();
+    const harness = await createRuntimeSdkHarness({}, (deps) => {
+      deps.deployment = createFakeDeploymentRuntime({
+        normalizeAppFile: normalizeDeploymentAppFile,
+        resolveDeployment: async () => null,
+        createExecution: () => ({
+          monitor: {
+            run: async ({ entry }) => {
+              entry.state.deployStatus = "complete";
+            }
+          },
+          observation: createWorkflowObservationScope(() => {
+            throw new Error("No artifact reads expected");
+          })
+        })
+      });
+      vi.mocked(deps.readDeploymentModel).mockResolvedValue({
+        status: "missing"
+      });
+    });
     try {
-      const entry = createFakeServerEntry("selected-panel", "deployed");
-      entry.state = {
-        deployParams: {
-          targetRepo: "acme/widgets",
-          branch: "feature",
-          environment: "production"
-        },
-        deployAttempt: {
-          id: "repair",
-          targetRepo: "acme/widgets",
-          branch: "feature",
-          environment: "production",
-          appFile: "app.bicep"
-        }
+      const current = () => {
+        const found = harness.deps.deployment.owner.lookup();
+        if (found.kind !== "found")
+          throw new Error("Expected an admitted deployment");
+        return found.invocation;
       };
-      harness.servers.set("selected-panel", entry);
-      const bodies: Record<string, unknown>[] = [];
-      vi.mocked(harness.deps.deploy.fetch).mockImplementation(
-        async (url, init) => {
-          expect(url).toBe(`${entry.baseUrl}/api/deploy`);
-          bodies.push(JSON.parse(String(init?.body)));
-          return Response.json({ ok: true });
-        }
-      );
       const tool = harness.extension.tools.find(
         ({ name }) => name === "radius_deploy"
       );
       if (!tool) throw new Error("Missing deploy tool");
-      expect(await tool.handler({})).toContain("started");
-      expect(bodies[0]).not.toHaveProperty("appFile");
-      expect(await tool.handler({ attemptId: "repair" })).toContain("started");
-      expect(bodies[1].appFile).toBe("app.bicep");
+      expect(await tool.handler({ environment: "production" })).toContain(
+        "started"
+      );
+      await expect
+        .poll(() => harness.deps.deployment.owner.hasActiveWork())
+        .toBe(false);
+      const first = current();
+      expect(first.target.appFile).toBe("app.bicep");
+      expect(first.state.deployParams).not.toHaveProperty("appFile");
+      expect(first.state.deployAttempt?.appFile).toBe("app.bicep");
+      first.state.deployStatus = "failed";
+      const attemptId = first.attemptId;
+      expect(await tool.handler({ attemptId })).toContain("started");
+      await expect
+        .poll(() => harness.deps.deployment.owner.hasActiveWork())
+        .toBe(false);
+      expect(current().target.appFile).toBe("app.bicep");
+      expect(current().state.deployParams).not.toHaveProperty("appFile");
+      current().state.deployStatus = "failed";
       expect(
-        await tool.handler({ attemptId: "repair", appFile: "./app.bicep" })
+        await tool.handler({ attemptId, appFile: "./app.bicep" })
       ).toContain("started");
-      expect(bodies[2].appFile).toBe("./app.bicep");
+      await expect
+        .poll(() => harness.deps.deployment.owner.hasActiveWork())
+        .toBe(false);
+      expect(current().target.appFile).toBe("app.bicep");
+      current().state.deployStatus = "failed";
       expect(
         await tool.handler({
-          attemptId: "repair",
+          attemptId,
           appFile: ".radius/app.bicep"
         })
       ).toContain("cannot be retargeted");
-      expect(bodies).toHaveLength(3);
-      vi.mocked(harness.deps.deploy.fetch).mockResolvedValue(
-        Response.json(
-          { error: "Could not select the deployment model" },
-          { status: 503 }
-        )
-      );
+      expect(harness.deps.readDeploymentModel).toHaveBeenCalledTimes(1);
+      vi.mocked(harness.deps.readDeploymentModel).mockResolvedValue({
+        status: "available",
+        content: "managed model",
+        fromWorkspace: true
+      });
+      expect(await tool.handler({})).toContain("started");
+      await expect
+        .poll(() => harness.deps.deployment.owner.hasActiveWork())
+        .toBe(false);
+      expect(current().target.appFile).toBe(".radius/app.bicep");
+      expect(current().attemptId).not.toBe(attemptId);
+      expect(current().state.deployParams).not.toHaveProperty("appFile");
+      expect(harness.deps.readDeploymentModel).toHaveBeenCalledTimes(2);
+      const prior = current();
+      vi.mocked(harness.deps.readDeploymentModel).mockResolvedValue({
+        status: "unavailable",
+        error: "Could not select the deployment model"
+      });
       expect(await tool.handler({})).toContain(
         "Could not select the deployment model"
       );
+      expect(current()).toBe(prior);
+      expect(harness.servers.size).toBe(0);
       expect(harness.getOrCreateServer).not.toHaveBeenCalled();
     } finally {
       await harness.extension.shutdown("test");

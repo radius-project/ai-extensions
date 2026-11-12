@@ -746,6 +746,8 @@ test.describe("Radius Canvas in Chromium", () => {
   for (const launch of [
     "explicit",
     "tool",
+    "tool-root",
+    "tool-managed",
     "deploying",
     "planned",
     "managed"
@@ -755,10 +757,14 @@ test.describe("Radius Canvas in Chromium", () => {
       canvas
     }, testInfo) => {
       const environment = "fixture-environment";
+      const isTool =
+        launch === "tool" ||
+        launch === "tool-root" ||
+        launch === "tool-managed";
+      const isManaged = launch === "managed" || launch === "tool-managed";
       const appFile =
-        launch === "explicit" || launch === "tool" ?
-          "models/custom.bicep"
-        : launch === "managed" ? ".radius/app.bicep"
+        launch === "explicit" || launch === "tool" ? "models/custom.bicep"
+        : isManaged ? ".radius/app.bicep"
         : "app.bicep";
       await fs.mkdir(path.join(canvas.workspacePath, "models"), {
         recursive: true
@@ -770,11 +776,11 @@ test.describe("Radius Canvas in Chromium", () => {
       await fs.writeFile(
         path.join(
           canvas.workspacePath,
-          ...(launch === "managed" ? ["app.bicep"] : [".radius", "app.bicep"])
+          ...(isManaged ? ["app.bicep"] : [".radius", "app.bicep"])
         ),
         "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'different-default'\n}\n"
       );
-      if (launch !== "explicit" && launch !== "tool" && launch !== "managed")
+      if (launch !== "explicit" && launch !== "tool" && !isManaged)
         await fs.rm(path.join(canvas.workspacePath, ".radius", "app.bicep"));
       const opaque = "OpaqueBindingWitness92741";
       const named = "UnregisteredNamedWitness63281";
@@ -1094,8 +1100,8 @@ test.describe("Radius Canvas in Chromium", () => {
       canvas.setDeployRepairHandoff(async (input) => {
         deliveries.push(input);
       });
-      // Only the Planned-page launch has a cached graph. The other launches
-      // must recover the admitted model through the production composition.
+      // Only Planned has a cached graph. Other Canvas launches recover the
+      // admitted model; tools deliberately supply no graph recovery callback.
       await canvas.seedState({
         ...baseCanvasState(canvas.workspacePath),
         appFile,
@@ -1116,10 +1122,10 @@ test.describe("Radius Canvas in Chromium", () => {
         throw new Error("Missing mutation nonce.");
       let toolObservationId: string | undefined;
       const admitted = await (async () => {
-        if (launch === "tool") {
+        if (isTool) {
           const started = await canvas.deploymentTools.start({
             environment,
-            appFile
+            ...(launch === "tool" ? { appFile } : {})
           });
           const status = JSON.parse(await canvas.deploymentTools.status());
           expect(status.status).toBe("in_progress");
@@ -1168,8 +1174,8 @@ test.describe("Radius Canvas in Chromium", () => {
         return admitted;
       })();
       if (admitted) expect(admitted.status()).toBe(200);
-      expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
-      if (launch !== "tool") {
+      if (!isTool) {
+        expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
         if (launch !== "explicit")
           expect(await bodyFor(canvas, "/api/deploy")).not.toHaveProperty(
             "appFile"
@@ -1193,7 +1199,7 @@ test.describe("Radius Canvas in Chromium", () => {
         expect(await progress.json()).toMatchObject({
           status: "in_progress",
           resources:
-            launch === "tool" ?
+            isTool ?
               []
             : [
                 { name: "web", deployStatus: "pending" },
@@ -1201,12 +1207,13 @@ test.describe("Radius Canvas in Chromium", () => {
               ]
         });
         expect(canvas.entry.state.plannedResources).toEqual([]);
+        expect(canvas.entry.state.deployAttempt?.appFile).toBe(appFile);
         const graphCall = (await canvas.cliCalls()).find(
           (call) =>
             call.tool === "rad" &&
             call.args.slice(0, 2).join(" ") === "app graph"
         );
-        if (launch === "tool") {
+        if (isTool) {
           expect(graphCall).toBeUndefined();
           expect(canvas.entry.state.deployLogs?.join("\n")).not.toContain(
             "Planned 2 resource(s)."

@@ -5,7 +5,11 @@ import {
   type DeploymentRuntime
 } from "@radius-project/adapter-shared";
 import { createFakeDeploymentRuntime } from "../../test/support/runtime/deployment.js";
-import { createDeploymentTools } from "./deployment-tools.js";
+import {
+  createDeploymentTools,
+  type DeploymentToolsPorts
+} from "./deployment-tools.js";
+import type { DeployModelSource } from "../server/services/deploy-model-source.js";
 
 const target = {
   repo: "fixture/app",
@@ -33,14 +37,22 @@ function fixture() {
     reportError: vi.fn()
   });
   runtimes.push(runtime);
-  const workspace = vi.fn(async () => ({
+  const workspace = vi.fn<DeploymentToolsPorts["workspace"]>(async () => ({
     repo: target.repo,
     branch: target.branch
   }));
+  const readModel = vi.fn<DeploymentToolsPorts["readModel"]>(
+    async (): Promise<DeployModelSource> => ({
+      status: "available",
+      content: "fixture managed model",
+      fromWorkspace: true
+    })
+  );
   return {
     runtime,
     workspace,
-    tools: createDeploymentTools({ runtime, workspace })
+    readModel,
+    tools: createDeploymentTools({ runtime, workspace, readModel })
   };
 }
 
@@ -49,6 +61,157 @@ afterEach(async () => {
 });
 
 describe("direct deployment tools", () => {
+  it.each([
+    [{ status: "missing" }, "app.bicep"],
+    [{ status: "available", content: "", fromWorkspace: true }, "app.bicep"],
+    [
+      { status: "available", content: " \n", fromWorkspace: false },
+      ".radius/app.bicep"
+    ]
+  ] satisfies [DeployModelSource, string][])(
+    "selects the exact model from source %j without planned-graph recovery",
+    async (source, appFile) => {
+      const { tools, runtime, readModel } = fixture();
+      readModel.mockResolvedValue(source);
+      expect(await tools.start({ environment: "dev" })).toContain("started");
+      const current = runtime.owner.lookup();
+      if (current.kind !== "found") throw new Error("Missing deployment");
+      expect(current.invocation.target.appFile).toBe(appFile);
+      expect(current.invocation.state.deployAttempt?.appFile).toBe(appFile);
+      expect(current.invocation.state.deployParams).not.toHaveProperty(
+        "appFile"
+      );
+      expect(readModel).toHaveBeenCalledWith(
+        {
+          state: {
+            workspaceRepo: target.repo,
+            workspaceBranch: target.branch,
+            workspacePath: undefined
+          }
+        },
+        target.repo,
+        target.branch,
+        ".radius/app.bicep"
+      );
+      expect(current.invocation.state.deployingResources).toEqual([]);
+    }
+  );
+
+  it("refuses unavailable auto selection before admitting an invocation", async () => {
+    const { tools, runtime, readModel } = fixture();
+    readModel.mockResolvedValue({
+      status: "unavailable",
+      error: "model source unavailable"
+    });
+    expect(await tools.start({ environment: "dev" })).toContain(
+      "model source unavailable"
+    );
+    expect(runtime.owner.lookup().kind).toBe("missing");
+    readModel.mockRejectedValue(new Error("reader failed"));
+    expect(await tools.start({ environment: "dev" })).toContain(
+      "reader failed"
+    );
+    expect(runtime.owner.lookup().kind).toBe("missing");
+  });
+
+  it("uses the captured workspace for model selection instead of later host mutations", async () => {
+    const { tools, workspace, readModel } = fixture();
+    const detected = { repo: target.repo, branch: target.branch };
+    workspace.mockResolvedValue(detected);
+    readModel.mockImplementation(async (captured) => {
+      detected.branch = "new-host-branch";
+      expect(captured.state.workspaceRepo).toBe(target.repo);
+      expect(captured.state.workspaceBranch).toBe(target.branch);
+      return { status: "missing" };
+    });
+    expect(await tools.start({ environment: "dev" })).toContain("started");
+  });
+
+  it("retains explicit repeat intent across multiple repeats without reading implicit models", async () => {
+    const { tools, runtime, readModel } = fixture();
+    await tools.start({ ...target, appFile: "./models/custom.bicep" });
+    for (let repeat = 0; repeat < 2; repeat++) {
+      await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
+      expect(await tools.start()).toContain("started");
+      const current = runtime.owner.lookup();
+      if (current.kind !== "found") throw new Error("Missing repeated deploy");
+      expect(current.invocation.target.appFile).toBe("models/custom.bicep");
+      expect(current.invocation.state.deployParams?.appFile).toBe(
+        "models/custom.bicep"
+      );
+    }
+    expect(readModel).not.toHaveBeenCalled();
+  });
+
+  it.each([{ repo: "fixture/other" }, { branch: "other" }])(
+    "reselects rather than inheriting an explicit model when retargeted: %j",
+    async (change) => {
+      const { tools, runtime, readModel } = fixture();
+      await tools.start({ ...target, appFile: "models/custom.bicep" });
+      await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
+      const started = await tools.start({
+        branch: target.branch,
+        ...change,
+        environment: "dev"
+      });
+      expect(started).toContain("started");
+      const observationId = started.match(/observationId "([^"]+)"/)?.[1];
+      if (!observationId) throw new Error("Missing observation handle");
+      const current = runtime.owner.lookup({ observationId });
+      if (current.kind !== "found") throw new Error("Missing deployment");
+      expect(current.invocation.target.appFile).toBe(".radius/app.bicep");
+      const expected = { ...target, ...change };
+      expect(readModel).toHaveBeenCalledWith(
+        {
+          state: {
+            workspaceRepo: target.repo,
+            workspaceBranch: target.branch,
+            workspacePath: undefined
+          }
+        },
+        expected.repo,
+        expected.branch,
+        ".radius/app.bicep"
+      );
+    }
+  );
+
+  it("selects an explicit repository model without inventing trusted workspace context", async () => {
+    const { tools, workspace, readModel } = fixture();
+    workspace.mockResolvedValue(undefined);
+    expect(
+      await tools.start({
+        repo: target.repo,
+        branch: target.branch,
+        environment: target.environment
+      })
+    ).toContain("started");
+    expect(readModel).toHaveBeenCalledWith(
+      {
+        state: {
+          workspaceRepo: undefined,
+          workspaceBranch: undefined,
+          workspacePath: undefined
+        }
+      },
+      target.repo,
+      target.branch,
+      ".radius/app.bicep"
+    );
+  });
+
+  it.each(["", " \n"])(
+    "refuses an explicit empty model %j instead of auto-selecting",
+    async (appFile) => {
+      const { tools, runtime, readModel } = fixture();
+      expect(await tools.start({ ...target, appFile })).toContain(
+        "non-empty string"
+      );
+      expect(readModel).not.toHaveBeenCalled();
+      expect(runtime.owner.lookup().kind).toBe("missing");
+    }
+  );
+
   it("starts and observes through the runtime without Canvas or HTTP", async () => {
     const { runtime, tools } = fixture();
     const started = await tools.start({ environment: "dev" });
@@ -140,8 +303,16 @@ describe("direct deployment tools", () => {
     expect(
       await tools.start({ attemptId, appFile: ".radius/app.bicep" })
     ).toContain("cannot be retargeted");
+    expect(
+      await tools.start({ attemptId, appFile: ".\\models\\custom.bicep" })
+    ).toContain("automatic repair attempt 1 of 5");
+    await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
+    const equivalentRepair = runtime.owner.lookup({ attemptId });
+    if (equivalentRepair.kind !== "found")
+      throw new Error("Missing equivalent-path repair");
+    equivalentRepair.invocation.state.deployStatus = "failed";
     expect(await tools.start({ attemptId })).toContain(
-      "automatic repair attempt 1 of 5"
+      "automatic repair attempt 2 of 5"
     );
     await expect.poll(() => runtime.owner.hasActiveWork()).toBe(false);
     const repaired = runtime.owner.lookup({ attemptId });

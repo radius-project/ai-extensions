@@ -303,6 +303,11 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       }))
     },
     deployment: createFakeDeploymentRuntime(),
+    readDeploymentModel: vi.fn(async () => ({
+      status: "available" as const,
+      content: "fixture managed model",
+      fromWorkspace: true
+    })),
     environment: {
       start: vi.fn(async () => {
         throw new Error("Environment setup was not scripted.");

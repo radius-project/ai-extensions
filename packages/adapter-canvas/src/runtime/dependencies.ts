@@ -19,6 +19,7 @@ import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js
 import type { EnvironmentTools } from "./environment-tools.js";
 import type { PluginUpdatePreferences } from "./plugin-update-preferences.js";
 import type { DeploymentRuntime } from "@radius-project/adapter-shared";
+import type { DeploymentToolsPorts } from "./deployment-tools.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -337,6 +338,7 @@ export interface RadiusExtensionDependencies {
   core: CoreGraphDependencies;
   rad: RadDependencies;
   deployment: DeploymentRuntime;
+  readDeploymentModel: DeploymentToolsPorts["readModel"];
   sourceRefs: SourceRefsDependencies;
   publishTargets: PublishTargetsDependencies;
   hostCallbacks: HostCallbackDependencies;

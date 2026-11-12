@@ -50,6 +50,7 @@ export function createRadiusTools(
   );
   const deployment = createDeploymentTools({
     runtime: deps.deployment,
+    readModel: deps.readDeploymentModel,
     workspace: async () => {
       const context = await deps.workspace.detectWorkspaceContext(
         deps.session.get()

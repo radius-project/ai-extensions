@@ -13,6 +13,9 @@ import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { EnvironmentOperationRunner } from "../../../src/server.js";
 import type { EnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 import { createDeploymentTools } from "../../../src/runtime/deployment-tools.js";
+import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
+import { fetchWorkspaceFile } from "../../../src/workspace.js";
+import { createDeploymentRepository } from "@radius-project/adapter-shared";
 
 // Resolved from this module rather than the process directory so the suite
 // behaves identically whether it is launched from the workspace root or from
@@ -1452,8 +1455,17 @@ export class CanvasHarness {
     this.originalEnv = input.originalEnv;
     this.originalFetch = input.originalFetch;
     this.serverModule = input.serverModule;
+    const readModel = createDeployModelSource({
+      readWorkspace: fetchWorkspaceFile,
+      readRepository: createDeploymentRepository({
+        execute: input.ghModule.cliExec,
+        redactDiagnostic: input.ghModule.redactGhCredentials
+      }).readFileResult,
+      redactDiagnostic: input.ghModule.redactGhCredentials
+    });
     this.deploymentTools = createDeploymentTools({
       runtime: input.serverModule.deploymentRuntime,
+      readModel,
       workspace: async () => ({
         repo: REPOSITORY,
         branch: WORKTREE_BRANCH,

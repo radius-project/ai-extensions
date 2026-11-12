@@ -8,10 +8,12 @@ import {
   summarizeDeployStatus
 } from "../deploy-tools.js";
 import { errorMessage } from "./util.js";
+import type { createDeployModelSource } from "../server/services/deploy-model-source.js";
 
 export interface DeploymentToolsPorts {
   runtime: DeploymentRuntime;
   workspace(): Promise<DeploymentWorkspace | undefined>;
+  readModel: ReturnType<typeof createDeployModelSource>;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -45,8 +47,52 @@ export function createDeploymentTools(ports: DeploymentToolsPorts) {
           throw new Error(
             "An observationId only reads status; it cannot authorize a repair."
           );
-        const workspace = await ports.workspace();
-        const result: unknown = await ports.runtime.start(input, { workspace });
+        const detectedWorkspace = await ports.workspace();
+        const workspace =
+          detectedWorkspace ?
+            Object.freeze({ ...detectedWorkspace })
+          : undefined;
+        if (!input.attemptId && input.appFile === undefined) {
+          const previous = ports.runtime.owner.lookup();
+          if (previous.kind === "found") {
+            const { target, state } = previous.invocation;
+            if (
+              (input.repo || target.repo).toLowerCase() ===
+                target.repo.toLowerCase() &&
+              (input.branch || target.branch) === target.branch
+            )
+              input.appFile = state.deployParams?.appFile;
+          }
+        }
+        const result: unknown = await ports.runtime.start(input, {
+          workspace,
+          ...(!input.attemptId && input.appFile === undefined ?
+            {
+              modelSelection: {
+                resolve: async (target) => {
+                  const source = await ports.readModel(
+                    {
+                      state: {
+                        workspaceRepo: workspace?.repo,
+                        workspaceBranch: workspace?.branch,
+                        workspacePath: workspace?.workspacePath
+                      }
+                    },
+                    target.repo,
+                    target.branch,
+                    ".radius/app.bicep"
+                  );
+                  if (source.status === "unavailable")
+                    throw new Error(source.error);
+                  return source.status === "available" && source.content ?
+                      ".radius/app.bicep"
+                    : "app.bicep";
+                },
+                isCurrent: () => true
+              }
+            }
+          : {})
+        });
         if (!record(result))
           throw new Error(
             "The deployment service returned an invalid start result."

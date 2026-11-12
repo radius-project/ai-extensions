@@ -1173,7 +1173,7 @@ describe("RU-11: radius_deploy", () => {
     expect(result).toContain(invocation.observationId);
     expect(start).toHaveBeenCalledWith(
       expect.objectContaining({ repo: "acme/widgets", branch: "main" }),
-      { workspace: undefined }
+      expect.objectContaining({ workspace: undefined })
     );
     expect(deps.getOrCreateServer).not.toHaveBeenCalled();
   });
