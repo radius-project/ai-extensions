@@ -13,9 +13,12 @@ import {
 } from "./deployment-templates.js";
 import { parse } from "yaml";
 
-function workflowRecord(value: unknown): Record<string, unknown> {
+function workflowRecord(
+  value: unknown,
+  message = "Invalid deployment workflow contract."
+): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error("Invalid deployment workflow contract.");
+    throw new Error(message);
   return Object.fromEntries(Object.entries(value));
 }
 
@@ -62,31 +65,35 @@ export function createDeploymentWorkflows(
       const workflow = workflowRecord(parse(source));
       const trigger =
         file === DEPLOY_DISPATCHER_FILE ? "workflow_dispatch" : "workflow_call";
+      const inputError = `${file} must accept the string app_file input in ${trigger}. Update the Radius workflows.`;
       const input = workflowRecord(
         workflowRecord(
-          workflowRecord(workflowRecord(workflow.on)[trigger]).inputs
-        ).app_file
+          workflowRecord(
+            workflowRecord(workflow.on, inputError)[trigger],
+            inputError
+          ).inputs,
+          inputError
+        ).app_file,
+        inputError
       );
-      if (input.type !== "string")
-        throw new Error(
-          `${file} must accept the string app_file input. Update the Radius workflows.`
-        );
+      if (input.type !== "string") throw new Error(inputError);
       return workflow;
     };
     const dispatcher = await readWorkflow(DEPLOY_DISPATCHER_FILE);
     const dispatchInputs = workflowRecord(
       workflowRecord(workflowRecord(dispatcher.on).workflow_dispatch).inputs
     );
+    const correlationError =
+      "The dispatcher must accept the string correlation_id input and expose it in its run-name. Update the Radius workflows.";
     if (
-      workflowRecord(dispatchInputs.correlation_id).type !== "string" ||
+      workflowRecord(dispatchInputs.correlation_id, correlationError).type !==
+        "string" ||
       dispatcher["run-name"] !==
         "Radius - Deploy ${{ inputs.environment }} ${{ inputs.correlation_id }}"
     )
-      throw new Error(
-        "The dispatcher must accept correlation_id and expose it in its run-name. Update the Radius workflows."
-      );
-    const jobs = Object.values(workflowRecord(dispatcher.jobs)).map(
-      workflowRecord
+      throw new Error(correlationError);
+    const jobs = Object.values(workflowRecord(dispatcher.jobs)).map((value) =>
+      workflowRecord(value)
     );
     for (const file of files.slice(1)) {
       const routes = jobs.filter(
@@ -110,7 +117,7 @@ export function createDeploymentWorkflows(
       )
         throw new Error(`${file} must use app_file as its effective APP_FILE.`);
       const providerJobs = Object.values(workflowRecord(provider.jobs)).map(
-        workflowRecord
+        (value) => workflowRecord(value)
       );
       let consumes = false;
       for (const job of providerJobs) {

@@ -13,6 +13,8 @@ export interface DeploymentFileResult {
   content: string | null;
   error: string | null;
   status: number | null;
+  encoding?: string;
+  size?: number;
 }
 
 export interface DeploymentJsonResult {
@@ -59,7 +61,9 @@ export function createDeploymentRepository(ports: {
                 ok: false,
                 status: 200,
                 json: null,
-                stderr: `failed to parse response: ${parseError instanceof Error ? parseError.message : String(parseError)}`
+                stderr: ports.redactDiagnostic(
+                  `failed to parse response: ${parseError instanceof Error ? parseError.message : String(parseError)}`
+                )
               });
             }
             return;
@@ -92,50 +96,72 @@ export function createDeploymentRepository(ports: {
       )
     );
 
-  function readContentResult(
+  async function readContentResult(
     apiPath: string,
     timeout = 15000
   ): Promise<DeploymentFileResult> {
-    return new Promise((resolve) =>
-      ports.execute(
-        "gh",
-        ["api", apiPath, "--jq", ".content"],
-        { timeout },
-        (error, stdout, stderr) => {
-          if (error) {
-            const detail = ports.redactDiagnostic(
-              (stderr && stderr.trim()) || error.message || String(error)
-            );
-            const status = detail.match(/\bHTTP\s+(\d{3})\b/i);
-            resolve({
-              content: null,
-              error: detail.trim(),
-              status: status ? Number(status[1]) : null
-            });
-          } else if (!stdout || !stdout.trim()) {
-            resolve({
-              content: null,
-              error: "empty response from gh api",
-              status: 200
-            });
-          } else {
-            try {
-              resolve({
-                content: Buffer.from(stdout.trim(), "base64").toString("utf8"),
-                error: null,
-                status: 200
-              });
-            } catch (error) {
-              resolve({
-                content: null,
-                error: `failed to decode response: ${error instanceof Error ? error.message : String(error)}`,
-                status: 200
-              });
-            }
-          }
-        }
-      )
-    );
+    const response = await readJson(apiPath, { timeout });
+    const unavailable = (
+      error: string,
+      metadata: Pick<DeploymentFileResult, "encoding" | "size"> = {}
+    ): DeploymentFileResult => ({
+      content: null,
+      error: ports.redactDiagnostic(error),
+      status: response.status,
+      ...metadata
+    });
+    if (!response.ok)
+      return unavailable(
+        response.stderr || "The repository file could not be read."
+      );
+    const value = response.json;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return unavailable("Invalid repository file metadata.");
+    const encoding =
+      "encoding" in value && typeof value.encoding === "string" ?
+        value.encoding
+      : undefined;
+    const size =
+      (
+        "size" in value &&
+        typeof value.size === "number" &&
+        Number.isSafeInteger(value.size) &&
+        value.size >= 0
+      ) ?
+        value.size
+      : undefined;
+    const metadata = {
+      ...(encoding !== undefined ? { encoding } : {}),
+      ...(size !== undefined ? { size } : {})
+    };
+    if (encoding === undefined || size === undefined)
+      return unavailable(
+        "Invalid repository file encoding or size metadata.",
+        metadata
+      );
+    if (encoding !== "base64")
+      return unavailable(
+        "Repository file content is unavailable in a supported encoding. GitHub must return the complete base64 model or workflow content before deployment.",
+        metadata
+      );
+    if (!("content" in value) || typeof value.content !== "string")
+      return unavailable(
+        "Repository file content is missing or malformed.",
+        metadata
+      );
+    const encoded = value.content.replace(/\s/g, "");
+    const decoded = Buffer.from(encoded, "base64");
+    if (decoded.toString("base64") !== encoded || decoded.length !== size)
+      return unavailable(
+        "Repository file content is incomplete or invalid base64. GitHub must return the complete model or workflow content before deployment.",
+        metadata
+      );
+    return {
+      content: decoded.toString("utf8"),
+      error: null,
+      status: response.status,
+      ...metadata
+    };
   }
   const readFileResult = (repo: string, path: string, branch: string) =>
     readContentResult(`/repos/${repo}/contents/${path}?ref=${branch}`);

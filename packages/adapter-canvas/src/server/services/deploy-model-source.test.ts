@@ -58,10 +58,28 @@ describe("deployment model source", () => {
       { content: "", error: null, status: 200 },
       { status: "available", content: "", fromWorkspace: false }
     ],
+    [
+      { content: "", error: null, status: 200, encoding: "base64", size: 0 },
+      { status: "available", content: "", fromWorkspace: false }
+    ],
+    [
+      {
+        content: null,
+        error:
+          "Repository file content is unavailable in a supported encoding.",
+        status: 200,
+        encoding: "none",
+        size: 1_048_577
+      },
+      {
+        status: "unavailable",
+        error: "Repository file content is unavailable in a supported encoding."
+      }
+    ],
     [{ content: null, error: "Not Found", status: 404 }, { status: "missing" }],
     [
       { content: null, error: "empty response from gh api", status: 200 },
-      { status: "available", content: "", fromWorkspace: false }
+      { status: "unavailable", error: "empty response from gh api" }
     ],
     [
       {

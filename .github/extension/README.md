@@ -98,6 +98,8 @@ Before dispatching with these inputs, the extension synchronizes the deploy work
 
 Workflow observation remains independent of this input upgrade: existing run IDs and supported legacy deployment artifacts remain readable. Stopping an observation ends local reads, not the remote workflow.
 
+Repository model and workflow reads require complete base64 content with valid encoding and byte-size metadata from GitHub. A missing or genuinely empty managed model can select the root model automatically; unsupported encoding, omitted or incomplete content, malformed metadata, and failed reads stop deployment rather than selecting a different file. This also applies when GitHub reports a nonempty file with `encoding: "none"`. Explicit model paths and repairs never fall back to another file.
+
 ### Select a Radius release
 
 By default, `setup-control-plane` installs the checked-in stable Radius pin. AWS workflows are the exception, see below. To test another published release, set the GitHub Environment variable `RADIUS_RELEASE_OVERRIDE` to a JSON object with `tag`, `commit`, and `checksum` fields. Use the exact release tag, its 40-character source commit, and the 64-character SHA-256 checksum of `deploy/install.sh` at that commit. Release candidates are supported.

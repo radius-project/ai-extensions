@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
-import { parse } from "yaml";
+import { parse, parseDocument } from "yaml";
 import { DEPLOY_AWS_FILE, DEPLOY_DISPATCHER_FILE } from "@radius-project/core";
 import {
   createDeploymentWorkflows,
@@ -51,6 +51,95 @@ function fixture(includeAws = false) {
 }
 
 describe("deployment workflow production bindings", () => {
+  it.each(
+    [
+      ["dispatcher", "app_file"],
+      ["provider", "app_file"],
+      ["aws", "app_file"],
+      ["dispatcher", "correlation_id"]
+    ].flatMap(([kind, input]) =>
+      [
+        ["missing", undefined],
+        ["null", null],
+        ["scalar", "string"],
+        ["array", []],
+        ["missing type", {}],
+        ["wrong type", { type: "boolean" }]
+      ].map(([shape, value]) => ({ kind, input, shape, value }))
+    )
+  )(
+    "gives upgrade guidance for $shape $input on $kind",
+    async ({ kind, input, value }) => {
+      const h = fixture(kind === "aws");
+      await h.workflows.ensureCurrent(
+        "owner/app",
+        "dev",
+        "azure",
+        h.workflows.files,
+        "topic"
+      );
+      const file =
+        h.workflows.files[
+          kind === "dispatcher" ? 0
+          : kind === "aws" ? 2
+          : 1
+        ];
+      const key = `topic:.github/workflows/${file}`;
+      const source = h.files.get(key);
+      if (!source) throw new Error("Missing fixture workflow");
+      const document = parseDocument(source);
+      const path = [
+        "on",
+        kind === "dispatcher" ? "workflow_dispatch" : "workflow_call",
+        "inputs",
+        input
+      ];
+      if (value === undefined) document.deleteIn(path);
+      else document.setIn(path, value);
+      h.files.set(key, document.toString());
+      await expect(
+        h.workflows.verifyAppFileInput("owner/app", "topic")
+      ).rejects.toThrow(new RegExp(`${input}.*Update the Radius workflows`));
+    }
+  );
+
+  it.each(["dispatcher", "provider"])(
+    "gives actionable input guidance for absent or malformed %s parents",
+    async (kind) => {
+      const h = fixture();
+      await h.workflows.ensureCurrent(
+        "owner/app",
+        "dev",
+        "azure",
+        h.workflows.files,
+        "topic"
+      );
+      const file = h.workflows.files[kind === "dispatcher" ? 0 : 1];
+      const key = `topic:.github/workflows/${file}`;
+      const source = h.files.get(key);
+      if (!source) throw new Error("Missing fixture workflow");
+      for (const path of [
+        ["on"],
+        ["on", kind === "dispatcher" ? "workflow_dispatch" : "workflow_call"],
+        [
+          "on",
+          kind === "dispatcher" ? "workflow_dispatch" : "workflow_call",
+          "inputs"
+        ]
+      ]) {
+        for (const value of [undefined, null, [], "invalid"]) {
+          const document = parseDocument(source);
+          if (value === undefined) document.deleteIn(path);
+          else document.setIn(path, value);
+          h.files.set(key, document.toString());
+          await expect(
+            h.workflows.verifyAppFileInput("owner/app", "topic")
+          ).rejects.toThrow(`${file} must accept the string app_file input`);
+        }
+      }
+    }
+  );
+
   it.each([false, true])(
     "verifies the real generated templates after competing environment synchronization (AWS %s)",
     async (aws) => {

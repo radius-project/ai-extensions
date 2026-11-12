@@ -5,6 +5,7 @@ import {
 import { redactGhCredentials } from "../../../src/gh.js";
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseDocument } from "yaml";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
@@ -59,9 +60,11 @@ import {
   readWorkflowRun,
   readWorkflowLog,
   createWorkflowArtifactReader,
+  createDeploymentRepository,
   createDeploymentWorkflows,
   type WorkflowExecution
 } from "@radius-project/adapter-shared";
+import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
 import { createDeployOutcomeService } from "../../../src/server/services/deploy-outcome.js";
 import {
   DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
@@ -2358,6 +2361,43 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   it.each([
     {
+      name: "genuine empty managed uses root",
+      appFile: undefined,
+      managed: "",
+      root: true,
+      selected: "app.bicep",
+      dispatched: true
+    },
+    {
+      name: "unavailable nonempty managed never uses root",
+      appFile: undefined,
+      managed: "model",
+      metadata: { encoding: "none", size: 1_048_577, content: "" },
+      root: true,
+      selected: undefined,
+      dispatched: false,
+      refused: true
+    },
+    {
+      name: "explicit unavailable managed never uses root",
+      appFile: ".radius/app.bicep",
+      managed: "model",
+      metadata: { encoding: "none", size: 1_048_577, content: "" },
+      root: true,
+      selected: ".radius/app.bicep",
+      dispatched: false
+    },
+    {
+      name: "truncated managed never uses root",
+      appFile: undefined,
+      managed: "model",
+      metadata: { encoding: "base64", size: 100, content: "" },
+      root: true,
+      selected: undefined,
+      dispatched: false,
+      refused: true
+    },
+    {
       name: "root-only omission",
       appFile: undefined,
       managed: null,
@@ -2407,11 +2447,58 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     }
   ])(
     "preserves model selection through the real request and monitor: $name",
-    async ({ appFile, managed, root, selected, dispatched }) => {
+    async ({ appFile, managed, root, selected, dispatched, ...scenario }) => {
       const unexpected = () => {
         throw new Error("Unexpected external operation in root-model deploy");
       };
       const calls: string[][] = [];
+      const reads: string[] = [];
+      const model =
+        "resource app 'Applications.Core/applications@2023-10-01-preview' = { name: 'root-app' }";
+      const repository = createDeploymentRepository({
+        redactDiagnostic: String,
+        execute: (_command, args, _options, callback) => {
+          expect(args[0]).toBe("api");
+          expect(args).toHaveLength(2);
+          const path =
+            args[1].includes("/contents/.radius/app.bicep?") ?
+              ".radius/app.bicep"
+            : "app.bicep";
+          expect(args[1]).toBe(
+            `/repos/acme/widgets/contents/${path}?ref=feature/root`
+          );
+          reads.push(path);
+          const content =
+            path === ".radius/app.bicep" ?
+              managed === "model" ?
+                model
+              : managed
+            : root ? model
+            : null;
+          if (content === null)
+            callback({ code: 1 }, "", "Not Found (HTTP 404)");
+          else
+            callback(
+              null,
+              JSON.stringify(
+                path === ".radius/app.bicep" && "metadata" in scenario ?
+                  scenario.metadata
+                : {
+                    content: Buffer.from(content).toString("base64"),
+                    encoding: "base64",
+                    size: Buffer.byteLength(content)
+                  }
+              ),
+              ""
+            );
+          return {};
+        }
+      });
+      const readModelForSelection = createDeployModelSource({
+        readWorkspace: async () => null,
+        readRepository: repository.readFileResult,
+        redactDiagnostic: String
+      });
       const dispatch = createDeployDispatchService({
         id: () => "root-model",
         deployWorkflowFile: "run-rad-commands.yml",
@@ -2430,14 +2517,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         runGitHubJson: unexpected,
         readProcessEnv: () => ({}),
         ghCredentialSource: () => "keyring",
-        fetchFileForSelection: async (_entry, repo, branch, path) => {
-          expect(repo).toBe("acme/widgets");
-          expect(branch).toBe("feature/root");
-          if (path === ".radius/app.bicep" && managed !== "model")
-            return managed;
-          if (path === "app.bicep" && !root) return null;
-          return "resource app 'Applications.Core/applications@2023-10-01-preview' = { name: 'root-app' }";
-        },
+        fetchFileForSelection: (_entry, repo, branch, path) =>
+          repository.readFile(repo, path, branch),
         appParams,
         resolveDeployParams,
         partitionParams,
@@ -2457,16 +2538,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       });
       const observed = createUnconfirmedMonitor(null, dispatch);
       const harness = startDeploy(observed.monitor, {
-        readModelForSelection: async (_entry, repo, branch, path) => {
-          expect([repo, branch, path]).toEqual([
-            "acme/widgets",
-            "feature/root",
-            ".radius/app.bicep"
-          ]);
-          return managed === null ?
-              { status: "missing" }
-            : { status: "available", content: managed, fromWorkspace: false };
-        }
+        readModelForSelection
       });
       const entry = await container!.getOrCreate("panel-a");
       const response = await post(
@@ -2474,6 +2546,19 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         "/api/deploy",
         deployBody({ provider: "aws", branch: "feature/root", appFile })
       );
+      if ("refused" in scenario && scenario.refused) {
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({
+          error: expect.stringMatching(/content|base64/)
+        });
+        expect(reads).toEqual([".radius/app.bicep"]);
+        expect(calls).toEqual([]);
+        expect(harness.stateOf("panel-a").deployAttempt).toBeUndefined();
+        expect(
+          activeDeploymentMutation(harness.stateOf("panel-a"))
+        ).toBeUndefined();
+        return;
+      }
       expect(response.status).toBe(200);
       await expect
         .poll(() => activeDeploymentMutation(harness.stateOf("panel-a")))
@@ -2488,6 +2573,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         ).toContain(`deploy ${selected}`);
       } else {
         expect(calls).toEqual([]);
+        if (appFile === ".radius/app.bicep")
+          expect(reads).toEqual([".radius/app.bicep"]);
         expect(harness.stateOf("panel-a").deployErrorKind).toBe(
           "model-preflight-failed"
         );
@@ -2539,27 +2626,60 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     }
   );
 
-  it.each(["run-rad-commands.yml", "run-rad-commands-azure.yml"])(
-    "refuses an installed pre-upgrade %s contract before parameter-secret writes",
-    async (legacyFile) => {
+  it.each(
+    [
+      ["run-rad-commands.yml", "workflow_dispatch", "app_file"],
+      ["run-rad-commands.yml", "workflow_dispatch", "correlation_id"],
+      ["run-rad-commands-azure.yml", "workflow_call", "app_file"]
+    ].flatMap(([legacyFile, trigger, input]) =>
+      ["missing", "wrong type"].map((shape) => ({
+        legacyFile,
+        trigger,
+        input,
+        shape
+      }))
+    )
+  )(
+    "refuses installed $legacyFile $shape $input before secret access or dispatch",
+    async ({ legacyFile, trigger, input, shape }) => {
       const unexpected = () => {
         throw new Error(
           "Incompatible workflows must stop before external execution"
         );
       };
+      const repository = createDeploymentRepository({
+        redactDiagnostic: String,
+        execute: (_command, args, _options, callback) => {
+          expect(args).toHaveLength(2);
+          const file = args[1].match(
+            /\/contents\/\.github\/workflows\/([^?]+)\?ref=feat$/
+          )?.[1];
+          const source = file ? deploymentTemplates[file] : undefined;
+          if (!source) throw new Error(`Unexpected workflow ${args[1]}`);
+          const document = parseDocument(source);
+          if (file === legacyFile) {
+            const path = ["on", trigger, "inputs", input];
+            if (shape === "missing") document.deleteIn(path);
+            else document.setIn(path, { type: "boolean" });
+          }
+          const content = document.toString();
+          callback(
+            null,
+            JSON.stringify({
+              content: Buffer.from(content).toString("base64"),
+              encoding: "base64",
+              size: Buffer.byteLength(content)
+            }),
+            ""
+          );
+          return {};
+        }
+      });
       const workflows = createDeploymentWorkflows(false, {
         readRepositoryFile: unexpected,
         now: () => 0,
         ghOrThrow: unexpected,
-        readFile: async (_repo, path, branch) => {
-          expect(branch).toBe("feat");
-          const file = path.slice(path.lastIndexOf("/") + 1);
-          const source = deploymentTemplates[file];
-          if (!source) throw new Error(`Unexpected workflow ${path}`);
-          return file === legacyFile ?
-              source.replaceAll("app_file", "legacy_input")
-            : source;
-        },
+        readFile: repository.readFile,
         defaultBranch: unexpected,
         branchHead: unexpected,
         commitFile: unexpected,
@@ -2628,6 +2748,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       });
       expect(runGh).not.toHaveBeenCalled();
       expect(runGhWithStdin).not.toHaveBeenCalled();
+      expect(state.deployError).toContain(input);
+      expect(state.deployError).toContain("Update the Radius workflows.");
       expect(observed.reads).toEqual([]);
       expect(state.deployHandoffState).not.toBe("pending");
     }

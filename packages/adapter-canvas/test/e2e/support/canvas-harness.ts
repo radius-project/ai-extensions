@@ -734,9 +734,7 @@ export function defaultFakeCliScenario(): FakeCliScenario {
     tool: "gh",
     args: [
       "api",
-      `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`,
-      "--jq",
-      ".content"
+      `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`
     ],
     exitCode: 1,
     stderr: "gh: Not Found (HTTP 404)"
@@ -1294,7 +1292,7 @@ export async function removeDirectoryWithRetries(
 function missingGhContent(pathname: string): FakeCliCommand {
   return {
     tool: "gh",
-    args: ["api", pathname, "--jq", ".content"],
+    args: ["api", pathname],
     exitCode: 1,
     stderr: "gh: Not Found (HTTP 404)"
   };

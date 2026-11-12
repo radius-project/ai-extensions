@@ -741,9 +741,7 @@ test.describe("Radius Canvas in Chromium", () => {
         tool: "gh",
         args: [
           "api",
-          `/repos/${REPOSITORY}/contents/app.bicep?ref=${WORKTREE_BRANCH}`,
-          "--jq",
-          ".content"
+          `/repos/${REPOSITORY}/contents/app.bicep?ref=${WORKTREE_BRANCH}`
         ],
         exitCode: 1,
         stderr: "gh: Not Found (HTTP 404)"
@@ -873,19 +871,20 @@ test.describe("Radius Canvas in Chromium", () => {
       ["delete-environment.yml", DELETE_RADIUS_REF],
       ["delete-environment-azure.yml", DELETE_RADIUS_REF]
     ]) {
+      const content = await fs.readFile(
+        path.join(REPOSITORY_ROOT, ".github", "extension", file)
+      );
       additions.push(
         command(
           [
             "api",
-            `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=${ref}`,
-            "--jq",
-            ".content"
+            `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=${ref}`
           ],
-          (
-            await fs.readFile(
-              path.join(REPOSITORY_ROOT, ".github", "extension", file)
-            )
-          ).toString("base64")
+          JSON.stringify({
+            content: content.toString("base64"),
+            encoding: "base64",
+            size: content.length
+          })
         )
       );
     }
@@ -899,9 +898,7 @@ test.describe("Radius Canvas in Chromium", () => {
         tool: "gh",
         args: [
           "api",
-          `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`,
-          "--jq",
-          ".content"
+          `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`
         ],
         exitCode: 1,
         stderr: "gh: Not Found (HTTP 404)"
@@ -930,11 +927,13 @@ test.describe("Radius Canvas in Chromium", () => {
           command(
             [
               "api",
-              `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${branch}`,
-              "--jq",
-              ".content"
+              `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${branch}`
             ],
-            Buffer.from(content).toString("base64")
+            JSON.stringify({
+              content: Buffer.from(content).toString("base64"),
+              encoding: "base64",
+              size: Buffer.byteLength(content)
+            })
           ),
           command(
             [

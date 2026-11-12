@@ -44,11 +44,6 @@ export function createDeployModelSource(ports: {
           content: remote.content,
           fromWorkspace: false
         };
-      if (
-        remote.status === 200 &&
-        remote.error === "empty response from gh api"
-      )
-        return { status: "available", content: "", fromWorkspace: false };
       return {
         status: "unavailable",
         error: ports.redactDiagnostic(
