@@ -102,9 +102,7 @@ describe("deployment delivery through registered SDK handlers", () => {
       expect(runtime.owner.isCurrent(result.invocation)).toBe(true);
       await sdk.host.close("panel");
       finished.resolve();
-      await vi.waitFor(() =>
-        expect(runtime.owner.hasActiveWork()).toBe(false)
-      );
+      await vi.waitFor(() => expect(runtime.owner.hasActiveWork()).toBe(false));
       expect(sdk.session.send).toHaveBeenCalledExactlyOnceWith(
         deployRepairHandoffMessage(input.repo, input.branch, {
           error: "Model failed",
