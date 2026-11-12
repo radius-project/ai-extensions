@@ -1307,7 +1307,7 @@ test.describe("Radius Canvas in Chromium", () => {
       expect(status.logs.join("\n")).not.toContain(
         "Could not verify Azure federated credential coverage"
       );
-      if (launch === "tool") expect(status.resources).toEqual([]);
+      if (isTool) expect(status.resources).toEqual([]);
       else
         expect(status.resources[0].deployMessage).toContain(
           "opaque-witness=[REDACTED]"
@@ -1320,7 +1320,7 @@ test.describe("Radius Canvas in Chromium", () => {
       expect(deliveries[0]).toMatchObject({
         appFile,
         attemptId,
-        instanceId: launch === "tool" ? "" : canvas.instanceId,
+        instanceId: isTool ? "" : canvas.instanceId,
         repo: REPOSITORY,
         branch: WORKTREE_BRANCH,
         deployRunUrl: runUrl
