@@ -4,7 +4,7 @@
 - **Design**: [GitHub Radius: Extracting a Reusable Library from Canvas](./2026-09-github-radius.md), approved and merged in [#845](https://github.com/radius-project/ai-extensions/pull/845).
 - **Planning baseline**: `c1c9e938963bbca923984138c82173ec3f0d8b08`, inspected on September 23, 2026. Recheck the current code and concurrent work before starting each slice.
 - **Implementation basis**: The approved design and current production code only.
-- **Current assessment**: November 9, 2026. The [ownership ledger](./2026-09-github-radius-migration-inventory.md#migration-ownership-ledger) and [deployment qualification](./2026-09-github-radius-migration-inventory.md#deployment-admission-and-dispatch) distinguish the replacement stack from historical source results. Open implementation branches are not merged delivery or human acceptance. Older slice records retain their original scope; their "remaining" statements are historical where superseded below.
+- **Implementation assessment**: The [ownership ledger](./2026-09-github-radius-migration-inventory.md#migration-ownership-ledger) and [deployment qualification](./2026-09-github-radius-migration-inventory.md#deployment-admission-and-dispatch) describe delivered stage responsibilities and distinguish their exact-revision evidence from historical source results. Live review and delivery state is tracked on the linked PRs. Older slice records retain their original scope; their "remaining" statements are historical where superseded below.
 
 ## Delivery strategy
 
