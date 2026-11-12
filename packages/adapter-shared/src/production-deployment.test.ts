@@ -566,8 +566,99 @@ describe("shared production deployment composition", () => {
     }
   });
 
+  it.each(["success", "failure"] as const)(
+    "publishes repository dispatch facts after local invalidation only on remote %s",
+    async (outcome) => {
+      const h = fixture({ dispatch: "success" });
+      const entered = createDeploymentDeferred<void>();
+      const release = createDeploymentDeferred<void>();
+      let held = false;
+      const execute: ProductionDeploymentPorts["execute"] = (
+        command,
+        args,
+        options,
+        callback
+      ) => {
+        h.ports.execute(command, args, options, (error, stdout, stderr) => {
+          if (args[0] !== "workflow" || held) {
+            callback(error, stdout, stderr);
+            return;
+          }
+          held = true;
+          entered.resolve();
+          void release.promise.then(() => {
+            if (outcome === "failure") {
+              callback(
+                Object.assign(new Error("dispatch refused"), { code: 1 }),
+                "",
+                "dispatch refused"
+              );
+            } else {
+              callback(error, stdout, stderr);
+            }
+          });
+        });
+        return {};
+      };
+      const runtime = createProductionDeploymentRuntime({
+        ...h.ports,
+        execute
+      });
+      runtimes.push(runtime);
+      const repositoryListener = vi.fn();
+      const attemptListener = vi.fn();
+      runtime.subscribeDispatch(repositoryListener);
+      try {
+        const result = await runtime.start({
+          repo: "owner/app",
+          branch: "topic",
+          environment: "dev"
+        });
+        if (!result.ok) throw new Error(result.error);
+        runtime.owner.subscribe(result.invocation, attemptListener);
+        await entered.promise;
+        const priorPublications = attemptListener.mock.calls.length;
+        expect(runtime.owner.invalidate(result.invocation)).toBe(true);
+        expect(
+          runtime.owner.reserve(result.invocation.target, "delete")
+        ).toBeNull();
+        release.resolve();
+        await vi.waitFor(() =>
+          expect(runtime.owner.hasActiveWork()).toBe(false)
+        );
+        expect(attemptListener).toHaveBeenCalledTimes(priorPublications);
+        expect(repositoryListener).toHaveBeenCalledTimes(
+          outcome === "success" ? 1 : 0
+        );
+        if (outcome === "success")
+          expect(repositoryListener).toHaveBeenLastCalledWith("owner/app");
+        const replacement = await runtime.start({
+          repo: "owner/app",
+          branch: "topic",
+          environment: "dev"
+        });
+        if (!replacement.ok) throw new Error(replacement.error);
+        await vi.waitFor(() =>
+          expect(runtime.owner.hasActiveWork()).toBe(false)
+        );
+        expect(replacement.invocation.observationId).not.toBe(
+          result.invocation.observationId
+        );
+        expect(repositoryListener).toHaveBeenCalledTimes(
+          outcome === "success" ? 2 : 1
+        );
+        expect(runtime.owner.isCurrent(result.invocation)).toBe(false);
+        expect(attemptListener).toHaveBeenCalledTimes(priorPublications);
+        expect(h.diagnostics).not.toHaveBeenCalled();
+      } finally {
+        release.resolve();
+        await runtime.owner.shutdown(100);
+      }
+    }
+  );
+
   it.each(["invalidate", "shutdown"] as const)(
-    "stops remaining dispatch callbacks after reentrant %s",
+    "notifies remaining repository listeners after reentrant %s only while runtime remains open",
     async (action) => {
       const h = fixture({ dispatch: "success" });
       const lateListener = vi.fn();
@@ -589,14 +680,16 @@ describe("shared production deployment composition", () => {
       await vi.waitFor(() =>
         expect(h.runtime.owner.hasActiveWork()).toBe(false)
       );
-      expect(lateListener).not.toHaveBeenCalled();
       if (action === "shutdown") {
+        expect(lateListener).not.toHaveBeenCalled();
         expect(() => h.runtime.subscribeDispatch(vi.fn())).toThrow(
           "shutting down"
         );
         expect(() =>
           h.runtime.owner.subscribe(result.invocation, vi.fn())
         ).toThrow("shutting down");
+      } else {
+        expect(lateListener).toHaveBeenCalledExactlyOnceWith("owner/app");
       }
       expect(h.diagnostics).not.toHaveBeenCalled();
     }

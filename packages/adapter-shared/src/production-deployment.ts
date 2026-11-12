@@ -28,8 +28,6 @@ import {
 import { createDeploymentRepository } from "./deployment-repository.js";
 import type { DeploymentCommandExecutor } from "./deployment-command-bindings.js";
 import type { DeployCommandResult } from "./deployment-dispatch.js";
-import type { DeploymentInvocation } from "./deployment-owner.js";
-import type { DeploymentState } from "@radius-project/core";
 import { createDeploymentWorkflows } from "./deployment-workflows.js";
 import { createDeploymentLookup } from "./deployment-lookup.js";
 import { createDeploymentIdentityReader } from "./deployment-identity.js";
@@ -107,17 +105,9 @@ export function createProductionDeploymentRuntime(
   const reportError = (error: unknown): void =>
     ports.reportDiagnostic(ports.redactDiagnostic(errorMessage(error)));
   const dispatchListeners = new Set<(repo: string) => unknown>();
-  function notifyDispatch(
-    repo: string,
-    invocation: DeploymentInvocation<DeploymentState>
-  ): void {
+  function notifyDispatch(repo: string): void {
     for (const listener of dispatchListeners) {
-      if (
-        runtime.owner.isShuttingDown() ||
-        invocation.signal.aborted ||
-        !runtime.owner.isCurrent(invocation)
-      )
-        return;
+      if (runtime.owner.isShuttingDown()) return;
       try {
         void Promise.resolve(listener(repo)).then(undefined, reportError);
       } catch (error) {
@@ -237,7 +227,7 @@ export function createProductionDeploymentRuntime(
         verifyAppFileInput: workflows.verifyAppFileInput,
         latestWorkflowRunId: reads.latestWorkflowRunId,
         classifyDeployDispatchFailure,
-        invalidateDeployListCache: (repo) => notifyDispatch(repo, invocation),
+        invalidateDeployListCache: notifyDispatch,
         errorMessage: (error) => ports.redactDiagnostic(errorMessage(error)),
         sleep: ports.sleep,
         now: ports.now
@@ -282,7 +272,10 @@ export function createProductionDeploymentRuntime(
   });
   return {
     ...runtime,
-    /** Returned promises report failures without delaying deployment or shutdown. */
+    /**
+     * Repository dispatch facts survive attempt invalidation, but not shutdown.
+     * Returned promises are observed without delaying deployment or shutdown.
+     */
     subscribeDispatch(listener: (repo: string) => unknown): () => void {
       if (runtime.owner.isShuttingDown())
         throw new Error("Deployment runtime is shutting down.");

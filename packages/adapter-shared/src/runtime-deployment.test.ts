@@ -392,6 +392,107 @@ describe("panel-independent deployment runtime", () => {
     expect(second.invocation.target.appFile).toBe("models/explicit.bicep");
   });
 
+  it("inherits explicit repeat intent across environment casing without rewriting the requested target", async () => {
+    const h = fixture({ awsEnabled: true });
+    const first = await h.runtime.start({
+      ...target,
+      environment: "prod",
+      provider: "aws",
+      branch: "release/Production",
+      appFile: "models/explicit.bicep"
+    });
+    if (!first.ok) throw new Error(first.error);
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    const resolve = vi.fn(async () => "models/auto.bicep");
+    const second = await h.runtime.start(
+      { repo: target.repo, environment: "Prod" },
+      { modelSelection: { resolve, isCurrent: () => true } }
+    );
+    if (!second.ok) throw new Error(second.error);
+    expect(second.invocation.target).toEqual({
+      repo: target.repo,
+      environment: "Prod",
+      provider: "aws",
+      branch: "release/Production",
+      appFile: "models/explicit.bicep"
+    });
+    expect(second.invocation.state.deployParams).toMatchObject({
+      environment: "Prod",
+      provider: "aws",
+      branch: "release/Production",
+      appFile: "models/explicit.bicep"
+    });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(second.invocation.state.deployAttempt?.environment).toBe("Prod");
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    const independent = await h.runtime.start({
+      repo: target.repo,
+      environment: "staging"
+    });
+    if (!independent.ok) throw new Error(independent.error);
+    expect(independent.invocation.target).toEqual({
+      repo: target.repo,
+      environment: "staging",
+      provider: "azure",
+      branch: "release",
+      appFile: ".radius/app.bicep"
+    });
+  });
+
+  it("does not retarget a pinned repair to another environment spelling", async () => {
+    const h = fixture({ awsEnabled: true }, async ({ entry }) => {
+      entry.state.deployStatus = "failed";
+      entry.state.deployError = "Model validation failed";
+    });
+    const first = await h.runtime.start({
+      ...target,
+      environment: "prod",
+      provider: "aws"
+    });
+    if (!first.ok) throw new Error(first.error);
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    expect(
+      await h.runtime.start({
+        attemptId: first.invocation.attemptId,
+        environment: "Prod"
+      })
+    ).toMatchObject({ ok: false, status: 409 });
+    const repaired = await h.runtime.start({
+      attemptId: first.invocation.attemptId
+    });
+    if (!repaired.ok) throw new Error(repaired.error);
+    expect(repaired.invocation.target).toEqual(first.invocation.target);
+    expect(repaired.invocation.target.environment).toBe("prod");
+  });
+
+  it("fences inherited mixed-case environment intent if its prior attempt retires during admission", async () => {
+    let retire = () => {};
+    const h = fixture({
+      resolveDeployment: async () => {
+        retire();
+        return null;
+      }
+    });
+    const first = await h.runtime.start({
+      ...target,
+      environment: "prod",
+      appFile: "models/explicit.bicep"
+    });
+    if (!first.ok) throw new Error(first.error);
+    await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+    retire = () => {
+      h.runtime.owner.retire(first.invocation);
+    };
+    expect(
+      await h.runtime.start({
+        ...target,
+        environment: "Prod",
+        appFile: undefined
+      })
+    ).toMatchObject({ ok: false, status: 409 });
+    expect(h.createExecution).toHaveBeenCalledOnce();
+  });
+
   it.each(["branch", "environment"] as const)(
     "does not inherit explicit model intent across a different %s",
     async (field) => {

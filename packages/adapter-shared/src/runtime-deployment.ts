@@ -191,7 +191,8 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
     const eligiblePrior =
       prior &&
       prior.target.repo.toLowerCase() === repo.toLowerCase() &&
-      prior.target.environment === target.environment;
+      prior.target.environment.toLowerCase() ===
+        target.environment.toLowerCase();
     const inheritedModel =
       (
         input.appFile === undefined &&
