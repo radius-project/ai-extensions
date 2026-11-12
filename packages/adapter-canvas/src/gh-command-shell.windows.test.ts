@@ -52,7 +52,13 @@ describeWindows("native PowerShell command guidance", () => {
   });
 
   afterAll(async () => {
-    if (root) await rm(root, { recursive: true, force: true });
+    if (root)
+      await rm(root, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 100
+      });
   });
 
   it.each(["powershell.exe", "pwsh.exe"])(
