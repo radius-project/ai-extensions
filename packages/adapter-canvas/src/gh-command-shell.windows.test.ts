@@ -31,7 +31,10 @@ describeWindows("native PowerShell command guidance", () => {
     "two words\\",
     'a\\"b',
     'a\\\\"b',
-    'a "b" c'
+    'a "b" c',
+    "\\".repeat(1_000) + "x",
+    "\\".repeat(1_000) + '"',
+    "\\".repeat(1_000)
   ];
 
   beforeAll(async () => {

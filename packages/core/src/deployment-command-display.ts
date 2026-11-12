@@ -68,7 +68,15 @@ export function displayShellCommand(
     if (!legacy) return quoteLiteral(value, shell);
     // PowerShell 5.1's native marshaller consumes a quote layer. Doubling quotes
     // (not backslash-escaping them) preserves embedded quotes with whitespace.
-    const encoded = value.replace(/(\\*)"/g, '$1$1""').replace(/\\+$/, "$&$&");
+    const encoded = value.replace(/\\+|"/g, (run, offset: number) => {
+      if (run === '"') return '""';
+      return (
+          offset + run.length === value.length ||
+            value[offset + run.length] === '"'
+        ) ?
+          run + run
+        : run;
+    });
     return quoteLiteral(`"${encoded}"`, shell);
   });
   const command = [invocation, ...tokens].join(" ");

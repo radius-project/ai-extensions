@@ -173,10 +173,28 @@ export function deploymentRunId(repo: string, runUrl: string): number | null {
 /** Retains the workflow-compatible first-name fallback for older application models. */
 export function extractAppName(source: unknown): string {
   if (typeof source !== "string" || !source) return "";
-  const onResource = source.match(
-    /applications@[^'"]*['"]\s*=\s*\{[\s\S]*?\bname:\s*['"]([^'"]+)['"]/
-  );
-  if (onResource) return onResource[1];
-  const first = source.match(/\bname:\s*['"]([^'"]+)['"]/);
+  const header = /\s*=\s*\{/y;
+  const name = /\bname:\s*['"]([^'"]+)['"]/g;
+  let application = false;
+  for (const token of source.matchAll(/applications@|['"]/g)) {
+    if (token[0] === "applications@") {
+      application = true;
+      continue;
+    }
+    if (application) {
+      header.lastIndex = token.index + 1;
+      if (header.test(source)) {
+        // The first valid header owns the remaining name search, even across
+        // braces, preserving the legacy fallback without rescanning suffixes.
+        name.lastIndex = header.lastIndex;
+        const onResource = name.exec(source);
+        if (onResource) return onResource[1];
+        break;
+      }
+    }
+    application = false;
+  }
+  name.lastIndex = 0;
+  const first = name.exec(source);
   return first ? first[1] : "";
 }

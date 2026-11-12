@@ -69,10 +69,16 @@ export function parseBicepParams(source: unknown): BicepParam[] {
     }
     if (line.startsWith("@")) continue; // other decorators: keep pending state
     const m = line.match(
-      /^param\s+([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z0-9_.\[\]?]+)\s*(?:=\s*([\s\S]+))?$/
+      /^param\s+([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z0-9_.\[\]?]+)/
     );
-    if (m) {
-      const [, name, type, def] = m;
+    const suffix = m ? line.slice(m[0].length).trim() : "";
+    if (
+      m &&
+      (suffix === "" ||
+        (suffix.startsWith("=") && suffix.slice(1).trim() !== ""))
+    ) {
+      const [, name, type] = m;
+      const def = suffix === "" ? undefined : suffix.slice(1).trim();
       params.push({
         name,
         type,

@@ -115,6 +115,22 @@ it("quotes PowerShell splats and marshals whitespace with a trailing slash", () 
   );
 });
 
+it("serializes long backslash runs once without changing native quote layers", () => {
+  const slashes = "\\".repeat(50_000);
+  const argumentsAndEncoding = [
+    [slashes + "x", slashes + "x"],
+    [slashes + '"', slashes + slashes + '""'],
+    [slashes, slashes + slashes],
+    ['""x', '""""x'],
+    ["a\\b\\", "a\\b\\\\"]
+  ];
+  for (const [value, encoded] of argumentsAndEncoding) {
+    expect(displayShellCommand("powershell", "gh", ["", value])).toBe(
+      `& { $PSNativeCommandArgumentPassing = 'Legacy'; gh '""' '"${encoded}"' }`
+    );
+  }
+});
+
 it.each([
   ["", []],
   ["gh", ["\0"]],

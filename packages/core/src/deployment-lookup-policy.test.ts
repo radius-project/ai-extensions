@@ -244,6 +244,30 @@ describe("deployment record selection", () => {
 });
 
 describe("extractAppName", () => {
+  it("scans repeated application markers and nameless headers without rescanning suffixes", () => {
+    const markers = "applications@".repeat(20_000);
+    const headers = 'applications@"={{'.repeat(20_000);
+    expect(extractAppName(markers)).toBe("");
+    expect(extractAppName(headers)).toBe("");
+    expect(extractAppName(`name: 'fallback' ${headers}`)).toBe("fallback");
+    expect(extractAppName(`${markers}" = { name: 'selected' }`)).toBe(
+      "selected"
+    );
+    expect(extractAppName(`${headers} name: 'selected'`)).toBe("selected");
+  });
+
+  it.each([
+    ["name: 'backing' applications@v1' = { name: 'app'", "app"],
+    ['applications@bad"x applications@good\' = { name: "app"', "app"],
+    ["applications@bad\" applications@good\" = { name: 'app'", "app"],
+    ['applications@v1"\t=\u00a0{ name: \'mixed"', "mixed"],
+    ["name: 'fallback' applications@v1' = { name: '' }", "fallback"],
+    ["applications@v1' = {} xname: 'wrong' name: 'outside'", "outside"],
+    ["name: 'first' Applications@v1' = { name: 'second'", "first"]
+  ])("retains legacy extraction for %s", (source, expected) => {
+    expect(extractAppName(source)).toBe(expected);
+  });
+
   it.each([undefined, null, "", 7, {}])("returns no name for %j", (source) => {
     expect(extractAppName(source)).toBe("");
   });

@@ -78,6 +78,59 @@ describe("appParams", () => {
 });
 
 describe("parseBicepParams", () => {
+  it("rejects long incomplete defaults and clears their pending decorators", () => {
+    expect(
+      parseBicepParams(`@secure()
+@description('invalid declaration')
+param A .=${" ".repeat(100_000)}
+param ordinary string`)
+    ).toEqual([
+      {
+        name: "ordinary",
+        type: "string",
+        secure: false,
+        hasDefault: false,
+        default: null,
+        description: ""
+      }
+    ]);
+  });
+
+  it.each([
+    ["param A string?", "string?", null],
+    ["param A\nstring", "", null],
+    [
+      "param A\tFixture.Type[]?\u00a0=\t'one=two'",
+      "Fixture.Type[]?",
+      "'one=two'"
+    ],
+    ["param A string = ''", "string", "''"],
+    ["param A string = = value", "string", "= value"],
+    ["param A string = 'value' // comment", "string", "'value' // comment"],
+    ["param A string suffix", "", null],
+    ["param A string // comment", "", null],
+    ["param A string =", "", null],
+    ["param A string !", "", null]
+  ])(
+    "retains parameter declaration compatibility for %s",
+    (source, type, value) => {
+      expect(parseBicepParams(source)).toEqual(
+        type ?
+          [
+            {
+              name: "A",
+              type,
+              secure: false,
+              hasDefault: value !== null,
+              default: value,
+              description: ""
+            }
+          ]
+        : []
+      );
+    }
+  );
+
   it.each([undefined, null, false, 42, {}])(
     "returns no parameters for non-source input %j",
     (source) => {
