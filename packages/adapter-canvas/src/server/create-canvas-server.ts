@@ -146,7 +146,7 @@ export function createCanvasServer(
       try {
         instances.delete(instanceId);
         await closeServer(server, true);
-        dependencies.onStopped?.(instanceId);
+        dependencies.onStopped?.(instanceId, entry);
       } catch {
         // A failure while unwinding must not mask why startup failed.
       }
@@ -213,7 +213,7 @@ export function createCanvasServer(
       try {
         await closeServer(entry.server, force);
       } finally {
-        dependencies.onStopped?.(instanceId);
+        dependencies.onStopped?.(instanceId, entry);
       }
     })();
     stopping.set(instanceId, work);

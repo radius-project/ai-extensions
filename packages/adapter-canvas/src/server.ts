@@ -6554,8 +6554,8 @@ export function createProductionCanvasServerRuntime(
             coordinator.start(entry.baseUrl);
           }
         },
-        onStopped: (instanceId) => {
-          deploymentViews.detach(instanceId);
+        onStopped: (instanceId, entry) => {
+          deploymentViews.detach(instanceId, entry.state);
           instanceRequestCoordinators.get(instanceId)?.detach();
           instanceRequestCoordinators.delete(instanceId);
         },
@@ -6593,8 +6593,13 @@ export function createProductionCanvasServerRuntime(
       errorMessage
     }),
     readModelForSelection: readDeployModelForSelection,
-    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    readInstanceEntry: (instanceId) => {
+      const entry = canvasServer.instances.get(instanceId);
+      if (entry) deploymentViews.refresh(instanceId, entry.state);
+      return entry;
+    },
     attach: deploymentViews.attach,
+    readDeploymentDefaults: deploymentViews.defaults,
     reportError: (error) =>
       console.error(redactGhCredentials(errorMessage(error))),
     errorMessage

@@ -43,6 +43,156 @@ function harness() {
 }
 
 describe("detachable deployment projections", () => {
+  it("retires remembered evidence after its only panel has been disposed", () => {
+    const h = harness();
+    const invocation = h.begin({ deployStatus: "success" });
+    const state: CanvasState = {};
+    h.views.attach("panel", state, invocation);
+    h.views.detach("panel", state);
+    expect(h.views.retire(invocation)).toBe(true);
+    const reopened: CanvasState = {};
+    h.views.refresh("panel", reopened);
+    expect(reopened.deployAttempt).toBeUndefined();
+  });
+
+  it.each(["active reset", "terminal reset", "retirement"] as const)(
+    "does not suppress a new repository after %s",
+    (action) => {
+      const h = harness();
+      const first = h.begin({
+        deployStatus: action === "active reset" ? "in_progress" : "success"
+      });
+      const second = h.begin(
+        { deployStatus: "in_progress" },
+        "acme/other",
+        undefined,
+        "staging"
+      );
+      const state: CanvasState = { contextRepo: h.target.repo };
+      h.views.attach("panel", state, first);
+      if (action === "retirement") h.views.retire(first);
+      else h.views.reset(state, first.attemptId);
+      h.views.refresh("panel", state);
+      expect(state.deployAttempt).toBeUndefined();
+      state.contextRepo = "acme/other";
+      h.views.refresh("panel", state);
+      expect(state.deployAttempt?.id).toBe(second.attemptId);
+      expect(state.envName).toBe("staging");
+    }
+  );
+
+  it("keeps explicit context defaults separate from projected deployment values", () => {
+    const h = harness();
+    const invocation = h.begin({ deployStatus: "in_progress" }, "acme/other");
+    const state: CanvasState = {
+      contextRepo: h.target.repo,
+      envName: "selected-env",
+      deployProvider: "aws",
+      appFile: "models/selected.bicep"
+    };
+    h.views.attach("panel", state, invocation);
+    expect(state.envName).toBe("production");
+    expect(h.views.defaults(state)).toEqual({
+      envName: "selected-env",
+      deployProvider: "aws",
+      appFile: "models/selected.bicep"
+    });
+    h.runtime.owner.publish(invocation);
+    expect(h.views.defaults(state).envName).toBe("selected-env");
+    state.envName = "new-selection";
+    h.runtime.owner.publish(invocation);
+    expect(h.views.defaults(state).envName).toBe("new-selection");
+    state.contextRepo = "acme/new-context";
+    h.views.refresh("panel", state);
+    expect(h.views.defaults(state)).toEqual({
+      envName: undefined,
+      deployProvider: undefined,
+      appFile: undefined
+    });
+  });
+
+  it("limits reset suppression and stale cleanup to the disposed state lifetime", () => {
+    const h = harness();
+    const invocation = h.begin({ deployStatus: "in_progress" });
+    const old: CanvasState = {};
+    h.views.attach("panel", old, invocation);
+    h.views.reset(old, invocation.attemptId);
+    h.views.refresh("panel", old);
+    expect(old.deployStatus).toBeUndefined();
+    h.views.detach("panel", old);
+    const reopened: CanvasState = {};
+    h.views.refresh("panel", reopened);
+    expect(reopened.deployAttempt?.id).toBe(invocation.attemptId);
+    h.views.detach("panel", old);
+    invocation.state.deployLogs = ["new lifetime"];
+    h.runtime.owner.publish(invocation);
+    expect(reopened.deployLogs).toEqual(["new lifetime"]);
+    expect(old.deployLogs).toBeUndefined();
+  });
+
+  it("retains an explicit cross-repository target until the ambient context changes", () => {
+    const h = harness();
+    const invocation = h.begin({ deployStatus: "in_progress" }, "acme/other");
+    const state: CanvasState = {
+      contextRepo: h.target.repo,
+      contextBranch: "feature"
+    };
+    h.views.attach("panel", state, invocation);
+    h.views.refresh("panel", state);
+    expect(state.deployAttempt?.id).toBe(invocation.attemptId);
+    state.contextBranch = "another";
+    invocation.state.deployLogs = ["must not overwrite changed context"];
+    h.runtime.owner.publish(invocation);
+    expect(state.deployLogs).toBeUndefined();
+    h.views.refresh("panel", state);
+    expect(state.deployAttempt).toBeUndefined();
+  });
+
+  it.each(["unique", "ambiguous", "missing"] as const)(
+    "selects repository-local evidence without projected defaults: %s",
+    (kind) => {
+      const h = harness();
+      const first = h.begin({ deployStatus: "complete" });
+      const state: CanvasState = { contextRepo: h.target.repo };
+      h.views.attach("panel", state, first);
+      const second =
+        kind === "missing" ? undefined : (
+          h.begin(
+            { deployStatus: "in_progress" },
+            "acme/other",
+            undefined,
+            "staging"
+          )
+        );
+      if (kind === "ambiguous")
+        h.begin({ deployStatus: "failed" }, "acme/other", undefined, "test");
+      state.contextRepo = "ACME/other";
+      h.views.refresh("panel", state);
+      expect(state.deployAttempt?.id).toBe(
+        kind === "unique" ? second?.attemptId : undefined
+      );
+      expect(state.envName).toBe(kind === "unique" ? "staging" : undefined);
+      expect(state.deployProvider).toBe(
+        kind === "unique" ? "azure" : undefined
+      );
+      expect(state.appFile).toBe(
+        kind === "unique" ? ".radius/app.bicep" : undefined
+      );
+    }
+  );
+
+  it("preserves newly selected context defaults while removing old projections", () => {
+    const h = harness();
+    const first = h.begin({ deployStatus: "complete" });
+    const second = h.begin({}, "acme/other", undefined, "staging");
+    const state: CanvasState = { contextRepo: h.target.repo };
+    h.views.attach("panel", state, first);
+    state.contextRepo = "acme/other";
+    state.envName = "staging";
+    h.views.refresh("panel", state);
+    expect(state.deployAttempt?.id).toBe(second.attemptId);
+  });
+
   it("clones nested resources and logs, preserving unrelated panel state", () => {
     const h = harness();
     const invocation = h.begin({
@@ -76,8 +226,8 @@ describe("detachable deployment projections", () => {
     const done = createDeferred<void>();
     const work = h.runtime.owner.run(invocation, () => done.promise);
     h.views.attach("panel", state, invocation);
-    h.views.detach("panel");
-    h.views.detach("panel");
+    h.views.detach("panel", state);
+    h.views.detach("panel", state);
     invocation.state.deployStatus = "success";
     h.runtime.owner.publish(invocation);
     expect(state.deployStatus).toBe("in_progress");
@@ -240,7 +390,7 @@ describe("detachable deployment projections", () => {
     const first = h.begin({ deployStatus: "success" });
     const state: CanvasState = {};
     h.views.attach("panel", state, first);
-    h.views.detach("panel");
+    h.views.detach("panel", state);
     h.begin({ deployStatus: "failed" }, "acme/other");
     const next = h.begin({ deployStatus: "in_progress" });
     const reopened: CanvasState = {};

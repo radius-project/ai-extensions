@@ -39,7 +39,7 @@ import {
   setDeployRepairHandoff,
   triggerDeployRepairHandoff
 } from "../../../src/server.js";
-import { DEPLOY_REPAIR_ATTEMPT_CAP } from "../../../src/runtime/hooks.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "@radius-project/core";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type {
@@ -2215,6 +2215,7 @@ function startDeploy(
         fromWorkspace: true
       })),
     attach: views.attach,
+    readDeploymentDefaults: views.defaults,
     readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
     reportError: (error) => {
       throw error;
@@ -3462,7 +3463,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         expect(releases).toBe(1);
         expect(observed.reads).toHaveLength(reads);
 
-        harness.views.detach("panel-a");
+        harness.views.detach("panel-a", entry.state);
         state.deployNoticeState = "idle";
         const replacement = structuredClone(state);
         noticeDone.resolve("notice-id");

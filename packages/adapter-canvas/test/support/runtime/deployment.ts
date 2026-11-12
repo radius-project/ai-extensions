@@ -1,8 +1,9 @@
 import {
   createDeploymentRuntime,
+  normalizeDeploymentAppFile,
   type DeploymentRuntimePorts
 } from "@radius-project/adapter-shared";
-import { toSafeRepoRelPath } from "../../../src/workspace.js";
+import { deploymentStatusBlocksMutation } from "@radius-project/core";
 
 export function createFakeDeploymentRuntime(
   overrides: Partial<DeploymentRuntimePorts> = {}
@@ -15,15 +16,14 @@ export function createFakeDeploymentRuntime(
       throw error;
     },
     awsEnabled: false,
-    normalizeAppFile: toSafeRepoRelPath,
+    normalizeAppFile: normalizeDeploymentAppFile,
     resolveDefaultBranch: async () => {
       throw new Error("Deployment branch lookup was not scripted.");
     },
     resolveDeployment: async () => {
       throw new Error("Deployment lookup was not scripted.");
     },
-    statusBlocksMutation: (status) =>
-      status === "pending" || status === "deleting",
+    statusBlocksMutation: deploymentStatusBlocksMutation,
     createExecution: () => {
       throw new Error("Deployment execution was not scripted.");
     },

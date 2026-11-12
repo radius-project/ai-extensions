@@ -66,7 +66,7 @@ import {
 } from "./server.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createEnvironmentAccountContext } from "./runtime/environment-account-context.js";
-import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "@radius-project/core";
 import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
   createOperation,

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWorkflowObservationScope } from "@radius-project/adapter-shared";
-import { redactCredentials } from "@radius-project/core";
+import {
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  redactCredentials,
+  type DeploymentErrorKind
+} from "@radius-project/core";
 import { createDeploymentDelivery } from "../../../src/server/services/deployment-delivery.js";
 import { createTestDeploymentRuntime } from "../../support/server/deployment-runtime.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
@@ -12,7 +16,10 @@ import {
 
 afterEach(() => vi.useRealTimers());
 
-async function harness(kind: "repair" | "notice") {
+async function harness(
+  kind: "repair" | "notice" | DeploymentErrorKind,
+  error = "Model failed"
+) {
   const delivery = createDeploymentDelivery();
   const runtime = createTestDeploymentRuntime({
     resolveDeployment: async () => null,
@@ -23,11 +30,12 @@ async function harness(kind: "repair" | "notice") {
       monitor: {
         async run({ entry }) {
           entry.state.deployStatus = "failed";
-          entry.state.deployError = "Model failed";
+          entry.state.deployError = error;
           entry.state.deployRunUrl =
             "https://github.com/acme/app/actions/runs/42";
           if (kind === "notice")
             entry.state.deployErrorKind = "run-unconfirmed";
+          else if (kind !== "repair") entry.state.deployErrorKind = kind;
         }
       }
     }),
@@ -46,6 +54,66 @@ async function harness(kind: "repair" | "notice") {
 }
 
 describe("deployment delivery through registered SDK handlers", () => {
+  it.each([
+    [
+      "model-preflight-failed",
+      "The selected model is missing. Commit the selected file."
+    ],
+    [
+      "workflow-preflight-failed",
+      "The workflow has incompatible inputs. Update the workflow."
+    ]
+  ] satisfies [DeploymentErrorKind, string][])(
+    "keeps %s ineligible for automatic model repair",
+    async (kind, error) => {
+      const { sdk, runtime } = await harness(kind, error);
+      try {
+        const result = await runtime.start({
+          repo: "acme/app",
+          environment: "production",
+          branch: "feature"
+        });
+        if (!result.ok) throw new Error(result.error);
+        await vi.waitFor(() =>
+          expect(runtime.owner.hasActiveWork()).toBe(false)
+        );
+        expect(sdk.session.send).not.toHaveBeenCalled();
+        expect(result.invocation.state.deployError).toBe(error);
+        expect(result.invocation.state.deployRepairing).not.toBe(true);
+      } finally {
+        await sdk.extension.shutdown("test");
+      }
+    }
+  );
+
+  it("uses the shared repair cap and actionable refusal wording at admission", async () => {
+    const { sdk, runtime } = await harness("repair");
+    try {
+      const first = await runtime.start({
+        repo: "acme/app",
+        environment: "production",
+        branch: "feature"
+      });
+      if (!first.ok) throw new Error(first.error);
+      await vi.waitFor(() => expect(runtime.owner.hasActiveWork()).toBe(false));
+      first.invocation.state.deployRepairAttempts = DEPLOY_REPAIR_ATTEMPT_CAP;
+      const refused = await runtime.start({
+        attemptId: first.invocation.attemptId
+      });
+      expect(refused).toEqual({
+        ok: false,
+        status: 409,
+        error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again.`
+      });
+      expect(runtime.owner.lookup()).toEqual({
+        kind: "found",
+        invocation: first.invocation
+      });
+    } finally {
+      await sdk.extension.shutdown("test");
+    }
+  });
+
   it("keeps owned execution across duplicate registered close and reopen events", async () => {
     const finished = createDeferred<void>();
     const entered = createDeferred<void>();

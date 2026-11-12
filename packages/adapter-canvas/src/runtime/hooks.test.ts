@@ -10,7 +10,6 @@ import {
   deployFailureNoticePrompt,
   deployFailureNoticeDisplayPrompt,
   deployFailureNoticeMessage,
-  DEPLOY_REPAIR_ATTEMPT_CAP,
   DEPLOY_ERROR_CHAR_CAP,
   appModelUnverifiedPrompt,
   appModelUnverifiedDisplayPrompt,
@@ -23,7 +22,10 @@ import {
   refreshRequestKey
 } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
-import type { AppModelFreshnessStatus } from "@radius-project/core";
+import {
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  type AppModelFreshnessStatus
+} from "@radius-project/core";
 import { RADIUS_FAILURE_REPORT_CONTEXT } from "./declarations.js";
 
 describe("failure report handoff guidance", () => {

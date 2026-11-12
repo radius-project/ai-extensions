@@ -59,6 +59,7 @@ import {
 } from "../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 import { createUnconfirmedMonitor } from "../support/server/unconfirmed-monitor.js";
+import { createDeferred } from "../support/browser/fakes.js";
 import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 import { workspaceSourceRevision } from "../../src/workspace.js";
 import {
@@ -1500,6 +1501,143 @@ test.describe("Radius Canvas in Chromium", () => {
       );
     });
   }
+
+  test("reset polling stays empty but closing and reopening the same panel resumes owned progress @safety", async ({
+    page,
+    canvas
+  }) => {
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deploy-status**");
+    const target = {
+      repo: REPOSITORY,
+      branch: WORKTREE_BRANCH,
+      environment: "fixture-environment",
+      provider: "azure",
+      appFile: ".radius/app.bicep"
+    };
+    const lease = canvas.deploymentOwner.reserve(target, "deploy");
+    if (!lease) throw new Error("Fixture target is reserved");
+    const invocation = canvas.deploymentOwner.begin(
+      target,
+      { deployStatus: "in_progress", deployLogs: ["before reset"] },
+      lease
+    );
+    invocation.state.deployAttempt = {
+      id: invocation.attemptId,
+      targetRepo: target.repo,
+      environment: target.environment
+    };
+    canvas.deploymentOwner.release(lease);
+    const finished = createDeferred<void>();
+    const work = canvas.deploymentOwner.run(invocation, () => finished.promise);
+    try {
+      await gotoCanvas(page, canvas, "deployed");
+      await expect(page.locator("#deployed-log-output")).toContainText(
+        "before reset"
+      );
+      const reset = await page.request.post(
+        `${canvas.baseUrl}/api/deploy-reset`,
+        {
+          headers: {
+            "x-radius-mutation-nonce": String(
+              canvas.entry.state.browserMutationNonce
+            )
+          },
+          data: { attemptId: invocation.attemptId }
+        }
+      );
+      expect(reset.status()).toBe(200);
+      const status = await page.request.get(
+        `${canvas.baseUrl}/api/deploy-status`
+      );
+      expect(await status.json()).toMatchObject({ attempt: null });
+      const oldState = canvas.entry.state;
+      await canvas.reopenServer();
+      await canvas.seedState(baseCanvasState(canvas.workspacePath));
+      invocation.state.deployLogs = ["after reopen"];
+      canvas.deploymentOwner.publish(invocation);
+      await gotoCanvas(page, canvas, "deployed");
+      await expect(page.locator("#deployed-log-output")).toContainText(
+        "after reopen"
+      );
+      expect(canvas.entry.state.deployAttempt?.id).toBe(invocation.attemptId);
+      expect(oldState.deployAttempt).toBeUndefined();
+      expect(invocation.signal.aborted).toBe(false);
+      await page.locator("#deployed-app-select").focus();
+      await page.keyboard.press("Tab");
+      await expect(page.locator("#deployed-env-select")).toBeFocused();
+      expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+    } finally {
+      finished.resolve();
+      await work;
+    }
+  });
+
+  test("switching repositories follows the new environment without reusing projected deployment defaults @safety", async ({
+    page,
+    canvas
+  }) => {
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deploy-status**");
+    const begin = (repo: string, environment: string, log: string) => {
+      const target = {
+        repo,
+        environment,
+        branch: WORKTREE_BRANCH,
+        provider: "azure",
+        appFile: "models/selected.bicep"
+      };
+      const lease = canvas.deploymentOwner.reserve(target, "deploy");
+      if (!lease) throw new Error("Fixture target is reserved");
+      const invocation = canvas.deploymentOwner.begin(
+        target,
+        { deployStatus: "in_progress", deployLogs: [log] },
+        lease
+      );
+      invocation.state.deployAttempt = {
+        id: invocation.attemptId,
+        targetRepo: repo,
+        environment
+      };
+      canvas.deploymentOwner.release(lease);
+      return invocation;
+    };
+    const first = begin(REPOSITORY, "production", "repository A progress");
+    const second = begin("fixture/other", "staging", "repository B progress");
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.locator("#deployed-log-output")).toContainText(
+      "repository A progress"
+    );
+    canvas.entry.state.contextRepo = "fixture/other";
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.locator("#deployed-log-output")).toContainText(
+      "repository B progress"
+    );
+    await expect(page.locator("#deployed-log-output")).not.toContainText(
+      "repository A progress"
+    );
+    expect(canvas.entry.state.deployAttempt?.id).toBe(second.attemptId);
+    expect(canvas.entry.state.envName).toBe("staging");
+    first.state.deployLogs = ["late repository A progress"];
+    canvas.deploymentOwner.publish(first);
+    expect(canvas.entry.state.deployLogs).toEqual(["repository B progress"]);
+    canvas.entry.state.contextRepo = "fixture/empty";
+    const response = await page.request.post(`${canvas.baseUrl}/api/deploy`, {
+      headers: {
+        "x-radius-mutation-nonce": String(
+          canvas.entry.state.browserMutationNonce
+        )
+      },
+      data: { branch: WORKTREE_BRANCH }
+    });
+    expect(response.status()).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: "A valid repo (owner/repo) and environment are required."
+    });
+    expect(canvas.entry.state.envName).toBeUndefined();
+    expect(canvas.entry.state.deployProvider).toBeUndefined();
+    expect(canvas.entry.state.appFile).toBeUndefined();
+  });
 
   for (const fixture of pageStateCases()) {
     test(`round-trips hidden page state through the real parser: ${fixture.name} @safety`, async ({

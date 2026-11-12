@@ -1,8 +1,12 @@
 import {
   createDeploymentRuntime,
+  normalizeDeploymentAppFile,
   type DeploymentRuntimePorts
 } from "@radius-project/adapter-shared";
-import { redactCredentials } from "@radius-project/core";
+import {
+  deploymentStatusBlocksMutation,
+  redactCredentials
+} from "@radius-project/core";
 
 function unexpected(): never {
   throw new Error("Unexpected deployment execution boundary");
@@ -19,9 +23,8 @@ export function createTestDeploymentRuntime(
     reportError: unexpected,
     resolveDefaultBranch: unexpected,
     resolveDeployment: unexpected,
-    normalizeAppFile: (value) => value,
-    statusBlocksMutation: (status) =>
-      status === "deploying" || status === "deleting" || status === "running",
+    normalizeAppFile: normalizeDeploymentAppFile,
+    statusBlocksMutation: deploymentStatusBlocksMutation,
     createExecution: unexpected,
     delivery: {
       redactDiagnostic: redactCredentials,

@@ -131,7 +131,7 @@ describe("createCanvasServer (SU-02)", () => {
       expect(stopObservation).toHaveBeenCalledTimes(1);
       expect(fakeServers[0].closeCalls).toBe(1);
       expect(fakeServers[0].forceCalls).toBe(method === "stopAll" ? 1 : 0);
-      expect(stopped).toHaveBeenCalledExactlyOnceWith("panel");
+      expect(stopped).toHaveBeenCalledExactlyOnceWith("panel", entry);
     }
   );
 
@@ -160,7 +160,7 @@ describe("createCanvasServer (SU-02)", () => {
     expect(stopObservation).toHaveBeenCalledTimes(1);
     expect(container.instances.size).toBe(0);
     expect(fakeServers[0].closeCalls).toBe(0);
-    expect(stopped).toHaveBeenCalledExactlyOnceWith("panel");
+    expect(stopped).toHaveBeenCalledExactlyOnceWith("panel", entry);
   });
 
   it("creates isolated state, reuses one instance, and preserves its page by default", async () => {

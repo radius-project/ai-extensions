@@ -54,6 +54,7 @@ function harness(state: CanvasState = {}) {
     ),
     runtime: { ...runtime, start },
     readInstanceEntry: () => entry,
+    readDeploymentDefaults: views.defaults,
     attach,
     reportError: vi.fn(),
     errorMessage: (error: unknown) =>
@@ -395,14 +396,15 @@ describe("deployment HTTP request adapter", () => {
     h.finished.resolve();
   });
 
-  it("prefers the planned repository over ambient context", async () => {
+  it("does not deploy into a stale planned repository after a context switch", async () => {
     const h = harness({
       plannedRepo: "acme/widgets",
       contextRepo: "other/repo",
       envName: "test"
     });
     await h.service.deploy({ instanceId: "panel", body: "{}" });
-    expect(h.state.deployingRepo).toBe("acme/widgets");
+    expect(h.state.deployingRepo).toBe("other/repo");
+    expect(h.start.mock.calls[0]?.[1]?.resources).toEqual([]);
     h.finished.resolve();
   });
 

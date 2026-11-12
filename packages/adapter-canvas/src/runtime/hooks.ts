@@ -27,7 +27,10 @@ import {
   infrastructureFailureSummaryList,
   modelFailureSummaryList
 } from "../model-failure-policy.js";
-import { freshnessIdentity } from "@radius-project/core";
+import {
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  freshnessIdentity
+} from "@radius-project/core";
 import {
   RADIUS_CANVAS_INSTANCE_ID,
   RADIUS_FAILURE_REPORT_CONTEXT
@@ -342,9 +345,6 @@ export function appModelRadiusCliOutdatedNotice(
   const where = status.repo ? ` for ${status.repo}` : "";
   return `Radius: the application model${where} on branch \`${status.branch}\` was not refreshed. ${status.freshness.reason}`;
 }
-
-// Maximum automatic repair-and-redeploy attempts before handing back to the user.
-export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
 
 export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "../deploy-diagnostics.js";
 

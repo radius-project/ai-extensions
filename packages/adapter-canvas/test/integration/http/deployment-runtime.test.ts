@@ -26,7 +26,11 @@ afterEach(async () => {
   }
 });
 
-function harness(abandonment = false, graphBuild?: typeof buildGraphViaRad) {
+function harness(
+  abandonment = false,
+  graphBuild?: typeof buildGraphViaRad,
+  awsEnabled = false
+) {
   const modelSources = new Map<string, string | null | Error>();
   let trackedApplication = "another-app";
   let trackedRunId = 31;
@@ -37,6 +41,7 @@ function harness(abandonment = false, graphBuild?: typeof buildGraphViaRad) {
   let observation: WorkflowObservationScope | undefined;
   const resolveDeployment = vi.fn(async () => null);
   const deployment = createTestDeploymentRuntime({
+    awsEnabled,
     resolveDeployment,
     createExecution: (_invocation, _workspace, plannedGraph) => {
       observation = createWorkflowObservationScope(() => {
@@ -75,7 +80,7 @@ function harness(abandonment = false, graphBuild?: typeof buildGraphViaRad) {
       .find((arg) => /^\/?repos\//.test(arg))
       ?.replace(/^\/?/, "/");
     const model = endpoint?.match(
-      /^\/repos\/acme\/widgets\/contents\/(.+)\?ref=feature$/
+      /^\/repos\/acme\/(?:widgets|other)\/contents\/(.+)\?ref=feature$/
     )?.[1];
     if (model && modelSources.has(model)) {
       const source = modelSources.get(model);
@@ -213,6 +218,62 @@ const target = {
 };
 
 describe("shared deployment runtime through production Canvas HTTP", () => {
+  it("keeps an explicit target visible from a different ambient repository until context changes", async () => {
+    const h = harness();
+    const entry = await h.server.getOrCreateServer("panel", "deploying");
+    entry.state.contextRepo = "acme/ambient";
+    entry.state.contextBranch = "feature";
+    expect((await post(entry, "/api/deploy", target)).status).toBe(200);
+    for (let poll = 0; poll < 2; poll++) {
+      const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+      expect(await response.json()).toMatchObject({
+        attempt: { targetRepo: target.repo }
+      });
+    }
+    entry.state.contextRepo = "acme/new-context";
+    const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+    expect(await response.json()).toMatchObject({ attempt: null });
+    expect(h.deployment.owner.lookup().kind).toBe("found");
+  });
+
+  it("clears projected defaults before a new deployment after switching repositories", async () => {
+    const h = harness(false, undefined, true);
+    const entry = await h.server.getOrCreateServer("panel", "deploying");
+    entry.state.contextRepo = target.repo;
+    entry.state.plannedRepo = target.repo;
+    expect(
+      (
+        await post(entry, "/api/deploy", {
+          ...target,
+          provider: "aws",
+          appFile: "models/old.bicep"
+        })
+      ).status
+    ).toBe(200);
+    expect(entry.state.deployProvider).toBe("aws");
+    entry.state.contextRepo = "acme/other";
+    // Admission itself must reconcile context; no preceding status poll.
+    const missingEnvironment = await post(entry, "/api/deploy", {
+      branch: "feature"
+    });
+    expect(missingEnvironment.status).toBe(400);
+    expect(entry.state.envName).toBeUndefined();
+    expect(entry.state.deployProvider).toBeUndefined();
+    expect(entry.state.appFile).toBeUndefined();
+    h.modelSources.set(".radius/app.bicep", null);
+    const next = await post(entry, "/api/deploy", {
+      branch: "feature",
+      environment: "staging"
+    });
+    expect(next.status, await next.clone().text()).toBe(200);
+    expect(h.request()).toMatchObject({
+      repo: "acme/other",
+      provider: "azure",
+      appFile: "app.bicep"
+    });
+    expect(entry.state.deployAttempt?.environment).toBe("staging");
+  });
+
   it.each(["workspace", "remote", "workspace fallback"] as const)(
     "binds fresh-panel graph recovery to the admitted %s model",
     async (source) => {
@@ -458,6 +519,18 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
         .kind
     ).toBe("found");
     expect(scope.stopped).toBe(false);
+
+    const suppressed = await fetch(`${reopened.baseUrl}/api/deploy-status`);
+    expect(await suppressed.json()).toMatchObject({ attempt: null });
+    await h.server.stopServer("panel", true);
+    const nextLifetime = await h.server.getOrCreateServer("panel", "deploying");
+    const reattached = await fetch(`${nextLifetime.baseUrl}/api/deploy-status`);
+    expect(await reattached.json()).toMatchObject({
+      attempt: { id: invocation.attemptId }
+    });
+    await post(nextLifetime, "/api/deploy-reset", {
+      attemptId: invocation.attemptId
+    });
 
     const other = await h.server.getOrCreateServer("other", "deploying");
     for (const route of [

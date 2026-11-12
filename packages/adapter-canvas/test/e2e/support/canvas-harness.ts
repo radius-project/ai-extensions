@@ -1402,7 +1402,7 @@ export async function unwindHarnessConstruction(
 
 export class CanvasHarness {
   readonly accountContext: EnvironmentAccountContext;
-  readonly entry: CanvasServerEntry;
+  entry: CanvasServerEntry;
   readonly instanceId: string;
   readonly rootDir: string;
   readonly fakeBin: string;
@@ -1716,6 +1716,20 @@ export class CanvasHarness {
 
   get baseUrl(): string {
     return this.entry.baseUrl;
+  }
+
+  get deploymentOwner() {
+    return this.serverModule.deploymentRuntime.owner;
+  }
+
+  async reopenServer(): Promise<void> {
+    await this.page.goto("about:blank");
+    const page = this.entry.page;
+    await this.serverModule.stopServer(this.instanceId, true);
+    this.entry = await this.serverModule.getOrCreateServer(
+      this.instanceId,
+      page
+    );
   }
 
   renameWorkspaceBranch(branch: string): void {
@@ -2234,13 +2248,13 @@ export class CanvasHarness {
   }
 
   private async installNetworkGuard(): Promise<void> {
-    const allowedOrigin = new URL(this.entry.baseUrl).origin;
     // Context routing also intercepts a popup's initial navigation. Page-level
     // routing starts too late for target="_blank" links and could allow a live
     // GitHub or cloud URL to escape the offline harness.
     await this.page.context().route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
+      const allowedOrigin = new URL(this.entry.baseUrl).origin;
       if (url.origin !== allowedOrigin) {
         this.externalRequests.push(request.url());
         await route.abort();

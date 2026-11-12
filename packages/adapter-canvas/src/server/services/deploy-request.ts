@@ -25,6 +25,9 @@ export interface DeployRequestDependencies {
     appFile: string
   ): Promise<DeployModelSource>;
   readInstanceEntry(instanceId: string): DeployRequestInstanceEntry | undefined;
+  readDeploymentDefaults(
+    state: CanvasState
+  ): Pick<CanvasState, "envName" | "deployProvider">;
   attach(
     instanceId: string,
     state: CanvasState,
@@ -56,6 +59,7 @@ export function createDeployRequestService(
 ): DeployRequestService {
   assertDeployDependencies("createDeployRequestService", dependencies, [
     "readInstanceEntry",
+    "readDeploymentDefaults",
     "attach",
     "errorMessage",
     "reportError",
@@ -96,17 +100,23 @@ export function createDeployRequestService(
             "appFile must be a non-empty repository-relative model path."
           );
         const repair = Boolean(data.attemptId);
+        const defaults = dependencies.readDeploymentDefaults(state);
+        const contextRepo = state.contextRepo || state.plannedRepo;
+        const inheritsContext =
+          !data.targetRepo ||
+          optionalString(data.targetRepo)?.toLowerCase() ===
+            contextRepo?.toLowerCase();
         const input: DeploymentStartInput = {
           repo:
             optionalString(data.targetRepo) ||
-            (repair ? undefined : state.plannedRepo || state.contextRepo),
+            (repair ? undefined : contextRepo),
           environment:
             optionalString(data.environment) ||
-            (repair ? undefined : state.envName),
+            (repair || !inheritsContext ? undefined : defaults.envName),
           branch: optionalString(data.branch),
           provider:
             optionalString(data.provider) ||
-            (repair ? undefined : state.deployProvider),
+            (repair || !inheritsContext ? undefined : defaults.deployProvider),
           appFile: optionalString(data.appFile),
           attemptId: optionalString(data.attemptId)
         };
@@ -175,7 +185,14 @@ export function createDeployRequestService(
               }
             : undefined,
           resources:
-            !repair && !input.appFile ? state.plannedResources || [] : []
+            (
+              !repair &&
+              !input.appFile &&
+              (!state.plannedRepo ||
+                state.plannedRepo.toLowerCase() === input.repo?.toLowerCase())
+            ) ?
+              state.plannedResources || []
+            : []
         });
         if (!result.ok)
           return { status: result.status, body: { error: result.error } };

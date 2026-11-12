@@ -44,6 +44,31 @@ function deferred() {
 afterEach(() => vi.useRealTimers());
 
 describe("runtime deployment ownership", () => {
+  it("looks up one current repository record without choosing among environments", () => {
+    const { owner, begin } = fixture();
+    expect(owner.lookupRepository("fixture/app")).toEqual({ kind: "missing" });
+    const first = begin();
+    owner.release(first.reservation);
+    const other = begin({ ...target, repo: "fixture/other" });
+    owner.release(other.reservation);
+    expect(owner.lookupRepository("FIXTURE/app")).toEqual({
+      kind: "found",
+      invocation: first.invocation
+    });
+    const second = begin({ ...target, environment: "staging" });
+    owner.release(second.reservation);
+    expect(owner.lookupRepository("fixture/app")).toEqual({
+      kind: "ambiguous"
+    });
+    owner.invalidate(second.invocation);
+    expect(owner.lookupRepository("fixture/app")).toEqual({
+      kind: "found",
+      invocation: first.invocation
+    });
+    owner.retire(first.invocation);
+    expect(owner.lookupRepository("fixture/app")).toEqual({ kind: "missing" });
+  });
+
   it.each(["success", "failure"] as const)(
     "invalidates observable evidence while retaining issued work through %s",
     async (outcome) => {

@@ -13,6 +13,18 @@ import {
 
 type Invocation = DeploymentInvocation<DeploymentState>;
 
+function context(state: CanvasState): string {
+  return JSON.stringify([
+    (
+      state.contextRepo ||
+      state.workspaceRepo ||
+      state.plannedRepo ||
+      ""
+    ).toLowerCase(),
+    state.contextBranch || state.workspaceBranch || state.plannedBranch || ""
+  ]);
+}
+
 export interface DeploymentViewReservation {
   repo: string;
   environment: string;
@@ -68,12 +80,23 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
     {
       attemptId: string;
       target: Pick<DeploymentTarget, "repo" | "environment">;
+      context: string;
     }
   >();
-  const resetViews = new Set<string>();
+  const resetViews = new WeakMap<CanvasState, string>();
+  const lifetimes = new Map<string, CanvasState>();
+  const projectedDefaults = new WeakMap<
+    CanvasState,
+    Pick<CanvasState, "envName" | "deployProvider" | "appFile">
+  >();
+  const contextDefaults = new WeakMap<
+    CanvasState,
+    Pick<CanvasState, "envName" | "deployProvider" | "appFile">
+  >();
   const leases = new WeakMap<DeploymentViewReservation, OwnedReservation>();
 
   function project(state: CanvasState, invocation: Invocation): void {
+    contextDefaults.set(state, defaults(state));
     const snapshot = structuredClone(invocation.state);
     for (const key of PROJECTION_KEYS) {
       delete state[key];
@@ -83,11 +106,49 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
     state.envName = invocation.target.environment;
     state.deployProvider = invocation.target.provider;
     state.appFile = invocation.target.appFile;
+    projectedDefaults.set(state, {
+      envName: state.envName,
+      deployProvider: state.deployProvider,
+      appFile: state.appFile
+    });
   }
 
-  function detach(instanceId: string): void {
+  function defaults(
+    state: CanvasState
+  ): Pick<CanvasState, "envName" | "deployProvider" | "appFile"> {
+    const projected = projectedDefaults.get(state);
+    const selected = contextDefaults.get(state);
+    return Object.fromEntries(
+      (["envName", "deployProvider", "appFile"] as const).map((key) => [
+        key,
+        projected && state[key] === projected[key] ?
+          selected?.[key]
+        : state[key]
+      ])
+    );
+  }
+
+  function unsubscribe(instanceId: string): void {
     views.get(instanceId)?.unsubscribe();
     views.delete(instanceId);
+  }
+
+  function detach(instanceId: string, state: CanvasState): void {
+    if (lifetimes.get(instanceId) !== state) return;
+    unsubscribe(instanceId);
+    lifetimes.delete(instanceId);
+    resetViews.delete(state);
+  }
+
+  function clearProjection(state: CanvasState): void {
+    for (const key of PROJECTION_KEYS) delete state[key];
+    delete state.deployResult;
+    const projected = projectedDefaults.get(state);
+    if (projected)
+      for (const key of ["envName", "deployProvider", "appFile"] as const)
+        if (state[key] === projected[key]) delete state[key];
+    projectedDefaults.delete(state);
+    contextDefaults.delete(state);
   }
 
   function attach(
@@ -95,56 +156,63 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
     state: CanvasState,
     invocation: Invocation
   ): void {
-    detach(instanceId);
-    resetViews.delete(instanceId);
+    unsubscribe(instanceId);
+    lifetimes.set(instanceId, state);
+    resetViews.delete(state);
+    const attachedContext = context(state);
     remembered.set(instanceId, {
       attemptId: invocation.attemptId,
       target: {
         repo: invocation.target.repo,
         environment: invocation.target.environment
-      }
+      },
+      context: attachedContext
     });
     project(state, invocation);
-    const unsubscribe = runtime.owner.subscribe(invocation, (current) =>
-      project(state, current)
-    );
-    views.set(instanceId, { state, invocation, unsubscribe });
+    const stop = runtime.owner.subscribe(invocation, (current) => {
+      if (context(state) === attachedContext) project(state, current);
+    });
+    views.set(instanceId, { state, invocation, unsubscribe: stop });
   }
 
   function refresh(instanceId: string, state: CanvasState): void {
-    if (resetViews.has(instanceId)) return;
+    const resetContext = resetViews.get(state);
+    if (resetContext !== undefined) {
+      if (resetContext === context(state)) return;
+      resetViews.delete(state);
+    }
+    if (lifetimes.get(instanceId) !== state) {
+      unsubscribe(instanceId);
+      lifetimes.set(instanceId, state);
+    }
     const repo = state.contextRepo || state.workspaceRepo || state.plannedRepo;
     let previous = remembered.get(instanceId);
-    if (
-      previous &&
-      repo &&
-      repo.toLowerCase() !== previous.target.repo.toLowerCase()
-    ) {
-      detach(instanceId);
+    if (previous && context(state) !== previous.context) {
+      unsubscribe(instanceId);
       remembered.delete(instanceId);
       previous = undefined;
-      for (const key of PROJECTION_KEYS) delete state[key];
-      delete state.deployResult;
+      clearProjection(state);
     }
     const environment = state.envName;
     let selected =
       previous ? runtime.owner.lookup({ attemptId: previous.attemptId })
       : repo && environment ? runtime.owner.lookupTarget({ repo, environment })
+      : repo ? runtime.owner.lookupRepository(repo)
       : runtime.owner.lookup();
     if (previous && selected.kind === "missing")
       selected = runtime.owner.lookupTarget(previous.target);
     if (selected.kind !== "found") return;
     if (
-      (repo &&
+      (!previous &&
+        repo &&
         repo.toLowerCase() !== selected.invocation.target.repo.toLowerCase()) ||
       (!previous &&
         environment &&
         environment.toLowerCase() !==
           selected.invocation.target.environment.toLowerCase())
     ) {
-      detach(instanceId);
-      for (const key of PROJECTION_KEYS) delete state[key];
-      delete state.deployResult;
+      unsubscribe(instanceId);
+      clearProjection(state);
       return;
     }
     const view = views.get(instanceId);
@@ -169,25 +237,25 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
       retire(view.invocation);
       return;
     }
-    detach(instanceId);
+    unsubscribe(instanceId);
     remembered.delete(instanceId);
-    resetViews.add(instanceId);
-    for (const key of PROJECTION_KEYS) delete state[key];
-    delete state.deployResult;
+    resetViews.set(state, context(state));
+    clearProjection(state);
   }
 
   function retire(invocation: Invocation): boolean {
     if (!runtime.owner.retire(invocation)) return false;
     for (const [id, view] of views) {
       if (view.invocation !== invocation) continue;
-      detach(id);
-      for (const key of PROJECTION_KEYS) delete view.state[key];
-      delete view.state.deployResult;
+      unsubscribe(id);
+      resetViews.set(view.state, context(view.state));
+      clearProjection(view.state);
     }
     for (const [id, reference] of remembered) {
       if (reference.attemptId !== invocation.attemptId) continue;
       remembered.delete(id);
-      resetViews.add(id);
+      const state = lifetimes.get(id);
+      if (state) resetViews.set(state, context(state));
     }
     return true;
   }
@@ -213,9 +281,8 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
       if (!runtime.owner.invalidate(invocation)) return;
       for (const [id, view] of views) {
         if (view.invocation !== invocation) continue;
-        detach(id);
-        for (const key of PROJECTION_KEYS) delete view.state[key];
-        delete view.state.deployResult;
+        unsubscribe(id);
+        clearProjection(view.state);
       }
       for (const [id, reference] of remembered) {
         if (reference.attemptId === invocation.attemptId) remembered.delete(id);
@@ -227,6 +294,7 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
     attach,
     detach,
     refresh,
+    defaults,
     reset,
     retire,
     captureDeletion,
