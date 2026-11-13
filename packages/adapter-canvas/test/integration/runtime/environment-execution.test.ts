@@ -694,6 +694,7 @@ describe("real server and fake SDK runtime ownership", () => {
             accessConfig: { authenticationMode: "API" }
           }
         },
+        "eks describe-addon": { addon: { status: "ACTIVE" } },
         "iam list-open-id-connect-providers": { OpenIDConnectProviderList: [] },
         "iam create-open-id-connect-provider": {},
         "iam create-role": { Role: { Arn: roleArn } },
@@ -711,8 +712,14 @@ describe("real server and fake SDK runtime ownership", () => {
         .mockImplementation((command, args, _options, callback) => {
           expect(command).toBe("aws");
           const key = args.slice(0, 2).join(" ");
-          // A new role has no policies yet, so setup records the one it adds.
-          if (key === "iam get-role" || key === "iam get-role-policy") {
+          // A new role has no policies yet, and the environment has no app
+          // boundary, so setup records each one it adds.
+          if (
+            key === "iam get-role" ||
+            key === "iam get-role-policy" ||
+            (key === "iam get-policy" &&
+              args.some((arg) => arg.includes(":policy/radius/apps/")))
+          ) {
             callback(
               Object.assign(new Error("NoSuchEntity"), { code: 254 }),
               "",
@@ -811,7 +818,9 @@ describe("real server and fake SDK runtime ownership", () => {
           "repo:fixture/app:environment:dev",
           "repo:fixture@7/app@42:environment:dev"
         ]);
-        expect(ledger.awsRolePolicies).toHaveLength(panel ? 0 : 1);
+        // The environment's policy and the repository's app-roles policy.
+        expect(ledger.awsRolePolicies).toHaveLength(panel ? 0 : 2);
+        expect(ledger.awsAppBoundaries).toHaveLength(panel ? 0 : 1);
         expect(ledger.awsAccessEntries).toHaveLength(panel ? 0 : 1);
         expect(
           op.providerRecovery.mutations.map(
@@ -821,11 +830,18 @@ describe("real server and fake SDK runtime ownership", () => {
             ]
           )
         ).toEqual(
+          // The pause refuses the app-roles put after the journal prepared it,
+          // so the journal records it as never sent.
           panel ?
-            [["aws_role.create", "confirmed"]]
+            [
+              ["aws_role.create", "confirmed"],
+              ["aws_role_policy.put", "not_applied"]
+            ]
           : [
               ["aws_role.create", "confirmed"],
               ["aws_role_policy.put", "confirmed"],
+              ["aws_role_policy.put", "confirmed"],
+              ["aws_app_boundary.create", "confirmed"],
               ["aws_access_entry.create", "confirmed"]
             ]
         );
@@ -2353,7 +2369,11 @@ describe("real server and fake SDK runtime ownership", () => {
           expect(snapshots.at(-1)?.setupArtifacts).toMatchObject(
             azureStage ?
               {
-                azureApp: { state: "created", origin: "this_operation", appId }
+                azureApp: {
+                  state: "created",
+                  origin: "this_operation",
+                  appId
+                }
               }
             : stage === "environment" ?
               {

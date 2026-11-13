@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   AWS_EKS_CLUSTER_ADMIN_POLICY_ARN,
   AWS_MANAGED_TAG,
@@ -6,6 +7,10 @@ import {
   GITHUB_OIDC_AUDIENCE,
   GITHUB_OIDC_PROVIDER_URL,
   GITHUB_OIDC_THUMBPRINT,
+  awsAppRolesPolicyRepositoryId,
+  buildAwsAppBoundaryPolicy,
+  buildAwsAppRolesPolicy,
+  buildAwsAppRolesPolicyName,
   buildAwsEnvironmentPermissionPolicy,
   buildGitHubTrustPolicy,
   AWS_CLI_MINIMUM_VERSION,
@@ -17,6 +22,7 @@ import {
   describeRadiusRoleOwner,
   githubOidcProviderArn,
   isAwsCommercialRegion,
+  isAwsEnvironmentPolicyName,
   acceptedGitHubSubjects,
   isRadiusManagedRole,
   mergeGitHubTrustSubject,
@@ -30,10 +36,14 @@ import {
   repositoryLessSubjectMessage,
   subjectNamesRepository,
   trustedGitHubSubjects,
+  type AwsAppBoundary,
   type OidcSubjectConfig,
   type PolicyDocument
 } from "@radius-project/core";
-import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
+import {
+  awsAppBoundary,
+  awsEnvironmentPolicyName
+} from "../../aws-deploy-role-name.js";
 import {
   verifyAwsCliSession,
   type AwsCommandResult
@@ -42,12 +52,14 @@ export type { AwsCommandResult } from "./aws-cli-session.js";
 
 // Sets up the AWS deploy identity for one environment: the account's GitHub
 // identity provider, the repository's IAM role and its trust in this
-// environment's GitHub subject, the environment's permission policy, and
-// cluster-admin on the target EKS cluster through an access entry.
+// environment's GitHub subject, the environment's permission policy, the
+// permissions boundary for the environment's app roles and the role's
+// permission to manage them, and cluster-admin on the target EKS cluster
+// through an access entry.
 //
 // Every check that cannot change anything runs first. Nothing is written to
-// AWS until the CLI version, the signed-in account, and the cluster's auth
-// mode are known to be usable.
+// AWS until the CLI version, the signed-in account, the cluster's auth mode,
+// and its EKS Pod Identity Agent are known to be usable.
 
 export interface AwsDeployIdentityPorts {
   // Run `aws <args>`. Never throws; a spawn failure is a non-zero result.
@@ -136,6 +148,17 @@ export type AwsSetupChange =
       readonly policyName: string;
     }
   | {
+      // The managed policy the environment's app roles must carry as their
+      // permissions boundary. The role fields name the deploy role whose setup
+      // creates it.
+      readonly kind: "aws_app_boundary.create";
+      readonly accountId: string;
+      readonly roleArn: string;
+      readonly roleName: string;
+      readonly roleId: string | null;
+      readonly policyArn: string;
+    }
+  | {
       readonly kind: "aws_access_entry.create";
       readonly accountId: string;
       readonly roleArn: string;
@@ -156,6 +179,8 @@ export type AwsDeployIdentityResult =
       readonly ok: true;
       readonly roleArn: string;
       readonly roleCreated: boolean;
+      // The permissions boundary every app role in the environment must carry.
+      readonly appBoundaryArn: string;
     }
   | {
       readonly ok: false;
@@ -203,8 +228,64 @@ function clusterStatus(stdout: string): string {
 const ACCESS_DENIED = /AccessDenied|UnauthorizedOperation|not authorized/i;
 const NO_SUCH_ENTITY = /NoSuchEntity/;
 const RESOURCE_IN_USE = /ResourceInUseException/;
-
+const RESOURCE_NOT_FOUND = /ResourceNotFoundException/;
+const ENTITY_EXISTS = /EntityAlreadyExists/;
+const DELETE_CONFLICT = /DeleteConflict/;
 const LIMIT_EXCEEDED = /LimitExceeded/;
+
+// Statuses in which the add-on's agent serves credentials. UPDATING keeps the
+// running agent until its replacement is ready.
+const POD_IDENTITY_AGENT_READY = new Set(["ACTIVE", "UPDATING"]);
+
+// App roles reach pods through EKS Pod Identity, which needs the agent on
+// every node. EKS Auto Mode runs it itself; any other cluster needs the
+// eks-pod-identity-agent add-on. Null when the cluster has it.
+async function podIdentityAgentProblem(
+  ports: Pick<AwsDeployIdentityPorts, "runAws">,
+  cluster: string,
+  region: string,
+  described: unknown
+): Promise<{ code: string; message: string } | null> {
+  const computeConfig =
+    isRecord(described) && isRecord(described.cluster) ?
+      described.cluster.computeConfig
+    : undefined;
+  if (isRecord(computeConfig) && computeConfig.enabled === true) return null;
+  const addon = await ports.runAws([
+    "eks",
+    "describe-addon",
+    "--cluster-name",
+    cluster,
+    "--addon-name",
+    "eks-pod-identity-agent",
+    "--region",
+    region,
+    "--output",
+    "json"
+  ]);
+  const install = `Install it, then retry: aws eks create-addon --cluster-name ${cluster} --addon-name eks-pod-identity-agent --region ${region}`;
+  if (!succeeded(addon)) {
+    return RESOURCE_NOT_FOUND.test(addon.stderr) ?
+        {
+          code: "aws-pod-identity-agent-missing",
+          message: `Cluster ${cluster} doesn't have the EKS Pod Identity Agent add-on, which gives app containers their AWS permissions. Nothing was changed. ${install}`
+        }
+      : {
+          code: "aws-pod-identity-agent-unreadable",
+          message: `Could not read the EKS Pod Identity Agent add-on on cluster ${cluster}, so Radius can't tell whether app containers will get their AWS permissions. Nothing was changed. Allow eks:DescribeAddon on the cluster, then retry. ${detail(addon)}`
+        };
+  }
+  const output = parseJson(addon.stdout);
+  const status =
+    isRecord(output) && isRecord(output.addon) ? output.addon.status : "";
+  if (typeof status === "string" && POD_IDENTITY_AGENT_READY.has(status)) {
+    return null;
+  }
+  return {
+    code: "aws-pod-identity-agent-missing",
+    message: `The EKS Pod Identity Agent add-on on cluster ${cluster} is ${typeof status === "string" && status ? status : "in an unknown state"}, so app containers can't get their AWS permissions. Nothing was changed. Fix the add-on in the EKS console, then retry.`
+  };
+}
 
 // IAM is eventually consistent. A run that releases the lock right after
 // writing the trust policy could let the next holder read the policy from
@@ -399,6 +480,14 @@ export async function setupAwsDeployIdentity(
   ports.step(
     `✅ Cluster ${cluster} accepts access entries (${authenticationMode}).`
   );
+  const agent = await podIdentityAgentProblem(
+    ports,
+    cluster,
+    region,
+    parseJson(describe.stdout)
+  );
+  if (agent) return fail(agent.code, agent.message);
+  ports.step(`✅ Cluster ${cluster} runs the EKS Pod Identity Agent.`);
 
   // Resolve which role this is before writing anything, so a same-named role
   // Radius does not own stops setup with nothing created.
@@ -491,6 +580,23 @@ export async function setupAwsDeployIdentity(
       );
     }
   }
+  // Read the environment's app boundary before anything is written too, so a
+  // boundary at its path that another repository owns stops setup here.
+  const appBoundaryTarget = awsAppBoundary(
+    accountId,
+    request.repoId,
+    request.environment
+  );
+  const appBoundaryArn = appBoundaryTarget.arn;
+  const boundaryRead = await readAppBoundary(ports, appBoundaryArn);
+  if (!boundaryRead.ok) return fail(boundaryRead.code, boundaryRead.message);
+  const boundaryProblem = appBoundaryOwnerProblem(
+    boundaryRead.policy,
+    appBoundaryArn,
+    request
+  );
+  if (boundaryProblem)
+    return fail(boundaryProblem.code, boundaryProblem.message);
   // The account-wide GitHub identity provider. Created once, never removed.
   const providers = await ports.runAws([
     "iam",
@@ -560,7 +666,7 @@ export async function setupAwsDeployIdentity(
     ]);
     if (
       !succeeded(createProvider) &&
-      !/EntityAlreadyExists/.test(createProvider.stderr)
+      !ENTITY_EXISTS.test(createProvider.stderr)
     ) {
       return fail(
         ACCESS_DENIED.test(createProvider.stderr) ?
@@ -713,40 +819,90 @@ export async function setupAwsDeployIdentity(
     }
   }
 
-  const attached = await write(
-    {
-      kind: "aws_role_policy.put",
-      accountId,
-      roleArn,
-      roleName,
-      roleId,
-      policyName
-    },
-    [
-      "iam",
-      "put-role-policy",
-      "--role-name",
-      roleName,
-      "--policy-name",
-      policyName,
-      "--policy-document",
-      JSON.stringify(buildAwsEnvironmentPermissionPolicy(region))
-    ]
+  const putPolicy = (
+    name: string,
+    document: PolicyDocument
+  ): Promise<AwsCommandResult> =>
+    write(
+      {
+        kind: "aws_role_policy.put",
+        accountId,
+        roleArn,
+        roleName,
+        roleId,
+        policyName: name
+      },
+      [
+        "iam",
+        "put-role-policy",
+        "--role-name",
+        roleName,
+        "--policy-name",
+        name,
+        "--policy-document",
+        JSON.stringify(document)
+      ]
+    );
+  const putFailure = (
+    name: string,
+    result: AwsCommandResult
+  ): AwsDeployIdentityResult =>
+    LIMIT_EXCEEDED.test(result.stderr) ?
+      fail(
+        "aws-role-limit-exceeded",
+        `IAM role ${roleName} has reached the 10,240-character inline-policy limit, which cannot be raised. Radius's policies fit about 15 environments when no other inline policies use the space. Delete an unused environment or choose another role. AWS reported: ${detail(result)}`
+      )
+    : fail(
+        "aws-role-policy-failed",
+        `Failed to put policy ${name} on IAM role ${roleName}: ${detail(result)}`
+      );
+
+  // The containers Recipe creates each app's IAM role through Cloud Control
+  // as this role. One policy covers every environment of the repository. It
+  // goes on first and is always journaled, so a run that puts the environment
+  // policy can roll the app-roles policy back too, once no other environment
+  // of the repository uses it.
+  const appRolesPolicyName = buildAwsAppRolesPolicyName(request.repoId);
+  const appRoles = await putPolicy(
+    appRolesPolicyName,
+    buildAwsAppRolesPolicy(accountId, request.repoId)
   );
-  if (!succeeded(attached)) {
-    return /LimitExceeded/.test(attached.stderr) ?
-        fail(
-          "aws-role-limit-exceeded",
-          `IAM role ${roleName} has reached the 10,240-character inline-policy limit, which cannot be raised. These policies fit about 17 environments when no other inline policies use the space. Delete an unused environment or choose another role. AWS reported: ${detail(attached)}`
-        )
-      : fail(
-          "aws-role-policy-failed",
-          `Failed to attach the deploy permission policy: ${detail(attached)}`
-        );
-  }
+  if (!succeeded(appRoles)) return putFailure(appRolesPolicyName, appRoles);
+  created.push(`policy ${appRolesPolicyName} on ${roleName}`);
+  ports.step(
+    `✅ Attached policy ${appRolesPolicyName}, which lets the role create app roles only under a permissions boundary.`
+  );
+
+  const attached = await putPolicy(
+    policyName,
+    buildAwsEnvironmentPermissionPolicy(region)
+  );
+  if (!succeeded(attached)) return putFailure(policyName, attached);
   created.push(`policy ${policyName} on ${roleName}`);
   ports.step(
     `✅ Attached deploy permission policy ${policyName}, limited to ${region}.`
+  );
+
+  const boundary = await ensureAppBoundary(ports, write, {
+    accountId,
+    region,
+    request,
+    roleArn,
+    roleName,
+    roleId,
+    boundary: appBoundaryTarget,
+    existing: boundaryRead.policy
+  });
+  if (!boundary.ok) return fail(boundary.code, boundary.message);
+  if (boundary.change === "created") {
+    created.push(`permissions boundary ${appBoundaryArn}`);
+  }
+  ports.step(
+    boundary.change === "created" ?
+      `✅ Created permissions boundary ${appBoundaryArn} for the environment's app roles.`
+    : boundary.change === "updated" ?
+      `✅ Updated permissions boundary ${appBoundaryArn} for ${region}.`
+    : `✅ Permissions boundary ${appBoundaryArn} is up to date.`
   );
 
   const entryArgs = [
@@ -862,7 +1018,247 @@ export async function setupAwsDeployIdentity(
     );
   }
   ports.step(`✅ Granted the role cluster-admin on ${cluster}.`);
-  return { ok: true, roleArn, roleCreated };
+  return { ok: true, roleArn, roleCreated, appBoundaryArn };
+}
+
+type AppBoundaryRead =
+  | { readonly ok: true; readonly policy: Record<string, unknown> | null }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+function appBoundaryPermissions(accountId: string): string {
+  return `Ask an IAM administrator to allow iam:GetPolicy, iam:CreatePolicy, iam:TagPolicy, iam:GetPolicyVersion, iam:ListPolicyVersions, iam:CreatePolicyVersion, iam:DeletePolicyVersion, and iam:DeletePolicy on arn:aws:iam::${accountId}:policy/radius/apps/*.`;
+}
+
+// The boundary as `aws iam get-policy` describes it, with its tags, or a null
+// policy when IAM has none at the ARN.
+async function readAppBoundary(
+  ports: Pick<AwsDeployIdentityPorts, "runAws">,
+  arn: string
+): Promise<AppBoundaryRead> {
+  const read = await ports.runAws([
+    "iam",
+    "get-policy",
+    "--policy-arn",
+    arn,
+    "--output",
+    "json"
+  ]);
+  if (!succeeded(read)) {
+    if (NO_SUCH_ENTITY.test(read.stderr)) return { ok: true, policy: null };
+    const denied = ACCESS_DENIED.test(read.stderr);
+    return {
+      ok: false,
+      code: denied ? "aws-app-boundary-denied" : "aws-app-boundary-unreadable",
+      message: `Could not read permissions boundary ${arn}: ${detail(read)}.${
+        denied ? ` ${appBoundaryPermissions(arnAccount(arn))}` : ""
+      }`
+    };
+  }
+  const output = parseJson(read.stdout);
+  if (!isRecord(output) || !isRecord(output.Policy)) {
+    return {
+      ok: false,
+      code: "aws-app-boundary-unreadable",
+      message: `IAM did not describe permissions boundary ${arn}.`
+    };
+  }
+  return { ok: true, policy: output.Policy };
+}
+
+function arnAccount(arn: string): string {
+  return arn.split(":")[4] ?? "";
+}
+
+// A boundary at the environment's path is this repository's only when Radius
+// tagged it with the repository's ID. Policies share the role tag shape.
+function appBoundaryOwnerProblem(
+  policy: Record<string, unknown> | null,
+  arn: string,
+  request: Pick<AwsDeployIdentityRequest, "repo" | "repoId">
+): { code: string; message: string } | null {
+  if (policy === null || radiusRoleRepositoryId(policy) === request.repoId) {
+    return null;
+  }
+  return {
+    code: "aws-app-boundary-not-owned",
+    message: `IAM policy ${arn} already exists, but Radius did not create it for ${request.repo} (repository ID ${request.repoId}). Nothing was changed. It sits at the path of this environment's app roles, so delete or move it if nothing uses it, then retry.`
+  };
+}
+
+// IAM keeps at most five versions of a managed policy and won't delete one
+// with versions besides the default.
+async function deleteOtherPolicyVersions(
+  ports: Pick<AwsDeployIdentityPorts, "runAws">,
+  arn: string
+): Promise<AwsCommandResult | null> {
+  const listed = await ports.runAws([
+    "iam",
+    "list-policy-versions",
+    "--policy-arn",
+    arn,
+    "--output",
+    "json"
+  ]);
+  if (!succeeded(listed)) return listed;
+  const output = parseJson(listed.stdout);
+  const versions =
+    isRecord(output) && Array.isArray(output.Versions) ? output.Versions : null;
+  if (versions === null) {
+    return {
+      code: 1,
+      stdout: "",
+      stderr: `IAM did not list the versions of ${arn}.`
+    };
+  }
+  for (const version of versions) {
+    if (
+      !isRecord(version) ||
+      version.IsDefaultVersion === true ||
+      typeof version.VersionId !== "string"
+    ) {
+      continue;
+    }
+    const deletion = await ports.runAws([
+      "iam",
+      "delete-policy-version",
+      "--policy-arn",
+      arn,
+      "--version-id",
+      version.VersionId
+    ]);
+    if (!succeeded(deletion) && !NO_SUCH_ENTITY.test(deletion.stderr)) {
+      return deletion;
+    }
+  }
+  return null;
+}
+
+// The policy document in `aws iam get-policy-version` output, or null when IAM
+// returned something that is not one.
+function policyVersionDocument(stdout: string): PolicyDocument | null {
+  const output = parseJson(stdout);
+  if (!isRecord(output) || !isRecord(output.PolicyVersion)) return null;
+  try {
+    return parsePolicyDocument(output.PolicyVersion.Document);
+  } catch {
+    return null;
+  }
+}
+
+// Create the environment's app boundary, or bring the one there up to date
+// with the environment's region. The Recipe passes its ARN to every app role.
+async function ensureAppBoundary(
+  ports: Pick<AwsDeployIdentityPorts, "runAws">,
+  write: (change: AwsSetupChange, args: string[]) => Promise<AwsCommandResult>,
+  context: {
+    accountId: string;
+    region: string;
+    request: AwsDeployIdentityRequest;
+    roleArn: string;
+    roleName: string;
+    roleId: string | null;
+    boundary: AwsAppBoundary;
+    existing: Record<string, unknown> | null;
+  }
+): Promise<
+  | { readonly ok: true; readonly change: "created" | "updated" | "none" }
+  | { readonly ok: false; readonly code: string; readonly message: string }
+> {
+  const { accountId, region, request } = context;
+  const { arn } = context.boundary;
+  const document = buildAwsAppBoundaryPolicy(accountId, region);
+  const failed = (result: AwsCommandResult, action: string) => {
+    const denied = ACCESS_DENIED.test(result.stderr);
+    return {
+      ok: false as const,
+      code: denied ? "aws-app-boundary-denied" : "aws-app-boundary-failed",
+      message: `Could not ${action} permissions boundary ${arn}: ${detail(result)}.${
+        denied ? ` ${appBoundaryPermissions(accountId)}` : ""
+      }`
+    };
+  };
+  let policy = context.existing;
+  if (policy === null) {
+    const creation = await write(
+      {
+        kind: "aws_app_boundary.create",
+        accountId,
+        roleArn: context.roleArn,
+        roleName: context.roleName,
+        roleId: context.roleId,
+        policyArn: arn
+      },
+      [
+        "iam",
+        "create-policy",
+        "--path",
+        context.boundary.path,
+        "--policy-name",
+        context.boundary.name,
+        "--description",
+        `Limits the IAM roles Radius creates for apps in environment ${request.environment} of ${request.repo}.`,
+        "--policy-document",
+        JSON.stringify(document),
+        "--tags",
+        `Key=${AWS_MANAGED_TAG},Value=true`,
+        `Key=${AWS_REPOSITORY_TAG},Value=${request.repo}`,
+        `Key=${AWS_REPOSITORY_ID_TAG},Value=${request.repoId}`,
+        ...(request.operationId ?
+          [`Key=${AWS_OPERATION_TAG},Value=${request.operationId}`]
+        : []),
+        "--output",
+        "json"
+      ]
+    );
+    if (succeeded(creation)) return { ok: true, change: "created" };
+    if (!ENTITY_EXISTS.test(creation.stderr)) {
+      return failed(creation, "create");
+    }
+    // Another run created it after the read. Adopt it only if it's ours.
+    const reread = await readAppBoundary(ports, arn);
+    if (!reread.ok) return reread;
+    const problem = appBoundaryOwnerProblem(reread.policy, arn, request);
+    if (problem) return { ok: false, ...problem };
+    policy = reread.policy;
+    if (policy === null) return failed(creation, "create");
+  }
+
+  const versionId = policy.DefaultVersionId;
+  if (typeof versionId !== "string" || !versionId) {
+    return {
+      ok: false,
+      code: "aws-app-boundary-unreadable",
+      message: `IAM did not name the default version of permissions boundary ${arn}, so nothing was changed on it.`
+    };
+  }
+  const version = await ports.runAws([
+    "iam",
+    "get-policy-version",
+    "--policy-arn",
+    arn,
+    "--version-id",
+    versionId,
+    "--output",
+    "json"
+  ]);
+  if (!succeeded(version)) return failed(version, "read");
+  const current = policyVersionDocument(version.stdout);
+  if (current && isDeepStrictEqual(current, parsePolicyDocument(document))) {
+    return { ok: true, change: "none" };
+  }
+  const cleared = await deleteOtherPolicyVersions(ports, arn);
+  if (cleared) return failed(cleared, "update");
+  const update = await ports.runAws([
+    "iam",
+    "create-policy-version",
+    "--policy-arn",
+    arn,
+    "--policy-document",
+    JSON.stringify(document),
+    "--set-as-default"
+  ]);
+  if (!succeeded(update)) return failed(update, "update");
+  return { ok: true, change: "updated" };
 }
 
 // One of the repository's other AWS environments, as its GitHub variables
@@ -948,8 +1344,6 @@ export type AwsDeployIdentityRemovalResult =
     }
   | { readonly ok: false; readonly message: string };
 
-const RESOURCE_NOT_FOUND = /ResourceNotFoundException/;
-
 function sameText(left: string, right: string): boolean {
   return left.trim().toLowerCase() === right.trim().toLowerCase();
 }
@@ -975,7 +1369,8 @@ function namesList(names: readonly string[]): string {
     : `environments ${names.join(", ")} still use`;
 }
 
-type AccessEntryOutcome =
+// What removal did with one thing an environment's setup added.
+type CleanupOutcome =
   | { readonly kind: "removed" | "kept" | "warning"; readonly text: string }
   | { readonly kind: "absent" }
   | { readonly kind: "failed"; readonly message: string };
@@ -1054,7 +1449,7 @@ async function readAccessEntry(
 async function deleteAccessEntry(
   target: AccessEntryTarget,
   ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
-): Promise<AccessEntryOutcome> {
+): Promise<CleanupOutcome> {
   const deleteEntry = await ports.runAws([
     "eks",
     "delete-access-entry",
@@ -1097,7 +1492,7 @@ interface AccessEntryRequest extends AccessEntryTarget {
 async function removeUnusedAccessEntry(
   request: AccessEntryRequest,
   ports: AwsDeployIdentityRemovalPorts
-): Promise<AccessEntryOutcome> {
+): Promise<CleanupOutcome> {
   const { roleName, accountId, region, cluster, repository } = request;
   const onCluster = cluster ? ` on ${cluster}` : "";
   // The repository's ID only matters for a role tagged with one. A role
@@ -1177,7 +1572,7 @@ async function removeOrphanedAccessEntry(
   target: AccessEntryTarget,
   ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">,
   replacedAt?: unknown
-): Promise<AccessEntryOutcome> {
+): Promise<CleanupOutcome> {
   if (!target.cluster || !target.region) return { kind: "absent" };
   const found = await readAccessEntry(target, ports);
   if (found.kind === "absent") return found;
@@ -1207,6 +1602,133 @@ async function removeOrphanedAccessEntry(
   return deleteAccessEntry(target, ports);
 }
 
+// The repository's app-roles policy serves all its environments on the role,
+// so it goes only with the last environment policy. `deletedPolicies` are left
+// out of the listing, which IAM may still show just after the delete. IAM may
+// also miss a policy another setup put moments ago. The policy is then
+// deleted, and that environment's app roles fail with AccessDenied until its
+// setup runs again and puts the policy back.
+async function removeUnusedAppRolesPolicy(
+  roleName: string,
+  repoId: number,
+  deletedPolicies: readonly string[],
+  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
+): Promise<CleanupOutcome> {
+  const policyName = buildAwsAppRolesPolicyName(repoId);
+  const label = `policy ${policyName}`;
+  const deleteCommand = `aws iam delete-role-policy --role-name ${roleName} --policy-name ${policyName}`;
+  const listed = await ports.runAws([
+    "iam",
+    "list-role-policies",
+    "--role-name",
+    roleName,
+    "--output",
+    "json"
+  ]);
+  const output = succeeded(listed) ? parseJson(listed.stdout) : null;
+  const names =
+    isRecord(output) && Array.isArray(output.PolicyNames) ?
+      output.PolicyNames.filter(
+        (name): name is string => typeof name === "string"
+      )
+    : null;
+  if (names === null) {
+    return {
+      kind: "warning",
+      text: `Kept ${label} on ${roleName}, because Radius couldn't list the role's policies (${succeeded(listed) ? "IAM returned no policy names" : detail(listed)}). If no environment of this repository uses the role, run: ${deleteCommand}`
+    };
+  }
+  if (!names.includes(policyName)) return { kind: "absent" };
+  if (
+    names.some(
+      (name) =>
+        !deletedPolicies.includes(name) &&
+        isAwsEnvironmentPolicyName(name, repoId)
+    )
+  ) {
+    return {
+      kind: "kept",
+      text: `${label} on ${roleName}, because other environments of this repository still use the role`
+    };
+  }
+  const deletion = await ports.runAws([
+    "iam",
+    "delete-role-policy",
+    "--role-name",
+    roleName,
+    "--policy-name",
+    policyName
+  ]);
+  if (succeeded(deletion)) return { kind: "removed", text: label };
+  if (NO_SUCH_ENTITY.test(deletion.stderr)) return { kind: "absent" };
+  return {
+    kind: "failed",
+    message: `Failed to delete ${label} from ${roleName}: ${detail(deletion)}.`
+  };
+}
+
+// Delete the environment's app boundary unless an app role still uses it or
+// another repository owns the policy at its ARN.
+async function removeAppBoundary(
+  arn: string,
+  request: Pick<
+    AwsDeployIdentityRemovalRequest,
+    "repo" | "repoId" | "environment"
+  >,
+  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
+): Promise<CleanupOutcome> {
+  const label = `permissions boundary ${arn}`;
+  const deleteCommand = `aws iam delete-policy --policy-arn ${arn}`;
+  const read = await readAppBoundary(ports, arn);
+  if (!read.ok) {
+    return {
+      kind: "warning",
+      text: `Kept ${label}. ${read.message} If no app role in environment ${request.environment} uses it, delete its non-default versions and run: ${deleteCommand}`
+    };
+  }
+  if (read.policy === null) return { kind: "absent" };
+  if (radiusRoleRepositoryId(read.policy) !== request.repoId) {
+    return {
+      kind: "kept",
+      text: `${label}, because Radius did not create it for ${request.repo}`
+    };
+  }
+  const uses =
+    Number(read.policy.PermissionsBoundaryUsageCount ?? 0) +
+    Number(read.policy.AttachmentCount ?? 0);
+  if (uses > 0) {
+    return {
+      kind: "warning",
+      text: `Kept ${label}, because ${uses} IAM ${uses === 1 ? "role uses" : "roles use"} it. Delete the environment's apps, or those roles, then run: ${deleteCommand}`
+    };
+  }
+  const cleared = await deleteOtherPolicyVersions(ports, arn);
+  if (cleared) {
+    return {
+      kind: "failed",
+      message: `Failed to delete the old versions of ${label}: ${detail(cleared)}.`
+    };
+  }
+  const deletion = await ports.runAws([
+    "iam",
+    "delete-policy",
+    "--policy-arn",
+    arn
+  ]);
+  if (succeeded(deletion)) return { kind: "removed", text: label };
+  if (NO_SUCH_ENTITY.test(deletion.stderr)) return { kind: "absent" };
+  if (DELETE_CONFLICT.test(deletion.stderr)) {
+    return {
+      kind: "warning",
+      text: `Kept ${label}, because IAM reported it is still in use (${detail(deletion)}). Delete the environment's apps, then run: ${deleteCommand}`
+    };
+  }
+  return {
+    kind: "failed",
+    message: `Failed to delete ${label}: ${detail(deletion)}.`
+  };
+}
+
 function stoppedPartWay(
   failure: string,
   removed: readonly string[],
@@ -1224,10 +1746,12 @@ function stoppedPartWay(
 
 /**
  * Remove what one environment added to the shared role: its trust subjects,
- * its permission policy, and its cluster's access entry when nothing else uses
- * it. The role and the account's GitHub identity provider always stay, because
- * other environments, repositories, or services may use them. The lock is
- * taken after the account check and released by the caller.
+ * its permission policy, its app permissions boundary when no app role uses
+ * it, and its cluster's access entry when nothing else uses it. The
+ * repository's app-roles policy goes with its last environment. The role and
+ * the account's GitHub identity provider always stay, because other
+ * environments, repositories, or services may use them. The lock is taken
+ * after the account check and released by the caller.
  */
 export async function removeAwsEnvironmentFromRole(
   request: AwsDeployIdentityRemovalRequest,
@@ -1267,19 +1791,39 @@ export async function removeAwsEnvironmentFromRole(
     region: request.region.trim(),
     cluster: request.cluster.trim()
   };
+  const boundaryArn = awsAppBoundary(
+    accountId,
+    request.repoId,
+    request.environment
+  ).arn;
+  const boundaryLabel = `permissions boundary ${boundaryArn}`;
   if (!succeeded(getRole)) {
     if (NO_SUCH_ENTITY.test(getRole.stderr)) {
+      const boundary = await removeAppBoundary(boundaryArn, request, ports);
+      if (boundary.kind === "failed") {
+        return stoppedPartWay(
+          boundary.message,
+          [],
+          [boundaryLabel, entryLabel(entryTarget)]
+        );
+      }
       const orphan = await removeOrphanedAccessEntry(entryTarget, ports);
+      const removed = boundary.kind === "removed" ? [boundary.text] : [];
       if (orphan.kind === "failed") {
-        return stoppedPartWay(orphan.message, [], [entryLabel(entryTarget)]);
+        return stoppedPartWay(orphan.message, removed, [
+          entryLabel(entryTarget)
+        ]);
       }
       return {
         ok: true,
-        removed: orphan.kind === "removed" ? [orphan.text] : [],
-        kept: [],
+        removed:
+          orphan.kind === "removed" ? [...removed, orphan.text] : removed,
+        kept: boundary.kind === "kept" ? [boundary.text] : [],
         warnings: [
           `IAM role ${roleName} was already gone, so there was nothing to remove from it.`,
-          ...(orphan.kind === "warning" ? [orphan.text] : [])
+          ...[boundary, orphan].flatMap((outcome) =>
+            outcome.kind === "warning" ? [outcome.text] : []
+          )
         ]
       };
     }
@@ -1392,6 +1936,34 @@ export async function removeAwsEnvironmentFromRole(
     `IAM role ${roleName}`,
     "the account's GitHub identity provider"
   ];
+  const warnings = [...shared];
+  const settle = (outcome: CleanupOutcome) => {
+    if (outcome.kind === "removed") removed.push(outcome.text);
+    if (outcome.kind === "kept") kept.push(outcome.text);
+    if (outcome.kind === "warning") warnings.push(outcome.text);
+  };
+  const appRoles = await removeUnusedAppRolesPolicy(
+    roleName,
+    request.repoId,
+    [policyName],
+    ports
+  );
+  if (appRoles.kind === "failed") {
+    return stoppedPartWay(appRoles.message, removed, [
+      `policy ${buildAwsAppRolesPolicyName(request.repoId)}`,
+      boundaryLabel,
+      entryLabel(entryTarget)
+    ]);
+  }
+  settle(appRoles);
+  const boundary = await removeAppBoundary(boundaryArn, request, ports);
+  if (boundary.kind === "failed") {
+    return stoppedPartWay(boundary.message, removed, [
+      boundaryLabel,
+      entryLabel(entryTarget)
+    ]);
+  }
+  settle(boundary);
   const entry = await removeUnusedAccessEntry(
     {
       ...entryTarget,
@@ -1407,12 +1979,8 @@ export async function removeAwsEnvironmentFromRole(
   if (entry.kind === "failed") {
     return stoppedPartWay(entry.message, removed, [entryLabel(entryTarget)]);
   }
-  return {
-    ok: true,
-    removed: entry.kind === "removed" ? [...removed, entry.text] : removed,
-    kept: entry.kind === "kept" ? [...kept, entry.text] : kept,
-    warnings: [...shared, ...(entry.kind === "warning" ? [entry.text] : [])]
-  };
+  settle(entry);
+  return { ok: true, removed, kept, warnings };
 }
 
 // One AWS change a setup recorded, as Roll back sees it.
@@ -1442,6 +2010,15 @@ export type AwsSetupRollbackTarget =
       readonly roleName: string;
       readonly roleId: string | null;
       readonly policyName: string;
+    }
+  | {
+      readonly key: string;
+      readonly artifactType: "aws_app_boundary";
+      readonly roleArn: string;
+      readonly roleName: string;
+      readonly roleId: string | null;
+      readonly policyArn: string;
+      readonly policyId: string | null;
     }
   | {
       readonly key: string;
@@ -1485,7 +2062,7 @@ function rollbackOutcome(
 
 function entryOutcome(
   key: string,
-  entry: AccessEntryOutcome
+  entry: CleanupOutcome
 ): AwsSetupRollbackOutcome {
   switch (entry.kind) {
     case "removed":
@@ -1503,11 +2080,13 @@ function entryOutcome(
 
 /**
  * Undo the AWS changes one setup recorded on one role, in reverse order: the
- * access entry (by the same rule as environment delete), the permission
- * policy, the trust subjects, then the role. The role goes only when setup
- * created it, it is still that role, and nothing else trusts or is attached to
- * it. The account's GitHub identity provider always stays. The lock is taken
- * after the account check and released by the caller.
+ * access entry (by the same rule as environment delete), the environment's
+ * policy, the repository's app-roles policy (by the same rule as environment
+ * delete), the trust subjects, the permissions boundary, then the role. The
+ * role goes only when setup created it, it is still that role, and nothing
+ * else trusts or is attached to it. The account's GitHub identity provider
+ * always stays. The lock is taken after the account check and released by the
+ * caller.
  */
 export async function rollbackAwsSetupChanges(
   request: {
@@ -1590,6 +2169,16 @@ export async function rollbackAwsSetupChanges(
       );
     }
   };
+  // A boundary is separate from the role, and its policy ID shows whether it
+  // is still the one this setup created, so it is undone whatever happened to
+  // the role.
+  const rollbackAppBoundaries = async () => {
+    for (const target of targets) {
+      if (target.artifactType === "aws_app_boundary") {
+        await add(await rollbackAppBoundary(target, ports));
+      }
+    }
+  };
   if (!succeeded(getRole)) {
     if (!NO_SUCH_ENTITY.test(getRole.stderr)) {
       return everyTarget(
@@ -1598,8 +2187,12 @@ export async function rollbackAwsSetupChanges(
       );
     }
     await removeOrphanedEntries();
+    await rollbackAppBoundaries();
     for (const target of targets) {
-      if (target.artifactType !== "aws_access_entry") {
+      if (
+        target.artifactType !== "aws_access_entry" &&
+        target.artifactType !== "aws_app_boundary"
+      ) {
         await add(rollbackOutcome(target.key, "not_found"));
       }
     }
@@ -1617,9 +2210,13 @@ export async function rollbackAwsSetupChanges(
   // its same-named policy and trust too.
   if (targets.some((target) => target.roleId !== role.RoleId)) {
     await removeOrphanedEntries(role.CreateDate ?? null);
+    await rollbackAppBoundaries();
     const replaced = `IAM role ${roleName} was deleted and created again after this setup, so Radius left the new role and its policies as they are.`;
     for (const target of targets) {
-      if (target.artifactType !== "aws_access_entry") {
+      if (
+        target.artifactType !== "aws_access_entry" &&
+        target.artifactType !== "aws_app_boundary"
+      ) {
         await add(rollbackOutcome(target.key, "skipped", replaced));
       }
     }
@@ -1680,8 +2277,49 @@ export async function rollbackAwsSetupChanges(
   }
 
   let policiesKept = false;
-  for (const target of targets) {
-    if (target.artifactType !== "aws_role_policy") continue;
+  const policyTargets = targets.flatMap((target) =>
+    target.artifactType === "aws_role_policy" ? [target] : []
+  );
+  // A repository's app-roles policy goes last, and only with the last of the
+  // repository's environment policies on the role.
+  const appRolesRepository = (target: { policyName: string }) =>
+    awsAppRolesPolicyRepositoryId(target.policyName);
+  const deletedPolicies: string[] = [];
+  const failedPolicies: string[] = [];
+  for (const target of [
+    ...policyTargets.filter((target) => appRolesRepository(target) === null),
+    ...policyTargets.filter((target) => appRolesRepository(target) !== null)
+  ]) {
+    const repoId = appRolesRepository(target);
+    if (repoId !== null) {
+      // An environment policy of this setup that is still on the role would
+      // read as another environment's, and keep the app-roles policy for good.
+      const blocking = failedPolicies.find((name) =>
+        isAwsEnvironmentPolicyName(name, repoId)
+      );
+      if (blocking !== undefined) {
+        policiesKept = true;
+        await add(
+          rollbackOutcome(
+            target.key,
+            "warning",
+            `Kept policy ${target.policyName} on IAM role ${roleName}, because Radius couldn't delete policy ${blocking} first.`
+          )
+        );
+        continue;
+      }
+      const outcome = await removeUnusedAppRolesPolicy(
+        roleName,
+        repoId,
+        deletedPolicies,
+        ports
+      );
+      if (outcome.kind === "warning" || outcome.kind === "failed") {
+        policiesKept = true;
+      }
+      await add(entryOutcome(target.key, outcome));
+      continue;
+    }
     const deletion = await ports.runAws([
       "iam",
       "delete-role-policy",
@@ -1691,11 +2329,14 @@ export async function rollbackAwsSetupChanges(
       target.policyName
     ]);
     if (succeeded(deletion)) {
+      deletedPolicies.push(target.policyName);
       await add(rollbackOutcome(target.key, "deleted"));
     } else if (NO_SUCH_ENTITY.test(deletion.stderr)) {
+      deletedPolicies.push(target.policyName);
       await add(rollbackOutcome(target.key, "not_found"));
     } else {
       policiesKept = true;
+      failedPolicies.push(target.policyName);
       await add(
         rollbackOutcome(
           target.key,
@@ -1730,6 +2371,8 @@ export async function rollbackAwsSetupChanges(
     }
   }
 
+  await rollbackAppBoundaries();
+
   if (roleTarget) {
     await add(
       await deleteCreatedRole(roleTarget.key, roleName, policy, {
@@ -1740,6 +2383,67 @@ export async function rollbackAwsSetupChanges(
     );
   }
   return outcomes;
+}
+
+// Delete the permissions boundary setup created, unless IAM's policy there is
+// another one now or an app role uses it.
+async function rollbackAppBoundary(
+  target: Extract<AwsSetupRollbackTarget, { artifactType: "aws_app_boundary" }>,
+  ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
+): Promise<AwsSetupRollbackOutcome> {
+  const arn = target.policyArn;
+  const label = `permissions boundary ${arn}`;
+  const deleteCommand = `aws iam delete-policy --policy-arn ${arn}`;
+  if (!target.policyId) {
+    return rollbackOutcome(
+      target.key,
+      "skipped",
+      `Kept ${label}, because Radius didn't record IAM's ID for it, so it can't tell whether the policy there now is the one this setup created. If no app role uses it, delete its non-default versions and run: ${deleteCommand}`
+    );
+  }
+  const read = await readAppBoundary(ports, arn);
+  if (!read.ok) return rollbackOutcome(target.key, "warning", read.message);
+  if (read.policy === null) return rollbackOutcome(target.key, "not_found");
+  if (read.policy.PolicyId !== target.policyId) {
+    return rollbackOutcome(
+      target.key,
+      "skipped",
+      `Kept ${label}, because it was deleted and created again after this setup.`
+    );
+  }
+  const uses =
+    Number(read.policy.PermissionsBoundaryUsageCount ?? 0) +
+    Number(read.policy.AttachmentCount ?? 0);
+  if (uses > 0) {
+    return rollbackOutcome(
+      target.key,
+      "warning",
+      `Kept ${label}, because ${uses} IAM ${uses === 1 ? "role uses" : "roles use"} it. Delete the environment's apps, then retry deletion.`
+    );
+  }
+  const cleared = await deleteOtherPolicyVersions(ports, arn);
+  if (cleared) {
+    return rollbackOutcome(
+      target.key,
+      "warning",
+      `Could not delete the old versions of ${label} (${detail(cleared)}).`
+    );
+  }
+  const deletion = await ports.runAws([
+    "iam",
+    "delete-policy",
+    "--policy-arn",
+    arn
+  ]);
+  if (succeeded(deletion)) return rollbackOutcome(target.key, "deleted");
+  if (NO_SUCH_ENTITY.test(deletion.stderr)) {
+    return rollbackOutcome(target.key, "not_found");
+  }
+  return rollbackOutcome(
+    target.key,
+    "warning",
+    `Could not delete ${label} (${detail(deletion)}).`
+  );
 }
 
 // Delete the role setup created, unless anything else still depends on it.

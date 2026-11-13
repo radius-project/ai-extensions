@@ -90,13 +90,16 @@ function operation(): EnvironmentOperationRecord {
 const NOW = Date.parse("2026-08-25T01:06:05.000Z");
 const AWS_ROLE_ARN = "arn:aws:iam::123456789012:role/r";
 const AWS_SUBJECTS = ["repo:octo/shop:environment:dev"];
+const AWS_APP_BOUNDARY_ARN =
+  "arn:aws:iam::123456789012:policy/radius/apps/1/dev/radius-app-boundary-1-dev";
 
 function awsIdentityReady(): Partial<EnvironmentOperationWorkflowDependencies> {
   return {
     setupAwsDeployIdentity: async () => ({
       ok: true,
       roleArn: AWS_ROLE_ARN,
-      subjects: AWS_SUBJECTS
+      subjects: AWS_SUBJECTS,
+      appBoundaryArn: AWS_APP_BOUNDARY_ARN
     })
   };
 }
@@ -1298,7 +1301,8 @@ describe("runEnvironmentOperationWorkflow", () => {
           return {
             ok: true,
             roleArn: AWS_ROLE_ARN,
-            subjects: AWS_SUBJECTS
+            subjects: AWS_SUBJECTS,
+            appBoundaryArn: AWS_APP_BOUNDARY_ARN
           };
         }
       });
@@ -1536,6 +1540,9 @@ describe("runEnvironmentOperationWorkflow", () => {
             }
           })
         }),
+        "eks describe-addon": command({
+          stdout: JSON.stringify({ addon: { status: "ACTIVE" } })
+        }),
         // Another run holds the lock for the whole test.
         "iam create-policy": command({
           code: 254,
@@ -1731,6 +1738,7 @@ describe("runEnvironmentOperationWorkflow", () => {
           accessConfig: { authenticationMode: "API" }
         }
       },
+      "eks describe-addon": { addon: { status: "ACTIVE" } },
       "iam create-policy": { Policy: { PolicyId: "LOCK1" } },
       "iam get-policy": { Policy: { PolicyId: "LOCK1" } },
       "iam delete-policy": "",
@@ -1832,6 +1840,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       "--version",
       "sts get-caller-identity",
       "eks describe-cluster",
+      "eks describe-addon",
       "iam create-policy",
       "iam get-policy",
       "iam get-role",
@@ -1915,7 +1924,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       setupAwsDeployIdentity: async () => ({
         ok: true,
         roleArn: AWS_ROLE_ARN,
-        subjects: AWS_SUBJECTS
+        subjects: AWS_SUBJECTS,
+        appBoundaryArn: AWS_APP_BOUNDARY_ARN
       })
     });
 

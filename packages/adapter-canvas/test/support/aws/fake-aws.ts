@@ -22,9 +22,16 @@ export interface FakeManagedPolicy {
   PolicyName: string;
   PolicyId: string;
   Arn: string;
+  Path: string;
   CreateDate: string;
   Description: string;
-  document: unknown;
+  Tags: Array<{ Key: string; Value: string }>;
+  // Oldest first. IAM numbers versions v1, v2, ... and never reuses a number.
+  versions: Array<{ VersionId: string; document: unknown; CreateDate: string }>;
+  DefaultVersionId: string;
+  // IAM roles outside this fake that use the policy as their permissions
+  // boundary, such as app roles a Recipe created through Cloud Control.
+  boundaryUses: number;
 }
 
 export interface FakeAccessEntry {
@@ -40,6 +47,8 @@ export interface FakeEksCluster {
   region: string;
   status: string;
   authenticationMode: string;
+  // The eks-pod-identity-agent add-on's status, or null when not installed.
+  podIdentityAgent: string | null;
   entries: Map<string, FakeAccessEntry>;
 }
 
@@ -110,6 +119,8 @@ function flagValues(args: readonly string[], name: string): string[] {
 const WRITES: ReadonlySet<string> = new Set([
   "iam create-policy",
   "iam delete-policy",
+  "iam create-policy-version",
+  "iam delete-policy-version",
   "iam create-role",
   "iam update-assume-role-policy",
   "iam delete-role",
@@ -120,6 +131,17 @@ const WRITES: ReadonlySet<string> = new Set([
   "eks delete-access-entry",
   "eks associate-access-policy"
 ]);
+
+// `--tags Key=k,Value=v ...`, as create-role and create-policy take them.
+function parseTags(
+  args: readonly string[]
+): Array<{ Key: string; Value: string }> {
+  return flagValues(args, "--tags").map((pair) => {
+    const match = /^Key=([^,]*),Value=(.*)$/.exec(pair);
+    if (!match) throw new Error(`fake aws: unreadable tag ${pair}`);
+    return { Key: match[1] ?? "", Value: match[2] ?? "" };
+  });
+}
 
 export function awsCommand(args: readonly string[]): string {
   return args[0] === "--version" ? "--version" : args.slice(0, 2).join(" ");
@@ -144,7 +166,10 @@ export class FakeAws {
   // Set to make every call fail the way an expired sign-in does.
   sessionExpired = false;
   // Commands refused once each, as AWS refuses a call it throttles.
-  private readonly refusals = new Map<string, string>();
+  private readonly refusals = new Map<
+    string,
+    { code: string; only: (args: readonly string[]) => boolean }
+  >();
   private readonly now: () => number;
   private ids = 0;
 
@@ -165,6 +190,7 @@ export class FakeAws {
       region,
       status: "ACTIVE",
       authenticationMode,
+      podIdentityAgent: "ACTIVE",
       entries: new Map()
     });
   }
@@ -198,6 +224,33 @@ export class FakeAws {
     return role;
   }
 
+  // A managed policy that exists before the test starts, such as another
+  // environment's permissions boundary.
+  addManagedPolicy(input: {
+    path: string;
+    name: string;
+    document: unknown;
+    tags?: Array<{ Key: string; Value: string }>;
+  }): FakeManagedPolicy {
+    const created = this.time();
+    const policy: FakeManagedPolicy = {
+      PolicyName: input.name,
+      PolicyId: this.nextId("ANPA"),
+      Arn: `arn:aws:iam::${this.accountId}:policy${input.path}${input.name}`,
+      Path: input.path,
+      CreateDate: created,
+      Description: "",
+      Tags: [...(input.tags ?? [])],
+      versions: [
+        { VersionId: "v1", document: input.document, CreateDate: created }
+      ],
+      DefaultVersionId: "v1",
+      boundaryUses: 0
+    };
+    this.policies.set(policy.Arn, policy);
+    return policy;
+  }
+
   addAccessEntry(
     region: string,
     cluster: string,
@@ -216,9 +269,16 @@ export class FakeAws {
     });
   }
 
-  /** Refuse the next `command` once with `code`, changing nothing. */
-  refuseOnce(command: string, code: string): void {
-    this.refusals.set(command, code);
+  /**
+   * Refuse the next `command` once with `code`, changing nothing. With
+   * `only`, refuse the next one whose arguments it accepts.
+   */
+  refuseOnce(
+    command: string,
+    code: string,
+    only: (args: readonly string[]) => boolean = () => true
+  ): void {
+    this.refusals.set(command, { code, only });
   }
 
   roleArn(name: string): string {
@@ -288,9 +348,9 @@ export class FakeAws {
       };
     }
     const refusal = this.refusals.get(command);
-    if (refusal !== undefined) {
+    if (refusal?.only(args)) {
       this.refusals.delete(command);
-      return serviceError(refusal, command, "Refused by the test.");
+      return serviceError(refusal.code, command, "Refused by the test.");
     }
     if (this.sessionExpired) {
       return serviceError(
@@ -308,12 +368,98 @@ export class FakeAws {
         });
       case "eks describe-cluster":
         return this.describeCluster(args);
+      case "eks describe-addon":
+        return this.describeAddon(args);
       case "iam create-policy":
         return this.createPolicy(args);
       case "iam get-policy":
-        return this.getPolicy(args);
+        return this.withPolicy(args, "GetPolicy", (policy) =>
+          ok({ Policy: this.policyView(policy) })
+        );
       case "iam delete-policy":
         return this.deletePolicy(args);
+      case "iam list-policy-versions":
+        return this.withPolicy(args, "ListPolicyVersions", (policy) =>
+          ok({
+            Versions: [...policy.versions].reverse().map((version) => ({
+              VersionId: version.VersionId,
+              IsDefaultVersion: version.VersionId === policy.DefaultVersionId,
+              CreateDate: version.CreateDate
+            })),
+            IsTruncated: false
+          })
+        );
+      case "iam get-policy-version":
+        return this.withPolicy(args, "GetPolicyVersion", (policy) => {
+          const version = policy.versions.find(
+            (candidate) => candidate.VersionId === flag(args, "--version-id")
+          );
+          if (!version) {
+            return serviceError(
+              "NoSuchEntity",
+              "GetPolicyVersion",
+              `Policy ${policy.Arn} version ${flag(args, "--version-id")} does not exist or is not attachable.`
+            );
+          }
+          return ok({
+            PolicyVersion: {
+              Document: version.document,
+              VersionId: version.VersionId,
+              IsDefaultVersion: version.VersionId === policy.DefaultVersionId,
+              CreateDate: version.CreateDate
+            }
+          });
+        });
+      case "iam create-policy-version":
+        return this.withPolicy(args, "CreatePolicyVersion", (policy) => {
+          if (policy.versions.length >= 5) {
+            return serviceError(
+              "LimitExceeded",
+              "CreatePolicyVersion",
+              `A managed policy can have up to 5 versions. Before you create a new version, you must delete an existing version.`
+            );
+          }
+          const last = policy.versions.at(-1)?.VersionId ?? "v0";
+          const version = {
+            VersionId: `v${Number(last.slice(1)) + 1}`,
+            document: JSON.parse(flag(args, "--policy-document")),
+            CreateDate: this.time()
+          };
+          policy.versions.push(version);
+          if (args.includes("--set-as-default")) {
+            policy.DefaultVersionId = version.VersionId;
+          }
+          return ok({
+            PolicyVersion: {
+              VersionId: version.VersionId,
+              IsDefaultVersion: version.VersionId === policy.DefaultVersionId,
+              CreateDate: version.CreateDate
+            }
+          });
+        });
+      case "iam delete-policy-version":
+        return this.withPolicy(args, "DeletePolicyVersion", (policy) => {
+          const id = flag(args, "--version-id");
+          if (id === policy.DefaultVersionId) {
+            return serviceError(
+              "DeleteConflict",
+              "DeletePolicyVersion",
+              "Cannot delete the default version of a policy."
+            );
+          }
+          const index = policy.versions.findIndex(
+            (version) => version.VersionId === id
+          );
+          if (index < 0) {
+            return serviceError(
+              "NoSuchEntity",
+              "DeletePolicyVersion",
+              `Policy ${policy.Arn} version ${id} does not exist or is not deletable.`
+            );
+          }
+          policy.versions.splice(index, 1);
+          return ok();
+        });
       case "iam get-role":
         return this.getRole(args);
       case "iam create-role":
@@ -482,19 +628,65 @@ export class FakeAws {
     });
   }
 
+  private describeAddon(args: readonly string[]): AwsCommandResult {
+    const cluster = this.cluster(args);
+    const name = flag(args, "--addon-name");
+    const status =
+      name === "eks-pod-identity-agent" ? cluster?.podIdentityAgent : null;
+    if (!cluster || !status) {
+      return serviceError(
+        "ResourceNotFoundException",
+        "DescribeAddon",
+        `No addon: ${name} found in cluster: ${flag(args, "--cluster-name")}`
+      );
+    }
+    return ok({
+      addon: { addonName: name, clusterName: cluster.name, status }
+    });
+  }
+
   private policyView(policy: FakeManagedPolicy) {
     return {
       PolicyName: policy.PolicyName,
       PolicyId: policy.PolicyId,
       Arn: policy.Arn,
+      Path: policy.Path,
+      DefaultVersionId: policy.DefaultVersionId,
+      AttachmentCount: this.attachments(policy.Arn),
+      PermissionsBoundaryUsageCount: policy.boundaryUses,
       CreateDate: policy.CreateDate,
-      Description: policy.Description
+      Description: policy.Description,
+      Tags: policy.Tags.map((tag) => ({ ...tag }))
     };
+  }
+
+  private attachments(arn: string): number {
+    return [...this.roles.values()].filter((role) =>
+      role.attached.includes(arn)
+    ).length;
+  }
+
+  private withPolicy(
+    args: readonly string[],
+    operation: string,
+    work: (policy: FakeManagedPolicy) => AwsCommandResult
+  ): AwsCommandResult {
+    const arn = flag(args, "--policy-arn");
+    const policy = this.policies.get(arn);
+    if (!policy) {
+      return serviceError(
+        "NoSuchEntity",
+        operation,
+        `Policy ${arn} was not found.`
+      );
+    }
+    return work(policy);
   }
 
   private createPolicy(args: readonly string[]): AwsCommandResult {
     const name = flag(args, "--policy-name");
-    // IAM names ignore case, so one role always has one lock.
+    // IAM names ignore case and must be unique in the account, whatever the
+    // path, so one role always has one lock.
     const taken = [...this.policies.values()].some(
       (policy) => policy.PolicyName.toLowerCase() === name.toLowerCase()
     );
@@ -505,40 +697,46 @@ export class FakeAws {
         `A policy called ${name} already exists. Duplicate names are not allowed.`
       );
     }
+    const path = flag(args, "--path") || "/";
+    const created = this.time();
     const policy: FakeManagedPolicy = {
       PolicyName: name,
       PolicyId: this.nextId("ANPA"),
-      Arn: `arn:aws:iam::${this.accountId}:policy/${name}`,
-      CreateDate: this.time(),
+      Arn: `arn:aws:iam::${this.accountId}:policy${path}${name}`,
+      Path: path,
+      CreateDate: created,
       Description: flag(args, "--description"),
-      document: JSON.parse(flag(args, "--policy-document"))
+      Tags: parseTags(args),
+      versions: [
+        {
+          VersionId: "v1",
+          document: JSON.parse(flag(args, "--policy-document")),
+          CreateDate: created
+        }
+      ],
+      DefaultVersionId: "v1",
+      boundaryUses: 0
     };
     this.policies.set(policy.Arn, policy);
     return ok({ Policy: this.policyView(policy) });
   }
 
-  private getPolicy(args: readonly string[]): AwsCommandResult {
-    const policy = this.policies.get(flag(args, "--policy-arn"));
-    if (!policy) {
-      return serviceError(
-        "NoSuchEntity",
-        "GetPolicy",
-        `Policy ${flag(args, "--policy-arn")} was not found.`
-      );
-    }
-    return ok({ Policy: this.policyView(policy) });
-  }
-
   private deletePolicy(args: readonly string[]): AwsCommandResult {
-    const arn = flag(args, "--policy-arn");
-    if (!this.policies.delete(arn)) {
-      return serviceError(
-        "NoSuchEntity",
-        "DeletePolicy",
-        `Policy ${arn} was not found.`
-      );
-    }
-    return ok();
+    return this.withPolicy(args, "DeletePolicy", (policy) => {
+      if (
+        policy.versions.length > 1 ||
+        policy.boundaryUses > 0 ||
+        this.attachments(policy.Arn) > 0
+      ) {
+        return serviceError(
+          "DeleteConflict",
+          "DeletePolicy",
+          "Cannot delete a policy attached to entities or with non-default versions."
+        );
+      }
+      this.policies.delete(policy.Arn);
+      return ok();
+    });
   }
 
   private getRole(args: readonly string[]): AwsCommandResult {
@@ -567,11 +765,7 @@ export class FakeAws {
         `Role with name ${name} already exists.`
       );
     }
-    const tags = flagValues(args, "--tags").map((pair) => {
-      const match = /^Key=([^,]*),Value=(.*)$/.exec(pair);
-      if (!match) throw new Error(`fake aws: unreadable tag ${pair}`);
-      return { Key: match[1] ?? "", Value: match[2] ?? "" };
-    });
+    const tags = parseTags(args);
     const role: FakeIamRole = {
       RoleName: name,
       RoleId: this.nextId("AROA"),

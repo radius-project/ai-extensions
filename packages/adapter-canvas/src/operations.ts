@@ -195,6 +195,19 @@ export type AwsRolePolicyArtifact = {
   policyName: string;
 };
 
+// The permissions boundary on the environment's app roles, recorded only when
+// this setup created the policy. The role fields name the deploy role whose
+// setup created it, so a rollback handles it with that role's other changes.
+export type AwsAppBoundaryArtifact = {
+  state: "created" | "deleted";
+  roleArn: string;
+  roleName: string;
+  roleId: string | null;
+  policyArn: string;
+  // IAM's id for the policy. A rollback deletes only a policy with this id.
+  policyId: string | null;
+};
+
 // The role's EKS access entry on the environment's cluster, recorded only when
 // this setup created it.
 export type AwsAccessEntryArtifact = {
@@ -246,6 +259,7 @@ export type SetupCleanupArtifactType =
   | "github_environment"
   | "aws_access_entry"
   | "aws_role_policy"
+  | "aws_app_boundary"
   | "aws_trust_subject"
   | "aws_role"
   | "role_assignment"
@@ -286,6 +300,7 @@ export type SetupArtifactLedger = {
   awsRole: AwsRoleArtifact;
   awsTrustSubjects: AwsTrustSubjectArtifact[];
   awsRolePolicies: AwsRolePolicyArtifact[];
+  awsAppBoundaries: AwsAppBoundaryArtifact[];
   awsAccessEntries: AwsAccessEntryArtifact[];
   githubEnvironmentVariables: GitHubEnvironmentVariableArtifact[];
   commit: SetupArtifactCommitState;
@@ -1324,6 +1339,7 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
     },
     awsTrustSubjects: [],
     awsRolePolicies: [],
+    awsAppBoundaries: [],
     awsAccessEntries: [],
     githubEnvironmentVariables: [],
     commit: {
@@ -1413,7 +1429,11 @@ function readAwsRoleState(value: unknown): SetupArtifactPresence {
 // An AWS list entry with every field a rollback needs, or nothing. One missing
 // its role or target cannot be deleted precisely, so it is dropped rather than
 // guessed at.
-function readAwsList<T>(value: unknown, fields: readonly string[]): T[] {
+function readAwsList<T>(
+  value: unknown,
+  fields: readonly string[],
+  ids: readonly string[] = []
+): T[] {
   if (!Array.isArray(value)) return [];
   const entries: T[] = [];
   for (const raw of value) {
@@ -1425,8 +1445,12 @@ function readAwsList<T>(value: unknown, fields: readonly string[]): T[] {
     };
     for (const field of fields) entry[field] = String(raw[field] || "").trim();
     if (!Object.values(entry).every(Boolean)) continue;
-    // Optional: a rollback refuses an entry without it, so it is kept.
-    entries.push({ ...entry, roleId: optionalIdentityString(raw.roleId) } as T);
+    // Optional: a rollback refuses an entry without them, so it is kept.
+    const optional: Record<string, string | null> = {
+      roleId: optionalIdentityString(raw.roleId)
+    };
+    for (const id of ids) optional[id] = optionalIdentityString(raw[id]);
+    entries.push({ ...entry, ...optional } as T);
   }
   return entries;
 }
@@ -1496,6 +1520,11 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
     },
     awsTrustSubjects: readAwsList(source.awsTrustSubjects, ["subject"]),
     awsRolePolicies: readAwsList(source.awsRolePolicies, ["policyName"]),
+    awsAppBoundaries: readAwsList(
+      source.awsAppBoundaries,
+      ["policyArn"],
+      ["policyId"]
+    ),
     awsAccessEntries: readAwsList(source.awsAccessEntries, [
       "cluster",
       "region"
@@ -2131,9 +2160,9 @@ export function recordAwsRole(op: any, patch: any): any {
 }
 
 // Add a created AWS list entry, or revive one a rollback had removed. The same
-// identity is never listed twice, and a revived one takes the role id of the
-// write that made it again.
-function recordAwsListEntry<T extends { state: string; roleId: string | null }>(
+// identity is never listed twice, and a revived one takes the ids of the write
+// that made it again.
+function recordAwsListEntry<T extends { state: string }>(
   list: T[],
   artifactType: SetupCleanupArtifactType,
   entry: T
@@ -2142,10 +2171,8 @@ function recordAwsListEntry<T extends { state: string; roleId: string | null }>(
   const existing = list.find(
     (item) => cleanupArtifactIdentity(artifactType, item) === identity
   );
-  if (existing) {
-    existing.state = "created";
-    existing.roleId = entry.roleId;
-  } else list.push(entry);
+  if (existing) Object.assign(existing, entry);
+  else list.push(entry);
 }
 
 export function recordAwsTrustSubject(op: any, entry: any): any {
@@ -2164,6 +2191,21 @@ export function recordAwsRolePolicy(op: any, entry: any): any {
   const [record] = readAwsList<AwsRolePolicyArtifact>([entry], ["policyName"]);
   if (!ledger || !record) return op;
   recordAwsListEntry(ledger.awsRolePolicies, "aws_role_policy", {
+    ...record,
+    state: "created"
+  });
+  return op;
+}
+
+export function recordAwsAppBoundary(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const [record] = readAwsList<AwsAppBoundaryArtifact>(
+    [entry],
+    ["policyArn"],
+    ["policyId"]
+  );
+  if (!ledger || !record) return op;
+  recordAwsListEntry(ledger.awsAppBoundaries, "aws_app_boundary", {
     ...record,
     state: "created"
   });
@@ -2406,10 +2448,12 @@ export function recordCleanupDeletion(
       return true;
     case "aws_trust_subject":
     case "aws_role_policy":
+    case "aws_app_boundary":
     case "aws_access_entry": {
       const list: Array<{ state: string }> =
         artifactType === "aws_trust_subject" ? ledger.awsTrustSubjects
         : artifactType === "aws_role_policy" ? ledger.awsRolePolicies
+        : artifactType === "aws_app_boundary" ? ledger.awsAppBoundaries
         : ledger.awsAccessEntries;
       const entry = list.find(
         (item) => item.state === "created" && matches(item)
@@ -2472,6 +2516,7 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
     ledger.awsRole.state === "created" ||
     ledger.awsTrustSubjects.some((entry) => entry.state === "created") ||
     ledger.awsRolePolicies.some((entry) => entry.state === "created") ||
+    ledger.awsAppBoundaries.some((entry) => entry.state === "created") ||
     ledger.awsAccessEntries.some((entry) => entry.state === "created") ||
     ledger.githubEnvironmentVariables.some(
       (entry) => entry.state === "created"
@@ -2747,6 +2792,13 @@ export function cleanupArtifactIdentity(
       return `${normalizeIdentityPart(artifact.roleArn)}#${normalizeIdentityPart(
         artifact.policyName
       )}`;
+    // IAM's policy id leads, so a boundary deleted and recreated under the
+    // same ARN is a different identity to a delete.
+    case "aws_app_boundary":
+      return identityLedBy(
+        artifact.policyId,
+        normalizeIdentityPart(artifact.policyArn)
+      );
     case "aws_access_entry":
       return `${normalizeIdentityPart(artifact.region)}:${normalizeIdentityPart(
         artifact.cluster
@@ -2886,6 +2938,18 @@ const LEDGER_ARTIFACTS: readonly LedgerArtifactRow[] = Object.freeze([
           "aws_role_policy",
           entry,
           `${entry.policyName} on IAM role ${entry.roleName}`,
+          entry.state
+        )
+      )
+  },
+  {
+    kind: "aws_app_boundary",
+    entries: (ledger: any) =>
+      ledger.awsAppBoundaries.map((entry: any) =>
+        ledgerEntry(
+          "aws_app_boundary",
+          entry,
+          `permissions boundary ${entry.policyArn}`,
           entry.state
         )
       )
@@ -3769,6 +3833,7 @@ const ROLLBACK_ARTIFACT_ORDER: readonly SetupCleanupArtifactType[] =
     "workflow_file",
     "github_environment_variable",
     "aws_access_entry",
+    "aws_app_boundary",
     "aws_role_policy",
     "aws_trust_subject",
     "aws_role",
@@ -4635,6 +4700,7 @@ const SHARED_SUBJECT_KEEP_ACTION =
 // GitHub can tell. The preview says so rather than read them on every poll.
 const AWS_REMOVED_IF_UNUSED: ReadonlySet<string> = new Set([
   "aws_role",
+  "aws_app_boundary",
   "aws_access_entry"
 ]);
 

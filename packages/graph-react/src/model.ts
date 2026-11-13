@@ -544,7 +544,10 @@ const RADIUS_SUPPORTING_OUTPUT_KINDS: Record<string, boolean> = {
   dbparametergroup: true,
   dbclusterparametergroup: true,
   subnetgroup: true,
-  securitygroupingress: true
+  securitygroupingress: true,
+  // The EKS containers recipe creates the app's IAM role and its Pod Identity
+  // association before the Deployment.
+  podidentityassociation: true
 };
 
 export function radiusResolvedOutputRank(out: ResourceOutput): number {

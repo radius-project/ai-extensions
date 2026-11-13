@@ -66,6 +66,14 @@ const CHANGES: Record<AwsSetupChange["kind"], AwsSetupChange> = {
     roleId: "AROA1",
     policyName: "radius-deploy-dev-1"
   },
+  "aws_app_boundary.create": {
+    kind: "aws_app_boundary.create",
+    accountId: ACCOUNT,
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    roleId: "AROA1",
+    policyArn: `arn:aws:iam::${ACCOUNT}:policy/radius/apps/1/dev/radius-app-boundary-1-dev`
+  },
   "aws_access_entry.create": {
     kind: "aws_access_entry.create",
     accountId: ACCOUNT,
@@ -117,6 +125,7 @@ describe("AWS setup change identity", () => {
       `attempt-2|${ROLE_ARN}`,
       `attempt-2|${ROLE_ARN}#trust`,
       `attempt-2|${ROLE_ARN}#radius-deploy-dev-1`,
+      `attempt-2|arn:aws:iam::${ACCOUNT}:policy/radius/apps/1/dev/radius-app-boundary-1-dev`,
       `attempt-2|us-west-2:shop:${ROLE_ARN}`
     ]);
   });
@@ -753,6 +762,32 @@ describe("createAwsSetupJournal", () => {
         `Could not check whether IAM role ${ROLE} already has policy radius-deploy-dev-1: AccessDenied`
       );
       expect(send.run).not.toHaveBeenCalled();
+    });
+
+    // Rollback removes it only once no environment of the repository uses
+    // it, so a setup that reused it can still clean it up.
+    it("records the app-roles policy even when the role already had it", async () => {
+      const { journal: j } = journal({});
+      const op = operation();
+      const send = sender(ok());
+
+      await j.write(
+        op,
+        {
+          kind: "aws_role_policy.put",
+          accountId: ACCOUNT,
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          roleId: "AROA1",
+          policyName: "radius-app-roles-1"
+        },
+        put,
+        send
+      );
+
+      expect(send.read).not.toHaveBeenCalled();
+      expect(op.setupArtifacts.awsRolePolicies).toHaveLength(1);
+      expect(op.providerRecovery.mutations).toHaveLength(1);
     });
   });
 

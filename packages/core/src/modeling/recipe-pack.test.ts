@@ -130,6 +130,15 @@ describe("deriveConcreteResource", () => {
     );
     expect(deriveConcreteResource(src)?.type).toBe("apps/Deployment");
   });
+
+  it("maps the AWS container recipe to the EKS cluster it runs on", () => {
+    expect(
+      deriveConcreteResource(
+        "ghcr.io/radius-project/aws-eks-recipes/containers:f3717de",
+        "aws"
+      )
+    ).toMatchObject({ type: "AWS.EKS/Cluster", provider: "aws" });
+  });
 });
 
 describe("recipePackPathForProvider", () => {

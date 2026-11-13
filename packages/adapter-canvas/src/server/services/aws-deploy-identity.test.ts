@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAwsAppBoundaryPolicy,
+  buildAwsAppRolesPolicy,
+  buildAwsAppRolesPolicyName,
   buildGitHubTrustPolicy,
   trustedGitHubSubjects,
   parsePolicyDocument,
@@ -21,7 +24,10 @@ import {
   type AwsLockResult,
   type AwsRepositoryIdLookup
 } from "./aws-deploy-identity.js";
-import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
+import {
+  awsAppBoundary,
+  awsEnvironmentPolicyName
+} from "../../aws-deploy-role-name.js";
 
 const ACCOUNT = "123456789012";
 const ROLE = "radius-deploy-octo-shop";
@@ -41,6 +47,14 @@ const radiusTags = (repo: string, repoId: number | null) => [
   : [{ Key: "radius-repository-id", Value: String(repoId) }])
 ];
 const POLICY = awsEnvironmentPolicyName(REPO_ID, "dev");
+const APP_ROLES_POLICY = buildAwsAppRolesPolicyName(REPO_ID);
+const BOUNDARY = awsAppBoundary(ACCOUNT, REPO_ID, "dev");
+const NO_BOUNDARY: AwsCommandResult = {
+  code: 254,
+  stdout: "",
+  stderr:
+    "An error occurred (NoSuchEntity) when calling the GetPolicy operation"
+};
 
 const ok = (stdout: unknown = ""): AwsCommandResult => ({
   code: 0,
@@ -184,7 +198,8 @@ const freeChecks: Script = {
       status: "ACTIVE",
       accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" }
     }
-  })
+  }),
+  "eks describe-addon": ok({ addon: { status: "ACTIVE" } })
 };
 
 const PROVIDER_ARN = `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`;
@@ -205,6 +220,8 @@ const happyPath: Script = {
   "iam create-open-id-connect-provider": ok(),
   "iam create-role": ok({ Role: { Arn: ROLE_ARN } }),
   "iam put-role-policy": ok(),
+  "iam get-policy": NO_BOUNDARY,
+  "iam create-policy": ok({ Policy: { Arn: BOUNDARY.arn } }),
   "eks create-access-entry": ok(),
   "eks associate-access-policy": ok()
 };
@@ -244,17 +261,47 @@ describe("setupAwsDeployIdentity", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      roleCreated: true
+      roleCreated: true,
+      appBoundaryArn: BOUNDARY.arn
     });
     expect(aws.steps).toEqual([
       "✅ AWS CLI 2.17.0 meets the 2.15.3 minimum.",
       "✅ Cluster shop accepts access entries (API_AND_CONFIG_MAP).",
+      "✅ Cluster shop runs the EKS Pod Identity Agent.",
       `✅ Created the GitHub identity provider in account ${ACCOUNT}.`,
       `ℹ️ Deploy identity will trust ${DEV}`,
       `✅ Created IAM role ${ROLE}.`,
+      `✅ Attached policy ${APP_ROLES_POLICY}, which lets the role create app roles only under a permissions boundary.`,
       `✅ Attached deploy permission policy ${POLICY}, limited to us-west-2.`,
+      `✅ Created permissions boundary ${BOUNDARY.arn} for the environment's app roles.`,
       "✅ Granted the role cluster-admin on shop."
     ]);
+    const putPolicies = aws.calls.filter(
+      (args) => args[1] === "put-role-policy"
+    );
+    expect(
+      putPolicies.map((args) => [
+        args[args.indexOf("--policy-name") + 1],
+        JSON.parse(args[args.indexOf("--policy-document") + 1] ?? "null")
+      ])
+    ).toEqual([
+      [APP_ROLES_POLICY, buildAwsAppRolesPolicy(ACCOUNT, REPO_ID)],
+      [POLICY, expect.anything()]
+    ]);
+    const createPolicy = aws.find("iam create-policy") ?? [];
+    const arg = (name: string) => createPolicy[createPolicy.indexOf(name) + 1];
+    expect(arg("--path")).toBe(BOUNDARY.path);
+    expect(arg("--policy-name")).toBe(BOUNDARY.name);
+    expect(JSON.parse(arg("--policy-document") ?? "null")).toEqual(
+      buildAwsAppBoundaryPolicy(ACCOUNT, "us-west-2")
+    );
+    expect(createPolicy).toEqual(
+      expect.arrayContaining([
+        "Key=radius-managed,Value=true",
+        "Key=radius-repository,Value=octo/shop",
+        `Key=radius-repository-id,Value=${REPO_ID}`
+      ])
+    );
     const createRole = aws.find("iam create-role");
     expect(createRole).toContain("Key=radius-managed,Value=true");
     expect(createRole).toContain("Key=radius-repository,Value=octo/shop");
@@ -309,7 +356,8 @@ describe("setupAwsDeployIdentity", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      roleCreated: false
+      roleCreated: false,
+      appBoundaryArn: BOUNDARY.arn
     });
     // The entry is newer than the role, so it is the role's own and stays.
     expect(aws.find("eks delete-access-entry")).toBeUndefined();
@@ -372,7 +420,9 @@ describe("setupAwsDeployIdentity", () => {
     async (_label, tags, message) => {
       const aws = fakeAws({
         ...freeChecks,
-        "iam get-role": ok({ Role: { ...managedRole([DEV]).Role, Tags: tags } })
+        "iam get-role": ok({
+          Role: { ...managedRole([DEV]).Role, Tags: tags }
+        })
       });
       const result = await setupAwsDeployIdentity(request, aws.ports);
       expect(result).toEqual({
@@ -385,6 +435,7 @@ describe("setupAwsDeployIdentity", () => {
         "--version",
         "sts get-caller-identity",
         "eks describe-cluster",
+        "eks describe-addon",
         "iam get-role"
       ]);
     }
@@ -419,7 +470,8 @@ describe("setupAwsDeployIdentity", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      roleCreated: true
+      roleCreated: true,
+      appBoundaryArn: BOUNDARY.arn
     });
     expect(aws.steps).toContain(
       `ℹ️ Deploy identity will trust ${DEV}, ${DEV_ID}`
@@ -695,7 +747,9 @@ describe("setupAwsDeployIdentity", () => {
       created: [
         `the GitHub identity provider in account ${ACCOUNT}`,
         `IAM role ${ROLE}`,
-        `policy ${POLICY} on ${ROLE}`
+        `policy ${APP_ROLES_POLICY} on ${ROLE}`,
+        `policy ${POLICY} on ${ROLE}`,
+        `permissions boundary ${BOUNDARY.arn}`
       ]
     });
     expect(aws.sleeps).toEqual([2000, 4000, 8000, 15000, 30000]);
@@ -727,7 +781,9 @@ describe("setupAwsDeployIdentity", () => {
       created: [
         `the GitHub identity provider in account ${ACCOUNT}`,
         `IAM role ${ROLE}`,
+        `policy ${APP_ROLES_POLICY} on ${ROLE}`,
         `policy ${POLICY} on ${ROLE}`,
+        `permissions boundary ${BOUNDARY.arn}`,
         `access entry for ${ROLE} on shop`
       ]
     });
@@ -790,6 +846,7 @@ describe("setupAwsDeployIdentity", () => {
       "--version",
       "sts get-caller-identity",
       "eks describe-cluster",
+      "eks describe-addon",
       "iam get-role"
     ]);
   });
@@ -806,6 +863,8 @@ describe("setupAwsDeployIdentity", () => {
       }),
       "iam update-assume-role-policy": ok(),
       "iam put-role-policy": ok(),
+      "iam get-policy": NO_BOUNDARY,
+      "iam create-policy": ok(),
       "eks create-access-entry": ok(),
       "eks associate-access-policy": ok()
     });
@@ -913,13 +972,22 @@ describe("setupAwsDeployIdentity failure paths", () => {
       "Failed to update the role's trust policy: AccessDenied"
     ],
     [
-      "the deploy permission policy cannot be attached",
+      "the app-roles policy cannot be attached",
       {
         ...happyPath,
         "iam put-role-policy": fail("MalformedPolicyDocument: bad")
       },
       "aws-role-policy-failed",
-      "Failed to attach the deploy permission policy: MalformedPolicyDocument"
+      `Failed to put policy ${APP_ROLES_POLICY} on IAM role ${ROLE}: MalformedPolicyDocument`
+    ],
+    [
+      "the deploy permission policy cannot be attached",
+      {
+        ...happyPath,
+        "iam put-role-policy": [ok(), fail("MalformedPolicyDocument: bad")]
+      },
+      "aws-role-policy-failed",
+      `Failed to put policy ${POLICY} on IAM role ${ROLE}: MalformedPolicyDocument`
     ]
   ])("fails when %s", async (_label, script, code, message) => {
     const aws = fakeAws(script);
@@ -988,7 +1056,7 @@ describe("setupAwsDeployIdentity failure paths", () => {
       expect(message).toContain(
         "10,240-character inline-policy limit, which cannot be raised"
       );
-      expect(message).toContain("about 17 environments");
+      expect(message).toContain("about 15 environments");
       expect(message).toContain("Maximum policy size of 10240 bytes exceeded");
       expect(message).toContain(
         "Delete an unused environment or choose another role."
@@ -1012,7 +1080,8 @@ describe("setupAwsDeployIdentity failure paths", () => {
       expect(result).toEqual({
         ok: true,
         roleArn: ROLE_ARN,
-        roleCreated: true
+        roleCreated: true,
+        appBoundaryArn: BOUNDARY.arn
       });
       expect(aws.find("eks describe-access-entry")).toBeUndefined();
       expect(aws.find("eks delete-access-entry")).toEqual(
@@ -1129,7 +1198,8 @@ describe("setupAwsDeployIdentity failure paths", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      roleCreated: false
+      roleCreated: false,
+      appBoundaryArn: BOUNDARY.arn
     });
     expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
@@ -1157,6 +1227,9 @@ describe("setupAwsDeployIdentity safety gates", () => {
     "create-role",
     "update-assume-role-policy",
     "put-role-policy",
+    "create-policy",
+    "create-policy-version",
+    "delete-policy-version",
     "create-access-entry",
     "associate-access-policy"
   ]);
@@ -1412,7 +1485,9 @@ describe("removeAwsEnvironmentFromRole", () => {
   const signedIn: Script = {
     "--version": freeChecks["--version"],
     "sts get-caller-identity": ok({ Account: ACCOUNT }),
-    "eks describe-access-entry": NO_ACCESS_ENTRY
+    "eks describe-access-entry": NO_ACCESS_ENTRY,
+    "iam list-role-policies": ok({ PolicyNames: [] }),
+    "iam get-policy": NO_BOUNDARY
   };
   const taggedEntry: Script = {
     "eks describe-access-entry": ok({
@@ -1472,7 +1547,11 @@ describe("removeAwsEnvironmentFromRole", () => {
       });
       expect(trustedGitHubSubjects(writtenTrust(aws), ACCOUNT)).toEqual([PROD]);
       expect(aws.calls.map((args) => args[1])).not.toContain("delete-role");
-      expect(aws.find("iam list-role-policies")).toBeUndefined();
+      expect(
+        aws.calls
+          .filter((args) => args[1] === "delete-role-policy")
+          .map((args) => args[args.indexOf("--policy-name") + 1])
+      ).toEqual([policyName]);
     }
   );
 
@@ -2114,11 +2193,16 @@ describe("deploy identity lock order", () => {
   it("locks the role after the read-only checks and before reading its trust policy", async () => {
     const aws = fakeAws(happyPath);
     await setupAwsDeployIdentity(request, aws.ports);
-    expect(aws.locks).toEqual([{ roleName: ROLE, after: 3 }]);
+    expect(aws.locks).toEqual([{ roleName: ROLE, after: 4 }]);
     expect(
-      aws.calls.slice(0, 3).map((args) => args.slice(0, 2).join(" "))
-    ).toEqual(["--version", "sts get-caller-identity", "eks describe-cluster"]);
-    expect(aws.calls[3]?.slice(0, 2)).toEqual(["iam", "get-role"]);
+      aws.calls.slice(0, 4).map((args) => args.slice(0, 2).join(" "))
+    ).toEqual([
+      "--version",
+      "sts get-caller-identity",
+      "eks describe-cluster",
+      "eks describe-addon"
+    ]);
+    expect(aws.calls[4]?.slice(0, 2)).toEqual(["iam", "get-role"]);
   });
 
   it("locks the picked role by its own name", async () => {
@@ -2154,7 +2238,7 @@ describe("deploy identity lock order", () => {
       message: "not allowed iam:CreatePolicy",
       created: []
     });
-    expect(aws.calls).toHaveLength(3);
+    expect(aws.calls).toHaveLength(4);
   });
 
   it.each([
@@ -2190,6 +2274,8 @@ describe("deploy identity lock order", () => {
       "iam get-role": ok(managedRole([DEV, PROD])),
       "iam update-assume-role-policy": ok(),
       "iam delete-role-policy": ok(),
+      "iam list-role-policies": ok({ PolicyNames: [] }),
+      "iam get-policy": NO_BOUNDARY,
       "eks describe-access-entry": NO_ACCESS_ENTRY
     });
     await removeAwsEnvironmentFromRole(removalRequest, {
@@ -2247,15 +2333,16 @@ describe("waiting for an ACTIVE cluster", () => {
 
     expect(result.ok).toBe(true);
     expect(
-      aws.calls.slice(0, 5).map((args) => args.slice(0, 2).join(" "))
+      aws.calls.slice(0, 6).map((args) => args.slice(0, 2).join(" "))
     ).toEqual([
       "--version",
       "sts get-caller-identity",
       "eks describe-cluster",
       "eks describe-cluster",
-      "eks describe-cluster"
+      "eks describe-cluster",
+      "eks describe-addon"
     ]);
-    expect(aws.locks).toEqual([{ roleName: ROLE, after: 5 }]);
+    expect(aws.locks).toEqual([{ roleName: ROLE, after: 6 }]);
     expect(aws.sleeps).toEqual([15000, 15000]);
     expect(aws.steps).toContain(
       "ℹ️ Cluster shop is UPDATING. Setup waits for it to be ACTIVE before it changes anything."
@@ -2373,6 +2460,8 @@ describe("waiting for IAM to show a trust policy write", () => {
       "iam get-role": ok(managedRole([DEV, PROD])),
       "iam update-assume-role-policy": ok(),
       "iam delete-role-policy": ok(),
+      "iam list-role-policies": ok({ PolicyNames: [] }),
+      "iam get-policy": NO_BOUNDARY,
       "eks describe-access-entry": NO_ACCESS_ENTRY
     };
     const remove = (aws: ReturnType<typeof fakeAws>) =>
@@ -2902,7 +2991,23 @@ describe("the changes setup records", () => {
         roleArn: ROLE_ARN,
         roleName: ROLE,
         roleId: "AROA1",
+        policyName: APP_ROLES_POLICY
+      },
+      {
+        kind: "aws_role_policy.put",
+        accountId: ACCOUNT,
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
         policyName: POLICY
+      },
+      {
+        kind: "aws_app_boundary.create",
+        accountId: ACCOUNT,
+        roleArn: ROLE_ARN,
+        roleName: ROLE,
+        roleId: "AROA1",
+        policyArn: BOUNDARY.arn
       },
       {
         kind: "aws_access_entry.create",
@@ -2931,10 +3036,16 @@ describe("the changes setup records", () => {
       { ok: true }
     );
 
-    expect(aws.find("iam put-role-policy")).toContain(POLICY);
+    expect(
+      aws.calls
+        .filter((args) => args[1] === "put-role-policy")
+        .map((args) => args[args.indexOf("--policy-name") + 1])
+    ).toEqual([APP_ROLES_POLICY, POLICY]);
     expect(aws.find("iam delete-role-policy")).toBeUndefined();
     expect(recorded.changes.map((change) => change.kind)).toEqual([
       "aws_role_policy.put",
+      "aws_role_policy.put",
+      "aws_app_boundary.create",
       "aws_access_entry.create"
     ]);
   });
@@ -2983,13 +3094,15 @@ describe("the changes setup records", () => {
     ).toHaveLength(2);
   });
 
-  it("records exactly one environment policy", async () => {
+  it("records each policy it puts once", async () => {
     const aws = fakeAws(happyPath);
     const recorded = recording(aws);
     await setupAwsDeployIdentity(request, recorded.ports);
     expect(
-      recorded.changes.filter((change) => change.kind === "aws_role_policy.put")
-    ).toHaveLength(1);
+      recorded.changes.flatMap((change) =>
+        change.kind === "aws_role_policy.put" ? [change.policyName] : []
+      )
+    ).toEqual([APP_ROLES_POLICY, POLICY]);
   });
 });
 
@@ -3610,5 +3723,714 @@ describe("rollbackAwsSetupChanges", () => {
       "iam delete-role-policy",
       "iam update-assume-role-policy"
     ]);
+  });
+});
+
+// The environment's app boundary as `aws iam get-policy` describes it when
+// Radius created it for octo/shop.
+const ownedBoundary = (policy: Record<string, unknown> = {}) =>
+  ok({
+    Policy: {
+      Arn: BOUNDARY.arn,
+      PolicyId: "ANPA1",
+      DefaultVersionId: "v1",
+      AttachmentCount: 0,
+      PermissionsBoundaryUsageCount: 0,
+      Tags: radiusTags("octo/shop", REPO_ID),
+      ...policy
+    }
+  });
+const boundaryVersion = (region: string) =>
+  ok({
+    PolicyVersion: {
+      VersionId: "v1",
+      IsDefaultVersion: true,
+      Document: buildAwsAppBoundaryPolicy(ACCOUNT, region)
+    }
+  });
+const ENTITY_ALREADY_EXISTS = fail(
+  "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation"
+);
+const iamWrites = (aws: ReturnType<typeof fakeAws>) =>
+  aws.calls
+    .filter((args) => args[0] === "iam" && !/^(get|list)-/.test(args[1] ?? ""))
+    .map((args) => args[1]);
+
+describe("setupAwsDeployIdentity and the EKS Pod Identity Agent", () => {
+  it("doesn't look for the add-on on an EKS Auto Mode cluster", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "eks describe-cluster": ok({
+        cluster: {
+          status: "ACTIVE",
+          accessConfig: { authenticationMode: "API" },
+          computeConfig: { enabled: true }
+        }
+      })
+    });
+    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
+      ok: true
+    });
+    expect(aws.find("eks describe-addon")).toBeUndefined();
+    expect(aws.steps).toContain(
+      "✅ Cluster shop runs the EKS Pod Identity Agent."
+    );
+  });
+
+  it("accepts an add-on that is updating", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "eks describe-addon": ok({ addon: { status: "UPDATING" } })
+    });
+    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
+      ok: true
+    });
+    expect(aws.find("eks describe-addon")).toEqual([
+      "eks",
+      "describe-addon",
+      "--cluster-name",
+      "shop",
+      "--addon-name",
+      "eks-pod-identity-agent",
+      "--region",
+      "us-west-2",
+      "--output",
+      "json"
+    ]);
+  });
+
+  it.each([
+    [
+      "missing",
+      fail(
+        "An error occurred (ResourceNotFoundException) when calling the DescribeAddon operation"
+      ),
+      "aws-pod-identity-agent-missing",
+      "doesn't have the EKS Pod Identity Agent add-on"
+    ],
+    [
+      "unreadable",
+      fail(
+        "An error occurred (AccessDeniedException) when calling the DescribeAddon operation"
+      ),
+      "aws-pod-identity-agent-unreadable",
+      "Allow eks:DescribeAddon"
+    ],
+    [
+      "failed",
+      ok({ addon: { status: "CREATE_FAILED" } }),
+      "aws-pod-identity-agent-missing",
+      "is CREATE_FAILED"
+    ],
+    [
+      "degraded",
+      ok({ addon: { status: "DEGRADED" } }),
+      "aws-pod-identity-agent-missing",
+      "is DEGRADED"
+    ],
+    [
+      "undescribed",
+      ok({}),
+      "aws-pod-identity-agent-missing",
+      "is in an unknown state"
+    ]
+  ])(
+    "stops before the lock and any write when the add-on is %s",
+    async (_label, addon, code, text) => {
+      const aws = fakeAws({ ...happyPath, "eks describe-addon": addon });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({ ok: false, code, created: [] });
+      expect(result.ok ? "" : result.message).toContain(text);
+      expect(result.ok ? "" : result.message).toContain("Nothing was changed.");
+      expect(aws.locks).toEqual([]);
+      expect(aws.calls.filter((args) => args[0] === "iam")).toEqual([]);
+    }
+  );
+
+  it("names the command that installs a missing add-on", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "eks describe-addon": fail("(ResourceNotFoundException) No addon")
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result.ok ? "" : result.message).toContain(
+      "aws eks create-addon --cluster-name shop --addon-name eks-pod-identity-agent --region us-west-2"
+    );
+  });
+});
+
+describe("setupAwsDeployIdentity and the environment's app boundary", () => {
+  it("leaves a boundary it created that is up to date", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-policy": ownedBoundary(),
+      "iam get-policy-version": boundaryVersion("us-west-2")
+    });
+    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
+      ok: true,
+      appBoundaryArn: BOUNDARY.arn
+    });
+    expect(aws.find("iam get-policy-version")).toEqual([
+      "iam",
+      "get-policy-version",
+      "--policy-arn",
+      BOUNDARY.arn,
+      "--version-id",
+      "v1",
+      "--output",
+      "json"
+    ]);
+    expect(iamWrites(aws)).not.toContain("create-policy");
+    expect(iamWrites(aws)).not.toContain("create-policy-version");
+    expect(aws.steps).toContain(
+      `✅ Permissions boundary ${BOUNDARY.arn} is up to date.`
+    );
+  });
+
+  it("makes the environment's region the default version, after deleting the others", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-policy": ownedBoundary({ DefaultVersionId: "v5" }),
+      "iam get-policy-version": boundaryVersion("us-east-1"),
+      "iam list-policy-versions": ok({
+        Versions: [
+          { VersionId: "v5", IsDefaultVersion: true },
+          { VersionId: "v4", IsDefaultVersion: false },
+          { VersionId: "v3", IsDefaultVersion: false }
+        ]
+      }),
+      "iam delete-policy-version": ok(),
+      "iam create-policy-version": ok()
+    });
+    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
+      ok: true
+    });
+    const boundaryWrites = aws.calls.filter((args) =>
+      /^(delete|create)-policy-version$/.test(args[1] ?? "")
+    );
+    expect(
+      boundaryWrites.map((args) =>
+        args[1] === "delete-policy-version" ?
+          args[args.indexOf("--version-id") + 1]
+        : args[1]
+      )
+    ).toEqual(["v4", "v3", "create-policy-version"]);
+    const update = boundaryWrites[2] ?? [];
+    expect(update).toContain("--set-as-default");
+    expect(
+      JSON.parse(update[update.indexOf("--policy-document") + 1] ?? "{}")
+    ).toEqual(buildAwsAppBoundaryPolicy(ACCOUNT, "us-west-2"));
+    expect(aws.steps).toContain(
+      `✅ Updated permissions boundary ${BOUNDARY.arn} for us-west-2.`
+    );
+  });
+
+  it.each([
+    ["another repository", radiusTags("octo/other", 99)],
+    ["no Radius tags", []]
+  ])(
+    "stops before any write when a policy with %s is at the boundary's ARN",
+    async (_label, tags) => {
+      const aws = fakeAws({
+        ...happyPath,
+        "iam get-policy": ownedBoundary({ Tags: tags })
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "aws-app-boundary-not-owned",
+        created: []
+      });
+      expect(result.ok ? "" : result.message).toContain(
+        `IAM policy ${BOUNDARY.arn} already exists, but Radius did not create it for octo/shop (repository ID ${REPO_ID}).`
+      );
+      expect(iamWrites(aws)).toEqual([]);
+    }
+  );
+
+  it("stops before any write when it can't read the boundary", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-policy": fail(
+        "An error occurred (AccessDenied) when calling the GetPolicy operation"
+      )
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-app-boundary-denied",
+      created: []
+    });
+    expect(result.ok ? "" : result.message).toContain(
+      `iam:GetPolicy, iam:CreatePolicy, iam:TagPolicy, iam:GetPolicyVersion, iam:ListPolicyVersions, iam:CreatePolicyVersion, iam:DeletePolicyVersion, and iam:DeletePolicy on arn:aws:iam::${ACCOUNT}:policy/radius/apps/*.`
+    );
+    expect(iamWrites(aws)).toEqual([]);
+  });
+
+  it("adopts a boundary another run of this repository created after the read", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-policy": [NO_BOUNDARY, ownedBoundary()],
+      "iam create-policy": ENTITY_ALREADY_EXISTS,
+      "iam get-policy-version": boundaryVersion("us-west-2")
+    });
+    expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
+      ok: true,
+      appBoundaryArn: BOUNDARY.arn
+    });
+    expect(aws.steps).toContain(
+      `✅ Permissions boundary ${BOUNDARY.arn} is up to date.`
+    );
+  });
+
+  it("refuses a boundary another repository created after the read", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-policy": [
+        NO_BOUNDARY,
+        ownedBoundary({ Tags: radiusTags("octo/other", 99) })
+      ],
+      "iam create-policy": ENTITY_ALREADY_EXISTS
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-app-boundary-not-owned"
+    });
+    expect(result.ok ? [] : result.created).not.toContain(
+      `permissions boundary ${BOUNDARY.arn}`
+    );
+    expect(aws.find("iam get-policy-version")).toBeUndefined();
+  });
+
+  it("names the permissions it needs when IAM refuses the create", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam create-policy": fail(
+        "An error occurred (AccessDenied) when calling the CreatePolicy operation"
+      )
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-app-boundary-denied"
+    });
+    expect(result.ok ? "" : result.message).toContain(
+      `Could not create permissions boundary ${BOUNDARY.arn}`
+    );
+    expect(result.ok ? [] : result.created).not.toContain(
+      `permissions boundary ${BOUNDARY.arn}`
+    );
+  });
+});
+
+describe("removeAwsEnvironmentFromRole and the app resources", () => {
+  const PROD_POLICY = awsEnvironmentPolicyName(REPO_ID, "prod");
+  const ENTRY = `the access entry for ${ROLE} on shop`;
+  const BOUNDARY_LABEL = `permissions boundary ${BOUNDARY.arn}`;
+  const unusedBoundary: Script = {
+    "iam get-policy": ownedBoundary(),
+    "iam list-policy-versions": ok({
+      Versions: [
+        { VersionId: "v2", IsDefaultVersion: true },
+        { VersionId: "v1", IsDefaultVersion: false }
+      ]
+    }),
+    "iam delete-policy-version": ok(),
+    "iam delete-policy": ok()
+  };
+  const roleThere: Script = {
+    "--version": freeChecks["--version"],
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "eks describe-access-entry": NO_ACCESS_ENTRY,
+    "iam get-role": ok(managedRole([DEV, PROD])),
+    "iam update-assume-role-policy": ok(),
+    "iam delete-role-policy": ok(),
+    "iam list-role-policies": ok({ PolicyNames: [POLICY, APP_ROLES_POLICY] }),
+    ...unusedBoundary
+  };
+  const remove = (aws: ReturnType<typeof fakeAws>) =>
+    removeAwsEnvironmentFromRole(removalRequest, aws.ports);
+  const deletedPolicies = (aws: ReturnType<typeof fakeAws>) =>
+    aws.calls
+      .filter((args) => args[1] === "delete-role-policy")
+      .map((args) => args[args.indexOf("--policy-name") + 1]);
+
+  it("removes the app-roles policy and the unused boundary with the repository's last environment", async () => {
+    const aws = fakeAws(roleThere);
+    expect(await remove(aws)).toEqual({
+      ok: true,
+      removed: [
+        `trust subject ${DEV}`,
+        `policy ${POLICY}`,
+        `policy ${APP_ROLES_POLICY}`,
+        BOUNDARY_LABEL
+      ],
+      kept: [`IAM role ${ROLE}`, "the account's GitHub identity provider"],
+      warnings: []
+    });
+    expect(deletedPolicies(aws)).toEqual([POLICY, APP_ROLES_POLICY]);
+    expect(
+      aws.calls
+        .filter((args) => /^delete-policy(-version)?$/.test(args[1] ?? ""))
+        .map((args) => args.slice(1))
+    ).toEqual([
+      [
+        "delete-policy-version",
+        "--policy-arn",
+        BOUNDARY.arn,
+        "--version-id",
+        "v1"
+      ],
+      ["delete-policy", "--policy-arn", BOUNDARY.arn]
+    ]);
+  });
+
+  it("keeps the app-roles policy while another environment of the repository uses the role", async () => {
+    const aws = fakeAws({
+      ...roleThere,
+      "iam list-role-policies": ok({
+        PolicyNames: [
+          POLICY,
+          PROD_POLICY,
+          awsEnvironmentPolicyName(99, "dev"),
+          APP_ROLES_POLICY
+        ]
+      })
+    });
+    const result = await remove(aws);
+    expect(result).toMatchObject({
+      ok: true,
+      kept: expect.arrayContaining([
+        `policy ${APP_ROLES_POLICY} on ${ROLE}, because other environments of this repository still use the role`
+      ])
+    });
+    expect(deletedPolicies(aws)).toEqual([POLICY]);
+  });
+
+  it("removes the app-roles policy when only other repositories' policies remain", async () => {
+    const aws = fakeAws({
+      ...roleThere,
+      "iam list-role-policies": ok({
+        PolicyNames: [awsEnvironmentPolicyName(99, "dev"), APP_ROLES_POLICY]
+      })
+    });
+    await remove(aws);
+    expect(deletedPolicies(aws)).toEqual([POLICY, APP_ROLES_POLICY]);
+  });
+
+  it("keeps the app-roles policy, with a warning, when it can't list the role's policies", async () => {
+    const aws = fakeAws({
+      ...roleThere,
+      "iam list-role-policies": fail(
+        "An error occurred (AccessDenied) when calling the ListRolePolicies operation"
+      )
+    });
+    const result = await remove(aws);
+    expect(result.ok).toBe(true);
+    expect(result.ok ? result.warnings : []).toEqual([
+      expect.stringContaining(
+        `Kept policy ${APP_ROLES_POLICY} on ${ROLE}, because Radius couldn't list the role's policies`
+      )
+    ]);
+    expect(deletedPolicies(aws)).toEqual([POLICY]);
+  });
+
+  it.each([
+    [1, "1 IAM role uses it"],
+    [3, "3 IAM roles use it"]
+  ])(
+    "keeps the boundary, with a warning, while %i app roles use it",
+    async (uses, text) => {
+      const aws = fakeAws({
+        ...roleThere,
+        "iam get-policy": ownedBoundary({
+          PermissionsBoundaryUsageCount: uses
+        })
+      });
+      const result = await remove(aws);
+      expect(result.ok ? result.warnings : []).toEqual([
+        `Kept ${BOUNDARY_LABEL}, because ${text}. Delete the environment's apps, or those roles, then run: aws iam delete-policy --policy-arn ${BOUNDARY.arn}`
+      ]);
+      expect(aws.find("iam delete-policy")).toBeUndefined();
+      expect(aws.find("iam delete-policy-version")).toBeUndefined();
+    }
+  );
+
+  it("keeps a policy at the boundary's ARN that Radius did not create for the repository", async () => {
+    const aws = fakeAws({
+      ...roleThere,
+      "iam get-policy": ownedBoundary({ Tags: radiusTags("octo/other", 99) })
+    });
+    const result = await remove(aws);
+    expect(result).toMatchObject({
+      ok: true,
+      kept: expect.arrayContaining([
+        `${BOUNDARY_LABEL}, because Radius did not create it for octo/shop`
+      ])
+    });
+    expect(aws.find("iam delete-policy")).toBeUndefined();
+  });
+
+  it("warns when IAM reports the boundary is still in use", async () => {
+    const aws = fakeAws({
+      ...roleThere,
+      "iam delete-policy": fail(
+        "An error occurred (DeleteConflict) when calling the DeletePolicy operation: Cannot delete a policy attached to entities."
+      )
+    });
+    const result = await remove(aws);
+    expect(result.ok).toBe(true);
+    expect(result.ok ? result.warnings : []).toEqual([
+      expect.stringContaining(
+        `Kept ${BOUNDARY_LABEL}, because IAM reported it is still in use`
+      )
+    ]);
+  });
+
+  it("warns when it can't read the boundary", async () => {
+    const aws = fakeAws({
+      ...roleThere,
+      "iam get-policy": fail(
+        "An error occurred (AccessDenied) when calling the GetPolicy operation"
+      )
+    });
+    const result = await remove(aws);
+    expect(result.ok).toBe(true);
+    expect(result.ok ? result.warnings : []).toEqual([
+      expect.stringContaining(`Kept ${BOUNDARY_LABEL}. Could not read`)
+    ]);
+    expect(aws.find("iam delete-policy")).toBeUndefined();
+  });
+
+  it("stops and says what is still there when the boundary delete fails", async () => {
+    const aws = fakeAws({
+      ...roleThere,
+      "iam delete-policy": fail(
+        "An error occurred (ServiceFailure) when calling the DeletePolicy operation"
+      )
+    });
+    const result = await remove(aws);
+    expect(result.ok).toBe(false);
+    expect(result.ok ? "" : result.message).toContain(
+      `Still there: ${BOUNDARY_LABEL}, ${ENTRY}. Retry removes what's still there.`
+    );
+    expect(aws.find("eks describe-access-entry")).toBeUndefined();
+  });
+
+  it("removes the boundary when the role is already gone", async () => {
+    const aws = fakeAws({
+      ...roleThere,
+      "iam get-role": fail(
+        "An error occurred (NoSuchEntity) when calling the GetRole operation"
+      )
+    });
+    expect(await remove(aws)).toEqual({
+      ok: true,
+      removed: [BOUNDARY_LABEL],
+      kept: [],
+      warnings: [
+        `IAM role ${ROLE} was already gone, so there was nothing to remove from it.`
+      ]
+    });
+  });
+});
+
+describe("rollbackAwsSetupChanges and the app boundary", () => {
+  const boundaryTarget: AwsSetupRollbackTarget = {
+    key: "boundary",
+    artifactType: "aws_app_boundary",
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    roleId: "AROA1",
+    policyArn: BOUNDARY.arn,
+    policyId: "ANPA1"
+  };
+  const script: Script = {
+    "--version": ok("aws-cli/2.17.0"),
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-role": ok({
+      Role: { ...managedRole([PROD]).Role, RoleId: "AROA1" }
+    }),
+    "iam get-policy": ownedBoundary(),
+    "iam list-policy-versions": ok({
+      Versions: [{ VersionId: "v1", IsDefaultVersion: true }]
+    }),
+    "iam delete-policy": ok()
+  };
+  const rollback = (
+    aws: ReturnType<typeof fakeAws>,
+    target: AwsSetupRollbackTarget = boundaryTarget
+  ) =>
+    rollbackAwsSetupChanges(
+      {
+        repo: "octo/shop",
+        repository: { ok: true, repoId: REPO_ID },
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        targets: [target]
+      },
+      {
+        ...aws.ports,
+        listOtherEnvironments: async () => ({ ok: true, environments: [] })
+      }
+    );
+
+  it("deletes the boundary it created", async () => {
+    const aws = fakeAws(script);
+    expect(await rollback(aws)).toEqual([
+      expect.objectContaining({ key: "boundary", outcome: "deleted" })
+    ]);
+    expect(aws.find("iam delete-policy")).toEqual([
+      "iam",
+      "delete-policy",
+      "--policy-arn",
+      BOUNDARY.arn
+    ]);
+  });
+
+  it("deletes the boundary it created when the role is gone", async () => {
+    const aws = fakeAws({
+      ...script,
+      "iam get-role": fail(
+        "An error occurred (NoSuchEntity) when calling GetRole"
+      )
+    });
+    expect(await rollback(aws)).toEqual([
+      expect.objectContaining({ key: "boundary", outcome: "deleted" })
+    ]);
+  });
+
+  it.each([
+    [
+      "was created again",
+      { ...script, "iam get-policy": ownedBoundary({ PolicyId: "ANPA2" }) },
+      boundaryTarget,
+      "skipped",
+      "because it was deleted and created again after this setup"
+    ],
+    [
+      "has no recorded ID",
+      script,
+      { ...boundaryTarget, policyId: null },
+      "skipped",
+      "because Radius didn't record IAM's ID for it"
+    ],
+    [
+      "is in use",
+      {
+        ...script,
+        "iam get-policy": ownedBoundary({ PermissionsBoundaryUsageCount: 1 })
+      },
+      boundaryTarget,
+      "warning",
+      "because 1 IAM role uses it"
+    ]
+  ])(
+    "keeps a boundary that %s",
+    async (_label, answers, target, outcome, text) => {
+      const aws = fakeAws(answers);
+      const [result] = await rollback(aws, target);
+      expect(result).toMatchObject({ key: "boundary", outcome });
+      expect(result?.detail).toContain(text);
+      expect(aws.find("iam delete-policy")).toBeUndefined();
+    }
+  );
+
+  it("reports a boundary that is already gone", async () => {
+    const aws = fakeAws({ ...script, "iam get-policy": NO_BOUNDARY });
+    expect(await rollback(aws)).toEqual([
+      expect.objectContaining({ key: "boundary", outcome: "not_found" })
+    ]);
+  });
+});
+
+describe("rollbackAwsSetupChanges and the app-roles policy", () => {
+  const policyTarget = (key: string, policyName: string) => ({
+    key,
+    artifactType: "aws_role_policy" as const,
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    roleId: "AROA1",
+    policyName
+  });
+  // Setup journals the app-roles policy first, even when it already existed.
+  const targets = [
+    policyTarget("appRoles", APP_ROLES_POLICY),
+    policyTarget("policy", POLICY)
+  ];
+  const script: Script = {
+    "--version": ok("aws-cli/2.17.0"),
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-role": ok({
+      Role: { ...managedRole([PROD]).Role, RoleId: "AROA1" }
+    }),
+    "iam delete-role-policy": ok()
+  };
+  const rollback = (aws: ReturnType<typeof fakeAws>) =>
+    rollbackAwsSetupChanges(
+      {
+        repo: "octo/shop",
+        repository: { ok: true, repoId: REPO_ID },
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        targets
+      },
+      {
+        ...aws.ports,
+        listOtherEnvironments: async () => ({ ok: true, environments: [] })
+      }
+    );
+  const outcomes = (result: AwsSetupRollbackOutcome[]) =>
+    Object.fromEntries(result.map((entry) => [entry.key, entry.outcome]));
+  const deletedPolicies = (aws: ReturnType<typeof fakeAws>) =>
+    aws.calls
+      .filter((args) => args[1] === "delete-role-policy")
+      .map((args) => args[args.indexOf("--policy-name") + 1]);
+
+  it("removes a policy another setup put once this setup's environment policy is gone", async () => {
+    // IAM may still list the environment policy just deleted.
+    const aws = fakeAws({
+      ...script,
+      "iam list-role-policies": ok({ PolicyNames: [APP_ROLES_POLICY, POLICY] })
+    });
+    expect(outcomes(await rollback(aws))).toEqual({
+      policy: "deleted",
+      appRoles: "deleted"
+    });
+    expect(deletedPolicies(aws)).toEqual([POLICY, APP_ROLES_POLICY]);
+  });
+
+  it("keeps the policy while another environment of the repository remains", async () => {
+    const aws = fakeAws({
+      ...script,
+      "iam list-role-policies": ok({
+        PolicyNames: [
+          APP_ROLES_POLICY,
+          awsEnvironmentPolicyName(REPO_ID, "prod")
+        ]
+      })
+    });
+    expect(outcomes(await rollback(aws))).toEqual({
+      policy: "deleted",
+      appRoles: "skipped"
+    });
+    expect(deletedPolicies(aws)).toEqual([POLICY]);
+  });
+
+  it("keeps the policy when this setup's environment policy couldn't be deleted", async () => {
+    const aws = fakeAws({
+      ...script,
+      "iam delete-role-policy": fail("AccessDenied")
+    });
+    const result = await rollback(aws);
+    expect(outcomes(result)).toEqual({
+      policy: "warning",
+      appRoles: "warning"
+    });
+    expect(result.find((entry) => entry.key === "appRoles")?.detail).toBe(
+      `Kept policy ${APP_ROLES_POLICY} on IAM role ${ROLE}, because Radius couldn't delete policy ${POLICY} first.`
+    );
+    expect(deletedPolicies(aws)).toEqual([POLICY]);
   });
 });

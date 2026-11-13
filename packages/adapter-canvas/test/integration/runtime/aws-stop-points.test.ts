@@ -397,7 +397,9 @@ describe.each(["new", "reused"] as const)(
         const op = createDeleteOperation(s);
         await operations.persist();
         // IAM refuses the release, and the deletion finishes without it.
-        s.aws.refuseOnce("iam delete-policy", "AccessDenied");
+        s.aws.refuseOnce("iam delete-policy", "AccessDenied", (args) =>
+          args.join(" ").includes(":policy/radius-lock-")
+        );
         await runDelete(s, op);
         expect(op.state).toBe("succeeded_with_warnings");
         const [held] = s.aws.locks();

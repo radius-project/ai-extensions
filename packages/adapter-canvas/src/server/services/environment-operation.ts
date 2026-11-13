@@ -127,6 +127,7 @@ export interface EnvironmentOperationWorkflowDependencies {
         ok: true;
         roleArn: string;
         subjects: readonly string[];
+        appBoundaryArn: string;
       }
     | { ok: false; status: number; error: string; code: string }
     | { ok: false; stopped: true }
@@ -435,7 +436,8 @@ export function createSetupCoordinatorPorts(
           {
             kind: "completed",
             roleArn: result.roleArn,
-            trustSubjects: result.subjects
+            trustSubjects: result.subjects,
+            appBoundaryArn: result.appBoundaryArn
           }
         : {
             kind: "failed",
