@@ -1,0 +1,84 @@
+name: Advisory review risk
+
+on:
+  pull_request_target:
+    types:
+      [
+        opened,
+        reopened,
+        synchronize,
+        edited,
+        ready_for_review,
+        labeled,
+        unlabeled
+      ]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Single pull request number to reconcile
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  context:
+    name: Validate advisory context
+    runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.context.outputs.pr }}
+    steps:
+      - name: Validate and normalize one PR
+        id: context
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+          const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+          if (process.env.GITHUB_REF !== `refs/heads/${event.repository.default_branch}` ||
+              !/^[a-f0-9]{40}$/.test(process.env.GITHUB_WORKFLOW_SHA) ||
+              process.env.GITHUB_SHA !== process.env.GITHUB_WORKFLOW_SHA) {
+            throw new Error("Only the immutable default-branch workflow may reconcile");
+          }
+          const raw = process.env.GITHUB_EVENT_NAME === "workflow_dispatch" ? event.inputs.pr : String(event.number);
+          if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) < 1) {
+            throw new Error("Expected one positive PR number");
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `pr=${Number(raw)}\n`);
+          NODE
+
+  advisory:
+    name: Advisory risk (not a merge gate)
+    needs: [context]
+    if: >-
+      ${{
+        needs.context.outputs.pr != '' &&
+        (github.event_name == 'workflow_dispatch' ||
+         (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+         contains(fromJSON('["risk:low","risk:medium","risk:high","review-instructions-changed"]'), github.event.label.name))
+      }}
+    concurrency:
+      group: review-risk-${{ github.repository }}-${{ needs.context.outputs.pr }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      REVIEW_RISK_ENABLED: ${{ vars.REVIEW_RISK_ENABLED }}
+    steps:
+      - name: Checkout trusted default-branch policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Use repository Node version
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Reconcile advisory or report disabled
+        run: node scripts/review-risk.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
