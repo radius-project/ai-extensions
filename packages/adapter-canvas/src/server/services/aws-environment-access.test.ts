@@ -4,7 +4,10 @@ import {
   parsePolicyDocument,
   trustedGitHubSubjects
 } from "@radius-project/core";
-import { awsEnvironmentPolicyName } from "../../aws-deploy-role-name.js";
+import {
+  awsAppBoundary,
+  awsEnvironmentPolicyName
+} from "../../aws-deploy-role-name.js";
 import type { GitHubJsonResponse } from "../../azure-oidc.js";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type {
@@ -64,10 +67,31 @@ const lockPolicy = (policyId: string, extra: Record<string, unknown> = {}) =>
 // A list answers successive calls in order, repeating its last entry.
 type Answer = AwsCommandResult | AwsCommandResult[];
 
+// The harness keys commands on the environment's app boundary, which lives
+// under /radius/apps/, as "<command> boundary", apart from the lock policy.
+const BOUNDARY_ARN = awsAppBoundary(ACCOUNT, 42, "dev").arn;
+const APP_ROLES = "radius-app-roles-42";
+const commandKey = (args: readonly string[]): string => {
+  const command = args.slice(0, 2).join(" ");
+  const boundary = args.some(
+    (arg) =>
+      arg.startsWith("/radius/apps/") ||
+      (arg.startsWith("arn:") && arg.includes(":policy/radius/apps/"))
+  );
+  return boundary ? `${command} boundary` : command;
+};
+
 const lockFree: Record<string, Answer> = {
   "iam create-policy": lockPolicy("LOCK1"),
   "iam get-policy": lockPolicy("LOCK1"),
-  "iam delete-policy": ok()
+  "iam delete-policy": ok(),
+  // The environment has no app boundary until setup creates one.
+  "iam get-policy boundary": fail(
+    "An error occurred (NoSuchEntity) when calling the GetPolicy operation"
+  ),
+  "iam create-policy boundary": ok({
+    Policy: { PolicyId: "BOUNDARY1", Arn: BOUNDARY_ARN }
+  })
 };
 
 const happyPath: Record<string, Answer> = {
@@ -77,6 +101,7 @@ const happyPath: Record<string, Answer> = {
   "eks describe-cluster": ok({
     cluster: { status: "ACTIVE", accessConfig: { authenticationMode: "API" } }
   }),
+  "eks describe-addon": ok({ addon: { status: "ACTIVE" } }),
   "iam get-role": fail("An error occurred (NoSuchEntity) when calling GetRole"),
   "iam list-open-id-connect-providers": ok({ OpenIDConnectProviderList: [] }),
   "iam create-open-id-connect-provider": ok(),
@@ -180,7 +205,7 @@ function harness(
   let writtenTrust: unknown = undefined;
   const runAws = async (args: string[]): Promise<AwsCommandResult> => {
     awsCalls.push(args);
-    const command = args.slice(0, 2).join(" ");
+    const command = commandKey(args);
     const scripted = aws[command];
     const result =
       Array.isArray(scripted) ?
@@ -191,7 +216,7 @@ function harness(
     if (!result) throw new Error(`unexpected aws ${args.join(" ")}`);
     // `command@n` pauses during the nth call of that command.
     const count = awsCalls.filter(
-      (call) => call.slice(0, 2).join(" ") === command
+      (call) => commandKey(call) === command
     ).length;
     if (command === pauseDuring || `${command}@${count}` === pauseDuring) {
       stopRequested = true;
@@ -289,8 +314,12 @@ function harness(
       error instanceof Error ? error.message : String(error)
   });
   const find = (command: string) =>
-    awsCalls.find((args) => args.slice(0, 2).join(" ") === command);
-  const commands = () => awsCalls.map((args) => args.slice(0, 2).join(" "));
+    awsCalls.find((args) => commandKey(args) === command);
+  const commands = () => awsCalls.map(commandKey);
+  const putPolicies = () =>
+    awsCalls
+      .filter((args) => commandKey(args) === "iam put-role-policy")
+      .map((args) => args[args.indexOf("--policy-name") + 1]);
   const steps = () =>
     events.filter(([kind]) => kind === "step").map(([, , text]) => text);
   // Whether setup recorded the role on the operation.
@@ -314,6 +343,7 @@ function harness(
     environmentReads,
     find,
     commands,
+    putPolicies,
     steps,
     roleRecorded,
     stoppedOperations,
@@ -416,7 +446,7 @@ describe("AWS environment access setup", () => {
           EXECUTOR
         )
       ).toMatchObject({ ok: true });
-      expect(retry.find("iam put-role-policy")).toContain(POLICY);
+      expect(retry.putPolicies()).toContain(POLICY);
     }
   );
 
@@ -544,7 +574,7 @@ describe("AWS environment access setup", () => {
     });
     const result = await h.access.setup(operation, input, EXECUTOR);
     expect(result).toMatchObject({ ok: true });
-    expect(h.find("iam put-role-policy")).toContain(POLICY);
+    expect(h.putPolicies()).toContain(POLICY);
   });
 
   it("preserves partial progress when paused during the EKS retry delay", async () => {
@@ -572,7 +602,7 @@ describe("AWS environment access setup", () => {
     expect(h.events).toContainEqual([
       "step",
       operation.id,
-      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, policy ${POLICY} on ${ROLE}.`,
+      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}, policy ${APP_ROLES} on ${ROLE}, policy ${POLICY} on ${ROLE}, permissions boundary ${BOUNDARY_ARN}.`,
       STAGE
     ]);
     expect(h.events.at(-1)).toEqual(["persist"]);
@@ -609,7 +639,12 @@ describe("AWS environment access setup", () => {
 
       const result = await h.access.setup(operation, input, EXECUTOR);
 
-      expect(result).toEqual({ ok: true, roleArn: ROLE_ARN, subjects });
+      expect(result).toEqual({
+        ok: true,
+        roleArn: ROLE_ARN,
+        subjects,
+        appBoundaryArn: BOUNDARY_ARN
+      });
       // The saved subjects are read before the lock and again under it.
       const variables = {
         path: "/repos/octo/shop/environments/dev/variables?per_page=100",
@@ -693,7 +728,8 @@ describe("AWS environment access setup", () => {
     expect(result).toEqual({
       ok: true,
       roleArn: picked,
-      subjects: [DEV, DEV_ID]
+      subjects: [DEV, DEV_ID],
+      appBoundaryArn: BOUNDARY_ARN
     });
     expect(h.find("iam get-role")).toEqual(
       expect.arrayContaining(["--role-name", "team-deployer"])
@@ -1009,7 +1045,8 @@ describe("trust subjects kept for deletion across a rename", () => {
     expect(await retry.access.setup(operation, renamed, EXECUTOR)).toEqual({
       ok: true,
       roleArn: ROLE_ARN,
-      subjects
+      subjects,
+      appBoundaryArn: BOUNDARY_ARN
     });
     expect(retry.contexts.get(operation.id)).toMatchObject({
       awsTrustSubjects: subjects
@@ -1057,7 +1094,11 @@ describe("trust subjects kept for deletion across a rename", () => {
 
     // GitHub still sends the old name to the renamed repository.
     const removal = harness(
-      { ...trusting([PROD, DEV, RENAMED]), "iam delete-role-policy": ok() },
+      {
+        ...trusting([PROD, DEV, RENAMED]),
+        "iam delete-role-policy": ok(),
+        "iam list-role-policies": ok({ PolicyNames: [POLICY] })
+      },
       {
         ...renamedNameOnly,
         "/repos/octo/shop": {
@@ -1201,17 +1242,18 @@ describe("trust subjects kept for deletion across a rename", () => {
 });
 
 describe("pausing AWS environment access setup", () => {
+  // The repository's app-roles policy, then the environment policy.
   const WRITES = [
     "iam create-open-id-connect-provider",
     "iam create-role",
     "iam put-role-policy",
+    "iam put-role-policy",
+    "iam create-policy boundary",
     "eks create-access-entry",
     "eks associate-access-policy"
   ];
   const writesRun = (h: ReturnType<typeof harness>) =>
-    h.awsCalls
-      .map((args) => args.slice(0, 2).join(" "))
-      .filter((command) => WRITES.includes(command));
+    h.commands().filter((command) => WRITES.includes(command));
   const steps = (h: ReturnType<typeof harness>) =>
     h.events.filter(([kind]) => kind === "step").map(([, , text]) => text);
 
@@ -1305,7 +1347,9 @@ describe("AWS environment access removal", () => {
       }
     }),
     "iam update-assume-role-policy": ok(),
-    "iam delete-role-policy": ok()
+    "iam delete-role-policy": ok(),
+    // Only this environment's policy; the repository has no app roles yet.
+    "iam list-role-policies": ok({ PolicyNames: [POLICY] })
   });
   const remainingTrust = (h: ReturnType<typeof harness>) => {
     const update = h.find("iam update-assume-role-policy") ?? [];
@@ -1804,6 +1848,8 @@ describe("AWS environment access removal of the cluster's access entry", () => {
     }),
     "iam update-assume-role-policy": ok(),
     "iam delete-role-policy": ok(),
+    // Only this environment's policy; the repository has no app roles yet.
+    "iam list-role-policies": ok({ PolicyNames: [POLICY] }),
     "eks describe-access-entry": ok({
       accessEntry: { tags: { "radius-managed": "true" } }
     }),
@@ -1964,10 +2010,11 @@ describe("the deploy identity lock during setup", () => {
       ok: true
     });
 
-    expect(h.commands().slice(0, 4)).toEqual([
+    expect(h.commands().slice(0, 5)).toEqual([
       "--version",
       "sts get-caller-identity",
       "eks describe-cluster",
+      "eks describe-addon",
       "iam create-policy"
     ]);
     expect(h.commands()).not.toContain("iam delete-policy");
@@ -2012,19 +2059,25 @@ describe("the deploy identity lock during setup", () => {
     const h = harness(happyPath);
     await h.access.setup(operation, input, EXECUTOR);
     const commands = h.commands();
-    const writes = [
+    const writes = new Set([
       "iam create-open-id-connect-provider",
       "iam create-role",
       "iam put-role-policy",
+      "iam create-policy boundary",
       "eks create-access-entry",
       "eks associate-access-policy"
-    ];
-    for (const write of writes) {
-      expect(commands[commands.indexOf(write) - 1]).toBe("iam get-policy");
+    ]);
+    const writeAt = commands.flatMap((command, index) =>
+      writes.has(command) ? [index] : []
+    );
+    // Both policies on the role, the boundary, and the other writes.
+    expect(writeAt).toHaveLength(7);
+    for (const index of writeAt) {
+      expect(commands[index - 1]).toBe("iam get-policy");
     }
     // One read confirms the new lock, then one before each write.
     expect(commands.filter((c) => c === "iam get-policy")).toHaveLength(
-      writes.length + 1
+      writeAt.length + 1
     );
   });
 
@@ -2520,7 +2573,9 @@ describe("the deploy identity lock during removal", () => {
       }
     }),
     "iam update-assume-role-policy": ok(),
-    "iam delete-role-policy": ok()
+    "iam delete-role-policy": ok(),
+    // Only this environment's policy; the repository has no app roles yet.
+    "iam list-role-policies": ok({ PolicyNames: [POLICY] })
   };
 
   it("locks the role, checks the lock before each write, and releases it", async () => {
@@ -2540,6 +2595,9 @@ describe("the deploy identity lock during removal", () => {
       "iam update-assume-role-policy",
       // IAM shows the write before the lock can be handed on.
       "iam get-role",
+      // No other policy is the app-roles policy, and no boundary exists.
+      "iam list-role-policies",
+      "iam get-policy boundary",
       "iam get-policy",
       "iam delete-policy"
     ]);
@@ -2839,7 +2897,7 @@ describe("the deploy identity lock during removal", () => {
       expect(seen).toEqual([
         [
           [`trust subject ${DEV}`, `policy ${POLICY}`],
-          ["iam get-role", "iam get-policy"]
+          ["iam get-policy boundary", "iam get-policy"]
         ]
       ]);
       expect(h.commands().slice(-2)).toEqual([
@@ -2901,8 +2959,9 @@ describe("the deploy identity lock during removal", () => {
   });
 });
 
-// IAM as two concurrent setups see it: one account, one role, and the lock's
-// name uniqueness. Every call yields first, so the setups interleave.
+// IAM as two concurrent setups see it: one account, one role, and managed
+// policies (the lock and each environment's boundary) unique by ARN. Every
+// call yields first, so the setups interleave.
 // `staleReads` makes the reads right after each trust write still return the
 // trust from before it, as IAM's eventually consistent reads can.
 function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
@@ -2911,7 +2970,7 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
   };
   let previousTrust: unknown = role.trust;
   let stale = 0;
-  const locks = new Map<string, { id: string; description: string }>();
+  const policies = new Map<string, { id: string; description: string }>();
   let created = 0;
   const writes: string[] = [];
   const answer = (args: string[]): AwsCommandResult => {
@@ -2929,23 +2988,30 @@ function sharedIam({ staleReads = 0 }: { staleReads?: number } = {}) {
             accessConfig: { authenticationMode: "API" }
           }
         });
+      case "eks describe-addon":
+        return ok({ addon: { status: "ACTIVE" } });
       case "iam create-policy": {
         const name = value("--policy-name");
-        if (locks.has(name)) return fail("EntityAlreadyExists");
-        const id = `LOCK${++created}`;
-        locks.set(name, { id, description: value("--description") });
-        return ok({ Policy: { PolicyId: id, Arn: LOCK_ARN } });
+        const path = args.includes("--path") ? value("--path") : "/";
+        const arn = `arn:aws:iam::${ACCOUNT}:policy${path}${name}`;
+        if (policies.has(arn)) return fail("EntityAlreadyExists");
+        const id =
+          name.startsWith("radius-lock-") ?
+            `LOCK${++created}`
+          : `POLICY-${name}`;
+        policies.set(arn, { id, description: value("--description") });
+        return ok({ Policy: { PolicyId: id, Arn: arn } });
       }
       case "iam get-policy": {
-        const lock = locks.get(`radius-lock-${ROLE}`);
-        return lock ?
+        const policy = policies.get(value("--policy-arn"));
+        return policy ?
             ok({
-              Policy: { PolicyId: lock.id, Description: lock.description }
+              Policy: { PolicyId: policy.id, Description: policy.description }
             })
           : fail("NoSuchEntity");
       }
       case "iam delete-policy":
-        locks.delete(`radius-lock-${ROLE}`);
+        policies.delete(value("--policy-arn"));
         return ok();
       case "iam get-role": {
         const trust = stale > 0 ? previousTrust : role?.trust;
@@ -3512,6 +3578,8 @@ describe("AWS environment access with a setup journal", () => {
     expect(write.mock.calls.map(([, change]) => change.kind)).toEqual([
       "aws_role.create",
       "aws_role_policy.put",
+      "aws_role_policy.put",
+      "aws_app_boundary.create",
       "aws_access_entry.create"
     ]);
   });

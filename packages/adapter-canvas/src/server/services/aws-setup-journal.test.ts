@@ -66,6 +66,14 @@ const CHANGES: Record<AwsSetupChange["kind"], AwsSetupChange> = {
     roleId: "AROA1",
     policyName: "radius-deploy-dev-1"
   },
+  "aws_app_boundary.create": {
+    kind: "aws_app_boundary.create",
+    accountId: ACCOUNT,
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    roleId: "AROA1",
+    policyArn: `arn:aws:iam::${ACCOUNT}:policy/radius/apps/1/dev/radius-app-boundary-1-dev`
+  },
   "aws_access_entry.create": {
     kind: "aws_access_entry.create",
     accountId: ACCOUNT,
@@ -117,6 +125,7 @@ describe("AWS setup change identity", () => {
       `attempt-2|${ROLE_ARN}`,
       `attempt-2|${ROLE_ARN}#trust`,
       `attempt-2|${ROLE_ARN}#radius-deploy-dev-1`,
+      `attempt-2|arn:aws:iam::${ACCOUNT}:policy/radius/apps/1/dev/radius-app-boundary-1-dev`,
       `attempt-2|us-west-2:shop:${ROLE_ARN}`
     ]);
   });
@@ -253,6 +262,7 @@ describe("reconcileAwsSetupChange", () => {
     ["aws_role.create", "iam get-role", "NoSuchEntity"],
     ["aws_trust.add", "iam get-role", "NoSuchEntity"],
     ["aws_role_policy.put", "iam get-role-policy", "NoSuchEntity"],
+    ["aws_app_boundary.create", "iam get-policy", "NoSuchEntity"],
     [
       "aws_access_entry.create",
       "eks describe-access-entry",
@@ -274,6 +284,7 @@ describe("reconcileAwsSetupChange", () => {
   it.each([
     ["aws_role.create", "iam get-role"],
     ["aws_role_policy.put", "iam get-role-policy"],
+    ["aws_app_boundary.create", "iam get-policy"],
     ["aws_access_entry.create", "eks describe-access-entry"]
   ] as const)(
     "keeps %s unknown when AWS cannot be read",
@@ -305,6 +316,30 @@ describe("reconcileAwsSetupChange", () => {
         aws.runAws
       )
     ).toEqual({ state: "applied", value: "" });
+  });
+
+  it.each([
+    ["tagged with this operation", OP, "applied"],
+    ["tagged with another operation", "op_later", "not_applied"]
+  ])("settles a boundary %s", async (_label, tag, state) => {
+    const aws = fakeAws({
+      ...SESSION,
+      "iam get-policy": ok({
+        Policy: {
+          PolicyId: "ANPA1",
+          Tags: [{ Key: "radius-operation", Value: tag }]
+        }
+      })
+    });
+    expect(
+      (
+        await reconcileAwsSetupChange(
+          CHANGES["aws_app_boundary.create"],
+          OP,
+          aws.runAws
+        )
+      ).state
+    ).toBe(state);
   });
 
   it.each([

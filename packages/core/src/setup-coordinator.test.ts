@@ -17,6 +17,8 @@ import {
 } from "../test/support/azure-setup.js";
 
 const ROLE_ARN = "arn:aws:iam::111111111111:role/radius-deploy";
+const BOUNDARY_ARN =
+  "arn:aws:iam::111111111111:policy/radius/apps/42/dev/radius-app-boundary-42-dev";
 const SUBJECTS = [
   "repo:owner/repo:environment:dev",
   "repository_owner_id:1:repository_id:2:environment:dev"
@@ -97,7 +99,8 @@ function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
       return {
         kind: "completed",
         roleArn: ROLE_ARN,
-        trustSubjects: SUBJECTS
+        trustSubjects: SUBJECTS,
+        appBoundaryArn: BOUNDARY_ARN
       };
     },
     releaseAws: async () => {
@@ -404,6 +407,7 @@ describe("runSetupCoordinator", () => {
             operationEnvironment: "dev",
             roleArn: ROLE_ARN,
             trustSubjects: SUBJECTS,
+            appBoundaryArn: BOUNDARY_ARN,
             clientId: ""
           }
         ]
@@ -603,7 +607,8 @@ describe("runSetupCoordinator", () => {
         "configure",
         expect.objectContaining({
           roleArn: ROLE_ARN,
-          trustSubjects: SUBJECTS
+          trustSubjects: SUBJECTS,
+          appBoundaryArn: BOUNDARY_ARN
         })
       ]);
     });
@@ -652,6 +657,9 @@ describe("runSetupCoordinator", () => {
       expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
         "trustSubjects"
       );
+      expect(
+        Array.isArray(configure) && configure[1].appBoundaryArn
+      ).toBeUndefined();
     });
   });
 });

@@ -1,6 +1,7 @@
 // Pure AWS deploy-identity rules for the Radius Canvas product: the IAM role
 // name, the GitHub OIDC trust policy a role carries, the per-environment
-// permission policy, and the AWS CLI version gate. No I/O: callers run the
+// permission policy, the app-role boundary and the deploy role's grant to
+// manage app roles, and the AWS CLI version gate. No I/O: callers run the
 // `aws` CLI and hand the parsed documents in.
 
 import {
@@ -23,11 +24,11 @@ export const GITHUB_OIDC_THUMBPRINT =
 export const AWS_EKS_CLUSTER_ADMIN_POLICY_ARN =
   "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
 
-// Tags Radius writes on a role it creates. A same-named role without them is
-// not Radius-managed and is never modified. The repository ID tag proves which
-// repository the role belongs to, because a rename keeps the ID and a new
-// repository at the old name gets another. The repository name tag is only a
-// readable label.
+// Tags Radius writes on a role or boundary policy it creates. A same-named
+// role or policy without them is not Radius-managed and is never modified. The
+// repository ID tag proves which repository the object belongs to, because a
+// rename keeps the ID and a new repository at the old name gets another. The
+// repository name tag is only a readable label.
 export const AWS_MANAGED_TAG = "radius-managed";
 export const AWS_REPOSITORY_TAG = "radius-repository";
 export const AWS_REPOSITORY_ID_TAG = "radius-repository-id";
@@ -192,14 +193,70 @@ export function buildAwsEnvironmentPolicyName(
 ): string {
   const prefix = "radius-deploy-";
   const suffix = `-${repoId}`;
+  const available = INLINE_POLICY_NAME_MAX - prefix.length - suffix.length;
+  return `${prefix}${environmentKey(environment, available, sha256Hex)}${suffix}`;
+}
+
+/**
+ * Whether an inline policy name is one of the repository's environment
+ * policies. The name ends in `-<repoId>`, and an environment key cannot end
+ * in a dash, so another repository's ID never matches.
+ */
+export function isAwsEnvironmentPolicyName(
+  name: string,
+  repoId: number
+): boolean {
+  return name.startsWith("radius-deploy-") && name.endsWith(`-${repoId}`);
+}
+
+// GitHub environment names ignore case and allow characters IAM names refuse.
+// A name IAM cannot hold as it is gets a hash of the lowercase name.
+function environmentKey(
+  environment: string,
+  available: number,
+  sha256Hex: (text: string) => string
+): string {
   const normalized = environment.toLowerCase();
   const safe = iamSafe(normalized);
-  const available = INLINE_POLICY_NAME_MAX - prefix.length - suffix.length;
-  if (safe === normalized && safe.length <= available) {
-    return `${prefix}${safe}${suffix}`;
-  }
+  if (safe === normalized && safe.length <= available) return safe;
   const hash = sha256Hex(normalized).slice(0, INLINE_POLICY_HASH_LENGTH);
-  return `${prefix}${safe.slice(0, available - INLINE_POLICY_HASH_LENGTH - 1)}-${hash}${suffix}`;
+  return `${safe.slice(0, available - INLINE_POLICY_HASH_LENGTH - 1)}-${hash}`;
+}
+
+const APP_PATH_ROOT = "/radius/apps/";
+// The containers Recipe starts every app role name with this.
+const APP_ROLE_NAME_PREFIX = "radius-app-";
+const APP_ENVIRONMENT_KEY_MAX = 64;
+
+/** Where one environment's app roles and their permissions boundary go. */
+export interface AwsAppBoundary {
+  // `/radius/apps/<repoId>/<environment>/`, the path of the boundary and of
+  // the app roles. The containers Recipe reads it from the boundary's ARN.
+  readonly path: string;
+  readonly name: string;
+  readonly arn: string;
+}
+
+/**
+ * One environment's permissions boundary. The deploy role may manage only
+ * roles under its repository's path. IAM policy names are unique in an account
+ * whatever their path, so the name repeats the repository and environment.
+ */
+export function buildAwsAppBoundary(
+  accountId: string,
+  repoId: number,
+  environment: string,
+  sha256Hex: (text: string) => string
+): AwsAppBoundary {
+  const key = environmentKey(environment, APP_ENVIRONMENT_KEY_MAX, sha256Hex);
+  const path = `${APP_PATH_ROOT}${repoId}/${key}/`;
+  const name = `radius-app-boundary-${repoId}-${key}`;
+  return { path, name, arn: `arn:aws:iam::${accountId}:policy${path}${name}` };
+}
+
+/** The deploy role's inline policy that lets it manage a repository's app roles. */
+export function buildAwsAppRolesPolicyName(repoId: number): string {
+  return `radius-app-roles-${repoId}`;
 }
 
 export function githubOidcProviderArn(accountId: string): string {
@@ -811,6 +868,23 @@ const GLOBAL_POWER_USER_ACTIONS = [
   "organizations:DescribeOrganization"
 ];
 
+// AWS's `PowerUserAccess` grant, limited to one region.
+function regionalPowerUserStatement(region: string): PolicyStatement {
+  return {
+    Effect: "Allow",
+    NotAction: [
+      "iam:*",
+      "organizations:*",
+      "account:*",
+      // Exclude the five access-administration actions, not the read APIs.
+      "eks:*teAccessEntry",
+      "eks:*AccessPolicy"
+    ],
+    Resource: "*",
+    Condition: { StringEquals: { "aws:RequestedRegion": region } }
+  };
+}
+
 /**
  * The environment's permission policy: the statements of AWS's
  * `PowerUserAccess` managed policy, with the broad grant limited to the
@@ -825,19 +899,7 @@ export function buildAwsEnvironmentPermissionPolicy(
   return {
     Version: "2012-10-17",
     Statement: [
-      {
-        Effect: "Allow",
-        NotAction: [
-          "iam:*",
-          "organizations:*",
-          "account:*",
-          // Exclude the five access-administration actions, not the read APIs.
-          "eks:*teAccessEntry",
-          "eks:*AccessPolicy"
-        ],
-        Resource: "*",
-        Condition: { StringEquals: { "aws:RequestedRegion": region } }
-      },
+      regionalPowerUserStatement(region),
       {
         Effect: "Allow",
         Action: [...GLOBAL_POWER_USER_ACTIONS],
@@ -861,7 +923,119 @@ export function buildAwsEnvironmentPermissionPolicy(
   };
 }
 
-/** Read role tags from `aws iam get-role` output. */
+/**
+ * The permissions boundary on an environment's app roles: the most an app
+ * role's own policy can grant. It allows what the deploy role may do in the
+ * environment's region, never IAM, and Bedrock models in other regions only
+ * through an inference profile in the environment's region, because
+ * cross-region inference runs the model in another region.
+ */
+export function buildAwsAppBoundaryPolicy(
+  accountId: string,
+  region: string
+): PolicyDocument {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      regionalPowerUserStatement(region),
+      {
+        Effect: "Allow",
+        Action: [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream"
+        ],
+        Resource: "arn:aws:bedrock:*::foundation-model/*",
+        Condition: {
+          ArnLike: {
+            "bedrock:InferenceProfileArn": `arn:aws:bedrock:${region}:${accountId}:inference-profile/*`
+          }
+        }
+      }
+    ]
+  };
+}
+
+/**
+ * What the deploy role needs for the app roles the containers Recipe creates
+ * through Cloud Control. It may create and change roles under the repository's
+ * app path only while they carry one of the repository's boundaries, and pass
+ * them only to EKS Pod Identity. IAM can't condition the reads and tag actions
+ * on the boundary, so the path limits them. Cloud Control reads a role before
+ * creating it, and IAM checks a missing role against `role/<name>`, so GetRole
+ * is also allowed on the Recipe's name prefix. The denies keep every app role's
+ * boundary in place. Deployments still work, because IAM checks setting a
+ * boundary against the role, with the policy only as a condition key.
+ */
+export function buildAwsAppRolesPolicy(
+  accountId: string,
+  repoId: number
+): PolicyDocument {
+  const roles = `arn:aws:iam::${accountId}:role${APP_PATH_ROOT}${repoId}/*`;
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: [
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:PutRolePermissionsBoundary",
+          "iam:UpdateRole",
+          "iam:UpdateRoleDescription",
+          "iam:UpdateAssumeRolePolicy"
+        ],
+        Resource: roles,
+        Condition: {
+          ArnLike: {
+            "iam:PermissionsBoundary": `arn:aws:iam::${accountId}:policy${APP_PATH_ROOT}${repoId}/*`
+          }
+        }
+      },
+      {
+        Effect: "Allow",
+        Action: [
+          "iam:GetRole",
+          "iam:GetRolePolicy",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListRoleTags",
+          "iam:TagRole",
+          "iam:UntagRole"
+        ],
+        Resource: roles
+      },
+      {
+        Effect: "Allow",
+        Action: "iam:GetRole",
+        Resource: `arn:aws:iam::${accountId}:role/${APP_ROLE_NAME_PREFIX}*`
+      },
+      {
+        Effect: "Allow",
+        Action: "iam:PassRole",
+        Resource: roles,
+        Condition: {
+          StringEquals: { "iam:PassedToService": "pods.eks.amazonaws.com" }
+        }
+      },
+      {
+        Effect: "Deny",
+        Action: "iam:DeleteRolePermissionsBoundary",
+        Resource: `arn:aws:iam::${accountId}:role${APP_PATH_ROOT}*`
+      },
+      {
+        Effect: "Deny",
+        Action: "iam:*",
+        Resource: `arn:aws:iam::${accountId}:policy${APP_PATH_ROOT}*`
+      }
+    ]
+  };
+}
+
+/** Read tags from a role or policy in `aws iam get-role` or `get-policy` output. */
 export function awsRoleTags(role: unknown): Record<string, string> {
   if (!isRecord(role)) return {};
   const tags: Record<string, string> = {};

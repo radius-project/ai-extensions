@@ -24,6 +24,7 @@ readonly CALLS="${TEST_ROOT}/calls.log"
 readonly OUTPUT="${TEST_ROOT}/output.log"
 readonly PACK_REF="0123456789abcdef0123456789abcdef01234567"
 readonly PACK_URL="https://raw.githubusercontent.com/radius-project/resource-types-contrib/${PACK_REF}/recipe-packs/aws-eks/aws-eks.bicep"
+readonly BOUNDARY_ARN="arn:aws:iam::123456789012:policy/radius/apps/4242/dev/radius-app-boundary-4242-dev"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -163,6 +164,8 @@ run_step() {
             AWS_REGION=us-west-2 \
             AWS_EKS_CLUSTER_NAME=dev-cluster \
             RADIUS_SUBNET_IDS=subnet-0a1,subnet-0b2 \
+            GITHUB_REPOSITORY_ID=4242 \
+            AWS_APP_BOUNDARY_ARN="${BOUNDARY_ARN}" \
             RECIPE_PACK_URL="${PACK_URL}" \
             RECIPE_PACK_REF="${PACK_REF}" \
             "$@" \
@@ -177,7 +180,7 @@ test_deploys_the_pinned_pack_with_its_parameters() {
         fail "the pack was not downloaded from the pinned URL"
     grep -qxF "rad deploy .radius/radius-environment.bicep" "${CALLS}" ||
         fail "the environment was not deployed"
-    grep -qxF "rad deploy .radius/radius-recipe-pack.bicep --environment dev --parameters eksClusterName=dev-cluster --parameters subnetIds=subnet-0a1,subnet-0b2 --parameters routesGatewayName=radius --parameters routesGatewayNamespace=radius-system --parameters containerImagesRegistry=ghcr.io/octo/app --parameters containerImagesRegistrySecretName=radius-ghcr-registry-creds" "${CALLS}" ||
+    grep -qxF "rad deploy .radius/radius-recipe-pack.bicep --environment dev --parameters eksClusterName=dev-cluster --parameters subnetIds=subnet-0a1,subnet-0b2 --parameters routesGatewayName=radius --parameters routesGatewayNamespace=radius-system --parameters containerImagesRegistry=ghcr.io/octo/app --parameters containerImagesRegistrySecretName=radius-ghcr-registry-creds --parameters appPermissionsBoundaryArn=${BOUNDARY_ARN}" "${CALLS}" ||
         fail "the recipe pack was not deployed with the aws-eks parameters"
     grep -qF "accountId: '123456789012'" "${work}/.radius/radius-environment.bicep" ||
         fail "the environment does not carry the AWS account"
@@ -188,8 +191,10 @@ test_deploys_the_pinned_pack_with_its_parameters() {
     if grep -q "kube-recipes/[a-z]*:latest" "${work}/.radius/radius-recipe-pack.bicep"; then
         fail "a Kubernetes recipe was left on its mutable latest tag"
     fi
-    grep -qF "kube-recipes/containers:pinned0123" "${work}/.radius/radius-recipe-pack.bicep" ||
-        fail "the containers recipe was not pinned"
+    grep -qF "kube-recipes/secrets:pinned0123" "${work}/.radius/radius-recipe-pack.bicep" ||
+        fail "the Kubernetes recipes were not pinned"
+    grep -qF "source: 'ghcr.io/radius-project/aws-eks-recipes/containers:${PACK_REF}'" "${work}/.radius/radius-recipe-pack.bicep" ||
+        fail "the containers recipe was not pinned to the pack's commit"
     grep -qF "source: 'ghcr.io/radius-project/aws-eks-recipes/mysqldatabases:${PACK_REF}'" "${work}/.radius/radius-recipe-pack.bicep" ||
         fail "the MySQL recipe was not pinned to the pack's commit"
     if grep -q "aws-eks-recipes/[a-z]*:latest" "${work}/.radius/radius-recipe-pack.bicep"; then
@@ -237,6 +242,9 @@ test_refuses_invalid_input_before_any_change AWS_EKS_CLUSTER_NAME "" "AWS_EKS_CL
 test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS "subnet-0a1, subnet-0b2" "RADIUS_SUBNET_IDS must be"
 test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS '["subnet-0a1"]' "RADIUS_SUBNET_IDS must be"
 test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS "" "RADIUS_SUBNET_IDS must be"
+test_refuses_invalid_input_before_any_change AWS_APP_BOUNDARY_ARN "" "AWS_APP_BOUNDARY_ARN must be"
+test_refuses_invalid_input_before_any_change AWS_APP_BOUNDARY_ARN "arn:aws:iam::210987654321:policy/radius/apps/4242/dev/radius-app-boundary-4242-dev" "AWS_APP_BOUNDARY_ARN must be"
+test_refuses_invalid_input_before_any_change AWS_APP_BOUNDARY_ARN "arn:aws:iam::123456789012:policy/radius/apps/4243/dev/radius-app-boundary-4243-dev" "AWS_APP_BOUNDARY_ARN must be"
 test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "main" "RECIPE_PACK_REF must be"
 test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "" "RECIPE_PACK_REF must be"
 test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "fedcba9876543210fedcba9876543210fedcba98" "RECIPE_PACK_REF must be"

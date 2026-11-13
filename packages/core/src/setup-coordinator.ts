@@ -32,6 +32,7 @@ export type SetupCoordinatorAwsResult =
       kind: "completed";
       roleArn: string;
       trustSubjects: readonly string[];
+      appBoundaryArn: string;
     }
   | { kind: "failed"; error: unknown }
   // A pause arrived during AWS setup, which recorded what it changed and ran
@@ -263,6 +264,7 @@ export async function runSetupCoordinator(
   const environmentRequest = record(request.environment);
   let awsRoleArn = "";
   let awsTrustSubjects: readonly string[] = [];
+  let awsAppBoundaryArn: string | undefined;
   // AWS setup takes the deploy identity lock and keeps it until Configure
   // environment has written the GitHub environment. Until then a delete that
   // checks which environments use a cluster could not see this one, and could
@@ -309,6 +311,7 @@ export async function runSetupCoordinator(
       }
       awsRoleArn = aws.roleArn;
       awsTrustSubjects = aws.trustSubjects;
+      awsAppBoundaryArn = aws.appBoundaryArn;
     }
     const clientId =
       setupResult && "clientId" in setupResult ?
@@ -327,6 +330,7 @@ export async function runSetupCoordinator(
         ...(awsTrustSubjects.length > 0 ?
           { trustSubjects: awsTrustSubjects }
         : {}),
+        appBoundaryArn: awsAppBoundaryArn,
         clientId:
           (typeof clientId === "string" && clientId) ||
           (typeof liveContext?.clientId === "string" && liveContext.clientId) ||

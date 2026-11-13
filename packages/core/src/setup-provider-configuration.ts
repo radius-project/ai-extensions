@@ -16,6 +16,8 @@ export interface SetupProviderConfigurationInput {
   subnetIds?: string;
   // AWS only: the GitHub OIDC subjects setup added to the role's trust.
   trustSubjects?: readonly string[];
+  // AWS only: the environment's app-role permissions boundary.
+  appBoundaryArn?: string;
 }
 
 export interface SetupProviderCredentialPorts {
@@ -155,6 +157,11 @@ export async function applySetupProviderConfiguration(
   const k8s = data.cluster || "";
 
   await ports.setEnvironmentVariable("AWS_ROLE_ARN", roleArn);
+  // The permissions boundary the containers Recipe puts on every app role.
+  await ports.setEnvironmentVariable(
+    "AWS_APP_BOUNDARY_ARN",
+    data.appBoundaryArn || ""
+  );
   await ports.setEnvironmentVariable("AWS_REGION", region);
   await ports.setEnvironmentVariable("AWS_ACCOUNT_ID", accountId);
   await ports.setEnvironmentVariable("AWS_EKS_CLUSTER_NAME", k8s);

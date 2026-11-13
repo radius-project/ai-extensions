@@ -68,6 +68,7 @@ const CLEANUP_ARTIFACT_TYPES = new Set([
   "github_environment_variable",
   "github_environment",
   "aws_access_entry",
+  "aws_app_boundary",
   "aws_role_policy",
   "aws_trust_subject",
   "aws_role",

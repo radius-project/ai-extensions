@@ -8,6 +8,9 @@ import {
   awsLockPolicyArn,
   awsRoleArn,
   awsRoleTags,
+  buildAwsAppBoundary,
+  buildAwsAppBoundaryPolicy,
+  buildAwsAppRolesPolicy,
   buildAwsDeployRoleName,
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
@@ -24,6 +27,7 @@ import {
   eksAuthenticationMode,
   githubOidcProviderArn,
   isAwsAccountId,
+  isAwsEnvironmentPolicyName,
   isAwsRegion,
   isAwsRoleName,
   isEksClusterName,
@@ -281,6 +285,38 @@ describe("names and identifiers", () => {
     expect(buildAwsEnvironmentPolicyName(42, `${maximum}a`, hash)).toMatch(
       /^radius-deploy-a+-[a-f0-9]{8}-42$/
     );
+  });
+
+  it("tells the repository's environment policies from other policies", () => {
+    expect(isAwsEnvironmentPolicyName("radius-deploy-dev-42", 42)).toBe(true);
+    expect(isAwsEnvironmentPolicyName("radius-deploy-dev-142", 42)).toBe(false);
+    expect(isAwsEnvironmentPolicyName("radius-app-roles-42", 42)).toBe(false);
+  });
+
+  it("names a unique boundary at the environment's app role path", () => {
+    expect(buildAwsAppBoundary("123456789012", 42, "Dev", hash)).toEqual({
+      path: "/radius/apps/42/dev/",
+      name: "radius-app-boundary-42-dev",
+      arn: "arn:aws:iam::123456789012:policy/radius/apps/42/dev/radius-app-boundary-42-dev"
+    });
+    const key = `qa-east-${hash("qa:east").slice(0, 8)}`;
+    expect(buildAwsAppBoundary("123456789012", 42, "qa:east", hash).path).toBe(
+      `/radius/apps/42/${key}/`
+    );
+    const maximum = "a".repeat(64);
+    expect(buildAwsAppBoundary("1", 42, maximum, hash).path).toBe(
+      `/radius/apps/42/${maximum}/`
+    );
+    const long = buildAwsAppBoundary(
+      "1",
+      9_007_199_254_740_991,
+      `${maximum}a`,
+      hash
+    );
+    expect(long.path).toMatch(/^\/radius\/apps\/\d+\/a+-[a-f0-9]{8}\/$/);
+    expect(long.path.split("/")[4]).toHaveLength(64);
+    // IAM's limit on a managed policy name.
+    expect(long.name.length).toBeLessThanOrEqual(128);
   });
 
   it.each([
@@ -808,10 +844,13 @@ describe("trust policy", () => {
 
 describe("permissions and provenance", () => {
   it.each(["us-east-2", "ap-southeast-7"])(
-    "fits 17 regional grants without account-email access in %s",
+    "fits 15 regional grants beside the app-roles policy without account-email access in %s",
     (region) => {
       const policy = buildAwsEnvironmentPermissionPolicy(region);
-      expect(JSON.stringify(policy).length * 17).toBeLessThanOrEqual(10240);
+      const appRoles = buildAwsAppRolesPolicy("123456789012", 9_999_999_999);
+      expect(
+        JSON.stringify(policy).length * 15 + JSON.stringify(appRoles).length
+      ).toBeLessThanOrEqual(10240);
       expect(JSON.stringify(policy)).not.toContain("account:GetPrimaryEmail");
     }
   );
@@ -885,6 +924,94 @@ describe("permissions and provenance", () => {
         }
       }
     });
+  });
+
+  it("bounds app roles to the environment's region and never IAM", () => {
+    const boundary = buildAwsAppBoundaryPolicy("123456789012", "us-west-2");
+    expect(boundary.Statement[0]).toEqual(
+      buildAwsEnvironmentPermissionPolicy("us-west-2").Statement[0]
+    );
+    expect(boundary.Statement).toHaveLength(2);
+    expect(JSON.stringify(boundary.Statement[1].Action)).not.toContain("iam:");
+  });
+
+  it("allows other-region Bedrock models only through a local inference profile", () => {
+    expect(
+      buildAwsAppBoundaryPolicy("123456789012", "us-west-2").Statement[1]
+    ).toEqual({
+      Effect: "Allow",
+      Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      Resource: "arn:aws:bedrock:*::foundation-model/*",
+      Condition: {
+        ArnLike: {
+          "bedrock:InferenceProfileArn":
+            "arn:aws:bedrock:us-west-2:123456789012:inference-profile/*"
+        }
+      }
+    });
+  });
+
+  it("lets the deploy role change app roles only while they keep a repository boundary", () => {
+    const [change, read, lookup, pass] = buildAwsAppRolesPolicy(
+      "123456789012",
+      42
+    ).Statement;
+    expect(change).toMatchObject({
+      Effect: "Allow",
+      Resource: "arn:aws:iam::123456789012:role/radius/apps/42/*",
+      Condition: {
+        ArnLike: {
+          "iam:PermissionsBoundary":
+            "arn:aws:iam::123456789012:policy/radius/apps/42/*"
+        }
+      }
+    });
+    expect(change.Action).toEqual(
+      expect.arrayContaining([
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteRole"
+      ])
+    );
+    expect(read).toMatchObject({
+      Effect: "Allow",
+      Resource: "arn:aws:iam::123456789012:role/radius/apps/42/*"
+    });
+    expect(read).not.toHaveProperty("Condition");
+    expect(read.Action).not.toContain("iam:CreateRole");
+    // Cloud Control looks up a role before it exists, by name without path.
+    expect(lookup).toEqual({
+      Effect: "Allow",
+      Action: "iam:GetRole",
+      Resource: "arn:aws:iam::123456789012:role/radius-app-*"
+    });
+    expect(pass).toEqual({
+      Effect: "Allow",
+      Action: "iam:PassRole",
+      Resource: "arn:aws:iam::123456789012:role/radius/apps/42/*",
+      Condition: {
+        StringEquals: { "iam:PassedToService": "pods.eks.amazonaws.com" }
+      }
+    });
+  });
+
+  it("denies lifting any app boundary, including other repositories'", () => {
+    const denies = buildAwsAppRolesPolicy("123456789012", 42).Statement.filter(
+      (statement) => statement.Effect === "Deny"
+    );
+    expect(denies).toEqual([
+      {
+        Effect: "Deny",
+        Action: "iam:DeleteRolePermissionsBoundary",
+        Resource: "arn:aws:iam::123456789012:role/radius/apps/*"
+      },
+      {
+        Effect: "Deny",
+        Action: "iam:*",
+        Resource: "arn:aws:iam::123456789012:policy/radius/apps/*"
+      }
+    ]);
   });
 
   it("skips malformed role tags", () => {

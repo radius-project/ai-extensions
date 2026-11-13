@@ -106,6 +106,8 @@ export type AwsEnvironmentSetupResult =
       ok: true;
       roleArn: string;
       subjects: readonly string[];
+      // The permissions boundary the containers Recipe puts on app roles.
+      appBoundaryArn: string;
     }
   | { ok: false; status: number; error: string; code: string }
   // A pause was requested. Every AWS change made before it is recorded on the
@@ -931,7 +933,12 @@ export function createAwsEnvironmentAccess<Operation>(
         awsTrustSubjects: trustSubjects
       });
       await dependencies.store.persist();
-      return { ok: true, roleArn: result.roleArn, subjects: trustSubjects };
+      return {
+        ok: true,
+        roleArn: result.roleArn,
+        subjects: trustSubjects,
+        appBoundaryArn: result.appBoundaryArn
+      };
     },
 
     async release(operation) {

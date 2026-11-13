@@ -179,8 +179,10 @@ describe("lostLocks", () => {
       PolicyName: `radius-lock-${ROLE}`,
       PolicyId: "ANPAHAND",
       Arn: LOCK_ARN,
+      Path: "/",
       CreateDate: "2026-11-09T12:00:00Z",
       Description: "",
+      Tags: [],
       document: {}
     });
     expect(lostLocks(s, "op-1", "crash-before", 0)).toEqual([

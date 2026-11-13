@@ -523,6 +523,19 @@ describe("radiusResolvedOutputRank", () => {
     ).toBe(1);
   });
 
+  it("ranks an EKS container's IAM role and Pod Identity association below its Deployment", () => {
+    const deployment = { type: "apps/Deployment" };
+    expect(
+      radiusSelectResolvedResource({
+        outputResources: [
+          { type: "AWS.IAM/Role" },
+          { type: "AWS.EKS/PodIdentityAssociation" },
+          deployment
+        ]
+      })
+    ).toBe(deployment);
+  });
+
   it("ranks everything else as a primary candidate", () => {
     expect(radiusResolvedOutputRank({ type: "apps/Deployment" })).toBe(2);
   });

@@ -10,13 +10,17 @@ import {
   requestStop,
   unresolvedProviderMutations
 } from "../../../src/operations.js";
-import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
+import {
+  awsAppBoundary,
+  awsEnvironmentPolicyName
+} from "../../../src/aws-deploy-role-name.js";
 import { disabledOperationStore } from "../../../src/operation-store.js";
 import { removeAwsDeployIdentityLock } from "../../../src/server/services/aws-deploy-identity-lock.js";
 import { releaseRecordedAwsLock } from "../../../src/server/services/aws-recorded-lock.js";
 import { isAwsCleanupArtifactType } from "../../../src/server/services/aws-setup-rollback.js";
 import type { FakeAwsSnapshot } from "../../support/aws/fake-aws.js";
 import {
+  ACCOUNT,
   assertSetupFinished,
   completedSetup,
   createAwsScenario,
@@ -396,7 +400,11 @@ describe.each(["new", "reused"] as const)(
         await completedSetup(s, "succeeded");
         const op = createDeleteOperation(s);
         await operations.persist();
-        // IAM refuses the release, and the deletion finishes without it.
+        // With the boundary already gone, the next delete-policy is the lock
+        // release. IAM refuses it, and the deletion finishes without it.
+        s.aws.policies.delete(
+          awsAppBoundary(ACCOUNT, s.github.repoId, ENVIRONMENT).arn
+        );
         s.aws.refuseOnce("iam delete-policy", "AccessDenied");
         await runDelete(s, op);
         expect(op.state).toBe("succeeded_with_warnings");

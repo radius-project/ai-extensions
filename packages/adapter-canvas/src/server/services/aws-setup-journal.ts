@@ -6,6 +6,7 @@ import {
   getOperationControl,
   type OperationControlRecord,
   recordAwsAccessEntry,
+  recordAwsAppBoundary,
   recordAwsRole,
   recordAwsRolePolicy,
   recordAwsTrustSubject,
@@ -33,6 +34,7 @@ export const AWS_SETUP_MUTATION_KINDS: readonly AwsSetupChange["kind"][] = [
   "aws_role.create",
   "aws_trust.add",
   "aws_role_policy.put",
+  "aws_app_boundary.create",
   "aws_access_entry.create"
 ];
 
@@ -98,6 +100,7 @@ const isSessionUnavailable = (error: unknown): boolean =>
 // there, by this very request. The operation tag on what is there tells.
 const CREATED_BY_A_RETRY: Partial<Record<AwsSetupChange["kind"], RegExp>> = {
   "aws_role.create": /\(EntityAlreadyExists\)/,
+  "aws_app_boundary.create": /\(EntityAlreadyExists\)/,
   "aws_access_entry.create": /\(ResourceInUseException\)/
 };
 
@@ -150,6 +153,8 @@ export function awsSetupChangeTarget(
       return `${scope}|${change.roleArn}#trust`;
     case "aws_role_policy.put":
       return `${scope}|${change.roleArn}#${change.policyName}`;
+    case "aws_app_boundary.create":
+      return `${scope}|${change.policyArn}`;
     case "aws_access_entry.create":
       return `${scope}|${change.region}:${change.cluster}:${change.roleArn}`;
   }
@@ -177,6 +182,8 @@ export function awsSetupChangeIntent(
       };
     case "aws_role_policy.put":
       return { ...base, roleId: change.roleId, policyName: change.policyName };
+    case "aws_app_boundary.create":
+      return { ...base, roleId: change.roleId, policyArn: change.policyArn };
     case "aws_access_entry.create":
       return {
         ...base,
@@ -226,6 +233,10 @@ export function awsSetupChangeFromIntent(
       const policyName = text(intent?.policyName);
       return policyName ? { kind, ...base, roleId, policyName } : null;
     }
+    case "aws_app_boundary.create": {
+      const policyArn = text(intent?.policyArn);
+      return policyArn ? { kind, ...base, roleId, policyArn } : null;
+    }
     case "aws_access_entry.create": {
       const cluster = text(intent?.cluster);
       const region = text(intent?.region);
@@ -238,9 +249,9 @@ export function awsSetupChangeFromIntent(
   }
 }
 
-// IAM lists a role's tags as Key and Value pairs.
-function roleTag(role: Record<string, unknown>, key: string): string {
-  const tags = Array.isArray(role.Tags) ? role.Tags : [];
+// IAM lists a role's or policy's tags as Key and Value pairs.
+function tagValue(resource: Record<string, unknown>, key: string): string {
+  const tags = Array.isArray(resource.Tags) ? resource.Tags : [];
   for (const tag of tags) {
     const entry = record(tag);
     if (entry.Key === key) return text(entry.Value);
@@ -249,10 +260,10 @@ function roleTag(role: Record<string, unknown>, key: string): string {
 }
 
 /**
- * Read AWS to learn whether `change` happened. A role or access entry is this
- * request's only when it carries `operationId` in its operation tag, which
- * nothing else writes. A read that fails throws, so the journal keeps the
- * outcome unknown instead of guessing.
+ * Read AWS to learn whether `change` happened. A role, boundary policy, or
+ * access entry is this request's only when it carries `operationId` in its
+ * operation tag, which nothing else writes. A read that fails throws, so the
+ * journal keeps the outcome unknown instead of guessing.
  */
 export async function reconcileAwsSetupChange(
   change: AwsSetupChange,
@@ -315,6 +326,34 @@ export async function reconcileAwsSetupChange(
     }
     return { state: "applied", value: "" };
   }
+  if (change.kind === "aws_app_boundary.create") {
+    const read = await runAws([
+      "iam",
+      "get-policy",
+      "--policy-arn",
+      change.policyArn,
+      "--output",
+      "json"
+    ]);
+    if (!succeeded(read)) {
+      if (/NoSuchEntity/.test(read.stderr)) {
+        return { state: "not_applied", evidence: "IAM has no such policy." };
+      }
+      throw new Error(`Could not read the policy: ${detail(read)}`);
+    }
+    const policy = record(parse(read.stdout).Policy);
+    return tagValue(policy, AWS_OPERATION_TAG) === operationId ?
+        {
+          state: "applied",
+          value: read.stdout,
+          providerId: text(policy.PolicyId) || null
+        }
+      : {
+          state: "not_applied",
+          evidence:
+            "The policy does not carry this setup's operation tag, so another request created it."
+        };
+  }
   const read = await runAws([
     "iam",
     "get-role",
@@ -331,7 +370,7 @@ export async function reconcileAwsSetupChange(
   }
   const role = record(parse(read.stdout).Role);
   if (change.kind === "aws_role.create") {
-    return roleTag(role, AWS_OPERATION_TAG) === operationId ?
+    return tagValue(role, AWS_OPERATION_TAG) === operationId ?
         {
           state: "applied",
           value: read.stdout,
@@ -402,6 +441,15 @@ export function recordAwsSetupChange(
         policyName: change.policyName
       });
       return;
+    case "aws_app_boundary.create":
+      recordAwsAppBoundary(operation, {
+        roleArn,
+        roleName,
+        roleId: change.roleId,
+        policyArn: change.policyArn,
+        policyId: text(record(parse(stdout).Policy).PolicyId)
+      });
+      return;
     case "aws_access_entry.create":
       recordAwsAccessEntry(operation, {
         roleArn,
@@ -458,6 +506,8 @@ export function createAwsSetupJournal<
         providerIdOf: (result) =>
           change.kind === "aws_role.create" ?
             text(record(parse(result.stdout).Role).RoleId) || null
+          : change.kind === "aws_app_boundary.create" ?
+            text(record(parse(result.stdout).Policy).PolicyId) || null
           : null,
         createdByOperation: () => true,
         acceptedEvidence: () => "AWS accepted the change.",

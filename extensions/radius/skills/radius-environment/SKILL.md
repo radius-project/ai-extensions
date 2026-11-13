@@ -110,10 +110,13 @@ The managed Contour Gateway supports HTTP and TLS routes. TCP and UDP routes req
 **AWS** — also set from the form for deploys (not read by verification):
 
 - `RADIUS_VPC_ID` (the EKS cluster's VPC), `RADIUS_SUBNET_IDS`
+- `AWS_APP_BOUNDARY_ARN`, set by setup, is the environment's permissions boundary under `policy/radius/apps/<repoId>/<env>/`, which the containers Recipe attaches to every IAM role it creates for an app.
 
 **AWS**, recorded for environment deletion (not read by any workflow):
 
 - Each environment's inline policy is named `radius-deploy-<env>-<repoId>`. Sanitized or truncated environment names also include an eight-character environment-name hash. Radius derives this name from GitHub's verified repository ID, not a saved policy-name variable.
+- The role also has one `radius-app-roles-<repoId>` inline policy per repository, which lets deployments manage IAM roles only under `role/radius/apps/<repoId>/` with one of the repository's boundaries and is removed with the repository's last environment on the role.
+- Setup tags the environment's permissions boundary with the repository ID, and deleting the environment deletes it unless an app role still uses it, in which case the completion message gives the command to delete it later.
 - `AWS_TRUST_SUBJECTS`: JSON array of the GitHub OIDC subjects setup added to the IAM role's trust policy. If a setup failed and the repository was renamed before the retry, the list keeps the subjects for both names. A rerun against the same `AWS_ROLE_ARN` keeps the subjects already saved, and stops if the value isn't a JSON array of subjects. Deleting the environment removes the listed subjects that name this repository by its ID, its current name, or an earlier name GitHub still redirects to it, so an older subject goes even if the repository was renamed. It keeps any other listed subject and warns. It also removes the subjects GitHub resolves for the environment now, which covers any that Repair added. Either way, it removes only subjects that name a repository and this environment. Any other subject, such as `repository_id:<id>` from a custom OIDC template, is presented by other environments or repositories too, so delete keeps it and warns when the role trusts it. It holds the deploy role's lock until the GitHub environment is deleted, so Repair can't add them back in between.
 
 Deleting an AWS environment also reads `AWS_REGION` and `AWS_EKS_CLUSTER_NAME` to find the cluster's access entry. It removes the entry only when Radius created the role for this repository (the role's `radius-repository-id` tag holds this repository's GitHub ID; a name tag doesn't count), setup tagged the entry, no other environment in the repository uses that cluster, and the role's trust lets in nothing but the subjects the repository's other environments recorded. Otherwise the entry is kept, and the completion message says why.
@@ -151,6 +154,7 @@ When setup or verification ends in failure and recovery stops, use the `radius-r
 
 - **AWS setup or deletion waits for "the lock on IAM role …"** — another Radius run is changing the same deploy role's trust policy, so this one waits. The lock is an IAM policy named `radius-lock-<role>`. After 10 minutes the canvas offers **Remove lock**. Use it only after confirming the other run has stopped, because two runs writing the trust policy at once can drop an environment's access.
 - **AWS setup stops with "not allowed iam:CreatePolicy"** — the signed-in AWS identity needs `iam:CreatePolicy`, `iam:GetPolicy`, and `iam:DeletePolicy` on `arn:aws:iam::<account>:policy/radius-lock-*` to take the deploy role's lock. Setup changed nothing.
+- **AWS setup stops with `aws-app-boundary-denied`** when the signed-in AWS identity lacks `iam:GetPolicy`, `iam:CreatePolicy`, `iam:TagPolicy`, `iam:GetPolicyVersion`, or `iam:DeletePolicy` on `arn:aws:iam::<account>:policy/radius/apps/*`.
 - **GHCR package bootstrap fails** — refresh the stored `gh` credential with `read:packages` and `write:packages`. The extension pushes a harmless retained `bootstrap` artifact with an `org.opencontainers.image.source` annotation, then requires the package to be private/internal and linked to the target repository. It never uses a public repository's `GITHUB_TOKEN` to create the package because that can make the package public.
 
 ## Verifying after creation
