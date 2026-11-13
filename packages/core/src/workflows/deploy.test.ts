@@ -353,13 +353,17 @@ jobs:
 `
 };
 
+function generateCommittedDeployWorkflows(): Record<string, string> {
+  return generateDeployWorkflow("prod", ".radius/app.bicep", {
+    [DEPLOY_DISPATCHER_FILE]: readCommittedTemplate(DEPLOY_DISPATCHER_FILE),
+    [DEPLOY_AZURE_FILE]: readCommittedTemplate(DEPLOY_AZURE_FILE),
+    [DEPLOY_AWS_FILE]: readCommittedTemplate(DEPLOY_AWS_FILE)
+  });
+}
+
 describe("the committed AWS deploy template", () => {
   it("resolves every placeholder and reads the pinned aws-eks pack", () => {
-    const files = generateDeployWorkflow("prod", ".radius/app.bicep", {
-      [DEPLOY_DISPATCHER_FILE]: readCommittedTemplate(DEPLOY_DISPATCHER_FILE),
-      [DEPLOY_AZURE_FILE]: readCommittedTemplate(DEPLOY_AZURE_FILE),
-      [DEPLOY_AWS_FILE]: readCommittedTemplate(DEPLOY_AWS_FILE)
-    });
+    const files = generateCommittedDeployWorkflows();
 
     expect(files[DEPLOY_AWS_FILE]).toContain(
       `RECIPE_PACK_URL: '${AWS_EKS_RECIPE_PACK_URL}'`
@@ -415,11 +419,7 @@ describe("generateDeployWorkflow YAML validity", () => {
 });
 
 describe("the committed deploy templates on an AKS cluster with Microsoft Entra integration", () => {
-  const files = generateDeployWorkflow("prod", ".radius/app.bicep", {
-    [DEPLOY_DISPATCHER_FILE]: readCommittedTemplate(DEPLOY_DISPATCHER_FILE),
-    [DEPLOY_AZURE_FILE]: readCommittedTemplate(DEPLOY_AZURE_FILE),
-    [DEPLOY_AWS_FILE]: readCommittedTemplate(DEPLOY_AWS_FILE)
-  });
+  const files = generateCommittedDeployWorkflows();
 
   it("gives the Azure workflow an AKS token in place of kubelogin", () => {
     expectAksTokenStep(files[DEPLOY_AZURE_FILE], RADIUS_REF);

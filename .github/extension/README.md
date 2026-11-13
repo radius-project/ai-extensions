@@ -176,22 +176,24 @@ The dispatcher routes to the matching provider workflow, which runs on `ubuntu-2
 
 ### AKS token errors
 
-When the Azure workflows cannot give the AKS kubeconfig a Microsoft Entra token, [`scripts/azure-aks-token.sh`](scripts/azure-aks-token.sh) fails the step with one annotation that starts with a stable code. It classifies Microsoft Entra failures by the HTTP status and the OAuth `error` code, and never prints the response body, the token, or the GitHub OIDC token. While commands run, the refresher reports the same codes as warnings and retries.
+When the Azure workflows cannot give the AKS kubeconfig a Microsoft Entra token, [`scripts/azure-aks-token.sh`](scripts/azure-aks-token.sh) fails the step with one annotation that starts with a stable code. The Azure OIDC refresher, [`scripts/refresh-azure-oidc-token.sh`](scripts/refresh-azure-oidc-token.sh), uses the same format on every Azure cluster. The token script classifies Microsoft Entra failures by the HTTP status and the OAuth `error` code, and never prints the response body, the token, or the GitHub OIDC token. While commands run, the refresher reports the same codes as warnings and retries.
 
-| Code                        | Meaning                                                                                        |
-|-----------------------------|------------------------------------------------------------------------------------------------|
-| `AKS_KUBECONFIG_MISSING`    | No file exists at `RADIUS_TARGET_KUBECONFIG`.                                                  |
-| `AKS_KUBECONFIG_UNREADABLE` | kubectl could not read one user and one cluster from the kubeconfig's current context.         |
-| `AKS_SERVER_ID_INVALID`     | The kubelogin `--server-id` value is not a valid application ID.                               |
-| `AKS_SETTINGS_INVALID`      | The client ID, tenant ID, or Microsoft Entra authority is missing or malformed.                |
-| `AKS_OIDC_UNAVAILABLE`      | The job could not get a GitHub OIDC token, usually because it lacks `id-token: write`.         |
-| `AKS_IDENTITY_REJECTED`     | Microsoft Entra returned `invalid_client` or `unauthorized_client` for the deploy identity.    |
-| `AKS_SERVER_APP_REJECTED`   | Microsoft Entra returned `invalid_scope` or `invalid_resource` for the AKS server application. |
-| `AKS_TOKEN_REQUEST_INVALID` | Microsoft Entra rejected the request with another HTTP 400 error.                              |
-| `AKS_TOKEN_UNAVAILABLE`     | Microsoft Entra returned no token, for example during an outage.                               |
-| `AKS_SECRET_UPDATE_FAILED`  | The renewed token could not be stored in the `target-kubeconfig` Secret on the control plane.  |
+| Code                        | Meaning                                                                                         |
+|-----------------------------|-------------------------------------------------------------------------------------------------|
+| `AKS_KUBECONFIG_MISSING`    | No file exists at `RADIUS_TARGET_KUBECONFIG`.                                                   |
+| `AKS_KUBECONFIG_UNREADABLE` | kubectl could not read one user and one cluster from the kubeconfig's current context.          |
+| `AKS_SERVER_ID_INVALID`     | The kubelogin `--server-id` value is not a valid application ID.                                |
+| `AKS_SETTINGS_INVALID`      | The client ID, tenant ID, or Microsoft Entra authority is missing or malformed.                 |
+| `AKS_OIDC_UNAVAILABLE`      | The job could not get a GitHub OIDC token, usually because it lacks `id-token: write`.          |
+| `AKS_IDENTITY_REJECTED`     | Microsoft Entra returned `invalid_client` or `unauthorized_client` for the deploy identity.     |
+| `AKS_SERVER_APP_REJECTED`   | Microsoft Entra returned `invalid_scope` or `invalid_resource` for the AKS server application.  |
+| `AKS_TOKEN_REQUEST_INVALID` | Microsoft Entra rejected the request with another HTTP 400 error.                               |
+| `AKS_ENTRA_UNREACHABLE`     | Microsoft Entra did not answer, or answered with an HTTP 5xx status.                            |
+| `AKS_TOKEN_UNAVAILABLE`     | Microsoft Entra returned no token for another reason, for example HTTP 429.                     |
+| `AKS_SECRET_UPDATE_FAILED`  | The renewed token could not be stored in the `target-kubeconfig` Secret on the control plane.   |
+| `AZURE_OIDC_UNAVAILABLE`    | The refresher could not get a GitHub OIDC token for the Radius pods. Reported on every cluster. |
 
-On every Azure cluster, the refresher reports `AZURE_OIDC_UNAVAILABLE` with the HTTP status when GitHub returns no OIDC token for the Radius pods. Canvas classifies a failed **Use a Microsoft Entra token for AKS** verification step by its code: `AKS_IDENTITY_REJECTED` is a federated credential problem, `AKS_TOKEN_UNAVAILABLE` with no response or an HTTP 5xx status means Microsoft Entra is unreachable, and every other code needs a fix before the environment can be created.
+When the **Use a Microsoft Entra token for AKS** verification step fails, Canvas classifies the failure by its code. `AKS_IDENTITY_REJECTED` is a federated credential problem, and `AKS_ENTRA_UNREACHABLE` means Microsoft Entra is unreachable. Every other code must be fixed before the environment can be created.
 
 ### Runner resource budget
 

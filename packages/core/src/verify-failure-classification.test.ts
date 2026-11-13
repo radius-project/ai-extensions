@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   classifyVerifyFailure,
@@ -171,32 +172,38 @@ describe("classifyVerifyFailure", () => {
     const classify = (log: string) =>
       classifyVerifyFailure(input({ failedSteps: tokenStep, log }));
 
+    it("keys on codes that the token script reports", () => {
+      const script = readFileSync(
+        new URL(
+          "../../../.github/extension/scripts/azure-aks-token.sh",
+          import.meta.url
+        ),
+        "utf8"
+      );
+      expect(script).toContain("report AKS_IDENTITY_REJECTED ");
+      expect(script).toContain("report AKS_ENTRA_UNREACHABLE ");
+    });
+
     it("classifies a rejected federated credential as oidc-trust", () => {
       expect(
         classify(
-          "##[error][AKS_IDENTITY_REJECTED] Microsoft Entra rejected the deploy identity's GitHub federated credential when Radius requested an AKS token (HTTP 401, invalid_client). Fix: Rerun environment setup."
+          "##[error][AKS_IDENTITY_REJECTED] Microsoft Entra rejected the deploy identity (HTTP 401, invalid_client). Fix: Rerun environment setup."
         )
       ).toEqual({ category: "oidc-trust" });
     });
 
-    it.each(["503", "000"])(
-      "classifies a token request that ends with HTTP %s as an unreachable cloud provider",
-      (status) => {
-        expect(
-          classify(
-            `##[error][AKS_TOKEN_UNAVAILABLE] Microsoft Entra did not return an AKS token (HTTP ${status}). Fix: Rerun the workflow.`
-          )
-        ).toEqual({
-          category: "cloud-unreachable",
-          component: "cloud provider"
-        });
-      }
-    );
+    it("classifies Microsoft Entra not answering as an unreachable cloud provider", () => {
+      expect(
+        classify(
+          "##[error][AKS_ENTRA_UNREACHABLE] Microsoft Entra did not answer the AKS token request (HTTP 503). Fix: Rerun the workflow."
+        )
+      ).toEqual({ category: "cloud-unreachable", component: "cloud provider" });
+    });
 
     it.each([
-      "##[error][AKS_TOKEN_UNAVAILABLE] Microsoft Entra did not return an AKS token (HTTP 200). Fix: Rerun the workflow.",
-      "##[error][AKS_SERVER_APP_REJECTED] Microsoft Entra rejected the AKS server application as a token scope (HTTP 400, invalid_scope). Fix: Confirm the cluster's integration.",
-      "##[error][AKS_OIDC_UNAVAILABLE] GitHub did not return an OIDC token for the AKS token exchange (HTTP 403). Fix: Rerun the workflow."
+      "##[error][AKS_TOKEN_UNAVAILABLE] Microsoft Entra did not return an AKS token (HTTP 403). Fix: Rerun the workflow.",
+      "##[error][AKS_SERVER_APP_REJECTED] Microsoft Entra rejected the AKS server application (HTTP 400, invalid_scope). Fix: Confirm the integration.",
+      "##[error][AKS_OIDC_UNAVAILABLE] GitHub did not return an OIDC token (HTTP 503). Fix: Rerun the workflow."
     ])(
       "keeps any other token failure generic, never a cluster problem: %s",
       (log) => {

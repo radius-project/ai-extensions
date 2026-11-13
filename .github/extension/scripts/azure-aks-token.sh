@@ -83,6 +83,7 @@ report() {
         AKS_IDENTITY_REJECTED) title="AKS token request rejected" ;;
         AKS_SERVER_APP_REJECTED) title="AKS server application rejected" ;;
         AKS_TOKEN_REQUEST_INVALID) title="AKS token request invalid" ;;
+        AKS_ENTRA_UNREACHABLE) title="Microsoft Entra unreachable" ;;
         AKS_TOKEN_UNAVAILABLE) title="AKS token unavailable" ;;
         AKS_SECRET_UPDATE_FAILED) title="AKS token not stored" ;;
     esac
@@ -217,6 +218,11 @@ request_token() {
             report AKS_TOKEN_REQUEST_INVALID \
                 "Microsoft Entra rejected the AKS token request (HTTP ${status}, ${error})." \
                 "Check that this GitHub environment's AZURE_CLIENT_ID and AZURE_TENANT_ID variables name the deploy identity, then rerun the workflow."
+            ;;
+        000:* | 5[0-9][0-9]:*)
+            report AKS_ENTRA_UNREACHABLE \
+                "Microsoft Entra did not answer the AKS token request (HTTP ${status})." \
+                "Rerun the workflow."
             ;;
         *)
             report AKS_TOKEN_UNAVAILABLE \

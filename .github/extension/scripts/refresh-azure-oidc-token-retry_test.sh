@@ -113,6 +113,8 @@ output="$(CURL_FAILURES="1" bash "${SCRIPT}" --watch 3 2>&1)"
     fail "expected a 15-second retry after one failure, got '$(sleeps)'"
 [[ "$(grep -c '^::warning::Azure OIDC token refresh failed; retrying\.$' \
     <<<"${output}")" == "1" ]] || fail "expected one failure warning, got: ${output}"
+[[ "$(grep -c '^::warning title=GitHub OIDC token unavailable::\[AZURE_OIDC_UNAVAILABLE\] .*(HTTP 503)\. Fix: ' \
+    <<<"${output}")" == "1" ]] || fail "expected one coded warning with the HTTP status, got: ${output}"
 [[ "$(grep -c '^Azure OIDC token refreshed\.$' <<<"${output}")" == "2" ]] ||
     fail "expected two refresh messages after the retry, got: ${output}"
 expected_updates=$'azure-identity-token=token-2\nazure-identity-token=token-3'

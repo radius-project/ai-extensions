@@ -442,7 +442,12 @@ Entra unauthorized_client|400|{"error":"unauthorized_client","error_description"
 Entra invalid_scope|400|{"error":"invalid_scope","error_description":"AADSTS70011: The provided value for scope is not valid."}|AKS_SERVER_APP_REJECTED
 Entra invalid_request with a misleading description|400|{"error":"invalid_request","error_description":"AADSTS90002: invalid_client invalid_scope"}|AKS_TOKEN_REQUEST_INVALID
 Entra 400 with an unusable error field|400|{"error":"Bad::Code\n::error::x"}|AKS_TOKEN_REQUEST_INVALID
-Entra outage|503|<html>AADSTS service unavailable</html>|AKS_TOKEN_UNAVAILABLE
+Entra outage|503|<html>AADSTS service unavailable</html>|AKS_ENTRA_UNREACHABLE
+Entra lowest server error|500|{"error":"server_error"}|AKS_ENTRA_UNREACHABLE
+Entra highest server error|599||AKS_ENTRA_UNREACHABLE
+Entra not reached|000||AKS_ENTRA_UNREACHABLE
+Entra throttling|429|{"error":"temporarily_unavailable"}|AKS_TOKEN_UNAVAILABLE
+Entra 401 without a known error|401|{"error":"invalid_token"}|AKS_TOKEN_UNAVAILABLE
 Entra success without a token|200|{"token_type":"Bearer","expires_in":3599}|AKS_TOKEN_UNAVAILABLE
 CASES
 
@@ -518,14 +523,14 @@ run bash "${REFRESH_SCRIPT}" --watch 1
 if grep -q '^::error' <<<"${OUTPUT}"; then
     fail "refresher retry: a retried failure was reported as an error: ${OUTPUT}"
 fi
-grep -q '^::warning title=AKS token unavailable::\[AKS_TOKEN_UNAVAILABLE\] ' <<<"${OUTPUT}" ||
+grep -q '^::warning title=Microsoft Entra unreachable::\[AKS_ENTRA_UNREACHABLE\] ' <<<"${OUTPUT}" ||
     fail "refresher retry: expected a coded warning: ${OUTPUT}"
 cmp -s "${CASE_DIR}/before" "${RADIUS_TARGET_KUBECONFIG}" || fail "refresher retry: kubeconfig changed"
 pass "a failed refresh while watching is a coded warning"
 
 run bash "${REFRESH_SCRIPT}" --prepare
 [[ "${STATUS}" != "0" ]] || fail "refresher prepare failure: expected a failed step"
-expect_one_annotation error AKS_TOKEN_UNAVAILABLE "refresher prepare failure"
+expect_one_annotation error AKS_ENTRA_UNREACHABLE "refresher prepare failure"
 pass "a failed refresh before commands run fails with a coded error"
 
 new_case
@@ -537,7 +542,7 @@ if grep -q '^secret target-kubeconfig$' "${FAKE_APPLIED}"; then
 fi
 pass "the refresher leaves target-kubeconfig alone without an AKS token"
 
-converted_case
+new_case
 export FAKE_OIDC_STATUS=403
 run bash "${REFRESH_SCRIPT}" --prepare
 [[ "${STATUS}" == "1" ]] || fail "refresher OIDC failure: exit ${STATUS}"
@@ -647,7 +652,7 @@ for workflow in run-rad-commands-azure.yml delete-azure.yml delete-environment-a
     export FAKE_ENTRA_STATUS=503
     run bash -e "${step_script}"
     [[ "${STATUS}" != "0" ]] || fail "${workflow} failed renewal: the step succeeded"
-    expect_one_annotation error AKS_TOKEN_UNAVAILABLE "${workflow} failed renewal"
+    expect_one_annotation error AKS_ENTRA_UNREACHABLE "${workflow} failed renewal"
     [[ ! -s "${FAKE_APPLIED}" && "$(calls_to 'kubectl rollout')" == "0" ]] ||
         fail "${workflow} failed renewal: changed the Secret or restarted consumers"
     cmp -s "${CASE_DIR}/before" "${RADIUS_TARGET_KUBECONFIG}" ||

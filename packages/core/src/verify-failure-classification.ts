@@ -79,9 +79,8 @@ const CREDENTIAL_STEP =
 // script prints one annotation with a stable code, so it is classified by that
 // code instead of by the cluster-step patterns that its name also matches.
 const AKS_TOKEN_STEP = /use\s+a\s+microsoft\s+entra\s+token\s+for\s+aks/i;
-const AKS_TOKEN_TRUST_REJECTION = /\[AKS_IDENTITY_REJECTED\]/;
-const AKS_TOKEN_OUTAGE =
-  /\[AKS_TOKEN_UNAVAILABLE\][^\n]*\(HTTP (?:000|5\d\d)\)/;
+const AKS_IDENTITY_REJECTED = "[AKS_IDENTITY_REJECTED]";
+const AKS_ENTRA_UNREACHABLE = "[AKS_ENTRA_UNREACHABLE]";
 
 // Kubernetes cluster access step.
 const CLUSTER_STEP = /verify\s+(?:aks|eks)\s+access|kubelogin|\b(?:aks|eks)\b/i;
@@ -189,14 +188,14 @@ export function classifyVerifyFailure(
   }
 
   // 5. The AKS token exchange failed. Microsoft Entra refusing the federated
-  //    credential is a trust problem (4.3), and no response or a server error
+  //    credential is a trust problem (4.3), and Microsoft Entra not answering
   //    is an unreachable provider (4.5). Any other failure stays generic, so
   //    it is not offered as a bypass.
   if (matchesStep(failedSteps, AKS_TOKEN_STEP)) {
-    if (AKS_TOKEN_TRUST_REJECTION.test(logText)) {
+    if (logText.includes(AKS_IDENTITY_REJECTED)) {
       return { category: "oidc-trust" };
     }
-    if (AKS_TOKEN_OUTAGE.test(logText)) {
+    if (logText.includes(AKS_ENTRA_UNREACHABLE)) {
       return { category: "cloud-unreachable", component: "cloud provider" };
     }
     return { category: "generic" };
