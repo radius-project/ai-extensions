@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   boundedDiagnostic,
@@ -117,6 +118,29 @@ describe("command failure diagnostics", () => {
     });
     expect(JSON.stringify(failure.cause)).not.toContain("secret-dir");
     expect(boundedDiagnostic(failure.message)).not.toContain("secret-dir");
+  });
+
+  it("omits the invocation from a real silent subprocess failure", async () => {
+    const failure = await new Promise<CommandFailure>((resolve) => {
+      execFile(
+        process.execPath,
+        [
+          "-e",
+          "process.exit(3)",
+          "--",
+          "--kubeconfig",
+          "/tmp/secret-dir/config"
+        ],
+        (error, _stdout, stderr) =>
+          resolve(new CommandFailure(error!, stderr, 10000, []))
+      );
+    });
+    expect(failure.code).toBe(3);
+    expect(failure.timedOut).toBe(false);
+    expect(failure.message).toContain("secret-dir");
+    expect(boundedDiagnostic(failure.message)).not.toContain("secret-dir");
+    expect(JSON.stringify(failure.cause)).not.toContain("secret-dir");
+    expect(failure.stderr).toBe("");
   });
 
   it("keeps long caller-visible messages whole while bounding saved fields", () => {
