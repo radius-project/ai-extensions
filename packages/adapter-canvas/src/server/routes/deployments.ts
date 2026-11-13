@@ -93,6 +93,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  id(): string;
   ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
@@ -158,7 +159,8 @@ export interface DeploymentsDependencies {
     repo: string,
     workflowFile: string,
     sinceMs: number,
-    knownId: number | string | null
+    knownId: number | string | null,
+    correlationId?: string
   ): Promise<number | string | null>;
   // Resolves rather than rejects on a non-zero exit, so the handler can inspect
   // stderr and choose the failure message.
@@ -754,6 +756,15 @@ export async function handleDeleteDeployment(
       (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
     );
     const dispatchedAt = Date.now();
+    const correlationId = `dep-${dependencies.id()}`;
+    if (
+      !/^dep-[a-zA-Z0-9-]{1,64}$/.test(correlationId) ||
+      `Radius - Delete ${environment} [radius:v1 app=${application}] ${correlationId}`
+        .length > 256
+    )
+      throw new Error(
+        "The delete identity cannot fit the supported run-title contract. No workflow was dispatched."
+      );
     const dispatchArgs = [
       "workflow",
       "run",
@@ -762,6 +773,8 @@ export async function handleDeleteDeployment(
       "environment=" + environment,
       "-f",
       "application=" + application,
+      "-f",
+      "correlation_id=" + correlationId,
       ...(force ? ["-f", "force=true"] : []),
       "--repo",
       repo
@@ -773,7 +786,7 @@ export async function handleDeleteDeployment(
     // from the default branch. Give that the same bounded retry the
     // not-yet-registered workflow gets, rather than reporting a failure the
     // user cannot act on.
-    const dispatchDelays = justCreated || force ? [0, 2000, 5000] : [0];
+    const dispatchDelays = [0, 2000, 5000];
     if (justCreated) await sleep(dependencies, 3000);
     for (const delay of dispatchDelays) {
       // `> 0` vs `> 1` is equivalent over the fixed delay set {0, 2000, 5000}:
@@ -787,7 +800,7 @@ export async function handleDeleteDeployment(
       // stop retrying.
       if (
         !/not found|HTTP 404/i.test(dispatch.stderr || "") &&
-        !(force && /unexpected inputs?|HTTP 422/i.test(dispatch.stderr || ""))
+        !/unexpected inputs?/i.test(dispatch.stderr || "")
       ) {
         break;
       }
@@ -814,10 +827,12 @@ export async function handleDeleteDeployment(
       // An exhausted unexpected-input retry is a stale dispatcher, not a
       // permissions or Actions problem, so it says so instead of sending the
       // user to check settings that are already correct.
-      const staleForceInput = force && /unexpected inputs?|HTTP 422/i.test(de);
+      const staleForceInput = /unexpected inputs?/i.test(de);
       const hint =
         staleForceInput ?
-          " GitHub is still rejecting the `force` input, which means the copy" +
+          " GitHub is still rejecting " +
+          (force ? "the `force` input" : "the workflow inputs") +
+          ", which means the copy" +
           " of " +
           DELETE_APP_DISPATCHER_FILE +
           " on the default branch of " +
@@ -865,7 +880,8 @@ export async function handleDeleteDeployment(
         repo,
         DELETE_APP_DISPATCHER_FILE,
         dispatchedAt,
-        null
+        null,
+        correlationId
       );
       if (runId)
         runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;

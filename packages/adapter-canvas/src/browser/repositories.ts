@@ -13,7 +13,14 @@
 
 import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
 import { hasClassToken } from "./html.js";
-import { isRecord, readArray, readRecord, readString } from "./json.js";
+import {
+  isRecord,
+  readArray,
+  readBoolean,
+  readNumber,
+  readRecord,
+  readString
+} from "./json.js";
 import type { EntryScope } from "./lifecycle.js";
 import type {
   BrowserContext,
@@ -71,6 +78,13 @@ export interface DeploymentInfo {
   runUrl: string;
   deploymentId?: string;
   identity?: { state: "known" } | { state: "unavailable"; reason: string };
+  recovery?: {
+    runId: number;
+    runAttempt: number;
+    revision: string;
+    confirmation: string;
+    canMarkCleanupComplete: boolean;
+  };
 }
 
 export interface DeploymentListing {
@@ -172,12 +186,40 @@ export function parseDeploymentListing(payload: unknown): DeploymentInfo[] {
         app.trim() !== "" &&
         readString(identity, "application").trim().toLowerCase() ===
           app.trim().toLowerCase();
+      const recovery = readRecord(entry, "recovery");
+      const runId = readNumber(recovery, "runId");
+      const runAttempt = readNumber(recovery, "runAttempt");
+      const revision = readString(recovery, "revision");
+      const confirmation = readString(recovery, "confirmation");
+      const parsedRecovery =
+        (
+          runId !== null &&
+          runAttempt !== null &&
+          Number.isSafeInteger(runId) &&
+          runId > 0 &&
+          Number.isSafeInteger(runAttempt) &&
+          runAttempt > 0 &&
+          /^[a-f0-9]{64}$/.test(revision) &&
+          confirmation !== ""
+        ) ?
+          {
+            runId,
+            runAttempt,
+            revision,
+            confirmation,
+            canMarkCleanupComplete: readBoolean(
+              recovery,
+              "canMarkCleanupComplete"
+            )
+          }
+        : undefined;
       return {
         app: known ? app : "",
         environment: readString(entry, "environment"),
         status: readString(entry, "status"),
         runUrl: readString(entry, "runUrl"),
         deploymentId: readString(entry, "deploymentId"),
+        ...(parsedRecovery ? { recovery: parsedRecovery } : {}),
         identity:
           known ?
             { state: "known" }

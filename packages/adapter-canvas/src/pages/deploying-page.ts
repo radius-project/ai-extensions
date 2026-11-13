@@ -6,7 +6,10 @@ import { radiusMark } from "../ui.js";
 import { browserScriptTag } from "../browser/scripts.js";
 import { DEPLOYING_PAGE_STATE_ID } from "./browser-state-ids.js";
 import { pageShell } from "./shell.js";
-import { DELETE_DEPLOYMENT_DIALOG_HTML } from "./fragments.js";
+import {
+  ABANDON_DEPLOYMENT_DIALOG_HTML,
+  DELETE_DEPLOYMENT_DIALOG_HTML
+} from "./fragments.js";
 import { confirmDialogMarkup } from "./environment/confirm-dialog.js";
 import { renderPageState } from "./page-state.js";
 
@@ -88,6 +91,7 @@ function deployLandingView(state: CanvasState): string {
      "deleting" transition is shown inline on the row (status → Deleting…),
      not as a blocking modal. -->
 ${DELETE_DEPLOYMENT_DIALOG_HTML}
+${ABANDON_DEPLOYMENT_DIALOG_HTML}
 
 <!-- The lighter shared confirmation, used to ask whether a delete the control
      plane refused should be forced. Forcing follows a delete the user already

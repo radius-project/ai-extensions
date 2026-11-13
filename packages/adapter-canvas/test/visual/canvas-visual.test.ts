@@ -924,6 +924,66 @@ test.describe("Radius Canvas visual baselines", () => {
       await screenshot(page, `vi-09-wizard-github-callout-${theme}.png`);
     });
 
+    test(`exact-run cleanup recovery and confirmation in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      await seed(canvas);
+      await page.route("**/api/list-deployments**", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            deployments: [
+              {
+                app: "",
+                environment: "fixture-environment",
+                status: "failed",
+                deploymentId: "7",
+                runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`,
+                identity: {
+                  state: "unavailable",
+                  reason: "Application identity artifact expired."
+                },
+                recovery: {
+                  runId: 42,
+                  runAttempt: 1,
+                  revision: "a".repeat(64),
+                  confirmation: `${REPOSITORY}/run-42@1/fixture-environment`,
+                  canMarkCleanupComplete: true
+                }
+              }
+            ]
+          })
+        })
+      );
+      await gotoVisual(page, canvas, "deploying", theme);
+      const action = page.getByRole("button", {
+        name: "Mark cleanup complete",
+        exact: true
+      });
+      await expect(action).toBeVisible();
+      await screenshot(page, `exact-run-cleanup-deployments-${theme}.png`);
+      await action.click();
+      const dialog = page.locator("#deploy-abandon-modal");
+      await dialog
+        .getByRole("button", { name: "I completed cleanup outside Canvas" })
+        .click();
+      await dialog
+        .getByRole("button", {
+          name: "I understand Canvas did not verify or perform cleanup"
+        })
+        .click();
+      await dialog.locator("input").fill("incorrect-confirmation");
+      await expect(
+        dialog.getByRole("button", {
+          name: "Mark cleanup complete",
+          exact: true
+        })
+      ).toBeDisabled();
+      await screenshot(page, `exact-run-cleanup-confirmation-${theme}.png`);
+    });
+
     test(`VI-10 delete dialog resource list in ${theme}`, async ({
       page,
       canvas

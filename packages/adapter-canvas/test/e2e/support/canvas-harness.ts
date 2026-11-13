@@ -1027,9 +1027,9 @@ export function defaultFakeCliScenario(): FakeCliScenario {
           "api",
           `/repos/${REPOSITORY}/actions/runs/1`,
           "--jq",
-          '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
+          '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "") + "\\t" + ((.run_attempt // 0) | tostring) + "\\t" + (.head_sha // "") + "\\t" + (.display_title // "") + "\\t" + ((.id // 0) | tostring) + "\\t" + (.repository.full_name // "") + "\\t" + (.event // "")'
         ],
-        stdout: ".github/workflows/run-rad-commands.yml\tcompleted\tsuccess"
+        stdout: `.github/workflows/run-rad-commands.yml\tcompleted\tsuccess\t1\t${"a".repeat(40)}\t\t1\t${REPOSITORY}\tworkflow_dispatch`
       },
       {
         tool: "gh",

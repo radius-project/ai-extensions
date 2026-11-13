@@ -1142,6 +1142,37 @@ describe("planned selectors", () => {
 });
 
 describe("deployment listings", () => {
+  it.each([
+    ["valid", {}],
+    ["missing-id", { runId: null }],
+    ["missing-attempt", { runAttempt: null }],
+    ["fractional-id", { runId: 1.5 }],
+    ["zero-id", { runId: 0 }],
+    ["fractional-attempt", { runAttempt: 1.5 }],
+    ["zero-attempt", { runAttempt: 0 }],
+    ["bad-revision", { revision: "wrong" }],
+    ["empty-confirmation", { confirmation: "" }]
+  ])("only retains safely bound recovery metadata: %s", (name, override) => {
+    const recovery = {
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      confirmation: "org/app/run-42@1/dev",
+      canMarkCleanupComplete: true,
+      ...override
+    };
+    const rows = parseDeploymentListing({
+      deployments: [
+        {
+          app: "",
+          environment: "dev",
+          status: "failed",
+          recovery
+        }
+      ]
+    });
+    expect(rows[0].recovery).toEqual(name === "valid" ? recovery : undefined);
+  });
   it("retains unknown application rows while dropping entries without an environment", () => {
     expect(
       parseDeploymentListing({

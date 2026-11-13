@@ -77,6 +77,16 @@ export function createDeploymentWorkflows(
         inputError
       );
       if (input.type !== "string") throw new Error(inputError);
+      const application = workflowRecord(
+        workflowRecord(
+          workflowRecord(workflowRecord(workflow.on)[trigger]).inputs
+        ).application,
+        inputError
+      );
+      if (application.type !== "string")
+        throw new Error(
+          `${file} must accept the string application input. Update the Radius workflows.`
+        );
       return workflow;
     };
     const dispatcher = await readWorkflow(DEPLOY_DISPATCHER_FILE);
@@ -89,7 +99,9 @@ export function createDeploymentWorkflows(
       workflowRecord(dispatchInputs.correlation_id, correlationError).type !==
         "string" ||
       dispatcher["run-name"] !==
-        "Radius - Deploy ${{ inputs.environment }} ${{ inputs.correlation_id }}"
+        "Radius - Deploy ${{ inputs.environment }} [radius:v1 app=${{ inputs.application || 'unknown' }}] ${{ inputs.correlation_id }}" ||
+      workflowRecord(dispatchInputs.application, correlationError).type !==
+        "string"
     )
       throw new Error(correlationError);
     const jobs = Object.values(workflowRecord(dispatcher.jobs)).map((value) =>
@@ -103,7 +115,9 @@ export function createDeploymentWorkflows(
         !routes.length ||
         routes.some(
           (job) =>
-            workflowRecord(job.with).app_file !== "${{ inputs.app_file }}"
+            workflowRecord(job.with).app_file !== "${{ inputs.app_file }}" ||
+            workflowRecord(job.with).application !==
+              "${{ inputs.application || 'unknown' }}"
         )
       )
         throw new Error(`The dispatcher must forward app_file to ${file}.`);
@@ -124,8 +138,34 @@ export function createDeploymentWorkflows(
         if (job.env && "APP_FILE" in workflowRecord(job.env))
           throw new Error(`${file} overrides APP_FILE at job scope.`);
         if (!Array.isArray(job.steps)) continue;
+        const preflight = workflowRecord(job.steps[1]);
+        if (
+          preflight.id !== "identity" ||
+          typeof preflight.uses !== "string" ||
+          !preflight.uses.startsWith(
+            "radius-project/ai-extensions/.github/extension/actions/validate-deployment-identity@"
+          ) ||
+          preflight.if !== undefined ||
+          workflowRecord(preflight.with).application !==
+            "${{ inputs.application || 'unknown' }}" ||
+          workflowRecord(preflight.with)["app-file"] !==
+            "${{ env.APP_FILE }}" ||
+          workflowRecord(preflight.with)["rad-commands"] !==
+            "${{ inputs.rad_commands || vars.RADIUS_RAD_COMMANDS }}"
+        )
+          throw new Error(
+            `${file} must validate declared identity immediately after checkout and before cloud work.`
+          );
         for (const value of job.steps) {
           const step = workflowRecord(value);
+          if (
+            typeof step.uses === "string" &&
+            step.uses.includes("/actions/teardown@") &&
+            step.if !== "${{ always() && steps.identity.outcome == 'success' }}"
+          )
+            throw new Error(
+              `${file} must not run teardown after identity preflight refuses.`
+            );
           if (step.env && "APP_FILE" in workflowRecord(step.env))
             throw new Error(`${file} overrides APP_FILE at step scope.`);
           if (

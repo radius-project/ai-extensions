@@ -50,6 +50,10 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
   const observations = new Map<string, DeploymentInvocation<State>>();
   const reservations = new Map<string, DeploymentReservation>();
   const tasks = new Map<DeploymentInvocation<State>, Set<Promise<unknown>>>();
+  const deliveries = new Map<
+    DeploymentInvocation<State>,
+    Set<Promise<unknown>>
+  >();
   const admissions = new Map<Promise<unknown>, string>();
   const controllers = new Map<DeploymentInvocation<State>, AbortController>();
   const subscribers = new Map<
@@ -241,17 +245,18 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
 
   function run<Result>(
     invocation: DeploymentInvocation<State>,
-    work: () => Promise<Result>
+    work: () => Promise<Result>,
+    tracked = tasks
   ): Promise<Result> {
     if (stopped || !isCurrent(invocation))
       return Promise.reject(
         new Error("Deployment invocation is no longer active.")
       );
-    const pending = tasks.get(invocation) ?? new Set<Promise<unknown>>();
-    tasks.set(invocation, pending);
+    const pending = tracked.get(invocation) ?? new Set<Promise<unknown>>();
+    tracked.set(invocation, pending);
     // Register before entering caller code so synchronous callbacks see active work.
     const promise = Promise.resolve().then(() => {
-      if (stopped || !isCurrent(invocation))
+      if (stopped || invocation.signal.aborted || !isCurrent(invocation))
         throw new Error("Deployment invocation stopped before execution.");
       return work();
     });
@@ -259,7 +264,7 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     const settled = promise.finally(() => {
       pending.delete(promise);
       if (!pending.size) {
-        tasks.delete(invocation);
+        tracked.delete(invocation);
         if (invalidated.has(invocation)) retire(invocation);
       }
       publish(invocation);
@@ -328,7 +333,9 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
       await Promise.race([
         Promise.allSettled([
           ...admissions.keys(),
-          ...[...tasks.values()].flatMap((pending) => [...pending])
+          ...[...tasks.values(), ...deliveries.values()].flatMap((pending) => [
+            ...pending
+          ])
         ]),
         new Promise<void>((resolve) => {
           timer = setTimeout(resolve, timeoutMs);
@@ -339,7 +346,10 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     }
     const pending = [
       ...admissions.values(),
-      ...[...tasks.keys()].map((invocation) => invocation.observationId)
+      ...[...tasks.keys()].map((invocation) => invocation.observationId),
+      ...[...deliveries.keys()].map(
+        (invocation) => `delivery:${invocation.observationId}`
+      )
     ];
     return { complete: pending.length === 0, pending };
   }
@@ -353,7 +363,14 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     release,
     retire,
     invalidate,
-    run,
+    run: <Result>(
+      invocation: DeploymentInvocation<State>,
+      work: () => Promise<Result>
+    ) => run(invocation, work),
+    observeDelivery: <Result>(
+      invocation: DeploymentInvocation<State>,
+      work: () => Promise<Result>
+    ) => run(invocation, work, deliveries),
     trackAdmission,
     subscribe,
     publish,
@@ -364,6 +381,7 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     isCurrent,
     isActive,
     hasActiveWork: () => tasks.size > 0 || admissions.size > 0,
+    hasPendingDelivery: () => deliveries.size > 0,
     isShuttingDown: () => stopped,
     shutdown
   };

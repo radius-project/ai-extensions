@@ -71,6 +71,48 @@ async function harness(
 }
 
 describe("deployment delivery through registered SDK handlers", () => {
+  it.each(["repair", "notice"] as const)(
+    "does not exclude recovery mutations while a registered SDK %s send is unresolved",
+    async (kind) => {
+      const { sdk, runtime } = await harness(kind);
+      const sent = createDeferred<void>();
+      const delivered = createDeferred<void>();
+      vi.mocked(sdk.session.send).mockImplementation(async () => {
+        expect(runtime.owner.hasActiveWork()).toBe(false);
+        sent.resolve();
+        await delivered.promise;
+      });
+      try {
+        const invocation = await startDeployment(sdk);
+        await sent.promise;
+        expect(runtime.owner.hasPendingDelivery()).toBe(true);
+        for (const operation of ["delete", "abandon", "deploy"] as const) {
+          const reservation = runtime.owner.reserve(
+            invocation.target,
+            operation
+          );
+          expect(reservation).not.toBeNull();
+          if (reservation) runtime.owner.release(reservation);
+        }
+        expect(runtime.owner.retire(invocation)).toBe(true);
+        const stopping = await runtime.owner.shutdown(0);
+        expect(stopping).toEqual({
+          complete: false,
+          pending: [`delivery:${invocation.observationId}`]
+        });
+        delivered.resolve();
+        await vi.waitFor(() =>
+          expect(runtime.owner.hasPendingDelivery()).toBe(false)
+        );
+        expect(sdk.session.send).toHaveBeenCalledOnce();
+        expect(invocation.state.deployRepairing).not.toBe(true);
+      } finally {
+        delivered.resolve();
+        await sdk.extension.shutdown("test");
+      }
+    }
+  );
+
   it.each([
     [
       "model-preflight-failed",
@@ -204,8 +246,13 @@ describe("deployment delivery through registered SDK handlers", () => {
       try {
         const invocation = await startDeployment(sdk);
         await vi.waitFor(() =>
-          expect(runtime.owner.hasActiveWork()).toBe(false)
+          expect(
+            kind === "repair" ?
+              invocation.state.deployHandoffState
+            : invocation.state.deployNoticeState
+          ).toBe("delivered")
         );
+        expect(runtime.owner.hasActiveWork()).toBe(false);
         const evidence = {
           error: "Model failed",
           deployRunUrl: "https://github.com/acme/app/actions/runs/42"

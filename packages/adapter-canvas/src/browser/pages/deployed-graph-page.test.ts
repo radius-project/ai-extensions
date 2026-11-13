@@ -2074,67 +2074,97 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
   });
 
-  it("offers stop tracking only after a failed teardown and sends its identity", async () => {
-    const {
-      browser,
-      action,
-      stopTrackingAction,
-      appSelect,
-      envSelect,
-      inlineStatus
-    } = fixture({
-      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
-    });
-    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
-    browser.net.handle("/api/abandon-deployment", () =>
-      jsonResponse({ outcome: "abandoned" })
-    );
-    initializeDeployedGraphPage(
-      browser.context,
-      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
-    );
-    await flushPromises();
+  it.each([false, true])(
+    "offers stop tracking after failed teardown with exact-run evidence: %s",
+    async (scoped) => {
+      const {
+        browser,
+        action,
+        stopTrackingAction,
+        appSelect,
+        envSelect,
+        inlineStatus
+      } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      });
+      const { createDialog, confirm, wasOpened } = createConfirmingDialog();
+      const recovery = {
+        runId: 42,
+        runAttempt: 1,
+        revision: "a".repeat(64),
+        confirmation: "app/dev",
+        canMarkCleanupComplete: true
+      };
+      const runUrl = "https://github.com/octo/app/actions/runs/42";
+      if (scoped)
+        browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+          jsonResponse({
+            deployments: [
+              {
+                app: "app",
+                environment: "dev",
+                status: "delete-failed",
+                identity: { state: "known", application: "app" },
+                deploymentId: "101",
+                runUrl,
+                recovery
+              }
+            ]
+          })
+        );
+      browser.net.handle("/api/abandon-deployment", () =>
+        jsonResponse({ outcome: "abandoned" })
+      );
+      initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
 
-    expect(action.dataset.mode).toBe("delete");
-    expect(action.textContent).toBe("Retry Delete");
-    expect(stopTrackingAction.textContent).toBe("Stop tracking deployment");
-    expect(stopTrackingAction.style.display).toBe("");
-    expect(createDialog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        variant: "abandon",
-        modalId: "deploy-abandon-modal"
-      })
-    );
-    appSelect.value = "app";
-    envSelect.value = "dev";
-    stopTrackingAction.dispatch("click");
-    expect(wasOpened()).toBe(true);
-    confirm();
-    expect(stopTrackingAction.textContent).toBe("Stopping tracking…");
-    await flushPromises();
+      expect(action.dataset.mode).toBe("delete");
+      expect(action.textContent).toBe("Retry Delete");
+      expect(stopTrackingAction.textContent).toBe("Stop tracking deployment");
+      expect(stopTrackingAction.style.display).toBe("");
+      expect(createDialog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: "abandon",
+          modalId: "deploy-abandon-modal"
+        })
+      );
+      appSelect.value = "app";
+      envSelect.value = "dev";
+      stopTrackingAction.dispatch("click");
+      expect(wasOpened()).toBe(true);
+      confirm();
+      expect(stopTrackingAction.textContent).toBe("Stopping tracking…");
+      await flushPromises();
 
-    const request = browser.net.calls.find(
-      (call) => call.url === "/api/abandon-deployment"
-    );
-    expect(request?.init).toEqual({
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Mutation-Nonce": "nonce-1"
-      },
-      body: JSON.stringify({
-        repo: "octo/app",
-        environment: "dev",
-        application: "app"
-      })
-    });
-    expect(inlineStatus.textContent).toContain(
-      "Cloud resources were not deleted"
-    );
-    expect(inlineStatus.textContent).toContain("may still exist");
-    expect(action.dataset.mode).toBe("deploy");
-    expect(browser.nav.assigned).toEqual([]);
-  });
+      const request = browser.net.calls.find(
+        (call) => call.url === "/api/abandon-deployment"
+      );
+      expect(request?.init).toEqual({
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": "nonce-1"
+        },
+        body: JSON.stringify({
+          repo: "octo/app",
+          environment: "dev",
+          application: "app",
+          ...(scoped ? { ...recovery, deploymentId: "101", runUrl } : {})
+        })
+      });
+      expect(inlineStatus.textContent).toContain(
+        "Cloud resources were not deleted"
+      );
+      expect(inlineStatus.textContent).toContain("may still exist");
+      expect(action.dataset.mode).toBe("deploy");
+      expect(browser.nav.assigned).toEqual([]);
+    }
+  );
 
   it("surfaces a stop-tracking refusal from the server", async () => {
     const { browser, action, stopTrackingAction, inlineStatus } = fixture({
