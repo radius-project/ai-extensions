@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+# Runs right after `az aks get-credentials --file` in the Azure deploy and delete
+# workflows. For an AKS cluster with Microsoft Entra integration, that
+# command writes a kubeconfig whose user runs kubelogin. Neither the runner nor
+# the Radius pods that read the target-kubeconfig Secret have kubelogin, so this
+# action replaces that user with a Microsoft Entra access token for the AKS
+# server application. It gets the token with the client-credentials flow, using
+# a new GitHub OIDC token as the client assertion, and exports the settings that
+# refresh-azure-oidc-token.sh and the "Refresh external deployment target
+# credentials" step use to renew it. A kubeconfig that does not run kubelogin,
+# such as one with a client certificate, is left unchanged.
+name: Radius - Use a Microsoft Entra token for AKS
+description: Replace the kubelogin credential in an AKS kubeconfig with a Microsoft Entra access token.
+
+inputs:
+  kubeconfig:
+    description: Path of the target cluster kubeconfig that az aks get-credentials wrote.
+    required: true
+  client-id:
+    description: Client ID of the deploy identity that azure/login signed in as.
+    required: true
+  tenant-id:
+    description: Microsoft Entra tenant of the deploy identity.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Replace kubelogin with a Microsoft Entra token
+      shell: bash
+      env:
+        RADIUS_TARGET_KUBECONFIG: ${{ inputs.kubeconfig }}
+        AZURE_CLIENT_ID: ${{ inputs.client-id }}
+        AZURE_TENANT_ID: ${{ inputs.tenant-id }}
+      run: |
+        bash "$GITHUB_ACTION_PATH/../../scripts/azure-aks-token.sh" --convert

@@ -131,6 +131,18 @@ jobs:
             --subscription "$AZURE_SUBSCRIPTION_ID" \
             --file "$RADIUS_TARGET_KUBECONFIG"
 
+      - name: Use a Microsoft Entra token for AKS
+        # For a cluster with Microsoft Entra integration, az aks get-credentials
+        # writes a user that runs kubelogin, which neither this runner nor the
+        # Radius pods have. This replaces it with a token and leaves any other
+        # kubeconfig, such as one with a client certificate, unchanged.
+        if: ${{ vars.AZURE_AKS_CLUSTER_NAME != '' }}
+        uses: radius-project/ai-extensions/.github/extension/actions/aks-token-kubeconfig@{{RADIUS_REF}}
+        with:
+          kubeconfig: ${{ env.RADIUS_TARGET_KUBECONFIG }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+
       - name: Set up control plane
         uses: radius-project/ai-extensions/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
         with:
@@ -209,8 +221,16 @@ jobs:
           # via the cluster access resolver, and bicep-de (Bicep 'extension kubernetes'
           # provider). The Terraform state backend deliberately stays on the
           # control-plane cluster, so no backend override is needed here.
-          kubectl create secret generic target-kubeconfig --namespace radius-system \
-            --from-file=kubeconfig="$TARGET_KUBECONFIG" --dry-run=client -o yaml | kubectl apply -f -
+          # An AKS cluster with Microsoft Entra integration gets a new token here,
+          # because the one from Connect to AKS cluster can be close to expiry.
+          # The script stores the kubeconfig and the token in the Secret, the
+          # token under the key that the kubeconfig names in tokenFile.
+          if [ -n "${RADIUS_AKS_SERVER_ID:-}" ]; then
+            bash "$RADIUS_AKS_TOKEN_SCRIPT" --renew
+          else
+            kubectl create secret generic target-kubeconfig --namespace radius-system \
+              --from-file=kubeconfig="$TARGET_KUBECONFIG" --dry-run=client -o yaml | kubectl apply -f -
+          fi
           for deploy in applications-rp dynamic-rp bicep-de; do
             kubectl rollout restart deployment/$deploy -n radius-system
           done
