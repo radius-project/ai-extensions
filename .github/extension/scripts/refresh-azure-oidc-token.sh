@@ -56,8 +56,11 @@ trap 'rm -rf "${TOKEN_DIR}"' EXIT
 chmod 700 "${TOKEN_DIR}"
 readonly OIDC_TOKEN_FILE="${TOKEN_DIR}/oidc-token"
 
-refresh_token() {
-    request_github_oidc_token "${AUDIENCE}" "${OIDC_TOKEN_FILE}" || return 1
+refresh_oidc_token() {
+    if ! request_github_oidc_token "${AUDIENCE}" "${OIDC_TOKEN_FILE}"; then
+        echo "::${ANNOTATION} title=GitHub OIDC token unavailable::[AZURE_OIDC_UNAVAILABLE] GitHub did not return an OIDC token for Azure (HTTP ${GITHUB_OIDC_STATUS}). Fix: Rerun the workflow."
+        return 1
+    fi
     kubectl create secret generic "${SECRET_NAME}" \
         --namespace "${NAMESPACE}" \
         --from-file="${TOKEN_KEY}=${OIDC_TOKEN_FILE}" \
@@ -65,14 +68,14 @@ refresh_token() {
         kubectl apply --request-timeout="${REQUEST_TIMEOUT_SECONDS}s" -f - >/dev/null
 }
 
-# Renews the AKS token with the GitHub OIDC token that refresh_token just got.
+# Renews the AKS token with the GitHub OIDC token that refresh_oidc_token just got.
 # azure-aks-token.sh updates the target-kubeconfig Secret and the runner's
-# kubeconfig. Its failures are warnings while watching, because the next
+# kubeconfig. Failures are warnings while watching, because the next
 # attempt retries them.
 refresh_tokens() {
-    refresh_token || return 1
+    refresh_oidc_token || return 1
     if [[ -n "${AKS_SERVER_ID}" ]]; then
-        RADIUS_AKS_ANNOTATION="${AKS_ANNOTATION}" \
+        RADIUS_AKS_ANNOTATION="${ANNOTATION}" \
             bash "${AKS_TOKEN_SCRIPT}" --renew "${OIDC_TOKEN_FILE}" || return 1
     fi
 }
@@ -92,13 +95,13 @@ restart_consumers() {
 
 case "${MODE}" in
     --prepare)
-        AKS_ANNOTATION=error
+        ANNOTATION=error
         refresh_tokens
         restart_consumers
         echo "Azure OIDC token refreshed and consumers restarted."
         ;;
     --watch)
-        AKS_ANNOTATION=warning
+        ANNOTATION=warning
         watch_token_refresh refresh_tokens \
             "Azure OIDC token refreshed." \
             "Azure OIDC token refresh failed; retrying." \

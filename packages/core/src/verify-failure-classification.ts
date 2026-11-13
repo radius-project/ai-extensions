@@ -75,6 +75,14 @@ const LOGIN_STEP =
 const CREDENTIAL_STEP =
   /verify\s+(?:azure|aws)\s+credentials|wait\s+for\s+azure\s+subscription/i;
 
+// Microsoft Entra token exchange for AKS. It never calls the cluster, and its
+// script prints one annotation with a stable code, so it is classified by that
+// code instead of by the cluster-step patterns that its name also matches.
+const AKS_TOKEN_STEP = /use\s+a\s+microsoft\s+entra\s+token\s+for\s+aks/i;
+const AKS_TOKEN_TRUST_REJECTION = /\[AKS_IDENTITY_REJECTED\]/;
+const AKS_TOKEN_OUTAGE =
+  /\[AKS_TOKEN_UNAVAILABLE\][^\n]*\(HTTP (?:000|5\d\d)\)/;
+
 // Kubernetes cluster access step.
 const CLUSTER_STEP = /verify\s+(?:aks|eks)\s+access|kubelogin|\b(?:aks|eks)\b/i;
 
@@ -180,7 +188,21 @@ export function classifyVerifyFailure(
     return { category: "generic" };
   }
 
-  // 5. The Kubernetes-access step failed. Not reaching the cluster is
+  // 5. The AKS token exchange failed. Microsoft Entra refusing the federated
+  //    credential is a trust problem (4.3), and no response or a server error
+  //    is an unreachable provider (4.5). Any other failure stays generic, so
+  //    it is not offered as a bypass.
+  if (matchesStep(failedSteps, AKS_TOKEN_STEP)) {
+    if (AKS_TOKEN_TRUST_REJECTION.test(logText)) {
+      return { category: "oidc-trust" };
+    }
+    if (AKS_TOKEN_OUTAGE.test(logText)) {
+      return { category: "cloud-unreachable", component: "cloud provider" };
+    }
+    return { category: "generic" };
+  }
+
+  // 6. The Kubernetes-access step failed. Not reaching the cluster is
   //    unreachable (4.5); reaching it and being refused is a permissions gap
   //    (4.4). Reachability wins when both appear.
   if (matchesStep(failedSteps, CLUSTER_STEP)) {
@@ -199,7 +221,7 @@ export function classifyVerifyFailure(
     return { category: "generic" };
   }
 
-  // 6. The GHCR package-push check failed. Only a definitive authorization
+  // 7. The GHCR package-push check failed. Only a definitive authorization
   //    denial is the bypassable permissions gap (4.4); a registry outage or any
   //    other cause stays generic so an operational failure is not mislabeled as
   //    a permissions problem the user is asked to bypass.

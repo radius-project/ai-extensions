@@ -30,7 +30,7 @@ AWS setup remains disabled by default. Enable the developer switch at extension 
 ### Azure
 
 1. **Form inputs**: env name, AAD App (client) ID, tenant ID, subscription ID, resource group, AKS cluster name. These are written as GitHub Environment variables.
-2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-azure.yml` and dispatches it. The workflow runs `azure/login` via OIDC and `az account show`, then `az aks get-credentials` + `kubelogin convert-kubeconfig` + `kubectl cluster-info` to confirm AKS access. Status is polled and shown live in the canvas.
+2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-azure.yml` and dispatches it. The workflow runs `azure/login` via OIDC and `az account show`, then `az aks get-credentials`, replaces a `kubelogin` credential with a Microsoft Entra token as deploys do, and runs `kubectl cluster-info` to confirm AKS access. Status is polled and shown live in the canvas.
 
 ## How to invoke
 

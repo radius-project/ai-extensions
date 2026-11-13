@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
 import {
@@ -357,17 +355,10 @@ jobs:
 
 describe("the committed AWS deploy template", () => {
   it("resolves every placeholder and reads the pinned aws-eks pack", () => {
-    const read = (file: string): string =>
-      readFileSync(
-        fileURLToPath(
-          new URL(`../../../../.github/extension/${file}`, import.meta.url)
-        ),
-        "utf8"
-      );
     const files = generateDeployWorkflow("prod", ".radius/app.bicep", {
-      [DEPLOY_DISPATCHER_FILE]: read(DEPLOY_DISPATCHER_FILE),
-      [DEPLOY_AZURE_FILE]: read(DEPLOY_AZURE_FILE),
-      [DEPLOY_AWS_FILE]: read(DEPLOY_AWS_FILE)
+      [DEPLOY_DISPATCHER_FILE]: readCommittedTemplate(DEPLOY_DISPATCHER_FILE),
+      [DEPLOY_AZURE_FILE]: readCommittedTemplate(DEPLOY_AZURE_FILE),
+      [DEPLOY_AWS_FILE]: readCommittedTemplate(DEPLOY_AWS_FILE)
     });
 
     expect(files[DEPLOY_AWS_FILE]).toContain(

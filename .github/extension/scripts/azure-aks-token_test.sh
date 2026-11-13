@@ -538,6 +538,20 @@ fi
 pass "the refresher leaves target-kubeconfig alone without an AKS token"
 
 converted_case
+export FAKE_OIDC_STATUS=403
+run bash "${REFRESH_SCRIPT}" --prepare
+[[ "${STATUS}" == "1" ]] || fail "refresher OIDC failure: exit ${STATUS}"
+expect_one_annotation error AZURE_OIDC_UNAVAILABLE "refresher OIDC failure"
+grep -q '(HTTP 403)' <<<"${OUTPUT}" || fail "refresher OIDC failure: no HTTP status: ${OUTPUT}"
+[[ ! -s "${FAKE_APPLIED}" && "$(calls_to 'kubectl rollout')" == "0" ]] ||
+    fail "refresher OIDC failure: changed the control plane"
+run bash "${REFRESH_SCRIPT}" --watch 1
+[[ "${STATUS}" == "0" ]] || fail "refresher OIDC retry: exit ${STATUS}"
+grep -q '^::warning title=GitHub OIDC token unavailable::\[AZURE_OIDC_UNAVAILABLE\] ' <<<"${OUTPUT}" ||
+    fail "refresher OIDC retry: expected a coded warning: ${OUTPUT}"
+pass "a refused GitHub OIDC request reports AZURE_OIDC_UNAVAILABLE with the HTTP status"
+
+converted_case
 cp "${RADIUS_TARGET_KUBECONFIG}" "${CASE_DIR}/before"
 export FAKE_KUBECTL_APPLY_FAILS=1
 run bash "${AKS_SCRIPT}" --renew

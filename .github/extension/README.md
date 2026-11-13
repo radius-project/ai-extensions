@@ -191,6 +191,8 @@ When the Azure workflows cannot give the AKS kubeconfig a Microsoft Entra token,
 | `AKS_TOKEN_UNAVAILABLE`     | Microsoft Entra returned no token, for example during an outage.                               |
 | `AKS_SECRET_UPDATE_FAILED`  | The renewed token could not be stored in the `target-kubeconfig` Secret on the control plane.  |
 
+On every Azure cluster, the refresher reports `AZURE_OIDC_UNAVAILABLE` with the HTTP status when GitHub returns no OIDC token for the Radius pods. Canvas classifies a failed **Use a Microsoft Entra token for AKS** verification step by its code: `AKS_IDENTITY_REJECTED` is a federated credential problem, `AKS_TOKEN_UNAVAILABLE` with no response or an HTTP 5xx status means Microsoft Entra is unreachable, and every other code needs a fix before the environment can be created.
+
 ### Runner resource budget
 
 With the `500m` database request, the verified single-node baseline reserves `1200m` in steady state. Including the readiness hook and encryption-rotation job gives a conservative `1310m`, leaving `690m` against a nominal `2000m` allocatable CPU budget. This is scheduling headroom for the control plane, not an application capacity or performance guarantee.
