@@ -61,21 +61,22 @@ export function createCloudDiscoveryDiagnostics(
       clearTimeout(timeout);
     }
   };
+  const protectedKinds = ["first-failure", "failure-snapshot", "capture-error"];
   const add = (kind: string, details: unknown): void => {
     if (events.length >= 64) {
       droppedEvents++;
-      if (
-        !["first-failure", "failure-snapshot", "capture-error"].includes(kind)
-      )
-        return;
+      if (!protectedKinds.includes(kind)) return;
+      // First-failure evidence may displace capture errors, never the reverse.
       const replace = events.findIndex(
-        (event) =>
-          !["first-failure", "failure-snapshot", "capture-error"].includes(
-            event.kind
-          )
+        (event) => !protectedKinds.includes(event.kind)
       );
-      if (replace < 0) return;
-      events.splice(replace, 1);
+      const fallback =
+        kind === "capture-error" ? -1 : (
+          events.findIndex((event) => event.kind === "capture-error")
+        );
+      const index = replace >= 0 ? replace : fallback;
+      if (index < 0) return;
+      events.splice(index, 1);
     }
     events.push({
       at: ports.now().toISOString(),
@@ -190,12 +191,15 @@ export function createCloudDiscoveryDiagnostics(
     },
     async guard<T>(action: () => Promise<T>): Promise<T> {
       if (firstFailure) throw await firstFailure;
-      return Promise.race([
+      const result = await Promise.race([
         action(),
         failure.then((error) => {
           throw error;
         })
       ]);
+      // The action can finish while the failure snapshot is still captured.
+      if (firstFailure) throw await firstFailure;
+      return result;
     },
     async save(): Promise<void> {
       await firstFailure;

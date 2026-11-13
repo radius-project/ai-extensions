@@ -4,10 +4,13 @@ export function boundedDiagnostic(
   value: string,
   credentials: readonly (string | undefined)[] = []
 ): string {
-  const redacted = redactCredentials(value, credentials).replace(
-    /(?:authorization|proxy-authorization)\s*:[^\r\n]*/gi,
-    "[REDACTED HEADER]"
-  );
+  const redacted = redactCredentials(value, credentials)
+    .replace(
+      /(?:authorization|proxy-authorization)\s*:[^\r\n]*/gi,
+      "[REDACTED HEADER]"
+    )
+    // Node echoes the full invocation after this prefix; saved text omits it.
+    .replace(/Command failed:[^\r\n]*/g, "Command failed: [arguments omitted]");
   // A CLI must not turn a kubeconfig or private key into saved error output.
   if (
     /(?:^|\n)\s*(?:clusters|users|contexts):|"(?:clusters|users|contexts)"\s*:|kind:\s*Config\b|-----BEGIN [^\r\n]*PRIVATE KEY-----/i.test(
@@ -38,7 +41,9 @@ export class CommandFailure extends Error {
     timeout: number | undefined,
     credentials: readonly (string | undefined)[]
   ) {
-    super(boundedDiagnostic(stderr || cause.message, credentials), {
+    // The message keeps its pre-existing credential-only redaction so callers
+    // see the same text; only the saved diagnostic fields are bounded.
+    super(redactCredentials(stderr || cause.message, credentials), {
       cause: Object.assign(
         new Error(boundedDiagnostic(cause.message, credentials)),
         {

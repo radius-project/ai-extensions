@@ -197,6 +197,44 @@ describe("Cloud E2E discovery evidence", () => {
     });
   });
 
+  it("keeps first-failure evidence when request-snapshot errors fill the buffer", async () => {
+    let failing = true;
+    const h = harness({
+      snapshot: async () => {
+        if (failing) throw new Error("request snapshot unavailable");
+        return { cluster: "selected-cluster" };
+      }
+    });
+    for (let index = 0; index < 64; index++) await h.observer.requestSnapshot();
+    failing = false;
+    await h.observer.discovery({ error: "namespace failure" });
+    await h.observer.save();
+    const kinds = h
+      .payload()
+      .events.map((event: { kind: string }) => event.kind);
+    expect(kinds).toContain("first-failure");
+    expect(kinds).toContain("failure-snapshot");
+    expect(kinds).toHaveLength(64);
+  });
+
+  it("does not return success when the action ends while the failure snapshot is captured", async () => {
+    let release: (value: unknown) => void = () => {};
+    const h = harness({
+      snapshot: () => new Promise((resolve) => (release = resolve))
+    });
+    let finish: (value: string) => void = () => {};
+    const guarded = h.observer.guard(
+      () => new Promise<string>((resolve) => (finish = resolve))
+    );
+    const rejected = expect(guarded).rejects.toThrow("namespace failure");
+    const discovery = h.observer.discovery({ error: "namespace failure" });
+    finish("filled the form");
+    await Promise.resolve();
+    release({ cluster: "selected-cluster" });
+    await discovery;
+    await rejected;
+  });
+
   it("bounds event count, namespace options and saved error output", async () => {
     const h = harness();
     for (let index = 0; index < 70; index++)

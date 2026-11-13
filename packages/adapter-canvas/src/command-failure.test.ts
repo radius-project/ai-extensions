@@ -102,6 +102,30 @@ describe("command failure diagnostics", () => {
     expect(JSON.stringify(failure.cause)).not.toContain("raw");
   });
 
+  it("omits the echoed invocation from saved text and keeps the caller message", () => {
+    const cause = Object.assign(
+      new Error(
+        "Command failed: kubectl --kubeconfig /tmp/secret-dir/config get namespaces\n"
+      ),
+      { code: 1 }
+    );
+    const failure = new CommandFailure(cause, "", 10000, []);
+    expect(failure.message).toContain("/tmp/secret-dir/config");
+    expect(failure.stderr).toBe("");
+    expect(failure.cause).toMatchObject({
+      message: "Command failed: [arguments omitted]\n"
+    });
+    expect(JSON.stringify(failure.cause)).not.toContain("secret-dir");
+    expect(boundedDiagnostic(failure.message)).not.toContain("secret-dir");
+  });
+
+  it("keeps long caller-visible messages whole while bounding saved fields", () => {
+    const long = "x".repeat(5000);
+    const failure = new CommandFailure(new Error("failed"), long, 10000, []);
+    expect(failure.message).toHaveLength(5000);
+    expect(failure.stderr).toHaveLength(2000 + "[truncated]".length);
+  });
+
   it.each([
     "apiVersion: v1\nclusters:\n- cluster: private",
     '{"clusters":[{"cluster":"private data"}]}',

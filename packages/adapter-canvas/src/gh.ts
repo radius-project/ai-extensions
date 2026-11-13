@@ -209,15 +209,23 @@ export function supportsWorkflowDispatchRunDetails(
 
 // This module is the gh process boundary, so every diagnostic leaving it must
 // redact both recognizable GitHub credentials and opaque injected tokens.
+export function processCredentials(
+  env: NodeJS.ProcessEnv = process.env
+): (string | undefined)[] {
+  return [
+    env.GH_TOKEN,
+    env.GITHUB_TOKEN,
+    env.GH_PACKAGES_TOKEN,
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    env.AZURE_CLIENT_SECRET
+  ];
+}
+
 export function redactGhCredentials(
   value: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  return redactCredentials(value, [
-    env.GH_TOKEN,
-    env.GITHUB_TOKEN,
-    env.GH_PACKAGES_TOKEN
-  ]);
+  return redactCredentials(value, processCredentials(env));
 }
 
 function errorMessage(error: unknown): string {
@@ -1423,13 +1431,12 @@ export function runCommand(
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
       if (err)
         reject(
-          new CommandFailure(err, stderr, execOpts.timeout, [
-            process.env.GH_TOKEN,
-            process.env.GITHUB_TOKEN,
-            process.env.GH_PACKAGES_TOKEN,
-            process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
-            process.env.AZURE_CLIENT_SECRET
-          ])
+          new CommandFailure(
+            err,
+            stderr,
+            execOpts.timeout,
+            processCredentials()
+          )
         );
       else resolve(stdout.trim());
     });
