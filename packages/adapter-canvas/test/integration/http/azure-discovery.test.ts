@@ -8,6 +8,7 @@ import {
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createAzureDiscoveryRoutes } from "../../../src/server/routes/azure-discovery.js";
+import { CommandFailure } from "../../../src/command-failure.js";
 import {
   azureDiscoveryContract,
   commandLine,
@@ -131,6 +132,102 @@ function start(): {
 }
 
 describe("azure-discovery real-loopback HIT (RF-03)", () => {
+  it.each([false, true])(
+    "returns opt-in discovery command diagnostics across HTTP (timeout=%s)",
+    async (timedOut) => {
+      const { cli } = start();
+      cli.set(CLI.aks, "[]");
+      cli.set(CLI.groups, "[]");
+      cli.set(CLI.credentials("aks-selected", "rg-selected"), "");
+      cli.set(CLI.namespaces, {
+        throws: new CommandFailure(
+          Object.assign(new Error("kubectl failed"), {
+            code: timedOut ? null : 1,
+            signal: timedOut ? ("SIGTERM" as const) : null,
+            killed: timedOut
+          }),
+          "connection refused; password=fixture-secret",
+          10000,
+          []
+        )
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await fetch(`${entry.baseUrl}/api/discover`, {
+        method: "POST",
+        headers: { "x-radius-discovery-diagnostics": "1" },
+        body: JSON.stringify({
+          provider: "azure",
+          resourceGroup: "rg-selected",
+          cluster: "aks-selected"
+        })
+      });
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain("fixture-secret");
+      expect(JSON.parse(text)).toMatchObject({
+        namespaces: [],
+        errors: { namespaces: expect.stringContaining("connection refused") },
+        diagnostics: {
+          events: [
+            expect.objectContaining({ step: "az aks list", exitCode: 0 }),
+            expect.objectContaining({ step: "az group list", exitCode: 0 }),
+            expect.objectContaining({
+              step: "az aks get-credentials",
+              exitCode: 0
+            }),
+            expect.objectContaining({
+              step: "kubectl get namespaces",
+              timeoutMs: 10000,
+              exitCode: timedOut ? null : 1,
+              signal: timedOut ? "SIGTERM" : null,
+              timedOut,
+              error: expect.stringContaining("[REDACTED]")
+            })
+          ]
+        }
+      });
+    }
+  );
+
+  it("does not change ordinary response envelopes without an explicit diagnostic opt-in", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+    for (const diagnosticFlag of ["", "invalid"]) {
+      const response = await fetch(`${entry.baseUrl}/api/discover`, {
+        method: "POST",
+        headers: { "x-radius-discovery-diagnostics": diagnosticFlag },
+        body: JSON.stringify({ provider: "azure", cluster: "-invalid" })
+      });
+      expect(await response.json()).toEqual({
+        error: "Invalid AKS cluster name.",
+        clusters: [],
+        resourceGroups: [],
+        namespaces: [],
+        vpcs: [],
+        subnets: []
+      });
+    }
+  });
+
+  it("returns an explicit empty diagnostic record when discovery cannot parse its input", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      headers: {
+        "x-radius-discovery-diagnostics": "1"
+      },
+      body: "not json"
+    });
+    expect(await response.json()).toMatchObject({
+      error: expect.any(String),
+      namespaces: ["default"],
+      diagnostics: {
+        events: []
+      }
+    });
+  });
+
   it("serves the App Registration picker payload over a real socket", async () => {
     const script = start().az;
     script.set(ARGV.list, {

@@ -14,6 +14,7 @@ import type {
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
 import { redactCredentials } from "./credential-redaction.js";
+import { CommandFailure } from "./command-failure.js";
 import {
   isGitHubAppBotLogin,
   isGitHubAppUserEndpointFailure
@@ -1420,7 +1421,16 @@ export function runCommand(
   const { stdin, ...execOpts } = opts;
   return new Promise((resolve, reject) => {
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
-      if (err) reject(new Error(redactGhCredentials(stderr || err.message)));
+      if (err)
+        reject(
+          new CommandFailure(err, stderr, execOpts.timeout, [
+            process.env.GH_TOKEN,
+            process.env.GITHUB_TOKEN,
+            process.env.GH_PACKAGES_TOKEN,
+            process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+            process.env.AZURE_CLIENT_SECRET
+          ])
+        );
       else resolve(stdout.trim());
     });
     if (stdin !== undefined) child.stdin?.end(stdin);
