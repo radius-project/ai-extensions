@@ -62,6 +62,37 @@ function abandon(
 }
 
 describe("createDeploymentAbandonmentService", () => {
+  describe.each(["pending", "deleting"])(
+    "active %s without recovery",
+    (status) => {
+      it.each(["run-scoped", "application-scoped"])(
+        "refuses %s cleanup without writing deployment statuses",
+        async (scope) => {
+          const current = row(status);
+          const ghOrThrow = vi.fn(async () => "");
+          const result = await abandon(
+            { ghOrThrow, resolveEnvDeployment: async () => current },
+            {
+              ...PAYLOAD,
+              ...(scope === "run-scoped" ?
+                {
+                  revision: "a".repeat(64),
+                  runId: 42,
+                  runAttempt: 1,
+                  deploymentId: current.deploymentId,
+                  runUrl: current.runUrl,
+                  confirmation: "todolist/dev"
+                }
+              : {})
+            }
+          );
+          expect(result.status).toBe(409);
+          expect(ghOrThrow).not.toHaveBeenCalled();
+        }
+      );
+    }
+  );
+
   it.each(["unknown", "known"] as const)(
     "attests external cleanup of the exact %s run without hiding older deployments",
     async (identity) => {

@@ -743,6 +743,168 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(false);
   });
 
+  test("keeps an active deployment and a healthy environment visible despite an older missing run @safety", async ({
+    page,
+    canvas
+  }) => {
+    const scenario = defaultFakeCliScenario();
+    const environment = "fixture-environment";
+    const healthy = "healthy-environment";
+    const findCommand = (endpoint: string, jq?: string) => {
+      const command = scenario.commands.find(
+        (candidate) =>
+          candidate.args?.includes(endpoint) &&
+          (jq === undefined || candidate.args.at(-1) === jq)
+      );
+      if (!command?.args) throw new Error(`Missing CLI fixture: ${endpoint}`);
+      return command;
+    };
+    const environments = findCommand(
+      `/repos/${REPOSITORY}/environments?per_page=100`,
+      ".environments[].name"
+    );
+    environments.stdout = `${environment}\n${healthy}\n`;
+    const deployments = findCommand(
+      `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`
+    );
+    deployments.stdout = "dep-1\ndep-old\n";
+    const run = findCommand(
+      `/repos/${REPOSITORY}/actions/runs/1`,
+      '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "") + "\\t" + ((.run_attempt // 0) | tostring) + "\\t" + (.head_sha // "") + "\\t" + (.display_title // "") + "\\t" + ((.id // 0) | tostring) + "\\t" + (.repository.full_name // "") + "\\t" + (.event // "")'
+    );
+    run.stdout = `.github/workflows/run-rad-commands.yml\twaiting\t\t1\t${"a".repeat(40)}\t\t1\t${REPOSITORY}\tworkflow_dispatch`;
+    const status = findCommand(
+      `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+      '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+    );
+    status.stdout = `in_progress\thttps://github.com/${REPOSITORY}/actions/runs/1\t`;
+    const variables = findCommand(
+      `/repos/${REPOSITORY}/environments/${environment}/variables?per_page=100`,
+      ".variables[].name"
+    );
+    for (const [command, from, to, stdout] of [
+      [variables, environment, healthy, "AZURE_SUBSCRIPTION_ID"],
+      [deployments, environment, healthy, "dep-healthy"],
+      [
+        status,
+        "dep-1",
+        "dep-healthy",
+        `success\thttps://github.com/${REPOSITORY}/actions/runs/2\t`
+      ],
+      [
+        status,
+        "dep-1",
+        "dep-old",
+        `failure\thttps://github.com/${REPOSITORY}/actions/runs/3\t`
+      ],
+      [
+        run,
+        "/runs/1",
+        "/runs/2",
+        `.github/workflows/run-rad-commands.yml\tcompleted\tsuccess\t1\t${"a".repeat(40)}\t\t2\t${REPOSITORY}\tworkflow_dispatch`
+      ]
+    ] as const) {
+      if (!command.args) throw new Error("Missing CLI fixture arguments");
+      scenario.commands.push({
+        ...command,
+        args: command.args.map((arg) => arg.replace(from, to)),
+        stdout
+      });
+    }
+    if (!run.args) throw new Error("Missing workflow fixture arguments");
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: run.args.map((arg) => arg.replace("/runs/1", "/runs/3")),
+        exitCode: 1,
+        stderr: "gh: Not Found (HTTP 404)"
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/actions/runs/2/artifacts?per_page=100`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            artifacts: [
+              {
+                id: 2,
+                name: "radius-deploy-status-healthy",
+                workflow_run: { id: 2 }
+              }
+            ]
+          })
+      },
+      {
+        tool: "gh",
+        argsPrefix: [
+          "run",
+          "download",
+          "2",
+          "--name",
+          "radius-deploy-status-healthy",
+          "--dir"
+        ],
+        argsSuffix: ["--repo", REPOSITORY],
+        writeFilesDirectoryArg: "--dir",
+        writeFiles: [
+          {
+            path: "deploy-progress.json",
+            content: JSON.stringify({
+              schemaVersion: 1,
+              application: "healthy-app",
+              environment: healthy,
+              runId: 2,
+              sequence: 1,
+              resources: []
+            })
+          }
+        ]
+      }
+    );
+    await canvas.setScenario(scenario);
+    const listing = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/list-deployments"
+    );
+    await gotoCanvas(page, canvas, "deploying");
+    expect(await (await listing).json()).toMatchObject({
+      deployments: [
+        { environment, app: "radius-app", status: "pending" },
+        { environment: healthy, app: "healthy-app", status: "success" }
+      ]
+    });
+    const table = page.locator("#deploy-table-body");
+    const active = table.locator("tr").filter({ hasText: environment });
+    const successful = table.locator("tr").filter({ hasText: healthy });
+    await expect(active).toContainText("radius-app");
+    await expect(successful).toContainText("healthy-app");
+    await expect(
+      active.getByRole("button", { name: "Delete Deployment" })
+    ).toBeDisabled();
+    await expect(
+      active.getByRole("button", { name: "Mark cleanup complete", exact: true })
+    ).toHaveCount(0);
+    const runLink = active.getByRole("link", { name: "View Run" });
+    await runLink.focus();
+    await expect(runLink).toBeFocused();
+    expect(
+      (await new AxeBuilder({ page }).include("#deploy-table-body").analyze())
+        .violations
+    ).toEqual([]);
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.args.includes("POST") &&
+          call.args.some((arg) => arg.includes("/statuses"))
+      )
+    ).toBe(false);
+  });
+
   test("attests exact-run external cleanup by keyboard and exposes older history @safety", async ({
     page,
     canvas
