@@ -937,6 +937,8 @@ Exclusive deployment ownership ends only after monitor/cloud work actually settl
 
 A future title reader would additionally require independently qualified successful preflight evidence before declaring identity known. That evidence is not qualified in this change, so title-only destructive eligibility remains disabled; the producer/source checks do not substitute for preflight acceptance. Exact-run attestation still recovers early failed/cancelled and expired-artifact runs without cloud calls. Healthy known latest deployments bypass older-history scans, while recovery requires complete grouped evidence within the 20-page budget rather than assuming duplicate records are adjacent.
 
+Verified active deploy and Delete runs bypass recovery-only history scans when they are the first decisive record within the 20-page budget. This requires a matching repository/run identity, a recognized nonterminal status (including approval waiting), no conclusion, and no cleanup or legacy abandonment marker. Unrelated records are skipped in order; newer read failures and preceding terminal markers retain fail-closed handling. Active rows expose no recovery metadata, so incomplete older duplicate groups cannot authorize cleanup. Artifact identity and destructive-operation guards remain unchanged.
+
 ### Stage 1: Conservative recovery foundation
 
 1. **Preserve and characterize `main`**: Lock down the existing contract that Delete always dispatches teardown, a failed deploy does not hide Delete, active operations block conflicts, and unavailable history disables mutations.

@@ -210,9 +210,36 @@ export async function resolveEnvironmentDeployment(
     return selectDeploymentRecord(record, context);
   };
 
+  const resolved = new Map<string, Promise<DeploymentRecord>>();
+  const readRecord = (id: string): Promise<DeploymentRecord> => {
+    let result = resolved.get(id);
+    if (!result) {
+      result = resolveRecord(id);
+      resolved.set(id, result);
+    }
+    return result;
+  };
   const records: DeploymentRecord[] = [];
-  const first = ids[0] ? await resolveRecord(ids[0]) : undefined;
+  const isVerifiedActive = (record: DeploymentRecord): boolean => {
+    return (
+      (record.workflow === "deploy" || record.workflow === "delete") &&
+      // resolveRecord only sets runId after matching the repository-bound URL.
+      record.runId !== undefined &&
+      record.runRepository?.toLowerCase() === repo.toLowerCase() &&
+      ["queued", "in_progress", "waiting", "requested", "pending"].includes(
+        record.runStatus
+      ) &&
+      !record.runConclusion &&
+      record.description !== ABANDONED_DEPLOYMENT_DESCRIPTION &&
+      !record.description.startsWith("Radius cleanup v1 ")
+    );
+  };
+  const first = ids[0] ? await readRecord(ids[0]) : undefined;
   if (first) {
+    if (isVerifiedActive(first)) {
+      const active = await decide(first);
+      if (active !== "skip") return active;
+    }
     if (
       (first.state === "inactive" &&
         first.description === ABANDONED_DEPLOYMENT_DESCRIPTION) ||
@@ -229,9 +256,47 @@ export async function resolveEnvironmentDeployment(
         return healthy;
     }
   }
+  let nextPage = 2;
+  let offset = 0;
+  let needsRecovery = false;
+  while (!needsRecovery) {
+    if (offset === ids.length) {
+      if (!more) break;
+      if (nextPage > 20)
+        throw new Error(
+          "Deployment history exceeds the recovery read budget. Tracking was not changed."
+        );
+      more = await readIds(nextPage++);
+    }
+    const batch = await Promise.allSettled(
+      ids
+        .slice(offset, offset + dependencies.maxParallelRecords)
+        .map(readRecord)
+    );
+    offset += batch.length;
+    for (const result of batch) {
+      if (result.status === "rejected") throw result.reason;
+      const record = result.value;
+      if (isVerifiedActive(record)) {
+        const active = await decide(record);
+        if (active !== "skip") return active;
+      }
+      if (
+        record.workflow !== "unrelated" ||
+        record.description.startsWith("Radius cleanup v1 ")
+      ) {
+        needsRecovery = true;
+        break;
+      }
+    }
+  }
   // A recovery marker must cover every duplicate record, including interleaved
   // runs. Only recovery paths need a complete, bounded history scan.
-  for (let page = 2; more && page <= 20; page++) {
+  if (more && nextPage > 20)
+    throw new Error(
+      "Deployment history exceeds the recovery read budget. Tracking was not changed."
+    );
+  for (let page = nextPage; more && page <= 20; page++) {
     more = await readIds(page);
     if (more && page === 20)
       throw new Error(
@@ -247,9 +312,7 @@ export async function resolveEnvironmentDeployment(
     const batch = await Promise.allSettled(
       ids
         .slice(offset, offset + dependencies.maxParallelRecords)
-        .map((id) =>
-          first?.id === id ? Promise.resolve(first) : resolveRecord(id)
-        )
+        .map(readRecord)
     );
     for (const result of batch) {
       if (result.status === "rejected") throw result.reason;

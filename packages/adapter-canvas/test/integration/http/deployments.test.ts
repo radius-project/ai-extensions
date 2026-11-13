@@ -2023,6 +2023,104 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.dispatches).toEqual([]);
   });
 
+  it("lists active and healthy environments despite unreadable older history and refuses active cleanup", async () => {
+    const harness = start();
+    harness.environments.push("dev", "healthy");
+    harness.setDeploymentResolver((repo, environment, application) =>
+      resolveEnvironmentDeployment(repo, environment, application, {
+        readApplicationIdentity: async () => ({
+          state: "known",
+          application: "todo-app"
+        }),
+        ghOrThrow: async (args) => {
+          const endpoint = args[1];
+          if (endpoint.includes("/variables?")) return "AZURE_CLIENT_ID";
+          if (endpoint.includes("/deployments?"))
+            return environment === "dev" ? "2\n1" : "3";
+          const deployment = /\/deployments\/(\d+)\/statuses/.exec(endpoint);
+          if (deployment) {
+            const id = deployment[1];
+            return `${id === "2" ? "in_progress" : "success"}\thttps://github.com/${repo}/actions/runs/${id}\t`;
+          }
+          const run = /\/actions\/runs\/(\d+)$/.exec(endpoint);
+          if (run) {
+            if (run[1] === "1") throw new Error("HTTP 404: older run missing");
+            return [
+              ".github/workflows/run-rad-commands.yml",
+              run[1] === "2" ? "waiting" : "completed",
+              run[1] === "2" ? "" : "success",
+              "1",
+              "a".repeat(40),
+              "",
+              run[1],
+              repo,
+              "workflow_dispatch"
+            ].join("\t");
+          }
+          throw new Error(`Unexpected resolver operation: ${endpoint}`);
+        },
+        deployWorkflowFile: "run-rad-commands.yml",
+        deleteWorkflowFile: "delete-application.yml",
+        maxParallelRecords: 10
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+    const listing = await fetch(
+      `${entry.baseUrl}/api/list-deployments?repo=octo/todo`
+    );
+    expect(listing.status).toBe(200);
+    expect(await listing.json()).toEqual({
+      deployments: [
+        {
+          app: "todo-app",
+          identity: { state: "known", application: "todo-app" },
+          environment: "dev",
+          provider: "azure",
+          status: "pending",
+          deploymentId: "2",
+          runUrl: "https://github.com/octo/todo/actions/runs/2"
+        },
+        {
+          app: "todo-app",
+          identity: { state: "known", application: "todo-app" },
+          environment: "healthy",
+          provider: "azure",
+          status: "success",
+          deploymentId: "3",
+          runUrl: "https://github.com/octo/todo/actions/runs/3"
+        }
+      ]
+    });
+    for (const recovery of [
+      {},
+      {
+        runId: 2,
+        runAttempt: 1,
+        revision: "a".repeat(64),
+        confirmation: "todo-app/dev",
+        deploymentId: "2",
+        runUrl: "https://github.com/octo/todo/actions/runs/2"
+      }
+    ]) {
+      const cleanup = await post(
+        entry.baseUrl,
+        "/api/abandon-deployment",
+        JSON.stringify({
+          repo: "octo/todo",
+          environment: "dev",
+          application: "todo-app",
+          ...recovery
+        })
+      );
+      expect(cleanup.status).toBe(409);
+      expect(await cleanup.json()).toMatchObject({ error: expect.any(String) });
+    }
+    expect(harness.ghApiCalls.some((args) => args.includes("--method"))).toBe(
+      false
+    );
+    expect(harness.state.deploymentMutation).toBeUndefined();
+  });
+
   it("fails closed over a real socket when the newest deployment cannot be identified", async () => {
     const harness = start();
     const resolverCalls: string[][] = [];
