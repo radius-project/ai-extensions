@@ -124,7 +124,14 @@ describe("cleanup history CLI fixture", () => {
       } finally {
         await reader.close();
       }
-      expect(await fs.readFile(scenario, "utf8")).toBe('{"commands":[]}');
+      const replacementReader = await fs.open(scenario, "r");
+      try {
+        expect(await replacementReader.readFile("utf8")).toBe(
+          '{"commands":[]}'
+        );
+      } finally {
+        await replacementReader.close();
+      }
       const artifact = path.join(directory, "artifact.json");
       await writeFakeCliFile(artifact, "artifact", scenario);
       expect(await fs.readFile(artifact, "utf8")).toBe("artifact");
