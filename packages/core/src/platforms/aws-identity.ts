@@ -25,10 +25,10 @@ export const AWS_EKS_CLUSTER_ADMIN_POLICY_ARN =
   "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
 
 // Tags Radius writes on a role or boundary policy it creates. A same-named
-// role or policy without them is not Radius-managed and is never modified. The repository ID tag proves which
-// repository the role belongs to, because a rename keeps the ID and a new
-// repository at the old name gets another. The repository name tag is only a
-// readable label.
+// role or policy without them is not Radius-managed and is never modified. The
+// repository ID tag proves which repository the object belongs to, because a
+// rename keeps the ID and a new repository at the old name gets another. The
+// repository name tag is only a readable label.
 export const AWS_MANAGED_TAG = "radius-managed";
 export const AWS_REPOSITORY_TAG = "radius-repository";
 export const AWS_REPOSITORY_ID_TAG = "radius-repository-id";
@@ -254,18 +254,9 @@ export function buildAwsAppBoundary(
   return { path, name, arn: `arn:aws:iam::${accountId}:policy${path}${name}` };
 }
 
-const APP_ROLES_POLICY_PREFIX = "radius-app-roles-";
-
 /** The deploy role's inline policy that lets it manage a repository's app roles. */
 export function buildAwsAppRolesPolicyName(repoId: number): string {
-  return `${APP_ROLES_POLICY_PREFIX}${repoId}`;
-}
-
-/** The repository ID in an app-roles policy name, or null for any other name. */
-export function awsAppRolesPolicyRepositoryId(name: string): number | null {
-  if (!name.startsWith(APP_ROLES_POLICY_PREFIX)) return null;
-  const id = name.slice(APP_ROLES_POLICY_PREFIX.length);
-  return /^[1-9]\d{0,15}$/.test(id) ? Number(id) : null;
+  return `radius-app-roles-${repoId}`;
 }
 
 export function githubOidcProviderArn(accountId: string): string {
@@ -966,17 +957,14 @@ export function buildAwsAppBoundaryPolicy(
 
 /**
  * What the deploy role needs for the app roles the containers Recipe creates
- * through Cloud Control. It may create and change roles under the
- * repository's app path only while they carry one of the repository's
- * boundaries, and pass them only to EKS Pod Identity. The reads and tag
- * actions cannot be conditioned on the boundary, so they are limited to the
- * path. Cloud Control calls GetRole before it creates a role and after it
- * deletes one. IAM checks a missing role against `role/<name>`, without the
- * path, so GetRole is also allowed on the Recipe's name prefix. The denies
- * stop it from removing a boundary or touching a boundary policy, which would
- * lift the limit on every role that uses it. Deployments never act on the
- * policy itself: IAM checks CreateRole, PutRolePermissionsBoundary, and
- * AttachRolePolicy against the role, with the policy as a condition key.
+ * through Cloud Control. It may create and change roles under the repository's
+ * app path only while they carry one of the repository's boundaries, and pass
+ * them only to EKS Pod Identity. IAM can't condition the reads and tag actions
+ * on the boundary, so the path limits them. Cloud Control reads a role before
+ * creating it, and IAM checks a missing role against `role/<name>`, so GetRole
+ * is also allowed on the Recipe's name prefix. The denies keep every app role's
+ * boundary in place. Deployments still work, because IAM checks setting a
+ * boundary against the role, with the policy only as a condition key.
  */
 export function buildAwsAppRolesPolicy(
   accountId: string,
@@ -1047,10 +1035,7 @@ export function buildAwsAppRolesPolicy(
   };
 }
 
-/**
- * Read tags from a role in `aws iam get-role` output or from
- * `aws iam list-policy-tags` output, which share the `Tags` shape.
- */
+/** Read tags from a role or policy in `aws iam get-role` or `get-policy` output. */
 export function awsRoleTags(role: unknown): Record<string, string> {
   if (!isRecord(role)) return {};
   const tags: Record<string, string> = {};

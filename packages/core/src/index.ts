@@ -156,7 +156,6 @@ export {
 } from "./setup-github-environment-provenance.js";
 
 export {
-  AWS_APP_BOUNDARY_ARN_VARIABLE,
   AWS_TRUST_SUBJECTS_VARIABLE,
   applySetupProviderConfiguration,
   azureRoleScope,

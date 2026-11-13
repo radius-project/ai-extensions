@@ -1,5 +1,4 @@
 import {
-  awsAppRolesPolicyRepositoryId,
   trustedGitHubSubjects,
   parsePolicyDocument
 } from "@radius-project/core";
@@ -263,8 +262,8 @@ function tagValue(resource: Record<string, unknown>, key: string): string {
 /**
  * Read AWS to learn whether `change` happened. A role, boundary policy, or
  * access entry is this request's only when it carries `operationId` in its
- * operation tag, which nothing else writes. A read that fails throws, so the journal keeps the
- * outcome unknown instead of guessing.
+ * operation tag, which nothing else writes. A read that fails throws, so the
+ * journal keeps the outcome unknown instead of guessing.
  */
 export async function reconcileAwsSetupChange(
   change: AwsSetupChange,
@@ -448,7 +447,7 @@ export function recordAwsSetupChange(
         roleName,
         roleId: change.roleId,
         policyArn: change.policyArn,
-        policyId: text(record(parse(stdout).Policy).PolicyId) || null
+        policyId: text(record(parse(stdout).Policy).PolicyId)
       });
       return;
     case "aws_access_entry.create":
@@ -586,17 +585,11 @@ export function createAwsSetupJournal<
     },
 
     async write(operation, change, args, sender) {
-      // A repository's app-roles policy is shared by its environments, and
-      // rollback removes it only once none of them uses it. So it is always
-      // this setup's to remove, even when the role already had it.
-      if (
-        change.kind !== "aws_role_policy.put" ||
-        awsAppRolesPolicyRepositoryId(change.policyName) !== null
-      ) {
+      if (change.kind !== "aws_role_policy.put") {
         return journaled(operation, change, args, sender);
       }
-      // `put-role-policy` replaces a policy that already exists, so only an
-      // environment policy the role did not have is this setup's to remove.
+      // `put-role-policy` replaces a policy that already exists, so only one
+      // the role did not have is this setup's to remove.
       const existing = await sender.read([
         "iam",
         "get-role-policy",

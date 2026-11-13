@@ -8,7 +8,6 @@ import {
   awsLockPolicyArn,
   awsRoleArn,
   awsRoleTags,
-  awsAppRolesPolicyRepositoryId,
   buildAwsAppBoundary,
   buildAwsAppBoundaryPolicy,
   buildAwsAppRolesPolicy,
@@ -321,12 +320,8 @@ describe("names and identifiers", () => {
     expect(long.name.length).toBeLessThanOrEqual(128);
   });
 
-  it("names the app-roles policy by repository and reads the ID back", () => {
+  it("names the app-roles policy by repository", () => {
     expect(buildAwsAppRolesPolicyName(42)).toBe("radius-app-roles-42");
-    expect(awsAppRolesPolicyRepositoryId("radius-app-roles-42")).toBe(42);
-    expect(awsAppRolesPolicyRepositoryId("radius-app-roles-042")).toBeNull();
-    expect(awsAppRolesPolicyRepositoryId("radius-app-roles-")).toBeNull();
-    expect(awsAppRolesPolicyRepositoryId("radius-deploy-dev-42")).toBeNull();
   });
 
   it.each([

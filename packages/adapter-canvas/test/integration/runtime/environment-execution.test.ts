@@ -830,13 +830,8 @@ describe("real server and fake SDK runtime ownership", () => {
             ]
           )
         ).toEqual(
-          // The pause refuses the app-roles put after the journal prepared it,
-          // so the journal records it as never sent.
           panel ?
-            [
-              ["aws_role.create", "confirmed"],
-              ["aws_role_policy.put", "not_applied"]
-            ]
+            [["aws_role.create", "confirmed"]]
           : [
               ["aws_role.create", "confirmed"],
               ["aws_role_policy.put", "confirmed"],

@@ -657,9 +657,9 @@ describe("runSetupCoordinator", () => {
       expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
         "trustSubjects"
       );
-      expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
-        "appBoundaryArn"
-      );
+      expect(
+        Array.isArray(configure) && configure[1].appBoundaryArn
+      ).toBeUndefined();
     });
   });
 });

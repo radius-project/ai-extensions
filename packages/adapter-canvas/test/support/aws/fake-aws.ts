@@ -26,12 +26,7 @@ export interface FakeManagedPolicy {
   CreateDate: string;
   Description: string;
   Tags: Array<{ Key: string; Value: string }>;
-  // Oldest first. IAM numbers versions v1, v2, ... and never reuses a number.
-  versions: Array<{ VersionId: string; document: unknown; CreateDate: string }>;
-  DefaultVersionId: string;
-  // IAM roles outside this fake that use the policy as their permissions
-  // boundary, such as app roles a Recipe created through Cloud Control.
-  boundaryUses: number;
+  document: unknown;
 }
 
 export interface FakeAccessEntry {
@@ -119,8 +114,6 @@ function flagValues(args: readonly string[], name: string): string[] {
 const WRITES: ReadonlySet<string> = new Set([
   "iam create-policy",
   "iam delete-policy",
-  "iam create-policy-version",
-  "iam delete-policy-version",
   "iam create-role",
   "iam update-assume-role-policy",
   "iam delete-role",
@@ -166,10 +159,7 @@ export class FakeAws {
   // Set to make every call fail the way an expired sign-in does.
   sessionExpired = false;
   // Commands refused once each, as AWS refuses a call it throttles.
-  private readonly refusals = new Map<
-    string,
-    { code: string; only: (args: readonly string[]) => boolean }
-  >();
+  private readonly refusals = new Map<string, string>();
   private readonly now: () => number;
   private ids = 0;
 
@@ -232,20 +222,15 @@ export class FakeAws {
     document: unknown;
     tags?: Array<{ Key: string; Value: string }>;
   }): FakeManagedPolicy {
-    const created = this.time();
     const policy: FakeManagedPolicy = {
       PolicyName: input.name,
       PolicyId: this.nextId("ANPA"),
       Arn: `arn:aws:iam::${this.accountId}:policy${input.path}${input.name}`,
       Path: input.path,
-      CreateDate: created,
+      CreateDate: this.time(),
       Description: "",
       Tags: [...(input.tags ?? [])],
-      versions: [
-        { VersionId: "v1", document: input.document, CreateDate: created }
-      ],
-      DefaultVersionId: "v1",
-      boundaryUses: 0
+      document: input.document
     };
     this.policies.set(policy.Arn, policy);
     return policy;
@@ -269,16 +254,9 @@ export class FakeAws {
     });
   }
 
-  /**
-   * Refuse the next `command` once with `code`, changing nothing. With
-   * `only`, refuse the next one whose arguments it accepts.
-   */
-  refuseOnce(
-    command: string,
-    code: string,
-    only: (args: readonly string[]) => boolean = () => true
-  ): void {
-    this.refusals.set(command, { code, only });
+  /** Refuse the next `command` once with `code`, changing nothing. */
+  refuseOnce(command: string, code: string): void {
+    this.refusals.set(command, code);
   }
 
   roleArn(name: string): string {
@@ -348,9 +326,9 @@ export class FakeAws {
       };
     }
     const refusal = this.refusals.get(command);
-    if (refusal?.only(args)) {
+    if (refusal !== undefined) {
       this.refusals.delete(command);
-      return serviceError(refusal.code, command, "Refused by the test.");
+      return serviceError(refusal, command, "Refused by the test.");
     }
     if (this.sessionExpired) {
       return serviceError(
@@ -378,23 +356,9 @@ export class FakeAws {
         );
       case "iam delete-policy":
         return this.deletePolicy(args);
-      case "iam list-policy-versions":
-        return this.withPolicy(args, "ListPolicyVersions", (policy) =>
-          ok({
-            Versions: [...policy.versions].reverse().map((version) => ({
-              VersionId: version.VersionId,
-              IsDefaultVersion: version.VersionId === policy.DefaultVersionId,
-              CreateDate: version.CreateDate
-            })),
-            IsTruncated: false
-          })
-        );
       case "iam get-policy-version":
         return this.withPolicy(args, "GetPolicyVersion", (policy) => {
-          const version = policy.versions.find(
-            (candidate) => candidate.VersionId === flag(args, "--version-id")
-          );
-          if (!version) {
+          if (flag(args, "--version-id") !== "v1") {
             return serviceError(
               "NoSuchEntity",
               "GetPolicyVersion",
@@ -403,62 +367,12 @@ export class FakeAws {
           }
           return ok({
             PolicyVersion: {
-              Document: version.document,
-              VersionId: version.VersionId,
-              IsDefaultVersion: version.VersionId === policy.DefaultVersionId,
-              CreateDate: version.CreateDate
+              Document: policy.document,
+              VersionId: "v1",
+              IsDefaultVersion: true,
+              CreateDate: policy.CreateDate
             }
           });
-        });
-      case "iam create-policy-version":
-        return this.withPolicy(args, "CreatePolicyVersion", (policy) => {
-          if (policy.versions.length >= 5) {
-            return serviceError(
-              "LimitExceeded",
-              "CreatePolicyVersion",
-              `A managed policy can have up to 5 versions. Before you create a new version, you must delete an existing version.`
-            );
-          }
-          const last = policy.versions.at(-1)?.VersionId ?? "v0";
-          const version = {
-            VersionId: `v${Number(last.slice(1)) + 1}`,
-            document: JSON.parse(flag(args, "--policy-document")),
-            CreateDate: this.time()
-          };
-          policy.versions.push(version);
-          if (args.includes("--set-as-default")) {
-            policy.DefaultVersionId = version.VersionId;
-          }
-          return ok({
-            PolicyVersion: {
-              VersionId: version.VersionId,
-              IsDefaultVersion: version.VersionId === policy.DefaultVersionId,
-              CreateDate: version.CreateDate
-            }
-          });
-        });
-      case "iam delete-policy-version":
-        return this.withPolicy(args, "DeletePolicyVersion", (policy) => {
-          const id = flag(args, "--version-id");
-          if (id === policy.DefaultVersionId) {
-            return serviceError(
-              "DeleteConflict",
-              "DeletePolicyVersion",
-              "Cannot delete the default version of a policy."
-            );
-          }
-          const index = policy.versions.findIndex(
-            (version) => version.VersionId === id
-          );
-          if (index < 0) {
-            return serviceError(
-              "NoSuchEntity",
-              "DeletePolicyVersion",
-              `Policy ${policy.Arn} version ${id} does not exist or is not deletable.`
-            );
-          }
-          policy.versions.splice(index, 1);
-          return ok();
         });
       case "iam get-role":
         return this.getRole(args);
@@ -651,19 +565,11 @@ export class FakeAws {
       PolicyId: policy.PolicyId,
       Arn: policy.Arn,
       Path: policy.Path,
-      DefaultVersionId: policy.DefaultVersionId,
-      AttachmentCount: this.attachments(policy.Arn),
-      PermissionsBoundaryUsageCount: policy.boundaryUses,
+      DefaultVersionId: "v1",
       CreateDate: policy.CreateDate,
       Description: policy.Description,
       Tags: policy.Tags.map((tag) => ({ ...tag }))
     };
-  }
-
-  private attachments(arn: string): number {
-    return [...this.roles.values()].filter((role) =>
-      role.attached.includes(arn)
-    ).length;
   }
 
   private withPolicy(
@@ -698,24 +604,15 @@ export class FakeAws {
       );
     }
     const path = flag(args, "--path") || "/";
-    const created = this.time();
     const policy: FakeManagedPolicy = {
       PolicyName: name,
       PolicyId: this.nextId("ANPA"),
       Arn: `arn:aws:iam::${this.accountId}:policy${path}${name}`,
       Path: path,
-      CreateDate: created,
+      CreateDate: this.time(),
       Description: flag(args, "--description"),
       Tags: parseTags(args),
-      versions: [
-        {
-          VersionId: "v1",
-          document: JSON.parse(flag(args, "--policy-document")),
-          CreateDate: created
-        }
-      ],
-      DefaultVersionId: "v1",
-      boundaryUses: 0
+      document: JSON.parse(flag(args, "--policy-document"))
     };
     this.policies.set(policy.Arn, policy);
     return ok({ Policy: this.policyView(policy) });
@@ -723,17 +620,6 @@ export class FakeAws {
 
   private deletePolicy(args: readonly string[]): AwsCommandResult {
     return this.withPolicy(args, "DeletePolicy", (policy) => {
-      if (
-        policy.versions.length > 1 ||
-        policy.boundaryUses > 0 ||
-        this.attachments(policy.Arn) > 0
-      ) {
-        return serviceError(
-          "DeleteConflict",
-          "DeletePolicy",
-          "Cannot delete a policy attached to entities or with non-default versions."
-        );
-      }
       this.policies.delete(policy.Arn);
       return ok();
     });

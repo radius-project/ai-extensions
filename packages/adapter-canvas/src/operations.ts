@@ -205,7 +205,7 @@ export type AwsAppBoundaryArtifact = {
   roleId: string | null;
   policyArn: string;
   // IAM's id for the policy. A rollback deletes only a policy with this id.
-  policyId: string | null;
+  policyId: string;
 };
 
 // The role's EKS access entry on the environment's cluster, recorded only when
@@ -1429,11 +1429,7 @@ function readAwsRoleState(value: unknown): SetupArtifactPresence {
 // An AWS list entry with every field a rollback needs, or nothing. One missing
 // its role or target cannot be deleted precisely, so it is dropped rather than
 // guessed at.
-function readAwsList<T>(
-  value: unknown,
-  fields: readonly string[],
-  ids: readonly string[] = []
-): T[] {
+function readAwsList<T>(value: unknown, fields: readonly string[]): T[] {
   if (!Array.isArray(value)) return [];
   const entries: T[] = [];
   for (const raw of value) {
@@ -1445,12 +1441,8 @@ function readAwsList<T>(
     };
     for (const field of fields) entry[field] = String(raw[field] || "").trim();
     if (!Object.values(entry).every(Boolean)) continue;
-    // Optional: a rollback refuses an entry without them, so it is kept.
-    const optional: Record<string, string | null> = {
-      roleId: optionalIdentityString(raw.roleId)
-    };
-    for (const id of ids) optional[id] = optionalIdentityString(raw[id]);
-    entries.push({ ...entry, ...optional } as T);
+    // Optional: a rollback refuses an entry without it, so it is kept.
+    entries.push({ ...entry, roleId: optionalIdentityString(raw.roleId) } as T);
   }
   return entries;
 }
@@ -1520,11 +1512,10 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
     },
     awsTrustSubjects: readAwsList(source.awsTrustSubjects, ["subject"]),
     awsRolePolicies: readAwsList(source.awsRolePolicies, ["policyName"]),
-    awsAppBoundaries: readAwsList(
-      source.awsAppBoundaries,
-      ["policyArn"],
-      ["policyId"]
-    ),
+    awsAppBoundaries: readAwsList(source.awsAppBoundaries, [
+      "policyArn",
+      "policyId"
+    ]),
     awsAccessEntries: readAwsList(source.awsAccessEntries, [
       "cluster",
       "region"
@@ -2160,9 +2151,9 @@ export function recordAwsRole(op: any, patch: any): any {
 }
 
 // Add a created AWS list entry, or revive one a rollback had removed. The same
-// identity is never listed twice, and a revived one takes the ids of the write
-// that made it again.
-function recordAwsListEntry<T extends { state: string }>(
+// identity is never listed twice, and a revived one takes the role id of the
+// write that made it again.
+function recordAwsListEntry<T extends { state: string; roleId: string | null }>(
   list: T[],
   artifactType: SetupCleanupArtifactType,
   entry: T
@@ -2171,8 +2162,10 @@ function recordAwsListEntry<T extends { state: string }>(
   const existing = list.find(
     (item) => cleanupArtifactIdentity(artifactType, item) === identity
   );
-  if (existing) Object.assign(existing, entry);
-  else list.push(entry);
+  if (existing) {
+    existing.state = "created";
+    existing.roleId = entry.roleId;
+  } else list.push(entry);
 }
 
 export function recordAwsTrustSubject(op: any, entry: any): any {
@@ -2201,8 +2194,7 @@ export function recordAwsAppBoundary(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
   const [record] = readAwsList<AwsAppBoundaryArtifact>(
     [entry],
-    ["policyArn"],
-    ["policyId"]
+    ["policyArn", "policyId"]
   );
   if (!ledger || !record) return op;
   recordAwsListEntry(ledger.awsAppBoundaries, "aws_app_boundary", {

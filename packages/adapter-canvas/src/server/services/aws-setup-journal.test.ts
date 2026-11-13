@@ -262,6 +262,7 @@ describe("reconcileAwsSetupChange", () => {
     ["aws_role.create", "iam get-role", "NoSuchEntity"],
     ["aws_trust.add", "iam get-role", "NoSuchEntity"],
     ["aws_role_policy.put", "iam get-role-policy", "NoSuchEntity"],
+    ["aws_app_boundary.create", "iam get-policy", "NoSuchEntity"],
     [
       "aws_access_entry.create",
       "eks describe-access-entry",
@@ -283,6 +284,7 @@ describe("reconcileAwsSetupChange", () => {
   it.each([
     ["aws_role.create", "iam get-role"],
     ["aws_role_policy.put", "iam get-role-policy"],
+    ["aws_app_boundary.create", "iam get-policy"],
     ["aws_access_entry.create", "eks describe-access-entry"]
   ] as const)(
     "keeps %s unknown when AWS cannot be read",
@@ -314,6 +316,30 @@ describe("reconcileAwsSetupChange", () => {
         aws.runAws
       )
     ).toEqual({ state: "applied", value: "" });
+  });
+
+  it.each([
+    ["tagged with this operation", OP, "applied"],
+    ["tagged with another operation", "op_later", "not_applied"]
+  ])("settles a boundary %s", async (_label, tag, state) => {
+    const aws = fakeAws({
+      ...SESSION,
+      "iam get-policy": ok({
+        Policy: {
+          PolicyId: "ANPA1",
+          Tags: [{ Key: "radius-operation", Value: tag }]
+        }
+      })
+    });
+    expect(
+      (
+        await reconcileAwsSetupChange(
+          CHANGES["aws_app_boundary.create"],
+          OP,
+          aws.runAws
+        )
+      ).state
+    ).toBe(state);
   });
 
   it.each([
@@ -762,32 +788,6 @@ describe("createAwsSetupJournal", () => {
         `Could not check whether IAM role ${ROLE} already has policy radius-deploy-dev-1: AccessDenied`
       );
       expect(send.run).not.toHaveBeenCalled();
-    });
-
-    // Rollback removes it only once no environment of the repository uses
-    // it, so a setup that reused it can still clean it up.
-    it("records the app-roles policy even when the role already had it", async () => {
-      const { journal: j } = journal({});
-      const op = operation();
-      const send = sender(ok());
-
-      await j.write(
-        op,
-        {
-          kind: "aws_role_policy.put",
-          accountId: ACCOUNT,
-          roleArn: ROLE_ARN,
-          roleName: ROLE,
-          roleId: "AROA1",
-          policyName: "radius-app-roles-1"
-        },
-        put,
-        send
-      );
-
-      expect(send.read).not.toHaveBeenCalled();
-      expect(op.setupArtifacts.awsRolePolicies).toHaveLength(1);
-      expect(op.providerRecovery.mutations).toHaveLength(1);
     });
   });
 
