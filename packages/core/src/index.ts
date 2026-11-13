@@ -28,6 +28,7 @@ export {
 } from "./workflow-readback.js";
 export * from "./deployment-command-result.js";
 export * from "./deployment-lookup-policy.js";
+export * from "./workflow-application-identity.js";
 export {
   selectLatestWorkflowRunId,
   selectDeploymentWorkflowRunId

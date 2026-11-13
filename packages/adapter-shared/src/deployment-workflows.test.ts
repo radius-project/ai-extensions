@@ -51,6 +51,104 @@ function fixture(includeAws = false) {
 }
 
 describe("deployment workflow production bindings", () => {
+  it("validates consumer identity without requiring a package-manager lockfile", async () => {
+    const action = parse(
+      await readFile(
+        new URL(
+          "../../../.github/extension/actions/validate-deployment-identity/action.yml",
+          import.meta.url
+        ),
+        "utf8"
+      )
+    );
+    expect(action.runs.steps[0].with).toEqual({
+      "node-version": "24",
+      "package-manager-cache": false
+    });
+  });
+
+  it.each([
+    {
+      name: "wrong application input type",
+      path: ["on", "workflow_call", "inputs", "application", "type"],
+      value: "boolean",
+      error: "string application input"
+    },
+    {
+      name: "missing preflight identity",
+      path: ["jobs", "run", "steps", 1, "id"],
+      value: undefined,
+      error: "before cloud work"
+    },
+    {
+      name: "missing preflight action",
+      path: ["jobs", "run", "steps", 1, "uses"],
+      value: undefined,
+      error: "before cloud work"
+    },
+    {
+      name: "unrecognized preflight action",
+      path: ["jobs", "run", "steps", 1, "uses"],
+      value: "another/action@fixture",
+      error: "before cloud work"
+    },
+    {
+      name: "conditional preflight",
+      path: ["jobs", "run", "steps", 1, "if"],
+      value: "${{ always() }}",
+      error: "before cloud work"
+    },
+    {
+      name: "mismatched declared identity",
+      path: ["jobs", "run", "steps", 1, "with", "application"],
+      value: "another-app",
+      error: "before cloud work"
+    },
+    {
+      name: "mismatched preflight model",
+      path: ["jobs", "run", "steps", 1, "with", "app-file"],
+      value: ".radius/another.bicep",
+      error: "before cloud work"
+    },
+    {
+      name: "unchecked repository command fallback",
+      path: ["jobs", "run", "steps", 1, "with", "rad-commands"],
+      value: "${{ inputs.rad_commands }}",
+      error: "before cloud work"
+    },
+    {
+      name: "teardown after refused preflight",
+      path: ["jobs", "run", "steps", 3],
+      value: {
+        uses: "radius-project/ai-extensions/.github/extension/actions/teardown@fixture",
+        if: "${{ always() }}"
+      },
+      error: "must not run teardown"
+    }
+  ])(
+    "refuses $name on the selected provider",
+    async ({ path, value, error }) => {
+      const h = fixture();
+      await h.workflows.ensureCurrent(
+        "owner/app",
+        "dev",
+        "azure",
+        h.workflows.files,
+        "topic"
+      );
+      const key = `topic:.github/workflows/${h.workflows.files[1]}`;
+      const source = h.files.get(key);
+      if (!source) throw new Error("Missing fixture workflow");
+      const document = parseDocument(source);
+      if (value === undefined) document.deleteIn(path);
+      else document.setIn(path, value);
+      h.files.set(key, document.toString());
+      await expect(
+        h.workflows.verifyAppFileInput("owner/app", "topic")
+      ).rejects.toThrow(error);
+    }
+  );
+
   it.each(
     [
       ["dispatcher", "app_file"],

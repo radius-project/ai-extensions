@@ -2,7 +2,8 @@ import {
   DELETE_RADIUS_REF,
   RADIUS_REF,
   enableAccessEntriesCommand,
-  redactCredentials
+  redactCredentials,
+  type DeploymentRow
 } from "@radius-project/core";
 import { remediationView } from "@radius-project/core/remediations";
 import { promises as fs, type Dirent } from "node:fs";
@@ -10,7 +11,9 @@ import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import {
   azureDiscoveryCommands,
+  armCleanupHistory,
   baseCanvasState,
+  cleanupHistoryScenario,
   CREDENTIAL_SENTINEL,
   defaultFakeCliScenario,
   expect,
@@ -574,7 +577,7 @@ function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
 
 async function routeDeployedPage(
   page: Page,
-  deploymentStatus: () => string,
+  deploymentStatus: () => string | null,
   abandon?: (body: unknown, nonce: string) => void,
   resources: unknown[] = []
 ): Promise<void> {
@@ -601,17 +604,21 @@ async function routeDeployedPage(
     });
   });
   await page.route("**/api/list-deployments**", async (route) => {
+    const status = deploymentStatus();
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        deployments: [
-          {
-            app: "radius-app",
-            environment: "fixture-environment",
-            status: deploymentStatus()
-          }
-        ]
+        deployments:
+          status === null ?
+            []
+          : [
+              {
+                app: "radius-app",
+                environment: "fixture-environment",
+                status
+              }
+            ]
       })
     });
   });
@@ -742,6 +749,581 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toBe(false);
   });
+
+  test("keeps an active deployment and a healthy environment visible despite an older missing run @safety", async ({
+    page,
+    canvas
+  }) => {
+    const scenario = defaultFakeCliScenario();
+    const environment = "fixture-environment";
+    const healthy = "healthy-environment";
+    const findCommand = (endpoint: string, jq?: string) => {
+      const command = scenario.commands.find(
+        (candidate) =>
+          candidate.args?.includes(endpoint) &&
+          (jq === undefined || candidate.args.at(-1) === jq)
+      );
+      if (!command?.args) throw new Error(`Missing CLI fixture: ${endpoint}`);
+      return command;
+    };
+    const environments = findCommand(
+      `/repos/${REPOSITORY}/environments?per_page=100`,
+      ".environments[].name"
+    );
+    environments.stdout = `${environment}\n${healthy}\n`;
+    const deployments = findCommand(
+      `/repos/${REPOSITORY}/deployments?per_page=100&environment=${environment}`
+    );
+    deployments.stdout = "dep-1\ndep-old\n";
+    const run = findCommand(
+      `/repos/${REPOSITORY}/actions/runs/1`,
+      '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "") + "\\t" + ((.run_attempt // 0) | tostring) + "\\t" + (.head_sha // "") + "\\t" + (.display_title // "") + "\\t" + ((.id // 0) | tostring) + "\\t" + (.repository.full_name // "") + "\\t" + (.event // "")'
+    );
+    run.stdout = `.github/workflows/run-rad-commands.yml\twaiting\t\t1\t${"a".repeat(40)}\t\t1\t${REPOSITORY}\tworkflow_dispatch`;
+    const status = findCommand(
+      `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+      '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+    );
+    status.stdout = `in_progress\thttps://github.com/${REPOSITORY}/actions/runs/1\t`;
+    const variables = findCommand(
+      `/repos/${REPOSITORY}/environments/${environment}/variables?per_page=100`,
+      ".variables[].name"
+    );
+    for (const [command, from, to, stdout] of [
+      [variables, environment, healthy, "AZURE_SUBSCRIPTION_ID"],
+      [deployments, environment, healthy, "dep-healthy"],
+      [
+        status,
+        "dep-1",
+        "dep-healthy",
+        `success\thttps://github.com/${REPOSITORY}/actions/runs/2\t`
+      ],
+      [
+        status,
+        "dep-1",
+        "dep-old",
+        `failure\thttps://github.com/${REPOSITORY}/actions/runs/3\t`
+      ],
+      [
+        run,
+        "/runs/1",
+        "/runs/2",
+        `.github/workflows/run-rad-commands.yml\tcompleted\tsuccess\t1\t${"a".repeat(40)}\t\t2\t${REPOSITORY}\tworkflow_dispatch`
+      ]
+    ] as const) {
+      if (!command.args) throw new Error("Missing CLI fixture arguments");
+      scenario.commands.push({
+        ...command,
+        args: command.args.map((arg) => arg.replace(from, to)),
+        stdout
+      });
+    }
+    if (!run.args) throw new Error("Missing workflow fixture arguments");
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: run.args.map((arg) => arg.replace("/runs/1", "/runs/3")),
+        exitCode: 1,
+        stderr: "gh: Not Found (HTTP 404)"
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/actions/runs/2/artifacts?per_page=100`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            artifacts: [
+              {
+                id: 2,
+                name: "radius-deploy-status-healthy",
+                workflow_run: { id: 2 }
+              }
+            ]
+          })
+      },
+      {
+        tool: "gh",
+        argsPrefix: [
+          "run",
+          "download",
+          "2",
+          "--name",
+          "radius-deploy-status-healthy",
+          "--dir"
+        ],
+        argsSuffix: ["--repo", REPOSITORY],
+        writeFilesDirectoryArg: "--dir",
+        writeFiles: [
+          {
+            path: "deploy-progress.json",
+            content: JSON.stringify({
+              schemaVersion: 1,
+              application: "healthy-app",
+              environment: healthy,
+              runId: 2,
+              sequence: 1,
+              resources: []
+            })
+          }
+        ]
+      }
+    );
+    await canvas.setScenario(scenario);
+    const listing = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/list-deployments"
+    );
+    await gotoCanvas(page, canvas, "deploying");
+    expect(await (await listing).json()).toMatchObject({
+      deployments: [
+        { environment, app: "radius-app", status: "pending" },
+        { environment: healthy, app: "healthy-app", status: "success" }
+      ]
+    });
+    const table = page.locator("#deploy-table-body");
+    const active = table.locator("tr").filter({ hasText: environment });
+    const successful = table.locator("tr").filter({ hasText: healthy });
+    await expect(active).toContainText("radius-app");
+    await expect(successful).toContainText("healthy-app");
+    await expect(
+      active.getByRole("button", { name: "Delete Deployment" })
+    ).toBeDisabled();
+    await expect(
+      active.getByRole("button", { name: "Mark cleanup complete", exact: true })
+    ).toHaveCount(0);
+    const runLink = active.getByRole("link", { name: "View Run" });
+    await runLink.focus();
+    await expect(runLink).toBeFocused();
+    expect(
+      (await new AxeBuilder({ page }).include("#deploy-table-body").analyze())
+        .violations
+    ).toEqual([]);
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.args.includes("POST") &&
+          call.args.some((arg) => arg.includes("/statuses"))
+      )
+    ).toBe(false);
+  });
+
+  for (const surface of ["deploying", "deployed"] as const) {
+    test(`cleanup details announce loading and preserve the ${surface} target on failure @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`
+      };
+      await page.route("**/api/list-deployments**", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            deployments: [
+              {
+                app: "radius-app",
+                environment: "fixture-environment",
+                status: "failed",
+                identity: { state: "known", application: "radius-app" },
+                deploymentId: "7",
+                runUrl: selection.runUrl,
+                cleanupSelection: selection
+              }
+            ]
+          })
+        })
+      );
+      const held = createDeferred<void>();
+      let requests = 0;
+      await page.route("**/api/deployment-cleanup-details", async (route) => {
+        requests++;
+        await held.promise;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "GitHub history is unavailable. Tracking was not changed."
+          })
+        });
+      });
+      await gotoCanvas(
+        page,
+        canvas,
+        `${surface}&application=radius-app&environment=fixture-environment`
+      );
+      const cleanup = page.getByRole("button", {
+        name: "Load cleanup details",
+        exact: true
+      });
+      const status = page.locator(
+        surface === "deploying" ?
+          "#deploy-inline-status"
+        : "#deployed-inline-status"
+      );
+      await cleanup.focus();
+      await page.keyboard.press("Enter");
+      const accessibility = () =>
+        new AxeBuilder({ page })
+          .include(
+            surface === "deploying" ?
+              "#deploy-inline-status"
+            : "#deployed-inline-status"
+          )
+          .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+          .analyze();
+      try {
+        await expect(cleanup).toBeDisabled();
+        await expect(cleanup).toHaveAttribute("aria-busy", "true");
+        await expect(status).toHaveAttribute("role", "status");
+        await expect(status).toContainText("Loading cleanup details");
+        expect((await accessibility()).violations).toEqual([]);
+      } finally {
+        held.resolve();
+      }
+      await expect(status).toContainText("GitHub history is unavailable");
+      await expect(cleanup).toBeEnabled();
+      await expect(page.locator("#deploy-abandon-modal")).toBeHidden();
+      await cleanup.focus();
+      await expect(cleanup).toBeFocused();
+      expect((await accessibility()).violations).toEqual([]);
+      expect(requests).toBe(1);
+    });
+  }
+
+  test("attests exact-run external cleanup by keyboard and exposes older history @safety", async ({
+    page,
+    canvas
+  }) => {
+    let marked = false;
+    let request: unknown;
+    const confirmation = `${REPOSITORY}/run-42@1/fixture-environment`;
+    const selection = {
+      runId: 42,
+      runAttempt: 1,
+      deploymentId: "7",
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`
+    };
+    await page.route("**/api/deployment-cleanup-details", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          prepared: true,
+          selection,
+          deployment: {
+            app: "",
+            environment: "fixture-environment",
+            status: "failed",
+            deploymentId: "7",
+            runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`,
+            recovery: {
+              runId: 42,
+              runAttempt: 1,
+              revision: "a".repeat(64),
+              confirmation,
+              canMarkCleanupComplete: true
+            }
+          }
+        })
+      })
+    );
+    await page.route("**/api/list-deployments**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          deployments: [
+            marked ?
+              {
+                app: "older-app",
+                environment: "fixture-environment",
+                status: "success",
+                identity: { state: "known", application: "older-app" }
+              }
+            : {
+                app: "",
+                environment: "fixture-environment",
+                status: "failed",
+                deploymentId: "7",
+                runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`,
+                identity: { state: "unavailable", reason: "Artifact expired" },
+                cleanupSelection: selection
+              }
+          ]
+        })
+      });
+    });
+    await page.route("**/api/abandon-deployment", async (route) => {
+      request = route.request().postDataJSON();
+      expect(route.request().headers()["x-radius-mutation-nonce"]).toBeTruthy();
+      marked = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ outcome: "abandoned" })
+      });
+    });
+    await gotoCanvas(page, canvas, "deploying");
+    const cleanup = page.getByRole("button", {
+      name: "Load cleanup details",
+      exact: true
+    });
+    await cleanup.focus();
+    await page.keyboard.press("Enter");
+    const modal = page.locator("#deploy-abandon-modal");
+    await expect(modal).toBeVisible();
+    await expect(modal).toContainText("Canvas will not contact the cloud");
+    await modal
+      .getByRole("button", { name: "I completed cleanup outside Canvas" })
+      .focus();
+    await page.keyboard.press("Enter");
+    await modal
+      .getByRole("button", {
+        name: "I understand Canvas did not verify or perform cleanup"
+      })
+      .focus();
+    await page.keyboard.press("Enter");
+    const token = modal.locator("input");
+    await token.fill("wrong");
+    await expect(
+      modal.getByRole("button", {
+        name: "Mark cleanup complete",
+        exact: true
+      })
+    ).toBeDisabled();
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .include("#deploy-abandon-modal")
+          .analyze()
+      ).violations
+    ).toEqual([]);
+    await token.fill(confirmation);
+    await modal
+      .getByRole("button", { name: "Mark cleanup complete", exact: true })
+      .focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#deploy-table-body")).toContainText("older-app");
+    expect(request).toMatchObject({
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      confirmation
+    });
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.args.slice(0, 3).join(" ") ===
+          "workflow run delete-application.yml"
+      )
+    ).toBe(false);
+  });
+
+  for (const { surface, known, partial, longHistory } of [
+    { surface: "deploying", known: false, partial: false, longHistory: false },
+    { surface: "deploying", known: false, partial: true, longHistory: false },
+    { surface: "deployed", known: true, partial: false, longHistory: false },
+    { surface: "deploying", known: false, partial: false, longHistory: true }
+  ]) {
+    test(`real grouped cleanup preserves history on ${surface}; partial: ${partial}; long history: ${longHistory} @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const scenario = cleanupHistoryScenario(known);
+      if (longHistory) {
+        const history = scenario.commands.find((command) =>
+          command.args?.includes(
+            `/repos/${REPOSITORY}/deployments?per_page=100&environment=fixture-environment`
+          )
+        );
+        if (!history) throw new Error("Missing history fixture");
+        const tail = Array.from({ length: 97 }, (_, i) => `older-${i}`);
+        history.stdout = ["8", "7", "6", ...tail].join("\n");
+        for (const id of tail)
+          scenario.commands.push({
+            tool: "gh",
+            args: [
+              "api",
+              `/repos/${REPOSITORY}/deployments/${id}/statuses?per_page=1`,
+              "--jq",
+              '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+            ],
+            stdout:
+              "inactive\t\tTracking abandoned in Radius Canvas; cloud resources were not deleted."
+          });
+      }
+      await canvas.setScenario(scenario);
+      const listing = page.waitForResponse((response) =>
+        response.url().includes("/api/list-deployments?")
+      );
+      await gotoCanvas(
+        page,
+        canvas,
+        known ?
+          `${surface}&application=radius-app&environment=fixture-environment`
+        : surface
+      );
+      const listed = (await (await listing).json()).deployments[0];
+      expect(listed.recovery).toBeUndefined();
+      expect(listed.cleanupSelection).toMatchObject({
+        runId: 42,
+        runAttempt: 1
+      });
+      const cleanup =
+        known ?
+          page.locator("#deployed-stop-tracking-btn")
+        : page.getByRole("button", {
+            name: "Load cleanup details",
+            exact: true
+          });
+      await expect(cleanup).toBeEnabled();
+      const preparation = page.waitForResponse((response) =>
+        response.url().endsWith("/api/deployment-cleanup-details")
+      );
+      await cleanup.focus();
+      await page.keyboard.press("Enter");
+      const current: DeploymentRow = (await (await preparation).json())
+        .deployment;
+      expect(current.recovery).toMatchObject({
+        runId: 42,
+        runAttempt: 1,
+        canMarkCleanupComplete: true,
+        confirmation:
+          known ?
+            "radius-app/fixture-environment"
+          : `${REPOSITORY}/run-42@1/fixture-environment`
+      });
+      if (!current.recovery) throw new Error("Missing real recovery evidence");
+      const marker = `Radius cleanup v1 run:42 attempt:1 rev:${current.recovery.revision}`;
+      await canvas.setScenario(armCleanupHistory(scenario, marker, partial));
+      const modal = page.locator("#deploy-abandon-modal");
+      await expect(modal).toBeVisible();
+      if (known) {
+        await page.keyboard.press("Escape");
+        await expect(modal).toBeHidden();
+        await expect(cleanup).toBeFocused();
+        await page.keyboard.press("Enter");
+        await expect(modal).toBeVisible();
+      }
+      await modal
+        .getByRole("button", { name: "I completed cleanup outside Canvas" })
+        .focus();
+      await page.keyboard.press("Enter");
+      await modal
+        .getByRole("button", {
+          name: "I understand Canvas did not verify or perform cleanup"
+        })
+        .focus();
+      await page.keyboard.press("Enter");
+      await modal.locator("input").fill(current.recovery.confirmation);
+      const confirm = modal.getByRole("button", {
+        name: "Mark cleanup complete",
+        exact: true
+      });
+      await expect(confirm).toBeEnabled();
+      const response = page.waitForResponse(
+        (result) =>
+          result.url().endsWith("/api/abandon-deployment") &&
+          result.request().method() === "POST"
+      );
+      const refreshed = page.waitForResponse((result) =>
+        result.url().includes("/api/list-deployments?")
+      );
+      const graph =
+        known ?
+          page.waitForResponse((result) =>
+            result.url().includes("/api/deployed-graph?")
+          )
+        : null;
+      await confirm.focus();
+      await page.keyboard.press("Enter");
+      if (partial) await expect(cleanup).toBeFocused();
+      expect((await response).status()).toBe(partial ? 502 : 200);
+      const rows: DeploymentRow[] = (await (await refreshed).json())
+        .deployments;
+      expect(rows).toMatchObject([
+        {
+          deploymentId: partial ? "8" : "6",
+          runUrl: `https://github.com/${REPOSITORY}/actions/runs/${partial ? 42 : 41}`
+        }
+      ]);
+      if (known && graph) {
+        const result = await graph;
+        expect(result.ok()).toBe(true);
+        expect(new URL(result.url()).searchParams.get("application")).toBe(
+          "radius-app"
+        );
+        expect(new URL(result.url()).searchParams.get("environment")).toBe(
+          "fixture-environment"
+        );
+        const payload = await result.json();
+        expect(payload).not.toHaveProperty("error");
+        expect(payload.mode).toBe("terminal");
+        await expect(page.locator("#deployed-delete-btn")).toHaveText(
+          "Delete Deployment"
+        );
+        await expect(page.locator("#deployed-delete-btn")).toBeEnabled();
+        await expect(page.locator("#deployed-app-select")).toHaveValue(
+          "radius-app"
+        );
+        await expect(cleanup).toBeHidden();
+      } else {
+        await expect(page.locator("#deploy-table-body")).toContainText(
+          partial ? "Application identity unavailable" : "radius-app"
+        );
+        if (partial) {
+          await expect(
+            page.getByText(/Could not verify all cleanup markers on GitHub/)
+          ).toBeVisible();
+          await expect(cleanup).toBeEnabled();
+          await page.reload();
+          await expect(page.locator("#deploy-table-body")).toContainText(
+            "Application identity unavailable"
+          );
+          const reread = await page.request.get(
+            `${canvas.baseUrl}/api/list-deployments?repo=${encodeURIComponent(REPOSITORY)}`
+          );
+          const retained = (await reread.json()).deployments[0];
+          expect(retained.cleanupSelection.runId).toBe(42);
+          expect(retained).not.toHaveProperty("recovery");
+        }
+      }
+      await expectNoWcagViolations(page);
+      const calls = await canvas.cliCalls();
+      const writes = calls.filter(
+        (call) =>
+          call.args.includes("POST") &&
+          call.args.some((arg) => /\/deployments\/\d+\/statuses$/.test(arg))
+      );
+      expect(writes).toHaveLength(2);
+      for (const [index, call] of writes.entries()) {
+        expect(call.args).toContain(
+          `/repos/${REPOSITORY}/deployments/${index === 0 ? 8 : 7}/statuses`
+        );
+        expect(call.args).toContain(`description=${marker}`);
+        expect(call.args).toContain("state=inactive");
+        expect(call.args).toContain("auto_inactive=false");
+        expect(call.exitCode).toBe(partial && index === 1 ? 1 : 0);
+      }
+      expect(calls.filter((call) => !call.matched)).toEqual([]);
+      expect(
+        calls.some(
+          (call) =>
+            call.args.slice(0, 3).join(" ") ===
+            "workflow run delete-application.yml"
+        )
+      ).toBe(false);
+    });
+  }
 
   for (const launch of [
     "explicit",
@@ -1480,39 +2062,25 @@ test.describe("Radius Canvas in Chromium", () => {
           ],
           "dep-1\n"
         ),
-        command(
-          [
-            "workflow",
-            "run",
-            "delete-application.yml",
-            "-f",
-            `environment=${environment}`,
-            "-f",
-            "application=radius-app",
-            "--repo",
-            REPOSITORY
-          ],
-          ""
-        ),
+        {
+          tool: "gh",
+          argsPrefix: ["workflow", "run", "delete-application.yml"],
+          argsSuffix: ["--repo", REPOSITORY],
+          stdout: ""
+        },
         command(
           [
             "run",
             "list",
             "--workflow=delete-application.yml",
             "--limit",
-            "5",
+            "100",
             "--json",
-            "databaseId,status,createdAt",
+            "databaseId,status,createdAt,displayTitle",
             "--repo",
             REPOSITORY
           ],
-          JSON.stringify([
-            {
-              databaseId: 103,
-              status: "queued",
-              createdAt: new Date().toISOString()
-            }
-          ])
+          "[]"
         )
       );
       await canvas.setScenario(scenario);
@@ -1536,6 +2104,40 @@ test.describe("Radius Canvas in Chromium", () => {
           response.request().method() === "POST"
       );
       await page.locator("#del-confirm-btn").click();
+      let deleteCorrelation: string | undefined;
+      await expect
+        .poll(async () => {
+          const dispatch = (await canvas.cliCalls()).find(
+            (call) =>
+              call.args.slice(0, 3).join(" ") ===
+              "workflow run delete-application.yml"
+          );
+          deleteCorrelation = dispatch?.args
+            .find((arg) => arg.startsWith("correlation_id="))
+            ?.slice("correlation_id=".length);
+          return deleteCorrelation;
+        })
+        .toMatch(/^dep-/);
+      const deleteDiscovery = scenario.commands.find((entry) =>
+        entry.args?.includes("--workflow=delete-application.yml")
+      );
+      if (!deleteDiscovery || !deleteCorrelation)
+        throw new Error("Missing exact delete correlation fixture");
+      deleteDiscovery.stdout = JSON.stringify([
+        {
+          databaseId: 104,
+          status: "queued",
+          createdAt: new Date().toISOString(),
+          displayTitle: `Radius - Delete ${environment} dep-unrelated`
+        },
+        {
+          databaseId: 103,
+          status: "queued",
+          createdAt: new Date().toISOString(),
+          displayTitle: `Radius - Delete ${environment} [radius:v1 app=radius-app] ${deleteCorrelation}`
+        }
+      ]);
+      await canvas.setScenario(scenario);
       const deleted = await accepted;
       expect(deleted.status(), await deleted.text()).toBe(200);
       expect(await deleted.json()).toMatchObject({ success: true });
@@ -7543,6 +8145,14 @@ test.describe("Radius Canvas in Chromium", () => {
     canvas
   }) => {
     const scenario = defaultFakeCliScenario();
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "deploying");
+    await expect(page.locator("#deploy-table-body")).toContainText(
+      "radius-app"
+    );
+
+    // Let listing establish the target before the independent admission read
+    // fails; an unavailable listing now correctly disables Deploy.
     const deploymentCommand = scenario.commands.find(
       (command) =>
         command.tool === "gh" &&
@@ -7555,8 +8165,6 @@ test.describe("Radius Canvas in Chromium", () => {
       deploymentCommand.stdout = "";
     }
     await canvas.setScenario(scenario);
-
-    await gotoCanvas(page, canvas, "deploying");
 
     // The branch the page offers must be the session worktree branch. A
     // regression to an implicit "main" would deploy the wrong ref, so this is
@@ -8273,14 +8881,14 @@ test.describe("Radius Canvas in Chromium", () => {
     );
   });
 
-  test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
+  test("confirms external cleanup by keyboard and sends the failed teardown identity @safety", async ({
     page,
     canvas
   }) => {
     const requests: Array<{ body: unknown; nonce: string }> = [];
     await routeDeployedPage(
       page,
-      () => "delete-failed",
+      () => (requests.length === 0 ? "delete-failed" : null),
       (body, nonce) => {
         requests.push({ body, nonce });
       }
@@ -8294,12 +8902,12 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.keyboard.press("Enter");
 
     const dialog = page.getByRole("dialog", {
-      name: "Stop Tracking Deployment"
+      name: "Mark cleanup complete"
     });
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText("does not delete cloud resources");
     const intent = page.getByRole("button", {
-      name: "I want to stop tracking this deployment"
+      name: "I completed cleanup outside Canvas"
     });
     await expect(intent).toBeFocused();
     await page.keyboard.press("Enter");

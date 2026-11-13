@@ -120,6 +120,7 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    id: () => "fixture",
     probeDeleteConflict: () => Promise.resolve({ state: "clear" as const }),
     isValidRepoSlug: () => true,
     readInstanceEntry: () => undefined,
@@ -133,6 +134,8 @@ const productionHandlers = {
     }),
     resolveRepoAppName: () => Promise.resolve(""),
     resolveEnvDeployment: () => Promise.resolve(null),
+    listEnvDeployment: () =>
+      Promise.resolve({ deployment: null, incomplete: false }),
     ghOrThrow: () => Promise.resolve(""),
     resetDeploymentViewState: () => {},
     captureDeletedDeployment: () => () => {},
@@ -471,6 +474,7 @@ describe("server route ownership boundary", () => {
       "POST /api/bypass-verification",
       "POST /api/operations",
       "POST /api/abandon-deployment",
+      "POST /api/deployment-cleanup-details",
       "POST /api/deploy/repair-aws-trust",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon",

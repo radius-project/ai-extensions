@@ -33,6 +33,10 @@ on:
         type: string
         required: false
         default: ''
+      application:
+        type: string
+        required: false
+        default: unknown
 
 permissions:
   id-token: write
@@ -77,6 +81,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate declared application identity
+        id: identity
+        uses: radius-project/ai-extensions/.github/extension/actions/validate-deployment-identity@{{RADIUS_REF}}
+        with:
+          application: ${{ inputs.application || 'unknown' }}
+          app-file: ${{ env.APP_FILE }}
+          environment: ${{ inputs.environment }}
+          rad-commands: ${{ inputs.rad_commands || vars.RADIUS_RAD_COMMANDS }}
 
       - name: Configure AWS Credentials (OIDC)
         if: ${{ vars.AWS_ROLE_ARN != '' }}
@@ -483,7 +496,7 @@ jobs:
           app-file: ${{ env.APP_FILE }}
 
       - name: Teardown
-        if: always()
+        if: ${{ always() && steps.identity.outcome == 'success' }}
         uses: radius-project/ai-extensions/.github/extension/actions/teardown@{{RADIUS_REF}}
         with:
           state-restored: ${{ steps.restore-state.outputs.state-restored }}

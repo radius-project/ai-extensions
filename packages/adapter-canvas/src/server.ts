@@ -452,7 +452,6 @@ import {
 } from "./credential-provenance.js";
 import type { GitHubEnvDeletionOutcome } from "./server/services/environment-deletion.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
-import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
 import type {
@@ -3503,7 +3502,15 @@ async function resolveEnvDeployment(
   appName: string,
   execute: typeof cliExec = cliExec
 ): Promise<DeploymentRow | null> {
-  return resolveEnvironmentDeployment(repo, environment, appName, {
+  return deploymentLookupFor(execute).resolveEnvDeployment(
+    repo,
+    environment,
+    appName
+  );
+}
+
+function deploymentLookupFor(execute: typeof cliExec) {
+  return createDeploymentLookup({
     readApplicationIdentity: createDeploymentIdentityReader({
       ...createDeploymentObservationBindings({
         execute,
@@ -5821,6 +5828,12 @@ export function createProductionCanvasServerRuntime(
     resolveRepoAppName,
     resolveEnvDeployment: (repo, environment, application) =>
       resolveEnvDeployment(repo, environment, application, cliExecPort),
+    listEnvDeployment: (repo, environment, application) =>
+      deploymentLookupFor(cliExecPort).listEnvDeployment(
+        repo,
+        environment,
+        application
+      ),
     ghOrThrow: (args) => ghOrThrow(args, 12000, cliExecPort),
     resetDeploymentViewState: (state, attemptId) => {
       deploymentViews.reset(state, attemptId);
@@ -5841,7 +5854,17 @@ export function createProductionCanvasServerRuntime(
     localDeploymentBlocksMutation: () => false,
     ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, awsEnabled),
     deleteApplicationWorkflowFiles: deleteApplicationWorkflowFiles(awsEnabled),
-    findWorkflowRun,
+    findWorkflowRun: (repo, file, since, known, correlation) =>
+      findWorkflowRun(
+        repo,
+        file,
+        since,
+        known,
+        undefined,
+        undefined,
+        correlation
+      ),
+    id: randomUUID,
     runGh: (args, timeout = 20000, extraEnv) =>
       new Promise((resolve) => {
         const opts: CliOptions = { timeout };

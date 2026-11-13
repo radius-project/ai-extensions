@@ -118,16 +118,16 @@ export function createDeploymentRepairCoordinator(
       if (kind === "repair") state.deployRepairing = true;
       return { kind, status: "delivered" };
     } catch (error) {
-      if (!ownsInvocation()) return { status: "stale" };
-      if (kind === "repair") state.deployRepairing = false;
-      const status =
-        attempt >= DEPLOY_HANDOFF_MAX_ATTEMPTS ? "failed" : "retryable";
-      state[stateField] = status;
       dependencies.reportDiagnostic(
         dependencies.redactDiagnostic(
           `Deployment ${kind} delivery failed: ${error instanceof Error ? error.message : String(error)}`
         )
       );
+      if (!ownsInvocation()) return { status: "stale" };
+      if (kind === "repair") state.deployRepairing = false;
+      const status =
+        attempt >= DEPLOY_HANDOFF_MAX_ATTEMPTS ? "failed" : "retryable";
+      state[stateField] = status;
       if (status === "retryable") {
         dependencies.scheduleRetry(
           { attemptId, generation },

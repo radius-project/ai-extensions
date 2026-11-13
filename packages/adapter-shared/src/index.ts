@@ -98,6 +98,7 @@ export * from "./workflow-observation-scope.js";
 export * from "./deployment-bindings.js";
 export * from "./deployment-workflows.js";
 export * from "./deployment-lookup.js";
+export * from "./deployment-cleanup-marker.js";
 export * from "./deployment-identity.js";
 export * from "./deployment-owner.js";
 export {

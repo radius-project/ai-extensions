@@ -197,6 +197,8 @@ describe("shared deployment without a frontend", () => {
         "--repo",
         "example/app",
         "-f",
+        "application=unknown",
+        "-f",
         'rad_commands=["rad deploy"]'
       ]
     ]);
