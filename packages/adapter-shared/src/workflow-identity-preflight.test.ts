@@ -14,6 +14,8 @@ describe("executed generated-workflow identity preflight", () => {
     "literal",
     "mismatch",
     "dynamic",
+    "multiline-example",
+    "multiline-unknown",
     "override",
     "unknown",
     "outside",
@@ -22,9 +24,20 @@ describe("executed generated-workflow identity preflight", () => {
   ] as const)("enforces the %s target before any cloud command", (kind) => {
     const workspace = mkdtempSync(join(tmpdir(), "radius-identity-"));
     try {
+      const model = `resource app 'Radius.Core/applications@1' = {\n name: ${kind === "dynamic" ? "appName" : "'my-app'"}\n}`;
       writeFileSync(
         join(workspace, "app.bicep"),
-        `resource app 'Radius.Core/applications@1' = {\n name: ${kind === "dynamic" ? "appName" : "'my-app'"}\n}`
+        kind.startsWith("multiline-") ?
+          `metadata example = '''
+it's an example
+${model}
+'''
+${model.replace("'my-app'", "'other-app'")}
+metadata tail = '''
+it's a tail
+'''
+`
+        : model
       );
       const run = () =>
         execFileSync(process.execPath, [script], {
@@ -32,7 +45,7 @@ describe("executed generated-workflow identity preflight", () => {
             GITHUB_WORKSPACE: workspace,
             IDENTITY_KIND: kind.includes("delete") ? "delete" : "deploy",
             DECLARED_APPLICATION:
-              kind === "unknown" ? "unknown"
+              kind === "unknown" || kind === "multiline-unknown" ? "unknown"
               : kind === "mismatch" ? "other-app"
               : kind === "invalid-delete" ? "../other"
               : "my-app",
@@ -46,7 +59,7 @@ describe("executed generated-workflow identity preflight", () => {
           encoding: "utf8",
           stdio: "pipe"
         });
-      if (["literal", "unknown", "delete"].includes(kind))
+      if (["literal", "unknown", "multiline-unknown", "delete"].includes(kind))
         expect(run()).toBe("");
       else expect(run).toThrow();
     } finally {

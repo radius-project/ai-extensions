@@ -15,6 +15,21 @@ describe("workflow application evidence", () => {
     [`// ignored\r${model}\n// end`, "my-app"],
     [`/* resource fake 'Radius.Core/applications@1' = {} */${model}`, "my-app"],
     [`var text = 'escaped\\' quote'\n${model}`, "my-app"],
+    [`metadata note = '''\na multiline description\n'''\n${model}`, null],
+    [
+      `metadata example = '''
+it's an example
+resource sample 'Radius.Core/applications@1' = {
+ name: 'sample'
+}
+'''
+${model}
+metadata tail = '''
+it's a tail
+'''
+`,
+      null
+    ],
     [`${model}\nidentifier`, "my-app"],
     [`${model}\n'not closed`, null],
     [`${model}\n'escaped\\`, null],
