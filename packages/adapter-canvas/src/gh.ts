@@ -14,6 +14,7 @@ import type {
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
 import { redactCredentials } from "./credential-redaction.js";
+import { CommandFailure } from "./command-failure.js";
 import {
   isGitHubAppBotLogin,
   isGitHubAppUserEndpointFailure
@@ -208,15 +209,23 @@ export function supportsWorkflowDispatchRunDetails(
 
 // This module is the gh process boundary, so every diagnostic leaving it must
 // redact both recognizable GitHub credentials and opaque injected tokens.
+export function processCredentials(
+  env: NodeJS.ProcessEnv = process.env
+): (string | undefined)[] {
+  return [
+    env.GH_TOKEN,
+    env.GITHUB_TOKEN,
+    env.GH_PACKAGES_TOKEN,
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    env.AZURE_CLIENT_SECRET
+  ];
+}
+
 export function redactGhCredentials(
   value: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  return redactCredentials(value, [
-    env.GH_TOKEN,
-    env.GITHUB_TOKEN,
-    env.GH_PACKAGES_TOKEN
-  ]);
+  return redactCredentials(value, processCredentials(env));
 }
 
 function errorMessage(error: unknown): string {
@@ -1420,7 +1429,15 @@ export function runCommand(
   const { stdin, ...execOpts } = opts;
   return new Promise((resolve, reject) => {
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
-      if (err) reject(new Error(redactGhCredentials(stderr || err.message)));
+      if (err)
+        reject(
+          new CommandFailure(
+            err,
+            stderr,
+            execOpts.timeout,
+            processCredentials()
+          )
+        );
       else resolve(stdout.trim());
     });
     if (stdin !== undefined) child.stdin?.end(stdin);

@@ -1,0 +1,161 @@
+import { execFile } from "node:child_process";
+import { describe, expect, it } from "vitest";
+import {
+  boundedDiagnostic,
+  CommandFailure,
+  type SubprocessFailure
+} from "./command-failure.js";
+
+describe("command failure diagnostics", () => {
+  it.each([
+    { code: 1, signal: null, killed: false, timedOut: false },
+    { code: "ENOENT", signal: null, killed: false, timedOut: false },
+    { code: null, signal: "SIGTERM", killed: true, timedOut: true },
+    { code: null, signal: "SIGKILL", killed: true, timedOut: false },
+    {
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+      signal: "SIGTERM",
+      killed: true,
+      timedOut: false
+    }
+  ] as const)(
+    "preserves exit $code and signal $signal without guessing from output",
+    ({ code, signal, killed, timedOut }) => {
+      const cause: SubprocessFailure = Object.assign(
+        new Error("spawn failed"),
+        {
+          code,
+          signal,
+          killed
+        }
+      );
+      const failure = new CommandFailure(cause, "permission denied", 10000, []);
+      expect(failure.cause).toMatchObject({
+        message: "spawn failed",
+        code,
+        signal,
+        killed
+      });
+      expect(failure).toMatchObject({
+        message: "permission denied",
+        code,
+        signal,
+        timedOut,
+        stderr: "permission denied"
+      });
+    }
+  );
+
+  it("uses the spawn message when no stderr exists and no timeout was set", () => {
+    const cause = Object.assign(
+      new Error("fixture-opaque-credential missing"),
+      {
+        killed: true,
+        signal: "SIGTERM" as const
+      }
+    );
+    const failure = new CommandFailure(cause, "", undefined, [
+      "fixture-opaque-credential"
+    ]);
+    expect(failure).toMatchObject({
+      message: "[REDACTED] missing",
+      stderr: "",
+      code: null,
+      signal: "SIGTERM",
+      timedOut: false
+    });
+  });
+
+  it.each([1999, 2000, 2001])(
+    "bounds saved text at %i characters",
+    (length) => {
+      expect(boundedDiagnostic("x".repeat(length))).toBe(
+        length > 2000 ? `${"x".repeat(2000)}[truncated]` : "x".repeat(length)
+      );
+    }
+  );
+
+  it("redacts credentials and authorization headers before truncation", () => {
+    const text = boundedDiagnostic(
+      "opaque-fixture-credential\nAuthorization: Bearer opaque-header\nclient_secret=fixture-value",
+      ["opaque-fixture-credential"]
+    );
+    expect(text).toBe(
+      "[REDACTED]\n[REDACTED HEADER]\nclient_secret=[REDACTED]"
+    );
+  });
+
+  it("preserves safe subprocess cause details without retaining raw captured streams", () => {
+    const cause = Object.assign(new Error("opaque-fixture-credential failed"), {
+      code: 1,
+      stdout: "raw kubeconfig must not be retained",
+      stderr: "raw credential must not be retained"
+    });
+    const failure = new CommandFailure(cause, "permission denied", 10000, [
+      "opaque-fixture-credential"
+    ]);
+    expect(failure.cause).toMatchObject({
+      message: "[REDACTED] failed",
+      code: 1,
+      signal: null,
+      killed: false
+    });
+    expect(JSON.stringify(failure.cause)).not.toContain("raw");
+  });
+
+  it("omits the echoed invocation from saved text and keeps the caller message", () => {
+    const cause = Object.assign(
+      new Error(
+        "Command failed: kubectl --kubeconfig /tmp/secret-dir/config get namespaces\n"
+      ),
+      { code: 1 }
+    );
+    const failure = new CommandFailure(cause, "", 10000, []);
+    expect(failure.message).toContain("/tmp/secret-dir/config");
+    expect(failure.stderr).toBe("");
+    expect(failure.cause).toMatchObject({
+      message: "Command failed: [arguments omitted]\n"
+    });
+    expect(JSON.stringify(failure.cause)).not.toContain("secret-dir");
+    expect(boundedDiagnostic(failure.message)).not.toContain("secret-dir");
+  });
+
+  it("omits the invocation from a real silent subprocess failure", async () => {
+    const failure = await new Promise<CommandFailure>((resolve) => {
+      execFile(
+        process.execPath,
+        [
+          "-e",
+          "process.exit(3)",
+          "--",
+          "--kubeconfig",
+          "/tmp/secret-dir/config"
+        ],
+        (error, _stdout, stderr) =>
+          resolve(new CommandFailure(error!, stderr, 10000, []))
+      );
+    });
+    expect(failure.code).toBe(3);
+    expect(failure.timedOut).toBe(false);
+    expect(failure.message).toContain("secret-dir");
+    expect(boundedDiagnostic(failure.message)).not.toContain("secret-dir");
+    expect(JSON.stringify(failure.cause)).not.toContain("secret-dir");
+    expect(failure.stderr).toBe("");
+  });
+
+  it("keeps long caller-visible messages whole while bounding saved fields", () => {
+    const long = "x".repeat(5000);
+    const failure = new CommandFailure(new Error("failed"), long, 10000, []);
+    expect(failure.message).toHaveLength(5000);
+    expect(failure.stderr).toHaveLength(2000 + "[truncated]".length);
+  });
+
+  it.each([
+    "apiVersion: v1\nclusters:\n- cluster: private",
+    '{"clusters":[{"cluster":"private data"}]}',
+    "kind: Config\nprivate data",
+    "-----BEGIN PRIVATE KEY-----\nprivate data"
+  ])("does not save raw configuration or private keys", (text) => {
+    expect(boundedDiagnostic(text)).toBe("[REDACTED CONFIGURATION]");
+  });
+});

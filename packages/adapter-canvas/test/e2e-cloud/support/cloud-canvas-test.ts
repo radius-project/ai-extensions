@@ -14,6 +14,7 @@
 
 import { test as base } from "@playwright/test";
 import { CanvasHarness } from "../../e2e/support/canvas-harness.js";
+import { observeCloudDiscovery } from "./cloud-discovery-diagnostics.js";
 import {
   CLOUD_CANVAS_HOST_ENV,
   resolveCloudCanvasHost,
@@ -55,6 +56,7 @@ export interface CloudCanvasSession {
   /** Loads the current canvas page again. */
   reload(): Promise<void>;
   cleanup(): Promise<void>;
+  guardDiscovery<T>(action: () => Promise<T>): Promise<T>;
 }
 
 interface CloudCanvasOpener {
@@ -87,47 +89,77 @@ export const cloudCanvasHost: CloudCanvasHost = resolveCloudCanvasHost(
 );
 
 const harnessTest = base.extend<CloudCanvasFixtures>({
-  cloudCanvas: async ({ page }, use) => {
-    await use({
-      host: "harness",
-      async open(options) {
-        const harness = await CanvasHarness.create({
-          page,
-          title: options.title,
-          mode: "cloud",
-          workspacePath: options.workspacePath,
-          initialPage: options.initialPage
-        });
-        const cleanup = (): Promise<void> => harness.cleanup();
-        try {
-          await harness.seedState(
-            cloudCanvasState({
-              repository: options.repository,
-              branch: options.branch,
-              workspacePath: options.workspacePath
-            })
-          );
-        } catch (error) {
-          await runCleanupSteps(
-            [{ label: "clean up Canvas harness", run: cleanup }],
-            error
-          );
-          throw error;
+  cloudCanvas: async ({ page }, use, testInfo) => {
+    const observers: Awaited<ReturnType<typeof observeCloudDiscovery>>[] = [];
+    try {
+      await use({
+        host: "harness",
+        async open(options) {
+          const harness = await CanvasHarness.create({
+            page,
+            title: options.title,
+            mode: "cloud",
+            workspacePath: options.workspacePath,
+            initialPage: options.initialPage
+          });
+          let diagnostics:
+            Awaited<ReturnType<typeof observeCloudDiscovery>> | undefined;
+          const cleanup = (): Promise<void> =>
+            runCleanupSteps([
+              {
+                label: "save discovery diagnostics",
+                run: async () => {
+                  await diagnostics?.dispose();
+                }
+              },
+              { label: "clean up Canvas harness", run: () => harness.cleanup() }
+            ]);
+          try {
+            await harness.seedState(
+              cloudCanvasState({
+                repository: options.repository,
+                branch: options.branch,
+                workspacePath: options.workspacePath
+              })
+            );
+            diagnostics = await observeCloudDiscovery(page, testInfo, [
+              process.env.GH_TOKEN,
+              process.env.GITHUB_TOKEN,
+              process.env.GH_PACKAGES_TOKEN,
+              process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+              process.env.AZURE_CLIENT_SECRET
+            ]);
+            observers.push(diagnostics);
+          } catch (error) {
+            await runCleanupSteps(
+              [{ label: "clean up Canvas harness", run: cleanup }],
+              error
+            );
+            throw error;
+          }
+          return {
+            target: page,
+            guardDiscovery: diagnostics.guard,
+            async goto(name) {
+              await page.goto(`${harness.baseUrl}/?page=${name}`);
+              await page.waitForLoadState("domcontentloaded");
+            },
+            async reload() {
+              await page.reload();
+              await page.waitForLoadState("domcontentloaded");
+            },
+            cleanup
+          };
         }
-        return {
-          target: page,
-          async goto(name) {
-            await page.goto(`${harness.baseUrl}/?page=${name}`);
-            await page.waitForLoadState("domcontentloaded");
-          },
-          async reload() {
-            await page.reload();
-            await page.waitForLoadState("domcontentloaded");
-          },
-          cleanup
-        };
-      }
-    });
+      });
+    } finally {
+      await runCleanupSteps(
+        observers.map((observer) => ({
+          label: "save discovery diagnostics",
+          run: () => observer.dispose()
+        }))
+      );
+    }
   }
 });
 
@@ -150,42 +182,61 @@ const appTest = copilotAppTest.extend<
     { scope: "worker" }
   ],
   cloudCanvas: async ({ copilotApp, radiusCanvasSlot }, use, testInfo) => {
-    await use({
-      host: "copilot-app",
-      app: copilotApp,
-      async attach() {
-        const previous = radiusCanvasSlot.current;
-        radiusCanvasSlot.current = undefined;
-        await previous?.dispose((message) => console.warn(message));
-        radiusCanvasSlot.current = await attachRadiusCanvas(
-          copilotApp.browser,
-          copilotApp.appPage,
-          copilotApp.cdpUrl
-        );
-        return radiusCanvasSlot.current.target;
-      },
-      async open(options) {
-        const attached = radiusCanvasSlot.current;
-        if (!attached)
-          throw new Error(
-            "The Radius canvas is not open in the Copilot app. The modeling " +
-              "test must pass first."
+    const observers: Awaited<ReturnType<typeof observeCloudDiscovery>>[] = [];
+    try {
+      await use({
+        host: "copilot-app",
+        app: copilotApp,
+        async attach() {
+          const previous = radiusCanvasSlot.current;
+          radiusCanvasSlot.current = undefined;
+          await previous?.dispose((message) => console.warn(message));
+          radiusCanvasSlot.current = await attachRadiusCanvas(
+            copilotApp.browser,
+            copilotApp.appPage,
+            copilotApp.cdpUrl
           );
-        const target = attached.target;
-        let current = options.initialPage;
-        await gotoCanvasPage(target, current);
-        return {
-          target,
-          async goto(name) {
-            current = name;
-            await gotoCanvasPage(target, name);
-          },
-          reload: () => gotoCanvasPage(target, current),
-          // The canvas belongs to the worker; the slot closes it.
-          cleanup: async () => {}
-        };
-      }
-    });
+          return radiusCanvasSlot.current.target;
+        },
+        async open(options) {
+          const attached = radiusCanvasSlot.current;
+          if (!attached)
+            throw new Error(
+              "The Radius canvas is not open in the Copilot app. The modeling " +
+                "test must pass first."
+            );
+          const target = attached.target;
+          const diagnostics = await observeCloudDiscovery(target, testInfo, [
+            process.env.GH_TOKEN,
+            process.env.GITHUB_TOKEN,
+            process.env.GH_PACKAGES_TOKEN,
+            process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+            process.env.AZURE_CLIENT_SECRET
+          ]);
+          observers.push(diagnostics);
+          let current = options.initialPage;
+          await gotoCanvasPage(target, current);
+          return {
+            target,
+            guardDiscovery: diagnostics.guard,
+            async goto(name) {
+              current = name;
+              await gotoCanvasPage(target, name);
+            },
+            reload: () => gotoCanvasPage(target, current),
+            // The canvas belongs to the worker; the slot closes it.
+            cleanup: () => diagnostics.dispose()
+          };
+        }
+      });
+    } finally {
+      await runCleanupSteps(
+        observers.map((observer) => ({
+          label: "save discovery diagnostics",
+          run: () => observer.dispose()
+        }))
+      );
+    }
     if (testInfo.status === testInfo.expectedStatus) return;
     try {
       await attachAppState(

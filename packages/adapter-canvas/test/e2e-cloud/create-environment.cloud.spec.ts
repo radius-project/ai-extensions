@@ -413,6 +413,16 @@ async function fillCreateEnvironmentForm(
   cloud: CloudFixture,
   options: { profileName: string; environmentName: string; appName?: string }
 ): Promise<() => Promise<OperationHttpResponse>> {
+  return canvas.guardDiscovery(() =>
+    fillDiscoveredEnvironmentForm(canvas, cloud, options)
+  );
+}
+
+async function fillDiscoveredEnvironmentForm(
+  canvas: CloudCanvasSession,
+  cloud: CloudFixture,
+  options: { profileName: string; environmentName: string; appName?: string }
+): Promise<() => Promise<OperationHttpResponse>> {
   const page = canvas.target;
   await canvas.goto("environment");
   await page.locator("#new-env-btn").click();
