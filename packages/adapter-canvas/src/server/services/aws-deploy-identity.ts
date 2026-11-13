@@ -835,10 +835,7 @@ export async function setupAwsDeployIdentity(
       );
 
   // The containers Recipe creates each app's IAM role through Cloud Control
-  // as this role. One policy covers every environment of the repository. It
-  // goes on first and is always journaled, so a run that puts the environment
-  // policy can roll the app-roles policy back too, once no other environment
-  // of the repository uses it.
+  // as this role. One policy covers every environment of the repository.
   const appRolesPolicyName = buildAwsAppRolesPolicyName(request.repoId);
   const appRoles = await putPolicy(
     appRolesPolicyName,
