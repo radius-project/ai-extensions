@@ -331,6 +331,9 @@ importers:
       '@radius-project/core':
         specifier: workspace:*
         version: link:../core
+      yaml:
+        specifier: 'catalog:'
+        version: 2.9.1
     devDependencies:
       vitest:
         specifier: 'catalog:'

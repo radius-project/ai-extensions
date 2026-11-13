@@ -10,7 +10,6 @@ import {
   deployFailureNoticePrompt,
   deployFailureNoticeDisplayPrompt,
   deployFailureNoticeMessage,
-  DEPLOY_REPAIR_ATTEMPT_CAP,
   DEPLOY_ERROR_CHAR_CAP,
   appModelUnverifiedPrompt,
   appModelUnverifiedDisplayPrompt,
@@ -23,7 +22,10 @@ import {
   refreshRequestKey
 } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
-import type { AppModelFreshnessStatus } from "@radius-project/core";
+import {
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  type AppModelFreshnessStatus
+} from "@radius-project/core";
 import { RADIUS_FAILURE_REPORT_CONTEXT } from "./declarations.js";
 
 describe("failure report handoff guidance", () => {
@@ -573,7 +575,10 @@ describe("deployRepairHandoffPrompt", () => {
   };
 
   it("names the repo, branch, error, and workflow run", () => {
-    const out = deployRepairHandoffPrompt("octo/app", "feat", failure);
+    const out = deployRepairHandoffPrompt("octo/app", "feat", {
+      ...failure,
+      appFile: "models/custom.bicep"
+    });
     expect(out).toContain("octo/app");
     expect(out).toContain("`feat`");
     expect(out).toContain("BCP037");
@@ -590,7 +595,8 @@ describe("deployRepairHandoffPrompt", () => {
 
   it("points at the tools that repair the model and redeploy", () => {
     const out = deployRepairHandoffPrompt("octo/app", "main", failure);
-    expect(out).toContain("radius_generate_app");
+    expect(out).toContain("radius-app-bicep");
+    expect(out).not.toContain("radius_generate_app");
     expect(out).toContain("radius_deploy");
     expect(out).toContain("radius_deploy_status");
     expect(out).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
@@ -619,10 +625,14 @@ describe("deployRepairHandoffPrompt", () => {
   it("requires the repair to be pushed, since the workflow deploys the remote branch", () => {
     // A fix left in the worktree would make the workflow redeploy the same
     // broken file, burning every repair attempt.
-    const out = deployRepairHandoffPrompt("octo/app", "feat", failure);
+    const out = deployRepairHandoffPrompt("octo/app", "feat", {
+      ...failure,
+      appFile: "models/custom.bicep"
+    });
     expect(out).toMatch(
-      /commit the repaired .radius\/app\.bicep and push it to `feat`/
+      /commit the repaired `models\/custom\.bicep` and push it to `feat`/
     );
+    expect(out).not.toContain(".radius/app.bicep");
     expect(out).toMatch(/as it exists on GitHub/);
     expect(out).toMatch(/protected/);
   });

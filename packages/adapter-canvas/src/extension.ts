@@ -30,12 +30,14 @@ import {
   ensureRadBinary,
   resolveInstalledRadiusVersion,
   runRadBicepPublishExtension,
-  runRadBicepPublish
+  runRadBicepPublish,
+  createDeploymentRepository
 } from "@radius-project/adapter-shared";
 import { createRadiusCliVersionReader } from "./radius-cli-version.js";
 import { readAwsSwitch } from "./aws-switch.js";
 import {
   github,
+  cliExec,
   fetchFileFromRepo,
   getBranchHeadSha,
   getGitHubIdentity,
@@ -63,21 +65,14 @@ import {
 } from "./workspace.js";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
 import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
-  summarizeDeployStatus,
-  describeDeployStarted
-} from "./deploy-tools.js";
-import {
   createProductionCanvasServerRuntime,
+  invalidateDeployListCache,
   setAppBicepHandoff,
-  setDeployRepairHandoff,
-  setDeployFailureNotice,
   setSessionPromptHandler,
   setOpenSourceHandler
 } from "./server.js";
+import { createProductionDeploymentRuntime } from "./runtime/production-deployment.js";
+import { createDeployModelSource } from "./server/services/deploy-model-source.js";
 import {
   getSourceRefResources,
   prepareSourceRefResources,
@@ -137,6 +132,17 @@ const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
+const awsEnabled = readAwsSwitch(process.env);
+const deploymentRuntime = createProductionDeploymentRuntime({ awsEnabled });
+const readDeploymentModel = createDeployModelSource({
+  readWorkspace: fetchWorkspaceFile,
+  readRepository: createDeploymentRepository({
+    execute: cliExec,
+    redactDiagnostic: redactGhCredentials
+  }).readFileResult,
+  redactDiagnostic: redactGhCredentials
+});
+deploymentRuntime.subscribeDispatch(invalidateDeployListCache);
 const deploymentAccount = createDeploymentAccountResolver({
   readinessOwner: executionOwner,
   logDiagnostic: (message) => console.error("[radius readiness]", message),
@@ -164,7 +170,8 @@ const {
 } = createProductionCanvasServerRuntime({
   executionOwner,
   accountContext,
-  awsEnabled: readAwsSwitch(process.env)
+  deploymentRuntime,
+  awsEnabled
 });
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
@@ -178,6 +185,8 @@ const dependencies: RadiusExtensionDependencies = {
     )
   ),
   session: sessionHolder,
+  deployment: deploymentRuntime,
+  readDeploymentModel,
   executionOwner,
   environment: createEnvironmentTools({
     ...environmentServices,
@@ -238,14 +247,6 @@ const dependencies: RadiusExtensionDependencies = {
     runRadBicepPublish,
     radArtifactsDirForSelection
   },
-  deployTools: {
-    selectDeployEntry,
-    buildDeployPayload,
-    validateDeployPayload,
-    validateDeployAttempt,
-    summarizeDeployStatus,
-    describeDeployStarted
-  },
   sourceRefs: {
     getSourceRefResources,
     prepareSourceRefResources,
@@ -260,17 +261,14 @@ const dependencies: RadiusExtensionDependencies = {
   },
   hostCallbacks: {
     setAppBicepHandoff,
-    setDeployRepairHandoff,
-    setDeployFailureNotice,
+    setDeployRepairHandoff: deploymentRuntime.setDeployRepairHandoff,
+    setDeployFailureNotice: deploymentRuntime.setDeployFailureNotice,
     setSessionPromptHandler,
     setOpenSourceHandler
   },
   process: {
     existsSync,
     execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
-  },
-  deploy: {
-    fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
   },
   operations: {
     setupInFlight
@@ -420,12 +418,7 @@ setupDevSelfReload({
       listener(filename)
     ),
   isShuttingDown,
-  isDeploying: () => {
-    for (const [, entry] of servers) {
-      if (entry?.state?.deployStatus === "in_progress") return true;
-    }
-    return false;
-  },
+  isDeploying: () => deploymentRuntime.owner.hasActiveWork(),
   getLastActivityAt: getLastWebviewActivityAt,
   now: Date.now,
   setTimer: setTimeout,

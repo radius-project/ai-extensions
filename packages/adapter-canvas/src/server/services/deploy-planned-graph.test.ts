@@ -11,12 +11,11 @@ function dependencies(
   return {
     prepareSourceRefResources: () => ({ token: "planned|acme/widgets|feat" }),
     setSourceRefResources: () => true,
-    fetchBicepSelection: () =>
+    readModelForSelection: () =>
       Promise.resolve({
+        status: "available",
         content: "resource app 'Radius.Core/applications@2023' = {}",
-        fromWorkspace: false,
-        branch: "feat",
-        bicepPath: ""
+        fromWorkspace: false
       }),
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "/tmp/rad", remote: true }),
@@ -39,6 +38,7 @@ function request(state: CanvasState = {}) {
       entry: { state },
       repo: "acme/widgets",
       branch: "feat",
+      appFile: ".radius/app.bicep",
       provider: "azure",
       log: (message: string) => logs.push(message)
     }
@@ -46,10 +46,29 @@ function request(state: CanvasState = {}) {
 }
 
 describe("planned graph recovery construction", () => {
+  it("reports an unavailable selected source without building another model", async () => {
+    const { input, logs } = request();
+    const service = createPlannedGraphRecoveryService(
+      dependencies({
+        readModelForSelection: async () => ({
+          status: "unavailable",
+          error: "GitHub unavailable"
+        }),
+        buildGraphViaRad: () => {
+          throw new Error("Must not build another model");
+        }
+      })
+    );
+    expect(await service.recover(input)).toBeNull();
+    expect(logs.at(-1)).toBe(
+      "⚠ Could not resolve planned graph: GitHub unavailable"
+    );
+  });
+
   it.each([
     "prepareSourceRefResources",
     "setSourceRefResources",
-    "fetchBicepSelection",
+    "readModelForSelection",
     "radArtifactsDirForSelection",
     "buildGraphViaRad",
     "fetchRecipePack",
@@ -66,8 +85,73 @@ describe("planned graph recovery construction", () => {
 });
 
 describe("planned graph recovery", () => {
+  it.each([
+    { deployParams: { appFile: "app.bicep" }, deployRepairing: false },
+    { deployParams: {}, deployRepairing: true },
+    { deployParams: { appFile: "app.bicep" }, deployRepairing: true }
+  ])(
+    "keeps explicit or repair graphs out of the automatic planned view: %j",
+    async (selection) => {
+      const cached = [{ id: "cached", name: "cached" }];
+      const { input, state } = request({
+        ...selection,
+        plannedResources: cached,
+        plannedRepo: "acme/original"
+      });
+      input.appFile = "app.bicep";
+      const unexpected = () => {
+        throw new Error("Must not touch the automatic planned view");
+      };
+      const service = createPlannedGraphRecoveryService(
+        dependencies({
+          prepareSourceRefResources: unexpected,
+          setSourceRefResources: unexpected
+        })
+      );
+      expect(await service.recover(input)).toMatchObject([{ id: "r1" }]);
+      expect(state.deployingResources).toMatchObject([{ id: "r1" }]);
+      expect(state.plannedResources).toBe(cached);
+      expect(state.plannedRepo).toBe("acme/original");
+    }
+  );
+
+  it("recovers the exact selected root model instead of choosing the managed model", async () => {
+    const { input } = request();
+    input.appFile = "app.bicep";
+    const paths: string[] = [];
+    const service = createPlannedGraphRecoveryService(
+      dependencies({
+        readModelForSelection: async (entry, repo, branch, path) => {
+          expect([entry, repo, branch]).toEqual([
+            input.entry,
+            input.repo,
+            input.branch
+          ]);
+          paths.push(path);
+          return {
+            status: "available",
+            content: "root model",
+            fromWorkspace: false
+          };
+        },
+        radArtifactsDirForSelection: async (selection) => {
+          paths.push(selection.bicepRepoPath);
+          return { dir: "/tmp/root", remote: true };
+        },
+        buildGraphViaRad: async (content, path) => {
+          expect(content).toBe("root model");
+          paths.push(path);
+          return [{ id: "root", name: "root" }];
+        }
+      })
+    );
+    expect(await service.recover(input)).toMatchObject([{ id: "root" }]);
+    expect(paths).toEqual(["app.bicep", "app.bicep", "app.bicep"]);
+  });
+
   it("rebuilds the graph, marks every node pending, and commits it to the panel", async () => {
     const { input, logs, state } = request();
+    input.appFile = "infra/app.bicep";
     const calls: Record<string, unknown[]> = {
       artifacts: [],
       rad: [],
@@ -76,12 +160,11 @@ describe("planned graph recovery", () => {
     };
     const service = createPlannedGraphRecoveryService(
       dependencies({
-        fetchBicepSelection: () =>
+        readModelForSelection: () =>
           Promise.resolve({
+            status: "available",
             content: "app bicep",
-            fromWorkspace: true,
-            branch: "feat",
-            bicepPath: "infra/app.bicep"
+            fromWorkspace: true
           }),
         radArtifactsDirForSelection: (selection) => {
           calls.artifacts.push(selection);
@@ -138,7 +221,7 @@ describe("planned graph recovery", () => {
     expect(calls.outputs).toEqual([[{ recipes: 1 }, "azure"]]);
   });
 
-  it("defaults the bicep path when the selection reports none", async () => {
+  it("uses the selected managed path for remote artifacts and graph building", async () => {
     const { input } = request();
     const paths: string[] = [];
     const service = createPlannedGraphRecoveryService(
@@ -201,30 +284,30 @@ describe("planned graph recovery", () => {
     ]);
   });
 
-  it("reports the missing app.bicep instead of building an empty graph", async () => {
-    const { input, logs, state } = request();
-    const service = createPlannedGraphRecoveryService(
-      dependencies({
-        fetchBicepSelection: () =>
-          Promise.resolve({
-            content: null,
-            fromWorkspace: false,
-            branch: "feat",
-            bicepPath: ""
-          }),
-        buildGraphViaRad: () => {
-          throw new Error("rad must not run without a bicep source");
-        }
-      })
-    );
+  it.each(["missing", "empty"] as const)(
+    "reports the %s model instead of building an empty graph",
+    async (mode) => {
+      const { input, logs, state } = request();
+      const service = createPlannedGraphRecoveryService(
+        dependencies({
+          readModelForSelection: async () =>
+            mode === "missing" ?
+              { status: "missing" }
+            : { status: "available", content: "", fromWorkspace: false },
+          buildGraphViaRad: () => {
+            throw new Error("rad must not run without a bicep source");
+          }
+        })
+      );
 
-    expect(await service.recover(input)).toBeNull();
-    expect(logs[1]).toContain(".radius/app.bicep not present");
-    expect(state.deployingResources).toBeUndefined();
-  });
+      expect(await service.recover(input)).toBeNull();
+      expect(logs[1]).toContain(".radius/app.bicep not present");
+      expect(state.deployingResources).toBeUndefined();
+    }
+  );
 
   it.each([
-    ["the bicep read", "fetchBicepSelection"],
+    ["the bicep read", "readModelForSelection"],
     ["the rad build", "buildGraphViaRad"],
     ["the recipe pack", "fetchRecipePack"]
   ] as const)("survives a failure in %s", async (_name, seam) => {

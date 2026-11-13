@@ -84,3 +84,30 @@ export {
 export * as ghcrBootstrap from "./ghcr-bootstrap.js";
 
 export * from "./setup-workflow-content.js";
+export * from "./deployment-command-bindings.js";
+export * from "./deployment-repository.js";
+export * from "./deployment-workspace.js";
+export * from "./deployment-observation-bindings.js";
+export * from "./deployment-templates.js";
+export * from "./deployment-parameters.js";
+export * from "./deployment-dispatch.js";
+export * from "./deployment-monitor.js";
+export * from "./deployment-outcome.js";
+export * from "./deployment-service-dependencies.js";
+export * from "./workflow-observation-scope.js";
+export * from "./deployment-bindings.js";
+export * from "./deployment-workflows.js";
+export * from "./deployment-lookup.js";
+export * from "./deployment-identity.js";
+export * from "./deployment-owner.js";
+export {
+  createDeploymentRuntime,
+  type DeploymentRuntime,
+  type DeploymentRuntimePorts,
+  type DeploymentStartResult,
+  type DeploymentStartContext,
+  type DeploymentStartInput,
+  type DeploymentWorkspace
+} from "./runtime-deployment.js";
+export * from "./deployment-repair.js";
+export * from "./production-deployment.js";

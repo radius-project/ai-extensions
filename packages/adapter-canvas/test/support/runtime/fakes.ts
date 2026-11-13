@@ -3,21 +3,13 @@
 //
 // Every fake here is in-memory only: no port is bound, no CLI is spawned, no
 // network call is made, and no real filesystem is mutated. Pure, already
-// well-tested adapter modules (deploy-tools.ts, source-refs.ts,
+// well-tested adapter modules (source-refs.ts,
 // publish-targets.ts) are reused as-is since they perform no I/O themselves;
 // everything that actually touches the outside world (servers, github,
 // workspace/git, rad, fetch, fs, execFile, the SDK session) is faked.
 
 import { vi } from "vitest";
 import type { Mock } from "vitest";
-import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
-  summarizeDeployStatus,
-  describeDeployStarted
-} from "../../../src/deploy-tools.js";
 import {
   getSourceRefResources,
   prepareSourceRefResources,
@@ -37,6 +29,7 @@ import {
 import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
 import { createSessionHolder } from "../../../src/runtime/session.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createFakeDeploymentRuntime } from "./deployment.js";
 import type { SessionPort } from "../../../src/runtime/session.js";
 import type {
   RadiusExtensionDependencies,
@@ -161,16 +154,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     appBicepHandoff?: Parameters<
       RadiusExtensionDependencies["hostCallbacks"]["setAppBicepHandoff"]
     >[0];
-    deployRepairHandoff?:
-      | ((input: {
-          repo: string;
-          branch: string;
-          error: string;
-          deployRunUrl: string;
-          attemptId: string;
-          instanceId: string;
-        }) => unknown)
-      | null;
+    deployRepairHandoff?: Parameters<
+      RadiusExtensionDependencies["hostCallbacks"]["setDeployRepairHandoff"]
+    >[0];
     deployFailureNotice?:
       | ((input: {
           repo: string;
@@ -316,14 +302,12 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         remote: false
       }))
     },
-    deployTools: {
-      selectDeployEntry,
-      buildDeployPayload,
-      validateDeployPayload,
-      validateDeployAttempt,
-      summarizeDeployStatus,
-      describeDeployStarted
-    },
+    deployment: createFakeDeploymentRuntime(),
+    readDeploymentModel: vi.fn(async () => ({
+      status: "available" as const,
+      content: "fixture managed model",
+      fromWorkspace: true
+    })),
     environment: {
       start: vi.fn(async () => {
         throw new Error("Environment setup was not scripted.");
@@ -367,15 +351,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     process: {
       existsSync: vi.fn(() => true),
       execFile: vi.fn(async () => ({ stdout: "", stderr: "" }))
-    },
-    deploy: {
-      fetch: vi.fn(
-        async () =>
-          new Response(JSON.stringify({}), {
-            status: 200,
-            headers: { "Content-Type": "application/json" }
-          })
-      )
     },
     executionOwner: {
       ...executionOwner,

@@ -1,0 +1,646 @@
+import type { DeployProgress } from "@radius-project/core";
+import {
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
+  DEPLOYMENT_MONITOR_LIMITS
+} from "@radius-project/core";
+import {
+  confirmedWorkflowConclusion,
+  describeWorkflowProtection,
+  WORKFLOW_READ_LIMITS,
+  redactCredentials,
+  WorkflowReadInterruptedError,
+  type WorkflowReadContext,
+  type WorkflowRunDetail,
+  type DeploymentResource,
+  type DeploymentState,
+  type DeploymentExecutionReference
+} from "@radius-project/core";
+import type { DeployDispatchService } from "./deployment-dispatch.js";
+import type {
+  DeployOutcomeService,
+  DeployOutcomeStatusReader
+} from "./deployment-outcome.js";
+import { assertDeployDependencies } from "./deployment-service-dependencies.js";
+import type { WorkflowReadRequest } from "./workflow-reads.js";
+
+export interface DeploymentObservationScope {
+  readonly stopped: boolean;
+  delay(milliseconds: number): Promise<void>;
+  observe(): WorkflowReadRequest;
+}
+
+/** Optional frontend enrichment; deployments do not require a display graph. */
+export interface DeploymentGraphRecovery {
+  recover(request: {
+    appFile: string;
+    entry: DeployMonitorInstanceEntry;
+    repo: string;
+    branch: string;
+    provider: string;
+    log(message: string): void;
+  }): Promise<DeploymentResource[] | null>;
+}
+
+// The background half of a deploy: recover the planned graph if the request
+// started without one, dispatch the workflow, find the run it created, and
+// follow that run until it settles.
+//
+// Deliberately backgrounded by the request service, which means every failure
+// here has to become canvas state — nothing above it is still listening. The
+// three failure shapes are preserved exactly: a confirmed workflow failure, a
+// branch that was never pushed, and a run whose outcome was never confirmed
+// (no run found, unreadable outcome, monitoring timed out, monitor crashed), which is the only one
+// an automatic repair may never act on.
+
+export interface DeployMonitorInstanceEntry {
+  state: DeploymentState;
+  observation?: DeploymentObservationScope;
+}
+
+export type DeployRunDetail = Pick<
+  WorkflowRunDetail,
+  "status" | "conclusion" | "steps"
+> &
+  Partial<Pick<WorkflowRunDetail, "jobs" | "protection">>;
+
+export interface DeployMonitorStatusReader extends DeployOutcomeStatusReader {
+  progress(context?: WorkflowReadContext): Promise<DeployProgress | null>;
+}
+
+export type DeployResourceStatus = NonNullable<
+  DeploymentResource["deployStatus"]
+>;
+
+export interface DeployStatusChange {
+  name?: string;
+  from: DeployResourceStatus;
+  to: DeployResourceStatus;
+}
+
+export interface DeployMonitorDependencies {
+  plannedGraph?: DeploymentGraphRecovery;
+  dispatch: DeployDispatchService;
+  outcome: DeployOutcomeService;
+  // Name of the step inside the run-rad-commands composite action that runs the
+  // `rad` commands. In-flight handling keys on finding a step with this exact
+  // name, so a mismatch silently disables all of it.
+  deployRadCommandsStep: string;
+  unconfirmedRunKind: DeploymentState["deployErrorKind"];
+  findWorkflowRun(
+    repo: string,
+    workflowFile: string,
+    sinceMs: number,
+    knownId: number | string | null,
+    afterRunId?: number | string | null,
+    correlationId?: string
+  ): Promise<number | string | null>;
+  getRunDetail(
+    repo: string,
+    runId: number | string,
+    request?: WorkflowReadRequest
+  ): Promise<DeployRunDetail | null>;
+  createStatusReader(
+    state: DeploymentState,
+    repo: string,
+    branch: string,
+    runId: number | string | null
+  ): Promise<DeployMonitorStatusReader>;
+  buildDeployStatusMap(
+    progress: DeployProgress | null
+  ): Map<string, DeployResourceStatus>;
+  buildDeployMessageMap(progress: DeployProgress | null): Map<string, string>;
+  applyDeployMessages(
+    resources: DeploymentResource[],
+    messages: Map<string, string>
+  ): void;
+  applyDeployStatusToResources(
+    resources: DeploymentResource[],
+    statuses: Map<string, DeployResourceStatus>
+  ): DeployStatusChange[];
+  // Unconfirmed exits never reach the outcome service's terminal settlement.
+  settleDeployStatuses(
+    resources: DeploymentResource[],
+    conclusion: string | null | undefined,
+    radiusError?: string
+  ): void;
+  generatePortalUrl(resourceType: string, provider: string): string;
+  optionalString(value: unknown): string;
+  errorMessage(error: unknown): string;
+  sleep(milliseconds: number): Promise<void>;
+  now(): number;
+}
+
+export interface DeployMonitorRequest {
+  appFile: string;
+  entry: DeployMonitorInstanceEntry;
+  repo: string;
+  branch: string;
+  provider: string;
+  requestedEnvironment: unknown;
+  resources: DeploymentResource[];
+  log(message: string): void;
+  onProgress?(): void;
+  isCurrent?(): boolean;
+}
+
+export interface DeployMonitorService {
+  run(request: DeployMonitorRequest): Promise<void>;
+}
+
+export interface DeployObservationService {
+  observe(
+    request: DeployMonitorRequest,
+    execution: DeploymentExecutionReference
+  ): Promise<void>;
+}
+
+const REQUIRED_DEPENDENCIES: readonly (keyof DeployMonitorDependencies)[] = [
+  "findWorkflowRun",
+  "getRunDetail",
+  "createStatusReader",
+  "buildDeployStatusMap",
+  "buildDeployMessageMap",
+  "applyDeployMessages",
+  "applyDeployStatusToResources",
+  "settleDeployStatuses",
+  "generatePortalUrl",
+  "optionalString",
+  "errorMessage",
+  "sleep",
+  "now"
+];
+
+// Artifact uploads take seconds, so polling faster than this just re-reads the
+// same bytes. The step-lifecycle stream and the heartbeat keep the feed moving
+// between refreshes.
+const {
+  statusPollMs: STATUS_POLL_MS,
+  discoveryAttempts: RUN_DISCOVERY_ATTEMPTS,
+  runPollAttempts: RUN_POLL_ATTEMPTS,
+  pollIntervalMs: POLL_INTERVAL_MS,
+  heartbeatMs: HEARTBEAT_MS,
+  pendingFallbackMs: PENDING_FALLBACK_MS
+} = DEPLOYMENT_MONITOR_LIMITS;
+
+function advancePendingNodes(resources: DeploymentResource[]): void {
+  for (const resource of resources) {
+    if ((resource.deployStatus ?? "pending") === "pending")
+      resource.deployStatus = "in_progress";
+    if (resource.outputResources) advancePendingNodes(resource.outputResources);
+  }
+}
+
+export function createDeployMonitorService(
+  dependencies: DeployMonitorDependencies
+): DeployMonitorService & DeployObservationService {
+  assertDeployDependencies(
+    "createDeployMonitorService",
+    dependencies,
+    REQUIRED_DEPENDENCIES
+  );
+  const missingServices = [
+    ...(dependencies.plannedGraph ?
+      [["plannedGraph.recover", dependencies.plannedGraph.recover]]
+    : []),
+    ["dispatch.prepareAndDispatch", dependencies.dispatch?.prepareAndDispatch],
+    ["outcome.settle", dependencies.outcome?.settle]
+  ].flatMap(([name, method]) => (typeof method === "function" ? [] : [name]));
+  if (missingServices.length > 0) {
+    throw new Error(
+      "createDeployMonitorService is missing required dependencies: " +
+        missingServices.join(", ")
+    );
+  }
+  // Neither value seam is function-typed, so the shared assert cannot reach
+  // them. `unconfirmedRunKind` is the load-bearing one: it marks a run whose
+  // real outcome is unknown, and an absent marking would let an attempt-bound
+  // repair redeploy race an in-flight run instead of refusing.
+  for (const name of ["deployRadCommandsStep", "unconfirmedRunKind"] as const) {
+    if (!dependencies[name]) {
+      throw new Error(
+        `createDeployMonitorService is missing required dependencies: ${name}`
+      );
+    }
+  }
+
+  const run = async (
+    request: DeployMonitorRequest,
+    execution?: DeploymentExecutionReference
+  ): Promise<void> => {
+    const { entry, repo, branch, provider } = request;
+    const log = (message: string) => request.log(redactCredentials(message));
+    let resources = request.resources;
+    let observation: WorkflowReadRequest | undefined;
+    let progressContext: WorkflowReadContext | undefined;
+    const readNotices = new Set<string>();
+    const assertCurrent = () => {
+      if (entry.observation?.stopped || request.isCurrent?.() === false)
+        throw new WorkflowReadInterruptedError("cancelled");
+    };
+    const publishProgress = () => {
+      assertCurrent();
+      request.onProgress?.();
+    };
+    const sleep = async (milliseconds: number) => {
+      if (entry.observation) await entry.observation.delay(milliseconds);
+      else await dependencies.sleep(milliseconds);
+      assertCurrent();
+    };
+    assertCurrent();
+
+    if (!repo) {
+      log("❌ No target repository specified.");
+      entry.state.deployError =
+        "No target repository was specified for the deployment.";
+      entry.state.deployStatus = "failed";
+      return;
+    }
+
+    // Push each new status down onto the resource's outputs, generating their
+    // portal links on success, the same way the rest of the deploy flow does.
+    const setStatus = (
+      r: DeploymentResource,
+      s: "pending" | "in_progress" | "success" | "failed"
+    ): void => {
+      r.deployStatus = s;
+      if (r.outputResources)
+        r.outputResources.forEach((o) => {
+          o.deployStatus = s;
+          if (s === "success") {
+            // The platform builds the link; an ID carries what it needs,
+            // such as an AWS resource's region.
+            const portalUrlKey = dependencies.optionalString(
+              o.id || o.type || o.displayType || ""
+            );
+            o.portalUrl = dependencies.generatePortalUrl(
+              portalUrlKey,
+              provider
+            );
+          }
+        });
+    };
+
+    // Build the planned graph if it was not resolved beforehand.
+    if (!execution && resources.length === 0 && dependencies.plannedGraph) {
+      const planned = await dependencies.plannedGraph.recover({
+        appFile: request.appFile,
+        entry,
+        repo,
+        branch,
+        provider,
+        log
+      });
+      assertCurrent();
+      if (planned) {
+        resources = planned;
+        entry.state.deployingResources = planned;
+        publishProgress();
+      }
+    }
+
+    const dispatched =
+      execution ?
+        { ...execution, dispatched: true }
+      : await dependencies.dispatch.prepareAndDispatch({
+          entry,
+          repo,
+          branch,
+          provider,
+          requestedEnvironment: request.requestedEnvironment,
+          appFile: request.appFile,
+          log,
+          isCurrent: () =>
+            !entry.observation?.stopped && request.isCurrent?.() !== false
+        });
+    assertCurrent();
+    if (!dispatched.dispatched) return;
+    const { workflowFile, dispatchedAt, baselineRunId, correlationId } =
+      dispatched;
+
+    log("Waiting for the deploy workflow to start...");
+    let dRunId: number | string | null = null;
+    for (
+      let attempt = 0;
+      attempt < RUN_DISCOVERY_ATTEMPTS && !dRunId;
+      attempt++
+    ) {
+      dRunId = await dependencies.findWorkflowRun(
+        repo,
+        workflowFile,
+        dispatchedAt,
+        null,
+        baselineRunId,
+        correlationId
+      );
+      assertCurrent();
+      if (!dRunId) await sleep(POLL_INTERVAL_MS);
+    }
+    if (!dRunId) {
+      log("⚠ No deploy run found for " + workflowFile + ".");
+      entry.state.deployError =
+        "The run rad commands workflow (" +
+        workflowFile +
+        ") did not start. Check that the workflow exists on the default branch and that Actions are enabled for " +
+        repo +
+        ".";
+      // The dispatch succeeded, so a run was very likely created — it just
+      // never became visible here. Treating that as an ordinary failure would
+      // let a repair redeploy race a run that is queued or merely slow to
+      // surface.
+      entry.state.deployErrorKind = dependencies.unconfirmedRunKind;
+      entry.state.deployStatus = "failed";
+      return;
+    }
+    entry.state.deployRunId = dRunId;
+    entry.state.deployRunUrl =
+      "https://github.com/" + repo + "/actions/runs/" + dRunId;
+    log(
+      "Tracking deploy run: https://github.com/" +
+        repo +
+        "/actions/runs/" +
+        dRunId
+    );
+    if (resources.length > 0 && resources[0].deployStatus === "pending")
+      setStatus(resources[0], "in_progress");
+    publishProgress();
+
+    const seenD = new Set<string>();
+    const startedD = new Set<string>();
+    let deployStepStartedAt = 0;
+    let beatStep = "";
+    let beatStepStartedAt = 0;
+    let lastBeatAt = 0;
+    let deployStarted = false;
+    let artifactProgressObserved = false;
+    let pendingFallbackApplied = false;
+
+    // Deploy status and the deployed graph are published as a workflow
+    // artifact. This reader is scoped to the run being tracked, so it reports
+    // this deploy's status rather than the previous one's.
+    const statusReader = await dependencies.createStatusReader(
+      entry.state,
+      repo,
+      branch,
+      dRunId
+    );
+    assertCurrent();
+    let lastStatusPollAt = 0;
+    // Announce only new transitions, not the same status every tick.
+    const statusAnnounced = new Set<string>();
+    let protectionNotice = "";
+
+    // Fold the newest published status map into the graph. Merging is
+    // conservative: a resource missing from the payload keeps its current
+    // status, and a failure is never downgraded within the run.
+    const pollDeployStatus = async (force = false): Promise<void> => {
+      if (resources.length === 0) return;
+      if (!force && dependencies.now() - lastStatusPollAt < STATUS_POLL_MS)
+        return;
+      lastStatusPollAt = dependencies.now();
+      let statusMap;
+      let messageMap;
+      try {
+        const progress = await statusReader.progress(progressContext);
+        assertCurrent();
+        statusMap = dependencies.buildDeployStatusMap(progress);
+        messageMap = dependencies.buildDeployMessageMap(progress);
+      } catch (e) {
+        assertCurrent();
+        log(
+          "    ⚠ Could not read deploy status: " + dependencies.errorMessage(e)
+        );
+        return;
+      }
+      if (statusMap.size > 0 || messageMap.size > 0)
+        artifactProgressObserved = true;
+      dependencies.applyDeployMessages(resources, messageMap);
+      const changes = dependencies.applyDeployStatusToResources(
+        resources,
+        statusMap
+      );
+      if (changes.length > 0) {
+        for (const resource of resources) {
+          if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+        }
+      }
+      publishProgress();
+      for (const change of changes) {
+        const line =
+          (change.to === "failed" ? "✗"
+          : change.to === "success" ? "✓"
+          : "◐") +
+          " " +
+          (change.name || "resource") +
+          " — " +
+          change.to;
+        if (statusAnnounced.has(line)) continue;
+        statusAnnounced.add(line);
+        log("  " + line);
+      }
+    };
+
+    const DEPLOY_STEP = dependencies.deployRadCommandsStep;
+    let completionObserved = false;
+    const stopUnconfirmed = (completed: boolean): void => {
+      log(
+        completed ?
+          "⚠ " + DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
+        : "⚠ Timed out waiting for the deploy workflow to complete."
+      );
+      // Stop unfinished spinners without claiming a workflow failure.
+      // Producer-terminal resources retain their own status and message.
+      dependencies.settleDeployStatuses(
+        resources,
+        completed ? null : "monitor_timed_out",
+        completed ? DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE : undefined
+      );
+      for (const resource of resources) {
+        if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+      }
+      entry.state.deployError =
+        (completed ?
+          DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE + " View the full run: "
+        : "Timed out waiting for the deploy workflow to complete. It may still be running — view it at ") +
+        "https://github.com/" +
+        repo +
+        "/actions/runs/" +
+        dRunId;
+      entry.state.deployErrorKind = dependencies.unconfirmedRunKind;
+      entry.state.deployStatus = "failed";
+      publishProgress();
+    };
+
+    for (let p = 0; p < RUN_POLL_ATTEMPTS; p++) {
+      assertCurrent();
+      observation = entry.observation?.observe();
+      if (observation)
+        observation.onDecision = (decision) => {
+          assertCurrent();
+          if (decision.state === "ready" || decision.reason === "ineligible")
+            return;
+          const notice = `Workflow evidence ${decision.state}: ${decision.reason}.`;
+          if (!readNotices.has(notice)) {
+            readNotices.add(notice);
+            log("    " + notice);
+          }
+        };
+      progressContext = observation?.context.limit(
+        WORKFLOW_READ_LIMITS.monitorMs
+      );
+      const detail = await dependencies.getRunDetail(repo, dRunId, observation);
+      assertCurrent();
+      if (!detail) {
+        if (protectionNotice) {
+          log(
+            "Observation: workflow detail is unavailable; current protection status is unknown."
+          );
+          protectionNotice = "";
+        }
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      const nextProtectionNotice =
+        detail.status === "waiting" && detail.protection ?
+          describeWorkflowProtection(detail.protection)
+        : "";
+      if (nextProtectionNotice && nextProtectionNotice !== protectionNotice)
+        log(nextProtectionNotice);
+      else if (!nextProtectionNotice && protectionNotice)
+        log(
+          detail.status === "completed" ?
+            "Observation: workflow completed; earlier protection observations are historical."
+          : detail.status === "queued" || detail.status === "in_progress" ?
+            "Observation: run left the protection wait; continuing to monitor."
+          : "Observation: current environment protection was not rechecked; approval status is unknown."
+        );
+      protectionNotice = nextProtectionNotice;
+
+      if (detail.status === "completed") {
+        completionObserved = true;
+        if (
+          typeof detail.conclusion === "string" &&
+          detail.conclusion.trim() !== "" &&
+          !confirmedWorkflowConclusion(detail)
+        ) {
+          stopUnconfirmed(true);
+          return;
+        }
+      }
+
+      // Stream step lifecycle: announce when a step STARTS (in_progress) and
+      // again when it COMPLETES so the feed never goes silent during
+      // long-running steps.
+      for (const s of detail.steps) {
+        const stepName = s.name || "";
+        if (s.status === "in_progress" && !startedD.has(stepName)) {
+          startedD.add(stepName);
+          log("  ▶ " + stepName + "…");
+        }
+        if (s.status === "completed" && !seenD.has(stepName)) {
+          seenD.add(stepName);
+          log(
+            "  " +
+              (s.conclusion === "success" ? "✓"
+              : s.conclusion ? "✗"
+              : "•") +
+              " " +
+              stepName
+          );
+        }
+      }
+
+      // Heartbeat: emit a "still running" line every ~30s for the currently
+      // executing step so the user sees continuous activity even when GitHub
+      // provides no intra-step log lines.
+      const running = detail.steps.find((s) => s.status === "in_progress");
+      if (running) {
+        const runningName = running.name || "";
+        if (beatStep !== runningName) {
+          beatStep = runningName;
+          beatStepStartedAt = dependencies.now();
+          lastBeatAt = dependencies.now();
+        } else if (dependencies.now() - lastBeatAt > HEARTBEAT_MS) {
+          lastBeatAt = dependencies.now();
+          log(
+            "    … " +
+              runningName +
+              " still running (" +
+              Math.round((dependencies.now() - beatStepStartedAt) / 1000) +
+              "s)"
+          );
+        }
+      }
+
+      // While the rad-commands step runs, fold in whatever per-resource
+      // status the deploy has published.
+      const deployStep = detail.steps.find((s) => s.name === DEPLOY_STEP);
+      if (
+        deployStep &&
+        deployStep.status === "in_progress" &&
+        resources.length > 0
+      ) {
+        if (!deployStarted) {
+          deployStarted = true;
+          deployStepStartedAt = dependencies.now();
+          entry.state.deployStartedAt = deployStepStartedAt;
+          log("🚀 rad deploy running — provisioning resources...");
+          log(
+            "  ⏱ Deployment started at " +
+              new Date(deployStepStartedAt).toISOString()
+          );
+          // Leave nodes gray; each flips to yellow when its own
+          // recipe/operation actually starts.
+        }
+        // The producer rotates changed snapshots through a bounded artifact
+        // ring while `rad deploy` runs. The reader selects the greatest valid
+        // sequence for this run, so artifact list order cannot roll status
+        // backwards.
+        await pollDeployStatus();
+        assertCurrent();
+        // Run this only when the producer has published no progress. This
+        // cannot use setStatus because advanced output nodes must be kept.
+        if (
+          !artifactProgressObserved &&
+          !pendingFallbackApplied &&
+          dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS
+        ) {
+          pendingFallbackApplied = true;
+          advancePendingNodes(resources);
+          publishProgress();
+        }
+      }
+
+      if (confirmedWorkflowConclusion(detail)) {
+        if (observation)
+          observation = {
+            ...observation,
+            context: observation.context.limit(WORKFLOW_READ_LIMITS.terminalMs)
+          };
+        progressContext = observation?.context;
+        await dependencies.outcome.settle({
+          entry,
+          repo,
+          runId: dRunId,
+          provider,
+          resources,
+          status: detail.status,
+          conclusion: detail.conclusion,
+          steps: detail.steps,
+          jobs: detail.jobs,
+          statusReader,
+          deployStepStartedAt,
+          log,
+          setStatus,
+          pollDeployStatus,
+          observation,
+          isCurrent: request.isCurrent
+        });
+        publishProgress();
+        return;
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+    stopUnconfirmed(completionObserved);
+  };
+  return { run, observe: (request, execution) => run(request, execution) };
+}

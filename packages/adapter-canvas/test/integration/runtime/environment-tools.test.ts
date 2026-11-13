@@ -2727,6 +2727,11 @@ describe("registered environment tools with production runtime services", () => 
   it.each([true, false])(
     "records an exact-run bypass only after trusted host confirmation=%s",
     async (confirmed) => {
+      const fetch = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(
+          new Error("Environment tools must not use loopback HTTP")
+        );
       const confirm = vi.fn(async () => confirmed);
       const h = await composition({ permissionsFailure: true, confirm });
       const op = createOperation({
@@ -2772,7 +2777,7 @@ describe("registered environment tools with production runtime services", () => 
         ).toHaveLength(confirmed ? 1 : 0);
         expect(h.runner).not.toHaveBeenCalled();
         expect(h.runtime.servers.size).toBe(0);
-        expect(h.deps.deploy.fetch).not.toHaveBeenCalled();
+        expect(fetch).not.toHaveBeenCalled();
       } finally {
         await h.extension.shutdown();
       }
@@ -2786,6 +2791,11 @@ describe("registered environment tools with production runtime services", () => 
   ] as const)(
     "durably admits %s verify-only setup named %j without Canvas or local HTTP",
     async (provider, environment) => {
+      const fetch = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(
+          new Error("Environment tools must not use loopback HTTP")
+        );
       const h = await composition({ awsEnabled: true });
       try {
         const result = await h.invoke("radius_setup_environment", {
@@ -2831,7 +2841,7 @@ describe("registered environment tools with production runtime services", () => 
         expect(h.persist).toHaveBeenCalled();
         expect(h.runtime.servers.size).toBe(0);
         expect(h.getOrCreateServer).not.toHaveBeenCalled();
-        expect(h.deps.deploy.fetch).not.toHaveBeenCalled();
+        expect(fetch).not.toHaveBeenCalled();
         expect(h.run).not.toHaveBeenCalled();
         const identity = {
           ...target,

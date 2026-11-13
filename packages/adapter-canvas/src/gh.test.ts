@@ -2175,14 +2175,18 @@ describe("selected GitHub executor", { concurrent: false }, () => {
 
   it("preserves success and failure status on default-account repository reads", async () => {
     const success = await loadGh("linux", {
-      commandResult: { stdout: "bWFpbg==" }
+      commandResult: {
+        stdout: '{"content":"bWFpbg==","encoding":"base64","size":4}'
+      }
     });
     await expect(
       success.fetchFileFromRepoResult("octo/app", "workflow.yml", "main")
     ).resolves.toEqual({
       content: "main",
       error: null,
-      status: 200
+      status: 200,
+      encoding: "base64",
+      size: 4
     });
 
     const denied = await loadGh("linux", {
@@ -2516,7 +2520,12 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
   });
 
   it.each([
-    ["success", null, "bWFpbg==\n", "main"],
+    [
+      "success",
+      null,
+      '{"content":"bWFpbg==","encoding":"base64","size":4}',
+      "main"
+    ],
     ["command failure", new Error("denied"), "bWFpbg==", null],
     ["empty response", null, "  ", null]
   ])(
@@ -2530,7 +2539,7 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
 
       await expect(ghApiGetContent("/contents/file")).resolves.toBe(expected);
       const call = childProcess.execFile.mock.calls[0];
-      expect(call?.[1]).toEqual(["api", "/contents/file", "--jq", ".content"]);
+      expect(call?.[1]).toEqual(["api", "/contents/file"]);
       expect(call?.[2]?.timeout).toBe(15000);
     }
   );
@@ -2594,8 +2603,8 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
   it("routes repository file and github facade calls through their public behavior", async () => {
     const gh = await loadGh("linux");
     const responses = [
-      "ZmlsZQ==",
-      "ZmlsZQ==",
+      '{"content":"ZmlsZQ==","encoding":"base64","size":4}',
+      '{"content":"ZmlsZQ==","encoding":"base64","size":4}',
       JSON.stringify({ encoding: "base64", content: "AAE=" }),
       '["one"]',
       JSON.stringify({ truncated: false, paths: ["src/index.ts"] }),
@@ -3063,7 +3072,11 @@ describe("remaining GitHub boundary fallbacks", { concurrent: false }, () => {
       "an error without message text",
       new Error(""),
       "",
-      { content: null, error: "Error", status: null }
+      {
+        content: null,
+        error: "The repository file could not be read.",
+        status: null
+      }
     ],
     [
       "an empty successful response",
@@ -3071,7 +3084,7 @@ describe("remaining GitHub boundary fallbacks", { concurrent: false }, () => {
       "",
       {
         content: null,
-        error: "empty response from gh api",
+        error: "Invalid repository file metadata.",
         status: 200
       }
     ]

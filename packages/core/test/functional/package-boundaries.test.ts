@@ -309,7 +309,8 @@ describe("core package in a host without HTTP or DOM globals", () => {
       "./domain": "./src/domain/index.ts",
       "./modeling": "./src/modeling/index.ts",
       "./platforms": "./src/platforms/index.ts",
-      "./remediations": "./src/remediations.ts"
+      "./remediations": "./src/remediations.ts",
+      "./deployment-command-display": "./src/deployment-command-display.ts"
     });
 
     // Loaded through the manifest's own targets rather than hardcoded source
@@ -319,13 +320,14 @@ describe("core package in a host without HTTP or DOM globals", () => {
         pathToFileURL(join(packageRoot, manifest.exports[subpath])).href
       ) as Promise<Record<string, unknown>>;
 
-    const [barrel, graph, modeling, platforms, remediations] =
+    const [barrel, graph, modeling, platforms, remediations, commands] =
       await Promise.all([
         load("."),
         load("./graph"),
         load("./modeling"),
         load("./platforms"),
-        load("./remediations")
+        load("./remediations"),
+        load("./deployment-command-display")
       ]);
 
     expect(typeof barrel.computeGraphDiff).toBe("function");
@@ -333,5 +335,7 @@ describe("core package in a host without HTTP or DOM globals", () => {
     expect(typeof modeling.evaluateStagedRun).toBe("function");
     expect(typeof platforms.buildOidcSubject).toBe("function");
     expect(typeof remediations.remediationView).toBe("function");
+    expect(typeof commands.displayShellCommand).toBe("function");
+    expect(commands.displayGhCommand).toBe(barrel.displayGhCommand);
   });
 });

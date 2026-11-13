@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildGitHubTrustPolicy } from "@radius-project/core";
+import { createDeploymentObservationBindings } from "@radius-project/adapter-shared";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
@@ -466,6 +467,40 @@ describe("environment listing diagnostics", () => {
 });
 
 describe("environment listing configuration over HTTP", () => {
+  it.each([false, true])(
+    "refuses environment deletion when application identity is unavailable (read failed: %s)",
+    async (readFailed) => {
+      const h = await start(
+        {},
+        {
+          resolveRepoAppName: async () => {
+            throw new Error("Default model is not deletion evidence");
+          },
+          resolveEnvDeployment: async () => ({
+            app: "",
+            environment: "dev",
+            status: "success",
+            provider: "azure",
+            deploymentId: "100",
+            runUrl: "https://github.com/octo/app/actions/runs/42",
+            identity: {
+              state: "unavailable",
+              reason: "Cannot verify application identity.",
+              readFailed
+            }
+          })
+        }
+      );
+      const response = await h.deleteEnvironment("dev");
+      expect(response).toMatchObject({
+        status: readFailed ? 503 : 409,
+        body: { code: "app-identity-unavailable", environment: "dev" }
+      });
+      expect(response.body).not.toHaveProperty("app");
+      expect(h.commands).toEqual([]);
+    }
+  );
+
   // The namespace reaches the Edit form as serialized `config.namespace` on
   // this route's response, so the contract is asserted through the real
   // loopback server rather than only at the handler.
@@ -708,14 +743,37 @@ function trackDeletions(): {
 function delayedDeleteWorkflow(outcome: "success" | "failure" | "missing") {
   let clock = 0;
   let lookups = 0;
-  const dispatch = vi.fn(async () => ({
-    code: 0,
-    stdout: "",
-    stderr: ""
-  }));
-  const findRun = vi.fn(async () =>
-    ++lookups < 4 || outcome === "missing" ? null : "42"
-  );
+  let correlation = "";
+  const dispatch = vi.fn(async (args: string[]) => {
+    correlation =
+      args
+        .find((arg) => arg.startsWith("correlation_id="))
+        ?.slice("correlation_id=".length) ?? "";
+    if (!correlation) throw new Error("Missing deletion correlation input");
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const discovery = createDeploymentObservationBindings({
+    execute: (_command, args, _options, callback) => {
+      expect(args).toContain("--workflow=delete-environment.yml");
+      lookups += 1;
+      const unrelated = {
+        databaseId: 43,
+        displayTitle: `Radius ${correlation}-suffix`
+      };
+      const own = {
+        databaseId: 42,
+        createdAt: "1969-12-30T00:00:00Z",
+        displayTitle: `Radius - Delete Environment dev ${correlation}`
+      };
+      const runs =
+        outcome === "missing" ? [unrelated]
+        : lookups < 4 ? [unrelated, own, { ...own, databaseId: 44 }]
+        : [unrelated, own];
+      callback(null, JSON.stringify(runs), "");
+    },
+    redactDiagnostic: redactGhCredentials
+  });
+  const findRun = vi.fn(discovery.findWorkflowRun);
   const readRun = vi.fn(async () => ({
     status: "completed",
     conclusion: outcome,

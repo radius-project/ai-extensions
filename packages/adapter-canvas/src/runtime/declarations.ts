@@ -328,7 +328,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_deploy",
     description:
-      "Deploys the Radius application by dispatching the same GitHub Actions deploy workflow the canvas Deploy button uses. The workflow checks out the target branch from GitHub, so commit and push any repair before calling this. Returns as soon as the deploy is started; poll the radius_deploy_status tool for the outcome. When repairing a failed deploy, pass the attemptId you were given: calling with no arguments repeats this session's last deploy as a brand new one, which leaves the repair loop and its remaining attempts behind.",
+      "Deploys a Radius application through the shared GitHub Actions workflow without requiring an open Canvas. Commit and push any repair first: the workflow checks out the target branch from GitHub. Returns an observationId for radius_deploy_status. Omitted fields use this runtime's unambiguous prior deployment or trusted workspace; unknown or ambiguous targets require explicit input. For repairs, pass the attemptId from the repair handoff, not an observationId. Calling without attemptId starts a new repair budget.",
     parameters: {
       type: "object",
       properties: {
@@ -349,17 +349,19 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         },
         branch: {
           type: "string",
-          description: "Branch to deploy. Defaults to the last deploy's branch."
+          description:
+            "Branch to deploy. Uses the prior target or trusted workspace branch, then the repository's confirmed default branch."
         },
         provider: {
           type: "string",
           enum: ["azure", "aws"],
-          description: "Cloud provider. Defaults to the last deploy's provider."
+          description:
+            "Cloud provider. Uses the prior target's provider, otherwise azure. AWS requires the runtime's AWS switch."
         },
         appFile: {
           type: "string",
           description:
-            "Path to the application Bicep file. Defaults to .radius/app.bicep."
+            "Repository-relative application model path. When omitted, select .radius/app.bicep first, then app.bicep at the repository root. Explicit paths never fall back to another model."
         }
       }
     }
@@ -374,7 +376,12 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         attemptId: {
           type: "string",
           description:
-            "Deploy attempt this call belongs to, as given in the repair handoff. Required while following a repair loop."
+            "Repair attempt from the handoff. Do not combine with observationId."
+        },
+        observationId: {
+          type: "string",
+          description:
+            "Observation-only handle returned by radius_deploy for this invocation. Superseded or foreign handles are rejected. Does not authorize repair."
         },
         logLines: {
           type: "number",

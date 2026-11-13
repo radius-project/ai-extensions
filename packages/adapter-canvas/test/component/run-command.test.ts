@@ -126,14 +126,14 @@ describe("run-command callout in Chromium", () => {
       {
         kind: "absolute",
         shell: "posix",
-        executablePath: "/opt/Copilot Tools/gh",
+        executablePath: "/opt/User's $HOME; `tools`/gh",
         installationNote: "Install GitHub CLI system-wide."
       }
     );
     const { scope } = mount(remediation);
 
     expect(scope.host.textContent).toContain(
-      "'/opt/Copilot Tools/gh' auth refresh"
+      "'/opt/User'\\''s $HOME; `tools`/gh' auth refresh"
     );
     expect(scope.host.textContent).toContain("Install GitHub CLI system-wide.");
     await user.click(button(/^Copy$/));

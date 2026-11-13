@@ -5,6 +5,7 @@ import {
 import { redactGhCredentials } from "../../../src/gh.js";
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseDocument } from "yaml";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
@@ -14,6 +15,12 @@ import {
   createDeployRequestService,
   type DeployRequestDependencies
 } from "../../../src/server/services/deploy-request.js";
+import { createDeploymentViews } from "../../../src/server/services/deployment-views.js";
+import { createTestDeploymentRuntime } from "../../support/server/deployment-runtime.js";
+import type {
+  DeploymentRuntime,
+  DeploymentRuntimePorts
+} from "@radius-project/adapter-shared";
 import { createDeployDispatchService } from "../../../src/server/services/deploy-dispatch.js";
 import { resolveEnvironmentDeployment } from "../../../src/server/services/deployment-resolver.js";
 import { probeDeleteConflict } from "../../../src/server/services/delete-conflict.js";
@@ -23,7 +30,6 @@ import {
 } from "../../../src/server/services/deploy-monitor.js";
 import {
   activeDeploymentMutation,
-  beginDeployAttempt,
   DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND,
   deploymentStatusBlocksMutation,
@@ -31,13 +37,9 @@ import {
   releaseDeploymentMutation,
   reserveDeploymentMutation,
   setDeployRepairHandoff,
-  setDeployFailureNotice,
-  triggerDeployRepairHandoff,
-  triggerDeployFailureNotice,
-  resolveDeploymentEnvironment,
-  resolveDeployRepairLoop
+  triggerDeployRepairHandoff
 } from "../../../src/server.js";
-import { DEPLOY_REPAIR_ATTEMPT_CAP } from "../../../src/runtime/hooks.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "@radius-project/core";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type {
@@ -58,9 +60,13 @@ import { observeWorkflowRun } from "@radius-project/core";
 import {
   readWorkflowRun,
   readWorkflowLog,
+  normalizeDeploymentAppFile,
   createWorkflowArtifactReader,
+  createDeploymentRepository,
+  createDeploymentWorkflows,
   type WorkflowExecution
 } from "@radius-project/adapter-shared";
+import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
 import { createDeployOutcomeService } from "../../../src/server/services/deploy-outcome.js";
 import {
   DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
@@ -70,18 +76,41 @@ import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monit
 import { createDeferred } from "../../support/browser/fakes.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
-import { createFakeServerEntry } from "../../support/runtime/fakes.js";
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
+import { deploymentTemplates } from "../../../../adapter-shared/test/fixtures/deployment-workflows.js";
+import {
+  appParams,
+  resolveDeployParams,
+  partitionParams,
+  extractAppName,
+  buildDeployRadCommand,
+  buildAppGraphRadCommand
+} from "../../../src/bicep.js";
 
 let container: CanvasServerContainer | undefined;
+const fixtureRuntimes: DeploymentRuntime[] = [];
+let deploymentHarness:
+  | {
+      runtime: DeploymentRuntime;
+      views: ReturnType<typeof createDeploymentViews>;
+      cleanup(): Promise<void>;
+    }
+  | undefined;
 
 afterEach(async () => {
   vi.useRealTimers();
   await container?.stopAll();
+  await deploymentHarness?.cleanup();
+  await Promise.all(
+    fixtureRuntimes.splice(0).map((runtime) => runtime.owner.shutdown(1000))
+  );
+  deploymentHarness = undefined;
   container = undefined;
 });
 
 interface Harness {
+  runtime: DeploymentRuntime;
+  views: ReturnType<typeof createDeploymentViews>;
   state: CanvasState;
   cache: Map<string, DeployListCacheEntry>;
   environments: string[];
@@ -119,6 +148,7 @@ interface Harness {
 function row(environment: string, status = "deployed"): DeploymentRow {
   return {
     app: "todo-app",
+    identity: { state: "known", application: "todo-app" },
     environment,
     provider: "azure",
     status,
@@ -137,6 +167,9 @@ function start(
   { awsEnabled = true }: { awsEnabled?: boolean } = {}
 ): Harness {
   const state: CanvasState = {};
+  const runtime = createTestDeploymentRuntime();
+  fixtureRuntimes.push(runtime);
+  const views = createDeploymentViews(runtime);
   const cache = new Map<string, DeployListCacheEntry>();
   const environments: string[] = [];
   const resets: unknown[] = [];
@@ -217,7 +250,11 @@ function start(
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
       isValidRepoSlug,
-      readInstanceEntry: () => (entryMissing ? undefined : { state }),
+      readInstanceEntry: (instanceId) => {
+        if (entryMissing) return undefined;
+        views.refresh(instanceId, state);
+        return { state };
+      },
       triggerDeployRepairHandoff:
         callbacks.triggerDeployRepairHandoff ?? (() => false),
       triggerDeployFailureNotice:
@@ -237,6 +274,10 @@ function start(
       },
       deployListCache: cache,
       deployListTtlMs: 15000,
+      captureDeletedDeployment: views.captureDeletion,
+      logError: (message) => {
+        throw new Error(message);
+      },
       // The destructive route's collaborators, wired to a permissive happy path
       // so the HIT exercises real HTTP rather than re-proving refusal logic the
       // unit tests already cover.
@@ -310,6 +351,8 @@ function start(
 
   return {
     state,
+    runtime,
+    views,
     cache,
     environments,
     resets,
@@ -354,6 +397,48 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
+  it.each([
+    {
+      workspaceRepo: "acme/workspace",
+      workspaceBranch: "feature",
+      expected: null
+    },
+    { workspaceRepo: undefined, workspaceBranch: undefined, expected: null },
+    { workspaceRepo: "acme/target", workspaceBranch: "other", expected: null },
+    {
+      workspaceRepo: "ACME/TARGET",
+      workspaceBranch: "feature",
+      expected: "feature"
+    }
+  ])(
+    "publishes push eligibility only for matching workspace identity $workspaceRepo@$workspaceBranch",
+    async ({ workspaceRepo, workspaceBranch, expected }) => {
+      const harness = start();
+      Object.assign(harness.state, {
+        workspaceRepo,
+        workspaceBranch,
+        deployStatus: "failed",
+        deployErrorKind: "branch-not-pushed",
+        deployErrorBranch: "feature",
+        deployAttempt: {
+          id: "cross-repository",
+          targetRepo: "acme/target",
+          branch: "feature"
+        }
+      });
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        errorKind: "branch-not-pushed",
+        errorBranch: expected,
+        attempt: { targetRepo: "acme/target", branch: "feature" }
+      });
+    }
+  );
+
   it("returns the same sanitized diagnostics as the direct caller without publishing raw credentials", async () => {
     const credential = "opaque-http-diagnostic-fixture";
     const namedCredential = "unregistered-http-workflow-fixture";
@@ -544,7 +629,10 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
                         {
                           name: "deploy",
                           steps: [
-                            { name: "Run rad commands", conclusion: "failure" }
+                            {
+                              name: "Run rad commands",
+                              conclusion: "failure"
+                            }
                           ]
                         }
                       ]
@@ -650,6 +738,28 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       scope.stop();
       vi.useRealTimers();
       const entry = await container!.getOrCreate("panel-a");
+      const target = {
+        repo: "org/app",
+        environment: "production",
+        branch: "feature",
+        provider: "azure",
+        appFile: ".radius/app.bicep"
+      };
+      const reservation = harness.runtime.owner.reserve(target, "deploy");
+      if (!reservation) throw new Error("Unexpected reservation conflict");
+      const invocation = harness.runtime.owner.begin(
+        target,
+        structuredClone(harness.state),
+        reservation
+      );
+      invocation.state.deployAttempt = {
+        ...target,
+        targetRepo: target.repo,
+        id: invocation.attemptId
+      };
+      invocation.state.deployGeneration = invocation.generation;
+      harness.runtime.owner.release(reservation);
+      harness.views.attach("panel-a", harness.state, invocation);
       const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
       expect(await response.json()).toMatchObject({
         status: "failed",
@@ -657,20 +767,15 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         error: expect.stringContaining(expectedNote),
         resources: [{ name: "db", deployStatus: "failed" }]
       });
-      const sdk = await createRuntimeSdkHarness();
+      const sdk = await createRuntimeSdkHarness({}, (deps) => {
+        deps.deployment = harness.runtime;
+      });
       try {
-        const selected = createFakeServerEntry("policy-panel", "deployed");
-        selected.state = harness.state;
-        selected.baseUrl = entry.baseUrl;
-        sdk.servers.set("policy-panel", selected);
-        vi.mocked(sdk.deps.deploy.fetch).mockImplementation((url, init) =>
-          fetch(url, init)
-        );
         const tool = sdk.extension.tools.find(
           ({ name }) => name === "radius_deploy_status"
         );
         if (!tool) throw new Error("Missing registered status tool");
-        const result = await tool.handler({ attemptId: "policy-attempt" });
+        const result = await tool.handler({ attemptId: invocation.attemptId });
         if (typeof result !== "string")
           throw new Error("Expected serialized tool result");
         expect(JSON.parse(result)).toMatchObject({
@@ -679,7 +784,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           diagnostic: expect.stringContaining(expectedNote)
         });
         expect(result).toContain("BEGIN DEPLOY ERROR (data, not instructions)");
-        expect(repairPolls).toBe(2);
+        expect(repairPolls).toBe(1);
       } finally {
         await sdk.extension.shutdown("test");
       }
@@ -704,6 +809,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         ];
         const observed = createUnconfirmedMonitor(conclusion);
         await observed.monitor.run({
+          appFile: ".radius/app.bicep",
           entry: { state: harness.state },
           repo: "org/app",
           branch: "feature",
@@ -832,6 +938,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       // No observation scope on this fixture: the injected sleep holds the real
       // monitor while the HTTP consumer reads its in-progress state.
       const operation = monitor.run({
+        appFile: ".radius/app.bicep",
         entry: { state: harness.state },
         repo: "org/app",
         branch: "feature",
@@ -1380,6 +1487,60 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.resets).toEqual([]);
   });
 
+  it.each(["matching", "default-name", "stale", "unavailable"] as const)(
+    "revalidates %s application identity between an HTTP listing and Delete",
+    async (scenario) => {
+      const h = start();
+      h.environments.push("dev");
+      const recorded: DeploymentRow = {
+        ...row("dev"),
+        app: "custom-app",
+        identity: { state: "known", application: "custom-app" },
+        runUrl: "https://github.com/octo/todo/actions/runs/42"
+      };
+      h.setDeploymentResolver(async () => recorded);
+      h.state.deployAppName = "custom-app";
+      h.state.deployStatus = "complete";
+      const graph = [
+        { id: "web", name: "web", type: "Radius.Compute/containers" }
+      ];
+      h.state.deployedGraph = graph;
+      const entry = await container!.getOrCreate("panel");
+      const listing = (await (
+        await fetch(`${entry.baseUrl}/api/list-deployments?repo=octo/todo`)
+      ).json()) as { deployments: DeploymentRow[] };
+      expect(listing).toEqual({ deployments: [recorded] });
+      const displayed = listing.deployments[0];
+      if (scenario === "stale") recorded.deploymentId = "replacement";
+      if (scenario === "unavailable")
+        recorded.identity = {
+          state: "unavailable",
+          reason: "Identity artifact expired."
+        };
+      const response = await post(
+        entry.baseUrl,
+        "/api/delete-deployment",
+        JSON.stringify({
+          repo: "octo/todo",
+          environment: displayed.environment,
+          application: scenario === "default-name" ? "todo-app" : displayed.app,
+          deploymentId: displayed.deploymentId,
+          runUrl: displayed.runUrl
+        })
+      );
+      expect(response.status).toBe(scenario === "matching" ? 200 : 409);
+      if (scenario === "matching") {
+        expect(h.dispatches).toHaveLength(1);
+        expect(h.dispatches[0]).toContain("application=custom-app");
+      } else {
+        expect(h.dispatches).toEqual([]);
+        expect(h.workflowSyncs).toEqual([]);
+        expect(h.state.deployedGraph).toBe(graph);
+        expect(h.state.deployStatus).toBe("complete");
+      }
+    }
+  );
+
   it("dispatches the delete workflow and evicts the cached listing over a real socket", async () => {
     const harness = start();
     harness.environments.push("dev");
@@ -1526,6 +1687,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     harness.setDeploymentResolver((_repo, environment) =>
       Promise.resolve({
         app: "todo-app",
+        identity: { state: "known", application: "todo-app" },
         environment,
         provider: "azure",
         status: "delete-failed",
@@ -1540,6 +1702,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     });
     harness.setArtifactFiles({
       "rad-delete-result.json": JSON.stringify({
+        resourceType: "application",
+        name: "todo-app",
         outcome: "failed",
         forced: false,
         output:
@@ -1598,6 +1762,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       "the delete failed for an unrelated reason",
       {
         "rad-delete-result.json": JSON.stringify({
+          resourceType: "application",
+          name: "todo-app",
           outcome: "failed",
           forced: false,
           output: "ERROR: failed to authenticate with the cloud provider"
@@ -1613,6 +1779,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       harness.setDeploymentResolver((_repo, environment) =>
         Promise.resolve({
           app: "todo-app",
+          identity: { state: "known", application: "todo-app" },
           environment,
           provider: "azure",
           status: "delete-failed",
@@ -1653,6 +1820,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     harness.setDeploymentResolver((_repo, environment) =>
       Promise.resolve({
         app: "todo-app",
+        identity: { state: "known", application: "todo-app" },
         environment,
         provider: "azure",
         status: "delete-failed",
@@ -1795,6 +1963,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     const resolverCalls: string[][] = [];
     harness.setDeploymentResolver((repo, environment, application) =>
       resolveEnvironmentDeployment(repo, environment, application, {
+        readApplicationIdentity: async () => {
+          throw new Error("Unexpected identity read");
+        },
         ghOrThrow: (args) => {
           resolverCalls.push(args);
           const path = args[1] ?? "";
@@ -1864,6 +2035,10 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     const harness = start();
     harness.setDeploymentResolver((repo, environment, application) =>
       resolveEnvironmentDeployment(repo, environment, application, {
+        readApplicationIdentity: async () => ({
+          state: "known",
+          application: "todo-app"
+        }),
         ghOrThrow: (args) => {
           const path = args[1] ?? "";
           if (path.includes("/variables?")) return Promise.resolve("");
@@ -1957,9 +2132,12 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
 // subprocess. Nothing here reaches the network, a CLI, or a cloud.
 
 interface DeployHarness {
+  runtime: DeploymentRuntime;
+  views: ReturnType<typeof createDeploymentViews>;
   monitorCalls: DeployMonitorRequest[];
   branchLookups: string[][];
   handoffs: string[];
+  observationDelays: number[];
   stateOf(instanceId: string): CanvasState;
   settleMonitor(error?: Error): Promise<void>;
   setPersistedDeployment(row: DeploymentRow | null): void;
@@ -1968,69 +2146,120 @@ interface DeployHarness {
 
 function startDeploy(
   monitorOverride?: DeployMonitorService,
-  callbacks: Partial<
-    Pick<
-      DeployRequestDependencies,
-      | "triggerDeployRepairHandoff"
-      | "triggerDeployFailureNotice"
-      | "releaseDeploymentMutation"
-    >
-  > = {}
+  callbacks: {
+    readModelForSelection?: DeployRequestDependencies["readModelForSelection"];
+    deletion?: Pick<
+      DeploymentsDependencies,
+      "runGh" | "findWorkflowRun" | "logError" | "setTimer"
+    >;
+    delivery?: Pick<
+      DeploymentRuntimePorts["delivery"],
+      "sendRepair" | "sendNotice"
+    >;
+    runCommand?(command: string, args: string[]): Promise<string>;
+    onMonitorSettled?(
+      state: import("@radius-project/core").DeploymentState
+    ): void;
+  } = {}
 ): DeployHarness {
   const monitorCalls: DeployMonitorRequest[] = [];
   const branchLookups: string[][] = [];
   const handoffs: string[] = [];
-  let releaseMonitor: ((error?: Error) => void) | undefined;
-  let monitorSettled: Promise<void> | undefined;
+  const observationDelays: number[] = [];
+  const pendingMonitors: {
+    release(error?: Error): void;
+    promise: Promise<void>;
+  }[] = [];
   let persisted: DeploymentRow | null = null;
   let persistedFails = false;
 
-  const deployRequest = createDeployRequestService({
-    readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
-    resolveDeployRepairLoop,
-    resolveDeploymentEnvironment,
-    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-    localDeploymentBlocksMutation: (state) =>
-      localDeploymentBlocksMutation(state),
-    reserveDeploymentMutation: (state, reservation) =>
-      reserveDeploymentMutation(state, reservation),
-    releaseDeploymentMutation:
-      callbacks.releaseDeploymentMutation ?? releaseDeploymentMutation,
-    deploymentStatusBlocksMutation,
-    resolveEnvDeployment: () =>
+  let sequence = 0;
+  const runtime = createTestDeploymentRuntime({
+    normalizeAppFile: normalizeDeploymentAppFile,
+    awsEnabled: true,
+    id: () => String(++sequence),
+    reportError: () => {},
+    statusBlocksMutation: deploymentStatusBlocksMutation,
+    resolveDeployment: () =>
       persistedFails ?
         Promise.reject(new Error("gh unreachable"))
       : Promise.resolve(persisted),
-    runCommand: (_command, args) => {
+    resolveDefaultBranch: async (repo) => {
+      const args = [
+        "repo",
+        "view",
+        repo,
+        "--json",
+        "defaultBranchRef",
+        "--jq",
+        ".defaultBranchRef.name"
+      ];
       branchLookups.push(args);
-      return Promise.resolve("release/7\n");
+      return callbacks.runCommand ?
+          callbacks.runCommand("gh", args)
+        : Promise.resolve("release/7\n");
     },
-    canvasGraphResources: (values) =>
-      values.filter(
-        (value): value is Record<string, never> =>
-          !!value && typeof value === "object"
+    delivery: {
+      sendRepair: (input) => {
+        handoffs.push(input.instanceId || "");
+      },
+      ...callbacks.delivery,
+      redactDiagnostic: redactCredentials,
+      reportDiagnostic: () => {}
+    },
+    createExecution: () => ({
+      observation: createWorkflowObservationScope(
+        () => {
+          throw new Error("Unexpected reader construction");
+        },
+        {
+          monotonic: () => 1,
+          wall: () => 1,
+          jitter: () => 0,
+          sleep: async (milliseconds) => {
+            observationDelays.push(milliseconds);
+          }
+        }
       ),
-    beginDeployAttempt,
-    triggerDeployRepairHandoff:
-      callbacks.triggerDeployRepairHandoff ??
-      ((_entry, instanceId) => {
-        handoffs.push(instanceId);
-        return true;
-      }),
-    triggerDeployFailureNotice:
-      callbacks.triggerDeployFailureNotice ?? (() => false),
-    monitor: monitorOverride ?? {
-      run: (request) => {
-        monitorCalls.push(request);
-        monitorSettled = new Promise<void>((resolve, reject) => {
-          releaseMonitor = (error?: Error) =>
-            error ? reject(error) : resolve();
-        });
-        return monitorSettled;
+      monitor: {
+        async run(request) {
+          try {
+            if (monitorOverride) await monitorOverride.run(request);
+            else {
+              monitorCalls.push(request);
+              const pending = createDeferred<void>();
+              pendingMonitors.push({
+                release: (error) =>
+                  error ? pending.reject(error) : pending.resolve(),
+                promise: pending.promise
+              });
+              await pending.promise;
+              request.entry.state.deployStatus = "success";
+            }
+          } finally {
+            callbacks.onMonitorSettled?.(request.entry.state);
+          }
+        }
       }
+    })
+  });
+  const views = createDeploymentViews(runtime);
+  const deployRequest = createDeployRequestService({
+    runtime,
+    plannedGraph: { recover: async () => null },
+    readModelForSelection:
+      callbacks.readModelForSelection ??
+      (async () => ({
+        status: "available",
+        content: "model",
+        fromWorkspace: true
+      })),
+    attach: views.attach,
+    readDeploymentDefaults: views.defaults,
+    readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
+    reportError: (error) => {
+      throw error;
     },
-    unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
-    repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error)
   });
@@ -2039,11 +2268,13 @@ function startDeploy(
     createDeploymentsRoutes({
       isValidRepoSlug,
       deleteApplicationWorkflowFiles: [],
-      readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
-      triggerDeployRepairHandoff:
-        callbacks.triggerDeployRepairHandoff ?? (() => false),
-      triggerDeployFailureNotice:
-        callbacks.triggerDeployFailureNotice ?? (() => false),
+      readInstanceEntry: (instanceId) => {
+        const entry = container?.instances.get(instanceId);
+        if (entry) views.refresh(instanceId, entry.state);
+        return entry;
+      },
+      triggerDeployRepairHandoff: () => false,
+      triggerDeployFailureNotice: () => false,
       deployHandoffStatus: () => ({
         state: "idle",
         attempts: 0,
@@ -2053,12 +2284,16 @@ function startDeploy(
       resolveRepoAppName: () => Promise.resolve("todo-app"),
       resolveEnvDeployment: () => Promise.resolve(null),
       ghOrThrow: () => Promise.resolve(""),
-      resetDeploymentViewState: () => {},
+      resetDeploymentViewState: views.reset,
+      captureDeletedDeployment: views.captureDeletion,
+      logError: (message) => {
+        throw new Error(message);
+      },
       deployListCache: new Map<string, DeployListCacheEntry>(),
       deployListTtlMs: 15000,
       activeDeploymentMutation: () => undefined,
-      reserveDeploymentMutation: () => null,
-      releaseDeploymentMutation: () => {},
+      reserveDeploymentMutation: views.reserve,
+      releaseDeploymentMutation: views.release,
       deploymentStatusBlocksMutation: () => false,
       localDeploymentBlocksMutation: () => false,
       ensureWorkflowsCurrent: () =>
@@ -2082,7 +2317,8 @@ function startDeploy(
         repair: () => {
           throw new Error("the deploy harness must not repair AWS trust");
         }
-      }
+      },
+      ...callbacks.deletion
     })
   );
 
@@ -2105,21 +2341,35 @@ function startDeploy(
     preferredPort: async () => 0,
     prepareIdentity: () => {}
   });
+  deploymentHarness = {
+    runtime,
+    views,
+    async cleanup() {
+      for (const pending of pendingMonitors) pending.release();
+      await Promise.all(
+        pendingMonitors.map((pending) => pending.promise.catch(() => {}))
+      );
+      await runtime.owner.shutdown(1000);
+    }
+  };
 
   return {
+    runtime,
+    views,
     monitorCalls,
     branchLookups,
     handoffs,
+    observationDelays,
     stateOf: (instanceId) => {
       const entry = container?.instances.get(instanceId);
       if (!entry) throw new Error(`no instance ${instanceId}`);
       return entry.state;
     },
     async settleMonitor(error) {
-      if (!releaseMonitor || !monitorSettled) return;
-      releaseMonitor(error);
-      await monitorSettled.catch(() => {});
-      // Let the .catch/.finally chain the request service attached run.
+      for (const pending of pendingMonitors) pending.release(error);
+      await Promise.all(
+        pendingMonitors.map((pending) => pending.promise.catch(() => {}))
+      );
       await new Promise((resolve) => setImmediate(resolve));
     },
     setPersistedDeployment(row) {
@@ -2156,16 +2406,33 @@ function parseError(body: string): string {
 }
 
 function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
-  state.deployStatus = "failed";
-  state.deployAttempt = {
-    id: "attempt-A",
-    targetRepo: "acme/widgets",
+  const harness = deploymentHarness;
+  if (!harness) throw new Error("Missing deployment runtime");
+  const target = {
+    repo: "acme/widgets",
     environment: "production",
     branch: "feat",
     provider: "azure",
     appFile: ".radius/app.bicep"
   };
-  Object.assign(state, extra);
+  const reservation = harness.runtime.owner.reserve(target, "deploy");
+  if (!reservation) throw new Error("Target is busy");
+  const invocation = harness.runtime.owner.begin(
+    target,
+    { deployStatus: "failed", ...extra },
+    reservation
+  );
+  invocation.state.deployAttempt = {
+    ...target,
+    targetRepo: target.repo,
+    id: invocation.attemptId
+  };
+  harness.runtime.owner.release(reservation);
+  const entry = [...(container?.instances ?? [])].find(
+    ([, entry]) => entry.state === state
+  );
+  if (!entry) throw new Error("Missing panel");
+  harness.views.attach(entry[0], state, invocation);
 }
 
 describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
@@ -2339,6 +2606,625 @@ describe("POST /api/deploy/repair-aws-trust real-loopback HIT", () => {
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   it.each([
+    {
+      name: "genuine empty managed uses root",
+      appFile: undefined,
+      managed: "",
+      root: true,
+      selected: "app.bicep",
+      dispatched: true
+    },
+    {
+      name: "unavailable nonempty managed never uses root",
+      appFile: undefined,
+      managed: "model",
+      metadata: { encoding: "none", size: 1_048_577, content: "" },
+      root: true,
+      selected: undefined,
+      dispatched: false,
+      refused: true
+    },
+    {
+      name: "explicit unavailable managed never uses root",
+      appFile: ".radius/app.bicep",
+      managed: "model",
+      metadata: { encoding: "none", size: 1_048_577, content: "" },
+      root: true,
+      selected: ".radius/app.bicep",
+      dispatched: false
+    },
+    {
+      name: "truncated managed never uses root",
+      appFile: undefined,
+      managed: "model",
+      metadata: { encoding: "base64", size: 100, content: "" },
+      root: true,
+      selected: undefined,
+      dispatched: false,
+      refused: true
+    },
+    {
+      name: "root-only omission",
+      appFile: undefined,
+      managed: null,
+      root: true,
+      selected: "app.bicep",
+      dispatched: true
+    },
+    {
+      name: "explicit root-only",
+      appFile: "app.bicep",
+      managed: null,
+      root: true,
+      selected: "app.bicep",
+      dispatched: true
+    },
+    {
+      name: "managed precedence",
+      appFile: undefined,
+      managed: "model",
+      root: true,
+      selected: ".radius/app.bicep",
+      dispatched: true
+    },
+    {
+      name: "explicit root with both models",
+      appFile: "app.bicep",
+      managed: "model",
+      root: true,
+      selected: "app.bicep",
+      dispatched: true
+    },
+    {
+      name: "missing explicit root",
+      appFile: "app.bicep",
+      managed: "model",
+      root: false,
+      selected: "app.bicep",
+      dispatched: false
+    },
+    {
+      name: "whitespace managed must not fall back",
+      appFile: undefined,
+      managed: "  ",
+      root: true,
+      selected: ".radius/app.bicep",
+      dispatched: false
+    }
+  ])(
+    "preserves model selection through the real request and monitor: $name",
+    async ({ appFile, managed, root, selected, dispatched, ...scenario }) => {
+      const unexpected = () => {
+        throw new Error("Unexpected external operation in root-model deploy");
+      };
+      const calls: string[][] = [];
+      const reads: string[] = [];
+      const model =
+        "resource app 'Applications.Core/applications@2023-10-01-preview' = { name: 'root-app' }";
+      const repository = createDeploymentRepository({
+        redactDiagnostic: String,
+        execute: (_command, args, _options, callback) => {
+          expect(args[0]).toBe("api");
+          expect(args).toHaveLength(2);
+          const path =
+            args[1].includes("/contents/.radius/app.bicep?") ?
+              ".radius/app.bicep"
+            : "app.bicep";
+          expect(args[1]).toBe(
+            `/repos/acme/widgets/contents/${path}?ref=feature/root`
+          );
+          reads.push(path);
+          const content =
+            path === ".radius/app.bicep" ?
+              managed === "model" ?
+                model
+              : managed
+            : root ? model
+            : null;
+          if (content === null)
+            callback({ code: 1 }, "", "Not Found (HTTP 404)");
+          else
+            callback(
+              null,
+              JSON.stringify(
+                path === ".radius/app.bicep" && "metadata" in scenario ?
+                  scenario.metadata
+                : {
+                    content: Buffer.from(content).toString("base64"),
+                    encoding: "base64",
+                    size: Buffer.byteLength(content)
+                  }
+              ),
+              ""
+            );
+          return {};
+        }
+      });
+      const readModelForSelection = createDeployModelSource({
+        readWorkspace: async () => null,
+        readRepository: repository.readFileResult,
+        redactDiagnostic: String
+      });
+      const dispatch = createDeployDispatchService({
+        id: () => "root-model",
+        deployWorkflowFile: "run-rad-commands.yml",
+        deployWorkflowFiles: ["run-rad-commands.yml"],
+        branchNotPushedKind: "branch-not-pushed",
+        oidcSubjectMissingKind: "oidc-subject-missing",
+        oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
+        getBranchHeadSha: async () => "head",
+        getDefaultBranch: unexpected,
+        runGh: async (args) => {
+          calls.push(args);
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        runGhWithStdin: unexpected,
+        runAz: unexpected,
+        runGitHubJson: unexpected,
+        readProcessEnv: () => ({}),
+        ghCredentialSource: () => "keyring",
+        fetchFileForSelection: (_entry, repo, branch, path) =>
+          repository.readFile(repo, path, branch),
+        appParams,
+        resolveDeployParams,
+        partitionParams,
+        extractAppName,
+        buildDeployRadCommand,
+        buildAppGraphRadCommand,
+        ensureDeployWorkflowsOnBranch: async () => {},
+        ensureWorkflowsCurrent: async () => ({ created: [], updated: [] }),
+        verifyAppFileInput: async () => {},
+        sleep: unexpected,
+        latestWorkflowRunId: async () => 10,
+        classifyDeployDispatchFailure: unexpected,
+        uncommittedGeneratedPaths: unexpected,
+        invalidateDeployListCache: () => {},
+        errorMessage: String,
+        now: () => 1
+      });
+      const observed = createUnconfirmedMonitor(null, dispatch);
+      const h = startDeploy(observed.monitor, {
+        readModelForSelection
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await post(
+        entry.baseUrl,
+        "/api/deploy",
+        deployBody({ provider: "aws", branch: "feature/root", appFile })
+      );
+      if ("refused" in scenario && scenario.refused) {
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({
+          error: expect.stringMatching(/content|base64/)
+        });
+        expect(reads).toEqual([".radius/app.bicep"]);
+        expect(calls).toEqual([]);
+        expect(h.stateOf("panel-a").deployAttempt).toBeUndefined();
+        expect(activeDeploymentMutation(h.stateOf("panel-a"))).toBeUndefined();
+        return;
+      }
+      expect(response.status).toBe(200);
+      await expect.poll(() => h.runtime.owner.hasActiveWork()).toBe(false);
+      expect(h.stateOf("panel-a").deployAttempt?.appFile).toBe(selected);
+      if (dispatched) {
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toContain(`app_file=${selected}`);
+        expect(calls[0]).toContain("feature/root");
+        expect(
+          calls[0].find((arg) => arg.startsWith("rad_commands="))
+        ).toContain(`deploy ${selected}`);
+      } else {
+        expect(calls).toEqual([]);
+        if (appFile === ".radius/app.bicep")
+          expect(reads).toEqual([".radius/app.bicep"]);
+        expect(h.stateOf("panel-a").deployErrorKind).toBe(
+          "model-preflight-failed"
+        );
+      }
+    }
+  );
+
+  it("reports unavailable model selection without creating a runtime attempt or retaining a lease", async () => {
+    const h = startDeploy(undefined, {
+      readModelForSelection: async () => ({
+        status: "unavailable",
+        error: "GitHub unavailable"
+      })
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy",
+      deployBody({ appFile: undefined })
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining("GitHub unavailable")
+    });
+    expect(h.runtime.owner.lookup()).toEqual({ kind: "missing" });
+    expect(h.runtime.owner.hasActiveWork()).toBe(false);
+    expect(h.monitorCalls).toEqual([]);
+  });
+
+  it.each([null, 42, "../app.bicep", ""])(
+    "rejects malformed HTTP model path %j before shared admission",
+    async (appFile) => {
+      const h = startDeploy();
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await post(
+        entry.baseUrl,
+        "/api/deploy",
+        deployBody({ appFile })
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toHaveProperty("error");
+      expect(h.runtime.owner.lookup()).toEqual({ kind: "missing" });
+      expect(h.runtime.owner.hasActiveWork()).toBe(false);
+      expect(h.monitorCalls).toEqual([]);
+    }
+  );
+
+  it.each(
+    [
+      ["run-rad-commands.yml", "workflow_dispatch", "app_file"],
+      ["run-rad-commands.yml", "workflow_dispatch", "correlation_id"],
+      ["run-rad-commands-azure.yml", "workflow_call", "app_file"]
+    ].flatMap(([legacyFile, trigger, input]) =>
+      ["missing", "wrong type"].map((shape) => ({
+        legacyFile,
+        trigger,
+        input,
+        shape
+      }))
+    )
+  )(
+    "refuses installed $legacyFile $shape $input before secret access or dispatch",
+    async ({ legacyFile, trigger, input, shape }) => {
+      const unexpected = () => {
+        throw new Error(
+          "Incompatible workflows must stop before external execution"
+        );
+      };
+      const repository = createDeploymentRepository({
+        redactDiagnostic: String,
+        execute: (_command, args, _options, callback) => {
+          expect(args).toHaveLength(2);
+          const file = args[1].match(
+            /\/contents\/\.github\/workflows\/([^?]+)\?ref=feat$/
+          )?.[1];
+          const source = file ? deploymentTemplates[file] : undefined;
+          if (!source) throw new Error(`Unexpected workflow ${args[1]}`);
+          const document = parseDocument(source);
+          if (file === legacyFile) {
+            const path = ["on", trigger, "inputs", input];
+            if (shape === "missing") document.deleteIn(path);
+            else document.setIn(path, { type: "boolean" });
+          }
+          const content = document.toString();
+          callback(
+            null,
+            JSON.stringify({
+              content: Buffer.from(content).toString("base64"),
+              encoding: "base64",
+              size: Buffer.byteLength(content)
+            }),
+            ""
+          );
+          return {};
+        }
+      });
+      const workflows = createDeploymentWorkflows(false, {
+        readRepositoryFile: unexpected,
+        now: () => 0,
+        ghOrThrow: unexpected,
+        readFile: repository.readFile,
+        defaultBranch: unexpected,
+        branchHead: unexpected,
+        commitFile: unexpected,
+        environmentProvider: unexpected,
+        reportDiagnostic: unexpected
+      });
+      const runGh = vi.fn(unexpected);
+      const runGhWithStdin = vi.fn(unexpected);
+      const dispatch = createDeployDispatchService({
+        id: () => "legacy-contract",
+        deployWorkflowFile: "run-rad-commands.yml",
+        deployWorkflowFiles: workflows.files,
+        branchNotPushedKind: "branch-not-pushed",
+        oidcSubjectMissingKind: "oidc-subject-missing",
+        oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
+        getBranchHeadSha: async () => "head",
+        getDefaultBranch: unexpected,
+        runGh,
+        runGhWithStdin,
+        runAz: unexpected,
+        runGitHubJson: unexpected,
+        readProcessEnv: () => ({}),
+        ghCredentialSource: () => "keyring",
+        fetchFileForSelection: async () => "model with a secure parameter",
+        appParams: () => [],
+        resolveDeployParams: () => ({ password: "generated-value" }),
+        partitionParams: () => ({
+          public: {},
+          secret: { password: "generated-value" }
+        }),
+        extractAppName: () => "app",
+        buildDeployRadCommand: () => "rad deploy",
+        buildAppGraphRadCommand: () => "rad app graph",
+        ensureDeployWorkflowsOnBranch: async () => {},
+        ensureWorkflowsCurrent: async () => ({ created: [], updated: [] }),
+        verifyAppFileInput: workflows.verifyAppFileInput,
+        sleep: unexpected,
+        latestWorkflowRunId: unexpected,
+        classifyDeployDispatchFailure: unexpected,
+        uncommittedGeneratedPaths: unexpected,
+        invalidateDeployListCache: unexpected,
+        errorMessage: String,
+        now: () => 0
+      });
+      const observed = createUnconfirmedMonitor(null, dispatch);
+      const harness = startDeploy(observed.monitor);
+      const entry = await container!.getOrCreate("panel-a");
+      const state = harness.stateOf("panel-a");
+      const response = await post(
+        entry.baseUrl,
+        "/api/deploy",
+        deployBody({ provider: "aws" })
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+      await expect.poll(() => state.deployStatus).toBe("failed");
+      await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
+      const status = await fetch(`${entry.baseUrl}/api/deploy-status`);
+      expect(status.status).toBe(200);
+      expect(await status.json()).toMatchObject({
+        status: "failed",
+        errorKind: "workflow-preflight-failed",
+        error: expect.stringContaining("No workflow was dispatched.")
+      });
+      expect(runGh).not.toHaveBeenCalled();
+      expect(runGhWithStdin).not.toHaveBeenCalled();
+      expect(state.deployError).toContain(input);
+      expect(state.deployError).toContain("Update the Radius workflows.");
+      expect(observed.reads).toEqual([]);
+      expect(state.deployHandoffState).not.toBe("pending");
+    }
+  );
+
+  it("refuses a reserved model through real HTTP admission before any execution", async () => {
+    const h = startDeploy();
+    const entry = await container!.getOrCreate("panel");
+    const response = await post(
+      entry.baseUrl,
+      "/api/deploy",
+      JSON.stringify({
+        targetRepo: "acme/widgets",
+        branch: "feature",
+        environment: "dev",
+        appFile: "models/radius-environment.bicep"
+      })
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining("reserved")
+    });
+    expect(h.runtime.owner.lookup()).toEqual({ kind: "missing" });
+  });
+
+  it("preserves an in-place replacement attempt while a delete waits for acceptance over HTTP", async () => {
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    startDeploy(undefined, {
+      deletion: {
+        async runGh() {
+          entered.resolve();
+          await release.promise;
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        findWorkflowRun: async () => null,
+        logError: () => {},
+        setTimer: () => ({})
+      }
+    });
+    const entry = await container!.getOrCreate("panel");
+    const attempt = {
+      id: "old",
+      targetRepo: "acme/widgets",
+      environment: "dev"
+    };
+    const graph = [
+      { id: "web", name: "web", type: "Radius.Compute/containers" }
+    ];
+    Object.assign(entry.state, {
+      contextRepo: "acme/widgets",
+      envName: "dev",
+      deployAttempt: attempt,
+      deployAppName: "widgets",
+      deployStatus: "complete",
+      deployRunId: 42,
+      deployedGraph: graph,
+      deployingResources: graph
+    });
+    const response = post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "acme/widgets",
+        environment: "dev",
+        application: "widgets"
+      })
+    );
+    try {
+      await entered.promise;
+      attempt.id = "replacement";
+    } finally {
+      release.resolve();
+    }
+    expect((await response).status).toBe(200);
+    expect(entry.state.deployAttempt).toBe(attempt);
+    expect(entry.state.deployedGraph).toEqual(graph);
+    expect(entry.state.deployRunId).toBe(42);
+    expect(entry.state.deployStatus).toBe("complete");
+  });
+
+  it.each(["missing", "throwing"] as const)(
+    "invalidates a completed tool deployment at delete acceptance, before %s run discovery, and allows fresh tool attachment",
+    async (discovery) => {
+      const findingRun = createDeferred<void>();
+      const finishDiscovery = createDeferred<void>();
+      let expire: (() => void) | undefined;
+      const dispatch = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+      const logError = vi.fn();
+      const h = startDeploy(
+        {
+          async run({ entry }) {
+            entry.state.deployStatus = "complete";
+            entry.state.deployAppName = "widgets";
+            entry.state.deployRunId = 42;
+            entry.state.deployedGraph = [
+              { id: "web", name: "web", type: "Radius.Compute/containers" }
+            ];
+          }
+        },
+        {
+          deletion: {
+            runGh: dispatch,
+            logError,
+            setTimer(callback) {
+              expire = callback;
+              return {};
+            },
+            async findWorkflowRun() {
+              findingRun.resolve();
+              await finishDiscovery.promise;
+              if (discovery === "throwing")
+                throw new Error("Run lookup unavailable");
+              return null;
+            }
+          }
+        }
+      );
+      const sdk = await createRuntimeSdkHarness({}, (deps) => {
+        deps.deployment = h.runtime;
+      });
+      try {
+        const deploy = sdk.extension.tools.find(
+          ({ name }) => name === "radius_deploy"
+        );
+        const status = sdk.extension.tools.find(
+          ({ name }) => name === "radius_deploy_status"
+        );
+        if (!deploy || !status) throw new Error("Deployment tools missing");
+        const target = {
+          repo: "acme/widgets",
+          branch: "feature",
+          environment: "production"
+        };
+        await deploy.handler(target);
+        await vi.waitFor(() =>
+          expect(h.runtime.owner.hasActiveWork()).toBe(false)
+        );
+        const selected = h.runtime.owner.lookup();
+        if (selected.kind !== "found") throw new Error("No tool deployment");
+        const first = selected.invocation;
+        const a = await container!.getOrCreate("panel-a");
+        const b = await container!.getOrCreate("panel-b");
+        for (const entry of [a, b]) {
+          entry.state.contextRepo = target.repo;
+          entry.state.envName = target.environment;
+          expect(
+            await (await fetch(`${entry.baseUrl}/api/deploy-status`)).json()
+          ).toMatchObject({
+            status: "complete",
+            attempt: { id: first.attemptId }
+          });
+        }
+        const deletion = post(
+          a.baseUrl,
+          "/api/delete-deployment",
+          JSON.stringify({
+            ...target,
+            environment: "PRODUCTION",
+            application: "widgets"
+          })
+        );
+        await findingRun.promise;
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(dispatch.mock.calls[0]).toEqual([
+          expect.arrayContaining(["environment=PRODUCTION"])
+        ]);
+        expect(
+          await status.handler({ observationId: first.observationId })
+        ).toContain("No matching");
+        expect(await status.handler({ attemptId: first.attemptId })).toContain(
+          "No matching"
+        );
+        expect(await deploy.handler({ attemptId: first.attemptId })).toContain(
+          "no longer current"
+        );
+        expect(await deploy.handler(target)).toContain("in progress");
+        for (const entry of [a, b]) {
+          await (
+            await fetch(
+              `${entry.baseUrl}/api/list-deployments?repo=acme/widgets`
+            )
+          ).json();
+          for (let poll = 0; poll < 2; poll++) {
+            const payload = await (
+              await fetch(`${entry.baseUrl}/api/deploy-status`)
+            ).json();
+            expect(payload.status).toBe("pending");
+            expect(payload.deployedGraph).toBeNull();
+            expect(entry.state.deployRunId).toBeUndefined();
+          }
+        }
+        finishDiscovery.resolve();
+        const response = await deletion;
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          success: true,
+          runUrl: "",
+          forced: false
+        });
+        expect(logError).toHaveBeenCalledTimes(
+          discovery === "throwing" ? 1 : 0
+        );
+        const blocked = await post(
+          b.baseUrl,
+          "/api/delete-deployment",
+          JSON.stringify({
+            ...target,
+            application: "widgets"
+          })
+        );
+        expect(blocked.status).toBe(409);
+        expect(dispatch).toHaveBeenCalledOnce();
+        expire?.();
+        await deploy.handler(target);
+        await vi.waitFor(() =>
+          expect(h.runtime.owner.hasActiveWork()).toBe(false)
+        );
+        const next = h.runtime.owner.lookup();
+        if (next.kind !== "found") throw new Error("Missing fresh deployment");
+        expect(next.invocation.attemptId).not.toBe(first.attemptId);
+        for (const entry of [a, b]) {
+          const payload = await (
+            await fetch(`${entry.baseUrl}/api/deploy-status`)
+          ).json();
+          expect(payload.attempt.id).toBe(next.invocation.attemptId);
+          expect(payload.status).toBe("complete");
+        }
+        expect(
+          await status.handler({ observationId: first.observationId })
+        ).toContain("No matching");
+      } finally {
+        finishDiscovery.resolve();
+        await sdk.extension.shutdown("test");
+      }
+    }
+  );
+
+  it.each([
     { change: "created", exhausted: false },
     { change: "updated", exhausted: false },
     { change: "created", exhausted: true },
@@ -2357,6 +3243,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         );
       };
       const dispatch = createDeployDispatchService({
+        id: () => "execution",
+        verifyAppFileInput: async () => {},
         deployWorkflowFile: "run-rad-commands.yml",
         deployWorkflowFiles: [
           "run-rad-commands.yml",
@@ -2387,7 +3275,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         runGitHubJson: unexpected,
         readProcessEnv: () => ({}),
         ghCredentialSource: () => "keyring",
-        fetchFileForSelection: () => Promise.resolve(null),
+        fetchFileForSelection: () => Promise.resolve("model source"),
         appParams: () => [],
         resolveDeployParams: () => ({}),
         partitionParams: () => ({ public: {}, secret: {} }),
@@ -2464,7 +3352,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       const response = await post(
         entry.baseUrl,
         "/api/deploy",
-        deployBody({ provider: "aws" })
+        deployBody({ provider: "aws", appFile: undefined })
       );
 
       expect(response.status).toBe(200);
@@ -2513,13 +3401,6 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       let releases = 0;
       let repairs = 0;
       const notices: string[] = [];
-      setDeployRepairHandoff(() => {
-        repairs++;
-      });
-      setDeployFailureNotice(({ error }) => {
-        notices.push(error);
-        return noticeDone.promise;
-      });
       const observed = createUnconfirmedMonitor(conclusion, {
         prepareAndDispatch: async () => {
           dispatches++;
@@ -2535,9 +3416,16 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       });
       try {
         const harness = startDeploy(observed.monitor, {
-          triggerDeployRepairHandoff,
-          triggerDeployFailureNotice,
-          releaseDeploymentMutation: (state, reservation) => {
+          delivery: {
+            sendRepair: () => {
+              repairs++;
+            },
+            sendNotice: ({ error }) => {
+              notices.push(error);
+              return noticeDone.promise;
+            }
+          },
+          onMonitorSettled: (state) => {
             expect(state.deployStatus).toBe("failed");
             expect(state.deployErrorKind).toBe("run-unconfirmed");
             expect(state.deployError).toContain(
@@ -2547,21 +3435,21 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
               deployStatus: "failed",
               deployMessage: DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
             });
-            expect(reservation.attemptId).toBe(state.deployAttempt?.id);
             releases++;
-            releaseDeploymentMutation(state, reservation);
           }
         });
         const entry = await container!.getOrCreate("panel-a");
         const state = harness.stateOf("panel-a");
         state.plannedResources = [{ id: "r1", name: "db" }];
-        const response = await post(entry.baseUrl, "/api/deploy", deployBody());
+        const response = await post(
+          entry.baseUrl,
+          "/api/deploy",
+          deployBody({ appFile: undefined })
+        );
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual({ ok: true });
         expect(dispatches).toBe(1);
-        expect(activeDeploymentMutation(state)?.attemptId).toBe(
-          state.deployAttempt?.id
-        );
+        expect(harness.runtime.owner.hasActiveWork()).toBe(true);
         expect(releases).toBe(0);
         expect(observed.reads).toEqual([]);
         expect(notices).toEqual([]);
@@ -2577,7 +3465,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
         dispatchDone.resolve();
         await expect.poll(() => releases).toBe(1);
-        expect(activeDeploymentMutation(state)).toBeUndefined();
+        expect(harness.runtime.owner.hasActiveWork()).toBe(true);
+        const terminal = await fetch(`${entry.baseUrl}/api/deploy-status`);
+        await terminal.json();
         expect(observed.reads).toHaveLength(reads);
         expect(
           observed.reads.every(
@@ -2592,7 +3482,10 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
               ])
           )
         ).toBe(true);
-        expect(observed.sleeps).toEqual(Array<number>(sleeps).fill(5000));
+        expect(harness.observationDelays).toEqual(
+          Array<number>(sleeps).fill(5000)
+        );
+        expect(observed.sleeps).toEqual([]);
         expect(notices).toEqual([state.deployError]);
         expect(state.deployNoticeState).toBe("pending");
         expect(state.deployNoticeAttempts).toBe(1);
@@ -2612,14 +3505,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         expect(releases).toBe(1);
         expect(observed.reads).toHaveLength(reads);
 
-        beginDeployAttempt(state, {
-          repo: "acme/widgets",
-          branch: "feat",
-          environment: "production",
-          provider: "azure",
-          appFile: ".radius/app.bicep",
-          repairLoop: false
-        });
+        harness.views.detach("panel-a", entry.state);
+        state.deployNoticeState = "idle";
         const replacement = structuredClone(state);
         noticeDone.resolve("notice-id");
         await noticeDone.promise;
@@ -2629,8 +3516,6 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       } finally {
         dispatchDone.resolve();
         noticeDone.resolve("notice-id");
-        setDeployRepairHandoff(null);
-        setDeployFailureNotice(null);
       }
     }
   );
@@ -2642,6 +3527,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   function oidcRefusalHarness(subjects: string[]) {
     const workflowDispatches: string[][] = [];
     const dispatch = createDeployDispatchService({
+      id: () => "execution",
+      verifyAppFileInput: async () => {},
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [
         "run-rad-commands.yml",
@@ -2777,7 +3664,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
     const response = await fetch(`${entry.baseUrl}/api/deploy`, {
       method: "POST",
-      body: deployBody()
+      body: deployBody({ appFile: undefined })
     });
 
     expect(response.status).toBe(200);
@@ -2803,7 +3690,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
     const response = await fetch(`${entry.baseUrl}/api/deploy`, {
       method: "POST",
-      body: deployBody()
+      body: deployBody({ appFile: undefined })
     });
 
     expect(response.status).toBe(200);
@@ -2816,6 +3703,32 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     expect(workflowDispatches).toEqual([]);
     await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
   });
+
+  it.each(["empty", "failed"] as const)(
+    "returns 503 rather than guessing main when default-branch lookup is %s",
+    async (outcome) => {
+      const harness = startDeploy(undefined, {
+        runCommand: () =>
+          outcome === "empty" ?
+            Promise.resolve(" ")
+          : Promise.reject(new Error("branch lookup unavailable"))
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+        method: "POST",
+        body: deployBody({ branch: "" })
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        error: expect.stringContaining(
+          "Could not resolve the deployment branch:"
+        )
+      });
+      expect(harness.monitorCalls).toEqual([]);
+      expect(entry.state.deployAttempt).toBeUndefined();
+      expect(activeDeploymentMutation(entry.state)).toBeUndefined();
+    }
+  );
 
   it("accepts an ordinary deploy, answers 200 immediately, and hands the monitor the resolved attempt", async () => {
     const harness = startDeploy();
@@ -2845,12 +3758,10 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     expect(state.deployLogs).toEqual([]);
     // The reservation is held by the monitor while it runs, then released
     // exactly once in its terminal cleanup.
-    expect(activeDeploymentMutation(state)?.attemptId).toBe(
-      state.deployAttempt?.id
-    );
+    expect(harness.runtime.owner.hasActiveWork()).toBe(true);
     await harness.settleMonitor();
     expect(activeDeploymentMutation(state)).toBeUndefined();
-    expect(harness.handoffs).toEqual(["panel-a"]);
+    expect(harness.handoffs).toEqual([]);
   });
 
   it("resolves the repo default branch when the request names none", async () => {
@@ -2883,10 +3794,11 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     const entry = await container!.getOrCreate("panel-a");
     const state = harness.stateOf("panel-a");
     failedAttempt(state, { deployRepairAttempts: 1 });
+    const attemptId = state.deployAttempt?.id;
 
     const response = await fetch(`${entry.baseUrl}/api/deploy`, {
       method: "POST",
-      body: deployBody({ attemptId: "attempt-A" })
+      body: deployBody({ attemptId })
     });
 
     expect(response.status).toBe(200);
@@ -2895,7 +3807,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       repairAttempt: 2,
       repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP
     });
-    expect(state.deployAttempt?.id).toBe("attempt-A");
+    expect(state.deployAttempt?.id).toBe(attemptId);
     expect(state.deployRepairAttempts).toBe(2);
     expect(state.deployRepairing).toBe(true);
     expect(harness.monitorCalls).toHaveLength(1);
@@ -2925,12 +3837,13 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       const entry = await container!.getOrCreate("panel-a");
       const state = harness.stateOf("panel-a");
       failedAttempt(state, { deployRepairAttempts: 1, ...extra });
+      const attemptId = state.deployAttempt?.id;
       const attemptsBefore = state.deployRepairAttempts;
       const statusBefore = state.deployStatus;
 
       const response = await fetch(`${entry.baseUrl}/api/deploy`, {
         method: "POST",
-        body: deployBody({ attemptId: "attempt-A" })
+        body: deployBody({ attemptId })
       });
 
       expect(response.status).toBe(409);
@@ -2944,7 +3857,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       expect(state.deployLogs).toBeUndefined();
       expect(state.deployRepairAttempts).toBe(attemptsBefore);
       expect(state.deployStatus).toBe(statusBefore);
-      expect(state.deployAttempt?.id).toBe("attempt-A");
+      expect(state.deployAttempt?.id).toBe(attemptId);
       expect(activeDeploymentMutation(state)).toBeUndefined();
     }
   );
@@ -2971,7 +3884,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
     expect(response.status).toBe(409);
     expect(String((await jsonBody(response)).error)).toMatch(
-      /no longer the current attempt/
+      /no longer current/
     );
     expect(harness.monitorCalls).toEqual([]);
     expect(harness.branchLookups).toEqual([]);
@@ -2996,7 +3909,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     });
     expect(second.status).toBe(409);
     expect(String((await jsonBody(second)).error)).toContain(
-      "A deploy operation for acme/widgets in environment production is already in progress."
+      "Another deployment operation for this repository and environment is in progress."
     );
     expect(harness.monitorCalls).toHaveLength(1);
     await harness.settleMonitor();
@@ -3014,7 +3927,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
     expect(response.status).toBe(503);
     expect(String((await jsonBody(response)).error)).toMatch(
-      /Could not verify whether this environment/
+      /Could not verify the deployment target/
     );
     expect(harness.monitorCalls).toEqual([]);
     // The reservation taken before the lookup is released again, so a retry is
@@ -3043,8 +3956,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
-      error:
-        "This deployment is currently being deleted. Wait for it to finish before deploying again."
+      error: "A remote deployment operation is already in progress."
     });
     expect(harness.monitorCalls).toEqual([]);
     expect(
@@ -3081,7 +3993,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
     expect(response.status).toBe(400);
     expect(response.headers.get("content-type")).toBe("application/json");
-    expect(String((await jsonBody(response)).error)).toMatch(/null/i);
+    expect(String((await jsonBody(response)).error)).toMatch(/JSON object/i);
     expect(harness.monitorCalls).toEqual([]);
   });
 
@@ -3096,7 +4008,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
-      error: "targetRepo and environment are required."
+      error: "A valid repo (owner/repo) and environment are required."
     });
     expect(harness.monitorCalls).toEqual([]);
   });
@@ -3124,7 +4036,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     ]);
     // Cleanup still runs on the failure path: handoff attempted once, and the
     // reservation released.
-    expect(harness.handoffs).toEqual(["panel-a"]);
+    expect(harness.handoffs).toEqual([]);
     expect(activeDeploymentMutation(state)).toBeUndefined();
   });
 

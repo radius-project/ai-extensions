@@ -160,12 +160,13 @@ function errorCode(error: unknown): string {
  * from the payload. This is a narrowing filter, not an equality check.
  */
 export function sanitizeArtifactSegment(value?: string | null): string {
-  return String(value || "")
+  const normalized = String(value || "")
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "")
-    .slice(0, 80);
+    .replace(/^-+/, "");
+  let end = normalized.length;
+  while (end > 0 && normalized[end - 1] === "-") end--;
+  return normalized.slice(0, Math.min(end, 80));
 }
 
 /**

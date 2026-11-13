@@ -98,6 +98,8 @@ export function createRadiusExtension(
   if (!deps.executionOwner) {
     throw new Error("Missing Radius runtime dependency: executionOwner");
   }
+  if (!deps.deployment)
+    throw new Error("Missing Radius runtime dependency: deployment");
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
   const canvasInstances = createRadiusCanvasInstanceRegistry();
@@ -229,12 +231,13 @@ export function createRadiusExtension(
       })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
-    ({ repo, branch, error, deployRunUrl, attemptId }) =>
+    ({ repo, branch, error, deployRunUrl, attemptId, appFile }) =>
       deps.session.get().send(
         deployRepairHandoffMessage(repo, branch, {
           error,
           deployRunUrl,
-          attemptId
+          attemptId,
+          appFile
         })
       )
   );
@@ -339,6 +342,8 @@ export function createRadiusExtension(
     shutdownPromise = (async () => {
       shuttingDown = true;
       const drain = deps.executionOwner.shutdown();
+      const deploymentDrain =
+        deps.deployment.owner.shutdown(CLEANUP_TIMEOUT_MS);
       let complete = true;
       try {
         console.error(
@@ -369,9 +374,22 @@ export function createRadiusExtension(
             );
           }
         });
+        const deploymentsDrained = deploymentDrain.then((outcome) => {
+          if (!outcome.complete) {
+            complete = false;
+            deps.logError(
+              `Radius deployment drain incomplete; pending attempts: ${outcome.pending
+                .slice(0, 10)
+                .map((id) => id.replace(/[^a-zA-Z0-9_.:-]/g, "?").slice(0, 100))
+                .join(
+                  ", "
+                )}. Remote workflows may still be running; inspect Actions before redeploying.`
+            );
+          }
+        });
         if (
           !(await withTimeout(
-            Promise.all([...closes, drained]),
+            Promise.all([...closes, drained, deploymentsDrained]),
             CLEANUP_TIMEOUT_MS
           ))
         ) {
@@ -443,10 +461,7 @@ export function createRadiusExtension(
   let keepaliveBusy = false;
 
   function deployInFlight(): boolean {
-    for (const [, entry] of deps.servers) {
-      if (entry?.state?.deployStatus === "in_progress") return true;
-    }
-    return false;
+    return deps.deployment.owner.hasActiveWork();
   }
 
   function startKeepalive(): void {

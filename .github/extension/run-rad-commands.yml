@@ -9,6 +9,7 @@
 # steps. This is the run-rad-commands action in the two-action Repo Radius model
 # (the other being verify-cloud-auth).
 name: Radius - Run rad Commands
+run-name: Radius - Deploy ${{ inputs.environment }} ${{ inputs.correlation_id }}
 
 on:
   workflow_dispatch:
@@ -19,6 +20,16 @@ on:
         default: '{{ENV}}'
       image:
         description: 'Container image passed only when the application template declares the image parameter'
+        required: false
+        default: ''
+      app_file:
+        description: 'Repository-relative application model path; empty uses the generated default'
+        type: string
+        required: false
+        default: ''
+      correlation_id:
+        description: 'Opaque identifier used to match this deployment to its workflow run'
+        type: string
         required: false
         default: ''
       rad_commands:
@@ -79,6 +90,7 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       image: ${{ inputs.image }}
       rad_commands: ${{ inputs.rad_commands }}
+      app_file: ${{ inputs.app_file }}
     secrets: inherit
 
   aws:
@@ -90,4 +102,5 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       image: ${{ inputs.image }}
       rad_commands: ${{ inputs.rad_commands }}
+      app_file: ${{ inputs.app_file }}
     secrets: inherit

@@ -5,6 +5,7 @@ import {
   type DeploymentAbandonmentReservation
 } from "./deployment-abandonment.js";
 import type { DeploymentRow } from "./deployment-resolver.js";
+import type { CanvasState } from "../../shared.js";
 
 const PAYLOAD = {
   repo: "octo/todolist",
@@ -21,6 +22,7 @@ const ABANDON_LEASE: DeploymentAbandonmentReservation = {
 function row(status: string): DeploymentRow {
   return {
     app: PAYLOAD.application,
+    identity: { state: "known", application: PAYLOAD.application },
     environment: PAYLOAD.environment,
     provider: "azure",
     status,
@@ -59,6 +61,32 @@ function abandon(
 }
 
 describe("createDeploymentAbandonmentService", () => {
+  it.each([
+    undefined,
+    { state: "unavailable" as const, reason: "expired" },
+    { state: "unavailable" as const, reason: "denied", readFailed: true },
+    { state: "known" as const, application: "another-app" }
+  ])(
+    "never abandons a deployment without matching identity evidence %j",
+    async (identity) => {
+      const ghOrThrow = vi.fn(async () => "");
+      const releaseDeploymentMutation = vi.fn();
+      const result = await abandon({
+        resolveEnvDeployment: async () => ({
+          ...row("delete-failed"),
+          identity
+        }),
+        ghOrThrow,
+        releaseDeploymentMutation
+      });
+      expect(result.status).toBe(
+        identity?.state === "unavailable" && identity.readFailed ? 503 : 409
+      );
+      expect(ghOrThrow).not.toHaveBeenCalled();
+      expect(releaseDeploymentMutation).toHaveBeenCalledOnce();
+    }
+  );
+
   it("fails construction when a required dependency is missing", () => {
     const incomplete = dependencies();
     Reflect.deleteProperty(incomplete, "ghOrThrow");
@@ -282,10 +310,11 @@ describe("createDeploymentAbandonmentService", () => {
 
   it("retires the matching failed deploy attempt after GitHub records abandonment", async () => {
     const state = {
+      deployAppName: " TODOLIST ",
       deployAttempt: {
         id: "attempt-dev",
-        targetRepo: PAYLOAD.repo,
-        environment: PAYLOAD.environment
+        targetRepo: PAYLOAD.repo.toUpperCase(),
+        environment: PAYLOAD.environment.toUpperCase()
       },
       deployResult: { error: "failed" },
       deployStatus: "failed",
@@ -310,8 +339,74 @@ describe("createDeploymentAbandonmentService", () => {
       abandon({ readInstanceState: () => state })
     ).resolves.toMatchObject({ status: 200 });
 
-    expect(state).toEqual({});
+    expect(state).toEqual({ deployAppName: " TODOLIST " });
   });
+
+  it.each(["other-app", "", " ", undefined])(
+    "preserves a legacy attempt with a different or unknown application %j",
+    async (deployAppName) => {
+      const state: CanvasState = {
+        deployAttempt: {
+          id: "original",
+          targetRepo: PAYLOAD.repo,
+          environment: PAYLOAD.environment
+        },
+        deployAppName,
+        deployStatus: "failed"
+      };
+      const before = { ...state };
+      expect((await abandon({ readInstanceState: () => state })).status).toBe(
+        200
+      );
+      expect(state).toEqual(before);
+    }
+  );
+
+  it.each([
+    "attempt",
+    "generation",
+    "application",
+    "run",
+    "id",
+    "repo",
+    "environment"
+  ] as const)(
+    "preserves legacy evidence when its %s changes during remote work",
+    async (changed) => {
+      const state: CanvasState = {
+        deployAttempt: {
+          id: "original",
+          targetRepo: PAYLOAD.repo,
+          environment: PAYLOAD.environment
+        },
+        deployAppName: PAYLOAD.application,
+        deployStatus: "failed",
+        deployRunId: "original-run"
+      };
+      let replacement: CanvasState = {};
+      const result = await abandon({
+        readInstanceState: () => state,
+        ghOrThrow: async () => {
+          if (changed === "attempt")
+            state.deployAttempt = { ...state.deployAttempt, id: "replacement" };
+          if (changed === "generation") state.deployGeneration = 2;
+          if (changed === "application") state.deployAppName = "another-app";
+          if (changed === "run") state.deployRunId = "replacement-run";
+          if (state.deployAttempt) {
+            if (changed === "id") state.deployAttempt.id = "replacement";
+            if (changed === "repo")
+              state.deployAttempt.targetRepo = "another/repo";
+            if (changed === "environment")
+              state.deployAttempt.environment = "another";
+          }
+          replacement = { ...state };
+          return "";
+        }
+      });
+      expect(result.status).toBe(200);
+      expect(state).toEqual(replacement);
+    }
+  );
 
   it("does not retire a different deploy attempt", async () => {
     const deployAttempt = {

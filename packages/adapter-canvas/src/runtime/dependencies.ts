@@ -14,17 +14,12 @@ import type {
   CanvasState,
   GraphProgressView
 } from "../shared.js";
-import type {
-  DeployServerEntry,
-  DeployToolArgs,
-  DeployPayload,
-  DeployStatusInput,
-  DeployStatusSummary
-} from "../deploy-tools.js";
 import type { SessionHolder } from "./session.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import type { EnvironmentTools } from "./environment-tools.js";
 import type { PluginUpdatePreferences } from "./plugin-update-preferences.js";
+import type { DeploymentRuntime } from "@radius-project/adapter-shared";
+import type { DeploymentToolsPorts } from "./deployment-tools.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -131,30 +126,6 @@ export interface RadDependencies {
   ): Promise<{ dir: string; remote: boolean }>;
 }
 
-export interface DeployToolsDependencies {
-  selectDeployEntry(
-    servers: ReadonlyMap<string, CanvasServerEntry>,
-    attemptId?: string
-  ): DeployServerEntry | null;
-  buildDeployPayload(args: DeployToolArgs, state: CanvasState): DeployPayload;
-  validateDeployPayload(payload: {
-    targetRepo?: unknown;
-    environment?: unknown;
-  }): string | null;
-  validateDeployAttempt(
-    args: DeployToolArgs,
-    state: CanvasState
-  ): string | null;
-  summarizeDeployStatus(
-    input: DeployStatusInput,
-    logLines?: number
-  ): DeployStatusSummary;
-  describeDeployStarted(
-    payload: { targetRepo?: string; branch?: string; environment?: string },
-    result: { repairAttempt?: unknown; repairAttemptCap?: unknown }
-  ): string;
-}
-
 export interface SourceRefsDependencies {
   getSourceRefResources(
     entry: CanvasServerEntry,
@@ -240,6 +211,7 @@ export interface HostCallbackDependencies {
           error: string;
           deployRunUrl: string;
           attemptId: string;
+          appFile?: string;
           instanceId: string;
         }) => unknown)
       | null
@@ -266,10 +238,6 @@ export interface HostCallbackDependencies {
   setSessionPromptHandler(
     fn: (prompt: string | SessionPromptMessage) => Promise<unknown>
   ): void;
-}
-
-export interface DeployRunnerDependencies {
-  fetch: typeof globalThis.fetch;
 }
 
 export interface ProcessDependencies {
@@ -369,12 +337,12 @@ export interface RadiusExtensionDependencies {
   github: GitHubContentReader;
   core: CoreGraphDependencies;
   rad: RadDependencies;
-  deployTools: DeployToolsDependencies;
+  deployment: DeploymentRuntime;
+  readDeploymentModel: DeploymentToolsPorts["readModel"];
   sourceRefs: SourceRefsDependencies;
   publishTargets: PublishTargetsDependencies;
   hostCallbacks: HostCallbackDependencies;
   process: ProcessDependencies;
-  deploy: DeployRunnerDependencies;
   operations: OperationsDependencies;
   appModel: AppModelDependencies;
   radiusAppBicepSkill(repoPath?: string, brief?: string): string;

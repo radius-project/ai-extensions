@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePluginRoot } from "./plugin-root.js";
+import type { DeploymentErrorKind as DeployErrorKind } from "@radius-project/core";
 
 export interface CredentialProfile {
   [key: string]: unknown;
@@ -366,12 +367,7 @@ export interface CanvasState {
 // strings are matched across server, tests and client. A union rather than
 // string makes a typo in any of them a compile error instead of a guard that
 // silently never fires.
-export type DeployErrorKind =
-  | "branch-not-pushed"
-  | "run-unconfirmed"
-  | "oidc-subject-missing"
-  | "oidc-subject-case-mismatch"
-  | "cloud-auth-drift";
+export type { DeploymentErrorKind as DeployErrorKind } from "@radius-project/core";
 
 export function escapeHtml(str: unknown): string {
   if (!str) return "";

@@ -16,6 +16,8 @@ import { disabledOperationStore } from "./operation-store.js";
 import { createEnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import type { CanvasState } from "./shared.js";
+import { createTestDeploymentRuntime } from "../test/support/server/deployment-runtime.js";
+import { createDeferred } from "../test/support/browser/fakes.js";
 
 const unexpectedDeletion = async (): Promise<never> => {
   throw new Error("Unexpected external deletion");
@@ -63,6 +65,7 @@ function runtime(
   > = {}
 ) {
   return createProductionCanvasServerRuntime({
+    deploymentRuntime: createTestDeploymentRuntime(),
     awsEnabled: false,
     executionOwner: createEnvironmentExecutionOwner(),
     accountContext: accountContext(),
@@ -451,6 +454,7 @@ describe("production canvas server runtime", () => {
       throw new Error("Environment runner must not start for invalid input");
     });
     const server = createProductionCanvasServerRuntime({
+      deploymentRuntime: createTestDeploymentRuntime(),
       awsEnabled: false,
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: accountContext(),
@@ -558,6 +562,7 @@ describe("production canvas server runtime", () => {
       throw new Error("Unexpected operation scheduling");
     });
     const server = createProductionCanvasServerRuntime({
+      deploymentRuntime: createTestDeploymentRuntime(),
       awsEnabled: false,
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: accountContext(),
@@ -667,6 +672,7 @@ describe("production canvas server runtime", () => {
       throw new Error("Stop must not start environment work");
     });
     const server = createProductionCanvasServerRuntime({
+      deploymentRuntime: createTestDeploymentRuntime(),
       awsEnabled: false,
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: accountContext(),
@@ -766,6 +772,29 @@ describe("production canvas server runtime", () => {
       branch: "feature/runtime-coverage",
       provider: "azure"
     });
+    const target = {
+      repo: "fixture/app",
+      environment: "dev",
+      branch: "feature/runtime-coverage",
+      provider: "azure",
+      appFile: ".radius/app.bicep"
+    };
+    const owner = server.deploymentRuntime.owner;
+    const reservation = owner.reserve(target, "deploy");
+    if (!reservation) throw new Error("Unexpected reservation conflict");
+    const invocation = owner.begin(
+      target,
+      structuredClone(entry.state),
+      reservation
+    );
+    invocation.state.deployAttempt = {
+      id: invocation.attemptId,
+      targetRepo: target.repo,
+      environment: target.environment
+    };
+    const done = createDeferred<void>();
+    const work = owner.run(invocation, () => done.promise);
+    owner.release(reservation);
 
     try {
       const status = await fetch(`${entry.baseUrl}/api/deploy-status?since=5`);
@@ -786,7 +815,7 @@ describe("production canvas server runtime", () => {
       });
       expect(deploy.status).toBe(409);
       expect(await json(deploy)).toMatchObject({
-        error: expect.stringContaining("already in progress")
+        error: expect.stringContaining("in progress")
       });
 
       const deleteDeployment = await fetch(
@@ -799,7 +828,7 @@ describe("production canvas server runtime", () => {
       );
       expect(deleteDeployment.status).toBe(409);
       expect(await json(deleteDeployment)).toMatchObject({
-        error: expect.stringContaining("already in progress")
+        error: expect.stringContaining("already starting")
       });
 
       const abandon = await fetch(`${entry.baseUrl}/api/abandon-deployment`, {
@@ -809,9 +838,11 @@ describe("production canvas server runtime", () => {
       });
       expect(abandon.status).toBe(409);
       expect(await json(abandon)).toMatchObject({
-        error: expect.stringContaining("already in progress")
+        error: expect.stringContaining("already starting")
       });
     } finally {
+      done.resolve();
+      await work;
       await server.stopServer("deploy-conflict", true);
     }
   });

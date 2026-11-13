@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { captureDeployedApplicationState } from "../services/deployed-view-state.js";
 import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
@@ -141,6 +142,10 @@ function dependencies(
       throw new Error("runGh not stubbed");
     },
     readProcessEnv: () => ({}),
+    captureDeletedDeployment: captureDeployedApplicationState,
+    logError: () => {
+      throw new Error("logError not stubbed");
+    },
     // Timers run inline so the dispatch retry delays cost nothing; the lease
     // callback is captured rather than fired, matching a real pending timer.
     setTimer: (callback, ms) => {
@@ -224,6 +229,7 @@ function statusDependencies(
 function row(environment: string, status = "deployed"): DeploymentRow {
   return {
     app: "todolist",
+    identity: { state: "known", application: "todolist" },
     environment,
     provider: "azure",
     status,
@@ -665,6 +671,8 @@ describe("deployments routes (SU-06)", () => {
         deployLogs: ["one", "two"],
         deployLogBase: 10,
         deployStatus: "in_progress",
+        workspaceRepo: "octo/todolist",
+        workspaceBranch: "feature/x",
         deployError: "boom",
         deployErrorKind: "branch-not-pushed",
         deployErrorBranch: "feature/x",
@@ -673,7 +681,11 @@ describe("deployments routes (SU-06)", () => {
         deployFinishedAt: 222,
         deployedGraph: [{ id: "g", name: "g", type: "t" }],
         deployRunUrl: "https://example.test/run",
-        deployAttempt: { id: "attempt-1" } as CanvasState["deployAttempt"]
+        deployAttempt: {
+          id: "attempt-1",
+          targetRepo: "octo/todolist",
+          branch: "feature/x"
+        }
       };
       const { recording, context: ctx } = context("GET", "/api/deploy-status");
       handleDeployStatus(ctx, statusDependencies(state));
@@ -697,6 +709,58 @@ describe("deployments routes (SU-06)", () => {
         active: true
       });
     });
+
+    it.each([
+      { workspaceRepo: undefined, workspaceBranch: "feature", expected: null },
+      {
+        workspaceRepo: "acme/other",
+        workspaceBranch: "feature",
+        expected: null
+      },
+      {
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: undefined,
+        expected: null
+      },
+      { workspaceRepo: "acme/widgets", workspaceBranch: "", expected: null },
+      {
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: "other",
+        expected: null
+      },
+      {
+        workspaceRepo: "ACME/WIDGETS",
+        workspaceBranch: "feature",
+        expected: "feature"
+      }
+    ])(
+      "offers branch remediation only for the verified workspace $workspaceRepo@$workspaceBranch",
+      ({ workspaceRepo, workspaceBranch, expected }) => {
+        const state: CanvasState = {
+          workspaceRepo,
+          workspaceBranch,
+          deployErrorKind: "branch-not-pushed",
+          deployErrorBranch: "feature",
+          deployAttempt: {
+            id: "attempt",
+            targetRepo: "acme/widgets",
+            branch: "feature"
+          }
+        };
+        const { recording, context: ctx } = context(
+          "GET",
+          "/api/deploy-status"
+        );
+
+        handleDeployStatus(ctx, statusDependencies(state));
+
+        expect(JSON.parse(recording.body)).toMatchObject({
+          errorKind: "branch-not-pushed",
+          errorBranch: expected,
+          attempt: state.deployAttempt
+        });
+      }
+    );
 
     it.each([
       ["success", false],
@@ -1251,8 +1315,8 @@ describe("deployments routes (SU-06)", () => {
         ]
       ]);
       expect(resolveCalls).toEqual([
-        ["octo/todolist", "dev", "todo-app"],
-        ["octo/todolist", "prod", "todo-app"]
+        ["octo/todolist", "dev", ""],
+        ["octo/todolist", "prod", ""]
       ]);
       expect(JSON.parse(recording.body)).toEqual({
         deployments: [row("dev")]
@@ -1536,6 +1600,218 @@ describe("deployments routes (SU-06)", () => {
     function deleteContext(body = BODY) {
       return context("POST", "/api/delete-deployment", body);
     }
+
+    it.each([
+      { identity: undefined },
+      { identity: { state: "unavailable" as const, reason: "expired" } },
+      {
+        identity: {
+          state: "unavailable" as const,
+          reason: "denied",
+          readFailed: true
+        }
+      },
+      { identity: { state: "known" as const, application: "other-app" } }
+    ])(
+      "refuses unverified application identity before workflow writes %j",
+      async ({ identity }) => {
+        const { context: ctx, recording } = deleteContext();
+        const ensureWorkflowsCurrent = vi.fn(async () => ({
+          created: [],
+          failed: []
+        }));
+        const runGh = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+        const releaseDeploymentMutation = vi.fn();
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            resolveEnvDeployment: async () => ({ ...row("dev"), identity }),
+            ensureWorkflowsCurrent,
+            runGh,
+            releaseDeploymentMutation
+          })
+        );
+        expect(recording.status).toBe(
+          identity?.state === "unavailable" && identity.readFailed ? 503 : 409
+        );
+        expect(ensureWorkflowsCurrent).not.toHaveBeenCalled();
+        expect(runGh).not.toHaveBeenCalled();
+        expect(releaseDeploymentMutation).toHaveBeenCalledOnce();
+      }
+    );
+
+    it.each([
+      { deploymentId: "superseded" },
+      { runUrl: "https://github.com/other/run" }
+    ])("refuses a stale displayed deployment %j", async (expected) => {
+      const { context: ctx, recording } = deleteContext(
+        JSON.stringify({ ...JSON.parse(BODY), ...expected })
+      );
+      const runGh = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          resolveEnvDeployment: async () => row("dev"),
+          runGh
+        })
+      );
+      expect(recording.status).toBe(409);
+      expect(runGh).not.toHaveBeenCalled();
+    });
+
+    it.each([{ deploymentId: 12 }, { runUrl: false }])(
+      "rejects malformed freshness input %j",
+      async (expected) => {
+        const { context: ctx, recording } = deleteContext(
+          JSON.stringify({ ...JSON.parse(BODY), ...expected })
+        );
+        await handleDeleteDeployment(ctx, deleteDependencies());
+        expect(recording.status).toBe(400);
+      }
+    );
+
+    it.each<{
+      name: string;
+      overrides: Partial<DeploymentsDependencies>;
+      status: number;
+      force?: boolean;
+    }>([
+      {
+        name: "unavailable remote state",
+        status: 503,
+        overrides: {
+          resolveEnvDeployment: async () => {
+            throw new Error("unavailable");
+          }
+        }
+      },
+      {
+        name: "force precondition refusal",
+        status: 409,
+        force: true,
+        overrides: {}
+      },
+      {
+        name: "workflow synchronization failure",
+        status: 400,
+        overrides: {
+          ensureWorkflowsCurrent: async () => {
+            throw new Error("sync failed");
+          }
+        }
+      },
+      {
+        name: "rejected dispatch",
+        status: 400,
+        overrides: {
+          runGh: async () => ({ code: 1, stdout: "", stderr: "rejected" })
+        }
+      },
+      {
+        name: "ambiguous dispatch timeout",
+        status: 400,
+        overrides: {
+          runGh: async () => ({
+            code: 1,
+            stdout: "",
+            stderr: "timeout",
+            timedOut: true
+          })
+        }
+      }
+    ])(
+      "preserves captured evidence after $name",
+      async ({ overrides, status, force }) => {
+        const invalidate = vi.fn();
+        const capture = vi.fn(() => invalidate);
+        const release = vi.fn();
+        const { recording, context: ctx } = deleteContext(
+          JSON.stringify({
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist",
+            force
+          })
+        );
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            ...overrides,
+            captureDeletedDeployment: capture,
+            releaseDeploymentMutation: release
+          })
+        );
+        expect(recording.status).toBe(status);
+        expect(capture).toHaveBeenCalledOnce();
+        expect(invalidate).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledOnce();
+      }
+    );
+
+    it.each(["missing", "throwing"] as const)(
+      "retains accepted dispatch and its lease after %s run discovery",
+      async (discovery) => {
+        const invalidate = vi.fn();
+        const capture = vi.fn(() => invalidate);
+        const release = vi.fn();
+        const logError = vi.fn();
+        const dispatch = vi.fn(async () => ({
+          code: 0,
+          stdout: "",
+          stderr: ""
+        }));
+        let expire: (() => void) | undefined;
+        const { recording, context: ctx } = deleteContext();
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            captureDeletedDeployment: capture,
+            readProcessEnv: () => ({ GH_TOKEN: "fixture-only-value" }),
+            releaseDeploymentMutation: release,
+            runGh: dispatch,
+            logError,
+            setTimer(callback) {
+              expire = callback;
+              return {};
+            },
+            findWorkflowRun: async () => {
+              expect(invalidate).toHaveBeenCalledOnce();
+              expect(expire).toBeTypeOf("function");
+              if (discovery === "throwing")
+                throw new Error(
+                  "Authorization: Bearer fixture-only-value\n" +
+                    "x".repeat(3000)
+                );
+              return null;
+            }
+          })
+        );
+        expect(recording.status).toBe(200);
+        expect(JSON.parse(recording.body)).toEqual({
+          success: true,
+          runUrl: "",
+          forced: false
+        });
+        expect(capture).toHaveBeenCalledWith(
+          {},
+          {
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist"
+          }
+        );
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(release).not.toHaveBeenCalled();
+        if (discovery === "throwing") {
+          expect(logError).toHaveBeenCalledOnce();
+          const diagnostic = logError.mock.calls[0][0];
+          expect(diagnostic).not.toContain("fixture-only-value");
+          expect(diagnostic.length).toBeLessThan(2100);
+        } else expect(logError).not.toHaveBeenCalled();
+        expire?.();
+        expect(release).toHaveBeenCalledOnce();
+      }
+    );
 
     it("refuses a request missing or malformed repo, environment or application", async () => {
       for (const body of [

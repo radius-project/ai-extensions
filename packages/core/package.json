@@ -20,7 +20,8 @@
     "./domain": "./src/domain/index.ts",
     "./modeling": "./src/modeling/index.ts",
     "./platforms": "./src/platforms/index.ts",
-    "./remediations": "./src/remediations.ts"
+    "./remediations": "./src/remediations.ts",
+    "./deployment-command-display": "./src/deployment-command-display.ts"
   },
   "files": [
     "dist"
