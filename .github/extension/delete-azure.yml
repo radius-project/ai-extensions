@@ -189,8 +189,7 @@ jobs:
           # An AKS cluster with Microsoft Entra integration gets a new token here,
           # because the one from Connect to AKS cluster can be close to expiry.
           # The script stores the kubeconfig and the token in the Secret, the
-          # token under the key that the kubeconfig names in tokenFile, and the
-          # run and delete actions keep both current.
+          # token under the key that the kubeconfig names in tokenFile.
           if [ -n "${RADIUS_AKS_SERVER_ID:-}" ]; then
             bash "$RADIUS_AKS_TOKEN_SCRIPT" --renew
           else

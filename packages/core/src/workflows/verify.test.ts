@@ -2,21 +2,7 @@ import { describe, expect, it } from "vitest";
 import { azure } from "../platforms/azure.js";
 import { aws } from "../platforms/aws.js";
 import { RADIUS_REF } from "./deploy.js";
-import {
-  VERIFY_AWS_FILE,
-  VERIFY_AZURE_FILE,
-  generateVerifyWorkflow,
-  verifyTemplateFile
-} from "./verify.js";
-import {
-  AKS_TOKEN_INPUTS,
-  AKS_TOKEN_STEP,
-  aksTokenAction,
-  expectNoAksTokenHandling,
-  readCommittedTemplate,
-  stepNamed,
-  workflowSteps
-} from "../../test/support/committed-workflows.js";
+import { generateVerifyWorkflow, verifyTemplateFile } from "./verify.js";
 
 // Minimal stand-ins for the upstream verify templates. They mirror the two
 // placeholders the real templates use: the workflow_dispatch `{{ENV}}` default
@@ -103,52 +89,6 @@ describe("generateVerifyWorkflow", () => {
 
     expect(() => generateVerifyWorkflow("prod", azure, template)).toThrow(
       /Unresolved template placeholder\(s\).*\{\{UNKNOWN_TOKEN\}\}/
-    );
-  });
-});
-
-describe("the committed verify templates", () => {
-  it("verifies AKS access with the deploy workflows' credential, not kubelogin", () => {
-    const workflow = generateVerifyWorkflow(
-      "prod",
-      azure,
-      readCommittedTemplate(VERIFY_AZURE_FILE)
-    );
-    const steps = workflowSteps(workflow);
-    const names = steps.map((step) => step.name);
-    const credentials = names.indexOf("Get AKS credentials");
-
-    expect(
-      steps.filter(
-        (step) =>
-          step.uses?.includes("kubelogin") || step.run?.includes("kubelogin")
-      )
-    ).toEqual([]);
-    expect(names.slice(credentials, credentials + 3)).toEqual([
-      "Get AKS credentials",
-      AKS_TOKEN_STEP,
-      "Verify AKS Access"
-    ]);
-    expect(steps[credentials].run).toContain(
-      '--file "$RADIUS_TARGET_KUBECONFIG"'
-    );
-    expect(stepNamed(steps, AKS_TOKEN_STEP)).toEqual({
-      name: AKS_TOKEN_STEP,
-      uses: aksTokenAction(RADIUS_REF),
-      with: AKS_TOKEN_INPUTS
-    });
-    expect(stepNamed(steps, "Verify AKS Access").run).toContain(
-      'kubectl --kubeconfig "$RADIUS_TARGET_KUBECONFIG" cluster-info'
-    );
-  });
-
-  it("leaves the AWS verify workflow without AKS token handling", () => {
-    expectNoAksTokenHandling(
-      generateVerifyWorkflow(
-        "prod",
-        aws,
-        readCommittedTemplate(VERIFY_AWS_FILE)
-      )
     );
   });
 });

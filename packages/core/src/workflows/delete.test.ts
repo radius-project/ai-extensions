@@ -16,9 +16,7 @@ import { assertTrustedGeneratedWorkflow } from "./generated-policy.js";
 import {
   expectAksTokenStep,
   expectNoAksTokenHandling,
-  readCommittedTemplate,
-  stepNamed,
-  workflowSteps
+  readCommittedTemplate
 } from "../../test/support/committed-workflows.js";
 
 // Minimal stand-ins for the delete templates the generator fills. The
@@ -305,14 +303,9 @@ describe("the committed delete templates on an AKS cluster with Microsoft Entra 
   );
 
   it.each([DELETE_AZURE_FILE, DELETE_ENV_AZURE_FILE])(
-    "gives %s an AKS token in place of kubelogin and renews it during the delete",
+    "gives %s an AKS token in place of kubelogin",
     (file) => {
       expectAksTokenStep(files[file], DELETE_RADIUS_REF);
-      expect(
-        stepNamed(workflowSteps(files[file]), "Delete Radius resource").with?.[
-          "azure-oidc-token-refresh"
-        ]
-      ).toBe("${{ vars.AZURE_CLIENT_ID != '' }}");
       expect(() =>
         assertTrustedGeneratedWorkflow(parseYaml, files[file], "provider", file)
       ).not.toThrow();

@@ -25,8 +25,6 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     environment: ${{ inputs.environment || '{{ENV}}' }}
-    env:
-      RADIUS_TARGET_KUBECONFIG: ${{ format('{0}/.radius-target-kubeconfig', github.workspace) }}
     steps:
       - name: Inspect GitHub OIDC token claims
         id: oidc_claims
@@ -165,12 +163,12 @@ jobs:
           az account show
           echo "✅ Azure OIDC login successful"
 
-      # Verification reaches the cluster with the same credential as the deploy
-      # and delete workflows: a Microsoft Entra token for a cluster with
-      # Microsoft Entra integration, otherwise the kubeconfig that
-      # az aks get-credentials writes. It does not install kubelogin, so it
-      # fails wherever a deploy would.
-      - name: Get AKS credentials
+      - name: Set up kubelogin
+        uses: azure/use-kubelogin@0ce7c36141aa27d4934872cf00b0120804c98a29 # v1.3
+        with:
+          kubelogin-version: 'v0.2.19'
+
+      - name: Verify AKS Access
         env:
           # Pass environment-controlled values through the environment rather
           # than interpolating them into the shell source, so a crafted value
@@ -184,18 +182,9 @@ jobs:
           AZURE_AKS_RESOURCE_GROUP: ${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}
           AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
         run: |
-          az aks get-credentials --name "$AZURE_AKS_CLUSTER_NAME" --resource-group "$AZURE_AKS_RESOURCE_GROUP" --file "$RADIUS_TARGET_KUBECONFIG"
-
-      - name: Use a Microsoft Entra token for AKS
-        uses: radius-project/ai-extensions/.github/extension/actions/aks-token-kubeconfig@{{RADIUS_REF}}
-        with:
-          kubeconfig: ${{ env.RADIUS_TARGET_KUBECONFIG }}
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-
-      - name: Verify AKS Access
-        run: |
-          kubectl --kubeconfig "$RADIUS_TARGET_KUBECONFIG" cluster-info
+          az aks get-credentials --name "$AZURE_AKS_CLUSTER_NAME" --resource-group "$AZURE_AKS_RESOURCE_GROUP" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
+          kubectl cluster-info
           echo "✅ AKS cluster accessible"
 
       - name: Verify GHCR package push permission

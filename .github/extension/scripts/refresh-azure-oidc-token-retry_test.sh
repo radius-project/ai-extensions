@@ -25,35 +25,20 @@ if [[ -f "${CURL_COUNT_FILE}" ]]; then
 fi
 ((count += 1))
 printf '%s' "${count}" >"${CURL_COUNT_FILE}"
-# Like curl -o FILE -w '%{http_code}': the body goes to FILE and the status to
-# standard output.
-out=""
-format=""
-while (($#)); do
-    case "$1" in
-        -o) out="$2"; shift ;;
-        -w) format="$2"; shift ;;
-    esac
-    shift
-done
 if [[ " ${CURL_FAILURES:-} " == *" ${count} "* ]]; then
-    printf '503'
-    exit 0
+    exit 22
 fi
-printf '{"value":"token-%s"}\n' "${count}" >"${out}"
-[[ "${format}" == '%{http_code}' ]] && printf '200'
+printf '{"value":"token-%s"}\n' "${count}"
 EOF
 
 cat >"${TEMP_DIR}/bin/kubectl" <<'EOF'
 #!/bin/bash
 set -euo pipefail
-# Secret values come from files, so they never appear in a command line.
 if [[ "${1:-}" == "create" ]]; then
     for argument in "$@"; do
         case "${argument}" in
-            --from-file=*=*)
-                pair="${argument#--from-file=}"
-                printf '%s=%s\n' "${pair%%=*}" "$(cat "${pair#*=}")"
+            --from-literal=*)
+                printf '%s\n' "${argument#*=}"
                 exit 0
                 ;;
         esac
@@ -113,8 +98,6 @@ output="$(CURL_FAILURES="1" bash "${SCRIPT}" --watch 3 2>&1)"
     fail "expected a 15-second retry after one failure, got '$(sleeps)'"
 [[ "$(grep -c '^::warning::Azure OIDC token refresh failed; retrying\.$' \
     <<<"${output}")" == "1" ]] || fail "expected one failure warning, got: ${output}"
-[[ "$(grep -c '^::warning title=GitHub OIDC token unavailable::\[AZURE_OIDC_UNAVAILABLE\] .*(HTTP 503)\. Fix: ' \
-    <<<"${output}")" == "1" ]] || fail "expected one coded warning with the HTTP status, got: ${output}"
 [[ "$(grep -c '^Azure OIDC token refreshed\.$' <<<"${output}")" == "2" ]] ||
     fail "expected two refresh messages after the retry, got: ${output}"
 expected_updates=$'azure-identity-token=token-2\nazure-identity-token=token-3'

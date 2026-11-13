@@ -12,8 +12,7 @@
 //
 // The step names below are the *exact* contracts emitted by those workflows:
 //   verify-azure.yml: Azure Login (OIDC) / Wait for Azure subscription /
-//     Verify Azure Credentials / Get AKS credentials /
-//     Use a Microsoft Entra token for AKS / Verify AKS Access /
+//     Verify Azure Credentials / Set up kubelogin / Verify AKS Access /
 //     Verify GHCR package push permission
 //   verify-aws.yml:   Configure AWS Credentials / Verify AWS Credentials /
 //     Verify EKS Access / Verify GHCR package push permission
@@ -74,13 +73,6 @@ const LOGIN_STEP =
 // may lack the RBAC to see the subscription or act as itself.
 const CREDENTIAL_STEP =
   /verify\s+(?:azure|aws)\s+credentials|wait\s+for\s+azure\s+subscription/i;
-
-// Microsoft Entra token exchange for AKS. It never calls the cluster, and its
-// script prints one annotation with a stable code, so it is classified by that
-// code instead of by the cluster-step patterns that its name also matches.
-const AKS_TOKEN_STEP = /use\s+a\s+microsoft\s+entra\s+token\s+for\s+aks/i;
-const AKS_IDENTITY_REJECTED = "[AKS_IDENTITY_REJECTED]";
-const AKS_ENTRA_UNREACHABLE = "[AKS_ENTRA_UNREACHABLE]";
 
 // Kubernetes cluster access step.
 const CLUSTER_STEP = /verify\s+(?:aks|eks)\s+access|kubelogin|\b(?:aks|eks)\b/i;
@@ -187,21 +179,7 @@ export function classifyVerifyFailure(
     return { category: "generic" };
   }
 
-  // 5. The AKS token exchange failed. Microsoft Entra refusing the federated
-  //    credential is a trust problem (4.3), and Microsoft Entra not answering
-  //    is an unreachable provider (4.5). Any other failure stays generic, so
-  //    it is not offered as a bypass.
-  if (matchesStep(failedSteps, AKS_TOKEN_STEP)) {
-    if (logText.includes(AKS_IDENTITY_REJECTED)) {
-      return { category: "oidc-trust" };
-    }
-    if (logText.includes(AKS_ENTRA_UNREACHABLE)) {
-      return { category: "cloud-unreachable", component: "cloud provider" };
-    }
-    return { category: "generic" };
-  }
-
-  // 6. The Kubernetes-access step failed. Not reaching the cluster is
+  // 5. The Kubernetes-access step failed. Not reaching the cluster is
   //    unreachable (4.5); reaching it and being refused is a permissions gap
   //    (4.4). Reachability wins when both appear.
   if (matchesStep(failedSteps, CLUSTER_STEP)) {
@@ -220,7 +198,7 @@ export function classifyVerifyFailure(
     return { category: "generic" };
   }
 
-  // 7. The GHCR package-push check failed. Only a definitive authorization
+  // 6. The GHCR package-push check failed. Only a definitive authorization
   //    denial is the bypassable permissions gap (4.4); a registry outage or any
   //    other cause stays generic so an operational failure is not mislabeled as
   //    a permissions problem the user is asked to bypass.
