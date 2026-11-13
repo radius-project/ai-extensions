@@ -227,7 +227,6 @@ function clusterStatus(stdout: string): string {
 const ACCESS_DENIED = /AccessDenied|UnauthorizedOperation|not authorized/i;
 const NO_SUCH_ENTITY = /NoSuchEntity/;
 const RESOURCE_IN_USE = /ResourceInUseException/;
-const RESOURCE_NOT_FOUND = /ResourceNotFoundException/;
 const ENTITY_EXISTS = /EntityAlreadyExists/;
 const DELETE_CONFLICT = /DeleteConflict/;
 const LIMIT_EXCEEDED = /LimitExceeded/;
@@ -1253,6 +1252,8 @@ export type AwsDeployIdentityRemovalResult =
       readonly warnings: readonly string[];
     }
   | { readonly ok: false; readonly message: string };
+
+const RESOURCE_NOT_FOUND = /ResourceNotFoundException/;
 
 function sameText(left: string, right: string): boolean {
   return left.trim().toLowerCase() === right.trim().toLowerCase();

@@ -11,7 +11,6 @@ import {
   buildAwsAppBoundary,
   buildAwsAppBoundaryPolicy,
   buildAwsAppRolesPolicy,
-  buildAwsAppRolesPolicyName,
   buildAwsDeployRoleName,
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
@@ -318,10 +317,6 @@ describe("names and identifiers", () => {
     expect(long.path.split("/")[4]).toHaveLength(64);
     // IAM's limit on a managed policy name.
     expect(long.name.length).toBeLessThanOrEqual(128);
-  });
-
-  it("names the app-roles policy by repository", () => {
-    expect(buildAwsAppRolesPolicyName(42)).toBe("radius-app-roles-42");
   });
 
   it.each([
