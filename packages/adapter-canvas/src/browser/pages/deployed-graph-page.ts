@@ -29,13 +29,14 @@ import {
   createDeployedState,
   deployDeployedApp,
   parseApplicationListing,
+  parseDeploymentListing,
   parseEnvironmentListing
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
 import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
-import type { EnvironmentProviders } from "../repositories.js";
+import type { DeploymentInfo, EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
 import { DEPLOYED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 
@@ -153,6 +154,7 @@ export function initializeDeployedGraphPage(
   const environmentStatuses: Record<string, string> = {};
   const adaptive = createDeployedState();
   const deployments = new Map<string, string>();
+  const recoveryTargets = new Map<string, DeploymentInfo>();
   let hasEnvironments = false;
   let environmentsUnavailable = false;
   let deploymentStatesStale = false;
@@ -278,6 +280,12 @@ export function initializeDeployedGraphPage(
         }
         deploymentStatesStale = false;
         deployments.clear();
+        recoveryTargets.clear();
+        for (const deployment of parseDeploymentListing(payload))
+          recoveryTargets.set(
+            deploymentKey(deployment.app, deployment.environment),
+            deployment
+          );
         for (const deployment of parseDeployments(payload)) {
           deployments.set(
             deploymentKey(deployment.app, deployment.environment),
@@ -748,6 +756,9 @@ export function initializeDeployedGraphPage(
   };
 
   const runAbandon = (application: string, environment: string): void => {
+    const selected = recoveryTargets.get(
+      deploymentKey(application, environment)
+    );
     // This callback is reachable only from the stop-tracking control registered
     // below, so the control exists whenever the callback can run.
     /* v8 ignore next */
@@ -765,7 +776,15 @@ export function initializeDeployedGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           environment,
-          application
+          application,
+          ...(selected?.recovery ?
+            {
+              ...selected.recovery,
+              deploymentId: selected.deploymentId,
+              runUrl: selected.runUrl,
+              confirmation: `${application}/${environment}`
+            }
+          : {})
         })
       })
       .then((response) =>

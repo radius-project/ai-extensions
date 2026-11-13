@@ -743,6 +743,111 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(false);
   });
 
+  test("attests exact-run external cleanup by keyboard and exposes older history @safety", async ({
+    page,
+    canvas
+  }) => {
+    let marked = false;
+    let request: unknown;
+    const confirmation = `${REPOSITORY}/run-42@1/fixture-environment`;
+    await page.route("**/api/list-deployments**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          deployments: [
+            marked ?
+              {
+                app: "older-app",
+                environment: "fixture-environment",
+                status: "success",
+                identity: { state: "known", application: "older-app" }
+              }
+            : {
+                app: "",
+                environment: "fixture-environment",
+                status: "failed",
+                deploymentId: "7",
+                runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`,
+                identity: { state: "unavailable", reason: "Artifact expired" },
+                recovery: {
+                  runId: 42,
+                  runAttempt: 1,
+                  revision: "a".repeat(64),
+                  confirmation,
+                  canMarkCleanupComplete: true
+                }
+              }
+          ]
+        })
+      });
+    });
+    await page.route("**/api/abandon-deployment", async (route) => {
+      request = route.request().postDataJSON();
+      expect(route.request().headers()["x-radius-mutation-nonce"]).toBeTruthy();
+      marked = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ outcome: "abandoned" })
+      });
+    });
+    await gotoCanvas(page, canvas, "deploying");
+    const cleanup = page.getByRole("button", {
+      name: "Mark cleanup complete",
+      exact: true
+    });
+    await cleanup.focus();
+    await page.keyboard.press("Enter");
+    const modal = page.locator("#deploy-abandon-modal");
+    await expect(modal).toBeVisible();
+    await expect(modal).toContainText("Canvas will not contact the cloud");
+    await modal
+      .getByRole("button", { name: "I completed cleanup outside Canvas" })
+      .focus();
+    await page.keyboard.press("Enter");
+    await modal
+      .getByRole("button", {
+        name: "I understand Canvas did not verify or perform cleanup"
+      })
+      .focus();
+    await page.keyboard.press("Enter");
+    const token = modal.locator("input");
+    await token.fill("wrong");
+    await expect(
+      modal.getByRole("button", {
+        name: "Mark cleanup complete",
+        exact: true
+      })
+    ).toBeDisabled();
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .include("#deploy-abandon-modal")
+          .analyze()
+      ).violations
+    ).toEqual([]);
+    await token.fill(confirmation);
+    await modal
+      .getByRole("button", { name: "Mark cleanup complete", exact: true })
+      .focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#deploy-table-body")).toContainText("older-app");
+    expect(request).toMatchObject({
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      confirmation
+    });
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.args.slice(0, 3).join(" ") ===
+          "workflow run delete-application.yml"
+      )
+    ).toBe(false);
+  });
+
   for (const launch of [
     "explicit",
     "tool",
@@ -1480,39 +1585,25 @@ test.describe("Radius Canvas in Chromium", () => {
           ],
           "dep-1\n"
         ),
-        command(
-          [
-            "workflow",
-            "run",
-            "delete-application.yml",
-            "-f",
-            `environment=${environment}`,
-            "-f",
-            "application=radius-app",
-            "--repo",
-            REPOSITORY
-          ],
-          ""
-        ),
+        {
+          tool: "gh",
+          argsPrefix: ["workflow", "run", "delete-application.yml"],
+          argsSuffix: ["--repo", REPOSITORY],
+          stdout: ""
+        },
         command(
           [
             "run",
             "list",
             "--workflow=delete-application.yml",
             "--limit",
-            "5",
+            "100",
             "--json",
-            "databaseId,status,createdAt",
+            "databaseId,status,createdAt,displayTitle",
             "--repo",
             REPOSITORY
           ],
-          JSON.stringify([
-            {
-              databaseId: 103,
-              status: "queued",
-              createdAt: new Date().toISOString()
-            }
-          ])
+          "[]"
         )
       );
       await canvas.setScenario(scenario);
@@ -1536,6 +1627,40 @@ test.describe("Radius Canvas in Chromium", () => {
           response.request().method() === "POST"
       );
       await page.locator("#del-confirm-btn").click();
+      let deleteCorrelation: string | undefined;
+      await expect
+        .poll(async () => {
+          const dispatch = (await canvas.cliCalls()).find(
+            (call) =>
+              call.args.slice(0, 3).join(" ") ===
+              "workflow run delete-application.yml"
+          );
+          deleteCorrelation = dispatch?.args
+            .find((arg) => arg.startsWith("correlation_id="))
+            ?.slice("correlation_id=".length);
+          return deleteCorrelation;
+        })
+        .toMatch(/^dep-/);
+      const deleteDiscovery = scenario.commands.find((entry) =>
+        entry.args?.includes("--workflow=delete-application.yml")
+      );
+      if (!deleteDiscovery || !deleteCorrelation)
+        throw new Error("Missing exact delete correlation fixture");
+      deleteDiscovery.stdout = JSON.stringify([
+        {
+          databaseId: 104,
+          status: "queued",
+          createdAt: new Date().toISOString(),
+          displayTitle: `Radius - Delete ${environment} dep-unrelated`
+        },
+        {
+          databaseId: 103,
+          status: "queued",
+          createdAt: new Date().toISOString(),
+          displayTitle: `Radius - Delete ${environment} [radius:v1 app=radius-app] ${deleteCorrelation}`
+        }
+      ]);
+      await canvas.setScenario(scenario);
       const deleted = await accepted;
       expect(deleted.status(), await deleted.text()).toBe(200);
       expect(await deleted.json()).toMatchObject({ success: true });
@@ -8273,7 +8398,7 @@ test.describe("Radius Canvas in Chromium", () => {
     );
   });
 
-  test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
+  test("confirms external cleanup by keyboard and sends the failed teardown identity @safety", async ({
     page,
     canvas
   }) => {
@@ -8294,12 +8419,12 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.keyboard.press("Enter");
 
     const dialog = page.getByRole("dialog", {
-      name: "Stop Tracking Deployment"
+      name: "Mark cleanup complete"
     });
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText("does not delete cloud resources");
     const intent = page.getByRole("button", {
-      name: "I want to stop tracking this deployment"
+      name: "I completed cleanup outside Canvas"
     });
     await expect(intent).toBeFocused();
     await page.keyboard.press("Enter");

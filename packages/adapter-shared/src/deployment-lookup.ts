@@ -8,6 +8,11 @@ import {
   type DeploymentRecord,
   type DeploymentRow
 } from "@radius-project/core";
+import {
+  cleanupConfirmation,
+  cleanupMarker,
+  cleanupRevision
+} from "./deployment-cleanup-marker.js";
 
 export interface DeploymentResolverDependencies {
   readApplicationIdentity(
@@ -28,6 +33,11 @@ export async function resolveEnvironmentDeployment(
   _appName: string,
   dependencies: DeploymentResolverDependencies
 ): Promise<DeploymentRow | null> {
+  if (
+    !Number.isSafeInteger(dependencies.maxParallelRecords) ||
+    dependencies.maxParallelRecords < 1
+  )
+    throw new Error("Deployment lookup requires a positive concurrency limit.");
   let provider = "";
   try {
     const varsRaw = await dependencies.ghOrThrow([
@@ -44,15 +54,28 @@ export async function resolveEnvironmentDeployment(
     provider = "";
   }
 
-  const idsRaw = await dependencies.ghOrThrow([
-    "api",
-    `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(
-      environment
-    )}`,
-    "--jq",
-    ".[].id"
-  ]);
-  const ids = idsRaw ? idsRaw.split("\n").filter(Boolean) : [];
+  const ids: string[] = [];
+  const readIds = async (page: number): Promise<boolean> => {
+    const idsRaw = await dependencies.ghOrThrow([
+      "api",
+      `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(
+        environment
+      )}${page === 1 ? "" : `&page=${page}`}`,
+      "--jq",
+      ".[].id"
+    ]);
+    const next = idsRaw ? idsRaw.split("\n").filter(Boolean) : [];
+    if (
+      next.some((id) => ids.includes(id)) ||
+      new Set(next).size !== next.length
+    )
+      throw new Error(
+        "GitHub deployment history changed during pagination. Refresh and retry."
+      );
+    ids.push(...next);
+    return next.length === 100;
+  };
+  let more = await readIds(1);
 
   const resolveRecord = async (id: string): Promise<DeploymentRecord> => {
     const latestStatusRaw = await dependencies.ghOrThrow([
@@ -97,14 +120,40 @@ export async function resolveEnvironmentDeployment(
     let runPath = "";
     let runStatus = "";
     let runConclusion = "";
+    let runAttempt: number | undefined;
+    let headSha: string | undefined;
+    let runTitle: string | undefined;
+    let runEvent: string | undefined;
+    let runRepository: string | undefined;
+    let confirmedRunId: number | undefined;
     if (matchedRunId) {
       const runInfo = await dependencies.ghOrThrow([
         "api",
         `/repos/${repo}/actions/runs/${matchedRunId}`,
         "--jq",
-        '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
+        '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "") + "\\t" + ((.run_attempt // 0) | tostring) + "\\t" + (.head_sha // "") + "\\t" + (.display_title // "") + "\\t" + ((.id // 0) | tostring) + "\\t" + (.repository.full_name // "") + "\\t" + (.event // "")'
       ]);
-      [runPath = "", runStatus = "", runConclusion = ""] = runInfo.split("\t");
+      const [
+        path = "",
+        status = "",
+        conclusion = "",
+        attempt = "",
+        sha = "",
+        title = "",
+        id = "",
+        repository = "",
+        event = ""
+      ] = runInfo.split("\t");
+      runPath = path;
+      runStatus = status;
+      runConclusion = conclusion;
+      if (/^[1-9]\d*$/.test(attempt) && Number.isSafeInteger(Number(attempt)))
+        runAttempt = Number(attempt);
+      if (/^[a-f0-9]{40}$/.test(sha)) headSha = sha;
+      runTitle = title;
+      runEvent = event;
+      runRepository = repository;
+      if (Number(id) === matchedRunId) confirmedRunId = matchedRunId;
     }
     const workflow = classifyDeploymentWorkflow(
       !!matchedRunId,
@@ -120,7 +169,14 @@ export async function resolveEnvironmentDeployment(
       runUrl,
       workflow,
       runStatus,
-      runConclusion
+      runConclusion,
+      runAttempt,
+      headSha,
+      runTitle,
+      runPath,
+      runEvent,
+      runRepository,
+      runId: confirmedRunId
     };
   };
 
@@ -154,17 +210,133 @@ export async function resolveEnvironmentDeployment(
     return selectDeploymentRecord(record, context);
   };
 
-  const batch = ids.slice(0, dependencies.maxParallelRecords);
-  const resolved = await Promise.allSettled(batch.map(resolveRecord));
-  for (const result of resolved) {
-    if (result.status === "rejected") throw result.reason;
-    const deployment = await decide(result.value);
-    if (deployment === "skip") continue;
-    return deployment;
+  const records: DeploymentRecord[] = [];
+  const first = ids[0] ? await resolveRecord(ids[0]) : undefined;
+  if (first) {
+    if (
+      (first.state === "inactive" &&
+        first.description === ABANDONED_DEPLOYMENT_DESCRIPTION) ||
+      (first.workflow === "delete" && first.runConclusion === "success")
+    )
+      return null;
+    if (
+      first.state === "success" &&
+      first.workflow === "deploy" &&
+      first.runConclusion === "success"
+    ) {
+      const healthy = await decide(first);
+      if (healthy && healthy !== "skip" && healthy.identity?.state === "known")
+        return healthy;
+    }
   }
-  for (const id of ids.slice(dependencies.maxParallelRecords)) {
-    const deployment = await decide(await resolveRecord(id));
+  // A recovery marker must cover every duplicate record, including interleaved
+  // runs. Only recovery paths need a complete, bounded history scan.
+  for (let page = 2; more && page <= 20; page++) {
+    more = await readIds(page);
+    if (more && page === 20)
+      throw new Error(
+        "Deployment history exceeds the recovery read budget. Tracking was not changed."
+      );
+  }
+  let stopHistory = false;
+  for (
+    let offset = 0;
+    offset < ids.length;
+    offset += dependencies.maxParallelRecords
+  ) {
+    const batch = await Promise.allSettled(
+      ids
+        .slice(offset, offset + dependencies.maxParallelRecords)
+        .map((id) =>
+          first?.id === id ? Promise.resolve(first) : resolveRecord(id)
+        )
+    );
+    for (const result of batch) {
+      if (result.status === "rejected") throw result.reason;
+      const record = result.value;
+      records.push(record);
+      if (
+        (record.state === "inactive" &&
+          record.description === ABANDONED_DEPLOYMENT_DESCRIPTION) ||
+        (record.workflow === "delete" && record.runConclusion === "success")
+      ) {
+        stopHistory = true;
+        break;
+      }
+    }
+    if (stopHistory) break;
+  }
+  const skipped = new Set<number>();
+  for (const record of records) {
+    const runId = deploymentRunId(repo, record.runUrl);
+    if (runId && skipped.has(runId)) continue;
+    const group =
+      runId ?
+        records.filter(
+          (candidate) => deploymentRunId(repo, candidate.runUrl) === runId
+        )
+      : [];
+    if (
+      group.some(
+        (candidate) =>
+          candidate.workflow !== record.workflow ||
+          candidate.runId !== record.runId ||
+          candidate.runRepository?.toLowerCase() !==
+            record.runRepository?.toLowerCase() ||
+          candidate.runAttempt !== record.runAttempt ||
+          candidate.headSha !== record.headSha ||
+          candidate.runStatus !== record.runStatus ||
+          candidate.runConclusion !== record.runConclusion
+      )
+    )
+      throw new Error(
+        "The workflow run changed while resolving deployment history. Refresh and retry."
+      );
+    const attempt = record.runAttempt;
+    const recovery =
+      (
+        runId !== null &&
+        attempt !== undefined &&
+        record.headSha !== undefined &&
+        record.runId === runId &&
+        record.runRepository?.toLowerCase() === repo.toLowerCase()
+      ) ?
+        {
+          runId,
+          runAttempt: attempt,
+          revision: cleanupRevision(repo, environment, runId, group),
+          deploymentIds: group.map((candidate) => candidate.id),
+          confirmation: "",
+          canMarkCleanupComplete:
+            record.runStatus === "completed" && Boolean(record.runConclusion)
+        }
+      : undefined;
+    if (
+      recovery &&
+      group.every(
+        (candidate) =>
+          candidate.state === "inactive" &&
+          candidate.description === cleanupMarker(recovery)
+      )
+    ) {
+      skipped.add(recovery.runId);
+      continue;
+    }
+    const deployment = await decide(record);
     if (deployment === "skip") continue;
+    if (deployment && recovery) {
+      recovery.confirmation = cleanupConfirmation(
+        repo,
+        environment,
+        recovery.runId,
+        recovery.runAttempt,
+        deployment.app
+      );
+      recovery.canMarkCleanupComplete &&=
+        deployment.identity?.state !== "unavailable" ||
+        deployment.identity.readFailed !== true;
+      deployment.recovery = recovery;
+    }
     return deployment;
   }
   return null;

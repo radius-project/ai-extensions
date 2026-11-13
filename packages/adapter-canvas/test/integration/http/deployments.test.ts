@@ -249,6 +249,7 @@ function start(
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      id: () => "fixture",
       isValidRepoSlug,
       readInstanceEntry: (instanceId) => {
         if (entryMissing) return undefined;
@@ -1577,6 +1578,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         "environment=dev",
         "-f",
         "application=todo-app",
+        "-f",
+        "correlation_id=dep-fixture",
         "--repo",
         "octo/todo"
       ]
@@ -1925,6 +1928,68 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.cache.has("octo/todo")).toBe(false);
   });
 
+  it("attests an unknown terminal run over HTTP only with a fresh revision and exact typed token", async () => {
+    const h = start();
+    const runUrl = "https://github.com/octo/todo/actions/runs/42";
+    const recovery = {
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      deploymentIds: ["7", "8"],
+      confirmation: "octo/todo/run-42@1/dev",
+      canMarkCleanupComplete: true
+    };
+    h.setDeploymentResolver(async () =>
+      h.ghApiCalls.some((args) => args.includes("POST")) ?
+        null
+      : {
+          app: "",
+          environment: "dev",
+          status: "failed",
+          provider: "azure",
+          runUrl,
+          deploymentId: "7",
+          identity: { state: "unavailable", reason: "Artifact expired" },
+          recovery
+        }
+    );
+    const entry = await container!.getOrCreate("panel-a");
+    const body = {
+      repo: "octo/todo",
+      environment: "dev",
+      application: "",
+      deploymentId: "7",
+      runUrl,
+      ...recovery
+    };
+    const wrong = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({ ...body, confirmation: "wrong" })
+    );
+    expect(wrong.status).toBe(400);
+    await wrong.text();
+    const stale = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({ ...body, revision: "b".repeat(64) })
+    );
+    expect(stale.status).toBe(409);
+    await stale.text();
+    const accepted = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify(body)
+    );
+    expect(accepted.status).toBe(200);
+    await accepted.text();
+    expect(h.ghApiCalls.filter((args) => args.includes("POST"))).toHaveLength(
+      2
+    );
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
   it("rejects malformed and non-failed abandonment over a real socket", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
@@ -2266,6 +2331,7 @@ function startDeploy(
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      id: () => "fixture",
       isValidRepoSlug,
       deleteApplicationWorkflowFiles: [],
       readInstanceEntry: (instanceId) => {
@@ -3465,7 +3531,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
         dispatchDone.resolve();
         await expect.poll(() => releases).toBe(1);
-        expect(harness.runtime.owner.hasActiveWork()).toBe(true);
+        await expect
+          .poll(() => harness.runtime.owner.hasActiveWork())
+          .toBe(false);
         const terminal = await fetch(`${entry.baseUrl}/api/deploy-status`);
         await terminal.json();
         expect(observed.reads).toHaveLength(reads);

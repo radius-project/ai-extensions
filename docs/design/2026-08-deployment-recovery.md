@@ -925,6 +925,18 @@ It must never emit “resources deleted” for `tracking_removed_user_attested`.
 
 ## Development plan
 
+### Implemented follow-on contracts
+
+The follow-on implementation uses grouped Actions run records rather than new GitHub Deployment admission writes. Recovery revisions bind repository, environment, exact run, attempt, and every detect/provider deployment record. The distinct `Radius cleanup v1` inactive marker skips only that group when every record is marked; partial writes retain effective tracking, and a later run attempt invalidates the previous revision. Older legacy abandonment markers retain their original history-stop behavior. Successful Delete also preserves its existing history-stop semantics: an older different application can remain hidden, so environment deletion continues to require the live no-applications guard and successful Radius teardown before removing credentials or state.
+
+Unknown application identity does not authorize Delete or cloud probing. A terminal, verifiably linked run can instead use exact-run external-cleanup attestation with a typed repository/run/attempt/environment token. The service has only GitHub tracking-write dependencies and reports that the user asserted cleanup. Missing or deleted runs and incomplete/conflicting history remain unavailable. This is deliberately narrower than the whole-epoch proposal above.
+
+Versioned run titles are a prospective optional evidence source, not a universal identity carrier. Providers validate a literal declared application and compatible effective selected-model commands before cloud work. Qualifying title evidence would require exact API run/repository/path/event identity, executed reusable workflow source binding, canonical workflows at the executed SHA, immutable shared-action references, and independent proof of accepted preflight. These conditions are not fully qualified, so titles currently remain unknown and the prospective source reader is not wired into production. Missing, truncated, malformed, mutable-source, rerun, and unqualified reusable binding evidence cannot authorize deletion; retained artifacts remain independent. The supported title budget is not a claimed GitHub truncation guarantee. No remote qualification fixture was mutated.
+
+Exclusive deployment ownership ends only after monitor/cloud work actually settles. Terminal sends and rejection retry timers use separate observed delivery bookkeeping and begin after the exclusive owner task settles. Supersession cancels unissued retries, observes issued sends, fences stale publication, and reports late rejected sends without mutating replacement state. Unknown-outcome sends are not resent. Shutdown reports unresolved delivery separately from active mutation work.
+
+A future title reader would additionally require independently qualified successful preflight evidence before declaring identity known. That evidence is not qualified in this change, so title-only destructive eligibility remains disabled; the producer/source checks do not substitute for preflight acceptance. Exact-run attestation still recovers early failed/cancelled and expired-artifact runs without cloud calls. Healthy known latest deployments bypass older-history scans, while recovery requires complete grouped evidence within the 20-page budget rather than assuming duplicate records are adjacent.
+
 ### Stage 1: Conservative recovery foundation
 
 1. **Preserve and characterize `main`**: Lock down the existing contract that Delete always dispatches teardown, a failed deploy does not hide Delete, active operations block conflicts, and unavailable history disables mutations.

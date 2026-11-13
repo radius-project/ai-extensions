@@ -373,7 +373,15 @@ function renderDeploymentRow(
     `<td>${statusHtml}</td>` +
     `<td>${monitorCell}</td>` +
     `<td>${workflowCell}</td>` +
-    `<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep"${deleteDisabled} data-env="${envName}" data-app="${appName}" style="margin:0;">Delete Deployment</button></td>` +
+    `<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep"${deleteDisabled} data-env="${envName}" data-app="${appName}" style="margin:0;">Delete Deployment</button>${
+      (
+        row.recovery?.canMarkCleanupComplete &&
+        !row.synthetic &&
+        !deploymentStatusBlocksMutation(status)
+      ) ?
+        `<button type="button" class="rad-btn rad-btn--secondary js-cleanup-dep" data-env="${envName}">Mark cleanup complete</button>`
+      : ""
+    }</td>` +
     "</tr>"
   );
 }
@@ -642,6 +650,29 @@ export function initializeDeployingPage(
           button.getAttribute("data-env") ?? "",
           button
         );
+      });
+    }
+    for (const button of context.dom.all(
+      context.dom.document,
+      ".js-cleanup-dep"
+    )) {
+      bind(rowBindings, button, "click", () => {
+        const selected = lastRecords.find(
+          (row) => row.environment === button.getAttribute("data-env")
+        );
+        if (
+          !selected?.recovery?.canMarkCleanupComplete ||
+          deploymentStatusBlocksMutation(
+            rowStatus(selected.app, selected.environment)
+          )
+        )
+          return;
+        cleanupTarget = selected;
+        const label =
+          selected.app ||
+          `${options.repo}/run-${selected.recovery.runId}@${selected.recovery.runAttempt}`;
+        context.focus.focus(button);
+        cleanupDialog?.open(label, selected.environment);
       });
     }
   };
@@ -985,6 +1016,54 @@ export function initializeDeployingPage(
     onConfirm: (app, environment) => runDelete(app, environment)
   });
   if (dialog) entry.onTeardown(() => dialog.teardown());
+  let cleanupTarget: DeploymentRecord | undefined;
+  const cleanupDialog = createDeleteDeploymentDialog(context, {
+    modalId: "deploy-abandon-modal",
+    bodyId: "deploy-abandon-body",
+    appId: "deploy-abandon-app",
+    envId: "deploy-abandon-env",
+    closeId: "deploy-abandon-close",
+    variant: "abandon",
+    onConfirm: (label, environment) => {
+      const selected = cleanupTarget;
+      if (!selected?.recovery) return;
+      void context.net
+        .fetch("/api/abandon-deployment", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Mutation-Nonce": options.mutationNonce
+          },
+          body: JSON.stringify({
+            repo: options.repo,
+            environment,
+            application: selected.app,
+            deploymentId: selected.deploymentId,
+            runUrl: selected.runUrl,
+            ...selected.recovery,
+            confirmation: `${label}/${environment}`
+          })
+        })
+        .then(async (response) => {
+          const payload: unknown = await response.json();
+          if (!entry.active) return;
+          showInline(
+            response.ok ? "success" : "error",
+            response.ok ?
+              "Recorded external cleanup for this run only. Canvas did not verify or perform cleanup. Older deployments may still be tracked; environment deletion still checks for live applications."
+            : readString(payload, "error") ||
+                "Could not record cleanup. Refresh and retry."
+          );
+          void loadDeployments(true, true);
+        })
+        .catch((error: unknown) => {
+          if (!entry.active) return;
+          context.logger.error("Radius cleanup attestation failed.", error);
+          showInline("error", "Could not record cleanup. Refresh and retry.");
+        });
+    }
+  });
+  if (cleanupDialog) entry.onTeardown(() => cleanupDialog.teardown());
 
   // The lighter shared confirmation carries the forced-delete question, so it
   // reads like every other confirm in the product rather than repeating the

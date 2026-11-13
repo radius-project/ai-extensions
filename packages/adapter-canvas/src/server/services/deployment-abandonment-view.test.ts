@@ -63,6 +63,49 @@ const request = {
 };
 
 describe("abandonment owner retirement", () => {
+  it.each([
+    ["https://github.com/acme/app/actions/runs/42", 42, true],
+    ["https://github.com/acme/app/actions/runs/42", 43, false],
+    [undefined, 42, false]
+  ])(
+    "retires unknown local identity only for the exact attested run %j / %s",
+    async (runUrl, runId, retired) => {
+      const h = harness();
+      h.first.state.deployAppName = undefined;
+      h.first.state.deployRunUrl = runUrl;
+      expect(
+        await h.service.abandon({
+          instanceId: "view",
+          payload: {
+            repo: "acme/app",
+            environment: "production",
+            application: "",
+            runId
+          }
+        })
+      ).toEqual({ status: 200, body: { outcome: "abandoned" } });
+      expect(h.retire.mock.calls).toEqual(retired ? [[h.first]] : []);
+      expect(h.runtime.owner.isCurrent(h.first)).toBe(!retired);
+      expect(h.runtime.owner.isCurrent(h.other)).toBe(true);
+    }
+  );
+
+  it("retains local evidence when the service rejects a malformed run identifier", async () => {
+    const h = harness();
+    h.abandon.mockResolvedValue({
+      status: 400,
+      body: { error: "Invalid run identifier" }
+    });
+    const input = {
+      ...request,
+      payload: { ...request.payload, runId: "42" }
+    };
+    expect((await h.service.abandon(input)).status).toBe(400);
+    expect(h.abandon).toHaveBeenCalledWith(input);
+    expect(h.retire).not.toHaveBeenCalled();
+    expect(h.runtime.owner.isCurrent(h.first)).toBe(true);
+  });
+
   it.each(["other-app", "", " ", undefined])(
     "preserves evidence for an unrelated or unknown application %j",
     async (application) => {

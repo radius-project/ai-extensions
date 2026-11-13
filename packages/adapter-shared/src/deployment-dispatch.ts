@@ -22,6 +22,10 @@ import {
   WorkflowReadInterruptedError,
   redactCredentials
 } from "@radius-project/core";
+import {
+  commandsMatchWorkflowApplication,
+  literalWorkflowApplication
+} from "@radius-project/core";
 
 // Second runtime stage of a background deploy: everything between "we have a
 // graph" and "a workflow run exists". Branch reachability, the rad commands and
@@ -425,7 +429,8 @@ export function createDeployDispatchService(
     const resolved = dependencies.resolveDeployParams(parsed);
     const { public: publicParams, secret: secretParams } =
       dependencies.partitionParams(parsed, resolved);
-    const appName = dependencies.extractAppName(bicepSource);
+    const literal = literalWorkflowApplication(bicepSource);
+    const appName = literal || dependencies.extractAppName(bicepSource);
     entry.state.deployAppName = appName;
     const deployCmd = dependencies.buildDeployRadCommand(
       appFile,
@@ -434,7 +439,30 @@ export function createDeployDispatchService(
     );
     const commands = [deployCmd];
     if (appName) commands.push(dependencies.buildAppGraphRadCommand(appName));
+    const application =
+      (
+        literal &&
+        commandsMatchWorkflowApplication(
+          JSON.stringify(commands),
+          appFile,
+          environment,
+          literal
+        )
+      ) ?
+        literal
+      : "unknown";
+    dispatchArgs.push("-f", "application=" + application);
     dispatchArgs.push("-f", "rad_commands=" + JSON.stringify(commands));
+    const correlation = dispatchArgs
+      .find((arg) => arg.startsWith("correlation_id="))
+      ?.slice("correlation_id=".length);
+    if (
+      `Radius - Deploy ${environment} [radius:v1 app=${application}] ${correlation || ""}`
+        .length > 256
+    )
+      throw new Error(
+        "The deployment identity title exceeds the supported 256-character budget. Shorten the environment name. No workflow was dispatched."
+      );
     log("Deploying with rad commands: " + commands.join("  |  "));
     return secretParams;
   };
@@ -1096,7 +1124,7 @@ export function createDeployDispatchService(
         // stop retrying and report it immediately.
         if (
           !/not found|HTTP 404/i.test(dispatchDeployRes.stderr || "") &&
-          !/unexpected inputs?.*correlation_id/i.test(
+          !/unexpected inputs?.*(correlation_id|application)/i.test(
             dispatchDeployRes.stderr || ""
           )
         )

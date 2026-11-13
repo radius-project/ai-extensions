@@ -194,7 +194,8 @@ describe("compiled page entry API contracts", () => {
         "/api/deploy",
         "/api/delete-deployment",
         "/api/deploy-status",
-        "/api/deployed-graph"
+        "/api/deployed-graph",
+        "/api/abandon-deployment"
       ]
     ],
     [

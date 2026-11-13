@@ -5841,7 +5841,17 @@ export function createProductionCanvasServerRuntime(
     localDeploymentBlocksMutation: () => false,
     ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, awsEnabled),
     deleteApplicationWorkflowFiles: deleteApplicationWorkflowFiles(awsEnabled),
-    findWorkflowRun,
+    findWorkflowRun: (repo, file, since, known, correlation) =>
+      findWorkflowRun(
+        repo,
+        file,
+        since,
+        known,
+        undefined,
+        undefined,
+        correlation
+      ),
+    id: randomUUID,
     runGh: (args, timeout = 20000, extraEnv) =>
       new Promise((resolve) => {
         const opts: CliOptions = { timeout };
