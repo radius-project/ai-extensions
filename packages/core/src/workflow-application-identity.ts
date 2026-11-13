@@ -32,6 +32,7 @@ export function literalWorkflowApplication(source: string): string | null {
       continue;
     }
     if (first === "'") {
+      if (source.startsWith("'''", cursor)) return null;
       cursor++;
       let closed = false;
       while (cursor < source.length) {
