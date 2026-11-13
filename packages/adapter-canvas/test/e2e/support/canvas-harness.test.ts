@@ -110,7 +110,7 @@ describe("cleanup history CLI fixture", () => {
       "Missing cleanup transition"
     );
   });
-  it("atomically replaces scenario files, preserves ordinary writes, and cleans failed replacements", async () => {
+  it("keeps an existing reader on the original file during atomic replacement", async () => {
     const directory = await fs.mkdtemp(
       path.join(tmpdir(), "radius-cli-scenario-")
     );
@@ -124,14 +124,19 @@ describe("cleanup history CLI fixture", () => {
       } finally {
         await reader.close();
       }
-      const replacementReader = await fs.open(scenario, "r");
-      try {
-        expect(await replacementReader.readFile("utf8")).toBe(
-          '{"commands":[]}'
-        );
-      } finally {
-        await replacementReader.close();
-      }
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("replaces scenario files, preserves ordinary writes, and cleans failed replacements", async () => {
+    const directory = await fs.mkdtemp(
+      path.join(tmpdir(), "radius-cli-scenario-")
+    );
+    const scenario = path.join(directory, "scenario.json");
+    try {
+      await fs.writeFile(scenario, "old");
+      await writeFakeCliFile(scenario, '{"commands":[]}', scenario);
+      expect(await fs.readFile(scenario, "utf8")).toBe('{"commands":[]}');
       const artifact = path.join(directory, "artifact.json");
       await writeFakeCliFile(artifact, "artifact", scenario);
       expect(await fs.readFile(artifact, "utf8")).toBe("artifact");
