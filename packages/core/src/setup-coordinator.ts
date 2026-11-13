@@ -264,7 +264,7 @@ export async function runSetupCoordinator(
   const environmentRequest = record(request.environment);
   let awsRoleArn = "";
   let awsTrustSubjects: readonly string[] = [];
-  let awsAppBoundaryArn = "";
+  let awsAppBoundaryArn: string | undefined;
   // AWS setup takes the deploy identity lock and keeps it until Configure
   // environment has written the GitHub environment. Until then a delete that
   // checks which environments use a cluster could not see this one, and could
@@ -330,7 +330,7 @@ export async function runSetupCoordinator(
         ...(awsTrustSubjects.length > 0 ?
           { trustSubjects: awsTrustSubjects }
         : {}),
-        ...(awsAppBoundaryArn ? { appBoundaryArn: awsAppBoundaryArn } : {}),
+        appBoundaryArn: awsAppBoundaryArn,
         clientId:
           (typeof clientId === "string" && clientId) ||
           (typeof liveContext?.clientId === "string" && liveContext.clientId) ||
