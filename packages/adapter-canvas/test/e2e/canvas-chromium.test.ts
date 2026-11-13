@@ -2,7 +2,8 @@ import {
   DELETE_RADIUS_REF,
   RADIUS_REF,
   enableAccessEntriesCommand,
-  redactCredentials
+  redactCredentials,
+  type DeploymentRow
 } from "@radius-project/core";
 import { remediationView } from "@radius-project/core/remediations";
 import { promises as fs, type Dirent } from "node:fs";
@@ -10,7 +11,9 @@ import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import {
   azureDiscoveryCommands,
+  armCleanupHistory,
   baseCanvasState,
+  cleanupHistoryScenario,
   CREDENTIAL_SENTINEL,
   defaultFakeCliScenario,
   expect,
@@ -574,7 +577,7 @@ function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
 
 async function routeDeployedPage(
   page: Page,
-  deploymentStatus: () => string,
+  deploymentStatus: () => string | null,
   abandon?: (body: unknown, nonce: string) => void,
   resources: unknown[] = []
 ): Promise<void> {
@@ -601,17 +604,21 @@ async function routeDeployedPage(
     });
   });
   await page.route("**/api/list-deployments**", async (route) => {
+    const status = deploymentStatus();
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        deployments: [
-          {
-            app: "radius-app",
-            environment: "fixture-environment",
-            status: deploymentStatus()
-          }
-        ]
+        deployments:
+          status === null ?
+            []
+          : [
+              {
+                app: "radius-app",
+                environment: "fixture-environment",
+                status
+              }
+            ]
       })
     });
   });
@@ -1009,6 +1016,162 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toBe(false);
   });
+
+  for (const { surface, known, partial } of [
+    { surface: "deploying", known: false, partial: false },
+    { surface: "deploying", known: false, partial: true },
+    { surface: "deployed", known: true, partial: false }
+  ]) {
+    test(`real grouped cleanup preserves history on ${surface}; partial: ${partial} @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const scenario = cleanupHistoryScenario(known);
+      await canvas.setScenario(scenario);
+      const listing = page.waitForResponse((response) =>
+        response.url().includes("/api/list-deployments?")
+      );
+      await gotoCanvas(
+        page,
+        canvas,
+        known ?
+          `${surface}&application=radius-app&environment=fixture-environment`
+        : surface
+      );
+      const current: DeploymentRow = (await (await listing).json())
+        .deployments[0];
+      expect(current.recovery).toMatchObject({
+        runId: 42,
+        runAttempt: 1,
+        canMarkCleanupComplete: true,
+        confirmation:
+          known ?
+            "radius-app/fixture-environment"
+          : `${REPOSITORY}/run-42@1/fixture-environment`
+      });
+      if (!current.recovery) throw new Error("Missing real recovery evidence");
+      const marker = `Radius cleanup v1 run:42 attempt:1 rev:${current.recovery.revision}`;
+      await canvas.setScenario(armCleanupHistory(scenario, marker, partial));
+      const cleanup =
+        known ?
+          page.locator("#deployed-stop-tracking-btn")
+        : page.getByRole("button", {
+            name: "Mark cleanup complete",
+            exact: true
+          });
+      await expect(cleanup).toBeEnabled();
+      await cleanup.focus();
+      await page.keyboard.press("Enter");
+      const modal = page.locator("#deploy-abandon-modal");
+      await expect(modal).toBeVisible();
+      await modal
+        .getByRole("button", { name: "I completed cleanup outside Canvas" })
+        .focus();
+      await page.keyboard.press("Enter");
+      await modal
+        .getByRole("button", {
+          name: "I understand Canvas did not verify or perform cleanup"
+        })
+        .focus();
+      await page.keyboard.press("Enter");
+      await modal.locator("input").fill(current.recovery.confirmation);
+      const confirm = modal.getByRole("button", {
+        name: "Mark cleanup complete",
+        exact: true
+      });
+      await expect(confirm).toBeEnabled();
+      const response = page.waitForResponse(
+        (result) =>
+          result.url().endsWith("/api/abandon-deployment") &&
+          result.request().method() === "POST"
+      );
+      const refreshed = page.waitForResponse((result) =>
+        result.url().includes("/api/list-deployments?")
+      );
+      const graph =
+        known ?
+          page.waitForResponse((result) =>
+            result.url().includes("/api/deployed-graph?")
+          )
+        : null;
+      await confirm.focus();
+      await page.keyboard.press("Enter");
+      if (partial) await expect(cleanup).toBeFocused();
+      expect((await response).status()).toBe(partial ? 502 : 200);
+      const rows: DeploymentRow[] = (await (await refreshed).json())
+        .deployments;
+      expect(rows).toMatchObject([
+        {
+          deploymentId: partial ? "8" : "6",
+          runUrl: `https://github.com/${REPOSITORY}/actions/runs/${partial ? 42 : 41}`
+        }
+      ]);
+      if (known && graph) {
+        const result = await graph;
+        expect(result.ok()).toBe(true);
+        expect(new URL(result.url()).searchParams.get("application")).toBe(
+          "radius-app"
+        );
+        expect(new URL(result.url()).searchParams.get("environment")).toBe(
+          "fixture-environment"
+        );
+        const payload = await result.json();
+        expect(payload).not.toHaveProperty("error");
+        expect(payload.mode).toBe("terminal");
+        await expect(page.locator("#deployed-delete-btn")).toHaveText(
+          "Delete Deployment"
+        );
+        await expect(page.locator("#deployed-delete-btn")).toBeEnabled();
+        await expect(page.locator("#deployed-app-select")).toHaveValue(
+          "radius-app"
+        );
+        await expect(cleanup).toBeHidden();
+      } else {
+        await expect(page.locator("#deploy-table-body")).toContainText(
+          partial ? "Application identity unavailable" : "radius-app"
+        );
+        if (partial) {
+          await expect(
+            page.getByText(/Could not verify all cleanup markers on GitHub/)
+          ).toBeVisible();
+          await expect(cleanup).toBeEnabled();
+          await page.reload();
+          await expect(page.locator("#deploy-table-body")).toContainText(
+            "Application identity unavailable"
+          );
+          const reread = await page.request.get(
+            `${canvas.baseUrl}/api/list-deployments?repo=${encodeURIComponent(REPOSITORY)}`
+          );
+          expect((await reread.json()).deployments[0].recovery.runId).toBe(42);
+        }
+      }
+      await expectNoWcagViolations(page);
+      const calls = await canvas.cliCalls();
+      const writes = calls.filter(
+        (call) =>
+          call.args.includes("POST") &&
+          call.args.some((arg) => /\/deployments\/\d+\/statuses$/.test(arg))
+      );
+      expect(writes).toHaveLength(2);
+      for (const [index, call] of writes.entries()) {
+        expect(call.args).toContain(
+          `/repos/${REPOSITORY}/deployments/${index === 0 ? 8 : 7}/statuses`
+        );
+        expect(call.args).toContain(`description=${marker}`);
+        expect(call.args).toContain("state=inactive");
+        expect(call.args).toContain("auto_inactive=false");
+        expect(call.exitCode).toBe(partial && index === 1 ? 1 : 0);
+      }
+      expect(calls.filter((call) => !call.matched)).toEqual([]);
+      expect(
+        calls.some(
+          (call) =>
+            call.args.slice(0, 3).join(" ") ===
+            "workflow run delete-application.yml"
+        )
+      ).toBe(false);
+    });
+  }
 
   for (const launch of [
     "explicit",
@@ -8567,7 +8730,7 @@ test.describe("Radius Canvas in Chromium", () => {
     const requests: Array<{ body: unknown; nonce: string }> = [];
     await routeDeployedPage(
       page,
-      () => "delete-failed",
+      () => (requests.length === 0 ? "delete-failed" : null),
       (body, nonce) => {
         requests.push({ body, nonce });
       }

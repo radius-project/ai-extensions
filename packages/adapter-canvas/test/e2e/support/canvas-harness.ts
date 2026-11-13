@@ -572,6 +572,24 @@ async function createWindowsShim(fakeBin: string): Promise<void> {
   }
 }
 
+export async function writeFakeCliFile(
+  target: string,
+  content: string,
+  scenarioPath: string
+): Promise<void> {
+  if (target !== scenarioPath) {
+    await fs.writeFile(target, content, "utf8");
+    return;
+  }
+  const temporary = `${target}.next-${process.pid}`;
+  try {
+    await fs.writeFile(temporary, content, "utf8");
+    await fs.rename(temporary, target);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
+}
+
 async function writeFakeCli(fakeBin: string): Promise<string> {
   // Keep the script at suite scope rather than inside an individual workspace.
   // A background server task may already have spawned a shim when teardown
@@ -670,7 +688,7 @@ for (const file of command.writeFiles || []) {
   const expanded = file.path.replace(/\\$([A-Z0-9_]+)/g, (_match, name) => process.env[name] || "");
   const target = path.isAbsolute(expanded) ? expanded : path.resolve(writeDirectory, expanded);
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, file.content, "utf8");
+  await (${writeFakeCliFile.toString()})(target, file.content, scenarioPath);
   if (file.executable && process.platform !== "win32") await fs.chmod(target, 0o755);
 }
 
@@ -1144,6 +1162,262 @@ export function defaultFakeCliScenario(): FakeCliScenario {
       }
     ]
   };
+}
+
+export function cleanupHistoryScenario(
+  knownApplication: boolean
+): FakeCliScenario {
+  const scenario = defaultFakeCliScenario();
+  scenario.commands.push(
+    {
+      tool: "gh",
+      args: ["api", `/repos/${REPOSITORY}`, "--jq", ".default_branch"],
+      stdout: WORKTREE_BRANCH
+    },
+    ...[".radius/app.bicep", "app.bicep"].map((file) => ({
+      tool: "gh",
+      args: [
+        "api",
+        `/repos/${REPOSITORY}/contents/${file}?ref=${WORKTREE_BRANCH}`,
+        "--jq",
+        ".content"
+      ],
+      exitCode: 1,
+      stderr: "gh: Not Found (HTTP 404)"
+    })),
+    ...[
+      "verify-azure.yml",
+      "verify-aws.yml",
+      "run-rad-commands.yml",
+      "run-rad-commands-azure.yml",
+      "delete-application.yml",
+      "delete-azure.yml",
+      "delete-environment.yml",
+      "delete-environment-azure.yml"
+    ].map((file) =>
+      missingGhContent(
+        `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=main`
+      )
+    )
+  );
+  const find = (endpoint: string, jq?: string): FakeCliCommand => {
+    const command = scenario.commands.find(
+      (candidate) =>
+        candidate.args?.includes(endpoint) &&
+        (jq === undefined || candidate.args.at(-1) === jq)
+    );
+    if (!command)
+      throw new Error(`Missing cleanup fixture command: ${endpoint}`);
+    return command;
+  };
+  find(
+    `/repos/${REPOSITORY}/deployments?per_page=100&environment=fixture-environment`
+  ).stdout = "8\n7\n6";
+  find(
+    `/repos/${REPOSITORY}/deployments?environment=fixture-environment&per_page=10`
+  ).stdout = "8\n7\n6";
+  const status = find(
+    `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+    '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+  );
+  const run = find(
+    `/repos/${REPOSITORY}/actions/runs/1`,
+    '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "") + "\\t" + ((.run_attempt // 0) | tostring) + "\\t" + (.head_sha // "") + "\\t" + (.display_title // "") + "\\t" + ((.id // 0) | tostring) + "\\t" + (.repository.full_name // "") + "\\t" + (.event // "")'
+  );
+  if (!status.args || !run.args)
+    throw new Error("Missing cleanup fixture arguments");
+  for (const id of ["8", "7", "6"]) {
+    const runId = id === "6" ? 41 : 42;
+    const args = status.args.map((arg) => arg.replace("dep-1", id));
+    scenario.commands.push({
+      tool: "gh",
+      args,
+      stdout: `${id === "6" ? "success" : "failure"}\thttps://github.com/${REPOSITORY}/actions/runs/${runId}\t`
+    });
+    scenario.commands.push({
+      tool: "gh",
+      args: [...args.slice(0, -1), '.[0].log_url // .[0].target_url // ""'],
+      stdout: `https://github.com/${REPOSITORY}/actions/runs/${runId}`
+    });
+    if (id !== "6")
+      scenario.commands.push(
+        {
+          tool: "gh",
+          args: [...args.slice(0, -1), '.[0].description // ""'],
+          stdout: ""
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            "--method",
+            "POST",
+            `/repos/${REPOSITORY}/deployments/${id}/statuses`,
+            "-f",
+            "state=inactive",
+            "-F",
+            "auto_inactive=false",
+            "-f",
+            "description=unarmed",
+            "-f",
+            `log_url=https://github.com/${REPOSITORY}/actions/runs/42`
+          ],
+          exitCode: 1,
+          stderr: "Fixture cleanup is not armed"
+        }
+      );
+  }
+  for (const runId of [42, 41]) {
+    const current = runId === 42;
+    const workflow =
+      current && knownApplication ?
+        "delete-application.yml"
+      : "run-rad-commands.yml";
+    scenario.commands.push({
+      tool: "gh",
+      args: ["api", `/repos/${REPOSITORY}/actions/runs/${runId}`],
+      stdout: JSON.stringify({
+        path: `.github/workflows/${workflow}`,
+        status: "completed",
+        conclusion: current ? "failure" : "success"
+      })
+    });
+    scenario.commands.push({
+      tool: "gh",
+      args: run.args.map((arg) => arg.replace("/runs/1", `/runs/${runId}`)),
+      stdout: `.github/workflows/${workflow}\tcompleted\t${current ? "failure" : "success"}\t1\t${"a".repeat(40)}\t\t${runId}\t${REPOSITORY}\tworkflow_dispatch`
+    });
+    const name = current ? "rad-delete-result" : "radius-deploy-status-fixture";
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/actions/runs/${runId}/artifacts?per_page=100`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            artifacts:
+              current && !knownApplication ?
+                []
+              : [{ id: runId, name, workflow_run: { id: runId } }]
+          })
+      },
+      {
+        tool: "gh",
+        argsPrefix: ["run", "download", String(runId), "--name", name, "--dir"],
+        argsSuffix: ["--repo", REPOSITORY],
+        writeFilesDirectoryArg: "--dir",
+        writeFiles: [
+          {
+            path: current ? "rad-delete-result.json" : "deploy-progress.json",
+            content: JSON.stringify(
+              current ?
+                { resourceType: "application", name: "radius-app" }
+              : {
+                  schemaVersion: 1,
+                  application: "radius-app",
+                  environment: "fixture-environment",
+                  runId,
+                  sequence: 1,
+                  state: "succeeded",
+                  resources: []
+                }
+            )
+          }
+        ]
+      }
+    );
+  }
+  scenario.commands.push({
+    tool: "gh",
+    args: [
+      "api",
+      `/repos/${REPOSITORY}/actions/artifacts?per_page=100&page=1`,
+      "--include",
+      "--method",
+      "GET"
+    ],
+    stdout:
+      "HTTP/2 200\n\n" +
+      JSON.stringify({
+        artifacts: [
+          {
+            id: 41,
+            name: "radius-deploy-status-fixture",
+            workflow_run: { id: 41 }
+          }
+        ]
+      })
+  });
+  const download = scenario.commands.find(
+    (command) => command.argsPrefix?.[2] === "41"
+  );
+  if (!download?.writeFiles)
+    throw new Error("Missing older graph artifact fixture");
+  download.writeFiles.push({
+    path: "deploy-graph.json",
+    content: appGraphJson()
+  });
+  return scenario;
+}
+
+export function armCleanupHistory(
+  scenario: FakeCliScenario,
+  marker: string,
+  partial: boolean
+): FakeCliScenario {
+  const states = [0, 1, 2].map((count) => {
+    const next = structuredClone(scenario);
+    for (const command of next.commands) {
+      const id = /\/deployments\/([78])\/statuses/.exec(
+        command.args?.find((arg) => arg.includes("/deployments/")) ?? ""
+      )?.[1];
+      if (!id || !command.args) continue;
+      const written = count >= (id === "8" ? 1 : 2);
+      if (command.args.includes("POST")) {
+        command.args = command.args.map((arg) =>
+          arg.startsWith("description=") ? `description=${marker}` : arg
+        );
+        command.exitCode = written ? 0 : 1;
+        command.stderr = written ? "" : "Fixture marker write refused";
+        delete command.writeFiles;
+      } else if (command.args.at(-1) === '.[0].description // ""') {
+        command.stdout = written ? marker : "";
+      } else if (written) {
+        const runUrl = `https://github.com/${REPOSITORY}/actions/runs/42`;
+        command.stdout =
+          command.args.at(-1) === '.[0].log_url // .[0].target_url // ""' ?
+            runUrl
+          : `inactive\t${runUrl}\t${marker}`;
+      }
+    }
+    return next;
+  });
+  for (const index of [1, 0]) {
+    if (partial && index === 1) continue;
+    const command = states[index].commands.find(
+      (candidate) =>
+        candidate.args?.includes("POST") &&
+        candidate.args.includes(
+          `/repos/${REPOSITORY}/deployments/${index === 0 ? 8 : 7}/statuses`
+        )
+    );
+    if (!command) throw new Error("Missing cleanup transition");
+    command.exitCode = 0;
+    command.stderr = "";
+    command.writeFiles = [
+      {
+        path: "$RADIUS_FAKE_CLI_SCENARIO",
+        content: JSON.stringify(states[index + 1])
+      }
+    ];
+  }
+  return states[0];
 }
 
 export interface AzureDiscoveryFixture {

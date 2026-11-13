@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   discoverResources,
   type DiscoveryDependencies
@@ -12,11 +14,14 @@ import {
 } from "../../support/azure-discovery-contract.js";
 import {
   applyHarnessProcessPlan,
+  armCleanupHistory,
   assertCloudWorkspaceClone,
   assertFakeModeAvailable,
   azureDiscoveryCommands,
   CREDENTIAL_STORE_PATH,
+  cleanupHistoryScenario,
   E2E_TMP_ROOT,
+  REPOSITORY,
   fakeCliArgsMatch,
   fakeCliCommandAvailable,
   fakeCliWriteDirectory,
@@ -30,9 +35,113 @@ import {
   stopAndDrainHarnessDeployment,
   harnessDeploymentSettled,
   unwindHarnessConstruction,
+  writeFakeCliFile,
   type FakeCliCommand,
+  type FakeCliScenario,
   type HarnessProcessPlanInput
 } from "./canvas-harness.js";
+
+describe("cleanup history CLI fixture", () => {
+  const marker = `Radius cleanup v1 run:42 attempt:1 rev:${"a".repeat(64)}`;
+  const command = (scenario: FakeCliScenario, id: string, post = false) => {
+    const found = scenario.commands.find(
+      (candidate) =>
+        candidate.args?.some((arg) =>
+          arg.includes(`/deployments/${id}/statuses`)
+        ) &&
+        (post ?
+          candidate.args.includes("POST")
+        : candidate.args.at(-1) === '.[0].description // ""')
+    );
+    if (!found) throw new Error("Missing test fixture command");
+    return found;
+  };
+  const transition = (
+    scenario: FakeCliScenario,
+    id: string
+  ): FakeCliScenario => {
+    const content = command(scenario, id, true).writeFiles?.[0].content;
+    if (!content) throw new Error("Missing test fixture transition");
+    return JSON.parse(content);
+  };
+  it.each([false, true])(
+    "advances only accepted writes with stable indexes; partial: %s",
+    (partial) => {
+      const initial = cleanupHistoryScenario(false);
+      const armed = armCleanupHistory(initial, marker, partial);
+      expect(command(initial, "8", true).exitCode).toBe(1);
+      expect(command(armed, "8").stdout).toBe("");
+      const first = transition(armed, "8");
+      expect(command(first, "8").stdout).toBe(marker);
+      expect(command(first, "7").stdout).toBe("");
+      expect(command(first, "8", true).writeFiles).toBeUndefined();
+      const states = [armed, first];
+      if (partial) {
+        expect(command(first, "7", true).exitCode).toBe(1);
+        expect(command(first, "7", true).writeFiles).toBeUndefined();
+      } else {
+        const final = transition(first, "7");
+        states.push(final);
+        expect(command(final, "7").stdout).toBe(marker);
+        expect(command(final, "7", true).writeFiles).toBeUndefined();
+      }
+      for (const state of states) {
+        expect(state.commands.map((item) => [item.tool, item.args])).toEqual(
+          armed.commands.map((item) => [item.tool, item.args])
+        );
+        expect(command(state, "8", true).times).toBeUndefined();
+        expect(command(state, "8", true).args).toContain(
+          `description=${marker}`
+        );
+        expect(
+          state.commands.find(
+            (item) =>
+              item.args?.includes(
+                `/repos/${REPOSITORY}/deployments/8/statuses?per_page=1`
+              ) && item.args.at(-1) === '.[0].log_url // .[0].target_url // ""'
+          )?.stdout
+        ).toBe(`https://github.com/${REPOSITORY}/actions/runs/42`);
+      }
+      expect(command(cleanupHistoryScenario(true), "8").stdout).toBe("");
+    }
+  );
+  it("rejects a missing transition instead of silently constructing a successful fixture", () => {
+    expect(() => armCleanupHistory({ commands: [] }, marker, false)).toThrow(
+      "Missing cleanup transition"
+    );
+  });
+  it("atomically replaces scenario files, preserves ordinary writes, and cleans failed replacements", async () => {
+    const directory = await fs.mkdtemp(
+      path.join(tmpdir(), "radius-cli-scenario-")
+    );
+    const scenario = path.join(directory, "scenario.json");
+    try {
+      await fs.writeFile(scenario, "old");
+      const reader = await fs.open(scenario, "r");
+      try {
+        await writeFakeCliFile(scenario, '{"commands":[]}', scenario);
+        expect(await reader.readFile("utf8")).toBe("old");
+      } finally {
+        await reader.close();
+      }
+      expect(await fs.readFile(scenario, "utf8")).toBe('{"commands":[]}');
+      const artifact = path.join(directory, "artifact.json");
+      await writeFakeCliFile(artifact, "artifact", scenario);
+      expect(await fs.readFile(artifact, "utf8")).toBe("artifact");
+      const invalid = path.join(directory, "invalid");
+      await fs.mkdir(invalid);
+      await expect(writeFakeCliFile(invalid, "new", invalid)).rejects.toThrow();
+      expect(await fs.readdir(directory)).toEqual(
+        expect.arrayContaining(["scenario.json", "artifact.json", "invalid"])
+      );
+      expect(
+        (await fs.readdir(directory)).some((name) => name.includes(".next-"))
+      ).toBe(false);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("fake CLI artifact output directories", () => {
   it("defaults ordinary fixture files to the command working directory", () => {

@@ -118,6 +118,7 @@ interface Harness {
   dispatches: string[][];
   workflowSyncs: unknown[][];
   ghApiCalls: string[][];
+  setGhOrThrow(run: (args: string[]) => Promise<string>): void;
   setEntryMissing(missing: boolean): void;
   setDeploymentStatus(status: string): void;
   setDeploymentResolver(
@@ -197,11 +198,11 @@ function start(
     application: string
   ): Promise<DeploymentRow | null> =>
     deploymentResolver(repo, environment, application);
+  let runGh = (args: string[]): Promise<string> =>
+    Promise.resolve(args.includes("--method") ? "" : environments.join("\n"));
   const ghOrThrow = (args: string[]): Promise<string> => {
     ghApiCalls.push(args);
-    return Promise.resolve(
-      args.includes("--method") ? "" : environments.join("\n")
-    );
+    return runGh(args);
   };
   let environmentTarget: EnvironmentTarget = {
     provider: "aws",
@@ -360,6 +361,9 @@ function start(
     dispatches,
     workflowSyncs,
     ghApiCalls,
+    setGhOrThrow(run) {
+      runGh = run;
+    },
     setEntryMissing(missing) {
       entryMissing = missing;
     },
@@ -2120,6 +2124,147 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     );
     expect(harness.state.deploymentMutation).toBeUndefined();
   });
+
+  it.each([false, true])(
+    "rescans real history after grouped cleanup with partial failure: %s",
+    async (partial) => {
+      const harness = start();
+      const markers = new Map<string, string>();
+      const writes: string[][] = [];
+      const gh = async (args: string[]): Promise<string> => {
+        const endpoint = args.find((arg) => arg.startsWith("/repos/"));
+        if (endpoint === "/repos/octo/todo/environments?per_page=100")
+          return "dev";
+        if (
+          endpoint ===
+          "/repos/octo/todo/environments/dev/variables?per_page=100"
+        )
+          return "AZURE_CLIENT_ID";
+        if (
+          endpoint ===
+          "/repos/octo/todo/deployments?per_page=100&environment=dev"
+        )
+          return "8\n7\n6";
+        const deployment = /\/deployments\/([678])\/statuses/.exec(
+          endpoint ?? ""
+        );
+        if (deployment) {
+          const id = deployment[1];
+          if (args.includes("POST")) {
+            writes.push(args);
+            if (partial && id === "7")
+              throw new Error("Fixture marker write refused");
+            const description = args.find((arg) =>
+              arg.startsWith("description=")
+            );
+            if (!description) throw new Error("Missing marker description");
+            markers.set(id, description.slice("description=".length));
+            return "";
+          }
+          if (args.at(-1) === '.[0].description // ""')
+            return markers.get(id) ?? "";
+          return [
+            markers.has(id) ? "inactive"
+            : id === "6" ? "success"
+            : "failure",
+            `https://github.com/octo/todo/actions/runs/${id === "6" ? 41 : 42}`,
+            markers.get(id) ?? ""
+          ].join("\t");
+        }
+        const run = /\/actions\/runs\/(41|42)$/.exec(endpoint ?? "");
+        if (run)
+          return [
+            ".github/workflows/run-rad-commands.yml",
+            "completed",
+            run[1] === "41" ? "success" : "failure",
+            "1",
+            "a".repeat(40),
+            "",
+            run[1],
+            "octo/todo",
+            "workflow_dispatch"
+          ].join("\t");
+        throw new Error(`Unexpected GitHub operation: ${JSON.stringify(args)}`);
+      };
+      harness.setGhOrThrow(gh);
+      harness.setDeploymentResolver((repo, environment, application) =>
+        resolveEnvironmentDeployment(repo, environment, application, {
+          readApplicationIdentity: async (_repo, _environment, runId) =>
+            runId === 42 ?
+              { state: "unavailable", reason: "Identity artifacts expired." }
+            : { state: "known", application: "todo-app" },
+          ghOrThrow: gh,
+          deployWorkflowFile: "run-rad-commands.yml",
+          deleteWorkflowFile: "delete-application.yml",
+          maxParallelRecords: 10
+        })
+      );
+      const entry = await container!.getOrCreate("panel-a");
+      const list = () =>
+        fetch(`${entry.baseUrl}/api/list-deployments?repo=octo%2Ftodo`);
+      const initial = await list();
+      expect(initial.status).toBe(200);
+      const current: DeploymentRow = (await initial.json()).deployments[0];
+      expect(current.recovery).toMatchObject({
+        runId: 42,
+        runAttempt: 1,
+        canMarkCleanupComplete: true,
+        confirmation: "octo/todo/run-42@1/dev"
+      });
+      if (!current.recovery) throw new Error("Missing recovery evidence");
+      expect(harness.cache.has("octo/todo")).toBe(true);
+      const response = await post(
+        entry.baseUrl,
+        "/api/abandon-deployment",
+        JSON.stringify({
+          repo: "octo/todo",
+          environment: "dev",
+          application: current.app,
+          deploymentId: current.deploymentId,
+          runUrl: current.runUrl,
+          ...current.recovery
+        })
+      );
+      expect(response.status).toBe(partial ? 502 : 200);
+      expect(await response.json()).toMatchObject(
+        partial ?
+          { error: expect.stringContaining("Cloud resources were not changed") }
+        : { outcome: "abandoned" }
+      );
+      expect(harness.cache.has("octo/todo")).toBe(false);
+      const marker = `Radius cleanup v1 run:42 attempt:1 rev:${current.recovery.revision}`;
+      expect(writes).toHaveLength(2);
+      for (const [index, args] of writes.entries())
+        expect(args).toEqual([
+          "api",
+          "--method",
+          "POST",
+          `/repos/octo/todo/deployments/${index === 0 ? 8 : 7}/statuses`,
+          "-f",
+          "state=inactive",
+          "-F",
+          "auto_inactive=false",
+          "-f",
+          `description=${marker}`,
+          "-f",
+          "log_url=https://github.com/octo/todo/actions/runs/42"
+        ]);
+      expect(markers.get("8")).toBe(marker);
+      expect(markers.get("7")).toBe(partial ? undefined : marker);
+      expect(markers.has("6")).toBe(false);
+      const refreshed = await list();
+      expect(refreshed.status).toBe(200);
+      expect((await refreshed.json()).deployments).toMatchObject([
+        {
+          deploymentId: partial ? "8" : "6",
+          runUrl: `https://github.com/octo/todo/actions/runs/${partial ? 42 : 41}`,
+          status: partial ? "failed" : "success"
+        }
+      ]);
+      expect(harness.dispatches).toEqual([]);
+      expect(harness.workflowSyncs).toEqual([]);
+    }
+  );
 
   it("fails closed over a real socket when the newest deployment cannot be identified", async () => {
     const harness = start();

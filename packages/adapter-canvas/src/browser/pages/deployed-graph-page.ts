@@ -790,7 +790,7 @@ export function initializeDeployedGraphPage(
       .then((response) =>
         response.json().then((payload) => ({ response, payload }))
       )
-      .then(({ response, payload }) => {
+      .then(async ({ response, payload }) => {
         if (!entry.active) return;
         if (!response.ok || readString(payload, "outcome") !== "abandoned") {
           setInline(
@@ -804,7 +804,8 @@ export function initializeDeployedGraphPage(
           refreshControls();
           return;
         }
-        deployments.delete(deploymentKey(application, environment));
+        await loadDeploymentStates();
+        if (!entry.active) return;
         setInline(
           context,
           "info",
