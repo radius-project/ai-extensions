@@ -8,6 +8,7 @@
 import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
+import { loadCleanupDetails } from "../deployment-cleanup.js";
 import { deletionInventoryResources } from "../deletion-inventory.js";
 import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
 import {
@@ -35,7 +36,7 @@ import {
   deploymentStatusBlocksMutation,
   parseApplicationListing,
   parseBranchListing,
-  parseDeploymentListing,
+  parseDeploymentListingWithDiagnostics,
   parseRequiredDeploymentListing,
   parseEnvironmentListing
 } from "../repositories.js";
@@ -192,6 +193,7 @@ export function deploymentStatusMarkup(status: string): string {
     success: "Success",
     failed: "Failed",
     pending: "Pending",
+    unverified: "History not verified",
     deleting: "Deleting…",
     "delete-failed": "Delete failed"
   };
@@ -199,7 +201,7 @@ export function deploymentStatusMarkup(status: string): string {
 }
 
 export function parseDeploymentRecords(payload: unknown): DeploymentRecord[] {
-  return parseDeploymentListing(payload);
+  return parseDeploymentListingWithDiagnostics(payload);
 }
 
 function parseHandoff(payload: unknown): DeployHandoff {
@@ -347,7 +349,8 @@ function renderDeploymentRow(
   const deployedHref = `/?page=deployed&environment=${encodeURIComponent(row.environment)}&application=${encodeURIComponent(row.app)}`;
   const known = row.identity?.state === "known";
   const monitorCell =
-    known ?
+    row.diagnostic ? `<span>${escapeBrowserHtml(row.diagnostic)}</span>`
+    : known ?
       `<a class="rad-monitor-link" href="${escapeBrowserHtml(deployedHref)}" title="Monitor the deployed application graph">Monitor Graph</a>`
     : row.synthetic ? "<span>Waiting for workflow evidence.</span>"
     : `<span>${escapeBrowserHtml(row.identity?.state === "unavailable" ? row.identity.reason : "Application identity is unavailable.")}</span>`;
@@ -375,11 +378,14 @@ function renderDeploymentRow(
     `<td>${workflowCell}</td>` +
     `<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep"${deleteDisabled} data-env="${envName}" data-app="${appName}" style="margin:0;">Delete Deployment</button>${
       (
-        row.recovery?.canMarkCleanupComplete &&
+        (row.cleanupSelection ||
+          row.recovery?.canMarkCleanupComplete ||
+          row.diagnostic) &&
         !row.synthetic &&
-        !deploymentStatusBlocksMutation(status)
+        (!known || status !== "success") &&
+        (!deploymentStatusBlocksMutation(status) || status === "unverified")
       ) ?
-        `<button type="button" class="rad-btn rad-btn--secondary js-cleanup-dep" data-env="${envName}">Mark cleanup complete</button>`
+        `<button type="button" class="rad-btn rad-btn--secondary js-cleanup-dep" data-env="${envName}">Load cleanup details</button>`
       : ""
     }</td>` +
     "</tr>"
@@ -429,23 +435,26 @@ export function initializeDeployingPage(
   let deploymentsAbort: AbortHandle | null = null;
   let deploymentsRequest = 0;
 
-  // Renders the dismissible success/error banner (green check / red warning).
+  // Renders the dismissible status banner.
   // The message uses textContent by default so server-provided strings can
   // never inject markup; isHtml is only for intentionally-built, escaped
   // markup produced below.
   const showInline = (
-    kind: "success" | "error",
+    kind: "success" | "error" | "info",
     message: string,
     isHtml = false
   ): void => {
     inlineStatus.style.display = "flex";
-    inlineStatus.className = `rad-inline rad-inline--${kind === "error" ? "error" : "success"}`;
+    inlineStatus.className = `rad-inline rad-inline--${kind}`;
     release(inlineBindings);
     inlineStatus.replaceChildren();
     const icon = context.dom.createElement("span");
     icon.className = "rad-inline__icon";
     icon.setAttribute("aria-hidden", "true");
-    icon.textContent = kind === "error" ? "⚠" : "✓";
+    icon.textContent =
+      kind === "error" ? "⚠"
+      : kind === "success" ? "✓"
+      : "i";
     const body = context.dom.createElement("span");
     body.className = "rad-inline__msg";
     if (isHtml) body.innerHTML = message;
@@ -661,21 +670,78 @@ export function initializeDeployingPage(
           (row) => row.environment === button.getAttribute("data-env")
         );
         if (
-          !selected?.recovery?.canMarkCleanupComplete ||
-          deploymentStatusBlocksMutation(
+          !selected ||
+          preparingCleanup.has(selected.environment) ||
+          (!selected.cleanupSelection &&
+            !selected.diagnostic &&
+            !selected.recovery?.canMarkCleanupComplete) ||
+          (deploymentStatusBlocksMutation(
             rowStatus(selected.app, selected.environment)
-          )
+          ) &&
+            selected.status !== "unverified")
         )
           return;
-        cleanupTarget = selected;
-        const label =
-          selected.app ||
-          `${options.repo}/run-${selected.recovery.runId}@${selected.recovery.runAttempt}`;
-        context.focus.focus(button);
-        cleanupDialog?.open(label, selected.environment);
+        preparingCleanup.add(selected.environment);
+        button.setAttribute("disabled", "");
+        button.setAttribute("aria-busy", "true");
+        showInline("info", "Loading cleanup details…");
+        void loadCleanupDetails(
+          context,
+          options.repo,
+          selected.environment,
+          options.mutationNonce,
+          selected.diagnostic ? undefined : selected
+        )
+          .then(({ deployment, prepared }) => {
+            if (!entry.active || !lastRecords.includes(selected)) return;
+            lastRecords = [
+              ...lastRecords.filter(
+                (row) => row.environment !== selected.environment
+              ),
+              ...(deployment ? [deployment] : [])
+            ];
+            if (!prepared || !deployment?.recovery) {
+              renderDeployments();
+              showInline(
+                "info",
+                deployment ?
+                  "History verified. Select Load cleanup details for the displayed run to confirm external cleanup."
+                : "History verified. No deployment remains tracked."
+              );
+              return;
+            }
+            cleanupTarget = deployment;
+            const label =
+              deployment.app ||
+              `${options.repo}/run-${deployment.recovery.runId}@${deployment.recovery.runAttempt}`;
+            showInline(
+              "info",
+              "Cleanup details verified. Confirm external cleanup for this run."
+            );
+            button.removeAttribute("disabled");
+            context.focus.focus(button);
+            cleanupDialog?.open(label, deployment.environment);
+          })
+          .catch((error: unknown) => {
+            if (!entry.active || !lastRecords.includes(selected)) return;
+            showInline(
+              "error",
+              error instanceof Error ?
+                error.message
+              : "Cleanup details could not load."
+            );
+          })
+          .finally(() => {
+            preparingCleanup.delete(selected.environment);
+            if (entry.active) {
+              button.removeAttribute("disabled");
+              button.removeAttribute("aria-busy");
+            }
+          });
       });
     }
   };
+  const preparingCleanup = new Set<string>();
 
   // Repaints the table from the newest records already held plus the local
   // overrides, so an optimistic row never waits on a round trip. A `fresh=1`
@@ -683,12 +749,23 @@ export function initializeDeployingPage(
   // deploy that shows no row for that long reads as a deploy that never
   // registered.
   const renderDeployments = (): void => {
+    const focused = context.focus.active();
+    const focusedCleanupEnvironment =
+      (
+        focused &&
+        context.dom
+          .all(context.dom.document, ".js-cleanup-dep")
+          .includes(focused)
+      ) ?
+        focused.getAttribute("data-env")
+      : null;
     const { rows, present } = buildDeploymentRows(lastRecords, overrides);
     deployRecordsPresent = present;
     if (rows.length === 0) {
       deployedEnvs = new Map();
       refreshDeployBtn();
       tableBody.innerHTML = NO_DEPLOYMENTS_ROW;
+      if (focusedCleanupEnvironment) context.focus.focus(deployBtn);
       return;
     }
     deployedEnvs = computeBlockedEnvironments(rows, overrides);
@@ -697,6 +774,15 @@ export function initializeDeployingPage(
       .map((row) => renderDeploymentRow(row, overrides))
       .join("");
     wireDeleteButtons();
+    if (focusedCleanupEnvironment)
+      context.focus.focus(
+        context.dom
+          .all(context.dom.document, ".js-cleanup-dep")
+          .find(
+            (button) =>
+              button.getAttribute("data-env") === focusedCleanupEnvironment
+          ) ?? deployBtn
+      );
   };
 
   // True once there is something real to show. A placeholder — loading, retry
@@ -737,7 +823,10 @@ export function initializeDeployingPage(
           if (!quiet && !hasRenderableRows()) tableBody.innerHTML = RETRY_ROW;
           return;
         }
-        lastRecords = parseDeploymentRecords(payload);
+        lastRecords = parseDeploymentListingWithDiagnostics(
+          payload,
+          lastRecords
+        );
         renderDeployments();
       })
       .catch((error: unknown) => {

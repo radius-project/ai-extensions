@@ -27,12 +27,83 @@ export interface DeploymentResolverDependencies {
   maxParallelRecords: number;
 }
 
+export interface DeploymentSelection {
+  runId: number;
+  runAttempt: number;
+  deploymentId: string;
+  runUrl: string;
+}
+
+export interface EnvironmentDeploymentListing {
+  deployment: DeploymentRow | null;
+  selection?: DeploymentSelection;
+  incomplete: boolean;
+}
+
 export async function resolveEnvironmentDeployment(
   repo: string,
   environment: string,
-  _appName: string,
+  appName: string,
   dependencies: DeploymentResolverDependencies
 ): Promise<DeploymentRow | null> {
+  return (
+    await readEnvironmentDeployment(
+      repo,
+      environment,
+      appName,
+      dependencies,
+      "complete"
+    )
+  ).deployment;
+}
+
+export function listEnvironmentDeployment(
+  repo: string,
+  environment: string,
+  appName: string,
+  dependencies: DeploymentResolverDependencies
+): Promise<EnvironmentDeploymentListing> {
+  return readEnvironmentDeployment(
+    repo,
+    environment,
+    appName,
+    dependencies,
+    "listing"
+  );
+}
+
+async function readEnvironmentDeployment(
+  repo: string,
+  environment: string,
+  _appName: string,
+  dependencies: DeploymentResolverDependencies,
+  purpose: "listing" | "complete"
+): Promise<EnvironmentDeploymentListing> {
+  const finish = (
+    deployment: DeploymentRow | null,
+    record?: DeploymentRecord
+  ): EnvironmentDeploymentListing => {
+    if (purpose === "complete") return { deployment, incomplete: false };
+    const runId = record && deploymentRunId(repo, record.runUrl);
+    const selection =
+      (
+        record &&
+        runId &&
+        record.runId === runId &&
+        record.runRepository?.toLowerCase() === repo.toLowerCase() &&
+        record.runAttempt !== undefined
+      ) ?
+        {
+          runId,
+          runAttempt: record.runAttempt,
+          deploymentId: record.id,
+          runUrl: record.runUrl
+        }
+      : undefined;
+    if (!deployment) return { deployment: null, incomplete: false };
+    const { recovery: _recovery, ...row } = deployment;
+    return { deployment: row, selection, incomplete: false };
+  };
   if (
     !Number.isSafeInteger(dependencies.maxParallelRecords) ||
     dependencies.maxParallelRecords < 1
@@ -238,14 +309,14 @@ export async function resolveEnvironmentDeployment(
   if (first) {
     if (isVerifiedActive(first)) {
       const active = await decide(first);
-      if (active !== "skip") return active;
+      if (active !== "skip") return finish(active, first);
     }
     if (
       (first.state === "inactive" &&
         first.description === ABANDONED_DEPLOYMENT_DESCRIPTION) ||
       (first.workflow === "delete" && first.runConclusion === "success")
     )
-      return null;
+      return finish(null);
     if (
       first.state === "success" &&
       first.workflow === "deploy" &&
@@ -253,15 +324,17 @@ export async function resolveEnvironmentDeployment(
     ) {
       const healthy = await decide(first);
       if (healthy && healthy !== "skip" && healthy.identity?.state === "known")
-        return healthy;
+        return finish(healthy, first);
     }
   }
   let nextPage = 2;
   let offset = 0;
+  let stopHistory = false;
   let needsRecovery = false;
-  while (!needsRecovery) {
+  while (!stopHistory) {
     if (offset === ids.length) {
       if (!more) break;
+      if (purpose === "listing") return { deployment: null, incomplete: true };
       if (nextPage > 20)
         throw new Error(
           "Deployment history exceeds the recovery read budget. Tracking was not changed."
@@ -277,46 +350,10 @@ export async function resolveEnvironmentDeployment(
     for (const result of batch) {
       if (result.status === "rejected") throw result.reason;
       const record = result.value;
-      if (isVerifiedActive(record)) {
+      if (!needsRecovery && isVerifiedActive(record)) {
         const active = await decide(record);
-        if (active !== "skip") return active;
+        if (active !== "skip") return finish(active, record);
       }
-      if (
-        record.workflow !== "unrelated" ||
-        record.description.startsWith("Radius cleanup v1 ")
-      ) {
-        needsRecovery = true;
-        break;
-      }
-    }
-  }
-  // A recovery marker must cover every duplicate record, including interleaved
-  // runs. Only recovery paths need a complete, bounded history scan.
-  if (more && nextPage > 20)
-    throw new Error(
-      "Deployment history exceeds the recovery read budget. Tracking was not changed."
-    );
-  for (let page = nextPage; more && page <= 20; page++) {
-    more = await readIds(page);
-    if (more && page === 20)
-      throw new Error(
-        "Deployment history exceeds the recovery read budget. Tracking was not changed."
-      );
-  }
-  let stopHistory = false;
-  for (
-    let offset = 0;
-    offset < ids.length;
-    offset += dependencies.maxParallelRecords
-  ) {
-    const batch = await Promise.allSettled(
-      ids
-        .slice(offset, offset + dependencies.maxParallelRecords)
-        .map(readRecord)
-    );
-    for (const result of batch) {
-      if (result.status === "rejected") throw result.reason;
-      const record = result.value;
       records.push(record);
       if (
         (record.state === "inactive" &&
@@ -326,8 +363,21 @@ export async function resolveEnvironmentDeployment(
         stopHistory = true;
         break;
       }
+      if (
+        purpose === "listing" &&
+        !needsRecovery &&
+        !record.description.startsWith("Radius cleanup v1 ")
+      ) {
+        const deployment = await decide(record);
+        if (deployment !== "skip") return finish(deployment, record);
+      }
+      if (
+        record.workflow !== "unrelated" ||
+        record.description.startsWith("Radius cleanup v1 ")
+      ) {
+        needsRecovery = true;
+      }
     }
-    if (stopHistory) break;
   }
   const skipped = new Set<number>();
   for (const record of records) {
@@ -400,9 +450,9 @@ export async function resolveEnvironmentDeployment(
         deployment.identity.readFailed !== true;
       deployment.recovery = recovery;
     }
-    return deployment;
+    return finish(deployment, record);
   }
-  return null;
+  return finish(null);
 }
 
 export function createDeploymentLookup(
@@ -451,6 +501,13 @@ export function createDeploymentLookup(
 
   return {
     resolveRepoAppName,
+    listEnvDeployment: (repo: string, environment: string, appName: string) =>
+      listEnvironmentDeployment(
+        repo,
+        environment,
+        appName,
+        resolverDependencies
+      ),
     resolveEnvDeployment: (
       repo: string,
       environment: string,

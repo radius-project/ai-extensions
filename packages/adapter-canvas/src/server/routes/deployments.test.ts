@@ -14,6 +14,7 @@ import {
   handleDeployStatus,
   handleListApplications,
   handleListDeployments,
+  handleCleanupDetails,
   type DeployListCacheEntry,
   type DeploymentsInstanceEntry,
   type DeploymentsDependencies,
@@ -95,6 +96,14 @@ function dependencies(
     },
     resolveEnvDeployment: () => {
       throw new Error("resolveEnvDeployment not stubbed");
+    },
+    listEnvDeployment: async (...args) => {
+      if (!overrides.resolveEnvDeployment)
+        throw new Error("listEnvDeployment not stubbed");
+      return {
+        deployment: await overrides.resolveEnvDeployment(...args),
+        incomplete: false
+      };
     },
     ghOrThrow: () => {
       throw new Error("ghOrThrow not stubbed");
@@ -245,7 +254,7 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the ten routes it owns", () => {
+  it("declares exactly the eleven routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
@@ -253,12 +262,70 @@ describe("deployments routes (SU-06)", () => {
       "GET /api/deploy-notification",
       "GET /api/list-applications",
       "GET /api/list-deployments",
+      "POST /api/deployment-cleanup-details",
       "GET /api/delete-conflict",
       "POST /api/deploy",
       "POST /api/deploy-reset",
       "POST /api/delete-deployment",
       "POST /api/abandon-deployment"
     ]);
+  });
+
+  it.each(["error", "incomplete"] as const)(
+    "keeps healthy rows visible when another environment has %s history",
+    async (kind) => {
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/list-deployments?repo=octo/todolist"
+      );
+      const resolveEnvDeployment = vi.fn(async () => null);
+      await handleListDeployments(
+        ctx,
+        dependencies({
+          deployListCache: new Map(),
+          deployListTtlMs: 15000,
+          ghOrThrow: async () => "dev\nprod",
+          resolveEnvDeployment,
+          listEnvDeployment: async (_repo, environment) => {
+            if (environment === "dev") {
+              if (kind === "error") throw new Error("rate limit exceeded");
+              return { deployment: null, incomplete: true };
+            }
+            return {
+              deployment: {
+                app: "app",
+                environment,
+                provider: "azure",
+                status: "success",
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/todolist/actions/runs/42"
+              },
+              incomplete: false
+            };
+          }
+        })
+      );
+      expect(JSON.parse(recording.body)).toMatchObject({
+        deployments: [{ app: "app", environment: "prod" }],
+        environmentDiagnostics: [
+          { environment: "dev", kind, message: expect.any(String) }
+        ]
+      });
+      expect(resolveEnvDeployment).not.toHaveBeenCalled();
+    }
+  );
+
+  it("refuses malformed cleanup details JSON before any resolver call", async () => {
+    const { recording, context: ctx } = context(
+      "POST",
+      "/api/deployment-cleanup-details",
+      "{"
+    );
+    await handleCleanupDetails(ctx, dependencies());
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Invalid cleanup request."
+    });
   });
 
   it("dispatches each declared key to its own handler", async () => {

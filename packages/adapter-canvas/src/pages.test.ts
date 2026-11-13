@@ -186,12 +186,13 @@ describe("compiled page entry API contracts", () => {
       "deploying-page",
       [
         "/api/run-remediation",
-        "/api/delete-conflict",
         "/api/discover-branches",
         "/api/list-applications",
         "/api/list-environments",
         "/api/list-deployments",
         "/api/deploy",
+        "/api/deployment-cleanup-details",
+        "/api/delete-conflict",
         "/api/delete-deployment",
         "/api/deploy-status",
         "/api/deployed-graph",
@@ -545,8 +546,9 @@ describe("compiled graph page network contracts", () => {
     [
       "deployed-graph-page",
       [
-        "/api/delete-conflict",
         "/api/deploy",
+        "/api/deployment-cleanup-details",
+        "/api/delete-conflict",
         "/api/list-deployments",
         "/api/deployed-graph",
         "/api/deploy-status",

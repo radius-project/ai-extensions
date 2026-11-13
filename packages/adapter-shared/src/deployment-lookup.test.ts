@@ -78,15 +78,21 @@ it.each([0, -1, 1.5, Number.NaN])(
 );
 
 it("fails closed at the full history budget without an unbounded recovery scan", async () => {
-  const h = resolver(["1"], {
-    "1": {
-      state: "failure",
-      logUrl: `https://github.com/${REPO}/actions/runs/1`,
-      runPath: DEPLOY_WORKFLOW,
-      runStatus: "completed",
-      runConclusion: "failure"
-    }
-  });
+  const h = resolver(
+    ["1"],
+    Object.fromEntries(
+      Array.from({ length: 2000 }, (_, index) => [
+        String(index + 1),
+        {
+          state: "failure",
+          logUrl: `https://github.com/${REPO}/actions/runs/1`,
+          runPath: DEPLOY_WORKFLOW,
+          runStatus: "completed",
+          runConclusion: "failure"
+        }
+      ])
+    )
+  );
   let pages = 0;
   const lookup = createDeploymentLookup({
     ghOrThrow: async (args) => {
@@ -230,6 +236,17 @@ function resolver(
 
   return {
     ghOrThrow,
+    list: () =>
+      createDeploymentLookup({
+        readApplicationIdentity: async () =>
+          options.identity ?? {
+            state: "known",
+            application: "radius-app"
+          },
+        ghOrThrow,
+        deployWorkflowFile: DEPLOY_WORKFLOW,
+        deleteWorkflowFile: DELETE_WORKFLOW
+      }).listEnvDeployment(REPO, ENVIRONMENT, ""),
     resolve: (appName = "radius-app") =>
       createDeploymentLookup({
         readApplicationIdentity: async (_repo, _environment, runId) =>
@@ -247,6 +264,165 @@ function resolver(
 }
 
 describe("resolveEnvironmentDeployment", () => {
+  it("reports verified absence from an empty bounded listing", async () => {
+    const h = resolver([], {});
+    expect(await h.list()).toEqual({ deployment: null, incomplete: false });
+  });
+
+  it.each(["active", "successful delete", "legacy stop"] as const)(
+    "keeps bounded %s history decisive without reading older records",
+    async (kind) => {
+      const h = resolver(["7", "6"], {
+        "7": {
+          state: kind === "legacy stop" ? "inactive" : "success",
+          description:
+            kind === "legacy stop" ? ABANDONED_DEPLOYMENT_DESCRIPTION : "",
+          logUrl: `https://github.com/${REPO}/actions/runs/42`,
+          runPath:
+            kind === "successful delete" ? DELETE_WORKFLOW : DEPLOY_WORKFLOW,
+          runStatus: kind === "active" ? "queued" : "completed",
+          runConclusion: kind === "active" ? "" : "success",
+          runAttempt: 1,
+          headSha: "a".repeat(40)
+        }
+      });
+      const result = await h.list();
+      expect(result.incomplete).toBe(false);
+      if (kind === "active") {
+        expect(result).toMatchObject({
+          deployment: { status: "pending" },
+          selection: { runId: 42, runAttempt: 1 }
+        });
+        expect(result.deployment?.recovery).toBeUndefined();
+      } else expect(result.deployment).toBeNull();
+      expect(
+        h.ghOrThrow.mock.calls.some(([args]) =>
+          args[1].includes("/deployments/6/")
+        )
+      ).toBe(false);
+    }
+  );
+
+  it.each([1999, 2000])(
+    "keeps ordinary listing bounded for %i historical records without confirmation authority",
+    async (length) => {
+      const ids = Array.from({ length }, (_, i) => String(i + 1));
+      const records = Object.fromEntries(
+        ids.map((id) => [
+          id,
+          {
+            state: "failure",
+            logUrl: `https://github.com/${REPO}/actions/runs/${id}`,
+            runPath: DEPLOY_WORKFLOW,
+            runStatus: "completed",
+            runConclusion: "failure",
+            runAttempt: 1,
+            headSha: "a".repeat(40)
+          }
+        ])
+      );
+      const h = resolver([], records, {
+        pages: [ids.slice(0, 100), ids.slice(100, 200)]
+      });
+      expect(await h.list()).toMatchObject({
+        deployment: { deploymentId: "1", status: "failed" },
+        selection: { runId: 1, runAttempt: 1 },
+        incomplete: false
+      });
+      expect((await h.list()).deployment?.recovery).toBeUndefined();
+      expect(
+        h.ghOrThrow.mock.calls.filter(([args]) =>
+          args[1].includes("/deployments?")
+        )
+      ).toHaveLength(2);
+      expect(h.ghOrThrow.mock.calls.length).toBeLessThanOrEqual(48);
+    }
+  );
+
+  it.each(["delete", "legacy abandonment"] as const)(
+    "honors a %s stop before requesting any older page",
+    async (stop) => {
+      const ids = Array.from({ length: 100 }, (_, i) => String(i + 1));
+      const records = Object.fromEntries(
+        ids.map((id) => [
+          id,
+          {
+            state:
+              id === "3" && stop === "legacy abandonment" ?
+                "inactive"
+              : "failure",
+            description:
+              id === "3" && stop === "legacy abandonment" ?
+                ABANDONED_DEPLOYMENT_DESCRIPTION
+              : "",
+            logUrl: `https://github.com/${REPO}/actions/runs/${id}`,
+            runPath:
+              id === "3" ? DELETE_WORKFLOW
+              : id === "2" ? DEPLOY_WORKFLOW
+              : "unrelated.yml",
+            runStatus: "completed",
+            runConclusion: id === "3" ? "success" : "failure",
+            runAttempt: 1,
+            headSha: "a".repeat(40)
+          }
+        ])
+      );
+      const h = resolver([], records, { pages: [ids] });
+      expect(await h.resolve()).toMatchObject({ deploymentId: "2" });
+      expect(
+        h.ghOrThrow.mock.calls.filter(([args]) =>
+          args[1].includes("/deployments?")
+        )
+      ).toHaveLength(1);
+    }
+  );
+
+  it.each(["partial", "complete", "rerun"] as const)(
+    "does not trust %s cleanup groups cut off at record 100",
+    async (mode) => {
+      const ids = Array.from({ length: 101 }, (_, i) => String(i + 1));
+      const records: Record<string, RecordFixture> = Object.fromEntries(
+        ids.map((id) => [
+          id,
+          {
+            state: "failure",
+            logUrl: `https://github.com/${REPO}/actions/runs/${id === "101" ? "1" : id}`,
+            runPath:
+              id === "1" || id === "101" ? DEPLOY_WORKFLOW : "unrelated.yml",
+            runStatus: "completed",
+            runConclusion: "failure",
+            runAttempt: 1,
+            headSha: "a".repeat(40)
+          }
+        ])
+      );
+      const h = resolver([], records, {
+        pages: [ids.slice(0, 100), ids.slice(100)]
+      });
+      const recovery = (await h.resolve())?.recovery;
+      if (!recovery) throw new Error("Missing recovery");
+      records["1"].state = "inactive";
+      records["1"].description = cleanupMarker(recovery);
+      if (mode !== "partial") {
+        records["101"].state = "inactive";
+        records["101"].description = cleanupMarker(recovery);
+      }
+      if (mode === "rerun") {
+        records["1"].runAttempt = 2;
+        records["101"].runAttempt = 2;
+      }
+      h.ghOrThrow.mockClear();
+      expect(await h.list()).toEqual({ deployment: null, incomplete: true });
+      expect(
+        h.ghOrThrow.mock.calls.filter(([args]) =>
+          args[1].includes("/deployments?")
+        )
+      ).toHaveLength(1);
+      const resolved = await h.resolve();
+      if (mode === "complete") expect(resolved).toBeNull();
+      else expect(resolved?.deploymentId).toBe("1");
+    }
+  );
   it.each(["delete", "legacy abandonment"] as const)(
     "preserves an older %s history stop without adopting unrelated records",
     async (kind) => {

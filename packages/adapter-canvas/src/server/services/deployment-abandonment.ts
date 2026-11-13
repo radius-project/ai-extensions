@@ -328,7 +328,7 @@ export function createDeploymentAbandonmentService(
               application
             );
             dependencies.invalidateDeployListCache(repo);
-            if (next?.recovery?.runId === recovery.runId)
+            if (next && deploymentRunId(repo, next.runUrl) === recovery.runId)
               return {
                 status: 502,
                 body: {

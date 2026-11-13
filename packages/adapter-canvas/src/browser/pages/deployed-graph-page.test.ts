@@ -2121,6 +2121,7 @@ describe("initializeDeployedGraphPage", () => {
               ]
         })
       );
+
       browser.net.handle("/api/abandon-deployment", () => {
         cleaned = true;
         return jsonResponse({ outcome: "abandoned" });
@@ -2173,6 +2174,260 @@ describe("initializeDeployedGraphPage", () => {
       expect(browser.nav.assigned).toEqual([]);
     }
   );
+
+  it.each([true, false])(
+    "only offers cleanup for a successful run when identity is unavailable: known %s",
+    async (known) => {
+      const { browser, action, stopTrackingAction, inlineStatus } = fixture();
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: "https://github.com/octo/app/actions/runs/42"
+      };
+      const deployment = {
+        app: known ? "app" : "",
+        environment: "dev",
+        status: "success",
+        deploymentId: "7",
+        runUrl: selection.runUrl,
+        cleanupSelection: selection,
+        identity:
+          known ?
+            { state: "known", application: "app" }
+          : { state: "unavailable", reason: "Artifact expired" }
+      };
+      browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+        jsonResponse({ deployments: [deployment] })
+      );
+      browser.net.handle("/api/deployment-cleanup-details", () =>
+        jsonResponse({
+          deployment: {
+            ...deployment,
+            recovery: {
+              runId: 42,
+              runAttempt: 1,
+              revision: "a".repeat(64),
+              confirmation: "octo/app/run-42@1/dev",
+              canMarkCleanupComplete: true
+            }
+          },
+          selection,
+          prepared: true
+        })
+      );
+      const { createDialog, wasOpened } = createConfirmingDialog();
+      const stop = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      expect(stopTrackingAction.style.display).toBe(known ? "none" : "");
+      expect(action.disabled).toBe(!known);
+      if (!known) {
+        stopTrackingAction.dispatch("click");
+        await flushPromises();
+        expect(wasOpened()).toBe(false);
+        expect(inlineStatus.textContent).toContain("Deployments page");
+      }
+      stop();
+    }
+  );
+
+  it.each([
+    "prepared",
+    "discovery",
+    "unknown-discovery",
+    "absence",
+    "error",
+    "network",
+    "non-error",
+    "other-app",
+    "stale-error",
+    "stale",
+    "detached"
+  ] as const)(
+    "loads graph cleanup details without publishing %s results prematurely",
+    async (outcome) => {
+      const {
+        browser,
+        action,
+        stopTrackingAction,
+        appSelect,
+        envSelect,
+        inlineStatus
+      } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      });
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: "https://github.com/octo/app/actions/runs/42"
+      };
+      const deployment = {
+        app: "app",
+        environment: "dev",
+        status: "delete-failed",
+        identity: { state: "known", application: "app" },
+        deploymentId: "7",
+        runUrl: selection.runUrl,
+        cleanupSelection: selection
+      };
+      browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+        jsonResponse({
+          deployments: [deployment]
+        })
+      );
+      const pending = createDeferred<HttpResponse>();
+      browser.net.handle(
+        "/api/deployment-cleanup-details",
+        () => pending.promise
+      );
+      const { createDialog, wasOpened } = createConfirmingDialog();
+      const stop = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      appSelect.value = "app";
+      envSelect.value = "dev";
+      expect(stopTrackingAction.textContent).toBe("Load cleanup details");
+      stopTrackingAction.dispatch("click");
+      stopTrackingAction.dispatch("click");
+      expect(wasOpened()).toBe(false);
+      expect(
+        browser.net.calls.filter(
+          (call) => call.url === "/api/deployment-cleanup-details"
+        )
+      ).toHaveLength(1);
+      if (outcome === "detached") stop();
+      if (outcome === "stale" || outcome === "stale-error") {
+        envSelect.value = "other";
+        envSelect.dispatch("change");
+      }
+      if (outcome === "network" || outcome === "stale-error")
+        pending.reject(new Error("offline"));
+      else if (outcome === "non-error") pending.reject("offline");
+      else
+        pending.resolve(
+          jsonResponse(
+            {
+              error: outcome === "error" ? "Run changed" : undefined,
+              prepared:
+                outcome !== "discovery" &&
+                outcome !== "unknown-discovery" &&
+                outcome !== "absence",
+              selection,
+              deployment:
+                outcome === "absence" ? null : (
+                  {
+                    ...deployment,
+                    ...(outcome === "unknown-discovery" ?
+                      {
+                        app: "",
+                        identity: {
+                          state: "unavailable",
+                          reason: "Artifact expired"
+                        }
+                      }
+                    : {}),
+                    ...(outcome === "other-app" ?
+                      {
+                        app: "other-app",
+                        identity: { state: "known", application: "other-app" }
+                      }
+                    : {}),
+                    recovery: {
+                      runId: 42,
+                      runAttempt: 1,
+                      revision: "a".repeat(64),
+                      confirmation: "app/dev",
+                      canMarkCleanupComplete: true
+                    }
+                  }
+                )
+            },
+            outcome !== "error",
+            outcome === "error" ? 409 : 200
+          )
+        );
+      await flushPromises();
+      expect(wasOpened()).toBe(outcome === "prepared");
+      if (outcome === "error")
+        expect(inlineStatus.textContent).toBe("Run changed");
+      if (outcome === "absence") {
+        expect(action.dataset.mode).toBe("deploy");
+        expect(stopTrackingAction.style.display).toBe("none");
+      }
+      if (outcome === "unknown-discovery") {
+        expect(action.disabled).toBe(true);
+        expect(stopTrackingAction.textContent).toBe("Load cleanup details");
+      }
+      if (outcome === "other-app")
+        expect(inlineStatus.textContent).toContain("Select the current run");
+      stop();
+    }
+  );
+
+  it("keeps last-known affected state and healthy environments while history is unverified", async () => {
+    const { browser, action, stopTrackingAction, envSelect, inlineStatus } =
+      fixture({
+        deployments: [{ app: "app", environment: "dev", status: "pending" }]
+      });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({
+        environments: [
+          { name: "dev", provider: "azure" },
+          { name: "healthy", provider: "azure" }
+        ]
+      })
+    );
+    const { createDialog } = createConfirmingDialog();
+    const stop = initializeDeployedGraphPage(
+      browser.context,
+      globals({
+        radiusCreateDeleteDeploymentDialog: createDialog
+      })
+    );
+    await flushPromises();
+    browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+      jsonResponse({
+        deployments: [
+          { app: "app", environment: "healthy", status: "success" }
+        ],
+        environmentDiagnostics: [
+          {
+            environment: "dev",
+            kind: "error",
+            message: "GitHub rate limit. Retry later."
+          }
+        ]
+      })
+    );
+    browser.clock.tick(DEPLOYED_STATE_POLL_MS);
+    await flushPromises();
+    expect(action.disabled).toBe(true);
+    expect(inlineStatus.textContent).toContain("GitHub rate limit");
+    expect(stopTrackingAction.textContent).toBe("Load cleanup details");
+    browser.net.handle("/api/deployment-cleanup-details", () =>
+      jsonResponse({
+        deployment: null,
+        prepared: false
+      })
+    );
+    stopTrackingAction.dispatch("click");
+    await flushPromises();
+    expect(action.dataset.mode).toBe("deploy");
+    envSelect.value = "healthy";
+    envSelect.dispatch("change");
+    await flushPromises();
+    expect(action.dataset.mode).toBe("delete");
+    expect(action.disabled).toBe(false);
+    stop();
+  });
 
   it.each(["success", "delete-failed", "pending", "deleting"])(
     "reloads older %s history after cleanup and replaces its recovery target",

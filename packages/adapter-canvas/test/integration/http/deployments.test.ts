@@ -162,7 +162,9 @@ function start(
   callbacks: Partial<
     Pick<
       DeploymentsDependencies,
-      "triggerDeployRepairHandoff" | "triggerDeployFailureNotice"
+      | "triggerDeployRepairHandoff"
+      | "triggerDeployFailureNotice"
+      | "listEnvDeployment"
     >
   > = {},
   { awsEnabled = true }: { awsEnabled?: boolean } = {}
@@ -270,6 +272,12 @@ function start(
       resolveRepoAppName: (_repo, branch) =>
         Promise.resolve(`todo-app@${branch}`),
       resolveEnvDeployment,
+      listEnvDeployment:
+        callbacks.listEnvDeployment ??
+        (async (...args) => ({
+          deployment: await resolveEnvDeployment(...args),
+          incomplete: false
+        })),
       ghOrThrow,
       resetDeploymentViewState: (_target, attemptId) => {
         resets.push(attemptId);
@@ -402,6 +410,223 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
+  it("keeps healthy environments visible over HTTP when peers are incomplete or unreadable", async () => {
+    const h = start({
+      listEnvDeployment: async (_repo, environment) => {
+        if (environment === "failed")
+          throw new Error("GitHub rate limit. Retry later.");
+        if (environment === "incomplete")
+          return { deployment: null, incomplete: true };
+        return { deployment: row(environment, "success"), incomplete: false };
+      }
+    });
+    h.environments.push("healthy", "incomplete", "failed");
+    h.setDeploymentResolver(async () => {
+      throw new Error("A listing must not run complete verification");
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(
+      `${entry.baseUrl}/api/list-deployments?repo=octo/todo`
+    );
+    expect(await response.json()).toMatchObject({
+      deployments: [{ environment: "healthy", status: "success" }],
+      environmentDiagnostics: [
+        { environment: "incomplete", kind: "incomplete" },
+        {
+          environment: "failed",
+          kind: "error",
+          message: "GitHub rate limit. Retry later."
+        }
+      ]
+    });
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
+  it("checks complete history beyond record 100 before admitting application deletion or conflict clearance", async () => {
+    const h = start();
+    const pages: number[] = [];
+    h.setDeploymentResolver((repo, environment, application) =>
+      resolveEnvironmentDeployment(repo, environment, application, {
+        deployWorkflowFile: "run-rad-commands.yml",
+        deleteWorkflowFile: "delete-application.yml",
+        maxParallelRecords: 10,
+        readApplicationIdentity: async () => ({
+          state: "known",
+          application: "todo-app"
+        }),
+        ghOrThrow: async (args) => {
+          const path = args[1];
+          if (path.includes("/variables?")) return "AZURE_CLIENT_ID";
+          if (path.includes("/deployments?")) {
+            const page = Number(/&page=(\d+)/.exec(path)?.[1] ?? 1);
+            pages.push(page);
+            return page === 1 ?
+                Array.from({ length: 100 }, (_, i) => String(i + 1)).join("\n")
+              : "101";
+          }
+          const status = /\/deployments\/(\d+)\/statuses/.exec(path);
+          if (status)
+            return `in_progress\thttps://github.com/${repo}/actions/runs/${status[1]}\t`;
+          const run = /\/actions\/runs\/(\d+)$/.exec(path);
+          if (run)
+            return [
+              run[1] === "101" ? "run-rad-commands.yml" : "unrelated.yml",
+              "in_progress",
+              "",
+              "1",
+              "a".repeat(40),
+              "",
+              run[1],
+              repo,
+              "workflow_dispatch"
+            ].join("\t");
+          throw new Error(`Unexpected history read: ${path}`);
+        }
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+    expect(response.status).toBe(409);
+    const conflict = await fetch(
+      `${entry.baseUrl}/api/delete-conflict?repo=octo%2Ftodo&environment=dev&application=todo-app`
+    );
+    expect(await conflict.json()).toMatchObject({ conflict: false });
+    expect(pages).toEqual([1, 2, 1, 2]);
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
+  it("prepares exact-run cleanup over HTTP without writes and rejects a superseded selection", async () => {
+    const h = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const selection = {
+      runId: 42,
+      runAttempt: 1,
+      deploymentId: "7",
+      runUrl: "https://github.com/octo/todo/actions/runs/42"
+    };
+    const current: DeploymentRow = {
+      ...row("dev", "failed"),
+      deploymentId: selection.deploymentId,
+      runUrl: selection.runUrl,
+      recovery: {
+        ...selection,
+        revision: "a".repeat(64),
+        deploymentIds: ["7", "6"],
+        confirmation: "todo-app/dev",
+        canMarkCleanupComplete: true
+      }
+    };
+    h.setDeploymentResolver(async () => current);
+    const target = { repo: "octo/todo", environment: "dev" };
+    const discovery = await post(
+      entry.baseUrl,
+      "/api/deployment-cleanup-details",
+      JSON.stringify(target)
+    );
+    expect(await discovery.json()).toMatchObject({
+      prepared: false,
+      selection
+    });
+    const prepared = await post(
+      entry.baseUrl,
+      "/api/deployment-cleanup-details",
+      JSON.stringify({ ...target, ...selection })
+    );
+    expect(prepared.status).toBe(200);
+    expect(await prepared.json()).toMatchObject({
+      prepared: true,
+      deployment: { recovery: current.recovery }
+    });
+    h.setDeploymentResolver(async () => ({
+      ...current,
+      runUrl: "https://github.com/octo/todo/actions/runs/43"
+    }));
+    const stale = await post(
+      entry.baseUrl,
+      "/api/deployment-cleanup-details",
+      JSON.stringify({ ...target, ...selection })
+    );
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: expect.stringContaining("changed")
+    });
+    expect(h.ghApiCalls).toEqual([]);
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
+  it("retains the local attempt when marker writes race an active rerun without recovery metadata", async () => {
+    const h = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const recovery = {
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      deploymentIds: ["7"],
+      confirmation: "todo-app/dev",
+      canMarkCleanupComplete: true
+    };
+    const current: DeploymentRow = {
+      ...row("dev", "failed"),
+      deploymentId: "7",
+      runUrl: "https://github.com/octo/todo/actions/runs/42",
+      recovery
+    };
+    Object.assign(h.state, {
+      deployStatus: "failed",
+      deployAppName: "todo-app",
+      deployRunUrl: current.runUrl,
+      deployRunId: "42",
+      deployAttempt: {
+        id: "original",
+        targetRepo: "octo/todo",
+        environment: "dev"
+      }
+    });
+    let rerunning = false;
+    h.setDeploymentResolver(async () =>
+      rerunning ?
+        {
+          ...current,
+          deploymentId: "new",
+          status: "pending",
+          recovery: undefined
+        }
+      : current
+    );
+    h.setGhOrThrow(async (args) => {
+      if (args.includes("POST")) rerunning = true;
+      return "";
+    });
+    const response = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app",
+        deploymentId: "7",
+        runUrl: current.runUrl,
+        ...recovery
+      })
+    );
+    expect(response.status).toBe(502);
+    expect(h.state.deployAttempt?.id).toBe("original");
+    expect(h.state.deployStatus).toBe("failed");
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
   it.each([
     {
       workspaceRepo: "acme/workspace",
@@ -2592,6 +2817,8 @@ function startDeploy(
       }),
       resolveRepoAppName: () => Promise.resolve("todo-app"),
       resolveEnvDeployment: () => Promise.resolve(null),
+      listEnvDeployment: () =>
+        Promise.resolve({ deployment: null, incomplete: false }),
       ghOrThrow: () => Promise.resolve(""),
       resetDeploymentViewState: views.reset,
       captureDeletedDeployment: views.captureDeletion,

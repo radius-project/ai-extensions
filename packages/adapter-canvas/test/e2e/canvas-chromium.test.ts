@@ -912,6 +912,93 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(false);
   });
 
+  for (const surface of ["deploying", "deployed"] as const) {
+    test(`cleanup details announce loading and preserve the ${surface} target on failure @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`
+      };
+      await page.route("**/api/list-deployments**", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            deployments: [
+              {
+                app: "radius-app",
+                environment: "fixture-environment",
+                status: "failed",
+                identity: { state: "known", application: "radius-app" },
+                deploymentId: "7",
+                runUrl: selection.runUrl,
+                cleanupSelection: selection
+              }
+            ]
+          })
+        })
+      );
+      const held = createDeferred<void>();
+      let requests = 0;
+      await page.route("**/api/deployment-cleanup-details", async (route) => {
+        requests++;
+        await held.promise;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "GitHub history is unavailable. Tracking was not changed."
+          })
+        });
+      });
+      await gotoCanvas(
+        page,
+        canvas,
+        `${surface}&application=radius-app&environment=fixture-environment`
+      );
+      const cleanup = page.getByRole("button", {
+        name: "Load cleanup details",
+        exact: true
+      });
+      const status = page.locator(
+        surface === "deploying" ?
+          "#deploy-inline-status"
+        : "#deployed-inline-status"
+      );
+      await cleanup.focus();
+      await page.keyboard.press("Enter");
+      const accessibility = () =>
+        new AxeBuilder({ page })
+          .include(
+            surface === "deploying" ?
+              "#deploy-inline-status"
+            : "#deployed-inline-status"
+          )
+          .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+          .analyze();
+      try {
+        await expect(cleanup).toBeDisabled();
+        await expect(cleanup).toHaveAttribute("aria-busy", "true");
+        await expect(status).toHaveAttribute("role", "status");
+        await expect(status).toContainText("Loading cleanup details");
+        expect((await accessibility()).violations).toEqual([]);
+      } finally {
+        held.resolve();
+      }
+      await expect(status).toContainText("GitHub history is unavailable");
+      await expect(cleanup).toBeEnabled();
+      await expect(page.locator("#deploy-abandon-modal")).toBeHidden();
+      await cleanup.focus();
+      await expect(cleanup).toBeFocused();
+      expect((await accessibility()).violations).toEqual([]);
+      expect(requests).toBe(1);
+    });
+  }
+
   test("attests exact-run external cleanup by keyboard and exposes older history @safety", async ({
     page,
     canvas
@@ -919,6 +1006,36 @@ test.describe("Radius Canvas in Chromium", () => {
     let marked = false;
     let request: unknown;
     const confirmation = `${REPOSITORY}/run-42@1/fixture-environment`;
+    const selection = {
+      runId: 42,
+      runAttempt: 1,
+      deploymentId: "7",
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`
+    };
+    await page.route("**/api/deployment-cleanup-details", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          prepared: true,
+          selection,
+          deployment: {
+            app: "",
+            environment: "fixture-environment",
+            status: "failed",
+            deploymentId: "7",
+            runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`,
+            recovery: {
+              runId: 42,
+              runAttempt: 1,
+              revision: "a".repeat(64),
+              confirmation,
+              canMarkCleanupComplete: true
+            }
+          }
+        })
+      })
+    );
     await page.route("**/api/list-deployments**", async (route) => {
       await route.fulfill({
         status: 200,
@@ -939,13 +1056,7 @@ test.describe("Radius Canvas in Chromium", () => {
                 deploymentId: "7",
                 runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`,
                 identity: { state: "unavailable", reason: "Artifact expired" },
-                recovery: {
-                  runId: 42,
-                  runAttempt: 1,
-                  revision: "a".repeat(64),
-                  confirmation,
-                  canMarkCleanupComplete: true
-                }
+                cleanupSelection: selection
               }
           ]
         })
@@ -963,7 +1074,7 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     await gotoCanvas(page, canvas, "deploying");
     const cleanup = page.getByRole("button", {
-      name: "Mark cleanup complete",
+      name: "Load cleanup details",
       exact: true
     });
     await cleanup.focus();
@@ -1017,16 +1128,39 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(false);
   });
 
-  for (const { surface, known, partial } of [
-    { surface: "deploying", known: false, partial: false },
-    { surface: "deploying", known: false, partial: true },
-    { surface: "deployed", known: true, partial: false }
+  for (const { surface, known, partial, longHistory } of [
+    { surface: "deploying", known: false, partial: false, longHistory: false },
+    { surface: "deploying", known: false, partial: true, longHistory: false },
+    { surface: "deployed", known: true, partial: false, longHistory: false },
+    { surface: "deploying", known: false, partial: false, longHistory: true }
   ]) {
-    test(`real grouped cleanup preserves history on ${surface}; partial: ${partial} @safety`, async ({
+    test(`real grouped cleanup preserves history on ${surface}; partial: ${partial}; long history: ${longHistory} @safety`, async ({
       page,
       canvas
     }) => {
       const scenario = cleanupHistoryScenario(known);
+      if (longHistory) {
+        const history = scenario.commands.find((command) =>
+          command.args?.includes(
+            `/repos/${REPOSITORY}/deployments?per_page=100&environment=fixture-environment`
+          )
+        );
+        if (!history) throw new Error("Missing history fixture");
+        const tail = Array.from({ length: 97 }, (_, i) => `older-${i}`);
+        history.stdout = ["8", "7", "6", ...tail].join("\n");
+        for (const id of tail)
+          scenario.commands.push({
+            tool: "gh",
+            args: [
+              "api",
+              `/repos/${REPOSITORY}/deployments/${id}/statuses?per_page=1`,
+              "--jq",
+              '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+            ],
+            stdout:
+              "inactive\t\tTracking abandoned in Radius Canvas; cloud resources were not deleted."
+          });
+      }
       await canvas.setScenario(scenario);
       const listing = page.waitForResponse((response) =>
         response.url().includes("/api/list-deployments?")
@@ -1038,8 +1172,27 @@ test.describe("Radius Canvas in Chromium", () => {
           `${surface}&application=radius-app&environment=fixture-environment`
         : surface
       );
-      const current: DeploymentRow = (await (await listing).json())
-        .deployments[0];
+      const listed = (await (await listing).json()).deployments[0];
+      expect(listed.recovery).toBeUndefined();
+      expect(listed.cleanupSelection).toMatchObject({
+        runId: 42,
+        runAttempt: 1
+      });
+      const cleanup =
+        known ?
+          page.locator("#deployed-stop-tracking-btn")
+        : page.getByRole("button", {
+            name: "Load cleanup details",
+            exact: true
+          });
+      await expect(cleanup).toBeEnabled();
+      const preparation = page.waitForResponse((response) =>
+        response.url().endsWith("/api/deployment-cleanup-details")
+      );
+      await cleanup.focus();
+      await page.keyboard.press("Enter");
+      const current: DeploymentRow = (await (await preparation).json())
+        .deployment;
       expect(current.recovery).toMatchObject({
         runId: 42,
         runAttempt: 1,
@@ -1052,18 +1205,15 @@ test.describe("Radius Canvas in Chromium", () => {
       if (!current.recovery) throw new Error("Missing real recovery evidence");
       const marker = `Radius cleanup v1 run:42 attempt:1 rev:${current.recovery.revision}`;
       await canvas.setScenario(armCleanupHistory(scenario, marker, partial));
-      const cleanup =
-        known ?
-          page.locator("#deployed-stop-tracking-btn")
-        : page.getByRole("button", {
-            name: "Mark cleanup complete",
-            exact: true
-          });
-      await expect(cleanup).toBeEnabled();
-      await cleanup.focus();
-      await page.keyboard.press("Enter");
       const modal = page.locator("#deploy-abandon-modal");
       await expect(modal).toBeVisible();
+      if (known) {
+        await page.keyboard.press("Escape");
+        await expect(modal).toBeHidden();
+        await expect(cleanup).toBeFocused();
+        await page.keyboard.press("Enter");
+        await expect(modal).toBeVisible();
+      }
       await modal
         .getByRole("button", { name: "I completed cleanup outside Canvas" })
         .focus();
@@ -1142,7 +1292,9 @@ test.describe("Radius Canvas in Chromium", () => {
           const reread = await page.request.get(
             `${canvas.baseUrl}/api/list-deployments?repo=${encodeURIComponent(REPOSITORY)}`
           );
-          expect((await reread.json()).deployments[0].recovery.runId).toBe(42);
+          const retained = (await reread.json()).deployments[0];
+          expect(retained.cleanupSelection.runId).toBe(42);
+          expect(retained).not.toHaveProperty("recovery");
         }
       }
       await expectNoWcagViolations(page);
@@ -7993,6 +8145,14 @@ test.describe("Radius Canvas in Chromium", () => {
     canvas
   }) => {
     const scenario = defaultFakeCliScenario();
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "deploying");
+    await expect(page.locator("#deploy-table-body")).toContainText(
+      "radius-app"
+    );
+
+    // Let listing establish the target before the independent admission read
+    // fails; an unavailable listing now correctly disables Deploy.
     const deploymentCommand = scenario.commands.find(
       (command) =>
         command.tool === "gh" &&
@@ -8005,8 +8165,6 @@ test.describe("Radius Canvas in Chromium", () => {
       deploymentCommand.stdout = "";
     }
     await canvas.setScenario(scenario);
-
-    await gotoCanvas(page, canvas, "deploying");
 
     // The branch the page offers must be the session worktree branch. A
     // regression to an implicit "main" would deploy the wrong ref, so this is

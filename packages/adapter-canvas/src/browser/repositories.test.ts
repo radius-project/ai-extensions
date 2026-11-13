@@ -38,6 +38,7 @@ import {
   parseApplicationListing,
   parseBranchListing,
   parseDeploymentListing,
+  parseDeploymentListingWithDiagnostics,
   parseRequiredDeploymentListing,
   parseEnvironmentListing,
   populateApplications,
@@ -1142,6 +1143,101 @@ describe("planned selectors", () => {
 });
 
 describe("deployment listings", () => {
+  it("retains a failed environment's last-known row without retaining confirmation authority", () => {
+    const rows = parseDeploymentListingWithDiagnostics(
+      {
+        deployments: [],
+        environmentDiagnostics: [
+          { environment: "dev", message: "rate limited" }
+        ]
+      },
+      [
+        {
+          app: "last-known",
+          environment: "dev",
+          status: "failed",
+          runUrl: "https://github.com/octo/app/actions/runs/42",
+          identity: { state: "known" },
+          recovery: {
+            runId: 42,
+            runAttempt: 1,
+            revision: "a".repeat(64),
+            confirmation: "previous",
+            canMarkCleanupComplete: true
+          }
+        }
+      ]
+    );
+    expect(rows).toEqual([
+      {
+        app: "last-known",
+        environment: "dev",
+        status: "unverified",
+        runUrl: "https://github.com/octo/app/actions/runs/42",
+        identity: { state: "known" },
+        diagnostic: "rate limited"
+      }
+    ]);
+  });
+
+  it("preserves healthy rows and makes incomplete or failed environments explicitly unverified", () => {
+    const rows = parseDeploymentListingWithDiagnostics({
+      deployments: [
+        {
+          app: "healthy",
+          environment: "prod",
+          status: "success",
+          runUrl: "",
+          identity: { state: "known", application: "healthy" }
+        },
+        { app: "current", environment: "dev", status: "failed", runUrl: "" }
+      ],
+      environmentDiagnostics: [
+        { environment: "dev", message: "rate limit" },
+        { environment: "unknown" },
+        {}
+      ]
+    });
+    expect(rows).toMatchObject([
+      { app: "healthy", status: "success" },
+      { environment: "dev", status: "unverified", diagnostic: "rate limit" },
+      {
+        environment: "unknown",
+        status: "unverified",
+        diagnostic: "Deployment history could not be verified."
+      }
+    ]);
+    expect(deploymentStatusBlocksMutation(rows[1].status)).toBe(true);
+  });
+
+  it.each([
+    { runId: null },
+    { runId: 0 },
+    { runId: 1.5 },
+    { runAttempt: null },
+    { runAttempt: 0 },
+    { runAttempt: 1.5 },
+    { deploymentId: "" },
+    { runUrl: "" }
+  ])("withholds a malformed cleanup selection %j", (changed) => {
+    const rows = parseDeploymentListing({
+      deployments: [
+        {
+          environment: "dev",
+          runUrl: "",
+          status: "failed",
+          cleanupSelection: {
+            runId: 42,
+            runAttempt: 1,
+            deploymentId: "7",
+            runUrl: "https://github.com/octo/app/actions/runs/42",
+            ...changed
+          }
+        }
+      ]
+    });
+    expect(rows[0].cleanupSelection).toBeUndefined();
+  });
   it.each([
     ["valid", {}],
     ["missing-id", { runId: null }],

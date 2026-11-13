@@ -929,6 +929,36 @@ test.describe("Radius Canvas visual baselines", () => {
       canvas
     }) => {
       await seed(canvas);
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`
+      };
+      await page.route("**/api/deployment-cleanup-details", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            prepared: true,
+            selection,
+            deployment: {
+              app: "",
+              environment: "fixture-environment",
+              status: "failed",
+              deploymentId: "7",
+              runUrl: `https://github.com/${REPOSITORY}/actions/runs/42`,
+              recovery: {
+                runId: 42,
+                runAttempt: 1,
+                revision: "a".repeat(64),
+                confirmation: `${REPOSITORY}/run-42@1/fixture-environment`,
+                canMarkCleanupComplete: true
+              }
+            }
+          })
+        })
+      );
       await page.route("**/api/list-deployments**", (route) =>
         route.fulfill({
           status: 200,
@@ -945,13 +975,7 @@ test.describe("Radius Canvas visual baselines", () => {
                   state: "unavailable",
                   reason: "Application identity artifact expired."
                 },
-                recovery: {
-                  runId: 42,
-                  runAttempt: 1,
-                  revision: "a".repeat(64),
-                  confirmation: `${REPOSITORY}/run-42@1/fixture-environment`,
-                  canMarkCleanupComplete: true
-                }
+                cleanupSelection: selection
               }
             ]
           })
@@ -959,7 +983,7 @@ test.describe("Radius Canvas visual baselines", () => {
       );
       await gotoVisual(page, canvas, "deploying", theme);
       const action = page.getByRole("button", {
-        name: "Mark cleanup complete",
+        name: "Load cleanup details",
         exact: true
       });
       await expect(action).toBeVisible();

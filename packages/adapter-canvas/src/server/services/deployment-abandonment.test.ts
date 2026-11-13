@@ -178,7 +178,11 @@ describe("createDeploymentAbandonmentService", () => {
       confirmation: "todolist/dev",
       canMarkCleanupComplete: true
     };
-    const current: DeploymentRow = { ...row("failed"), recovery };
+    const current: DeploymentRow = {
+      ...row("failed"),
+      runUrl: `https://github.com/${PAYLOAD.repo}/actions/runs/42`,
+      recovery
+    };
     const ghOrThrow = vi.fn(async () => "");
     const payload = {
       ...PAYLOAD,
@@ -245,7 +249,13 @@ describe("createDeploymentAbandonmentService", () => {
     expect(writes).toEqual(["3", "2", "2"]);
   });
 
-  it.each(["still tracked", "read failure", "string rejection"] as const)(
+  it.each([
+    "still tracked",
+    "pending rerun",
+    "deleting rerun",
+    "read failure",
+    "string rejection"
+  ] as const)(
     "does not retire local tracking when marker verification reports %s",
     async (failure) => {
       const recovery = {
@@ -256,7 +266,11 @@ describe("createDeploymentAbandonmentService", () => {
         confirmation: "todolist/dev",
         canMarkCleanupComplete: true
       };
-      const current: DeploymentRow = { ...row("failed"), recovery };
+      const current: DeploymentRow = {
+        ...row("failed"),
+        runUrl: `https://github.com/${PAYLOAD.repo}/actions/runs/42`,
+        recovery
+      };
       const state: CanvasState = {
         deployAttempt: {
           id: "original",
@@ -278,6 +292,12 @@ describe("createDeploymentAbandonmentService", () => {
           releaseDeploymentMutation,
           resolveEnvDeployment: async () => {
             if (++reads === 1 || failure === "still tracked") return current;
+            if (failure.endsWith("rerun"))
+              return {
+                ...row(failure === "pending rerun" ? "pending" : "deleting"),
+                runUrl: current.runUrl,
+                deploymentId: "new-rerun-record"
+              };
             if (failure === "read failure")
               throw new Error("GitHub history unavailable");
             throw "GitHub history unavailable";

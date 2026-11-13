@@ -60,7 +60,7 @@ function deployLandingView(state: CanvasState): string {
   <button id="deploy-now-btn" class="rad-btn rad-btn--primary" style="margin:0;" disabled>Deploy</button>
 </div>
 
-<div id="deploy-inline-status" class="rad-inline" style="display:none; margin:0 0 14px; padding:10px 14px; border-radius:8px; font-size:14px;"></div>
+<div id="deploy-inline-status" class="rad-inline" role="status" aria-live="polite" style="display:none; margin:0 0 14px; padding:10px 14px; border-radius:8px; font-size:14px;"></div>
 
 <div class="rad-table-wrap">
   <table class="rad-table">
@@ -130,6 +130,8 @@ ${confirmDialogMarkup()}
   .rad-inline--success .rad-inline__icon { color:var(--rad-success); font-weight:700; }
   .rad-inline--error { background:var(--rad-danger-bg); border:1px solid var(--rad-danger); color:var(--rad-text); }
   .rad-inline--error .rad-inline__icon { color:var(--rad-danger); }
+  .rad-inline--info { background:var(--rad-info-bg); border:1px solid var(--rad-info); color:var(--rad-text); }
+  .rad-inline--info .rad-inline__icon { color:var(--rad-info); }
   /* Delete confirmation dialog styling now lives in the global pageShell CSS
      so the Deployed graph page shares this exact dialog. */
   .rad-spinner-lg { flex:0 0 auto; width:34px; height:34px; border:4px solid var(--rad-stroke); border-top-color:var(--rad-info); border-radius:50%; animation:spin 0.8s linear infinite; }

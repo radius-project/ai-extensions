@@ -204,6 +204,13 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("POST", "/api/abandon-deployment", "exact", "json", "deployments"),
   declare(
     "POST",
+    "/api/deployment-cleanup-details",
+    "exact",
+    "json",
+    "deployments"
+  ),
+  declare(
+    "POST",
     "/api/deploy/repair-aws-trust",
     "exact",
     "json",

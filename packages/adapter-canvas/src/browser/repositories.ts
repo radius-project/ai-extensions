@@ -77,6 +77,13 @@ export interface DeploymentInfo {
   status: string;
   runUrl: string;
   deploymentId?: string;
+  cleanupSelection?: {
+    runId: number;
+    runAttempt: number;
+    deploymentId: string;
+    runUrl: string;
+  };
+  diagnostic?: string;
   identity?: { state: "known" } | { state: "unavailable"; reason: string };
   recovery?: {
     runId: number;
@@ -101,7 +108,10 @@ export function deploymentKey(
 
 export function deploymentStatusBlocksMutation(status: string): boolean {
   return (
-    status === "pending" || status === "in_progress" || status === "deleting"
+    status === "pending" ||
+    status === "in_progress" ||
+    status === "deleting" ||
+    status === "unverified"
   );
 }
 
@@ -213,6 +223,27 @@ export function parseDeploymentListing(payload: unknown): DeploymentInfo[] {
             )
           }
         : undefined;
+      const selection = readRecord(entry, "cleanupSelection");
+      const selectedRun = readNumber(selection, "runId");
+      const selectedAttempt = readNumber(selection, "runAttempt");
+      const cleanupSelection =
+        (
+          selectedRun !== null &&
+          Number.isSafeInteger(selectedRun) &&
+          selectedRun > 0 &&
+          selectedAttempt !== null &&
+          Number.isSafeInteger(selectedAttempt) &&
+          selectedAttempt > 0 &&
+          readString(selection, "deploymentId") &&
+          readString(selection, "runUrl")
+        ) ?
+          {
+            runId: selectedRun,
+            runAttempt: selectedAttempt,
+            deploymentId: readString(selection, "deploymentId"),
+            runUrl: readString(selection, "runUrl")
+          }
+        : undefined;
       return {
         app: known ? app : "",
         environment: readString(entry, "environment"),
@@ -220,6 +251,7 @@ export function parseDeploymentListing(payload: unknown): DeploymentInfo[] {
         runUrl: readString(entry, "runUrl"),
         deploymentId: readString(entry, "deploymentId"),
         ...(parsedRecovery ? { recovery: parsedRecovery } : {}),
+        ...(cleanupSelection ? { cleanupSelection } : {}),
         identity:
           known ?
             { state: "known" }
@@ -232,6 +264,52 @@ export function parseDeploymentListing(payload: unknown): DeploymentInfo[] {
       };
     })
     .filter((entry) => entry.environment !== "");
+}
+
+export function parseDeploymentDiagnostics(payload: unknown): {
+  environment: string;
+  message: string;
+}[] {
+  return readArray(payload, "environmentDiagnostics")
+    .map((entry) => ({
+      environment: readString(entry, "environment"),
+      message:
+        readString(entry, "message") ||
+        "Deployment history could not be verified."
+    }))
+    .filter((entry) => entry.environment !== "");
+}
+
+export function parseDeploymentListingWithDiagnostics(
+  payload: unknown,
+  previous: readonly DeploymentInfo[] = []
+): DeploymentInfo[] {
+  const rows = parseDeploymentListing(payload);
+  for (const diagnostic of parseDeploymentDiagnostics(payload)) {
+    const row = rows.find(
+      (candidate) => candidate.environment === diagnostic.environment
+    );
+    if (row) {
+      row.status = "unverified";
+      row.diagnostic = diagnostic.message;
+    } else {
+      const lastKnown = previous.find(
+        (candidate) => candidate.environment === diagnostic.environment
+      );
+      rows.push({
+        app: lastKnown?.app ?? "",
+        environment: diagnostic.environment,
+        status: "unverified",
+        runUrl: lastKnown?.runUrl ?? "",
+        diagnostic: diagnostic.message,
+        identity: lastKnown?.identity ?? {
+          state: "unavailable",
+          reason: diagnostic.message
+        }
+      });
+    }
+  }
+  return rows;
 }
 
 export function parseRequiredDeploymentListing(
@@ -252,7 +330,10 @@ export function parseRequiredDeploymentListing(
   if (!recordsAreComplete) {
     return { deployments: [], error: "Invalid deployment listing." };
   }
-  return { deployments, error: readString(payload, "error") };
+  return {
+    deployments: parseDeploymentListingWithDiagnostics(payload),
+    error: readString(payload, "error")
+  };
 }
 
 // A worktree branch has no pushed commit, so it is labelled as such instead of

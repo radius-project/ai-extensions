@@ -51,6 +51,22 @@ function fixture(includeAws = false) {
 }
 
 describe("deployment workflow production bindings", () => {
+  it("validates consumer identity without requiring a package-manager lockfile", async () => {
+    const action = parse(
+      await readFile(
+        new URL(
+          "../../../.github/extension/actions/validate-deployment-identity/action.yml",
+          import.meta.url
+        ),
+        "utf8"
+      )
+    );
+    expect(action.runs.steps[0].with).toEqual({
+      "node-version": "24",
+      "package-manager-cache": false
+    });
+  });
+
   it.each([
     {
       name: "wrong application input type",
