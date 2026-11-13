@@ -144,6 +144,12 @@ const SOURCE_CONCRETE_MAP: Record<
     displayType: "Amazon RDS for MySQL",
     provider: "aws"
   },
+  // Containers run on the EKS cluster, so the cluster is their AWS resource.
+  "aws-eks-recipes/containers": {
+    type: "AWS.EKS/Cluster",
+    displayType: "Amazon EKS",
+    provider: "aws"
+  },
   // Kubernetes recipes (ghcr.io/radius-project/kube-recipes/<name>) → primary K8s object.
   "kube-recipes/containers": {
     type: "apps/Deployment",
@@ -203,13 +209,6 @@ const PROVIDER_SOURCE_OVERRIDE: Record<
       type: "Microsoft.ContainerService/managedClusters",
       displayType: "Azure Kubernetes Service",
       provider: "azure"
-    }
-  },
-  aws: {
-    "kube-recipes/containers": {
-      type: "AWS.EKS/Cluster",
-      displayType: "Amazon EKS",
-      provider: "aws"
     }
   }
 };

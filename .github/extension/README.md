@@ -209,7 +209,7 @@ The workflow reads cloud and cluster configuration from GitHub Actions **variabl
 
 - Common: `KUBERNETES_NAMESPACE` (default `default`), `RADIUS_BUILD_REGISTRY` (default `ghcr.io/<owner>/<repo>`), `RADIUS_RAD_COMMANDS` (optional fallback for `rad_commands`), `RADIUS_GRAPH_REGISTRY` (optional OCI repository for the `rad` CLI's modeled graph archive), `RADIUS_ROUTES_GATEWAY_NAME` and `RADIUS_ROUTES_GATEWAY_NAMESPACE` (optional validation-only BYO Gateway; set both), and `RADIUS_ROUTES_EXPOSURE` (optional managed Gateway exposure: unset/`private` for `ClusterIP`, or `public` for `LoadBalancer`; invalid with BYO)
 - Azure (`run-rad-commands-azure.yml`): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_AKS_CLUSTER_NAME`, `AZURE_AKS_RESOURCE_GROUP` (optional; the cluster's own resource group, defaults to `AZURE_RESOURCE_GROUP`)
-- AWS (`run-rad-commands-aws.yml`): `AWS_ROLE_ARN`, `AWS_REGION`, `AWS_ACCOUNT_ID`, `AWS_EKS_CLUSTER_NAME`, `RADIUS_SUBNET_IDS`
+- AWS (`run-rad-commands-aws.yml`): `AWS_ROLE_ARN`, `AWS_REGION`, `AWS_ACCOUNT_ID`, `AWS_EKS_CLUSTER_NAME`, `RADIUS_SUBNET_IDS`, `AWS_APP_BOUNDARY_ARN` (the environment's permissions boundary for app IAM roles; the workflow refuses an ARN outside `policy/radius/apps/<repository ID>/` in `AWS_ACCOUNT_ID`)
 
 The provider steps run only when the identifying variable (`AZURE_CLIENT_ID` or `AWS_ROLE_ARN`) is non-empty. When it is unset, resources deploy to the ephemeral control-plane cluster instead of an external target.
 
