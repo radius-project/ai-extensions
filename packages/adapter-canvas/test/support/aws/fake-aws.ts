@@ -42,8 +42,6 @@ export interface FakeEksCluster {
   region: string;
   status: string;
   authenticationMode: string;
-  // The eks-pod-identity-agent add-on's status, or null when not installed.
-  podIdentityAgent: string | null;
   entries: Map<string, FakeAccessEntry>;
 }
 
@@ -180,7 +178,6 @@ export class FakeAws {
       region,
       status: "ACTIVE",
       authenticationMode,
-      podIdentityAgent: "ACTIVE",
       entries: new Map()
     });
   }
@@ -542,12 +539,11 @@ export class FakeAws {
     });
   }
 
+  // Every fake cluster runs the EKS Pod Identity Agent.
   private describeAddon(args: readonly string[]): AwsCommandResult {
     const cluster = this.cluster(args);
     const name = flag(args, "--addon-name");
-    const status =
-      name === "eks-pod-identity-agent" ? cluster?.podIdentityAgent : null;
-    if (!cluster || !status) {
+    if (!cluster || name !== "eks-pod-identity-agent") {
       return serviceError(
         "ResourceNotFoundException",
         "DescribeAddon",
@@ -555,7 +551,7 @@ export class FakeAws {
       );
     }
     return ok({
-      addon: { addonName: name, clusterName: cluster.name, status }
+      addon: { addonName: name, clusterName: cluster.name, status: "ACTIVE" }
     });
   }
 
