@@ -185,10 +185,10 @@ Two kinds of actions aren't granted:
 
 **Limits.** Two IAM size limits cap how many environments one deploy identity holds. The limit of 20 attached managed policies per role doesn't apply, because each environment's permissions are an inline policy.
 
-- **Inline policies:** a role's inline policies share 10,240 characters. Each environment's policy is about 1,550 with the pod identity grants, so a deploy identity holds about 6 environments. Setup stops with a message naming the limit, and more environments need another role.
+- **Inline policies:** a role's inline policies share 10,240 characters. Each environment's policy is about 580, and the repository's one shared app-roles policy (see pod identity below) takes a little more, so a deploy identity holds about 15 environments. Setup stops with a message naming the limit, and more environments need another role.
 - **Trust policy:** it allows 2,048 characters by default. That holds about 20 environments for a new repository, and about 12 for an older one, which needs two subjects each. A quota increase raises it to 8,192 characters.
 
-So the inline policy limit applies first: a deploy identity holds about 6 environments.
+So a deploy identity holds about 15 environments for a new repository, and about 12 for an older one, where the trust policy fills first.
 
 When either limit is reached, setup stops at that step, naming the limit and quoting AWS's error. Each environment keeps its own policy, so adding or deleting one never changes another's permissions. Raising the limit, for example by splitting environments across roles, is a question for both clouds and is separate work.
 
@@ -265,9 +265,9 @@ On Azure, a recipe returns a key, such as a storage account key, and the app use
 
 Pod Identity stores no secret. The app's AWS SDK gets short-lived credentials automatically, so most apps need no code change. It's AWS's recommended way for pods to reach AWS services, and it matches the passwordless model the canvas already uses for deploys. It brings three new requirements:
 
-- **A cluster prerequisite:** the EKS Pod Identity Agent add-on, installed once per cluster. Setup checks for it and tells the developer if it's missing.
+- **A cluster prerequisite:** the EKS Pod Identity Agent add-on, installed once per cluster. Clusters in EKS Auto Mode include it. Otherwise setup checks for it before changing anything, and stops with the command to install it if it's missing.
 - **A change to a shared type:** the container type and its recipe give each container its own Kubernetes service account.
-- **More IAM rights for the deploy identity:** it must be able to create per-container roles, limited by a permissions boundary and an IAM path, so it can't create a role with more access than itself.
+- **More IAM rights for the deploy identity:** it must be able to create per-container roles, limited by a permissions boundary and an IAM path, so it can't create a role with more access than itself. Each environment gets its own boundary under `/radius/apps/<repository ID>/<environment>/`. One policy per repository, `radius-app-roles-<repository ID>`, grants the role rights, so all of a repository's environments share it. Delete and rollback remove it only when no other environment uses it.
 
 AWS ships before pod identity, without the object storage and models recipes.
 
@@ -394,7 +394,7 @@ Create a new IAM role for each environment, so each has its own trust policy and
 |--------------------------------------------------|----------------------------------------------------|--------------------------------------------------------------------|
 | Roles in the example                             | `radius-deploy-contoso-storefront-dev` and `-prod` | `radius-deploy-contoso-storefront`                                 |
 | Two setups at once                               | No conflict                                        | A lock on the deploy identity                                      |
-| Size limits                                      | Per role                                           | Shared: about 6 environments per role |
+| Size limits                                      | Per role                                           | Shared: about 15 environments per role, 12 for an older repository |
 | Rights the developer needs for a new environment | `iam:CreateRole` every time                        | `iam:CreateRole` once                                              |
 | A role from the platform team                    | One per environment to request                     | One for the repository                                             |
 | Matches Azure                                    | No                                                 | Yes, one app registration per repository                           |
