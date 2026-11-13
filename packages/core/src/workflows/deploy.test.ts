@@ -22,6 +22,14 @@ import {
   AWS_EKS_RECIPE_PACK,
   AWS_EKS_RECIPE_PACK_URL
 } from "../modeling/recipe-pack.js";
+import { assertTrustedGeneratedWorkflow } from "./generated-policy.js";
+import {
+  expectAksTokenStep,
+  expectNoAksTokenHandling,
+  readCommittedTemplate,
+  stepNamed,
+  workflowSteps
+} from "../../test/support/committed-workflows.js";
 
 const BASE_TEMPLATES = {
   [DEPLOY_DISPATCHER_FILE]: `name: deploy
@@ -412,5 +420,40 @@ describe("generateDeployWorkflow YAML validity", () => {
     );
     // The plain single-quoted scalars stay intact too.
     expect(azure.env.APP_FILE).toBe(".radius/app.bicep");
+  });
+});
+
+describe("the committed deploy templates on an AKS cluster with Microsoft Entra integration", () => {
+  const files = generateDeployWorkflow("prod", ".radius/app.bicep", {
+    [DEPLOY_DISPATCHER_FILE]: readCommittedTemplate(DEPLOY_DISPATCHER_FILE),
+    [DEPLOY_AZURE_FILE]: readCommittedTemplate(DEPLOY_AZURE_FILE),
+    [DEPLOY_AWS_FILE]: readCommittedTemplate(DEPLOY_AWS_FILE)
+  });
+
+  it("gives the Azure workflow an AKS token in place of kubelogin", () => {
+    expectAksTokenStep(files[DEPLOY_AZURE_FILE], RADIUS_REF);
+    expect(() =>
+      assertTrustedGeneratedWorkflow(
+        parseYaml,
+        files[DEPLOY_AZURE_FILE],
+        "provider",
+        "Azure deploy workflow"
+      )
+    ).not.toThrow();
+  });
+
+  it("renews the AKS token while rad commands run", () => {
+    const run = stepNamed(
+      workflowSteps(files[DEPLOY_AZURE_FILE]),
+      "Run rad commands"
+    );
+
+    expect(run.with?.["azure-oidc-token-refresh"]).toBe(
+      "${{ vars.AZURE_CLIENT_ID != '' }}"
+    );
+  });
+
+  it("leaves the AWS workflow without AKS token handling", () => {
+    expectNoAksTokenHandling(files[DEPLOY_AWS_FILE]);
   });
 });

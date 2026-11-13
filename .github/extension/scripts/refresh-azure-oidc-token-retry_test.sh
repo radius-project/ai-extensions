@@ -25,20 +25,35 @@ if [[ -f "${CURL_COUNT_FILE}" ]]; then
 fi
 ((count += 1))
 printf '%s' "${count}" >"${CURL_COUNT_FILE}"
+# Like curl -o FILE -w '%{http_code}': the body goes to FILE and the status to
+# standard output.
+out=""
+format=""
+while (($#)); do
+    case "$1" in
+        -o) out="$2"; shift ;;
+        -w) format="$2"; shift ;;
+    esac
+    shift
+done
 if [[ " ${CURL_FAILURES:-} " == *" ${count} "* ]]; then
-    exit 22
+    printf '503'
+    exit 0
 fi
-printf '{"value":"token-%s"}\n' "${count}"
+printf '{"value":"token-%s"}\n' "${count}" >"${out}"
+[[ "${format}" == '%{http_code}' ]] && printf '200'
 EOF
 
 cat >"${TEMP_DIR}/bin/kubectl" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+# Secret values come from files, so they never appear in a command line.
 if [[ "${1:-}" == "create" ]]; then
     for argument in "$@"; do
         case "${argument}" in
-            --from-literal=*)
-                printf '%s\n' "${argument#*=}"
+            --from-file=*=*)
+                pair="${argument#--from-file=}"
+                printf '%s=%s\n' "${pair%%=*}" "$(cat "${pair#*=}")"
                 exit 0
                 ;;
         esac

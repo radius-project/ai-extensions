@@ -13,6 +13,7 @@ readonly COMMAND_ACTION="${REPO_ROOT}/.github/extension/actions/run-rad-commands
 readonly DELETE_ACTION="${REPO_ROOT}/.github/extension/actions/delete-resource/action.yml"
 readonly AZURE_COMMAND_WORKFLOW="${REPO_ROOT}/.github/extension/run-rad-commands-azure.yml"
 readonly AZURE_DELETE_WORKFLOW="${REPO_ROOT}/.github/extension/delete-azure.yml"
+readonly AZURE_DELETE_ENVIRONMENT_WORKFLOW="${REPO_ROOT}/.github/extension/delete-environment-azure.yml"
 TEMP_DIR="$(mktemp -d)"
 readonly TEMP_DIR
 trap 'rm -rf "${TEMP_DIR}"' EXIT
@@ -29,17 +30,31 @@ fi
 ((count += 1))
 printf '%s' "${count}" >"${CURL_COUNT_FILE}"
 printf '%s\n' "$*" >>"${CURL_ARGS_FILE}"
-printf '{"value":"token-%s"}\n' "${count}"
+# Like curl -o FILE -w '%{http_code}': the body goes to FILE and the status to
+# standard output.
+out=""
+format=""
+while (($#)); do
+    case "$1" in
+        -o) out="$2"; shift ;;
+        -w) format="$2"; shift ;;
+    esac
+    shift
+done
+printf '{"value":"token-%s"}\n' "${count}" >"${out}"
+[[ "${format}" == '%{http_code}' ]] && printf '200'
 EOF
 
 cat >"${TEMP_DIR}/bin/kubectl" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+# Secret values come from files, so they never appear in a command line.
 if [[ "${1:-}" == "create" ]]; then
     for argument in "$@"; do
         case "${argument}" in
-            --from-literal=*)
-                printf '%s\n' "${argument#*=}"
+            --from-file=*=*)
+                pair="${argument#--from-file=}"
+                printf '%s=%s\n' "${pair%%=*}" "$(cat "${pair#*=}")"
                 exit 0
                 ;;
         esac
@@ -83,7 +98,7 @@ export KUBECTL_ARGS_FILE="${TEMP_DIR}/kubectl-args"
 export KUBECTL_ROLLOUT_FILE="${TEMP_DIR}/kubectl-rollout"
 
 output="$(bash "${SCRIPT}" --prepare)"
-output+="$(bash "${SCRIPT}" --watch 2)"
+output+=$'\n'"$(bash "${SCRIPT}" --watch 2)"
 
 if [[ "$(cat "${CURL_COUNT_FILE}")" != "3" ]]; then
     echo "Expected three OIDC token requests." >&2
@@ -114,8 +129,15 @@ if [[ "$(cat "${KUBECTL_APPLY_FILE}")" != "${expected_updates}" ]]; then
     exit 1
 fi
 
-if [[ "${output}" == *"token-"* || "${output}" == *"request-token"* ]]; then
+# The runner hides ::add-mask:: commands, so only the other lines must be free
+# of tokens. Every token must be masked.
+visible="$(grep -v '^::add-mask::' <<<"${output}" || true)"
+if [[ "${visible}" == *"token-"* || "${visible}" == *"request-token"* ]]; then
     echo "Token value leaked to standard output." >&2
+    exit 1
+fi
+if [[ "$(grep -c '^::add-mask::token-' <<<"${output}")" != "3" ]]; then
+    echo "Expected every OIDC token to be masked." >&2
     exit 1
 fi
 
@@ -152,7 +174,8 @@ for action in "${COMMAND_ACTION}" "${DELETE_ACTION}"; do
     }
 done
 
-for workflow in "${AZURE_COMMAND_WORKFLOW}" "${AZURE_DELETE_WORKFLOW}"; do
+for workflow in "${AZURE_COMMAND_WORKFLOW}" "${AZURE_DELETE_WORKFLOW}" \
+    "${AZURE_DELETE_ENVIRONMENT_WORKFLOW}"; do
     grep -Fq 'azure-oidc-token-refresh:' "${workflow}" || {
         echo "Expected $(basename "${workflow}") to enable token refresh." >&2
         exit 1

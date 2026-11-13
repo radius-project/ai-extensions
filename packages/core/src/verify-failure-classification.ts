@@ -12,7 +12,8 @@
 //
 // The step names below are the *exact* contracts emitted by those workflows:
 //   verify-azure.yml: Azure Login (OIDC) / Wait for Azure subscription /
-//     Verify Azure Credentials / Set up kubelogin / Verify AKS Access /
+//     Verify Azure Credentials / Get AKS credentials /
+//     Use a Microsoft Entra token for AKS / Verify AKS Access /
 //     Verify GHCR package push permission
 //   verify-aws.yml:   Configure AWS Credentials / Verify AWS Credentials /
 //     Verify EKS Access / Verify GHCR package push permission
