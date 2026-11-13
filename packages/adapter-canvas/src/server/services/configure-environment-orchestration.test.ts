@@ -3527,6 +3527,17 @@ describe("environment configuration service: the seven-step workflow", () => {
     expect(harness.journal).toContain(`enterStage:${STAGE_VERIFY}`);
   });
 
+  it("dispatches a retried setup's verification under that retry's marker", async () => {
+    const harness = start();
+    harness.operation.setupRetryAttempt = 2;
+
+    await configure({ repo: "octo/app" });
+
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toEqual([expect.stringContaining("radius_operation=op-http:attempt-2")]);
+  });
+
   it("fails closed when the pre-dispatch run baseline is unreadable", async () => {
     const harness = start({
       gh: [{ match: /^run list /, result: { code: 0, stdout: "<html>" } }]
