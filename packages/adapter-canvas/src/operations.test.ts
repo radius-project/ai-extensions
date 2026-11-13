@@ -9710,11 +9710,18 @@ describe("setup continuation planning", () => {
     return op;
   }
 
+  const savedRun = {
+    dispatchedAt: 1,
+    workflow: ".github/workflows/verify.yml",
+    ref: "refs/heads/main"
+  };
+
   it.each([
     [
       "invalid resume point",
       continuationOp(),
       "not-a-step",
+      false,
       "azure_app",
       STAGE_AUTHORIZE_IDENTITY,
       true,
@@ -9724,6 +9731,7 @@ describe("setup continuation planning", () => {
       "identity work",
       continuationOp(),
       "service_principal",
+      false,
       "service_principal",
       STAGE_AUTHORIZE_IDENTITY,
       true,
@@ -9733,45 +9741,67 @@ describe("setup continuation planning", () => {
       "pre-existing credentials",
       continuationOp({ identity: false }),
       "azure_app",
+      false,
       "azure_app",
       STAGE_CONFIGURE_ENVIRONMENT,
       false,
       true
     ],
     [
-      "verification without a run",
+      "verification with a saved run through the identity route",
+      continuationOp({ verification: savedRun }),
+      "verification",
+      false,
+      "verification",
+      STAGE_AUTHORIZE_IDENTITY,
+      true,
+      true
+    ],
+    [
+      "verification with a saved run and pre-existing credentials",
+      continuationOp({ identity: false, verification: savedRun }),
+      "verification",
+      false,
+      "verification",
+      STAGE_CONFIGURE_ENVIRONMENT,
+      false,
+      true
+    ],
+    [
+      "recovered verification without a run",
       continuationOp(),
       "verification",
+      true,
       "verification",
       STAGE_CONFIGURE_ENVIRONMENT,
       false,
       true
     ],
     [
-      "verification with incomplete run identity",
-      continuationOp({
-        verification: {
-          dispatchedAt: 1,
-          workflow: ".github/workflows/verify.yml",
-          ref: ""
-        }
-      }),
+      "recovered verification with incomplete run identity",
+      continuationOp({ verification: { ...savedRun, ref: "" } }),
       "verification",
+      true,
       "verification",
       STAGE_CONFIGURE_ENVIRONMENT,
       false,
       true
     ],
     [
-      "verification monitor",
-      continuationOp({
-        verification: {
-          dispatchedAt: 1,
-          workflow: ".github/workflows/verify.yml",
-          ref: "refs/heads/main"
-        }
-      }),
+      "recovered identity work",
+      continuationOp(),
+      "azure_app",
+      true,
+      "azure_app",
+      STAGE_AUTHORIZE_IDENTITY,
+      true,
+      true
+    ],
+    [
+      "recovered verification monitor",
+      continuationOp({ verification: savedRun }),
       "verification",
+      true,
       "verification",
       STAGE_VERIFY,
       false,
@@ -9779,8 +9809,17 @@ describe("setup continuation planning", () => {
     ]
   ])(
     "plans %s through the public continuation seam",
-    (_label, op, requested, resumeFrom, stage, runIdentity, runEnvironment) => {
-      expect(planSetupContinuation(op, requested)).toEqual({
+    (
+      _label,
+      op,
+      requested,
+      recovered,
+      resumeFrom,
+      stage,
+      runIdentity,
+      runEnvironment
+    ) => {
+      expect(planSetupContinuation(op, requested, recovered)).toEqual({
         resumeFrom,
         stage,
         runIdentity,
@@ -9789,29 +9828,24 @@ describe("setup continuation planning", () => {
     }
   );
 
-  it("repositions stage state around the selected continuation point", () => {
-    const op = continuationOp({
-      verification: {
-        dispatchedAt: 1,
-        workflow: ".github/workflows/verify.yml",
-        ref: "refs/heads/main"
-      }
-    });
-    op.stages.forEach((stage) => {
-      stage.state = "failed";
-    });
+  it.each([
+    [false, STAGE_AUTHORIZE_IDENTITY, ["running", "pending", "pending"]],
+    [true, STAGE_VERIFY, ["succeeded", "succeeded", "running"]]
+  ])(
+    "repositions stage state for a continuation with recovered verification %s",
+    (recovered, stage, states) => {
+      const op = continuationOp({ verification: savedRun });
+      op.stages.forEach((entry) => {
+        entry.state = "failed";
+      });
 
-    expect(applySetupResumePoint(op, "verification")).toMatchObject({
-      stage: STAGE_VERIFY,
-      runEnvironment: false
-    });
-    expect(op.stages.map((stage) => stage.state)).toEqual([
-      "succeeded",
-      "succeeded",
-      "running"
-    ]);
-    expect(op.resumeFrom).toBe("verification");
-  });
+      expect(
+        applySetupResumePoint(op, "verification", recovered)
+      ).toMatchObject({ stage });
+      expect(op.stages.map((entry) => entry.state)).toEqual(states);
+      expect(op.resumeFrom).toBe("verification");
+    }
+  );
 
   it("returns a safe plan when no operation or matching stage is available", () => {
     expect(applySetupResumePoint(null, "verification")).toMatchObject({
@@ -9928,6 +9962,15 @@ describe("cleanup deletion selection boundaries", () => {
 });
 
 describe("retry snapshot restoration boundaries", () => {
+  it("keeps the setup retry attempt across a save and restore", () => {
+    const op = newOp();
+    op.setupRetryAttempt = 3;
+
+    expect(
+      fromPersistedOperation(toPersistedOperation(op)).setupRetryAttempt
+    ).toBe(3);
+  });
+
   it("removes transient fields that did not exist in the saved retry snapshot", () => {
     const op = newOp();
     delete op.resumeFrom;
@@ -9938,6 +9981,7 @@ describe("retry snapshot restoration boundaries", () => {
     const snapshot = snapshotRetryState(op);
 
     op.resumeFrom = "verification";
+    op.setupRetryAttempt = 2;
     op.inputRequired = { code: "choose-app" };
     op.verification = { runId: "123" };
     op.setupArtifacts = { cleanup: { state: "running" } };
@@ -9945,6 +9989,7 @@ describe("retry snapshot restoration boundaries", () => {
     rollbackRetryAttempt(op, snapshot);
 
     expect(op).not.toHaveProperty("resumeFrom");
+    expect(op).not.toHaveProperty("setupRetryAttempt");
     expect(op).not.toHaveProperty("inputRequired");
     expect(op).not.toHaveProperty("verification");
     expect(op.setupArtifacts.cleanup.state).toBe("running");
@@ -9953,6 +9998,7 @@ describe("retry snapshot restoration boundaries", () => {
   it("restores every customer-visible retry field from an isolated snapshot", () => {
     const op = newOp();
     op.resumeFrom = "verification";
+    op.setupRetryAttempt = 2;
     op.inputRequired = { code: "choose-app", metadata: { count: 2 } };
     op.verification = { runId: "123", workflowState: "active" };
     op.executionActive = true;
@@ -9966,6 +10012,7 @@ describe("retry snapshot restoration boundaries", () => {
     const snapshot = snapshotRetryState(op);
 
     op.resumeFrom = "azure_app";
+    op.setupRetryAttempt = 3;
     op.inputRequired = { code: "changed", metadata: { count: 99 } };
     op.verification.runId = "changed";
     op.executionActive = false;
@@ -9976,6 +10023,7 @@ describe("retry snapshot restoration boundaries", () => {
 
     expect(op).toMatchObject({
       resumeFrom: "verification",
+      setupRetryAttempt: 2,
       inputRequired: { metadata: { count: 2 } },
       verification: { runId: "123", workflowState: "active" },
       executionActive: true,

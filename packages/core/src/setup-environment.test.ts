@@ -519,4 +519,105 @@ describe("configureSetupEnvironment", () => {
       });
     }
   );
+
+  it.each([
+    [undefined, "op_setup", "octo/app:radius-verify-credentials.yml:trunk:dev"],
+    [
+      3,
+      "op_setup:attempt-3",
+      "octo/app:radius-verify-credentials.yml:trunk:dev:attempt-3"
+    ]
+  ])(
+    "dispatches verification for retry attempt %j with marker %s",
+    async (setupRetryAttempt, marker, target) => {
+      const h = setupEnvironmentHarness();
+      h.input.setupRetryAttempt = setupRetryAttempt;
+      const dispatch = h.ports.runVerificationDispatch;
+      const dispatched: Array<[string, string]> = [];
+      h.ports.runVerificationDispatch = async (input) => {
+        dispatched.push([input.target, input.operationMarker]);
+        return dispatch(input);
+      };
+
+      await configureSetupEnvironment(h.input, h.ports);
+
+      expect(dispatched).toEqual([[target, marker]]);
+    }
+  );
+
+  it.each([
+    [undefined, { trackingDeadline: 5, acquisitionPending: true }],
+    [2, {}]
+  ])(
+    "keeps an earlier run's state for retry attempt %j only when it is the same dispatch",
+    async (setupRetryAttempt, kept) => {
+      let verification: unknown = {
+        dispatchMutationTarget:
+          "octo/app:radius-verify-credentials.yml:trunk:dev",
+        runId: "9",
+        trackingDeadline: 5,
+        acquisitionPending: true
+      };
+      const h = setupEnvironmentHarness({
+        verification: () => verification,
+        setVerification: (value) => {
+          verification = value;
+        }
+      });
+      h.input.setupRetryAttempt = setupRetryAttempt;
+
+      await configureSetupEnvironment(h.input, h.ports);
+
+      expect(verification).toMatchObject({ runId: "10", ...kept });
+      if (setupRetryAttempt) {
+        expect(verification).not.toHaveProperty("trackingDeadline");
+        expect(verification).not.toHaveProperty("acquisitionPending");
+      }
+    }
+  );
+
+  it("names the retry marker when its verification dispatch is refused", async () => {
+    const h = setupEnvironmentHarness({
+      runVerificationDispatch: async () => ({
+        state: "rejected",
+        detail: "HTTP 422",
+        result: { code: 1, stdout: "", stderr: "HTTP 422" }
+      })
+    });
+    h.input.setupRetryAttempt = 2;
+
+    await configureSetupEnvironment(h.input, h.ports);
+
+    expect(h.failures).toEqual([
+      expect.objectContaining({
+        kind: "verification-dispatch",
+        operationMarker: "op_setup:attempt-2"
+      })
+    ]);
+  });
+
+  it.each([
+    ["absent", null, "op_setup"],
+    ["committed by this operation", "verify:op_setup", "op_setup"],
+    ["committed by another operation", "verify:op_other", undefined]
+  ])(
+    "regenerates the verify workflow when the default branch copy is %s",
+    async (_label, defaultContent, publishedMarker) => {
+      const generated: Array<string | undefined> = [];
+      const h = setupEnvironmentHarness({
+        fetchFileFromRepoResult: async (_repo, path) =>
+          path.endsWith("radius-verify-credentials.yml") && defaultContent ?
+            { content: defaultContent, error: null, status: 200 }
+          : { content: null, error: null, status: 404 },
+        generateVerifyWorkflow: async (_environment, _provider, marker) => {
+          generated.push(marker);
+          return `verify:${marker ?? ""}`;
+        }
+      });
+
+      await configureSetupEnvironment(h.input, h.ports);
+
+      expect(generated.at(-1)).toBe(publishedMarker);
+    }
+  );
 });

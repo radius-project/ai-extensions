@@ -522,7 +522,8 @@ async function runConfigureEnvironmentService(
         targetRepo,
         provider,
         envName,
-        data
+        data,
+        setupRetryAttempt: operation.setupRetryAttempt
       },
       createSetupEnvironmentPorts({
         dependencies,

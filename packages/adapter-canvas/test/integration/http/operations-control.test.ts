@@ -711,6 +711,7 @@ describe("operation controls real-loopback HIT", () => {
     expect(accepted.attempt).toBe(2);
     expect(accepted.commandId).toBe(`${op.operationId}:retry_setup:2:setup`);
     expect(accepted.operation.state).toBe("running");
+    expect(op.setupRetryAttempt).toBe(2);
     expect(harness.scheduled).toEqual([
       {
         kind: "setup_continuation",
