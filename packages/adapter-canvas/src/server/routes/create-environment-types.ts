@@ -104,6 +104,8 @@ export interface CreateEnvironmentOperation extends SetupOperationSnapshot {
   context?: Record<string, unknown>;
   request?: unknown;
   resumeRequest?: unknown;
+  // Set when Retry setup is accepted; see `SetupEnvironmentInput`.
+  setupRetryAttempt?: number;
   setupArtifacts?: {
     githubEnvironment?: {
       state?: unknown;

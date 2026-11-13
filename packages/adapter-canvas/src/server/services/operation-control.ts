@@ -925,7 +925,20 @@ function enterVerifyStage(operation: OperationRecord): void {
 }
 
 const applyResumePoint: CommandSpec["prepare"] = (operation, eligibility) =>
+  applySetupResumePoint(
+    operation,
+    eligibility.resumeFrom,
+    eligibility.recoveredVerification
+  );
+// A retry is a new attempt, so its verification dispatches a new run. Continue
+// keeps the saved attempt and resumes the run it already dispatched.
+const applyRetryResumePoint: CommandSpec["prepare"] = (
+  operation,
+  eligibility
+) => {
+  operation.setupRetryAttempt = getOperationControl(operation)?.attempts.setup;
   applySetupResumePoint(operation, eligibility.resumeFrom);
+};
 const applyDeleteResumePoint: CommandSpec["prepare"] = (operation) =>
   applyDeletionRetry(operation);
 
@@ -1095,7 +1108,7 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     commandKind: "retry_setup",
     attemptKind: "setup",
     eligibility: canRetrySetup,
-    prepare: applyResumePoint,
+    prepare: applyRetryResumePoint,
     scheduleKind: "setup_continuation",
     schedulerMiss: "close-operation",
     ...RETRY_PERSIST_FAILURE

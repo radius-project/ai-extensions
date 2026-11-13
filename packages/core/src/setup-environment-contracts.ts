@@ -18,6 +18,9 @@ export interface SetupEnvironmentInput {
   envName: string;
   provider: string;
   data: SetupProviderConfigurationInput & { profileName?: string };
+  // The setup attempt of the latest Retry setup. Verification then uses its own
+  // marker and dispatch journal key, so the retry starts a new run.
+  setupRetryAttempt?: number;
 }
 
 export type SetupPullRequestNextStep =

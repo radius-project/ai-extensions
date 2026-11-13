@@ -3574,7 +3574,8 @@ export type SetupContinuationPlan = {
  */
 export function planSetupContinuation(
   op: any,
-  resumeFrom: any
+  resumeFrom: any,
+  recoveredVerification = false
 ): SetupContinuationPlan {
   const step =
     SETUP_RESUME_STEPS.includes(String(resumeFrom || "")) ?
@@ -3584,15 +3585,18 @@ export function planSetupContinuation(
   const hasIdentityStage = stages.some(
     (stage: any) => stage?.id === STAGE_AUTHORIZE_IDENTITY
   );
-  // A repository that already had credentials never ran the identity stage, so
-  // there is no identity work to resume even when the ledger has no App
-  // Registration of its own.
+  // Only a recovered verification is scheduled as a monitor, and only when the
+  // record still names the run to watch.
+  const monitorOnly =
+    recoveredVerification &&
+    step === "verification" &&
+    hasVerificationRunToWatch(op);
+  // Every other continuation runs the setup coordinator. It re-enters the
+  // identity route whenever setup has that stage, and that route refuses a
+  // record positioned past it.
   const runIdentity =
-    hasIdentityStage && SETUP_IDENTITY_RESUME_STEPS.includes(step);
-  // Only verification can be resumed without re-entering the environment route,
-  // and only when the record still names the run to watch. Otherwise the
-  // environment route is what installs the workflow and dispatches the run.
-  const monitorOnly = step === "verification" && hasVerificationRunToWatch(op);
+    hasIdentityStage &&
+    (!recoveredVerification || SETUP_IDENTITY_RESUME_STEPS.includes(step));
   const stage =
     runIdentity ? STAGE_AUTHORIZE_IDENTITY
     : monitorOnly ? STAGE_VERIFY
@@ -3626,9 +3630,10 @@ function hasVerificationRunToWatch(op: any): boolean {
  */
 export function applySetupResumePoint(
   op: any,
-  resumeFrom: any
+  resumeFrom: any,
+  recoveredVerification = false
 ): SetupContinuationPlan {
-  const plan = planSetupContinuation(op, resumeFrom);
+  const plan = planSetupContinuation(op, resumeFrom, recoveredVerification);
   if (!op) return plan;
   const stages = Array.isArray(op.stages) ? op.stages : [];
   const found = stages.findIndex((stage: any) => stage?.id === plan.stage);
@@ -5871,6 +5876,8 @@ export function rollbackRetryAttempt(op: any, snapshot: any): any {
   op.executionActive = snapshot.executionActive;
   if (snapshot.resumeFrom === undefined) delete op.resumeFrom;
   else op.resumeFrom = snapshot.resumeFrom;
+  if (snapshot.setupRetryAttempt === undefined) delete op.setupRetryAttempt;
+  else op.setupRetryAttempt = snapshot.setupRetryAttempt;
   if (snapshot.inputRequired === undefined) delete op.inputRequired;
   else op.inputRequired = structuredClone(snapshot.inputRequired);
   if (snapshot.verification === undefined) delete op.verification;
@@ -5901,6 +5908,7 @@ export function snapshotRetryState(op: any): any {
     lastActivityAt: op.lastActivityAt ?? null,
     executionActive: op.executionActive,
     resumeFrom: op.resumeFrom,
+    setupRetryAttempt: op.setupRetryAttempt,
     inputRequired: op.inputRequired,
     verification:
       op.verification === undefined ?
@@ -6208,6 +6216,7 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "resumeRequest",
   "deleteRecovery",
   "resumeFrom",
+  "setupRetryAttempt",
   "verification",
   "control",
   "providerRecovery",
