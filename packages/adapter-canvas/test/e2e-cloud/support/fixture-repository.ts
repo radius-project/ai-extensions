@@ -58,8 +58,14 @@ export const CLOUD_E2E_LEASE_OWNER_PREFIX = "cloud-e2e-owner-run-id:";
  * workflow matches stale environments on it. A second copy of the prefix in
  * YAML would be a destructive operation keyed off a value nothing keeps in
  * step with this one.
+ *
+ * Azure runs use this prefix directly. AWS runs extend it with
+ * `AWS_ENVIRONMENT_NAME_PREFIX`, and the Azure cleanup skips those names.
  */
 export const ENVIRONMENT_NAME_PREFIX = "radtest-";
+
+/** Prefix of every AWS Cloud E2E environment name. */
+export const AWS_ENVIRONMENT_NAME_PREFIX = `${ENVIRONMENT_NAME_PREFIX}aws-`;
 
 const PLACEHOLDER_PATTERN = /^TODO-/;
 const UNSET_SHA_PATTERN = /^0+$/;
