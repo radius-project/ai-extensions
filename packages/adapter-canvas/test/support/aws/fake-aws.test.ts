@@ -220,7 +220,8 @@ describe("FakeAws", () => {
     ).toEqual({
       name: "shop",
       status: "ACTIVE",
-      accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" }
+      accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" },
+      resourcesVpcConfig: { vpcId: "vpc-shop" }
     });
     expect(
       fake.run([

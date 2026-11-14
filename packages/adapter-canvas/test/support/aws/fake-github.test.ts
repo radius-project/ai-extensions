@@ -26,7 +26,9 @@ describe("FakeGitHub", () => {
     ).toEqual({ use_default: true, use_immutable_subject: false });
     expect(fake.readJson("/repos/octo/shop/environments").json).toEqual({
       total_count: 1,
-      environments: [{ name: "dev", id: 17 }]
+      environments: [
+        { name: "dev", id: 17, created_at: "2026-11-01T00:00:00Z" }
+      ]
     });
     expect(fake.readJson("/repos/octo/shop/environments/DEV").json).toEqual({
       name: "dev",

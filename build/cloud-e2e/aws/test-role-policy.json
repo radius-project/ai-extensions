@@ -1,0 +1,124 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WhoAmI",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadInTestRegions",
+      "Effect": "Allow",
+      "Action": [
+        "eks:Describe*",
+        "eks:List*",
+        "ec2:Describe*",
+        "rds:Describe*",
+        "rds:ListTagsForResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": ["${MAIN_REGION}", "${SECOND_REGION}"]
+        }
+      }
+    },
+    {
+      "Sid": "ReadIam",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:ListRoles",
+        "iam:ListRoleTags",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:GetOpenIDConnectProvider",
+        "iam:ListOpenIDConnectProviders"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SimulateTheDeployRole",
+      "Effect": "Allow",
+      "Action": "iam:SimulatePrincipalPolicy",
+      "Resource": "arn:aws:iam::${ACCOUNT}:role/${DEPLOY_ROLE}"
+    },
+    {
+      "Sid": "ChangeOnlyTheDeployRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT}:role/${DEPLOY_ROLE}"
+    },
+    {
+      "Sid": "DeployRoleLock",
+      "Effect": "Allow",
+      "Action": ["iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy"],
+      "Resource": "arn:aws:iam::${ACCOUNT}:policy/radius-lock-${DEPLOY_ROLE}"
+    },
+    {
+      "Sid": "CreateDeployRoleAccessEntries",
+      "Effect": "Allow",
+      "Action": "eks:CreateAccessEntry",
+      "Resource": [
+        "arn:aws:eks:${MAIN_REGION}:${ACCOUNT}:cluster/${MAIN_CLUSTER}",
+        "arn:aws:eks:${SECOND_REGION}:${ACCOUNT}:cluster/${SECOND_CLUSTER}"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "eks:principalArn": "arn:aws:iam::${ACCOUNT}:role/${DEPLOY_ROLE}"
+        }
+      }
+    },
+    {
+      "Sid": "ChangeDeployRoleAccessEntries",
+      "Effect": "Allow",
+      "Action": [
+        "eks:TagResource",
+        "eks:DeleteAccessEntry",
+        "eks:AssociateAccessPolicy",
+        "eks:DisassociateAccessPolicy"
+      ],
+      "Resource": [
+        "arn:aws:eks:${MAIN_REGION}:${ACCOUNT}:access-entry/${MAIN_CLUSTER}/role/${ACCOUNT}/${DEPLOY_ROLE}/*",
+        "arn:aws:eks:${SECOND_REGION}:${ACCOUNT}:access-entry/${SECOND_CLUSTER}/role/${ACCOUNT}/${DEPLOY_ROLE}/*"
+      ]
+    },
+    {
+      "Sid": "ScaleAndUpdateMainNodeGroups",
+      "Effect": "Allow",
+      "Action": ["eks:UpdateNodegroupConfig", "eks:UpdateNodegroupVersion"],
+      "Resource": [
+        "arn:aws:eks:${MAIN_REGION}:${ACCOUNT}:nodegroup/${MAIN_CLUSTER}/default/*",
+        "arn:aws:eks:${MAIN_REGION}:${ACCOUNT}:nodegroup/${MAIN_CLUSTER}/isolated/*"
+      ]
+    },
+    {
+      "Sid": "DeleteRecipeMySqlLeftovers",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DeleteDBInstance",
+        "rds:DeleteDBSubnetGroup",
+        "rds:DeleteDBParameterGroup",
+        "rds:DeleteDBSnapshot"
+      ],
+      "Resource": [
+        "arn:aws:rds:${MAIN_REGION}:${ACCOUNT}:db:mysql-*",
+        "arn:aws:rds:${SECOND_REGION}:${ACCOUNT}:db:mysql-*",
+        "arn:aws:rds:${MAIN_REGION}:${ACCOUNT}:subgrp:mysql-*",
+        "arn:aws:rds:${SECOND_REGION}:${ACCOUNT}:subgrp:mysql-*",
+        "arn:aws:rds:${MAIN_REGION}:${ACCOUNT}:pg:mysql-*",
+        "arn:aws:rds:${SECOND_REGION}:${ACCOUNT}:pg:mysql-*",
+        "arn:aws:rds:${MAIN_REGION}:${ACCOUNT}:snapshot:rds-snapshot-*",
+        "arn:aws:rds:${SECOND_REGION}:${ACCOUNT}:snapshot:rds-snapshot-*"
+      ]
+    }
+  ]
+}

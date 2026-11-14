@@ -1,4 +1,5 @@
 import type { AwsCommandResult } from "../../../src/server/services/aws-cli-session.js";
+import { FakeRds, RDS_WRITES } from "./fake-rds.js";
 
 // A stateful stand-in for the AWS CLI. It keeps the IAM, STS, and EKS state
 // Radius reads and writes, and answers each `aws <args>` the way the CLI v2
@@ -42,7 +43,24 @@ export interface FakeEksCluster {
   region: string;
   status: string;
   authenticationMode: string;
+  vpcId: string;
   entries: Map<string, FakeAccessEntry>;
+  nodegroups: Map<string, FakeNodegroup>;
+}
+
+// A managed node group. UpdateNodegroupConfig refuses a group that is not
+// ACTIVE (ResourceInUseException) and a scaling config outside
+// 0 <= min <= desired <= max with max >= 1 (InvalidParameterException).
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupConfig.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_NodegroupScalingConfig.html
+export interface FakeNodegroup {
+  name: string;
+  status: string;
+  minSize: number;
+  maxSize: number;
+  desiredSize: number;
+  // Describe reads left before an UPDATING group is ACTIVE again.
+  updatingReads: number;
 }
 
 // What a test compares: everything that exists, in a stable order.
@@ -120,7 +138,9 @@ const WRITES: ReadonlySet<string> = new Set([
   "iam create-open-id-connect-provider",
   "eks create-access-entry",
   "eks delete-access-entry",
-  "eks associate-access-policy"
+  "eks associate-access-policy",
+  "eks update-nodegroup-config",
+  ...RDS_WRITES
 ]);
 
 // `--tags Key=k,Value=v ...`, as create-role and create-policy take them.
@@ -154,6 +174,7 @@ export class FakeAws {
   readonly policies = new Map<string, FakeManagedPolicy>();
   readonly oidcProviders = new Map<string, { clientIds: string[] }>();
   readonly clusters = new Map<string, FakeEksCluster>();
+  readonly rds: FakeRds;
   // Set to make every call fail the way an expired sign-in does.
   sessionExpired = false;
   // Commands refused once each, as AWS refuses a call it throttles.
@@ -166,20 +187,38 @@ export class FakeAws {
     let tick = Date.parse("2026-11-01T00:00:00Z");
     // Each creation is a second after the last, so ages always order.
     this.now = options.now ?? (() => (tick += 1000));
+    this.rds = new FakeRds(this.accountId, () => this.time());
   }
 
   addCluster(
     name: string,
     region: string,
-    authenticationMode = "API_AND_CONFIG_MAP"
+    authenticationMode = "API_AND_CONFIG_MAP",
+    vpcId = `vpc-${name}`
   ): void {
     this.clusters.set(`${region}:${name}`, {
       name,
       region,
       status: "ACTIVE",
       authenticationMode,
-      entries: new Map()
+      vpcId,
+      entries: new Map(),
+      nodegroups: new Map()
     });
+  }
+
+  addNodegroup(
+    region: string,
+    cluster: string,
+    name: string,
+    scaling: { minSize: number; maxSize: number; desiredSize: number },
+    status = "ACTIVE"
+  ): FakeNodegroup {
+    const target = this.clusters.get(`${region}:${cluster}`);
+    if (!target) throw new Error(`fake aws: no cluster ${region}:${cluster}`);
+    const group = { name, status, ...scaling, updatingReads: 1 };
+    target.nodegroups.set(name, group);
+    return group;
   }
 
   addGitHubProvider(): void {
@@ -334,6 +373,8 @@ export class FakeAws {
         "The security token included in the request is expired"
       );
     }
+    const rds = this.rds.run(command, args);
+    if (rds) return rds;
     switch (command) {
       case "sts get-caller-identity":
         return ok({
@@ -506,6 +547,33 @@ export class FakeAws {
           if (!entry.policies.includes(policy)) entry.policies.push(policy);
           return ok({ associatedAccessPolicy: { policyArn: policy } });
         });
+      case "eks describe-nodegroup":
+        return this.withNodegroup(
+          args,
+          "DescribeNodegroup",
+          (cluster, group) => {
+            if (group.status === "UPDATING") {
+              if (group.updatingReads <= 0) group.status = "ACTIVE";
+              else group.updatingReads -= 1;
+            }
+            return ok({
+              nodegroup: {
+                nodegroupName: group.name,
+                clusterName: cluster.name,
+                status: group.status,
+                scalingConfig: {
+                  minSize: group.minSize,
+                  maxSize: group.maxSize,
+                  desiredSize: group.desiredSize
+                }
+              }
+            });
+          }
+        );
+      case "eks update-nodegroup-config":
+        return this.withNodegroup(args, "UpdateNodegroupConfig", (_c, group) =>
+          this.updateNodegroup(args, group)
+        );
     }
     throw new Error(`fake aws: no answer for aws ${args.join(" ")}`);
   }
@@ -534,7 +602,8 @@ export class FakeAws {
       cluster: {
         name: cluster.name,
         status: cluster.status,
-        accessConfig: { authenticationMode: cluster.authenticationMode }
+        accessConfig: { authenticationMode: cluster.authenticationMode },
+        resourcesVpcConfig: { vpcId: cluster.vpcId }
       }
     });
   }
@@ -742,6 +811,77 @@ export class FakeAws {
         createdAt: entry.createdAt,
         type: entry.type,
         tags: { ...tags }
+      }
+    });
+  }
+
+  private withNodegroup(
+    args: readonly string[],
+    operation: string,
+    work: (cluster: FakeEksCluster, group: FakeNodegroup) => AwsCommandResult
+  ): AwsCommandResult {
+    const cluster = this.cluster(args);
+    const group = cluster?.nodegroups.get(flag(args, "--nodegroup-name"));
+    if (!cluster || !group) {
+      return serviceError(
+        "ResourceNotFoundException",
+        operation,
+        `No node group found for name: ${flag(args, "--nodegroup-name")}.`
+      );
+    }
+    return work(cluster, group);
+  }
+
+  private updateNodegroup(
+    args: readonly string[],
+    group: FakeNodegroup
+  ): AwsCommandResult {
+    if (group.status !== "ACTIVE") {
+      return serviceError(
+        "ResourceInUseException",
+        "UpdateNodegroupConfig",
+        `Nodegroup ${group.name} is in ${group.status} state and cannot be updated.`
+      );
+    }
+    const requested: Record<string, number> = {};
+    for (const pair of flag(args, "--scaling-config")
+      .split(",")
+      .filter(Boolean)) {
+      const [name = "", value = ""] = pair.split("=");
+      if (
+        !["minSize", "maxSize", "desiredSize"].includes(name) ||
+        !/^\d+$/.test(value)
+      ) {
+        return serviceError(
+          "InvalidParameterException",
+          "UpdateNodegroupConfig",
+          `Unreadable scaling config ${pair}.`
+        );
+      }
+      requested[name] = Number(value);
+    }
+    const next = {
+      minSize: requested.minSize ?? group.minSize,
+      maxSize: requested.maxSize ?? group.maxSize,
+      desiredSize: requested.desiredSize ?? group.desiredSize
+    };
+    if (
+      next.maxSize < 1 ||
+      next.minSize > next.desiredSize ||
+      next.desiredSize > next.maxSize
+    ) {
+      return serviceError(
+        "InvalidParameterException",
+        "UpdateNodegroupConfig",
+        "Minimum capacity must be less than or equal to desired capacity, which must be less than or equal to maximum capacity, and maximum capacity must be at least 1."
+      );
+    }
+    Object.assign(group, next, { status: "UPDATING", updatingReads: 1 });
+    return ok({
+      update: {
+        id: this.nextId("UPD"),
+        status: "InProgress",
+        type: "ConfigUpdate"
       }
     });
   }

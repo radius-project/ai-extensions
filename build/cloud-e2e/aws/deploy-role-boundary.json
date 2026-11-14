@@ -1,0 +1,60 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RecipeServicesInTestRegions",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateResource",
+        "cloudformation:GetResource",
+        "cloudformation:UpdateResource",
+        "cloudformation:DeleteResource",
+        "cloudformation:ListResources",
+        "cloudformation:GetResourceRequestStatus",
+        "cloudformation:ListResourceRequests",
+        "cloudformation:CancelResourceRequest",
+        "rds:*",
+        "eks:DescribeCluster",
+        "eks:ListClusters",
+        "ec2:Describe*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": ["${MAIN_REGION}", "${SECOND_REGION}"]
+        }
+      }
+    },
+    {
+      "Sid": "EncryptRdsStorage",
+      "Effect": "Allow",
+      "Action": ["kms:DescribeKey", "kms:CreateGrant"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": [
+            "rds.${MAIN_REGION}.amazonaws.com",
+            "rds.${SECOND_REGION}.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "WhoAmI",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverIamOrAccountSettings",
+      "Effect": "Deny",
+      "Action": [
+        "iam:*",
+        "organizations:*",
+        "account:*",
+        "s3:PutAccountPublicAccessBlock"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

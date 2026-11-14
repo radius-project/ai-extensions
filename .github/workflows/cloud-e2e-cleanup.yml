@@ -9,9 +9,10 @@ name: Cloud E2E Cleanup
 # SCOPE, and the boundary matters:
 #
 #   In scope   Leaked resource groups, Entra service principals and
-#              applications, stale GitHub Environments, fallback pull requests
-#              and branches, and resetting the fixture default branch to the
-#              baseline.
+#              applications, the AWS stage's RDS resources, workloads, nodes,
+#              and deploy-role access, stale GitHub Environments, fallback
+#              pull requests and branches, and resetting the fixture default
+#              branch to the baseline.
 #
 # Resource groups are deliberately reclaimed here, not left to the shared Radius
 # purge job. The Radius purge job still matches `^radtest-` older than six
@@ -1534,15 +1535,153 @@ jobs:
           fi
           echo "- Verified: no Entra application, cluster workload, or namespace remains" >>"$GITHUB_STEP_SUMMARY"
 
+  # The AWS half. AWS environment names extend the Azure prefix with `aws-`,
+  # and each job's selectors take only its own cloud's names, so neither job
+  # can delete the other's retry inputs. The sweep itself is TypeScript, in
+  # aws-cloud-cleanup.ts: for each stale AWS environment it deletes the app,
+  # sweeps the MySQL recipe's RDS leftovers and the Radius workloads, checks
+  # nothing is left, and only then removes the environment's deploy-role
+  # access (with the product's own removal code), records, state, and GitHub
+  # environment. A failure keeps everything a retry needs.
+  #
+  # Until the AWS variables are set this job still runs and succeeds with a
+  # notice, rather than being skipped: reset-fixture needs it to succeed, and
+  # a skipped need would hold back the Azure reset too.
+  purge-aws:
+    name: Reclaim leaked AWS state
+    needs: scope
+    if: github.repository == 'radius-project/ai-extensions' && needs.scope.outputs.configured == 'true'
+    runs-on: ubuntu-24.04
+    # A delete-application run and an RDS delete each take up to 15 minutes
+    # for each stale environment, and a lock left by a stopped run takes 10
+    # minutes to become removable.
+    timeout-minutes: 120
+    permissions:
+      contents: read # actions/checkout
+      id-token: write # OIDC token exchanged for AWS credentials by configure-aws-credentials
+    env:
+      AWS_TEST_ROLE_ARN: ${{ vars.AIEXT_CLOUD_E2E_AWS_ROLE_ARN }}
+      AWS_MAIN_REGION: ${{ vars.AIEXT_CLOUD_E2E_AWS_REGION }}
+      AWS_MAIN_CLUSTER: ${{ vars.AIEXT_CLOUD_E2E_AWS_EKS_CLUSTER_NAME }}
+      AWS_SECOND_REGION: ${{ vars.AIEXT_CLOUD_E2E_AWS_SECOND_REGION }}
+      AWS_SECOND_CLUSTER: ${{ vars.AIEXT_CLOUD_E2E_AWS_SECOND_EKS_CLUSTER_NAME }}
+      AWS_ENVIRONMENT_PREFIX: ${{ needs.scope.outputs.aws-environment-prefix }}
+      FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
+      FIXTURE_APPLICATION: ${{ needs.scope.outputs.fixture-application }}
+      RADIUS_ENVIRONMENT_NAMESPACE: ${{ needs.scope.outputs.radius-environment-namespace }}
+      DEFAULT_BRANCH: ${{ needs.scope.outputs.default-branch }}
+    steps:
+      # The sweep checks every variable again and refuses a partial or
+      # unexpected set. This only decides whether there is anything to do.
+      - name: Check the AWS configuration
+        id: aws-config
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${AWS_TEST_ROLE_ARN:-}" ]]; then
+            echo "configured=false" >>"$GITHUB_OUTPUT"
+            reason="AIEXT_CLOUD_E2E_AWS_ROLE_ARN is not set, so there is no AWS state to reclaim. See docs/eng/CLOUD_E2E_RUNBOOK.md, \"Required configuration\"."
+            echo "::notice::$reason"
+            echo "$reason" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "configured=true" >>"$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.aws-config.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        if: steps.aws-config.outputs.configured == 'true'
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - name: Setup Node.js
+        if: steps.aws-config.outputs.configured == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        if: steps.aws-config.outputs.configured == 'true'
+        run: pnpm install --frozen-lockfile
+
+      # The sweep calls the product's deploy-role removal, which plain `node`
+      # can't load, so it runs as one bundled file.
+      - name: Bundle the AWS cleanup sweep
+        id: bundle
+        if: steps.aws-config.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node packages/adapter-canvas/test/e2e-cloud/support/aws-cloud-cleanup-bundle.ts \
+            "$RUNNER_TEMP/aws-cloud-cleanup.mjs"
+
+      # The test role trusts only this repository's main branch, and can
+      # delete only the MySQL recipe's RDS resources, change only the deploy
+      # role and its lock, and scale only the main cluster's node groups.
+      - name: Sign in to AWS
+        id: aws-login
+        if: steps.aws-config.outputs.configured == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AIEXT_CLOUD_E2E_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AIEXT_CLOUD_E2E_AWS_REGION }}
+          role-session-name: cloud-e2e-cleanup-${{ github.run_id }}
+          role-duration-seconds: 7200
+
+      - name: Create a GitHub App token for the fixture repository
+        id: app-token
+        if: steps.aws-config.outputs.configured == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          owner: ${{ needs.scope.outputs.owner }}
+          repositories: ${{ needs.scope.outputs.name }}
+          # Dispatching and watching delete-application.yml.
+          permission-actions: write
+          # Deleting a GitHub environment needs Administration write.
+          permission-administration: write
+          permission-contents: read
+          permission-deployments: write
+          # Reading the environments' variables. Deleting an environment is
+          # Administration write, above.
+          permission-environments: read
+
+      - name: Sweep leaked AWS state
+        id: aws-sweep
+        if: steps.aws-config.outputs.configured == 'true' && steps.bundle.outcome == 'success' && steps.aws-login.outcome == 'success' && steps.app-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
+        shell: bash
+        run: node "$RUNNER_TEMP/aws-cloud-cleanup.mjs" sweep
+
+      # The age threshold lets a recent leak survive a sweep. This checks,
+      # whatever the age, that none of the AWS state the suite creates is left:
+      # RDS resources, workloads and the namespace on both clusters, nodes,
+      # the deploy role's lock, and its trust subjects, inline policies, and
+      # access entries. reset-fixture runs only when this job succeeds, and
+      # checks every cloud's GitHub state itself.
+      - name: Verify no leaked AWS state remains
+        id: aws-verification
+        if: always() && steps.aws-config.outputs.configured == 'true' && steps.bundle.outcome == 'success' && steps.aws-login.outcome == 'success'
+        shell: bash
+        run: node "$RUNNER_TEMP/aws-cloud-cleanup.mjs" verify
+
   reset-fixture:
     name: Reset the fixture once every cloud is clean
     needs:
       - scope
       - purge-azure
+      - purge-aws
     # Runs only when every cloud's job succeeded. A failed sweep keeps the
     # fixture branch, its delete workflows, and the fallback branches in place
     # so the next run can retry.
-    if: github.repository == 'radius-project/ai-extensions' && needs.scope.outputs.configured == 'true' && needs.purge-azure.result == 'success'
+    if: github.repository == 'radius-project/ai-extensions' && needs.scope.outputs.configured == 'true' && needs.purge-azure.result == 'success' && needs.purge-aws.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -1993,6 +2132,7 @@ jobs:
     needs:
       - scope
       - purge-azure
+      - purge-aws
       - reset-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -2002,7 +2142,7 @@ jobs:
       - name: Report or clear scheduled failure
         env:
           GH_TOKEN: ${{ github.token }}
-          RESULT: scope=${{ needs.scope.result }}, purge-azure=${{ needs.purge-azure.result }}, reset-fixture=${{ needs.reset-fixture.result }}
+          RESULT: scope=${{ needs.scope.result }}, purge-azure=${{ needs.purge-azure.result }}, purge-aws=${{ needs.purge-aws.result }}, reset-fixture=${{ needs.reset-fixture.result }}
           # A job is skipped when the fixture is not configured, or when an
           # earlier job failed, which that job's own result already reports.
           SCHEDULE_FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
