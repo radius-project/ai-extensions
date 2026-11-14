@@ -55,6 +55,14 @@ const SYSTEM_NAMESPACES = new Set([
 const STATE_PACKAGE_SUFFIX = /^[a-z0-9-]+-[0-9a-f]{12}$/;
 // Azure reports resource types in mixed case, so comparisons are lowercased.
 const MANAGED_CLUSTER_TYPE = "microsoft.containerservice/managedclusters";
+// The same values as ENVIRONMENT_NAME_PREFIX and AWS_ENVIRONMENT_NAME_PREFIX in
+// fixture-repository.ts. The cleanup workflow loads this module with plain
+// `node`, which cannot resolve a sibling import, so a test keeps them equal.
+export const SHARED_ENVIRONMENT_NAME_PREFIX = "radtest-";
+export const AWS_ENVIRONMENT_NAME_PREFIX = "radtest-aws-";
+const AWS_ENVIRONMENT_NAME_EXTENSION = AWS_ENVIRONMENT_NAME_PREFIX.slice(
+  SHARED_ENVIRONMENT_NAME_PREFIX.length
+);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ?
@@ -106,6 +114,22 @@ function parseInstant(value: unknown): number | null {
 
 function requireString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * Whether a name, label, or package belongs to the cloud a prefix selects.
+ *
+ * AWS environment names extend the shared `radtest-` prefix with `aws-`, so
+ * anything selected through a prefix ending in `radtest-` (the Azure
+ * environments, or a state package prefix built from them) excludes values
+ * that continue with `aws-`. Azure names are `radtest-` plus up to twelve
+ * alphanumerics, so none of them does. A prefix ending in `radtest-aws-`
+ * selects only AWS values, and no cloud's sweep can select the other's state.
+ */
+function ownedByPrefix(value: string, prefix: string): boolean {
+  if (!value.startsWith(prefix)) return false;
+  if (!prefix.endsWith(SHARED_ENVIRONMENT_NAME_PREFIX)) return true;
+  return !value.startsWith(AWS_ENVIRONMENT_NAME_EXTENSION, prefix.length);
 }
 
 function hasRadiusAppProvenance(
@@ -310,7 +334,7 @@ function prefixedEnvironmentEntries(
       );
     for (const entry of environments) {
       const item = asRecord(entry);
-      if (typeof item?.name === "string" && item.name.startsWith(prefix))
+      if (typeof item?.name === "string" && ownedByPrefix(item.name, prefix))
         entries.push({ name: item.name, createdAt: item.created_at });
     }
   }
@@ -329,7 +353,9 @@ export function selectExpiredEnvironments(
 }
 
 /**
- * Every GitHub Environment with the suite's prefix, whatever its age.
+ * Every GitHub Environment the prefix selects, whatever its age. A prefix
+ * ending in `radtest-` skips AWS names (see `ownedByPrefix`), so callers that
+ * need every cloud's environments ask once per cloud prefix.
  *
  * The Canvas wizard refuses to create an environment in a namespace that a
  * listed environment already owns. So one leaked `radtest-*` environment blocks
@@ -360,7 +386,7 @@ export function selectExpiredDeployments(
     const item = asRecord(entry);
     if (
       typeof item?.environment === "string" &&
-      item.environment.startsWith(prefix) &&
+      ownedByPrefix(item.environment, prefix) &&
       typeof item.id === "number" &&
       Number.isInteger(item.id) &&
       expired(item.created_at, cutoffMilliseconds)
@@ -526,7 +552,7 @@ export function selectStaleStatePackages(
     const item = asRecord(entry);
     const name = requireString(item?.name);
     if (
-      name.startsWith(prefix) &&
+      ownedByPrefix(name, prefix) &&
       STATE_PACKAGE_SUFFIX.test(name.slice(prefix.length)) &&
       expired(item?.updated_at, cutoffMilliseconds)
     )
@@ -553,7 +579,7 @@ export function selectStatePackages(
     .map((entry) => requireString(asRecord(entry)?.name))
     .filter(
       (name) =>
-        name.startsWith(prefix) &&
+        ownedByPrefix(name, prefix) &&
         STATE_PACKAGE_SUFFIX.test(name.slice(prefix.length))
     );
 }
@@ -668,7 +694,7 @@ export function selectLeakedClusterWorkloads(
     const metadata = asRecord(item?.metadata);
     const labels = asRecord(metadata?.labels);
     const environment = requireString(labels?.[RADIUS_ENVIRONMENT_LABEL]);
-    if (!environment.startsWith(environmentPrefix)) continue;
+    if (!ownedByPrefix(environment, environmentPrefix)) continue;
     if (requireString(labels?.[RADIUS_APPLICATION_LABEL]) !== application)
       continue;
     if (!expired(metadata?.creationTimestamp, cutoffMilliseconds)) continue;
