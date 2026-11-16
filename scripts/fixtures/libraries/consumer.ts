@@ -60,6 +60,30 @@ function queries(port: RadiusQueryPort, request: RadiusQueryRequest) {
 }
 void queries;
 
+const application = {
+  id: "/planes/radius/local/resourceGroups/demo/providers/Radius.Core/applications/demo",
+  name: "demo",
+  type: "Radius.Core/applications",
+  properties: {
+    provisioningState: "Succeeded",
+    environment: "/environment/demo"
+  }
+} satisfies Resource<ApplicationProperties>;
+const applicationWithMetadata = {
+  ...application,
+  systemData: {
+    createdAt: "2026-01-01T00:00:00Z",
+    revision: 1,
+    source: { kind: "test" }
+  }
+} satisfies Resource<ApplicationProperties>;
+const invalidApplication: Resource<ApplicationProperties> = {
+  ...application,
+  // @ts-expect-error Metadata support must not weaken typed resource properties.
+  properties: { provisioningState: "Succeeded", environment: 42 }
+};
+void [application, applicationWithMetadata, invalidApplication];
+
 const context: GraphContext = {
   connectionId: "packed-consumer",
   plane: { type: "radius", name: "local" },

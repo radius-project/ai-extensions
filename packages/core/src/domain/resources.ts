@@ -3,7 +3,7 @@ export interface Resource<T = Record<string, unknown>> {
   type: string;
   name: string;
   tags?: Record<string, string>;
-  systemData: Record<string, never>;
+  systemData?: Record<string, unknown>;
   properties: T;
 }
 
