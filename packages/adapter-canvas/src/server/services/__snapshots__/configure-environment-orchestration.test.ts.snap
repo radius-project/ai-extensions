@@ -43,6 +43,7 @@ exports[`publication baseline parity > preserves the direct command, journal, na
   "finished": [],
   "ledger": {
     "awsAccessEntries": [],
+    "awsAppBoundaries": [],
     "awsRole": {
       "origin": "unknown",
       "roleArn": null,
@@ -1667,6 +1668,7 @@ exports[`publication baseline parity > preserves the merge-required command, jou
   ],
   "ledger": {
     "awsAccessEntries": [],
+    "awsAppBoundaries": [],
     "awsRole": {
       "origin": "unknown",
       "roleArn": null,
@@ -3422,6 +3424,7 @@ exports[`publication baseline parity > preserves the protected command, journal,
   "finished": [],
   "ledger": {
     "awsAccessEntries": [],
+    "awsAppBoundaries": [],
     "awsRole": {
       "origin": "unknown",
       "roleArn": null,

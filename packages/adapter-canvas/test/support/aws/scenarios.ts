@@ -1,6 +1,9 @@
 import {
   applySetupProviderConfiguration,
   AWS_EKS_CLUSTER_ADMIN_POLICY_ARN,
+  buildAwsAppBoundaryPolicy,
+  buildAwsAppRolesPolicy,
+  buildAwsAppRolesPolicyName,
   buildGitHubTrustPolicy,
   isSetupExecutionInterrupted
 } from "@radius-project/core";
@@ -24,7 +27,10 @@ import {
   STAGE_CONFIGURE_ENVIRONMENT,
   touchOperation
 } from "../../../src/operations.js";
-import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
+import {
+  awsAppBoundary,
+  awsEnvironmentPolicyName
+} from "../../../src/aws-deploy-role-name.js";
 import type { SelectedGhExecutor } from "../../../src/gh.js";
 import {
   createAwsEnvironmentAccess,
@@ -129,8 +135,27 @@ export async function createAwsScenario(
         [awsEnvironmentPolicyName(github.repoId, OTHER_ENVIRONMENT)]: {
           Version: "2012-10-17",
           Statement: []
-        }
+        },
+        [buildAwsAppRolesPolicyName(github.repoId)]: buildAwsAppRolesPolicy(
+          ACCOUNT,
+          github.repoId
+        )
       }
+    });
+    const otherBoundary = awsAppBoundary(
+      ACCOUNT,
+      github.repoId,
+      OTHER_ENVIRONMENT
+    );
+    aws.addManagedPolicy({
+      path: otherBoundary.path,
+      name: otherBoundary.name,
+      document: buildAwsAppBoundaryPolicy(ACCOUNT, REGION),
+      tags: [
+        { Key: "radius-managed", Value: "true" },
+        { Key: "radius-repository", Value: REPO },
+        { Key: "radius-repository-id", Value: String(github.repoId) }
+      ]
     });
     aws.addAccessEntry(
       REGION,
@@ -144,7 +169,8 @@ export async function createAwsScenario(
       AWS_REGION: REGION,
       AWS_ACCOUNT_ID: ACCOUNT,
       AWS_EKS_CLUSTER_NAME: CLUSTER,
-      AWS_TRUST_SUBJECTS: JSON.stringify([OTHER_SUBJECT])
+      AWS_TRUST_SUBJECTS: JSON.stringify([OTHER_SUBJECT]),
+      AWS_APP_BOUNDARY_ARN: otherBoundary.arn
     });
   }
   const disk = new MemoryDisk();
@@ -326,7 +352,8 @@ export async function runSetup(
         region: REGION,
         accountId: ACCOUNT,
         cluster: CLUSTER,
-        trustSubjects: result.subjects
+        trustSubjects: result.subjects,
+        appBoundaryArn: result.appBoundaryArn
       },
       {
         setEnvironmentVariable: (name, value) =>

@@ -16,13 +16,14 @@ export const RECIPE_PACK_REPO = "radius-project/resource-types-contrib";
 export const RECIPE_PACK_REF = "main";
 
 // The AWS deploy workflow and the planned graph read the `aws-eks` recipe pack
-// from this pinned resource-types-contrib commit. Its MySQL recipe sets
-// CopyTagsToSnapshot, so the final snapshot RDS keeps on delete carries the
-// app's tags. The deploy also pins the pack's aws-eks recipes to this commit's
-// image tag, so it must be a main commit that published them. #1130 moves this
-// pin to the Radius release catalog.
+// from this pinned resource-types-contrib commit, the merge of
+// resource-types-contrib#476. Its containers recipe gives each container an IAM
+// role capped by the appPermissionsBoundaryArn the workflow passes. The deploy
+// also pins the pack's aws-eks recipes to this commit's image tag, so it must be
+// a main commit that published them. #1130 moves this pin to the Radius release
+// catalog.
 export const AWS_EKS_RECIPE_PACK = {
-  ref: "f3717de79d49d649a973c6fa098b6d546753a76f",
+  ref: "581148d94d2fc6a29371db487b52cf69ee6305ae",
   path: "recipe-packs/aws-eks/aws-eks.bicep"
 } as const;
 
@@ -144,6 +145,12 @@ const SOURCE_CONCRETE_MAP: Record<
     displayType: "Amazon RDS for MySQL",
     provider: "aws"
   },
+  // Containers run on the EKS cluster, so the cluster is their AWS resource.
+  "aws-eks-recipes/containers": {
+    type: "AWS.EKS/Cluster",
+    displayType: "Amazon EKS",
+    provider: "aws"
+  },
   // Kubernetes recipes (ghcr.io/radius-project/kube-recipes/<name>) → primary K8s object.
   "kube-recipes/containers": {
     type: "apps/Deployment",
@@ -203,13 +210,6 @@ const PROVIDER_SOURCE_OVERRIDE: Record<
       type: "Microsoft.ContainerService/managedClusters",
       displayType: "Azure Kubernetes Service",
       provider: "azure"
-    }
-  },
-  aws: {
-    "kube-recipes/containers": {
-      type: "AWS.EKS/Cluster",
-      displayType: "Amazon EKS",
-      provider: "aws"
     }
   }
 };

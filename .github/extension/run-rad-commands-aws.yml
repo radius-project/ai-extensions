@@ -293,6 +293,7 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_EKS_CLUSTER_NAME: ${{ vars.AWS_EKS_CLUSTER_NAME }}
           RADIUS_SUBNET_IDS: ${{ vars.RADIUS_SUBNET_IDS }}
+          AWS_APP_BOUNDARY_ARN: ${{ vars.AWS_APP_BOUNDARY_ARN }}
           # The aws-eks recipe pack is not in defaults.yaml yet. The extension
           # fills this URL and commit from the one it pins (AWS_EKS_RECIPE_PACK
           # in its core package) until the catalog carries the pack.
@@ -322,6 +323,13 @@ jobs:
           # pack accepts that or a JSON array string; pass the list on.
           if ! [[ "$RADIUS_SUBNET_IDS" =~ ^subnet-[0-9a-f]+(,subnet-[0-9a-f]+)*$ ]]; then
             echo "ERROR: RADIUS_SUBNET_IDS must be a comma-separated list of subnet IDs." >&2
+            exit 1
+          fi
+          # Environment setup creates this permissions boundary for the IAM roles
+          # the containers Recipe creates. The deploy role may create roles only
+          # with this repository's boundaries, so refuse any other ARN up front.
+          if ! [[ "$AWS_APP_BOUNDARY_ARN" =~ ^arn:aws:iam::${AWS_ACCOUNT_ID}:policy/radius/apps/${GITHUB_REPOSITORY_ID}/[A-Za-z0-9+=,.@_-]+/radius-app-boundary-${GITHUB_REPOSITORY_ID}-[A-Za-z0-9+=,.@_-]+$ ]]; then
+            echo "ERROR: AWS_APP_BOUNDARY_ARN must be one of this repository's permissions boundaries in AWS account ${AWS_ACCOUNT_ID}. Set up the environment again to record it." >&2
             exit 1
           fi
           # The aws-eks recipes are tagged with the contrib commit that published
@@ -418,6 +426,7 @@ jobs:
             --parameters routesGatewayNamespace="$RADIUS_ROUTES_GATEWAY_NAMESPACE"
             --parameters containerImagesRegistry="$BUILD_REGISTRY"
             --parameters containerImagesRegistrySecretName="$REGISTRY_SECRET_NAME"
+            --parameters appPermissionsBoundaryArn="$AWS_APP_BOUNDARY_ARN"
           )
 
           rad deploy "$RECIPE_PACK_BICEP" \

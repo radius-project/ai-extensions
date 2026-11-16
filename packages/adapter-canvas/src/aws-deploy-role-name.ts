@@ -6,8 +6,10 @@
 
 import { createHash } from "node:crypto";
 import {
+  buildAwsAppBoundary,
   buildAwsDeployRoleName,
-  buildAwsEnvironmentPolicyName
+  buildAwsEnvironmentPolicyName,
+  type AwsAppBoundary
 } from "@radius-project/core/platforms";
 
 function sha256Hex(text: string): string {
@@ -23,4 +25,12 @@ export function awsEnvironmentPolicyName(
   environment: string
 ): string {
   return buildAwsEnvironmentPolicyName(repoId, environment, sha256Hex);
+}
+
+export function awsAppBoundary(
+  accountId: string,
+  repoId: number,
+  environment: string
+): AwsAppBoundary {
+  return buildAwsAppBoundary(accountId, repoId, environment, sha256Hex);
 }

@@ -6153,6 +6153,8 @@ test.describe("Radius Canvas in Chromium", () => {
                   accessConfig: { authenticationMode: "API" }
                 }
               });
+            case "eks describe-addon":
+              return ok({ addon: { status: "ACTIVE" } });
             case "iam create-policy":
               return {
                 code: 254,
