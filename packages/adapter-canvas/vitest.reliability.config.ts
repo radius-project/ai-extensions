@@ -93,6 +93,7 @@ export default defineConfig({
       "src/browser/pages/**/*.test.ts",
       "src/browser/graph/**/*.test.ts",
       "test/ci/module-entry.test.mjs",
+      "test/ci/review-risk.test.mjs",
       "test/ci/plugins-script.test.mjs",
       "test/ci/release-version-script.test.mjs",
       "test/e2e-cloud/support/{cloud-command-port,cloud-fixture}.test.ts",
