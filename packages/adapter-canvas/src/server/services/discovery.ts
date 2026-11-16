@@ -272,9 +272,7 @@ export async function discoverResources(
     }
     if (resourceGroup && cluster) {
       const kubeconfig = dependencies.createTemporaryKubeconfig();
-      // Name the step unconditionally. The runner currently flattens process
-      // failures into Error, so this service cannot distinguish a timeout from
-      // authentication, authorization, connectivity, or target lookup failures.
+      // Keep the failing step visible even to clients that do not request diagnostics.
       let failedStep = "az aks get-credentials failed";
       try {
         await dependencies.runCli(

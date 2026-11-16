@@ -24,6 +24,18 @@ Open the run, open the failing step, and answer one question: **did the product'
 
 Then download the `cloud-e2e-diagnostics` artifact. It is uploaded on success as well as failure, so a passing run's artifact is the baseline you read the failing one against.
 
+### Discovery failures
+
+Open the `cloud-discovery-diagnostics` JSON attachment in the Playwright report or under `test-results/cloud/`. It stays in the existing `cloud-e2e-diagnostics` artifact with the same access rules and 14-day retention. Each file names the test and retry. Shared correlation IDs and operation/workflow links are not part of this capture.
+
+Read `discovery.commands` for the step name, UTC start time, duration, timeout limit, exit code, termination signal, timeout flag, and available redacted error text. A nonzero exit is not a timeout. A missing executable can have a string exit code such as `ENOENT`. An unknown exit code stays `null`; do not infer authentication or network failure from empty output. Successful command output and command arguments are not saved.
+
+An explicit discovery error stops the form test at once instead of waiting for the 30-minute test limit. The first error and `failure-snapshot` retain the selected resource group, cluster, namespace, available namespace options, and selector state before retries or cleanup change them. `beforeRequest` holds the state before the request was sent; `atFailure` holds the state after the error arrived. This preserves the selected target even if response rendering clears the selectors. Snapshot capture has a five-second limit. Later responses do not replace the first evidence. A `capture-error` record or an attachment write error means the evidence is incomplete and needs investigation.
+
+Credentials are redacted before text is retained or written. Each text field is limited to 2,000 characters plus a truncation marker. Command lists have at most 16 entries, option lists have at most 100 entries, and the event count is limited to 64. `droppedEvents` reports the number of records lost at that limit. The first failure keeps its command evidence even at that limit. Do not add tokens, raw kubeconfigs, environment dumps, authentication headers, or unrestricted CLI debug output to these files. This capture makes no extra cluster queries and does not start child-workflow monitoring.
+
+### Operation failures
+
 Environment deletion uses one 30-minute limit for run discovery and completion after GitHub accepts the dispatch. While the run is not yet visible, Radius keeps the operation active and looks for the same correlation ID. It does not dispatch another deletion. If the run cannot be found or does not finish successfully, Radius stops before it removes credentials or GitHub state. A later successful child run does not turn the failed parent test into a pass.
 
 For a service-principal creation failure, read the terminal operation's `failure.message` in the Playwright trace. While the create outcome is unknown, the browser does not receive the diagnostic. The operation coordinator invokes the Azure setup service directly, so the trace has no setup-endpoint `202` body. Radius shows the diagnostic in `failure.message` only when reconciliation ends. Radius preserves the command exit code, timeout flag, and available error output, even if later reads find no principal. It redacts credentials and limits each saved diagnostic to 2,000 characters, plus a truncation marker. Diagnostic text alone never authorizes a retry. Runs recorded before this fix can contain only the generic service-principal error; that missing output cannot be recovered from the trace.

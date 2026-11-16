@@ -1,4 +1,8 @@
 import type { CanvasRequestContext } from "../request-context.js";
+import {
+  observeDiscoveryCommands,
+  type DiscoveryCommandEvent
+} from "../services/discovery-diagnostics.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import {
   discoverResources,
@@ -168,14 +172,38 @@ export async function handleDiscover(
   // Read outside the try, exactly as the legacy arm did: a stream failure
   // propagates to the dispatcher instead of becoming the 200 error payload.
   const body = await context.readTextBody();
+  const events: DiscoveryCommandEvent[] = [];
+  const diagnostics =
+    context.request.headers["x-radius-discovery-diagnostics"] === "1" ?
+      { events }
+    : undefined;
+  const answer = (result: unknown): void =>
+    context.json(
+      200,
+      diagnostics ? { ...record(result), diagnostics } : result
+    );
   try {
     // Deliberately not normalized through a `record()` guard: `null` throws
     // when the service reads a property, while bare numbers and strings permit
     // property reads and fall through to AWS discovery, matching the legacy arm.
     const data = JSON.parse(body) as DiscoveryRequest;
-    context.json(200, await discoverResources(data, dependencies));
+    answer(
+      await discoverResources(
+        data,
+        diagnostics ?
+          {
+            ...dependencies,
+            runCli: observeDiscoveryCommands(
+              dependencies.runCli,
+              events,
+              Date.now
+            )
+          }
+        : dependencies
+      )
+    );
   } catch (e) {
-    context.json(200, {
+    answer({
       error: errorMessage(e),
       clusters: [],
       resourceGroups: [],

@@ -2498,6 +2498,28 @@ describe("default GitHub process helpers", { concurrent: false }, () => {
     }
   );
 
+  it("keeps the redacted subprocess cause, exit status, signal and timeout flag", async () => {
+    const { runCommand } = await loadGh("linux");
+    const cause = Object.assign(new Error("timed out"), {
+      code: null,
+      killed: true,
+      signal: "SIGTERM"
+    });
+    childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
+      cb(cause, "unused stdout", "");
+      return stubChild();
+    });
+    await expect(
+      runCommand("kubectl", ["get", "namespaces"], { timeout: 10000 })
+    ).rejects.toMatchObject({
+      cause,
+      code: null,
+      signal: "SIGTERM",
+      timedOut: true,
+      stderr: ""
+    });
+  });
+
   it("runs keyring-only commands without GitHub host or token overrides", async () => {
     process.env.GH_TOKEN = "ambient-gh";
     process.env.GITHUB_TOKEN = "ambient-github";
