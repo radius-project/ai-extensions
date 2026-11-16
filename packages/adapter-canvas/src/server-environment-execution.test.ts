@@ -213,7 +213,9 @@ function awsOperation(operationId: string) {
 const awsSetupResult = {
   ok: true as const,
   roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
-  subjects: ["repo:fixture/app:environment:dev"]
+  subjects: ["repo:fixture/app:environment:dev"],
+  appBoundaryArn:
+    "arn:aws:iam::123456789012:policy/radius/apps/1/dev/radius-app-boundary-1-dev"
 };
 
 afterEach(() => {
@@ -1264,6 +1266,9 @@ describe("production coordinator scheduling scopes", () => {
             })
           )
         ],
+        "eks describe-addon": [
+          ok(JSON.stringify({ addon: { status: "ACTIVE" } }))
+        ],
         "iam create-policy": [
           { code: 254, stdout: "", stderr: "EntityAlreadyExists" },
           lock("LOCK1")
@@ -1295,6 +1300,12 @@ describe("production coordinator scheduling scopes", () => {
       async runAws(args) {
         const command = args.slice(0, 2).join(" ");
         awsCommands.push(command);
+        // The environment has no app boundary yet.
+        if (
+          command === "iam get-policy" &&
+          args.some((arg) => arg.includes(":policy/radius/apps/"))
+        )
+          return { code: 254, stdout: "", stderr: "NoSuchEntity" };
         const list = answers.get(command);
         const answer = list?.[0];
 

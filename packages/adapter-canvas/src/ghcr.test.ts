@@ -646,6 +646,97 @@ test("withGhcrDockerConfig does not invoke the publish callback when credential 
   assert.equal(publish.mock.calls.length, 0);
 });
 
+async function withKeyringTestDirectory(
+  directory: string,
+  run: () => Promise<void>,
+  remove = () =>
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100
+    })
+): Promise<void> {
+  try {
+    await run();
+  } catch (error) {
+    try {
+      remove();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Keyring test and temporary directory cleanup both failed.",
+        { cause: cleanupError }
+      );
+    }
+    throw error;
+  }
+  remove();
+}
+
+test("removes the keyring test directory after success or a body failure", async () => {
+  for (const failBody of [false, true]) {
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "radius-keyring-cleanup-")
+    );
+    writeFileSync(path.join(directory, "fixture"), "fixture");
+    const bodyError = new Error("fixture assertion failure");
+    const result = withKeyringTestDirectory(directory, async () => {
+      if (failBody) throw bodyError;
+    });
+    if (failBody) {
+      await assert.rejects(result, (error) => error === bodyError);
+    } else {
+      await result;
+    }
+    assert.equal(existsSync(directory), false);
+  }
+});
+
+test("surfaces persistent keyring cleanup failure after a successful body", async () => {
+  const cleanupError = new Error("fixture persistent EPERM");
+  let bodyCalls = 0;
+  await assert.rejects(
+    withKeyringTestDirectory(
+      "unused",
+      async () => {
+        bodyCalls++;
+      },
+      () => {
+        throw cleanupError;
+      }
+    ),
+    (error) => error === cleanupError
+  );
+  assert.equal(bodyCalls, 1);
+});
+
+test.each([new Error("fixture assertion failure"), undefined])(
+  "retains both keyring body failure %s and persistent cleanup failure",
+  async (bodyError) => {
+    const cleanupError = new Error("fixture persistent EPERM");
+    let bodyCalls = 0;
+    await assert.rejects(
+      withKeyringTestDirectory(
+        "unused",
+        async () => {
+          bodyCalls++;
+          throw bodyError;
+        },
+        () => {
+          throw cleanupError;
+        }
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(error.errors, [bodyError, cleanupError]);
+        return true;
+      }
+    );
+    assert.equal(bodyCalls, 1);
+  }
+);
+
 test("uses the real keyring process binding for default package and publish credentials without ambient authority", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "radius-keyring-test-"));
   const executable = path.join(
@@ -653,71 +744,72 @@ test("uses the real keyring process binding for default package and publish cred
     process.platform === "win32" ? "gh.exe" : "gh"
   );
   const hook = path.join(directory, "keyring.cjs");
-  try {
-    copyFileSync(process.execPath, executable);
-    chmodSync(executable, 0o755);
-    writeFileSync(
-      hook,
-      [
-        'const args = [require("node:path").basename(process.argv[1]), ...process.argv.slice(2)];',
-        "if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_HOST) process.exit(61);",
-        "const commands = {",
-        '  \'["auth","token","--hostname","github.com"]\': "fixture-keyring-token",',
-        '  \'["api","--hostname","github.com","user","--jq",".login"]\': "fixture-keyring-user"',
-        "};",
-        "const output = commands[JSON.stringify(args)];",
-        "if (!output) { process.stderr.write(`Unexpected fake gh command: ${JSON.stringify(args)}`); process.exit(62); }",
-        "process.stdout.write(output);",
-        "process.exit(0);"
-      ].join("\n")
-    );
-    const pathKey =
-      Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ??
-      "PATH";
-    vi.stubEnv(pathKey, directory);
-    vi.stubEnv("NODE_OPTIONS", `--require="${hook.replaceAll("\\", "/")}"`);
-    vi.stubEnv("GH_CONFIG_DIR", directory);
-    vi.stubEnv("GH_TOKEN", "ambient-token-must-not-be-used");
-    vi.stubEnv("GITHUB_TOKEN", "ambient-token-must-not-be-used");
-    vi.stubEnv("GH_HOST", "wrong-host.invalid");
-    assert.deepEqual(await loadGhKeyringCredentials(), {
-      token: "fixture-keyring-token",
-      username: "fixture-keyring-user"
-    });
-    const bootstrap = createHarness();
-    await bootstrapGHCRStatePackage({
-      ...baseOptions,
-      credentials: undefined,
-      fetchImpl: bootstrap.fetchImpl
-    });
-    for (const failPublish of [false, true]) {
-      let configDirectory = "";
-      const publishing = withGhcrDockerConfig(async ({ DOCKER_CONFIG }) => {
-        configDirectory = DOCKER_CONFIG;
-        const config = JSON.parse(
-          readFileSync(path.join(DOCKER_CONFIG, "config.json"), "utf8")
-        );
-        assert.equal(
-          config.auths["ghcr.io"].auth,
-          Buffer.from("fixture-keyring-user:fixture-keyring-token").toString(
-            "base64"
-          )
-        );
-        if (failPublish) throw new Error("fixture publish failure");
-        return "published";
+  await withKeyringTestDirectory(directory, async () => {
+    try {
+      copyFileSync(process.execPath, executable);
+      chmodSync(executable, 0o755);
+      writeFileSync(
+        hook,
+        [
+          'const args = [require("node:path").basename(process.argv[1]), ...process.argv.slice(2)];',
+          "if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_HOST) process.exit(61);",
+          "const commands = {",
+          '  \'["auth","token","--hostname","github.com"]\': "fixture-keyring-token",',
+          '  \'["api","--hostname","github.com","user","--jq",".login"]\': "fixture-keyring-user"',
+          "};",
+          "const output = commands[JSON.stringify(args)];",
+          "if (!output) { process.stderr.write(`Unexpected fake gh command: ${JSON.stringify(args)}`); process.exit(62); }",
+          "process.stdout.write(output);",
+          "process.exit(0);"
+        ].join("\n")
+      );
+      const pathKey =
+        Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ??
+        "PATH";
+      vi.stubEnv(pathKey, directory);
+      vi.stubEnv("NODE_OPTIONS", `--require="${hook.replaceAll("\\", "/")}"`);
+      vi.stubEnv("GH_CONFIG_DIR", directory);
+      vi.stubEnv("GH_TOKEN", "ambient-token-must-not-be-used");
+      vi.stubEnv("GITHUB_TOKEN", "ambient-token-must-not-be-used");
+      vi.stubEnv("GH_HOST", "wrong-host.invalid");
+      assert.deepEqual(await loadGhKeyringCredentials(), {
+        token: "fixture-keyring-token",
+        username: "fixture-keyring-user"
       });
-      if (failPublish) {
-        await assert.rejects(publishing, /fixture publish failure/);
-      } else {
-        assert.equal(await publishing, "published");
+      const bootstrap = createHarness();
+      await bootstrapGHCRStatePackage({
+        ...baseOptions,
+        credentials: undefined,
+        fetchImpl: bootstrap.fetchImpl
+      });
+      for (const failPublish of [false, true]) {
+        let configDirectory = "";
+        const publishing = withGhcrDockerConfig(async ({ DOCKER_CONFIG }) => {
+          configDirectory = DOCKER_CONFIG;
+          const config = JSON.parse(
+            readFileSync(path.join(DOCKER_CONFIG, "config.json"), "utf8")
+          );
+          assert.equal(
+            config.auths["ghcr.io"].auth,
+            Buffer.from("fixture-keyring-user:fixture-keyring-token").toString(
+              "base64"
+            )
+          );
+          if (failPublish) throw new Error("fixture publish failure");
+          return "published";
+        });
+        if (failPublish) {
+          await assert.rejects(publishing, /fixture publish failure/);
+        } else {
+          assert.equal(await publishing, "published");
+        }
+        assert.ok(configDirectory);
+        assert.equal(existsSync(configDirectory), false);
       }
-      assert.ok(configDirectory);
-      assert.equal(existsSync(configDirectory), false);
+    } finally {
+      vi.unstubAllEnvs();
     }
-  } finally {
-    vi.unstubAllEnvs();
-    rmSync(directory, { recursive: true, force: true });
-  }
+  });
 });
 
 test("withGhcrDockerConfig hands rad a ghcr.io docker auth then removes it", async () => {

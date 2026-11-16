@@ -1925,6 +1925,7 @@ describe("production environment owner HTTP binding", () => {
         stdout:
           '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
       },
+      "eks describe-addon": { stdout: '{"addon":{"status":"ACTIVE"}}' },
       "iam create-policy": {
         stderr: "An error occurred (AccessDenied) when calling CreatePolicy",
         code: 254
@@ -1955,6 +1956,7 @@ describe("production environment owner HTTP binding", () => {
         stdout:
           '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
       },
+      "eks describe-addon": { stdout: '{"addon":{"status":"ACTIVE"}}' },
       "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
       "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
       "iam get-role": {
@@ -1994,6 +1996,7 @@ describe("production environment owner HTTP binding", () => {
         stdout:
           '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
       },
+      "eks describe-addon": { stdout: '{"addon":{"status":"ACTIVE"}}' },
       "iam create-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
       "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK1"}}' },
       "iam get-role": { stderr: "AccessDenied", code: 254 },
@@ -2133,6 +2136,7 @@ describe("production environment owner HTTP binding", () => {
         stdout:
           '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
       },
+      "eks describe-addon": { stdout: '{"addon":{"status":"ACTIVE"}}' },
       // Its own earlier lock is there, so it is replaced with a fresh one.
       "iam create-policy": [
         {
@@ -2277,6 +2281,7 @@ describe("production environment owner HTTP binding", () => {
           stdout:
             '{"cluster":{"status":"ACTIVE","accessConfig":{"authenticationMode":"API"}}}'
         },
+        "eks describe-addon": { stdout: '{"addon":{"status":"ACTIVE"}}' },
         "iam create-policy": {
           stderr:
             "An error occurred (EntityAlreadyExists) when calling the CreatePolicy operation",
