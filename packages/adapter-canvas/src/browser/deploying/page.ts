@@ -385,7 +385,7 @@ function renderDeploymentRow(
         (!known || status !== "success") &&
         (!deploymentStatusBlocksMutation(status) || status === "unverified")
       ) ?
-        `<button type="button" class="rad-btn rad-btn--secondary js-cleanup-dep" data-env="${envName}">Load cleanup details</button>`
+        `<button type="button" class="rad-btn rad-btn--secondary js-cleanup-dep" data-env="${envName}" style="margin:0;">Load cleanup details</button>`
       : ""
     }</td>` +
     "</tr>"

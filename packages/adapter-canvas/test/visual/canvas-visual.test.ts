@@ -987,6 +987,17 @@ test.describe("Radius Canvas visual baselines", () => {
         exact: true
       });
       await expect(action).toBeVisible();
+      const deleteBounds = await page
+        .getByRole("button", { name: "Delete Deployment", exact: true })
+        .boundingBox();
+      const cleanupBounds = await action.boundingBox();
+      if (!deleteBounds || !cleanupBounds) {
+        throw new Error("Both deployment action buttons must be visible.");
+      }
+      expect(cleanupBounds.y + cleanupBounds.height / 2).toBeCloseTo(
+        deleteBounds.y + deleteBounds.height / 2,
+        1
+      );
       await screenshot(page, `exact-run-cleanup-deployments-${theme}.png`);
       await action.click();
       const dialog = page.locator("#deploy-abandon-modal");
