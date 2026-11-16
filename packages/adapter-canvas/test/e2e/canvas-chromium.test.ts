@@ -86,6 +86,112 @@ import {
   waitForIdleSession,
   waitForSignedInShell
 } from "../e2e-cloud/support/copilot-app-ui.js";
+import { observeCloudDiscovery } from "../e2e-cloud/support/cloud-discovery-diagnostics.js";
+
+for (const host of ["page", "frame"] as const) {
+  test(`Cloud discovery captures the first failure and stops a blocked selector in a ${host} @safety`, async ({
+    canvas,
+    page
+  }, testInfo) => {
+    await page.goto(canvas.baseUrl);
+    if (host === "frame") {
+      await page.setContent(`<iframe src="${canvas.baseUrl}"></iframe>`);
+      await page.locator("iframe").contentFrame().locator("body").waitFor();
+    }
+    const target =
+      host === "frame" ?
+        page.frames().find((frame) => frame !== page.mainFrame())
+      : page;
+    if (!target) throw new Error("Missing test frame");
+    await target.setContent(`
+      <select id="azure-rg-select"><option selected>selected-group</option></select>
+      <select id="azure-cluster-select"><option selected>selected-cluster</option></select>
+      <select id="azure-namespace-select" disabled><option selected>Loading</option></select>
+      <input id="azure-namespace-custom" value="" style="display:none">
+    `);
+    await page.route("**/api/discover", async (route) => {
+      expect(route.request().headers()["x-radius-discovery-diagnostics"]).toBe(
+        "1"
+      );
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          diagnostics: {
+            events: [
+              {
+                step: "kubectl get namespaces",
+                exitCode: 1,
+                signal: null,
+                timedOut: false,
+                error: "fixture-opaque-credential denied"
+              }
+            ]
+          },
+          errors: { namespaces: "kubectl denied fixture-opaque-credential" },
+          namespaces: []
+        })
+      });
+    });
+    const diagnostics = await observeCloudDiscovery(target, testInfo, [
+      "fixture-opaque-credential"
+    ]);
+    try {
+      await expect(
+        diagnostics.guard(async () => {
+          await target.evaluate(() =>
+            fetch("/api/discover", {
+              method: "POST",
+              body: "{}"
+            }).then((response) => {
+              // Discovery rendering can clear the selected target before the
+              // network observer receives the decoded response.
+              document
+                .getElementById("azure-cluster-select")
+                ?.replaceChildren();
+              return response.json();
+            })
+          );
+          await target
+            .locator("#azure-namespace-select")
+            .selectOption("team", { timeout: 5000 });
+        })
+      ).rejects.toThrow("Cloud discovery failed");
+      await target.locator("#azure-cluster-select").evaluate((element) => {
+        element.replaceChildren(
+          new Option("changed-by-cleanup", "changed-by-cleanup")
+        );
+      });
+    } finally {
+      await diagnostics.dispose();
+      await page.unroute("**/api/discover");
+    }
+    const attachment = testInfo.attachments.find(
+      (entry) => entry.name === "cloud-discovery-diagnostics"
+    );
+    if (!attachment?.path) throw new Error("Missing diagnostic attachment");
+    const text = await fs.readFile(attachment.path, "utf8");
+    expect(text).toContain("selected-cluster");
+    expect(text).toContain("Loading");
+    expect(text).not.toContain("changed-by-cleanup");
+    expect(text).not.toContain("fixture-opaque-credential");
+    expect(JSON.parse(text).events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "failure-snapshot" })
+      ])
+    );
+    const first = JSON.parse(text).events.find(
+      (event: { kind: string }) => event.kind === "first-failure"
+    );
+    expect(first.details.beforeRequest.selectors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "azure-cluster-select",
+          value: "selected-cluster"
+        })
+      ])
+    );
+  });
+}
 
 for (const { name, markup } of [
   {
