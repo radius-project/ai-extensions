@@ -58,6 +58,13 @@ import {
 } from "./page.js";
 
 const HOSTILE = '<img src=x onerror="alert(1)">';
+const ABANDON_DIALOG_IDS = {
+  modal: "deploy-abandon-modal",
+  body: "deploy-abandon-body",
+  app: "deploy-abandon-app",
+  environment: "deploy-abandon-env",
+  close: "deploy-abandon-close"
+};
 
 interface FixtureOptions {
   repo?: string;
@@ -71,6 +78,7 @@ interface FixtureOptions {
   // withProgressModal says.
   withProgressModalElement?: boolean;
   withDeleteDialog?: boolean;
+  withCleanupDialog?: boolean;
   withForceConfirm?: boolean;
   appPayload?: unknown;
   envPayload?: unknown;
@@ -96,6 +104,7 @@ function fixture(options: FixtureOptions = {}) {
     withProgressModal = true,
     withProgressModalElement = withProgressModal,
     withDeleteDialog = true,
+    withCleanupDialog = true,
     withForceConfirm = true,
     appPayload = { applications: [{ name: "app" }] },
     envPayload = {
@@ -173,6 +182,12 @@ function fixture(options: FixtureOptions = {}) {
   if (withDeleteDialog) {
     elements.push(deleteModal, deleteBody, deleteApp, deleteEnv, deleteClose);
   }
+  const cleanupBody = createFakeElement(ABANDON_DIALOG_IDS.body);
+  for (const id of Object.values(ABANDON_DIALOG_IDS))
+    if (withCleanupDialog)
+      elements.push(
+        id === ABANDON_DIALOG_IDS.body ? cleanupBody : createFakeElement(id)
+      );
 
   // The lighter shared confirmation the page renders for the forced delete.
   const confirmElements: Record<string, FakeElement> = {};
@@ -230,7 +245,8 @@ function fixture(options: FixtureOptions = {}) {
     deleteBody,
     deleteApp,
     deleteEnv,
-    deleteClose
+    deleteClose,
+    cleanupBody
   };
 }
 
@@ -288,6 +304,281 @@ async function confirmDeleteDialog(
 }
 
 describe("initializeDeployingPage guards and lifecycle", () => {
+  it.each(["missing", "in-progress", "disabled"])(
+    "refuses stale cleanup controls when current evidence is %s",
+    async (state) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments:
+            state === "missing" ?
+              []
+            : [
+                {
+                  app: "",
+                  environment: "dev",
+                  status: state === "in-progress" ? "pending" : "failed",
+                  recovery: {
+                    runId: 42,
+                    runAttempt: 1,
+                    revision: "a".repeat(64),
+                    confirmation: "octo/app/run-42@1/dev",
+                    canMarkCleanupComplete: state !== "disabled"
+                  }
+                }
+              ]
+        }
+      });
+      const button = createFakeInput("stale-cleanup");
+      button.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-cleanup-dep", [button]);
+      const stop = init(page);
+      await flushPromises();
+      button.dispatch("click");
+      expect(page.cleanupBody.children).toEqual([]);
+      expect(
+        page.browser.net.calls.some(
+          (call) => call.url === "/api/abandon-deployment"
+        )
+      ).toBe(false);
+      stop();
+    }
+  );
+  it("initializes and tears down without optional cleanup markup", async () => {
+    const page = fixture({ withCleanupDialog: false });
+    const stop = init(page);
+    await flushPromises();
+    expect(page.deployBtn.disabled).toBe(false);
+    stop();
+  });
+  it.each([
+    "error",
+    "network",
+    "non-error",
+    "detached",
+    "detached-success"
+  ] as const)(
+    "keeps confirmation disabled during preparation and after %s",
+    async (outcome) => {
+      const selected = {
+        environment: "dev",
+        app: "",
+        status: "failed",
+        deploymentId: "7",
+        runUrl: "https://github.com/octo/app/actions/runs/42",
+        cleanupSelection: {
+          runId: 42,
+          runAttempt: 1,
+          deploymentId: "7",
+          runUrl: "https://github.com/octo/app/actions/runs/42"
+        }
+      };
+      const page = fixture({ deploymentsPayload: { deployments: [selected] } });
+      const pending = createDeferred<HttpResponse>();
+      page.browser.net.handle(
+        "/api/deployment-cleanup-details",
+        () => pending.promise
+      );
+      const button = createFakeInput("cleanup-details");
+      button.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-cleanup-dep", [button]);
+      const stop = init(page);
+      await flushPromises();
+      button.dispatch("click");
+      button.dispatch("click");
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      expect(page.cleanupBody.children).toEqual([]);
+      expect(
+        page.browser.net.calls.filter(
+          (call) => call.url === "/api/deployment-cleanup-details"
+        )
+      ).toHaveLength(1);
+      if (outcome.startsWith("detached")) stop();
+      if (outcome === "detached-success")
+        pending.resolve(
+          jsonResponse({ deployment: selected, prepared: false })
+        );
+      else if (outcome === "network") pending.reject(new Error("offline"));
+      else if (outcome === "non-error") pending.reject("offline");
+      else pending.resolve(jsonResponse({ error: "Run changed" }, false, 409));
+      await flushPromises();
+      expect(page.cleanupBody.children).toEqual([]);
+      expect(inlineMessage(page.inlineStatus)).toBe(
+        outcome.startsWith("detached") ? "Loading cleanup details…"
+        : outcome === "error" ? "Run changed"
+        : outcome === "network" ? "offline"
+        : "Cleanup details could not load."
+      );
+      stop();
+    }
+  );
+  it.each([false, true])(
+    "discovers unresolved history without enabling confirmation; absent: %s",
+    async (absent) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [],
+          environmentDiagnostics: [
+            {
+              environment: "dev",
+              message: "Only the first 100 records were checked."
+            }
+          ]
+        }
+      });
+      const button = createFakeInput("cleanup-details");
+      button.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-cleanup-dep", [button]);
+      page.browser.net.handle("/api/deployment-cleanup-details", () =>
+        jsonResponse({
+          prepared: false,
+          selection:
+            absent ? undefined : (
+              {
+                runId: 42,
+                runAttempt: 1,
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/app/actions/runs/42"
+              }
+            ),
+          deployment:
+            absent ? null : (
+              {
+                environment: "dev",
+                status: "failed",
+                app: "",
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/app/actions/runs/42"
+              }
+            )
+        })
+      );
+      const stop = init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain("History not verified");
+      expect(page.deployBtn.disabled).toBe(true);
+      page.browser.document.activeElement = button;
+      button.dispatch("click");
+      await flushPromises();
+      expect(page.cleanupBody.children).toEqual([]);
+      expect(inlineMessage(page.inlineStatus)).toContain(
+        absent ? "No deployment remains tracked" : "for the displayed run"
+      );
+      expect(absent ? page.deployBtn.focusCount : button.focusCount).toBe(1);
+      stop();
+    }
+  );
+  it.each([
+    "success",
+    "refusal",
+    "refusal-empty",
+    "network",
+    "known",
+    "detached",
+    "detached-error"
+  ] as const)(
+    "requires exact-run cleanup confirmation and surfaces %s without dispatching Delete",
+    async (result) => {
+      const success = result === "success" || result === "known";
+      const pending = createDeferred<HttpResponse>();
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: "https://github.com/octo/app/actions/runs/42"
+      };
+      const recovery = {
+        runId: 42,
+        runAttempt: 1,
+        revision: "a".repeat(64),
+        confirmation: "octo/app/run-42@1/dev",
+        canMarkCleanupComplete: true
+      };
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [
+            {
+              app: result === "known" ? "app" : "",
+              environment: "dev",
+              status: "failed",
+              deploymentId: "7",
+              runUrl: "https://github.com/octo/app/actions/runs/42",
+              identity:
+                result === "known" ?
+                  { state: "known", application: "app" }
+                : { state: "unavailable", reason: "Artifacts expired" },
+              cleanupSelection: selection
+            }
+          ]
+        }
+      });
+      const button = createFakeInput("cleanup");
+      button.className = "js-cleanup-dep";
+      button.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-cleanup-dep", [button]);
+      page.browser.net.handle("/api/abandon-deployment", () => {
+        if (result === "network") throw new Error("offline");
+        if (result.startsWith("detached")) return pending.promise;
+        return jsonResponse(
+          success ? { outcome: "abandoned" }
+          : result === "refusal-empty" ? {}
+          : { error: "Run changed" },
+          success,
+          success ? 200 : 409
+        );
+      });
+      page.browser.net.handle("/api/deployment-cleanup-details", () =>
+        jsonResponse({
+          prepared: true,
+          selection,
+          deployment: {
+            app: result === "known" ? "app" : "",
+            environment: "dev",
+            status: "failed",
+            deploymentId: "7",
+            runUrl: "https://github.com/octo/app/actions/runs/42",
+            identity:
+              result === "known" ?
+                { state: "known", application: "app" }
+              : { state: "unavailable", reason: "Artifacts expired" },
+            recovery
+          }
+        })
+      );
+      const stop = init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain("Load cleanup details");
+      button.dispatch("click");
+      const body = page.cleanupBody;
+      await confirmDeleteDialog(
+        body,
+        result === "known" ? "app" : "octo/app/run-42@1",
+        "dev"
+      );
+      if (result.startsWith("detached")) {
+        stop();
+        if (result === "detached-error")
+          pending.reject(new Error("late failure"));
+        else pending.resolve(jsonResponse({ outcome: "abandoned" }));
+        await flushPromises();
+        expect(inlineMessage(page.inlineStatus)).toBe(
+          "Cleanup details verified. Confirm external cleanup for this run."
+        );
+        return;
+      }
+      await flushPromises();
+      expect(inlineMessage(page.inlineStatus)).toContain(
+        success ? "Canvas did not verify or perform cleanup"
+        : result === "refusal" ? "Run changed"
+        : "Could not record cleanup"
+      );
+      expect(
+        page.browser.net.calls.some(
+          (call) => call.url === DELETE_DEPLOYMENT_PATH
+        )
+      ).toBe(false);
+      stop();
+    }
+  );
   it("returns NOOP_TEARDOWN when any required element is missing", () => {
     const required = [
       "deploy-now-btn",
@@ -673,6 +964,39 @@ describe("deploy button state", () => {
 });
 
 describe("deployments table", () => {
+  it.each([true, false])(
+    "does not offer healthy known deployments for cleanup: known %s",
+    async (known) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [
+            {
+              app: known ? "app" : "",
+              environment: "dev",
+              status: "success",
+              deploymentId: "7",
+              runUrl: "https://github.com/octo/app/actions/runs/42",
+              identity:
+                known ?
+                  { state: "known", application: "app" }
+                : { state: "unavailable", reason: "Artifact expired" },
+              cleanupSelection: {
+                runId: 42,
+                runAttempt: 1,
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/app/actions/runs/42"
+              }
+            }
+          ]
+        }
+      });
+      const stop = init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML.includes("js-cleanup-dep")).toBe(!known);
+      stop();
+    }
+  );
+
   it.each([
     undefined,
     { state: "unavailable", reason: "Identity artifact expired." }

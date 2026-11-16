@@ -6,6 +6,7 @@ import {
 } from "./deployment-abandonment.js";
 import type { DeploymentRow } from "./deployment-resolver.js";
 import type { CanvasState } from "../../shared.js";
+import { cleanupMarker } from "@radius-project/adapter-shared";
 
 const PAYLOAD = {
   repo: "octo/todolist",
@@ -61,6 +62,297 @@ function abandon(
 }
 
 describe("createDeploymentAbandonmentService", () => {
+  describe.each(["pending", "deleting"])(
+    "active %s without recovery",
+    (status) => {
+      it.each(["run-scoped", "application-scoped"])(
+        "refuses %s cleanup without writing deployment statuses",
+        async (scope) => {
+          const current = row(status);
+          const ghOrThrow = vi.fn(async () => "");
+          const result = await abandon(
+            { ghOrThrow, resolveEnvDeployment: async () => current },
+            {
+              ...PAYLOAD,
+              ...(scope === "run-scoped" ?
+                {
+                  revision: "a".repeat(64),
+                  runId: 42,
+                  runAttempt: 1,
+                  deploymentId: current.deploymentId,
+                  runUrl: current.runUrl,
+                  confirmation: "todolist/dev"
+                }
+              : {})
+            }
+          );
+          expect(result.status).toBe(409);
+          expect(ghOrThrow).not.toHaveBeenCalled();
+        }
+      );
+    }
+  );
+
+  it.each(["unknown", "known"] as const)(
+    "attests external cleanup of the exact %s run without hiding older deployments",
+    async (identity) => {
+      const current: DeploymentRow = {
+        ...row("failed"),
+        app: identity === "known" ? PAYLOAD.application : "",
+        identity:
+          identity === "known" ?
+            { state: "known", application: PAYLOAD.application }
+          : { state: "unavailable", reason: "Identity artifacts expired." },
+        deploymentId: "3",
+        runUrl: `https://github.com/${PAYLOAD.repo}/actions/runs/42`,
+        recovery: {
+          runId: 42,
+          runAttempt: 1,
+          revision: "a".repeat(64),
+          deploymentIds: ["3", "2"],
+          confirmation:
+            identity === "known" ?
+              `${PAYLOAD.application}/dev`
+            : `${PAYLOAD.repo}/run-42@1/dev`,
+          canMarkCleanupComplete: true
+        }
+      };
+      const recovery = current.recovery;
+      if (!recovery) throw new Error("Missing fixture recovery");
+      const markers = new Map<string, string>();
+      const marker = cleanupMarker(recovery);
+      const ghOrThrow = vi.fn(async (args: string[]) => {
+        const endpoint = args.find((arg) => arg.includes("/deployments/"));
+        const id = /deployments\/(\d+)/.exec(endpoint || "")?.[1];
+        if (!id) throw new Error("Unexpected external operation");
+        if (args.includes("POST")) {
+          expect(args).toContain("auto_inactive=false");
+          expect(args).toContain(`log_url=${current.runUrl}`);
+          markers.set(id, marker);
+          return "";
+        }
+        return markers.get(id) || "";
+      });
+      const payload = {
+        ...PAYLOAD,
+        application: current.app,
+        ...recovery,
+        deploymentId: current.deploymentId,
+        runUrl: current.runUrl
+      };
+      expect(
+        await abandon(
+          {
+            ghOrThrow,
+            resolveEnvDeployment: async () =>
+              markers.size === 2 ? row("success") : current
+          },
+          payload
+        )
+      ).toEqual({ status: 200, body: { outcome: "abandoned" } });
+      expect(markers).toEqual(
+        new Map([
+          ["3", marker],
+          ["2", marker]
+        ])
+      );
+      expect(ghOrThrow.mock.calls.every(([args]) => args[0] === "api")).toBe(
+        true
+      );
+    }
+  );
+
+  it.each([
+    "active",
+    "revision",
+    "run",
+    "attempt",
+    "confirmation",
+    "unknown-to-known"
+  ] as const)("refuses %s recovery before any marker write", async (reason) => {
+    const recovery = {
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      deploymentIds: ["3"],
+      confirmation: "todolist/dev",
+      canMarkCleanupComplete: true
+    };
+    const current: DeploymentRow = {
+      ...row("failed"),
+      runUrl: `https://github.com/${PAYLOAD.repo}/actions/runs/42`,
+      recovery
+    };
+    const ghOrThrow = vi.fn(async () => "");
+    const payload = {
+      ...PAYLOAD,
+      ...recovery,
+      deploymentId: current.deploymentId,
+      runUrl: current.runUrl
+    };
+    if (reason === "active") recovery.canMarkCleanupComplete = false;
+    if (reason === "revision") payload.revision = "b".repeat(64);
+    if (reason === "run") payload.runId = 43;
+    if (reason === "attempt") payload.runAttempt = 2;
+    if (reason === "confirmation") payload.confirmation = "incorrect";
+    if (reason === "unknown-to-known") payload.application = "";
+    const result = await abandon(
+      { ghOrThrow, resolveEnvDeployment: async () => current },
+      payload
+    );
+    expect(result.status).toBe(
+      reason === "confirmation" || reason === "unknown-to-known" ? 400 : 409
+    );
+    expect(ghOrThrow).not.toHaveBeenCalled();
+  });
+
+  it("keeps partial-marker failure effective and retries only missing writes", async () => {
+    const recovery = {
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      deploymentIds: ["3", "2"],
+      confirmation: "todolist/dev",
+      canMarkCleanupComplete: true
+    };
+    const current: DeploymentRow = { ...row("delete-failed"), recovery };
+    const markers = new Set<string>();
+    let fail = true;
+    const writes: string[] = [];
+    const ghOrThrow = vi.fn(async (args: string[]) => {
+      const id =
+        args.find((arg) => arg.includes("/deployments/"))?.includes("/3/") ?
+          "3"
+        : "2";
+      if (args.includes("POST")) {
+        writes.push(id);
+        if (id === "2" && fail) throw new Error("write refused");
+        markers.add(id);
+        return "";
+      }
+      return markers.has(id) ? cleanupMarker(recovery) : "";
+    });
+    const options = {
+      ghOrThrow,
+      resolveEnvDeployment: async () => (markers.size === 2 ? null : current)
+    };
+    const payload = {
+      ...PAYLOAD,
+      ...recovery,
+      deploymentId: current.deploymentId,
+      runUrl: current.runUrl
+    };
+    expect((await abandon(options, payload)).status).toBe(502);
+    expect(markers.size).toBe(1);
+    fail = false;
+    expect((await abandon(options, payload)).status).toBe(200);
+    expect(writes).toEqual(["3", "2", "2"]);
+  });
+
+  it.each([
+    "still tracked",
+    "pending rerun",
+    "deleting rerun",
+    "read failure",
+    "string rejection"
+  ] as const)(
+    "does not retire local tracking when marker verification reports %s",
+    async (failure) => {
+      const recovery = {
+        runId: 42,
+        runAttempt: 1,
+        revision: "a".repeat(64),
+        deploymentIds: ["3"],
+        confirmation: "todolist/dev",
+        canMarkCleanupComplete: true
+      };
+      const current: DeploymentRow = {
+        ...row("failed"),
+        runUrl: `https://github.com/${PAYLOAD.repo}/actions/runs/42`,
+        recovery
+      };
+      const state: CanvasState = {
+        deployAttempt: {
+          id: "original",
+          targetRepo: PAYLOAD.repo,
+          environment: PAYLOAD.environment
+        },
+        deployAppName: PAYLOAD.application,
+        deployRunId: "42",
+        deployStatus: "failed"
+      };
+      const before = structuredClone(state);
+      const invalidateDeployListCache = vi.fn();
+      const releaseDeploymentMutation = vi.fn();
+      let reads = 0;
+      const result = await abandon(
+        {
+          readInstanceState: () => state,
+          invalidateDeployListCache,
+          releaseDeploymentMutation,
+          resolveEnvDeployment: async () => {
+            if (++reads === 1 || failure === "still tracked") return current;
+            if (failure.endsWith("rerun"))
+              return {
+                ...row(failure === "pending rerun" ? "pending" : "deleting"),
+                runUrl: current.runUrl,
+                deploymentId: "new-rerun-record"
+              };
+            if (failure === "read failure")
+              throw new Error("GitHub history unavailable");
+            throw "GitHub history unavailable";
+          },
+          ghOrThrow: async (args) => {
+            if (args.some((arg) => arg.includes("/deployments/3/statuses")))
+              return "";
+            throw new Error("Unexpected external operation");
+          }
+        },
+        {
+          ...PAYLOAD,
+          ...recovery,
+          deploymentId: current.deploymentId,
+          runUrl: current.runUrl
+        }
+      );
+      expect(result.status).toBe(502);
+      expect(result.body).toMatchObject({
+        error: expect.stringMatching(/Tracking (remains|may remain) effective/)
+      });
+      expect(state).toEqual(before);
+      expect(invalidateDeployListCache).toHaveBeenCalledWith(PAYLOAD.repo);
+      expect(releaseDeploymentMutation).toHaveBeenCalledWith(
+        expect.any(Object),
+        ABANDON_LEASE
+      );
+    }
+  );
+
+  it("requires exact-run confirmation when the listing acquires recovery evidence", async () => {
+    const ghOrThrow = vi.fn(async () => "");
+    const current: DeploymentRow = {
+      ...row("delete-failed"),
+      recovery: {
+        runId: 42,
+        runAttempt: 1,
+        revision: "a".repeat(64),
+        deploymentIds: ["3"],
+        confirmation: "todolist/dev",
+        canMarkCleanupComplete: true
+      }
+    };
+    expect(
+      await abandon({
+        ghOrThrow,
+        resolveEnvDeployment: async () => current
+      })
+    ).toMatchObject({
+      status: 409,
+      body: { error: expect.stringContaining("exact recorded run") }
+    });
+    expect(ghOrThrow).not.toHaveBeenCalled();
+  });
+
   it.each([
     undefined,
     { state: "unavailable" as const, reason: "expired" },

@@ -1,4 +1,5 @@
 import { optionalBrowserFunction, requireBrowserFunction } from "../globals.js";
+import { loadCleanupDetails } from "../deployment-cleanup.js";
 import { asGraphController } from "../graph/surface.js";
 import { createGraphProgress } from "../graph/progress.js";
 import {
@@ -29,13 +30,15 @@ import {
   createDeployedState,
   deployDeployedApp,
   parseApplicationListing,
+  parseDeploymentListing,
+  parseDeploymentDiagnostics,
   parseEnvironmentListing
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
 import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
-import type { EnvironmentProviders } from "../repositories.js";
+import type { DeploymentInfo, EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
 import { DEPLOYED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 
@@ -112,9 +115,7 @@ function parseDeployments(payload: unknown): DeploymentState[] {
       environment: readString(deployment, "environment"),
       status: readString(deployment, "status") || "unknown"
     }))
-    .filter(
-      (deployment) => deployment.app !== "" && deployment.environment !== ""
-    );
+    .filter((deployment) => deployment.environment !== "");
 }
 
 function setInline(
@@ -153,9 +154,13 @@ export function initializeDeployedGraphPage(
   const environmentStatuses: Record<string, string> = {};
   const adaptive = createDeployedState();
   const deployments = new Map<string, string>();
+  const recoveryTargets = new Map<string, DeploymentInfo>();
   let hasEnvironments = false;
   let environmentsUnavailable = false;
   let deploymentStatesStale = false;
+  const deploymentDiagnostics = new Map<string, string>();
+  let preparingCleanup = false;
+  let cleanupGeneration = 0;
   let statePolls = 0;
   let stateTimer: ScopeTimer | null = null;
   let graphTimer: ScopeTimer | null = null;
@@ -202,9 +207,19 @@ export function initializeDeployedGraphPage(
   const selectedApplication = (): string => appSelect?.value ?? "";
   const selectedEnvironment = (): string => envSelect?.value ?? "";
   const selectedStatus = (): string =>
-    deployments.get(
-      deploymentKey(selectedApplication(), selectedEnvironment())
-    ) ?? "";
+    (
+      deploymentDiagnostics.has(selectedEnvironment()) ||
+      deployments.has(deploymentKey("", selectedEnvironment()))
+    ) ?
+      "unverified"
+    : (deployments.get(
+        deploymentKey(selectedApplication(), selectedEnvironment())
+      ) ?? "");
+  const forgetEnvironmentDeployments = (environment: string): void => {
+    const suffix = `|${encodeURIComponent(environment)}`;
+    for (const map of [deployments, recoveryTargets])
+      for (const key of map.keys()) if (key.endsWith(suffix)) map.delete(key);
+  };
 
   // Only the target's own resources may be named. A refresh that is still in
   // flight leaves the previous selection's list in place, so the tag is checked
@@ -253,10 +268,32 @@ export function initializeDeployedGraphPage(
       hasEnvironments,
       exists,
       deploymentStatus,
-      deploymentStatesStale,
+      deploymentStatesStale || deploymentStatus === "unverified",
       environmentsUnavailable,
       environmentStatuses[environment] ?? ""
     );
+    if (stopTrackingAction) {
+      const target =
+        recoveryTargets.get(deploymentKey(application, environment)) ??
+        recoveryTargets.get(deploymentKey("", environment));
+      const available =
+        (!!target?.cleanupSelection &&
+          !["pending", "deleting"].includes(deploymentStatus) &&
+          (deploymentStatus !== "success" ||
+            target.identity?.state !== "known")) ||
+        deploymentStatus === "delete-failed" ||
+        deploymentDiagnostics.has(environment);
+      stopTrackingAction.style.display = available ? "" : "none";
+      stopTrackingAction.textContent =
+        target?.cleanupSelection || deploymentDiagnostics.has(environment) ?
+          "Load cleanup details"
+        : "Stop tracking deployment";
+      stopTrackingAction.disabled =
+        !available || preparingCleanup || deploymentStatesStale;
+      if (preparingCleanup)
+        stopTrackingAction.setAttribute("aria-busy", "true");
+      else stopTrackingAction.removeAttribute("aria-busy");
+    }
     if (label) {
       label.textContent =
         application && environment ?
@@ -271,19 +308,32 @@ export function initializeDeployedGraphPage(
       .fetch(`/api/list-deployments?repo=${encodeURIComponent(page.repo)}`)
       .then((response) => response.json())
       .then((payload) => {
+        cleanupGeneration++;
         const error = readString(payload, "error");
         if (error) {
           deploymentStatesStale = true;
           return;
         }
         deploymentStatesStale = false;
-        deployments.clear();
+        deploymentDiagnostics.clear();
+        for (const diagnostic of parseDeploymentDiagnostics(payload))
+          deploymentDiagnostics.set(diagnostic.environment, diagnostic.message);
+        for (const previous of recoveryTargets.values())
+          if (!deploymentDiagnostics.has(previous.environment))
+            forgetEnvironmentDeployments(previous.environment);
+        for (const deployment of parseDeploymentListing(payload))
+          recoveryTargets.set(
+            deploymentKey(deployment.app, deployment.environment),
+            deployment
+          );
         for (const deployment of parseDeployments(payload)) {
           deployments.set(
             deploymentKey(deployment.app, deployment.environment),
             deployment.status
           );
         }
+        const message = deploymentDiagnostics.get(selectedEnvironment());
+        if (message) setInline(context, "error", message);
       })
       .catch((error: unknown) => {
         deploymentStatesStale = true;
@@ -748,6 +798,9 @@ export function initializeDeployedGraphPage(
   };
 
   const runAbandon = (application: string, environment: string): void => {
+    const selected = recoveryTargets.get(
+      deploymentKey(application, environment)
+    );
     // This callback is reachable only from the stop-tracking control registered
     // below, so the control exists whenever the callback can run.
     /* v8 ignore next */
@@ -765,13 +818,21 @@ export function initializeDeployedGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           environment,
-          application
+          application,
+          ...(selected?.recovery ?
+            {
+              ...selected.recovery,
+              deploymentId: selected.deploymentId,
+              runUrl: selected.runUrl,
+              confirmation: `${application}/${environment}`
+            }
+          : {})
         })
       })
       .then((response) =>
         response.json().then((payload) => ({ response, payload }))
       )
-      .then(({ response, payload }) => {
+      .then(async ({ response, payload }) => {
         if (!entry.active) return;
         if (!response.ok || readString(payload, "outcome") !== "abandoned") {
           setInline(
@@ -785,7 +846,8 @@ export function initializeDeployedGraphPage(
           refreshControls();
           return;
         }
-        deployments.delete(deploymentKey(application, environment));
+        await loadDeploymentStates();
+        if (!entry.active) return;
         setInline(
           context,
           "info",
@@ -907,12 +969,14 @@ export function initializeDeployedGraphPage(
 
   if (appSelect) {
     entry.on(appSelect, "change", () => {
+      cleanupGeneration++;
       refreshControls();
       loadGraph();
     });
   }
   if (envSelect) {
     entry.on(envSelect, "change", () => {
+      cleanupGeneration++;
       refreshControls();
       loadGraph();
     });
@@ -939,14 +1003,104 @@ export function initializeDeployedGraphPage(
   }
   if (stopTrackingAction) {
     entry.on(stopTrackingAction, "click", () => {
-      if (
-        abandonDialog &&
-        selectedStatus() === "delete-failed" &&
-        selectedApplication() &&
-        selectedEnvironment()
-      ) {
-        abandonDialog.open(selectedApplication(), selectedEnvironment());
+      const application = selectedApplication();
+      const environment = selectedEnvironment();
+      if (!abandonDialog || preparingCleanup || !environment) {
+        return;
       }
+      const selected =
+        deploymentDiagnostics.has(environment) ? undefined : (
+          (recoveryTargets.get(deploymentKey(application, environment)) ??
+          recoveryTargets.get(deploymentKey("", environment)))
+        );
+      if (
+        !selected?.cleanupSelection &&
+        !deploymentDiagnostics.has(environment) &&
+        selectedStatus() === "delete-failed" &&
+        application
+      ) {
+        abandonDialog.open(application, environment);
+        return;
+      }
+      preparingCleanup = true;
+      const generation = cleanupGeneration;
+      refreshControls();
+      setInline(context, "info", "Loading cleanup details…");
+      void loadCleanupDetails(
+        context,
+        page.repo,
+        environment,
+        page.mutationNonce,
+        selected
+      )
+        .then(({ deployment, prepared }) => {
+          if (
+            !entry.active ||
+            generation !== cleanupGeneration ||
+            application !== selectedApplication() ||
+            environment !== selectedEnvironment()
+          )
+            return;
+          if (!prepared || !deployment) {
+            deploymentDiagnostics.delete(environment);
+            forgetEnvironmentDeployments(environment);
+            if (deployment) {
+              recoveryTargets.set(
+                deploymentKey(deployment.app, environment),
+                deployment
+              );
+              deployments.set(
+                deploymentKey(deployment.app, environment),
+                deployment.status
+              );
+            }
+            setInline(
+              context,
+              "info",
+              deployment ?
+                "History verified. Load cleanup details for the current run to confirm external cleanup."
+              : "History verified. No deployment remains tracked."
+            );
+            return;
+          }
+          if (deployment.app !== application)
+            throw new Error(
+              "Select the current run on the Deployments page to confirm cleanup."
+            );
+          recoveryTargets.set(
+            deploymentKey(application, environment),
+            deployment
+          );
+          preparingCleanup = false;
+          refreshControls();
+          setInline(
+            context,
+            "info",
+            "Cleanup details verified. Confirm external cleanup for this run."
+          );
+          context.focus.focus(stopTrackingAction);
+          abandonDialog.open(application, environment);
+        })
+        .catch((error: unknown) => {
+          if (
+            !entry.active ||
+            generation !== cleanupGeneration ||
+            application !== selectedApplication() ||
+            environment !== selectedEnvironment()
+          )
+            return;
+          setInline(
+            context,
+            "error",
+            error instanceof Error ?
+              error.message
+            : "Cleanup details could not load."
+          );
+        })
+        .finally(() => {
+          preparingCleanup = false;
+          if (entry.active) refreshControls();
+        });
     });
   }
   entry.on(context.dom.document, "visibilitychange", () => {

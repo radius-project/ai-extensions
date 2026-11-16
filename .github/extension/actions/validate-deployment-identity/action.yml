@@ -1,0 +1,34 @@
+name: Radius - Validate declared application identity
+description: Refuse an incompatible declared application before cloud work.
+inputs:
+  kind:
+    description: Deploy or delete.
+    required: false
+    default: deploy
+  application:
+    required: true
+    description: Declared literal application or unknown.
+  app-file:
+    required: true
+    description: Selected repository-relative model.
+  environment:
+    required: true
+    description: Target environment.
+  rad-commands:
+    required: false
+    description: Optional command override.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - shell: bash
+      env:
+        IDENTITY_KIND: ${{ inputs.kind }}
+        DECLARED_APPLICATION: ${{ inputs.application }}
+        MODEL_FILE: ${{ inputs.app-file }}
+        TARGET_ENVIRONMENT: ${{ inputs.environment }}
+        RAD_COMMANDS: ${{ inputs.rad-commands }}
+      run: node "$GITHUB_ACTION_PATH/validate.mjs"

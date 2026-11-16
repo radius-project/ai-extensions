@@ -445,6 +445,31 @@ describe("federated credential list arguments", () => {
 });
 
 describe("deploy dispatch environment and branch preflight", () => {
+  it.each([0, 1])(
+    "admits the 256-character title boundary but refuses overflow by %s",
+    async (overflow) => {
+      const fixed = "Radius - Deploy  [radius:v1 app=unknown] dep-execution"
+        .length;
+      const environment = "e".repeat(256 - fixed + overflow);
+      const { input, state } = request({ envName: environment });
+      const gh = recordingGh();
+      const service = createDeployDispatchService(dependencies({ ...gh }));
+      if (overflow) {
+        expect(await service.prepareAndDispatch(input)).toEqual({
+          dispatched: false
+        });
+        expect(state.deployError).toContain("256-character budget");
+        expect(gh.calls).toEqual([]);
+      } else {
+        expect(await service.prepareAndDispatch(input)).toMatchObject({
+          dispatched: true,
+          environment
+        });
+        expect(gh.calls).toHaveLength(1);
+      }
+    }
+  );
+
   it("prefers the resolved instance environment over the request's", async () => {
     const { input, state } = request({ envName: "resolved-env" });
     const gh = recordingGh();
@@ -605,6 +630,8 @@ describe("deploy dispatch environment and branch preflight", () => {
       "correlation_id=dep-execution",
       "--repo",
       "acme/widgets",
+      "-f",
+      "application=unknown",
       "-f",
       'rad_commands=["rad deploy"]'
     ]);
@@ -2098,39 +2125,44 @@ describe("deploy dispatch workflow publication and dispatch", () => {
   // synchronously, so an immediate `gh workflow run` 404s even though the
   // file is genuinely on the branch it dispatches from.
   describe("workflow registration delay (#767)", () => {
-    it("retries only an explicit correlation-input rejection using the same execution marker", async () => {
-      const { input } = request();
-      const gh = recordingGh([
-        {
-          code: 1,
-          stdout: "",
-          stderr: "HTTP 422: Unexpected inputs provided: [correlation_id]"
-        },
-        OK
-      ]);
-      let ids = 0;
-      const service = createDeployDispatchService(
-        dependencies({
-          ...gh,
-          id: () => `execution-${++ids}`,
-          ensureWorkflowsCurrent: async () => ({
-            created: [],
-            updated: ["run-rad-commands.yml"],
-            failed: []
+    it.each(["correlation_id", "application"])(
+      "retries a new %s input rejection using the same execution marker",
+      async (field) => {
+        const { input } = request();
+        const gh = recordingGh([
+          {
+            code: 1,
+            stdout: "",
+            stderr: `HTTP 422: Unexpected inputs provided: [${field}]`
+          },
+          OK
+        ]);
+        let ids = 0;
+        const service = createDeployDispatchService(
+          dependencies({
+            ...gh,
+            id: () => `execution-${++ids}`,
+            ensureWorkflowsCurrent: async () => ({
+              created: [],
+              updated: ["run-rad-commands.yml"],
+              failed: []
+            })
           })
-        })
-      );
-      expect(await service.prepareAndDispatch(input)).toMatchObject({
-        dispatched: true,
-        correlationId: "dep-execution-1"
-      });
-      expect(ids).toBe(1);
-      expect(
-        gh.calls.filter((call) => call.args[0] === "workflow")
-      ).toHaveLength(2);
-      for (const call of gh.calls.filter((call) => call.args[0] === "workflow"))
-        expect(call.args).toContain("correlation_id=dep-execution-1");
-    });
+        );
+        expect(await service.prepareAndDispatch(input)).toMatchObject({
+          dispatched: true,
+          correlationId: "dep-execution-1"
+        });
+        expect(ids).toBe(1);
+        expect(
+          gh.calls.filter((call) => call.args[0] === "workflow")
+        ).toHaveLength(2);
+        for (const call of gh.calls.filter(
+          (call) => call.args[0] === "workflow"
+        ))
+          expect(call.args).toContain("correlation_id=dep-execution-1");
+      }
+    );
 
     it("rejects an invalid correlation factory result before workflow changes", async () => {
       const { input } = request();
@@ -2466,6 +2498,8 @@ describe("deploy dispatch workflow publication and dispatch", () => {
           "correlation_id=dep-execution",
           "--repo",
           "acme/widgets",
+          "-f",
+          "application=unknown",
           "-f",
           'rad_commands=["rad deploy"]'
         ]);

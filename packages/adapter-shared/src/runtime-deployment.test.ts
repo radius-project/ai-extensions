@@ -82,6 +82,74 @@ afterEach(async () => {
 });
 
 describe("panel-independent deployment runtime", () => {
+  it.each(["repair", "notice"] as const)(
+    "releases mutation exclusion before issuing a hanging %s, observing stale errors without resending",
+    async (kind) => {
+      vi.useFakeTimers();
+      const delivery = held();
+      const reportDiagnostic = vi.fn();
+      const send = vi.fn(() => {
+        expect(h.runtime.owner.hasActiveWork()).toBe(false);
+        return delivery.promise;
+      });
+      const h = fixture(
+        {
+          delivery: {
+            ...(kind === "repair" ?
+              { sendRepair: send }
+            : { sendNotice: send }),
+            redactDiagnostic: (value) => value,
+            reportDiagnostic
+          }
+        },
+        async ({ entry }) => {
+          entry.state.deployStatus = "failed";
+          if (kind === "notice")
+            entry.state.deployErrorKind = "run-unconfirmed";
+        }
+      );
+      const first = await h.runtime.start(target);
+      if (!first.ok) throw new Error(first.error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(send).toHaveBeenCalledOnce();
+      expect(h.runtime.owner.isActive(first.invocation)).toBe(false);
+      expect(h.runtime.owner.hasPendingDelivery()).toBe(true);
+      for (const operation of ["delete", "abandon", "deploy"] as const) {
+        const reservation = h.runtime.owner.reserve(target, operation);
+        expect(reservation).not.toBeNull();
+        if (reservation) h.runtime.owner.release(reservation);
+      }
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(send).toHaveBeenCalledOnce();
+      const replacement = await h.runtime.start(
+        kind === "repair" ? { attemptId: first.invocation.attemptId } : target
+      );
+      if (!replacement.ok) throw new Error(replacement.error);
+      expect(first.invocation.signal.aborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      const stopping = h.runtime.owner.shutdown(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await stopping).toEqual({
+        complete: false,
+        pending: [
+          `delivery:${first.invocation.observationId}`,
+          ...(kind === "notice" ?
+            [`delivery:${replacement.invocation.observationId}`]
+          : [])
+        ]
+      });
+      const snapshot = { ...replacement.invocation.state };
+      delivery.reject(new Error("late SDK rejection"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reportDiagnostic).toHaveBeenCalledWith(
+        expect.stringContaining("late SDK rejection")
+      );
+      expect(replacement.invocation.state).toEqual(snapshot);
+      expect(h.runtime.owner.hasPendingDelivery()).toBe(false);
+      expect(send).toHaveBeenCalledTimes(kind === "notice" ? 2 : 1);
+    }
+  );
+
   it.each([undefined, "models/custom.bicep"])(
     "keeps repeat intent separate from pinned repair identity (%s)",
     async (appFile) => {
@@ -633,7 +701,8 @@ describe("panel-independent deployment runtime", () => {
     if (!result.ok) throw new Error(result.error);
     await vi.advanceTimersByTimeAsync(0);
     expect(sendRepair).toHaveBeenCalledTimes(1);
-    expect(runtime.owner.hasActiveWork()).toBe(true);
+    expect(runtime.owner.hasActiveWork()).toBe(false);
+    expect(runtime.owner.hasPendingDelivery()).toBe(true);
     await vi.advanceTimersByTimeAsync(2000);
     expect(sendRepair).toHaveBeenCalledTimes(2);
     const stopped = await runtime.owner.shutdown(100);
@@ -713,9 +782,11 @@ describe("panel-independent deployment runtime", () => {
       expect(runtime.owner.invalidate(started.invocation)).toBe(true);
       await vi.advanceTimersByTimeAsync(0);
       expect(runtime.owner.lookup()).toEqual({ kind: "missing" });
-      expect(runtime.owner.hasActiveWork()).toBe(phase === "delivering");
-      if (phase === "delivering")
-        expect(runtime.owner.reserve(target, "delete")).toBeNull();
+      expect(runtime.owner.hasActiveWork()).toBe(false);
+      expect(runtime.owner.hasPendingDelivery()).toBe(phase === "delivering");
+      const reservation = runtime.owner.reserve(target, "delete");
+      expect(reservation).not.toBeNull();
+      if (reservation) runtime.owner.release(reservation);
       finish.resolve();
       await vi.advanceTimersByTimeAsync(10000);
       expect(runtime.owner.hasActiveWork()).toBe(false);

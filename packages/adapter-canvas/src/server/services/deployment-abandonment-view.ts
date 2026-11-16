@@ -2,7 +2,7 @@ import type {
   DeploymentInvocation,
   DeploymentRuntime
 } from "@radius-project/adapter-shared";
-import type { DeploymentState } from "@radius-project/core";
+import { deploymentRunId, type DeploymentState } from "@radius-project/core";
 import type { DeploymentAbandonmentService } from "./deployment-abandonment.js";
 import { matchesDeployedApplicationState } from "./deployed-view-state.js";
 
@@ -30,24 +30,37 @@ export function createDeploymentAbandonmentViewService(dependencies: {
           {
             repo: payload.repo.trim(),
             environment: payload.environment.trim(),
-            application: payload.application.trim()
+            application: payload.application.trim(),
+            runId:
+              "runId" in payload && typeof payload.runId === "number" ?
+                payload.runId
+              : undefined
           }
         : undefined;
       const selected =
-        target?.repo && target.environment && target.application ?
+        (
+          target?.repo &&
+          target.environment &&
+          (target.application || target.runId)
+        ) ?
           dependencies.owner.lookupTarget(target)
         : undefined;
       const invocation =
         (
           selected?.kind === "found" &&
           target &&
-          matchesDeployedApplicationState(
-            {
-              deployEnvName: selected.invocation.target.environment,
-              deployAppName: selected.invocation.state.deployAppName
-            },
-            target
-          )
+          (target.runId !== undefined ?
+            deploymentRunId(
+              target.repo,
+              selected.invocation.state.deployRunUrl || ""
+            ) === target.runId
+          : matchesDeployedApplicationState(
+              {
+                deployEnvName: selected.invocation.target.environment,
+                deployAppName: selected.invocation.state.deployAppName
+              },
+              target
+            ))
         ) ?
           selected.invocation
         : undefined;

@@ -44,7 +44,7 @@ ${graphHeader("deployed")}
   <button id="deployed-delete-btn" class="rad-btn rad-btn--danger-outline" style="margin:0;" disabled>Delete Deployment</button>
   <button id="deployed-stop-tracking-btn" class="rad-btn rad-btn--secondary" style="display:none; margin:0;" disabled>Stop tracking deployment</button>
 </div>
-<div id="deployed-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
+<div id="deployed-inline-status" role="status" aria-live="polite" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
 <div class="rad-card" style="margin:0;">
   <div id="deployed-graph-label" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:12px; line-height:1.5; white-space:pre-line;"></div>
   <div id="deployed-mode-note" style="display:none; font-size:12px; color:var(--rad-text-secondary); margin-bottom:12px;"></div>
