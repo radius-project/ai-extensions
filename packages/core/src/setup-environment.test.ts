@@ -546,14 +546,14 @@ describe("configureSetupEnvironment", () => {
   );
 
   it.each([
-    [undefined, { trackingDeadline: 5, acquisitionPending: true }],
-    [2, {}]
+    ["Continue of the first attempt", "", undefined, true],
+    ["Retry after the first attempt", "", 2, false],
+    ["Continue of the retry", ":attempt-2", 2, true]
   ])(
-    "keeps an earlier run's state for retry attempt %j only when it is the same dispatch",
-    async (setupRetryAttempt, kept) => {
+    "keeps an earlier run's tracking state only for the same dispatch: %s",
+    async (_scenario, savedTargetSuffix, setupRetryAttempt, kept) => {
       let verification: unknown = {
-        dispatchMutationTarget:
-          "octo/app:radius-verify-credentials.yml:trunk:dev",
+        dispatchMutationTarget: `octo/app:radius-verify-credentials.yml:trunk:dev${savedTargetSuffix}`,
         runId: "9",
         trackingDeadline: 5,
         acquisitionPending: true
@@ -568,8 +568,13 @@ describe("configureSetupEnvironment", () => {
 
       await configureSetupEnvironment(h.input, h.ports);
 
-      expect(verification).toMatchObject({ runId: "10", ...kept });
-      if (setupRetryAttempt) {
+      expect(verification).toMatchObject({ runId: "10" });
+      if (kept) {
+        expect(verification).toMatchObject({
+          trackingDeadline: 5,
+          acquisitionPending: true
+        });
+      } else {
         expect(verification).not.toHaveProperty("trackingDeadline");
         expect(verification).not.toHaveProperty("acquisitionPending");
       }
