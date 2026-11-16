@@ -467,6 +467,78 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
 
 // RU-15: graph/planned bicep resolution + the graph-diff auto-compare preload.
 describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () => {
+  it.each(["server", "workspace"])(
+    "does not let late %s resolution replace a newer graph comparison",
+    async (phase) => {
+      const { canvas, deps } = setup({
+        bicepByRepoBranch: {
+          "workspace:acme/widgets@main": "resource base {}",
+          "remote:acme/widgets@old": "resource old {}",
+          "remote:acme/widgets@new": "resource new {}"
+        }
+      });
+      let release: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      if (phase === "workspace") {
+        vi.mocked(deps.workspace.detectWorkspaceContext).mockImplementationOnce(
+          async () => {
+            await held;
+            return {
+              workspacePath: "/workspace",
+              repo: "acme/widgets",
+              branch: "main"
+            };
+          }
+        );
+      } else {
+        const create = vi
+          .mocked(deps.getOrCreateServer)
+          .getMockImplementation();
+        if (!create) throw new Error("Missing server factory");
+        vi.mocked(deps.getOrCreateServer).mockImplementationOnce(
+          async (...args) => {
+            const entry = await create(...args);
+            await held;
+            return entry;
+          }
+        );
+      }
+      const pending = canvas.open(
+        ctx("radius-panel", {
+          page: "graph-diff",
+          repo: "acme/widgets",
+          baseBranch: "main",
+          headBranch: "old"
+        })
+      );
+      await vi.waitFor(() =>
+        phase === "workspace" ?
+          expect(deps.workspace.detectWorkspaceContext).toHaveBeenCalledTimes(1)
+        : expect(deps.servers.has("radius-panel")).toBe(true)
+      );
+
+      await canvas.open(
+        ctx("radius-panel", {
+          page: "graph-diff",
+          repo: "acme/widgets",
+          baseBranch: "main",
+          headBranch: "new"
+        })
+      );
+      release?.();
+      await pending;
+
+      expect(deps.servers.get("radius-panel")?.state.diffHead).toBe("new");
+      expect(
+        vi
+          .mocked(deps.graphSources.read)
+          .mock.calls.map(([request]) => request.ref)
+      ).toEqual(["main", "new"]);
+    }
+  );
+
   it("prepares source-ref resources for graph and planned pages using the context repo/branch", async () => {
     const { canvas, deps } = setup();
     await canvas.open(
@@ -485,6 +557,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     const bicep = "resource db 'Radius.Data/redis@2023-10-01-preview' = {}";
     const { canvas, deps } = setup({
       bicepByRepoBranch: {
+        "workspace:acme/widgets@main": bicep,
         "remote:acme/widgets@main": bicep,
         "remote:acme/widgets@feat": bicep
       }
@@ -496,12 +569,12 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     session.log = vi.fn(() => {
       throw new Error("log unavailable");
     });
-    (
-      deps.rad.radArtifactsDirForSelection as ReturnType<typeof vi.fn>
-    ).mockImplementation(async ({ log }) => {
-      log("building graph");
-      return { dir: "/workspace/.radius", remote: false };
-    });
+    (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_content, _path, { log }) => {
+        log("building graph");
+        return [{ id: "1", name: "db", type: "Radius.Data/redis" }];
+      }
+    );
     await canvas.open(
       ctx("radius-panel", {
         page: "graph-diff",
@@ -560,6 +633,37 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     expect(sent.displayPrompt).not.toContain("BCP035");
   });
 
+  it("stops automatic runtime repair handoffs after the existing retry budget", async () => {
+    const { canvas, deps, sessionHolder } = setup({
+      bicepByRepoBranch: {
+        "workspace:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}"
+      }
+    });
+    vi.mocked(deps.rad.buildGraphViaRad).mockRejectedValue(
+      new RadProcessError("rad exited with code 1", "BCP035: invalid model", "")
+    );
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await canvas.open(
+        ctx("radius-panel", {
+          page: "graph-diff",
+          repo: "acme/widgets",
+          baseBranch: "main",
+          headBranch: "feat"
+        })
+      );
+    }
+
+    expect(sessionHolder.get().send).toHaveBeenCalledTimes(3);
+    expect(deps.servers.get("radius-panel")?.state.diffModelingFailed).toBe(
+      true
+    );
+    expect(deps.servers.get("radius-panel")?.state.diffError).toBe(
+      GRAPH_MODELING_FAILURE_MESSAGE
+    );
+  });
+
   it("preserves the compile failure when the Agent handoff cannot be delivered", async () => {
     const { canvas, deps, sessionHolder } = setup({
       bicepByRepoBranch: {
@@ -567,6 +671,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         "remote:acme/widgets@feat": "resource db {}"
       }
     });
+
     vi.mocked(sessionHolder.get().send).mockRejectedValue(
       new Error("session unavailable")
     );
@@ -638,17 +743,16 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         "remote:acme/widgets@other": "resource db {}"
       }
     });
-    // First compare fails...
+    let rejectFirst: (error: Error) => void = () => {
+      throw new Error("First compilation has not started");
+    };
     (
       deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>
-    ).mockRejectedValueOnce(
-      new Error("rad app graph failed", {
-        cause: new RadProcessError(
-          "rad exited with code 1",
-          "BCP035: stale invalid model",
-          ""
-        )
-      })
+    ).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFirst = reject;
+        })
     );
     const firstOpen = canvas.open(
       ctx("radius-panel", {
@@ -658,8 +762,9 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         headBranch: "feat"
       })
     );
-    // ...but a second compare (different heads) starts and succeeds before the
-    // first one's rejection is observed, changing the live context token.
+    await vi.waitFor(() =>
+      expect(deps.rad.buildGraphViaRad).toHaveBeenCalledTimes(1)
+    );
     (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockResolvedValue(
       []
     );
@@ -669,6 +774,15 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         repo: "acme/widgets",
         baseBranch: "main",
         headBranch: "other"
+      })
+    );
+    rejectFirst(
+      new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "BCP035: stale invalid model",
+          ""
+        )
       })
     );
     await firstOpen;
@@ -683,7 +797,13 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     const firstResult = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    const { canvas, deps } = setup();
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: {
+        "workspace:acme/widgets@main": "resource current {}",
+        "remote:acme/widgets@old": "resource old {}",
+        "remote:acme/widgets@new": "resource new {}"
+      }
+    });
     vi.mocked(deps.executionOwner.hasActiveDeletionTasks).mockReturnValue(true);
     vi.mocked(deps.executionOwner.onDeletionTasksSettled).mockImplementation(
       (_instanceId, listener) => {

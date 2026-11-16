@@ -31,7 +31,8 @@ import {
   resolveInstalledRadiusVersion,
   runRadBicepPublishExtension,
   runRadBicepPublish,
-  createDeploymentRepository
+  createDeploymentRepository,
+  createGraphSourceBindings
 } from "@radius-project/adapter-shared";
 import { createRadiusCliVersionReader } from "./radius-cli-version.js";
 import { readAwsSwitch } from "./aws-switch.js";
@@ -63,7 +64,6 @@ import {
   workspaceModelRecoverable,
   workspaceSourceChangedSince
 } from "./workspace.js";
-import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
 import {
   createProductionCanvasServerRuntime,
   invalidateDeployListCache,
@@ -134,6 +134,11 @@ const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
 const awsEnabled = readAwsSwitch(process.env);
 const deploymentRuntime = createProductionDeploymentRuntime({ awsEnabled });
+const graphSources = createGraphSourceBindings({
+  execute: cliExec,
+  redactDiagnostic: redactGhCredentials,
+  stagingRoot: join(os.homedir(), ".copilot", "radius", "graph-staging")
+});
 const readDeploymentModel = createDeployModelSource({
   readWorkspace: fetchWorkspaceFile,
   readRepository: createDeploymentRepository({
@@ -232,6 +237,7 @@ const dependencies: RadiusExtensionDependencies = {
     workspaceFileExists
   },
   github,
+  graphSources,
   core: {
     computeGraphDiff,
     fetchBicepFromRepo,
@@ -244,8 +250,7 @@ const dependencies: RadiusExtensionDependencies = {
       >,
     ensureRadBinary,
     runRadBicepPublishExtension,
-    runRadBicepPublish,
-    radArtifactsDirForSelection
+    runRadBicepPublish
   },
   sourceRefs: {
     getSourceRefResources,

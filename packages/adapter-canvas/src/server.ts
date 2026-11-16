@@ -4,10 +4,12 @@ import {
   createDeploymentRepository,
   createDeploymentIdentityReader,
   createDeploymentObservationBindings,
+  createGraphSourceBindings,
   readWorkspaceFile,
   type DeploymentRuntime
 } from "@radius-project/adapter-shared";
 import { createDeploymentViews } from "./server/services/deployment-views.js";
+import { createCanvasGraphSources } from "./server/graph-sources.js";
 import { createDeploymentAbandonmentViewService } from "./server/services/deployment-abandonment-view.js";
 import {
   ensureAzureServicePrincipal,
@@ -46,7 +48,6 @@ import {
   buildRemediation,
   computeGraphDiff,
   deployStatusKeys,
-  fetchBicepSelectionFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
   mergeDeployedGraphDisplayMetadata,
@@ -244,10 +245,6 @@ import type {
   SetupCleanupOutcome,
   SetupCleanupResult
 } from "./operations.js";
-import {
-  radArtifactsDirForSelection,
-  radArtifactsFingerprint
-} from "./remote-rad-artifacts.js";
 import {
   prepareSourceRefResources,
   setSourceRefResources
@@ -3641,36 +3638,6 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 // Takes only the state-bearing shape of an instance entry, not the whole
 // `CanvasServerEntry`, so the migrated `graphs-planning` write routes can inject
 // it against their own narrow entry type without a cast.
-async function fetchBicepSelection(
-  entry: { state: CanvasState },
-  repo: string,
-  branch: string
-): Promise<{
-  content: string | null;
-  fromWorkspace: boolean;
-  branch: string;
-  bicepPath: string;
-}> {
-  const access = accessForSelection(entry, repo, branch);
-  if (access.useWorkspace) {
-    const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
-    if (local)
-      return {
-        content: local.content,
-        fromWorkspace: true,
-        branch: access.branch,
-        bicepPath: local.repoPath
-      };
-  }
-  const remote = await fetchBicepSelectionFromRepo(github, repo, access.branch);
-  return {
-    content: remote?.content ?? null,
-    fromWorkspace: false,
-    branch: access.branch,
-    bicepPath: remote?.bicepPath ?? ""
-  };
-}
-
 // Every path on a branch, resolved through the same workspace-or-remote access
 // rule as the Bicep selection so the answer describes the tree the graph would
 // actually be built from. Resolves empty when the tree cannot be read, which
@@ -6033,6 +6000,17 @@ export function createProductionCanvasServerRuntime(
   });
   const authorizeAzure = createAzureSetupService(azureSetupDependencies);
 
+  const graphSources = createCanvasGraphSources(
+    createGraphSourceBindings({
+      execute: cliExecPort,
+      redactDiagnostic: redactGhCredentials,
+      stagingRoot: tmpdir(),
+      diagnostic: (message) => console.error(message)
+    }),
+    isWorkspaceSelection,
+    currentWorkspaceBranch
+  );
+  const fetchBicepSelection = graphSources.select;
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     resolveBranchForRequest: (entry, repo, requestedBranch) =>
@@ -6063,10 +6041,10 @@ export function createProductionCanvasServerRuntime(
       listBranchPaths(entry, repo, branch),
     workspaceGraphJsonPath: (state, bicepRepoPath) =>
       workspaceGraphJsonPath(state, bicepRepoPath),
-    radArtifactsDirForSelection: (options) =>
-      radArtifactsDirForSelection({ ...options, github }),
+    radArtifactsDirForSelection: graphSources.stage,
     buildGraphViaRad: buildGraphPort,
     canvasGraphResources,
+    removeDirectory: (dir) => rmSync(dir, { recursive: true, force: true }),
     errorMessage,
     logError: (message) => console.error(message)
   });
@@ -6092,13 +6070,11 @@ export function createProductionCanvasServerRuntime(
       pipeline: createGraphPipeline<CanvasServerEntry>({
         fetchBicepSelection: (entry, repo, branch) =>
           fetchBicepSelection(entry, repo, branch),
-        resolveRadArtifactsDir: (request) =>
-          radArtifactsDirForSelection({ ...request, github }),
+        resolveRadArtifactsDir: graphSources.stage,
         buildGraphViaRad: buildGraphPort,
         canvasGraphResources,
         workspaceGraphJsonPath,
         graphDefinitionHash,
-        radArtifactsFingerprint,
         removeDirectory: (dir) => {
           rmSync(dir, { recursive: true, force: true });
         }
@@ -6605,14 +6581,14 @@ export function createProductionCanvasServerRuntime(
     plannedGraph: createPlannedGraphRecoveryService({
       prepareSourceRefResources,
       setSourceRefResources,
-      readModelForSelection: readDeployModelForSelection,
-      radArtifactsDirForSelection: (request) =>
-        radArtifactsDirForSelection({ ...request, github }),
+      readModelForSelection: graphSources.readForRecovery,
+      radArtifactsDirForSelection: graphSources.stage,
       buildGraphViaRad: buildGraphPort,
       fetchRecipePack: (provider) => fetchRecipePack(github, provider),
       resolveRecipeOutputs: (parsed, recipes, provider) =>
         resolveRecipeOutputs(github, parsed, recipes, provider),
       canvasGraphResources,
+      removeDirectory: (dir) => rmSync(dir, { recursive: true, force: true }),
       errorMessage
     }),
     readModelForSelection: readDeployModelForSelection,

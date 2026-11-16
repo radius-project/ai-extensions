@@ -5,17 +5,33 @@
 import {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,
+  createGraphOrchestrator,
   evaluateAppModelFreshness,
   evaluateAppSource,
   parseAppOrigin
 } from "@radius-project/core";
 import type {
   AppModelFreshness,
-  AppSourceEvaluation
+  AppSourceEvaluation,
+  GraphSourceIdentity,
+  GraphSourceRead
 } from "@radius-project/core";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasState } from "../shared.js";
+
+export function createRuntimeGraphOrchestrator(
+  deps: RadiusExtensionDependencies,
+  log?: (message: string) => void
+) {
+  return createGraphOrchestrator({
+    stage: (selection) => deps.graphSources.stage(selection),
+    compile: (content, path, options) =>
+      deps.rad.buildGraphViaRad(content, path, { ...options, log }),
+    diff: deps.core.computeGraphDiff,
+    diagnostic: deps.logError
+  });
+}
 
 // A branch's application model, classified. `refreshable` is the branch-safety
 // half of the decision: the skill writes the working tree, so only a model that
@@ -31,6 +47,11 @@ export interface AppModelStatus {
 
 export interface GraphContextHelpers {
   workspaceState(): Promise<CanvasState>;
+  readBicepForBranch(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<GraphSourceRead>;
   fetchBicepForBranch(
     repo: string,
     branch: string,
@@ -60,6 +81,8 @@ export interface GraphContextHelpers {
 export function createGraphContextHelpers(
   deps: RadiusExtensionDependencies
 ): GraphContextHelpers {
+  if (!deps.graphSources)
+    throw new Error("Graph source bindings are required.");
   async function workspaceState(): Promise<CanvasState> {
     const session = deps.session.get();
     const workspace = await deps.workspace.detectWorkspaceContext(session);
@@ -72,20 +95,39 @@ export function createGraphContextHelpers(
     };
   }
 
+  async function readBicepForBranch(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<GraphSourceRead> {
+    return deps.graphSources.read({
+      repo,
+      ref: branch,
+      workspace: {
+        repo: state.workspaceRepo || "",
+        ref: state.workspaceBranch || "",
+        path: state.workspacePath || "",
+        authorized: deps.workspace.isWorkspaceSelection(state, repo, branch)
+      }
+    });
+  }
+
   async function fetchBicepForBranch(
     repo: string,
     branch: string,
     state: CanvasState
   ): Promise<string | null> {
-    if (deps.workspace.isWorkspaceSelection(state, repo, branch)) {
-      const local = await deps.workspace.fetchWorkspaceBicep(
-        state,
-        repo,
-        branch
-      );
-      if (local) return local;
+    const read = await readBicepForBranch(repo, branch, state);
+    if (read.status === "unavailable") throw new Error(read.diagnostic);
+    if (read.status === "present") {
+      if (!read.content.trim()) {
+        throw new Error(
+          `Application definition ${read.source.definitionPath} is empty.`
+        );
+      }
+      return read.content;
     }
-    return await deps.core.fetchBicepFromRepo(deps.github, repo, branch);
+    return null;
   }
 
   // Picks the lister that can actually see the branch — the local worktree for
@@ -143,19 +185,17 @@ export function createGraphContextHelpers(
   // generator wrote. So the record has to be looked for in both places, or a
   // root-level model would read as permanently unrecorded.
   async function readAppOrigin(
-    repo: string,
-    branch: string,
-    state: CanvasState,
-    fromWorkspace: boolean
+    source: GraphSourceIdentity
   ): Promise<string | null> {
     for (const repoPath of [APP_ORIGIN_REPO_PATH, APP_ORIGIN_ROOT_PATH]) {
-      const text = await (
-        fromWorkspace ?
-          deps.appModel.fetchWorkspaceFile(state, repo, branch, repoPath)
-        : deps.appModel.fetchRepoFile(repo, branch, repoPath)).catch(
-        () => null
-      );
-      if (text) return text;
+      const read = await deps.graphSources.readFile(source, repoPath);
+      if (read.status === "unavailable") {
+        deps.logError(
+          `Application model origin is unavailable: ${read.diagnostic}`
+        );
+        return null;
+      }
+      if (read.status === "present") return read.content;
     }
     return null;
   }
@@ -170,22 +210,18 @@ export function createGraphContextHelpers(
     branch: string,
     state: CanvasState
   ): Promise<AppModelStatus> {
-    let model: string | null = null;
-    let fromWorkspace = false;
-    if (repo && deps.workspace.isWorkspaceSelection(state, repo, branch)) {
-      model = await deps.workspace
-        .fetchWorkspaceBicep(state, repo, branch)
-        .catch(() => null);
-      fromWorkspace = !!model;
+    const read = await readBicepForBranch(repo, branch, state);
+    if (read.status === "unavailable") throw new Error(read.diagnostic);
+    const model = read.status === "present" ? read.content : null;
+    if (model !== null && !model.trim()) {
+      throw new Error(
+        `Application definition ${read.source.definitionPath} is empty.`
+      );
     }
-    if (!model) {
-      model = await deps.core
-        .fetchBicepFromRepo(deps.github, repo, branch)
-        .catch(() => null);
-    }
+    const fromWorkspace = read.source.kind === "workspace";
 
     const [originText, headCommit] = await Promise.all([
-      readAppOrigin(repo, branch, state, fromWorkspace),
+      readAppOrigin(read.source),
       // Only the worktree's head is worth fetching. On any other branch the
       // comparison it feeds cannot say anything useful, because committing an
       // app model is itself a commit past the one its record names, so the two
@@ -235,7 +271,7 @@ export function createGraphContextHelpers(
     return {
       repo,
       branch,
-      refreshable: fromWorkspace,
+      refreshable: fromWorkspace && model !== null,
       freshness: evaluateAppModelFreshness({
         model,
         originText,
@@ -251,6 +287,7 @@ export function createGraphContextHelpers(
 
   return {
     workspaceState,
+    readBicepForBranch,
     fetchBicepForBranch,
     evaluateAppSourceForBranch,
     listSourceTreeForBranch,

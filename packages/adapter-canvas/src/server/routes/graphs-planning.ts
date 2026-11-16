@@ -1,7 +1,16 @@
 import {
+  createGraphOrchestrator,
+  computeGraphDiff,
+  type GraphSourceRead,
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
+import {
+  graphArtifactHandle,
+  graphSourceForSelection,
+  GraphRequestSuperseded,
+  type StagedRadArtifacts
+} from "./graph-pipeline.js";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -721,18 +730,17 @@ export function createGraphsPlanningRoutes(
 // this route reads. A null `content` is the "no app.bicep on this branch" signal
 // that triggers the generation handoff.
 export interface LoadGraphStreamBicepSelection {
+  sourceRead?: GraphSourceRead;
   content: string | null;
   fromWorkspace: boolean;
   branch: string;
   bicepPath: string;
 }
 
-export interface LoadGraphStreamRadArtifacts {
-  dir: string;
-  remote: boolean;
-}
+export type LoadGraphStreamRadArtifacts = StagedRadArtifacts;
 
 export interface LoadGraphStreamRadArtifactsOptions {
+  selection: GraphSourceRead;
   isLocal: boolean;
   state: CanvasState | undefined;
   repo: string;
@@ -826,6 +834,7 @@ export interface GraphsPlanningStreamDependencies {
     options: LoadGraphStreamBuildOptions
   ): Promise<unknown[]>;
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
+  removeDirectory(dir: string): void;
   errorMessage(error: unknown): string;
   logError(message: string): void;
 }
@@ -926,6 +935,15 @@ export async function handleLoadGraphStream(
       branch
     );
     const content = selection.content;
+    if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+      sendDone({ stale: true });
+      return;
+    }
+    if (content !== null && !content.trim()) {
+      throw new Error(
+        `${selection.bicepPath || ".radius/app.bicep"} is empty; the graph is unavailable.`
+      );
+    }
 
     if (content) {
       sendProgress("Found existing app.bicep — parsing resources...");
@@ -937,6 +955,10 @@ export async function handleLoadGraphStream(
       const source = evaluateAppSource(
         await dependencies.listBranchPaths(entry, repo, branch)
       );
+      if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+        sendDone({ stale: true });
+        return;
+      }
       if (source.status === "none") {
         sendDone({
           error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
@@ -967,26 +989,48 @@ export async function handleLoadGraphStream(
       selection.fromWorkspace ?
         dependencies.workspaceGraphJsonPath(entry.state, selection.bicepPath)
       : "";
-    const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-      await dependencies.radArtifactsDirForSelection({
-        isLocal: selection.fromWorkspace,
-        state: entry.state,
-        repo,
-        branch,
-        bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-        log: sendProgress
-      });
-    const graphValues = await dependencies.buildGraphViaRad(
-      content,
-      selection.bicepPath || ".radius/app.bicep",
+    const graph = createGraphOrchestrator<
+      CanvasGraphResource,
+      CanvasGraphResource[]
+    >({
+      stage: async (selected) =>
+        graphArtifactHandle(
+          await dependencies.radArtifactsDirForSelection({
+            selection: selected,
+            isLocal: selection.fromWorkspace,
+            state: entry.state,
+            repo,
+            branch,
+            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
+            log: sendProgress
+          }),
+          dependencies.removeDirectory
+        ),
+      compile: async (definition, definitionPath, options) =>
+        dependencies.canvasGraphResources(
+          await dependencies.buildGraphViaRad(definition, definitionPath, {
+            ...options,
+            log: sendProgress,
+            saveGraphJsonTo: graphJsonPath
+          })
+        ),
+      diff: computeGraphDiff,
+      diagnostic: (message) =>
+        dependencies.logError(
+          `[radius graph] could not remove staged artifacts: ${message}`
+        )
+    });
+    const authored = await graph.authored(
+      graphSourceForSelection(selection, repo, branch),
       {
-        log: sendProgress,
-        saveGraphJsonTo: graphJsonPath,
-        radArtifactsDir,
-        cleanupRadArtifactsDir: radArtifactsRemote
+        checkCancelled: () => {
+          if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+            throw new GraphRequestSuperseded();
+          }
+        }
       }
     );
-    const resources = dependencies.canvasGraphResources(graphValues);
+    const resources = authored.resources;
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (
@@ -1012,6 +1056,10 @@ export async function handleLoadGraphStream(
 
     sendDone({ reload: true });
   } catch (e) {
+    if (e instanceof GraphRequestSuperseded) {
+      sendDone({ stale: true });
+      return;
+    }
     const failure = asGraphModelingFailure(e);
     if (failure instanceof GraphModelingFailure) {
       dependencies.logError(

@@ -135,6 +135,7 @@ function start(): Harness {
         ];
       },
       canvasGraphResources: (values) => values as CanvasGraphResource[],
+      removeDirectory: () => {},
       errorMessage: (error) =>
         error instanceof Error ? error.message : String(error),
       logError: () => {}

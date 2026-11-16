@@ -406,6 +406,30 @@ function replaceProgressRecord(
 
 describe("graph planning workflows", () => {
   it.each(["loadGraph", "planGraph"] as const)(
+    "does not author or stage a superseded %s selection",
+    async (workflow) => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        afterSelect: () => {
+          prepareSourceRefResources(
+            harness.entry,
+            workflow === "loadGraph" ? "graph" : "planned",
+            {
+              repo: "octo/other",
+              branch: "main"
+            }
+          );
+        }
+      });
+      const outcome = await harness.run(workflow, '{"repo":"octo/app"}');
+      expect(outcome.status).toBe(409);
+      expect(harness.handoffs).toEqual([]);
+      expect(harness.order).not.toContain("stage:main");
+      expect(harness.order).not.toContain("compile:main");
+    }
+  );
+
+  it.each(["loadGraph", "planGraph"] as const)(
     "reports an unavailable workspace branch without model lookup or handoff in %s",
     async (workflow) => {
       const harness = start({
@@ -705,7 +729,11 @@ describe("graph planning workflows", () => {
         }
         const explicit = await harness.run(
           workflow,
-          JSON.stringify({ ...request, retryModeling: true, restartWait: true })
+          JSON.stringify({
+            ...request,
+            retryModeling: true,
+            restartWait: true
+          })
         );
         expect(explicit.payload).toMatchObject({ needsAppBicep: true });
         expect(harness.state.appModelFailures).toEqual({});
@@ -1313,7 +1341,7 @@ describe("graph planning workflows", () => {
       ]);
     });
 
-    it("surfaces a discard failure on the cache path as 400, unlike the stale path", async () => {
+    it("logs a discard failure without replacing a cached graph result", async () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "/tmp/staged", remote: true } },
@@ -1333,9 +1361,11 @@ describe("graph planning workflows", () => {
         '{"repo":"octo/app","refresh":true}'
       );
 
-      expect(outcome.status).toBe(400);
-      expect(outcome.payload).toEqual({ error: "EBUSY" });
-      expect(harness.loggedErrors).toEqual([]);
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload.cached).toBe(true);
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] could not remove staged artifacts: EBUSY"
+      ]);
     });
 
     // Issue #475: the graph pages render a failed load as graph content, so
@@ -2000,7 +2030,7 @@ describe("graph planning workflows", () => {
       });
       expect(harness.handoffs).toHaveLength(1);
       expect(harness.state.plannedFollowsWorkspaceBranch).toBe(false);
-      expect(harness.order).toEqual(["select:main", "stage:main", "discard:"]);
+      expect(harness.order).toEqual(["select:main", "stage:main"]);
       expect(harness.recipePackCalls).toEqual([]);
     });
 
@@ -2088,7 +2118,7 @@ describe("graph planning workflows", () => {
       expect(harness.state.plannedDefinitionHash).toBe("hash-new");
     });
 
-    it("surfaces cleanup failures from the cached planned fast path", async () => {
+    it("logs cleanup failures without replacing the cached planned result", async () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "/tmp/staged", remote: true } },
@@ -2108,8 +2138,11 @@ describe("graph planning workflows", () => {
         '{"repo":"octo/app","environment":"prod","refresh":true}'
       );
 
-      expect(outcome.status).toBe(400);
-      expect(outcome.payload).toEqual({ error: "EBUSY" });
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload).toEqual({ reload: false, refreshed: true });
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] could not remove staged artifacts: EBUSY"
+      ]);
       expect(harness.order).toEqual([
         "select:main",
         "stage:main",
@@ -2317,6 +2350,53 @@ describe("graph planning workflows", () => {
 
   describe("POST /api/diff-branches", () => {
     const diffBody = '{"repo":"octo/app","base":"main","head":"feature/x"}';
+
+    it("disposes the base staging handle when staging the head fails", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
+        },
+        staged: { main: { dir: "/tmp/base", remote: true } }
+      });
+      const outcome = await harness.run("diffBranches", diffBody);
+      expect(outcome.status).toBe(400);
+      expect(outcome.payload.error).toContain("stageArtifacts");
+      expect(harness.order).toEqual([
+        "select:main",
+        "select:feature/x",
+        "stage:main",
+        "stage:feature/x",
+        "discard:/tmp/base"
+      ]);
+      expect(harness.state.diffResources).toBeUndefined();
+    });
+
+    it("disposes both staging handles after base compilation fails, preserving the primary error", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
+        },
+        staged: {
+          main: { dir: "/tmp/base", remote: true },
+          "feature/x": { dir: "/tmp/head", remote: true }
+        },
+        compileThrows: { main: new Error("primary compile failure") },
+        discardThrows: new Error("EBUSY")
+      });
+      const outcome = await harness.run("diffBranches", diffBody);
+      expect(outcome.payload.error).toBe("primary compile failure");
+      expect(harness.order.slice(-3)).toEqual([
+        "compile:main",
+        "discard:/tmp/base",
+        "discard:/tmp/head"
+      ]);
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] Graph artifact cleanup failed: EBUSY",
+        "[radius graph] Graph artifact cleanup failed: EBUSY"
+      ]);
+    });
 
     it("answers 400 without recording a diff error when the body will not parse", async () => {
       const harness = start();
@@ -2590,7 +2670,10 @@ describe("graph planning workflows", () => {
         const harness = start({
           selections: {
             [modeled]: selectionOf({ branch: modeled }),
-            [stillMissing]: selectionOf({ branch: stillMissing, content: null })
+            [stillMissing]: selectionOf({
+              branch: stillMissing,
+              content: null
+            })
           }
         });
         harness.state.appModelFailures = {
@@ -2699,7 +2782,9 @@ describe("graph planning workflows", () => {
         "stage:main",
         "stage:feature/x",
         "compile:main",
-        "compile:feature/x"
+        "compile:feature/x",
+        "discard:/tmp/base",
+        "discard:/tmp/head"
       ]);
       expect(outcome.payload).toEqual({
         message: "Comparing main → feature/x",
@@ -3001,7 +3086,7 @@ describe("graph planning workflows", () => {
 
       const outcome = await harness.run("diffBranches", diffBody);
 
-      expect(outcome.status).toBe(400);
+      expect(outcome.status).toBe(409);
       // The failure belongs to a selection no longer on screen, so it must not
       // paint an error over the newer one.
       expect(harness.state.diffError).toBeUndefined();
@@ -3168,7 +3253,8 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual([
         "select:main",
         "stage:main",
-        "compile:main"
+        "compile:main",
+        "discard:/tmp/stage"
       ]);
       expect(harness.recipePackCalls).toEqual([]);
       expect(harness.state.plannedRepo).toBeUndefined();

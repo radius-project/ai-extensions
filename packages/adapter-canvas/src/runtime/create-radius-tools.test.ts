@@ -879,8 +879,9 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
     expect(result).toMatchObject({
       resultType: "success",
-      textResultForLlm:
-        "No .radius/app.bicep or app.bicep could be read for main or feat. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.",
+      textResultForLlm: expect.stringContaining(
+        "No .radius/app.bicep or app.bicep could be read for main or feat. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas."
+      ),
       toolTelemetry: { radiusGraphDiff: { outcome: "unavailable" } }
     });
     expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
@@ -946,12 +947,12 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     session.log = vi.fn(() => {
       throw new Error("log unavailable");
     });
-    (
-      deps.rad.radArtifactsDirForSelection as ReturnType<typeof vi.fn>
-    ).mockImplementation(async ({ log }) => {
-      log("building graph");
-      return { dir: "/workspace/.radius", remote: false };
-    });
+    (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_content, _path, { log }) => {
+        log("building graph");
+        return [];
+      }
+    );
 
     const result = await findTool(
       tools,

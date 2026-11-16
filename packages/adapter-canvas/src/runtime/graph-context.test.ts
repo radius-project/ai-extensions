@@ -54,6 +54,40 @@ function helpers(options: Parameters<typeof createFakeDependencies>[0] = {}) {
 }
 
 describe("resolveAppModelStatus", () => {
+  it("reads remote origin metadata through the exact resolved model source", async () => {
+    const { resolveAppModelStatus, deps } = helpers();
+    const source = {
+      kind: "github" as const,
+      repo: "other/repo",
+      ref: "release",
+      revision: COMMIT,
+      definitionPath: "app.bicep"
+    };
+    vi.mocked(deps.graphSources.read).mockResolvedValue({
+      status: "present",
+      source,
+      content: MODEL
+    });
+    vi.mocked(deps.graphSources.readFile).mockResolvedValue({
+      status: "present",
+      source: { ...source, definitionPath: APP_ORIGIN_REPO_PATH },
+      content: origin()
+    });
+
+    const status = await resolveAppModelStatus(
+      "other/repo",
+      "release",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("up-to-date");
+    expect(deps.graphSources.readFile).toHaveBeenCalledWith(
+      source,
+      APP_ORIGIN_REPO_PATH
+    );
+    expect(deps.appModel.fetchRepoFile).not.toHaveBeenCalled();
+    expect(deps.appModel.workspaceHeadCommit).not.toHaveBeenCalled();
+  });
   it("reports a missing model on a branch that has none", async () => {
     const { resolveAppModelStatus } = helpers();
 
@@ -350,9 +384,7 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.status).toBe("generator-changed");
   });
 
-  it("does not judge a GitHub-served model against the worktree, even for the workspace branch", async () => {
-    // The worktree has no model on disk, so the branch's committed model is what
-    // renders, and the worktree head commit says nothing about it.
+  it("keeps a missing worktree model local even when GitHub has a model and origin", async () => {
     const { resolveAppModelStatus, deps } = helpers({
       bicepByRepoBranch: { "remote:acme/widgets@main": MODEL },
       filesByRepoBranch: {
@@ -374,12 +406,9 @@ describe("resolveAppModelStatus", () => {
     );
 
     expect(status.refreshable).toBe(false);
-    expect(status.freshness.status).toBe("up-to-date");
-    expect(deps.appModel.fetchRepoFile).toHaveBeenCalledWith(
-      "acme/widgets",
-      "main",
-      APP_ORIGIN_REPO_PATH
-    );
+    expect(status.freshness.status).toBe("missing");
+    expect(deps.appModel.fetchRepoFile).not.toHaveBeenCalled();
+    expect(deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
   });
 
   it("reports a model with no origin record as refreshable without confirmation", async () => {
@@ -511,7 +540,7 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.status).toBe("unrecorded");
   });
 
-  it("falls back to GitHub when reading the worktree model fails", async () => {
+  it("reports an unreadable worktree model without reading GitHub", async () => {
     const { resolveAppModelStatus, deps } = helpers({
       bicepByRepoBranch: { "remote:acme/widgets@main": MODEL }
     });
@@ -519,14 +548,10 @@ describe("resolveAppModelStatus", () => {
       throw new Error("worktree unreadable");
     };
 
-    const status = await resolveAppModelStatus(
-      "acme/widgets",
-      "main",
-      WORKSPACE_STATE
-    );
-
-    expect(status.refreshable).toBe(false);
-    expect(status.freshness.status).toBe("unrecorded");
+    await expect(
+      resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("worktree unreadable");
+    expect(deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
   });
 
   it("fails open when the head commit cannot be resolved", async () => {
@@ -549,19 +574,15 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.status).toBe("up-to-date");
   });
 
-  it("treats an unreadable model as missing rather than propagating the failure", async () => {
+  it("propagates unreadable remote models rather than treating them as missing", async () => {
     const { resolveAppModelStatus, deps } = helpers();
     deps.core.fetchBicepFromRepo = async () => {
       throw new Error("contents unavailable");
     };
 
-    const status = await resolveAppModelStatus(
-      "other/repo",
-      "main",
-      WORKSPACE_STATE
-    );
-
-    expect(status.freshness.status).toBe("missing");
+    await expect(
+      resolveAppModelStatus("other/repo", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("contents unavailable");
   });
 
   it("does not look in the worktree when no repo is known", async () => {
@@ -575,6 +596,14 @@ describe("resolveAppModelStatus", () => {
 });
 
 describe("workspaceState", () => {
+  it("fails construction when mandatory graph bindings are missing", () => {
+    const { deps } = helpers();
+    Reflect.deleteProperty(deps, "graphSources");
+
+    expect(() => createGraphContextHelpers(deps)).toThrow(
+      "Graph source bindings are required"
+    );
+  });
   it("seeds both the workspace and the context from the detected worktree", async () => {
     const { workspaceState } = helpers();
 
@@ -602,15 +631,36 @@ describe("fetchBicepForBranch", () => {
     ).toBe(MODEL);
   });
 
-  it("falls back to GitHub when the worktree has no model", async () => {
-    const { fetchBicepForBranch } = helpers({
+  it("does not fall back to GitHub when the worktree has no model", async () => {
+    const { fetchBicepForBranch, deps } = helpers({
       bicepByRepoBranch: { "remote:acme/widgets@main": "// committed" }
     });
 
     expect(
       await fetchBicepForBranch("acme/widgets", "main", WORKSPACE_STATE)
-    ).toBe("// committed");
+    ).toBeNull();
+    expect(deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
   });
+
+  it.each(["", " \n"])(
+    "rejects an empty preferred local definition (%j)",
+    async (content) => {
+      const { fetchBicepForBranch, resolveAppModelStatus, deps } = helpers({
+        bicepByRepoBranch: {
+          "workspace:acme/widgets@main": content,
+          "remote:acme/widgets@main": MODEL
+        }
+      });
+      await expect(
+        fetchBicepForBranch("acme/widgets", "main", WORKSPACE_STATE)
+      ).rejects.toThrow("empty");
+      await expect(
+        resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE)
+      ).rejects.toThrow("empty");
+      expect(deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+      expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+    }
+  );
 });
 
 describe("listSourceTreeForBranch", () => {

@@ -1,4 +1,10 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import {
+  prepareGraph,
+  compilePreparedGraph,
+  type GraphSourceRead,
+  type StagedGraphArtifacts
+} from "@radius-project/core";
 
 // The one modeling pipeline behind every `graphs-planning` write route.
 //
@@ -18,6 +24,24 @@ import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 // and owns no cache.
 
 export const DEFAULT_APP_BICEP_PATH = ".radius/app.bicep";
+
+export class GraphRequestSuperseded extends Error {}
+
+export function graphArtifactHandle(
+  staged: StagedRadArtifacts,
+  remove: (dir: string) => void | Promise<void>
+): StagedGraphArtifacts {
+  return (
+    staged.handle ?? {
+      dir: staged.dir,
+      owned: staged.remote,
+      fingerprint: "",
+      dispose: async () => {
+        if (staged.remote && staged.dir) await remove(staged.dir);
+      }
+    }
+  );
+}
 
 // The instance entry as the graph routes see it. Only `state` is declared: the
 // entry indirection is kept rather than flattened to a state reader because a
@@ -40,6 +64,7 @@ export interface AppBicepSelection {
   fromWorkspace: boolean;
   branch: string;
   bicepPath: string;
+  sourceRead?: GraphSourceRead;
 }
 
 // `remote` is true only when `dir` is a staged temp directory this process must
@@ -47,9 +72,11 @@ export interface AppBicepSelection {
 export interface StagedRadArtifacts {
   dir: string;
   remote: boolean;
+  handle?: StagedGraphArtifacts;
 }
 
 export interface RadArtifactsRequest {
+  selection: GraphSourceRead;
   isLocal: boolean;
   state?: CanvasState;
   repo: string;
@@ -91,10 +118,8 @@ export interface GraphPipelineDependencies<
     bicepRepoPath: string | null | undefined
   ): string;
   graphDefinitionHash(content: string, artifactsFingerprint: string): string;
-  radArtifactsFingerprint(dir?: string): string;
-  // Removes a staged artifacts directory. Allowed to throw: one caller wraps it
-  // best-effort and another deliberately lets the failure surface, and the two
-  // are observably different.
+  // The owning orchestration scope reports disposal failures without replacing
+  // the primary graph result.
   removeDirectory(dir: string): void;
 }
 
@@ -137,7 +162,25 @@ export interface GraphPipeline<
     staged: StagedRadArtifacts
   ): string;
   modelRevisionFor(selection: AppBicepSelection): string;
-  discardStagedArtifacts(staged: StagedRadArtifacts): void;
+  discardStagedArtifacts(staged: StagedRadArtifacts): void | Promise<void>;
+}
+
+export function graphSourceForSelection(
+  selection: AppBicepSelection,
+  repo = "",
+  branch = selection.branch
+): GraphSourceRead {
+  if (selection.sourceRead) return selection.sourceRead;
+  const source = {
+    kind:
+      selection.fromWorkspace ? ("workspace" as const) : ("github" as const),
+    repo,
+    ref: branch,
+    definitionPath: selection.bicepPath || DEFAULT_APP_BICEP_PATH
+  };
+  return selection.content === null ?
+      { status: "absent", source }
+    : { status: "present", source, content: selection.content };
 }
 
 export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
@@ -150,36 +193,77 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
   }
 
   return {
-    selectAppBicep(entry, repo, branch) {
-      return dependencies.fetchBicepSelection(entry, repo, branch);
+    async selectAppBicep(entry, repo, branch) {
+      const selection = await dependencies.fetchBicepSelection(
+        entry,
+        repo,
+        branch
+      );
+      if (selection.content !== null && !selection.content.trim()) {
+        throw new Error(
+          `${repo}@${branch}:${bicepPathOf(selection)} is empty; the graph is unavailable.`
+        );
+      }
+      return selection;
     },
 
     bicepPathOf,
 
-    stageArtifacts({ entry, selection, repo, branch, log }) {
-      return dependencies.resolveRadArtifactsDir({
-        // The legacy branches guard this as `!!(entry && selection.fromWorkspace)`.
-        // Every caller answers 503 before reaching here when the entry is
-        // missing, so the `entry &&` conjunct is an equivalent mutant; the
-        // required entry argument encodes that guarantee in the type instead.
-        isLocal: !!selection.fromWorkspace,
-        state: entry.state,
-        repo,
-        branch,
-        bicepRepoPath: bicepPathOf(selection),
-        log
+    async stageArtifacts({ entry, selection, repo, branch, log }) {
+      const selected = graphSourceForSelection(selection, repo, branch);
+      let staged: StagedRadArtifacts = { dir: "", remote: false };
+      const prepared = await prepareGraph(selected, async () => {
+        staged = await dependencies.resolveRadArtifactsDir({
+          selection: selected,
+          // The legacy branches guard this as `!!(entry && selection.fromWorkspace)`.
+          // Every caller answers 503 before reaching here when the entry is
+          // missing, so the `entry &&` conjunct is an equivalent mutant; the
+          // required entry argument encodes that guarantee in the type instead.
+          isLocal: !!selection.fromWorkspace,
+          state: entry.state,
+          repo,
+          branch,
+          bicepRepoPath: bicepPathOf(selection),
+          log
+        });
+        return (
+          staged.handle ?? {
+            dir: staged.dir,
+            owned: staged.remote,
+            fingerprint: "",
+            dispose: async () => {
+              if (staged.remote && staged.dir)
+                dependencies.removeDirectory(staged.dir);
+            }
+          }
+        );
       });
+      return { ...staged, handle: prepared.staged };
     },
 
     compileResources({ selection, staged, log, saveGraphJsonTo }) {
-      return dependencies
-        .buildGraphViaRad(selection.content || "", bicepPathOf(selection), {
-          log,
-          saveGraphJsonTo,
-          radArtifactsDir: staged.dir,
-          cleanupRadArtifactsDir: staged.remote
-        })
-        .then((values) => dependencies.canvasGraphResources(values));
+      if (selection.content === null) return Promise.resolve([]);
+      if (!selection.content.trim()) {
+        return Promise.reject(
+          new Error(
+            `${bicepPathOf(selection)} is empty; the graph is unavailable.`
+          )
+        );
+      }
+      return compilePreparedGraph(
+        {
+          selection: graphSourceForSelection(selection),
+          staged: graphArtifactHandle(staged, dependencies.removeDirectory)
+        },
+        (content, definitionPath, options) =>
+          dependencies
+            .buildGraphViaRad(content, definitionPath, {
+              log,
+              saveGraphJsonTo,
+              ...options
+            })
+            .then((values) => dependencies.canvasGraphResources(values))
+      );
     },
 
     toCanvasResources(values) {
@@ -200,7 +284,7 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
       // have matched.
       return dependencies.graphDefinitionHash(
         selection.content || "",
-        dependencies.radArtifactsFingerprint(staged.dir)
+        staged.handle?.fingerprint ?? ""
       );
     },
 
@@ -209,6 +293,7 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
     },
 
     discardStagedArtifacts(staged) {
+      if (staged.handle) return staged.handle.dispose();
       if (staged.remote && staged.dir) dependencies.removeDirectory(staged.dir);
     }
   };

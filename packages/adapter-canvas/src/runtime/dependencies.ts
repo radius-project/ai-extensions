@@ -18,7 +18,10 @@ import type { SessionHolder } from "./session.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import type { EnvironmentTools } from "./environment-tools.js";
 import type { PluginUpdatePreferences } from "./plugin-update-preferences.js";
-import type { DeploymentRuntime } from "@radius-project/adapter-shared";
+import type {
+  DeploymentRuntime,
+  GraphSourceBindings
+} from "@radius-project/adapter-shared";
 import type { DeploymentToolsPorts } from "./deployment-tools.js";
 
 export interface WorkspaceContext {
@@ -87,16 +90,6 @@ export interface CoreGraphDependencies {
   ): CanvasGraphResource[];
 }
 
-export interface RadArtifactsSelection {
-  isLocal: boolean;
-  state?: CanvasState;
-  github?: GitHubContentReader;
-  repo?: string;
-  branch?: string;
-  bicepRepoPath: string;
-  log?: (message: string) => void;
-}
-
 export interface RadDependencies {
   buildGraphViaRad(
     content: string,
@@ -121,9 +114,6 @@ export interface RadDependencies {
     env?: Record<string, string>;
     log?: (message: string) => void;
   }): Promise<unknown>;
-  radArtifactsDirForSelection(
-    selection: RadArtifactsSelection
-  ): Promise<{ dir: string; remote: boolean }>;
 }
 
 export interface SourceRefsDependencies {
@@ -335,6 +325,7 @@ export interface RadiusExtensionDependencies {
   getLastWebviewActivityAt(): number;
   workspace: WorkspaceDependencies;
   github: GitHubContentReader;
+  graphSources: GraphSourceBindings;
   core: CoreGraphDependencies;
   rad: RadDependencies;
   deployment: DeploymentRuntime;
