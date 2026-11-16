@@ -789,6 +789,32 @@ describe("createAwsSetupJournal", () => {
       );
       expect(send.run).not.toHaveBeenCalled();
     });
+
+    // Rollback removes it only once no environment of the repository uses
+    // it, so a setup that reused it can still clean it up.
+    it("records the app-roles policy even when the role already had it", async () => {
+      const { journal: j } = journal({});
+      const op = operation();
+      const send = sender(ok());
+
+      await j.write(
+        op,
+        {
+          kind: "aws_role_policy.put",
+          accountId: ACCOUNT,
+          roleArn: ROLE_ARN,
+          roleName: ROLE,
+          roleId: "AROA1",
+          policyName: "radius-app-roles-1"
+        },
+        put,
+        send
+      );
+
+      expect(send.read).not.toHaveBeenCalled();
+      expect(op.setupArtifacts.awsRolePolicies).toHaveLength(1);
+      expect(op.providerRecovery.mutations).toHaveLength(1);
+    });
   });
 
   describe("reconcile", () => {

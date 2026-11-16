@@ -1,4 +1,5 @@
 import {
+  awsAppRolesPolicyRepositoryId,
   trustedGitHubSubjects,
   parsePolicyDocument
 } from "@radius-project/core";
@@ -586,6 +587,12 @@ export function createAwsSetupJournal<
 
     async write(operation, change, args, sender) {
       if (change.kind !== "aws_role_policy.put") {
+        return journaled(operation, change, args, sender);
+      }
+      // A repository's app-roles policy is shared by its environments, and
+      // rollback removes it only once none of them uses it. So it is always
+      // this setup's to remove, even when the role already had it.
+      if (awsAppRolesPolicyRepositoryId(change.policyName) !== null) {
         return journaled(operation, change, args, sender);
       }
       // `put-role-policy` replaces a policy that already exists, so only one

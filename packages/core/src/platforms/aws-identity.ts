@@ -254,9 +254,18 @@ export function buildAwsAppBoundary(
   return { path, name, arn: `arn:aws:iam::${accountId}:policy${path}${name}` };
 }
 
+const APP_ROLES_POLICY_PREFIX = "radius-app-roles-";
+
 /** The deploy role's inline policy that lets it manage a repository's app roles. */
 export function buildAwsAppRolesPolicyName(repoId: number): string {
-  return `radius-app-roles-${repoId}`;
+  return `${APP_ROLES_POLICY_PREFIX}${repoId}`;
+}
+
+/** The repository ID in an app-roles policy name, or null for any other name. */
+export function awsAppRolesPolicyRepositoryId(name: string): number | null {
+  if (!name.startsWith(APP_ROLES_POLICY_PREFIX)) return null;
+  const id = name.slice(APP_ROLES_POLICY_PREFIX.length);
+  return /^[1-9]\d{0,15}$/.test(id) ? Number(id) : null;
 }
 
 export function githubOidcProviderArn(accountId: string): string {

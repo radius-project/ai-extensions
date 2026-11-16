@@ -1,4 +1,6 @@
 export const AWS_TRUST_SUBJECTS_VARIABLE = "AWS_TRUST_SUBJECTS";
+// The permissions boundary the containers Recipe puts on every app role.
+export const AWS_APP_BOUNDARY_ARN_VARIABLE = "AWS_APP_BOUNDARY_ARN";
 
 export interface SetupProviderConfigurationInput {
   clientId?: string;
@@ -157,9 +159,8 @@ export async function applySetupProviderConfiguration(
   const k8s = data.cluster || "";
 
   await ports.setEnvironmentVariable("AWS_ROLE_ARN", roleArn);
-  // The permissions boundary the containers Recipe puts on every app role.
   await ports.setEnvironmentVariable(
-    "AWS_APP_BOUNDARY_ARN",
+    AWS_APP_BOUNDARY_ARN_VARIABLE,
     data.appBoundaryArn || ""
   );
   await ports.setEnvironmentVariable("AWS_REGION", region);

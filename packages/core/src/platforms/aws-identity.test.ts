@@ -4,6 +4,7 @@ import {
   acceptedGitHubSubjects,
   AWS_CLI_MINIMUM_VERSION,
   AWS_LOCK_REMOVABLE_AFTER_MS,
+  awsAppRolesPolicyRepositoryId,
   awsLockHolderLabel,
   awsLockPolicyArn,
   awsRoleArn,
@@ -11,6 +12,7 @@ import {
   buildAwsAppBoundary,
   buildAwsAppBoundaryPolicy,
   buildAwsAppRolesPolicy,
+  buildAwsAppRolesPolicyName,
   buildAwsDeployRoleName,
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
@@ -291,6 +293,15 @@ describe("names and identifiers", () => {
     expect(isAwsEnvironmentPolicyName("radius-deploy-dev-42", 42)).toBe(true);
     expect(isAwsEnvironmentPolicyName("radius-deploy-dev-142", 42)).toBe(false);
     expect(isAwsEnvironmentPolicyName("radius-app-roles-42", 42)).toBe(false);
+  });
+
+  it("reads the repository ID from an app-roles policy name only", () => {
+    expect(awsAppRolesPolicyRepositoryId(buildAwsAppRolesPolicyName(42))).toBe(
+      42
+    );
+    expect(awsAppRolesPolicyRepositoryId("radius-deploy-dev-42")).toBeNull();
+    expect(awsAppRolesPolicyRepositoryId("radius-app-roles-042")).toBeNull();
+    expect(awsAppRolesPolicyRepositoryId("radius-app-roles-42-x")).toBeNull();
   });
 
   it("names a unique boundary at the environment's app role path", () => {

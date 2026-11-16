@@ -831,7 +831,10 @@ describe("real server and fake SDK runtime ownership", () => {
           )
         ).toEqual(
           panel ?
-            [["aws_role.create", "confirmed"]]
+            [
+              ["aws_role.create", "confirmed"],
+              ["aws_role_policy.put", "not_applied"]
+            ]
           : [
               ["aws_role.create", "confirmed"],
               ["aws_role_policy.put", "confirmed"],
@@ -2364,11 +2367,7 @@ describe("real server and fake SDK runtime ownership", () => {
           expect(snapshots.at(-1)?.setupArtifacts).toMatchObject(
             azureStage ?
               {
-                azureApp: {
-                  state: "created",
-                  origin: "this_operation",
-                  appId
-                }
+                azureApp: { state: "created", origin: "this_operation", appId }
               }
             : stage === "environment" ?
               {

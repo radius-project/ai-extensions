@@ -3795,25 +3795,48 @@ describe("setupAwsDeployIdentity and the EKS Pod Identity Agent", () => {
     ]);
   });
 
-  it("stops before the lock and any write when the add-on isn't ready", async () => {
-    const aws = fakeAws({
-      ...happyPath,
-      "eks describe-addon": fail(
+  it.each([
+    [
+      "is missing",
+      fail(
         "An error occurred (ResourceNotFoundException) when calling the DescribeAddon operation"
-      )
-    });
-    const result = await setupAwsDeployIdentity(request, aws.ports);
-    expect(result).toMatchObject({
-      ok: false,
-      code: "aws-pod-identity-agent-missing",
-      created: []
-    });
-    expect(result.ok ? "" : result.message).toContain(
-      "Nothing was changed. Install the add-on or fix it in the EKS console, then retry. To install it, run: aws eks create-addon --cluster-name shop --addon-name eks-pod-identity-agent --region us-west-2"
-    );
-    expect(aws.locks).toEqual([]);
-    expect(aws.calls.filter((args) => args[0] === "iam")).toEqual([]);
-  });
+      ),
+      "aws-pod-identity-agent-missing",
+      "Cluster shop doesn't have the EKS Pod Identity Agent add-on, which gives app containers their AWS permissions. Nothing was changed. Install it, then retry: aws eks create-addon --cluster-name shop --addon-name eks-pod-identity-agent --region us-west-2"
+    ],
+    [
+      "can't be read",
+      fail(
+        "An error occurred (AccessDeniedException) when calling the DescribeAddon operation"
+      ),
+      "aws-pod-identity-agent-unreadable",
+      "Allow eks:DescribeAddon on the cluster, then retry. AWS reported: An error occurred (AccessDeniedException)"
+    ],
+    [
+      "fails to load",
+      fail(
+        "An error occurred (ThrottlingException) when calling the DescribeAddon operation"
+      ),
+      "aws-pod-identity-agent-unreadable",
+      "Fix the cause, then retry. AWS reported: An error occurred (ThrottlingException)"
+    ],
+    [
+      "isn't active",
+      ok({ addon: { status: "DEGRADED" } }),
+      "aws-pod-identity-agent-missing",
+      "The EKS Pod Identity Agent add-on on cluster shop is DEGRADED"
+    ]
+  ])(
+    "stops before the lock and any write when the add-on %s",
+    async (_case, addon, code, message) => {
+      const aws = fakeAws({ ...happyPath, "eks describe-addon": addon });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({ ok: false, code, created: [] });
+      expect(result.ok ? "" : result.message).toContain(message);
+      expect(aws.locks).toEqual([]);
+      expect(aws.calls.filter((args) => args[0] === "iam")).toEqual([]);
+    }
+  );
 });
 
 describe("setupAwsDeployIdentity and the environment's app boundary", () => {
@@ -4380,5 +4403,95 @@ describe("rollbackAwsSetupChanges and the app boundary", () => {
       `Could not read permissions boundary ${BOUNDARY.arn}`
     );
     expect(aws.find("iam delete-policy")).toBeUndefined();
+  });
+});
+
+describe("rollbackAwsSetupChanges and the app-roles policy", () => {
+  const policyTarget = (key: string, policyName: string) => ({
+    key,
+    artifactType: "aws_role_policy" as const,
+    roleArn: ROLE_ARN,
+    roleName: ROLE,
+    roleId: "AROA1",
+    policyName
+  });
+  // Setup journals the app-roles policy first, even when it already existed.
+  const targets = [
+    policyTarget("appRoles", APP_ROLES_POLICY),
+    policyTarget("policy", POLICY)
+  ];
+  const script: Script = {
+    "--version": ok("aws-cli/2.17.0"),
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-role": ok({
+      Role: { ...managedRole([PROD]).Role, RoleId: "AROA1" }
+    }),
+    "iam delete-role-policy": ok()
+  };
+  const rollback = (aws: ReturnType<typeof fakeAws>) =>
+    rollbackAwsSetupChanges(
+      {
+        repo: "octo/shop",
+        repository: { ok: true, repoId: REPO_ID },
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        targets
+      },
+      {
+        ...aws.ports,
+        listOtherEnvironments: async () => ({ ok: true, environments: [] })
+      }
+    );
+  const outcomes = (result: AwsSetupRollbackOutcome[]) =>
+    Object.fromEntries(result.map((entry) => [entry.key, entry.outcome]));
+  const deletedPolicies = (aws: ReturnType<typeof fakeAws>) =>
+    aws.calls
+      .filter((args) => args[1] === "delete-role-policy")
+      .map((args) => args[args.indexOf("--policy-name") + 1]);
+
+  it("removes a policy another setup put once this setup's environment policy is gone", async () => {
+    // IAM may still list the environment policy just deleted.
+    const aws = fakeAws({
+      ...script,
+      "iam list-role-policies": ok({ PolicyNames: [APP_ROLES_POLICY, POLICY] })
+    });
+    expect(outcomes(await rollback(aws))).toEqual({
+      policy: "deleted",
+      appRoles: "deleted"
+    });
+    expect(deletedPolicies(aws)).toEqual([POLICY, APP_ROLES_POLICY]);
+  });
+
+  it("keeps the policy while another environment of the repository remains", async () => {
+    const aws = fakeAws({
+      ...script,
+      "iam list-role-policies": ok({
+        PolicyNames: [
+          APP_ROLES_POLICY,
+          awsEnvironmentPolicyName(REPO_ID, "prod")
+        ]
+      })
+    });
+    expect(outcomes(await rollback(aws))).toEqual({
+      policy: "deleted",
+      appRoles: "skipped"
+    });
+    expect(deletedPolicies(aws)).toEqual([POLICY]);
+  });
+
+  it("keeps the policy when this setup's environment policy couldn't be deleted", async () => {
+    const aws = fakeAws({
+      ...script,
+      "iam delete-role-policy": fail("AccessDenied")
+    });
+    const result = await rollback(aws);
+    expect(outcomes(result)).toEqual({
+      policy: "warning",
+      appRoles: "warning"
+    });
+    expect(result.find((entry) => entry.key === "appRoles")?.detail).toBe(
+      `Kept policy ${APP_ROLES_POLICY} on IAM role ${ROLE}, because Radius couldn't delete policy ${POLICY} first.`
+    );
+    expect(deletedPolicies(aws)).toEqual([POLICY]);
   });
 });

@@ -10,6 +10,7 @@ import {
   buildAwsAppBoundaryPolicy,
   buildAwsAppRolesPolicy,
   buildAwsAppRolesPolicyName,
+  awsAppRolesPolicyRepositoryId,
   buildAwsEnvironmentPermissionPolicy,
   buildGitHubTrustPolicy,
   AWS_CLI_MINIMUM_VERSION,
@@ -230,16 +231,17 @@ const RESOURCE_IN_USE = /ResourceInUseException/;
 const ENTITY_EXISTS = /EntityAlreadyExists/;
 const DELETE_CONFLICT = /DeleteConflict/;
 const LIMIT_EXCEEDED = /LimitExceeded/;
+const RESOURCE_NOT_FOUND = /ResourceNotFoundException/;
 
 // App roles reach pods through EKS Pod Identity, which needs the agent on
 // every node. A cluster without EKS Auto Mode gets it from the
 // eks-pod-identity-agent add-on. UPDATING keeps the running agent until its
-// replacement is ready.
-async function podIdentityAgentReady(
+// replacement is ready. Null when the add-on is ready.
+async function podIdentityAgentProblem(
   ports: Pick<AwsDeployIdentityPorts, "runAws">,
   cluster: string,
   region: string
-): Promise<boolean> {
+): Promise<{ code: string; message: string } | null> {
   const addon = await ports.runAws([
     "eks",
     "describe-addon",
@@ -252,10 +254,30 @@ async function podIdentityAgentReady(
     "--output",
     "json"
   ]);
-  const output = succeeded(addon) ? parseJson(addon.stdout) : null;
+  if (!succeeded(addon)) {
+    if (RESOURCE_NOT_FOUND.test(addon.stderr)) {
+      return {
+        code: "aws-pod-identity-agent-missing",
+        message: `Cluster ${cluster} doesn't have the EKS Pod Identity Agent add-on, which gives app containers their AWS permissions. Nothing was changed. Install it, then retry: aws eks create-addon --cluster-name ${cluster} --addon-name eks-pod-identity-agent --region ${region}`
+      };
+    }
+    const fix =
+      ACCESS_DENIED.test(addon.stderr) ?
+        "Allow eks:DescribeAddon on the cluster, then retry."
+      : "Fix the cause, then retry.";
+    return {
+      code: "aws-pod-identity-agent-unreadable",
+      message: `Could not read the EKS Pod Identity Agent add-on on cluster ${cluster}, so Radius can't tell whether app containers will get their AWS permissions. Nothing was changed. ${fix} AWS reported: ${detail(addon)}`
+    };
+  }
+  const output = parseJson(addon.stdout);
   const status =
     isRecord(output) && isRecord(output.addon) ? output.addon.status : "";
-  return status === "ACTIVE" || status === "UPDATING";
+  if (status === "ACTIVE" || status === "UPDATING") return null;
+  return {
+    code: "aws-pod-identity-agent-missing",
+    message: `The EKS Pod Identity Agent add-on on cluster ${cluster} is ${typeof status === "string" && status ? status : "in an unknown state"}, so app containers can't get their AWS permissions. Nothing was changed. Fix the add-on in the EKS console, then retry.`
+  };
 }
 
 // IAM is eventually consistent. A run that releases the lock right after
@@ -457,12 +479,9 @@ export async function setupAwsDeployIdentity(
       described.cluster.computeConfig
     : undefined;
   const autoMode = isRecord(computeConfig) && computeConfig.enabled === true;
-  if (!autoMode && !(await podIdentityAgentReady(ports, cluster, region))) {
-    return fail(
-      "aws-pod-identity-agent-missing",
-      `Radius could not confirm that cluster ${cluster} has an ACTIVE EKS Pod Identity Agent add-on, which gives app containers their AWS permissions. Nothing was changed. Install the add-on or fix it in the EKS console, then retry. To install it, run: aws eks create-addon --cluster-name ${cluster} --addon-name eks-pod-identity-agent --region ${region}`
-    );
-  }
+  const agent =
+    autoMode ? null : await podIdentityAgentProblem(ports, cluster, region);
+  if (agent) return fail(agent.code, agent.message);
   ports.step(`✅ Cluster ${cluster} runs the EKS Pod Identity Agent.`);
 
   // Resolve which role this is before writing anything, so a same-named role
@@ -1253,8 +1272,6 @@ export type AwsDeployIdentityRemovalResult =
     }
   | { readonly ok: false; readonly message: string };
 
-const RESOURCE_NOT_FOUND = /ResourceNotFoundException/;
-
 function sameText(left: string, right: string): boolean {
   return left.trim().toLowerCase() === right.trim().toLowerCase();
 }
@@ -1513,12 +1530,15 @@ async function removeOrphanedAccessEntry(
 }
 
 // The repository's app-roles policy serves all its environments on the role,
-// so it goes with the last environment policy. The listing leaves out
-// `deletedPolicy`, which IAM may still show just after the delete.
+// so it goes only with the last environment policy. `deletedPolicies` are left
+// out of the listing, which IAM may still show just after the delete. IAM may
+// also miss a policy another setup put moments ago. The policy is then
+// deleted, and that environment's app roles fail with AccessDenied until its
+// setup runs again and puts the policy back.
 async function removeUnusedAppRolesPolicy(
   roleName: string,
   repoId: number,
-  deletedPolicy: string,
+  deletedPolicies: readonly string[],
   ports: Pick<AwsDeployIdentityRemovalPorts, "runAws">
 ): Promise<AccessEntryOutcome> {
   const policyName = buildAwsAppRolesPolicyName(repoId);
@@ -1549,7 +1569,8 @@ async function removeUnusedAppRolesPolicy(
   if (
     names.some(
       (name) =>
-        name !== deletedPolicy && isAwsEnvironmentPolicyName(name, repoId)
+        !deletedPolicies.includes(name) &&
+        isAwsEnvironmentPolicyName(name, repoId)
     )
   ) {
     return {
@@ -1835,7 +1856,7 @@ export async function removeAwsEnvironmentFromRole(
   const appRoles = await removeUnusedAppRolesPolicy(
     roleName,
     request.repoId,
-    policyName,
+    [policyName],
     ports
   );
   if (appRoles.kind === "failed") {
@@ -1970,8 +1991,9 @@ function entryOutcome(
 
 /**
  * Undo the AWS changes one setup recorded on one role, in reverse order: the
- * access entry (by the same rule as environment delete), the permission
- * policies, the trust subjects, the permissions boundary, then the role. The
+ * access entry (by the same rule as environment delete), the environment's
+ * policy, the repository's app-roles policy (by the same rule as environment
+ * delete), the trust subjects, the permissions boundary, then the role. The
  * role goes only when setup created it, it is still that role, and nothing
  * else trusts or is attached to it. The account's GitHub identity provider
  * always stays. The lock is taken after the account check and released by the
@@ -2166,8 +2188,49 @@ export async function rollbackAwsSetupChanges(
   }
 
   let policiesKept = false;
-  for (const target of targets) {
-    if (target.artifactType !== "aws_role_policy") continue;
+  const policyTargets = targets.flatMap((target) =>
+    target.artifactType === "aws_role_policy" ? [target] : []
+  );
+  // A repository's app-roles policy goes last, and only with the last of the
+  // repository's environment policies on the role.
+  const appRolesRepository = (target: { policyName: string }) =>
+    awsAppRolesPolicyRepositoryId(target.policyName);
+  const deletedPolicies: string[] = [];
+  const failedPolicies: string[] = [];
+  for (const target of [
+    ...policyTargets.filter((target) => appRolesRepository(target) === null),
+    ...policyTargets.filter((target) => appRolesRepository(target) !== null)
+  ]) {
+    const repoId = appRolesRepository(target);
+    if (repoId !== null) {
+      // An environment policy of this setup that is still on the role would
+      // read as another environment's, and keep the app-roles policy for good.
+      const blocking = failedPolicies.find((name) =>
+        isAwsEnvironmentPolicyName(name, repoId)
+      );
+      if (blocking !== undefined) {
+        policiesKept = true;
+        await add(
+          rollbackOutcome(
+            target.key,
+            "warning",
+            `Kept policy ${target.policyName} on IAM role ${roleName}, because Radius couldn't delete policy ${blocking} first.`
+          )
+        );
+        continue;
+      }
+      const outcome = await removeUnusedAppRolesPolicy(
+        roleName,
+        repoId,
+        deletedPolicies,
+        ports
+      );
+      if (outcome.kind === "warning" || outcome.kind === "failed") {
+        policiesKept = true;
+      }
+      await add(entryOutcome(target.key, outcome));
+      continue;
+    }
     const deletion = await ports.runAws([
       "iam",
       "delete-role-policy",
@@ -2177,11 +2240,14 @@ export async function rollbackAwsSetupChanges(
       target.policyName
     ]);
     if (succeeded(deletion)) {
+      deletedPolicies.push(target.policyName);
       await add(rollbackOutcome(target.key, "deleted"));
     } else if (NO_SUCH_ENTITY.test(deletion.stderr)) {
+      deletedPolicies.push(target.policyName);
       await add(rollbackOutcome(target.key, "not_found"));
     } else {
       policiesKept = true;
+      failedPolicies.push(target.policyName);
       await add(
         rollbackOutcome(
           target.key,
