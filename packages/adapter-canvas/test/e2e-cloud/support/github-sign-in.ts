@@ -121,12 +121,14 @@ export function readGhSessionCredentials(
 
 /**
  * Sets the session for everything this process runs: the product, the
- * fixture's `gh` calls, and the package calls.
+ * fixture's `gh` calls, and the package calls. The session is for github.com,
+ * so an inherited GH_HOST is removed too.
  */
 export function applyGhSessionCredentials(
   credentials: GhSessionCredentials,
   env: NodeJS.ProcessEnv = process.env
 ): void {
+  delete env.GH_HOST;
   env.GH_TOKEN = credentials.token;
   env.GITHUB_TOKEN = credentials.token;
   env.GH_PACKAGES_TOKEN = credentials.token;

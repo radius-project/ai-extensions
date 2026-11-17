@@ -167,8 +167,14 @@ describe("readGhSessionCredentials", () => {
 });
 
 describe("applyGhSessionCredentials", () => {
-  it("sets the token for gh, the product, and package calls", () => {
-    const env: NodeJS.ProcessEnv = { GH_PACKAGES_TOKEN: "old", PATH: "/bin" };
+  // The session belongs to github.com, so an inherited enterprise host would
+  // send every later gh call to the wrong server.
+  it("sets the token for gh, the product, and package calls, on github.com", () => {
+    const env: NodeJS.ProcessEnv = {
+      GH_PACKAGES_TOKEN: "old",
+      GH_HOST: "ghe.example.test",
+      PATH: "/bin"
+    };
 
     applyGhSessionCredentials({ token: SESSION_TOKEN, login: LOGIN }, env);
 
@@ -205,7 +211,7 @@ describe("prepareCloudRun", () => {
 
   it("signs a local run in with the gh session for a copy outside radius-project", () => {
     const { runGh } = fakeGh();
-    const env: NodeJS.ProcessEnv = { ...OVERRIDE };
+    const env: NodeJS.ProcessEnv = { ...OVERRIDE, GH_HOST: "ghe.example.test" };
 
     expect(prepareCloudRun(runGh, env)).toEqual({
       fixture: copy("octo-cat/ai-extensions-fixture"),
@@ -213,6 +219,7 @@ describe("prepareCloudRun", () => {
     });
     expect(env.GH_TOKEN).toBe(SESSION_TOKEN);
     expect(env.GH_PACKAGES_USER).toBe(LOGIN);
+    expect(env).not.toHaveProperty("GH_HOST");
   });
 
   it("keeps the GitHub App for an override that names a radius-project repository", () => {
