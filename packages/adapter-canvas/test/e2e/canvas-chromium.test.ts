@@ -39,7 +39,10 @@ import {
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { AWS_SUBNET_NOTE } from "../../src/browser/environment/aws-infrastructure.js";
-import { defaultAwsDeployRoleName } from "../../src/aws-deploy-role-name.js";
+import {
+  awsAppBoundary,
+  defaultAwsDeployRoleName
+} from "../../src/aws-deploy-role-name.js";
 import {
   generateDeleteWorkflow,
   generateDeployWorkflow,
@@ -793,6 +796,7 @@ async function openEnvironmentWizard(page: Page): Promise<void> {
 const RETRY_ENVIRONMENT = "fixture-environment";
 const RETRY_FAILED_RUN_ID = 39;
 const RETRY_NEW_RUN_ID = 41;
+const RETRY_REPOSITORY_ID = 42;
 const GH_NOT_FOUND = { exitCode: 1, stderr: "gh: Not Found (HTTP 404)" };
 
 function ghCommand(
@@ -910,7 +914,7 @@ function retrySetupGitHubCommands(
       ["api", `/repos/${REPOSITORY}`],
       JSON.stringify({
         full_name: REPOSITORY,
-        id: 42,
+        id: RETRY_REPOSITORY_ID,
         owner: { id: 7, login: "fixture" },
         default_branch: "main",
         permissions: { admin: true, push: true }
@@ -1038,6 +1042,19 @@ function verifyRunCommands(
 function stateWrittenBy(calls: readonly FakeCliCall[]): FakeCliCommand[] {
   const option = (args: readonly string[], name: string) =>
     args[args.indexOf(name) + 1] ?? "";
+  const tags = (args: readonly string[]) => {
+    const start = args.indexOf("--tags") + 1;
+    const end = args.indexOf("--output", start);
+    return args.slice(start, end < 0 ? undefined : end).map((tag) => {
+      const [key = "", value = ""] = tag.split(",");
+      return {
+        Key: key.replace(/^Key=/, ""),
+        Value: value.replace(/^Value=/, "")
+      };
+    });
+  };
+  // The account of the IAM objects the first attempt created.
+  let account = "";
   const commands: FakeCliCommand[] = [];
   for (const { tool, args, matched } of calls) {
     if (!matched) continue;
@@ -1055,20 +1072,10 @@ function stateWrittenBy(calls: readonly FakeCliCall[]): FakeCliCommand[] {
     }
     if (tool === "aws" && args[0] === "iam" && args[1] === "create-role") {
       const roleName = option(args, "--role-name");
-      const tagsStart = args.indexOf("--tags") + 1;
-      const tagsEnd = args.indexOf("--output", tagsStart);
-      const tags = args
-        .slice(tagsStart, tagsEnd < 0 ? undefined : tagsEnd)
-        .map((tag) => {
-          const [key = "", value = ""] = tag.split(",");
-          return {
-            Key: key.replace(/^Key=/, ""),
-            Value: value.replace(/^Value=/, "")
-          };
-        });
       const trust = option(args, "--assume-role-policy-document");
       // The trust policy names the account through its identity provider ARN.
-      const account = /arn:aws:iam::(\d{12}):oidc-provider\//.exec(trust)?.[1];
+      account =
+        /arn:aws:iam::(\d{12}):oidc-provider\//.exec(trust)?.[1] ?? account;
       commands.push({
         tool: "aws",
         argsPrefix: ["iam", "get-role", "--role-name", roleName],
@@ -1080,10 +1087,50 @@ function stateWrittenBy(calls: readonly FakeCliCall[]): FakeCliCommand[] {
             Path: "/",
             Description: option(args, "--description"),
             AssumeRolePolicyDocument: JSON.parse(trust) as unknown,
-            Tags: tags
+            Tags: tags(args)
           }
         })
       });
+    }
+    if (
+      tool === "aws" &&
+      args[0] === "iam" &&
+      args[1] === "create-policy" &&
+      args[2] === "--path"
+    ) {
+      const arn = `arn:aws:iam::${account}:policy${option(args, "--path")}${option(args, "--policy-name")}`;
+      commands.push(
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "get-policy", "--policy-arn", arn],
+          stdout: JSON.stringify({
+            Policy: {
+              PolicyName: option(args, "--policy-name"),
+              Arn: arn,
+              DefaultVersionId: "v1",
+              Tags: tags(args)
+            }
+          })
+        },
+        {
+          tool: "aws",
+          argsPrefix: [
+            "iam",
+            "get-policy-version",
+            "--policy-arn",
+            arn,
+            "--version-id",
+            "v1"
+          ],
+          stdout: JSON.stringify({
+            PolicyVersion: {
+              VersionId: "v1",
+              IsDefaultVersion: true,
+              Document: JSON.parse(option(args, "--policy-document")) as unknown
+            }
+          })
+        }
+      );
     }
     if (tool === "aws" && args[0] === "iam" && args[1] === "put-role-policy") {
       const roleName = option(args, "--role-name");
@@ -6645,7 +6692,8 @@ test.describe("Radius Canvas in Chromium", () => {
     });
 
     // The cloud side of an AWS setup that creates its deploy identity: the
-    // identity provider exists, the role does not yet, and the deploy
+    // identity provider and the EKS Pod Identity Agent add-on exist, the role
+    // and the app roles' permissions boundary do not yet, and the deploy
     // identity lock is free.
     function awsDeployIdentityCommands(): FakeCliCommand[] {
       const roleName = defaultAwsDeployRoleName(REPOSITORY);
@@ -6657,6 +6705,11 @@ test.describe("Radius Canvas in Chromium", () => {
           CreateDate: new Date().toISOString()
         }
       };
+      const boundary = awsAppBoundary(
+        AWS_ACCOUNT,
+        RETRY_REPOSITORY_ID,
+        RETRY_ENVIRONMENT
+      );
       const notFound = (operation: string) => ({
         exitCode: 254,
         stderr: `An error occurred (NoSuchEntity) when calling the ${operation} operation: The entity cannot be found.`
@@ -6684,8 +6737,35 @@ test.describe("Radius Canvas in Chromium", () => {
             }
           }
         }),
-        aws(["iam", "create-policy"], lockPolicy),
-        aws(["iam", "get-policy"], lockPolicy),
+        aws(["eks", "describe-addon"], {
+          addon: { addonName: "eks-pod-identity-agent", status: "ACTIVE" }
+        }),
+        aws(
+          [
+            "iam",
+            "create-policy",
+            "--policy-name",
+            lockPolicy.Policy.PolicyName
+          ],
+          lockPolicy
+        ),
+        aws(
+          ["iam", "get-policy", "--policy-arn", lockPolicy.Policy.Arn],
+          lockPolicy
+        ),
+        // The permissions boundary for the environment's app roles.
+        aws(
+          ["iam", "get-policy", "--policy-arn", boundary.arn],
+          "",
+          notFound("GetPolicy")
+        ),
+        aws(["iam", "create-policy", "--path", boundary.path], {
+          Policy: {
+            PolicyName: boundary.name,
+            Arn: boundary.arn,
+            DefaultVersionId: "v1"
+          }
+        }),
         aws(["iam", "delete-policy"], ""),
         aws(["iam", "list-open-id-connect-providers"], {
           OpenIDConnectProviderList: [
@@ -6708,10 +6788,7 @@ test.describe("Radius Canvas in Chromium", () => {
             Path: "/"
           }
         }),
-        aws(["iam", "get-role-policy"], "", {
-          ...notFound("GetRolePolicy"),
-          times: 1
-        }),
+        aws(["iam", "get-role-policy"], "", notFound("GetRolePolicy")),
         aws(["iam", "put-role-policy"], ""),
         aws(["eks", "create-access-entry"], {
           accessEntry: {
