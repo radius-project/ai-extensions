@@ -89,6 +89,10 @@ function cli(account = ACCOUNT) {
       });
     if (line.startsWith("aws iam list-role-policies"))
       return OK({ PolicyNames: [] });
+    if (line.startsWith("aws iam list-roles")) return OK({ Roles: [] });
+    if (line.startsWith("aws iam list-policies")) return OK({ Policies: [] });
+    if (line.startsWith("aws eks list-pod-identity-associations"))
+      return OK({ associations: [] });
     if (line.startsWith("aws eks describe-access-entry"))
       return NOT_FOUND("ResourceNotFoundException");
     if (line.startsWith("aws eks update-kubeconfig")) return OK({});
@@ -107,6 +111,7 @@ function cli(account = ACCOUNT) {
       )
     )
       return OK([[]]);
+    if (line.startsWith("gh api repos/octo/fixture -H")) return OK({ id: 42 });
     if (line.startsWith("gh api users/octo"))
       return OK({ type: "Organization" });
     if (line.startsWith("gh api --paginate --slurp orgs/octo/packages"))
@@ -162,6 +167,56 @@ describe("runAwsCleanup", () => {
       GH_TOKEN: "app-token"
     });
     expect(calls.some((call) => call.command === "kubectl")).toBe(true);
+    // App roles are read under the repository's ID, which GitHub names.
+    expect(
+      calls.find((call) => call.args[1] === "list-roles")?.args.slice(2, 4)
+    ).toEqual(["--path-prefix", "/radius/apps/42/"]);
+  });
+
+  it("still scales the node groups down when the repository's ID can't be read, and fails", async () => {
+    const { run } = cli();
+    const lines: string[] = [];
+    const noRepository: AwsCleanupMainDependencies["run"] = async (
+      command,
+      args,
+      options
+    ) => {
+      lines.push(`${command} ${args.slice(0, 2).join(" ")}`);
+      if (args[1] === "repos/octo/fixture")
+        return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      // A run left the default node group up.
+      if (args[1] === "describe-nodegroup" && args.includes("default"))
+        return OK({
+          nodegroup: {
+            status: "ACTIVE",
+            scalingConfig: { minSize: 0, maxSize: 2, desiredSize: 1 }
+          }
+        });
+      if (args[1] === "update-nodegroup-config") return OK({});
+      return run(command, args, options);
+    };
+    const sweep = dependencies(ENV, noRepository);
+    expect(await runAwsCleanup("sweep", sweep.deps)).toBe(1);
+    expect(sweep.log.filter((line) => line.startsWith("::"))).toEqual([
+      "::error::No app role, Pod Identity association, or app boundary was swept, because the fixture repository's ID could not be read: Could not read the ID of octo/fixture (gh: Not Found (HTTP 404))."
+    ]);
+    expect(sweep.log).toContain(
+      "Scaled node group default on main to zero from 1"
+    );
+    // The account is still checked before any other AWS call.
+    expect(lines.find((line) => line.startsWith("aws "))).toBe(
+      "aws sts get-caller-identity"
+    );
+    expect(lines).not.toContain("aws iam list-roles");
+
+    const verify = dependencies(ENV, noRepository);
+    expect(await runAwsCleanup("verify", verify.deps)).toBe(1);
+    expect(verify.log).toContain(
+      "  - Could not check app roles, Pod Identity associations, or app boundaries: Could not read the ID of octo/fixture (gh: Not Found (HTTP 404))."
+    );
+    expect(verify.log).toContain(
+      "  - node group default on cluster main at 1 nodes"
+    );
   });
 
   it("fails each mode with the findings in the log and the summary", async () => {

@@ -82,12 +82,28 @@ export interface FakeAccessEntry {
   policies: string[];
 }
 
+// DescribeCluster returns the control plane's Kubernetes `version`, the
+// cluster security group EKS creates (`resourcesVpcConfig.
+// clusterSecurityGroupId`), whether the API endpoint is public
+// (`endpointPublicAccess`), and `upgradePolicy.supportType`, STANDARD or
+// EXTENDED. ListNodegroups answers ResourceNotFoundException for an unknown
+// cluster. DescribeAddon answers ResourceNotFoundException for an add-on the
+// cluster doesn't have; `podIdentityAgent` null models that.
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_DescribeCluster.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_ListNodegroups.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_DescribeAddon.html
 export interface FakeEksCluster {
   name: string;
   region: string;
   status: string;
   authenticationMode: string;
   vpcId: string;
+  version: string;
+  endpointPublicAccess: boolean;
+  clusterSecurityGroupId: string;
+  supportType: string;
+  // The eks-pod-identity-agent add-on's status, or null when it is missing.
+  podIdentityAgent: string | null;
   entries: Map<string, FakeAccessEntry>;
   nodegroups: Map<string, FakeNodegroup>;
   podIdentity: Map<string, FakePodIdentityAssociation>;
@@ -98,6 +114,15 @@ export interface FakeEksCluster {
 // 0 <= min <= desired <= max with max >= 1 (InvalidParameterException).
 // https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupConfig.html
 // https://docs.aws.amazon.com/eks/latest/APIReference/API_NodegroupScalingConfig.html
+// DescribeNodegroup also returns its Kubernetes `version`, AMI
+// `releaseVersion`, `labels`, `taints`, and `launchTemplate` (id and
+// version) when it was created with one.
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_Nodegroup.html
+// UpdateNodegroupVersion moves a group to the cluster's version when no
+// `version` is given, can't roll a group back to an earlier version
+// (InvalidParameterException), and, like UpdateNodegroupConfig, refuses a
+// group that is not ACTIVE (ResourceInUseException).
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupVersion.html
 export interface FakeNodegroup {
   name: string;
   status: string;
@@ -106,6 +131,22 @@ export interface FakeNodegroup {
   desiredSize: number;
   // Describe reads left before an UPDATING group is ACTIVE again.
   updatingReads: number;
+  version: string;
+  releaseVersion: string;
+  labels: Record<string, string>;
+  taints: Array<{ key: string; value: string; effect: string }>;
+  launchTemplate: { id: string; version: string } | null;
+}
+
+// An EC2 launch template version, as DescribeLaunchTemplateVersions returns
+// it for `--launch-template-id` and `--versions`. An unknown template is
+// InvalidLaunchTemplateId.NotFound and an unknown version
+// InvalidLaunchTemplateId.VersionNotFound.
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeLaunchTemplateVersions.html
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html
+export interface FakeLaunchTemplateVersion {
+  SecurityGroupIds?: string[];
+  NetworkInterfaces?: Array<{ Groups?: string[] }>;
 }
 
 // What a test compares: everything that exists, in a stable order.
@@ -185,6 +226,7 @@ const WRITES: ReadonlySet<string> = new Set([
   "eks delete-access-entry",
   "eks associate-access-policy",
   "eks update-nodegroup-config",
+  "eks update-nodegroup-version",
   "eks delete-pod-identity-association",
   ...RDS_WRITES
 ]);
@@ -220,6 +262,10 @@ export class FakeAws {
   readonly policies = new Map<string, FakeManagedPolicy>();
   readonly oidcProviders = new Map<string, { clientIds: string[] }>();
   readonly clusters = new Map<string, FakeEksCluster>();
+  readonly launchTemplates = new Map<
+    string,
+    Map<string, FakeLaunchTemplateVersion>
+  >();
   readonly rds: FakeRds;
   // Set to make every call fail the way an expired sign-in does.
   sessionExpired = false;
@@ -241,17 +287,24 @@ export class FakeAws {
     region: string,
     authenticationMode = "API_AND_CONFIG_MAP",
     vpcId = `vpc-${name}`
-  ): void {
-    this.clusters.set(`${region}:${name}`, {
+  ): FakeEksCluster {
+    const cluster: FakeEksCluster = {
       name,
       region,
       status: "ACTIVE",
       authenticationMode,
       vpcId,
+      version: "1.33",
+      endpointPublicAccess: true,
+      clusterSecurityGroupId: `sg-cluster-${name}`,
+      supportType: "STANDARD",
+      podIdentityAgent: "ACTIVE",
       entries: new Map(),
       nodegroups: new Map(),
       podIdentity: new Map()
-    });
+    };
+    this.clusters.set(`${region}:${name}`, cluster);
+    return cluster;
   }
 
   addNodegroup(
@@ -263,9 +316,31 @@ export class FakeAws {
   ): FakeNodegroup {
     const target = this.clusters.get(`${region}:${cluster}`);
     if (!target) throw new Error(`fake aws: no cluster ${region}:${cluster}`);
-    const group = { name, status, ...scaling, updatingReads: 1 };
+    const group: FakeNodegroup = {
+      name,
+      status,
+      ...scaling,
+      updatingReads: 1,
+      version: target.version,
+      releaseVersion: `${target.version}.0-20261101`,
+      labels: {},
+      taints: [],
+      launchTemplate: null
+    };
     target.nodegroups.set(name, group);
     return group;
+  }
+
+  // Versions by number. `$Default` is version 1 and `$Latest` the highest.
+  addLaunchTemplate(
+    region: string,
+    id: string,
+    versions: Record<string, FakeLaunchTemplateVersion>
+  ): void {
+    this.launchTemplates.set(
+      `${region}:${id}`,
+      new Map(Object.entries(versions))
+    );
   }
 
   addGitHubProvider(): void {
@@ -689,11 +764,18 @@ export class FakeAws {
                 nodegroupName: group.name,
                 clusterName: cluster.name,
                 status: group.status,
+                version: group.version,
+                releaseVersion: group.releaseVersion,
                 scalingConfig: {
                   minSize: group.minSize,
                   maxSize: group.maxSize,
                   desiredSize: group.desiredSize
-                }
+                },
+                labels: { ...group.labels },
+                taints: group.taints.map((taint) => ({ ...taint })),
+                ...(group.launchTemplate ?
+                  { launchTemplate: { ...group.launchTemplate } }
+                : {})
               }
             });
           }
@@ -702,6 +784,16 @@ export class FakeAws {
         return this.withNodegroup(args, "UpdateNodegroupConfig", (_c, group) =>
           this.updateNodegroup(args, group)
         );
+      case "eks list-nodegroups":
+        return this.listNodegroups(args);
+      case "eks update-nodegroup-version":
+        return this.withNodegroup(
+          args,
+          "UpdateNodegroupVersion",
+          (cluster, group) => this.updateNodegroupVersion(args, cluster, group)
+        );
+      case "ec2 describe-launch-template-versions":
+        return this.describeLaunchTemplateVersions(args);
     }
     throw new Error(`fake aws: no answer for aws ${args.join(" ")}`);
   }
@@ -730,17 +822,26 @@ export class FakeAws {
       cluster: {
         name: cluster.name,
         status: cluster.status,
+        version: cluster.version,
         accessConfig: { authenticationMode: cluster.authenticationMode },
-        resourcesVpcConfig: { vpcId: cluster.vpcId }
+        resourcesVpcConfig: {
+          vpcId: cluster.vpcId,
+          clusterSecurityGroupId: cluster.clusterSecurityGroupId,
+          endpointPublicAccess: cluster.endpointPublicAccess
+        },
+        upgradePolicy: { supportType: cluster.supportType }
       }
     });
   }
 
-  // Every fake cluster runs the EKS Pod Identity Agent.
   private describeAddon(args: readonly string[]): AwsCommandResult {
     const cluster = this.cluster(args);
     const name = flag(args, "--addon-name");
-    if (!cluster || name !== "eks-pod-identity-agent") {
+    if (
+      !cluster ||
+      name !== "eks-pod-identity-agent" ||
+      cluster.podIdentityAgent === null
+    ) {
       return serviceError(
         "ResourceNotFoundException",
         "DescribeAddon",
@@ -748,7 +849,101 @@ export class FakeAws {
       );
     }
     return ok({
-      addon: { addonName: name, clusterName: cluster.name, status: "ACTIVE" }
+      addon: {
+        addonName: name,
+        clusterName: cluster.name,
+        status: cluster.podIdentityAgent
+      }
+    });
+  }
+
+  private listNodegroups(args: readonly string[]): AwsCommandResult {
+    const cluster = this.cluster(args);
+    if (!cluster) {
+      return serviceError(
+        "ResourceNotFoundException",
+        "ListNodegroups",
+        `No cluster found for name: ${flag(args, "--cluster-name")}.`
+      );
+    }
+    return ok({ nodegroups: [...cluster.nodegroups.keys()] });
+  }
+
+  private updateNodegroupVersion(
+    args: readonly string[],
+    cluster: FakeEksCluster,
+    group: FakeNodegroup
+  ): AwsCommandResult {
+    if (group.status !== "ACTIVE") {
+      return serviceError(
+        "ResourceInUseException",
+        "UpdateNodegroupVersion",
+        `Nodegroup ${group.name} is in ${group.status} state and cannot be updated.`
+      );
+    }
+    const version = flag(args, "--kubernetes-version") || cluster.version;
+    const parts = (value: string) => value.split(".").map(Number);
+    const [toMajor = 0, toMinor = 0] = parts(version);
+    const [fromMajor = 0, fromMinor = 0] = parts(group.version);
+    if (toMajor < fromMajor || (toMajor === fromMajor && toMinor < fromMinor)) {
+      return serviceError(
+        "InvalidParameterException",
+        "UpdateNodegroupVersion",
+        `Requested Nodegroup version ${version} is older than the current version ${group.version}.`
+      );
+    }
+    Object.assign(group, {
+      version,
+      releaseVersion: `${version}.0-20261101`,
+      status: "UPDATING",
+      updatingReads: 1
+    });
+    return ok({
+      update: {
+        id: this.nextId("UPD"),
+        status: "InProgress",
+        type: "VersionUpdate"
+      }
+    });
+  }
+
+  private describeLaunchTemplateVersions(
+    args: readonly string[]
+  ): AwsCommandResult {
+    const id = flag(args, "--launch-template-id");
+    const versions = this.launchTemplates.get(
+      `${flag(args, "--region")}:${id}`
+    );
+    if (!versions) {
+      return serviceError(
+        "InvalidLaunchTemplateId.NotFound",
+        "DescribeLaunchTemplateVersions",
+        `The specified launch template, with template ID ${id}, does not exist.`
+      );
+    }
+    const numbers = [...versions.keys()].sort((a, b) => Number(a) - Number(b));
+    const requested = flagValues(args, "--versions");
+    const resolved = (requested.length > 0 ? requested : numbers).map(
+      (value) =>
+        value === "$Latest" ? (numbers.at(-1) ?? "")
+        : value === "$Default" ? "1"
+        : value
+    );
+    const missing = resolved.find((value) => !versions.has(value));
+    if (missing !== undefined) {
+      return serviceError(
+        "InvalidLaunchTemplateId.VersionNotFound",
+        "DescribeLaunchTemplateVersions",
+        `Could not find launch template version ${missing} for template ${id}.`
+      );
+    }
+    return ok({
+      LaunchTemplateVersions: resolved.map((value) => ({
+        LaunchTemplateId: id,
+        VersionNumber: Number(value),
+        DefaultVersion: value === "1",
+        LaunchTemplateData: structuredClone(versions.get(value))
+      }))
     });
   }
 

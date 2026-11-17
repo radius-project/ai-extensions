@@ -12,6 +12,7 @@ import {
   ghJsonRunner,
   ghNamespaceClaims,
   httpStatus,
+  readRepositoryId,
   runCommand,
   temporaryDirectory,
   type CommandResult
@@ -533,6 +534,35 @@ describe("ghNamespaceClaims", () => {
     const { gh } = scriptedGh([["api", OK({ environments: [] })]]);
     const claims = ghNamespaceClaims(gh);
     expect(await claims.listEnvironmentNames(REPO)).toMatchObject({ ok: true });
+  });
+});
+
+describe("readRepositoryId", () => {
+  it("reads GitHub's ID for the repository, and refuses anything but a positive integer", async () => {
+    const answer =
+      (json: Record<string, unknown> | null, ok = true, status = 200) =>
+      async (apiPath: string) => {
+        expect(apiPath).toBe(`/repos/${REPO}`);
+        return { ok, status, json, stderr: "" };
+      };
+    expect(await readRepositoryId(answer({ id: 1361595003 }), REPO)).toBe(
+      1361595003
+    );
+    for (const json of [{ id: 0 }, { id: "x" }, { id: 1.5 }, {}, null])
+      await expect(readRepositoryId(answer(json), REPO)).rejects.toThrow(
+        `Could not read the ID of ${REPO} (HTTP 200).`
+      );
+    await expect(
+      readRepositoryId(
+        async () => ({
+          ok: false,
+          status: null,
+          json: null,
+          stderr: ""
+        }),
+        REPO
+      )
+    ).rejects.toThrow(`Could not read the ID of ${REPO} (HTTP unknown).`);
   });
 });
 

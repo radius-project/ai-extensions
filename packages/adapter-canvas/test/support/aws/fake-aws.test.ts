@@ -217,7 +217,7 @@ describe("FakeAws", () => {
           "us-west-2"
         ]).stdout
       ).cluster
-    ).toEqual({
+    ).toMatchObject({
       name: "shop",
       status: "ACTIVE",
       accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" },
@@ -707,5 +707,196 @@ describe("FakeAws policy simulator", () => {
     expect(
       json(simulate(fake, "us-west-1").stdout).EvaluationResults[0].EvalDecision
     ).toBe("allowed");
+  });
+});
+
+describe("FakeAws EKS clusters and node groups", () => {
+  const MAIN = ["--region", "us-east-2", "--cluster-name", "main"];
+
+  function cluster() {
+    const fake = new FakeAws({ accountId: ACCOUNT });
+    const main = fake.addCluster("main", "us-east-2", "API", "vpc-main");
+    const group = fake.addNodegroup("us-east-2", "main", "isolated", {
+      minSize: 0,
+      maxSize: 1,
+      desiredSize: 0
+    });
+    return { fake, main, group };
+  }
+
+  it("describes the version, endpoint, security group, and upgrade policy", () => {
+    const { fake, main } = cluster();
+    main.supportType = "EXTENDED";
+    expect(
+      json(
+        fake.run([
+          "eks",
+          "describe-cluster",
+          "--region",
+          "us-east-2",
+          "--name",
+          "main"
+        ]).stdout
+      ).cluster
+    ).toEqual({
+      name: "main",
+      status: "ACTIVE",
+      version: "1.33",
+      accessConfig: { authenticationMode: "API" },
+      resourcesVpcConfig: {
+        vpcId: "vpc-main",
+        clusterSecurityGroupId: "sg-cluster-main",
+        endpointPublicAccess: true
+      },
+      upgradePolicy: { supportType: "EXTENDED" }
+    });
+  });
+
+  it("answers the Pod Identity add-on's status, and not found once it is gone", () => {
+    const { fake, main } = cluster();
+    const describe = [
+      "eks",
+      "describe-addon",
+      "--cluster-name",
+      "main",
+      "--addon-name",
+      "eks-pod-identity-agent",
+      "--region",
+      "us-east-2"
+    ];
+    main.podIdentityAgent = "DEGRADED";
+    expect(json(fake.run(describe).stdout).addon.status).toBe("DEGRADED");
+    main.podIdentityAgent = null;
+    expect(fake.run(describe).stderr).toContain("(ResourceNotFoundException)");
+  });
+
+  it("lists node groups, and refuses an unknown cluster", () => {
+    const { fake } = cluster();
+    expect(json(fake.run(["eks", "list-nodegroups", ...MAIN]).stdout)).toEqual({
+      nodegroups: ["isolated"]
+    });
+    expect(
+      fake.run([
+        "eks",
+        "list-nodegroups",
+        "--region",
+        "us-west-1",
+        "--cluster-name",
+        "main"
+      ]).stderr
+    ).toContain("(ResourceNotFoundException)");
+  });
+
+  it("describes a node group's version, labels, taints, and launch template", () => {
+    const { fake, group } = cluster();
+    group.labels = { "radius-e2e/pool": "isolated" };
+    group.taints = [
+      { key: "radius-e2e/isolated", value: "true", effect: "NO_SCHEDULE" }
+    ];
+    group.launchTemplate = { id: "lt-1", version: "2" };
+    expect(
+      json(
+        fake.run([
+          "eks",
+          "describe-nodegroup",
+          ...MAIN,
+          "--nodegroup-name",
+          "isolated"
+        ]).stdout
+      ).nodegroup
+    ).toMatchObject({
+      version: "1.33",
+      releaseVersion: "1.33.0-20261101",
+      labels: { "radius-e2e/pool": "isolated" },
+      taints: [
+        { key: "radius-e2e/isolated", value: "true", effect: "NO_SCHEDULE" }
+      ],
+      launchTemplate: { id: "lt-1", version: "2" }
+    });
+  });
+
+  it("updates a node group to the control plane's version, then is ACTIVE again", () => {
+    const { fake, main, group } = cluster();
+    main.version = "1.34";
+    const update = [
+      "eks",
+      "update-nodegroup-version",
+      ...MAIN,
+      "--nodegroup-name",
+      "isolated"
+    ];
+    expect(isFakeAwsWrite(update)).toBe(true);
+    expect(json(fake.run(update).stdout).update.type).toBe("VersionUpdate");
+    expect(group).toMatchObject({ version: "1.34", status: "UPDATING" });
+    expect(fake.run(update).stderr).toContain("(ResourceInUseException)");
+    const describe = [
+      "eks",
+      "describe-nodegroup",
+      ...MAIN,
+      "--nodegroup-name",
+      "isolated"
+    ];
+    fake.run(describe);
+    expect(json(fake.run(describe).stdout).nodegroup.status).toBe("ACTIVE");
+  });
+
+  it("refuses to roll a node group back to an earlier version", () => {
+    const { fake, group } = cluster();
+    const result = fake.run([
+      "eks",
+      "update-nodegroup-version",
+      ...MAIN,
+      "--nodegroup-name",
+      "isolated",
+      "--kubernetes-version",
+      "1.32"
+    ]);
+    expect(result.stderr).toContain("(InvalidParameterException)");
+    expect(group).toMatchObject({ version: "1.33", status: "ACTIVE" });
+  });
+
+  it("describes launch template versions by number, $Default, and $Latest", () => {
+    const fake = new FakeAws({ accountId: ACCOUNT });
+    fake.addLaunchTemplate("us-east-2", "lt-1", {
+      "1": { SecurityGroupIds: ["sg-a"] },
+      "2": { NetworkInterfaces: [{ Groups: ["sg-b"] }] }
+    });
+    const read = (...versions: string[]) =>
+      fake.run([
+        "ec2",
+        "describe-launch-template-versions",
+        "--region",
+        "us-east-2",
+        "--launch-template-id",
+        "lt-1",
+        ...(versions.length > 0 ? ["--versions", ...versions] : [])
+      ]);
+    expect(json(read("2").stdout).LaunchTemplateVersions).toEqual([
+      {
+        LaunchTemplateId: "lt-1",
+        VersionNumber: 2,
+        DefaultVersion: false,
+        LaunchTemplateData: { NetworkInterfaces: [{ Groups: ["sg-b"] }] }
+      }
+    ]);
+    expect(
+      json(read("$Default", "$Latest").stdout).LaunchTemplateVersions.map(
+        (item: { VersionNumber: number }) => item.VersionNumber
+      )
+    ).toEqual([1, 2]);
+    expect(json(read().stdout).LaunchTemplateVersions).toHaveLength(2);
+    expect(read("3").stderr).toContain(
+      "(InvalidLaunchTemplateId.VersionNotFound)"
+    );
+    expect(
+      fake.run([
+        "ec2",
+        "describe-launch-template-versions",
+        "--region",
+        "us-west-1",
+        "--launch-template-id",
+        "lt-1"
+      ]).stderr
+    ).toContain("(InvalidLaunchTemplateId.NotFound)");
   });
 });

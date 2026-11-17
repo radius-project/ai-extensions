@@ -404,7 +404,7 @@ describe("FakeAws node groups", () => {
           "main"
         ]).stdout
       ).cluster.resourcesVpcConfig
-    ).toEqual({ vpcId: "vpc-main" });
+    ).toMatchObject({ vpcId: "vpc-main" });
   });
 
   it.each([
