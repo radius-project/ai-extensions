@@ -98,9 +98,16 @@ Everything except IAM is limited to the two regions. The test role can't create 
 
 - The tags setup puts on a role it creates, including `radius-repository-id` with the fixture repository's GitHub ID, so setup reuses it instead of creating one.
 - The trust policy setup leaves when no environment uses the role: one deny statement, `RadiusNoTrustedEnvironments`.
-- A permissions boundary, which is the most a role can ever do, whatever its own policies say. It allows only the services the recipes use (Cloud Control, RDS, EKS Pod Identity associations on the two clusters, and a few EKS and EC2 reads), only in the two regions. For the IAM role the containers recipe gives each app through EKS Pod Identity, it allows exactly what the product's app-roles policy grants: roles under `role/radius/apps/<fixture repository ID>/` that carry one of the repository's app boundaries, passed only to EKS Pod Identity. It denies all other IAM, account settings, and `s3:PutAccountPublicAccessBlock`. Each new recipe adds its service. A unit test checks that the boundary allows everything the product's app-roles policy grants, so a product change fails in a pull request instead of in the daily run.
+- A permissions boundary, which is the most the deploy role itself can ever do, whatever its own policies say. It allows only the services the recipes use (Cloud Control, RDS, EKS Pod Identity associations on the two clusters, and a few EKS and EC2 reads), only in the two regions. For the IAM role the containers recipe gives each app through EKS Pod Identity, it allows exactly what the product's app-roles policy grants: roles under `role/radius/apps/<fixture repository ID>/` that carry one of the repository's app boundaries, passed only to EKS Pod Identity. It denies all other IAM, account settings, and `s3:PutAccountPublicAccessBlock`. Each new recipe adds its service. A unit test checks that the boundary allows everything the product's app-roles policy grants, so a product change fails in a pull request instead of in the daily run.
 
 The boundary lists services instead of allowing everything in the two regions, because a region condition limits where a request is sent, not what it changes. For example, `s3:PutAccountPublicAccessBlock` sent to `us-east-2` turns off S3 Block Public Access for every bucket in the account, including Radius's.
+
+A boundary caps only the role it's on, not the roles that role creates. The app roles the deploy role creates are capped by the product's app boundary instead, which allows nearly everything in the environment's region except IAM, and the deploy role writes their trust policies. IAM has no condition on a new role's trust or on a new policy's content, so neither role's policies can close this:
+
+- The deploy role can create an app role that acts outside its own boundary in the two regions, or that trusts another account.
+- The test role must create the app boundaries setup writes, so it can write one that allows everything and have the deploy role create an app role under it. In effect, this repository's `main` CI can become an administrator of the account.
+
+So before AWS runs in `radius-test`, an organization administrator adds a guard above IAM: a service control policy that denies IAM, `sts:AssumeRole`, organizations, account, and `s3:PutAccountPublicAccessBlock` to roles under `role/radius/apps/`, or a dedicated account for these tests. The product change that stops the deploy identity from creating roles is tracked in #1276.
 
 The deploy role can't create service-linked roles. RDS's already exists; a new service's recipe may need an administrator to create one. If the deploy role is missing, setup stops and changes nothing, because the test role can't create roles.
 
@@ -180,7 +187,7 @@ Azure's 150 minutes is still twice its longest recent run. The app host's limits
 ### Rollout
 
 1. This design is reviewed.
-2. Administrators create the two roles and clusters in `radius-test`, and the `ai-extensions` secrets and variables. No repository or GitHub App install is needed.
+2. Administrators create the two roles and clusters in `radius-test`, and the `ai-extensions` secrets and variables. No repository or GitHub App install is needed. An organization administrator adds the guard for app roles described in [How the test signs in to AWS](#how-the-test-signs-in-to-aws), or the tests move to a dedicated account.
 3. The AWS cleanup lands first, so AWS never runs in the daily job without cleanup.
 4. The AWS steps land in `cloud-e2e.yml`, with Azure's lower limits, after a local run in the developer's own AWS account and a fork of the fixture repository, as the lifecycle design allows.
 5. On `main`, a manual cleanup run, then a manual Cloud E2E run on each host. Until the AWS variables are set, the AWS steps skip and the job runs Azure only.

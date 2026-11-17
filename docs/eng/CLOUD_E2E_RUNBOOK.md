@@ -430,7 +430,9 @@ for file in build/cloud-e2e/aws/*; do envsubst <"$file" >"$WORK/${file##*/}"; do
      --notifications-with-subscribers "file://$WORK/budget-notifications.json"
    ```
 
-6. Set the [AWS variables](#aws-configuration).
+6. Have an organization administrator add a guard above IAM for app roles, before setting the variables. The deploy role's boundary caps only the deploy role: the app roles it creates through EKS Pod Identity are capped by the product's app boundary, and the test role can write that boundary. A service control policy on the account that denies `iam:*`, `sts:AssumeRole`, `organizations:*`, `account:*`, and `s3:PutAccountPublicAccessBlock` to principals matching `arn:aws:iam::*:role/radius/apps/*` (an `ArnLike` condition on `aws:PrincipalArn`) closes this. See [How the test signs in to AWS](../design/2026-11-aws-cloud-e2e.md#how-the-test-signs-in-to-aws). #1276 tracks the product change that removes the need.
+
+7. Set the [AWS variables](#aws-configuration).
 
 Before applying a change to a policy file, validate it. These calls are read-only:
 
