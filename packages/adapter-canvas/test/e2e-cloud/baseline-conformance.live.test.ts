@@ -25,15 +25,17 @@ import {
 import {
   describeUnprovisionedFixtureRepository,
   FIXTURE_RADIUS_DIRECTORY,
-  isFixtureRepositoryProvisioned,
-  PINNED_FIXTURE,
-  resolveFixtureSelection
+  isFixtureRepositoryProvisioned
 } from "./support/fixture-repository.js";
+import { prepareCloudRun, runGhSync } from "./support/github-sign-in.js";
 
 const ENABLED =
   !!process.env.RADIUS_CLOUD_E2E && isFixtureRepositoryProvisioned();
-// The pinned commits, or a developer's own copy and its commits.
-const FIXTURE = ENABLED ? resolveFixtureSelection() : PINNED_FIXTURE;
+// The pinned commits, or a developer's own copy and its commits. A local run
+// against a copy signs in here, as the Playwright journey does, before any gh
+// call reads the token.
+const cloudRun = prepareCloudRun(runGhSync);
+const FIXTURE = cloudRun.fixture;
 const PINNED_COMMITS = [
   ["Azure baseline", FIXTURE.baselineSha],
   ["AWS baseline", FIXTURE.awsBaselineSha],
@@ -64,6 +66,7 @@ describe.skipIf(!ENABLED)(`pinned commits of ${FIXTURE.repository}`, () => {
   it.each(PINNED_COMMITS)(
     "%s %s carries every required staged file and still compiles",
     async (_label, sha) => {
+      if (cloudRun.failure) throw new Error(cloudRun.failure);
       const ports = createNodeCloudFixturePorts();
       const workspacePath = await ports.makeWorkspaceDir(
         "radtest-canvas-conformance"
