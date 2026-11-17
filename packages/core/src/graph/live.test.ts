@@ -412,13 +412,28 @@ describe("live UCP graph normalization", () => {
       expect(result.resources[1]).not.toHaveProperty("icon");
       expect(result.warnings).toEqual([]);
     });
-    it("accepts an XML prolog and comments before the svg element", () => {
+    it("removes an XML prolog and comments before the svg element", () => {
       const prefixed = `<?xml version="1.0"?>\n<!-- icon -->\n${svg}`;
       const result = normalizeLiveGraph(
         { resources: [withIcon(hash)], icons: { [hash]: prefixed } },
         context
       );
-      expect(result.resources[0].icon).toBe(prefixed);
+      expect(result.resources[0].icon).toBe(svg);
+    });
+    it.each([
+      ["repeated comments", "<!--x-->".repeat(5000)],
+      ["repeated prologs", "<?xml?>".repeat(5000)],
+      ["an unclosed comment", "<!-- never closed"],
+      ["an unclosed prolog", "<?xml never closed"]
+    ])("rejects %s without an svg element in linear time", (_name, prefix) => {
+      const started = performance.now();
+      const result = normalizeLiveGraph(
+        { resources: [withIcon(hash)], icons: { [hash]: `${prefix}not-svg` } },
+        context
+      );
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(result.resources[0]).not.toHaveProperty("icon");
+      expect(result.warnings).toHaveLength(1);
     });
     it.each([
       ["a missing icons map", undefined, hash],

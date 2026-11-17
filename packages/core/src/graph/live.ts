@@ -31,8 +31,33 @@ const APPLICATION_TYPES: ReadonlySet<string> = new Set([
   "applications.core/applications"
 ]);
 const ICON_HASH_PATTERN = /^[0-9a-f]{64}$/;
-const SVG_START =
-  /^(?:<\?xml[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*<svg(?:\s|\/?>)/;
+const SVG_ROOT = /^<svg(?:\s|\/?>)/;
+
+/**
+ * Returns the `<svg>` markup of an icon, without any leading XML prolog or
+ * comments, or `undefined` when the value is not an SVG document. The scan
+ * moves forward once and never rereads text, so hostile input stays linear.
+ */
+function svgMarkup(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const source = value.trim();
+  const whitespace = /\s*/y;
+  let at = 0;
+  for (;;) {
+    const close =
+      source.startsWith("<?xml", at) ? "?>"
+      : source.startsWith("<!--", at) ? "-->"
+      : undefined;
+    if (close === undefined) break;
+    const end = source.indexOf(close, at);
+    if (end === -1) return undefined;
+    whitespace.lastIndex = end + close.length;
+    whitespace.test(source);
+    at = whitespace.lastIndex;
+  }
+  const markup = source.slice(at);
+  return SVG_ROOT.test(markup) ? markup : undefined;
+}
 
 // UCP resource IDs, including plane segments, are case-insensitive.
 function sameUcpSegment(left: string, right: string): boolean {
@@ -109,16 +134,17 @@ export function normalizeLiveGraph(
     let icon: string | undefined;
     const iconHash = raw.iconHash;
     if (iconHash !== undefined && iconHash !== null) {
-      const candidate =
+      const markup = svgMarkup(
         (
           typeof iconHash === "string" &&
-          ICON_HASH_PATTERN.test(iconHash) &&
-          Object.hasOwn(icons, iconHash)
+            ICON_HASH_PATTERN.test(iconHash) &&
+            Object.hasOwn(icons, iconHash)
         ) ?
           icons[iconHash]
-        : undefined;
-      if (typeof candidate === "string" && SVG_START.test(candidate.trim())) {
-        icon = candidate;
+        : undefined
+      );
+      if (markup !== undefined) {
+        icon = markup;
       } else {
         warnings.push(
           warning("invalid-icon", id, `Unresolved resource icon ignored: ${id}`)
