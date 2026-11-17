@@ -932,20 +932,30 @@ export function buildAwsEnvironmentPermissionPolicy(
   };
 }
 
-// Account-wide security settings an app never needs to change. A region
-// condition limits where a request is sent, not what it changes, so these are
-// denied outright.
+// Account-wide security settings an app never needs to change, including the
+// actions that weaken them indirectly: resetting the default EBS key, relaxing
+// snapshot Block Public Access, dropping a trail's event selectors, and hiding
+// GuardDuty findings with filters or trusted IP lists. A region condition
+// limits where a request is sent, not what it changes, so these are denied
+// outright.
 const ACCOUNT_SECURITY_SETTING_ACTIONS = [
   "s3:PutAccountPublicAccessBlock",
   "ec2:DisableEbsEncryptionByDefault",
   "ec2:ModifyEbsDefaultKmsKeyId",
+  "ec2:ResetEbsDefaultKmsKeyId",
   "ec2:DisableImageBlockPublicAccess",
   "ec2:DisableSnapshotBlockPublicAccess",
+  "ec2:EnableSnapshotBlockPublicAccess",
   "cloudtrail:StopLogging",
   "cloudtrail:DeleteTrail",
   "cloudtrail:UpdateTrail",
+  "cloudtrail:PutEventSelectors",
   "guardduty:DeleteDetector",
-  "guardduty:UpdateDetector"
+  "guardduty:UpdateDetector",
+  "guardduty:CreateFilter",
+  "guardduty:UpdateFilter",
+  "guardduty:CreateIPSet",
+  "guardduty:UpdateIPSet"
 ];
 
 /**
@@ -953,9 +963,9 @@ const ACCOUNT_SECURITY_SETTING_ACTIONS = [
  * role's own policy can grant. It allows what the deploy role may do in the
  * environment's region, never IAM, and Bedrock models in other regions only
  * through an inference profile in the environment's region, because
- * cross-region inference runs the model in another region. It denies turning
- * off account-wide protections: S3 and EC2 Block Public Access, EBS default
- * encryption and its KMS key, CloudTrail trails, and GuardDuty detectors.
+ * cross-region inference runs the model in another region. It denies weakening
+ * account-wide protections: S3 and EC2 Block Public Access, EBS default
+ * encryption and its KMS key, CloudTrail trails, and GuardDuty.
  */
 export function buildAwsAppBoundaryPolicy(
   accountId: string,

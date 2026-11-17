@@ -946,7 +946,7 @@ describe("permissions and provenance", () => {
     expect(JSON.stringify(boundary.Statement[1].Action)).not.toContain("iam:");
   });
 
-  it("denies app roles every change to account-wide security settings", () => {
+  it("denies app roles weakening account-wide security settings", () => {
     expect(
       buildAwsAppBoundaryPolicy("123456789012", "us-west-2").Statement[2]
     ).toEqual({
@@ -955,13 +955,20 @@ describe("permissions and provenance", () => {
         "s3:PutAccountPublicAccessBlock",
         "ec2:DisableEbsEncryptionByDefault",
         "ec2:ModifyEbsDefaultKmsKeyId",
+        "ec2:ResetEbsDefaultKmsKeyId",
         "ec2:DisableImageBlockPublicAccess",
         "ec2:DisableSnapshotBlockPublicAccess",
+        "ec2:EnableSnapshotBlockPublicAccess",
         "cloudtrail:StopLogging",
         "cloudtrail:DeleteTrail",
         "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors",
         "guardduty:DeleteDetector",
-        "guardduty:UpdateDetector"
+        "guardduty:UpdateDetector",
+        "guardduty:CreateFilter",
+        "guardduty:UpdateFilter",
+        "guardduty:CreateIPSet",
+        "guardduty:UpdateIPSet"
       ],
       Resource: "*"
     });
