@@ -129,7 +129,7 @@ describe("readGhSessionCredentials", () => {
 
     expect(() => readGhSessionCredentials(runGh, {})).toThrow(expected);
     expect(() => readGhSessionCredentials(runGh, {})).toThrow(
-      "gh auth refresh -h github.com -s read:packages,delete:packages"
+      "gh auth refresh -h github.com -s workflow,read:packages,write:packages,delete:packages"
     );
     expect(calls.every((call) => call.args[0] === "auth")).toBe(true);
   });

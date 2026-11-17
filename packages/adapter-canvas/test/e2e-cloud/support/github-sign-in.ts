@@ -59,7 +59,7 @@ const UNPREPARED: CloudRunPreparation = {
 const GH_SESSION_TIMEOUT_MS = 30_000;
 const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const GH_REFRESH_COMMAND =
-  "gh auth refresh -h github.com -s read:packages,delete:packages";
+  "gh auth refresh -h github.com -s workflow,read:packages,write:packages,delete:packages";
 
 /**
  * Uses the `gh` session only outside CI and only for a fixture copy outside

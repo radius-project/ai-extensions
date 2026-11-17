@@ -237,11 +237,11 @@ A local run uses your own Azure subscription and your own copy of the fixture re
    git push https://github.com/<you>/ai-extensions-fixture.git main baselines/aws
    ```
 
-2. Sign in with your own GitHub CLI session, and give it the package scopes the run needs to check and remove the state package:
+2. Sign in with your own GitHub CLI session. Then add the scopes a fresh login doesn't have: `workflow` to commit the generated workflows, and the package scopes to push, check, and remove the state package:
 
    ```bash
    gh auth login -h github.com
-   gh auth refresh -h github.com -s read:packages,delete:packages
+   gh auth refresh -h github.com -s workflow,read:packages,write:packages,delete:packages
    ```
 
    The run reads this session itself with `gh auth token`, and ignores any `GH_TOKEN` or `GITHUB_TOKEN` you have set. It never writes the token to the log.
