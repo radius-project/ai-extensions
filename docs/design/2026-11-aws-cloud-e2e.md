@@ -89,7 +89,7 @@ An account administrator creates both once.
 - Read EKS, EC2, and RDS, and run `kubectl` on the two clusters.
 - Scale and update the two node groups on the main cluster.
 - Change only the deploy role's trust policy and inline policies, its lock policy, and access entries on the two clusters.
-- Create, read, and delete the app permissions boundaries setup writes for each environment, under `policy/radius/apps/<fixture repository ID>/`.
+- Create, read, and delete the app permissions boundaries setup writes for each environment, under `policy/radius/apps/<fixture repository ID>/`. It may create or delete one only when it carries the tags Radius uses to mark the fixture repository's policies.
 - Delete only RDS instances, groups, and snapshots named `mysql-*` and `rds-snapshot-*`, app roles under `role/radius/apps/<fixture repository ID>/`, and EKS Pod Identity associations on the two clusters.
 
 Everything except IAM is limited to the two regions. The test role can't create roles, delete any role outside the app role path, change a permissions boundary, or create an identity provider. Its session lasts 6 hours, as long as the job, because AWS's default is 1 hour and the job signs in only once.

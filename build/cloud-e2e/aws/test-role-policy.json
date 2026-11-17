@@ -65,16 +65,28 @@
       "Resource": "arn:aws:iam::${ACCOUNT}:policy/radius-lock-${DEPLOY_ROLE}"
     },
     {
-      "Sid": "AppBoundaries",
+      "Sid": "CreateFixtureAppBoundaries",
       "Effect": "Allow",
-      "Action": [
-        "iam:GetPolicy",
-        "iam:CreatePolicy",
-        "iam:TagPolicy",
-        "iam:GetPolicyVersion",
-        "iam:DeletePolicy"
-      ],
-      "Resource": "arn:aws:iam::${ACCOUNT}:policy/radius/apps/${FIXTURE_REPO_ID}/*"
+      "Action": ["iam:CreatePolicy", "iam:TagPolicy"],
+      "Resource": "arn:aws:iam::${ACCOUNT}:policy/radius/apps/${FIXTURE_REPO_ID}/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/radius-managed": "true",
+          "aws:RequestTag/radius-repository-id": "${FIXTURE_REPO_ID}"
+        }
+      }
+    },
+    {
+      "Sid": "DeleteFixtureAppBoundaries",
+      "Effect": "Allow",
+      "Action": "iam:DeletePolicy",
+      "Resource": "arn:aws:iam::${ACCOUNT}:policy/radius/apps/${FIXTURE_REPO_ID}/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/radius-managed": "true",
+          "aws:ResourceTag/radius-repository-id": "${FIXTURE_REPO_ID}"
+        }
+      }
     },
     {
       "Sid": "DeleteAppRoleLeftovers",
