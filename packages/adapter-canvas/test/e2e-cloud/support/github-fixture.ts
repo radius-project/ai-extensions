@@ -30,7 +30,13 @@ export interface GitHubFixtureRepository {
   readonly commands: CloudCommandPort;
   readonly repository: string;
   readonly defaultBranch: string;
+  /** This run's baseline. Teardown leaves the default branch here. */
   readonly baselineSha: string;
+  /**
+   * Other clouds' baselines. Every cloud shares the default branch, so it is
+   * also clean at one of these when a run starts.
+   */
+  readonly otherBaselineShas: readonly string[];
 }
 
 /** The GitHub state one run's environment owns. */
@@ -281,10 +287,11 @@ export async function collectGitHubLeakedState(
     repository,
     fixture.defaultBranch
   );
-  if (!sameSha(head, fixture.baselineSha))
+  if (!isAtPinnedBaseline(fixture, head))
     findings.push(
-      `${repository}@${fixture.defaultBranch} is at ${head}, not the pinned baseline ${fixture.baselineSha} ` +
-        "(a previous run committed workflow files to the default branch)"
+      `${repository}@${fixture.defaultBranch} is at ${head}, not a pinned baseline ` +
+        `(${[fixture.baselineSha, ...fixture.otherBaselineShas].join(" or ")}); ` +
+        "a previous run committed workflow files to the default branch"
     );
 
   // The product only commits to the default branch when its token carries
@@ -301,6 +308,57 @@ export async function collectGitHubLeakedState(
     );
 
   return findings;
+}
+
+/**
+ * Moves the default branch to this run's baseline. Call it only after the
+ * whole clean-slate check passed, so a dirty branch stays where it is for the
+ * retry that needs its workflows.
+ *
+ * The branch is read again right before the write: anything other than a
+ * pinned baseline fails without writing.
+ */
+export async function moveDefaultBranchToBaseline(
+  fixture: GitHubFixtureRepository
+): Promise<void> {
+  const { commands, repository, defaultBranch, baselineSha } = fixture;
+  const head = await readDefaultBranchSha(commands, repository, defaultBranch);
+  if (sameSha(head, baselineSha)) return;
+  if (!isAtPinnedBaseline(fixture, head))
+    throw new Error(
+      `${repository}@${defaultBranch} moved to ${head} after the clean-slate check, so it was left there. ` +
+        "Find what changed it before re-running."
+    );
+  // Force is required: moving from one cloud's baseline to the other's is not
+  // a fast-forward.
+  const moved = expectSuccess(
+    await commands.runGh([
+      "api",
+      "--method",
+      "PATCH",
+      `repos/${repository}/git/refs/heads/${defaultBranch}`,
+      "-f",
+      `sha=${baselineSha}`,
+      "-F",
+      "force=true",
+      "--jq",
+      ".object.sha"
+    ]),
+    `gh api PATCH refs/heads/${defaultBranch}`
+  ).stdout;
+  if (!sameSha(moved, baselineSha))
+    throw new Error(
+      `Moving ${repository}@${defaultBranch} to ${baselineSha} reported ${moved.trim() || "no commit"} instead.`
+    );
+}
+
+function isAtPinnedBaseline(
+  fixture: GitHubFixtureRepository,
+  head: string
+): boolean {
+  return [fixture.baselineSha, ...fixture.otherBaselineShas].some((sha) =>
+    sameSha(head, sha)
+  );
 }
 
 /**

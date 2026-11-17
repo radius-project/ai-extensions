@@ -9,7 +9,7 @@
 // would prove nothing, and later asserting they are gone would prove only that
 // the fixture cleaned up after itself.
 //
-// `assertCleanSlate()` is what enforces the rule at run time. It asserts every
+// `prepareCleanSlate()` is what enforces the rule at run time. It asserts every
 // product-created artifact is absent before the journey starts, which turns the
 // later assertions from observations into proofs and catches a previous run's
 // leaked state before that state silently turns a red test green.
@@ -37,6 +37,7 @@ import {
   appRegistrationName,
   clusterName as buildClusterName,
   environmentName as buildEnvironmentName,
+  FIXTURE_AWS_BASELINE_SHA,
   FIXTURE_BASELINE_SHA,
   FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
   FIXTURE_REPO_DEFAULT_BRANCH,
@@ -51,6 +52,7 @@ import {
   cloneFixtureAtBaseline,
   collectGitHubLeakedState,
   fixtureLeaseOwner,
+  moveDefaultBranchToBaseline,
   reclaimGitHubEnvironment,
   reclaimGitHubRunState,
   requireProbeEnvironmentAbsent,
@@ -167,8 +169,13 @@ export interface CloudFixture {
   readonly defaultBranch: string;
   readonly baselineSha: string;
 
-  /** Fails when any product-created artifact is already present. */
-  assertCleanSlate(): Promise<void>;
+  /**
+   * Starts the run from a clean slate. Fails, changing nothing, when any
+   * product-created artifact is already present or the default branch is not
+   * at a pinned baseline. Only then moves the default branch to this run's
+   * baseline.
+   */
+  prepareCleanSlate(): Promise<void>;
   assertAppRegistrationExists(): Promise<AppRegistrationRecord>;
   assertFederatedCredentialExists(subject: string): Promise<void>;
   assertRoleAssignmentExists(
@@ -267,6 +274,11 @@ export interface CloudFixtureOptions {
   readonly repository?: string;
   readonly defaultBranch?: string;
   readonly baselineSha?: string;
+  /**
+   * Other clouds' baselines the default branch may be at when the run starts.
+   * Defaults to the pinned AWS baseline.
+   */
+  readonly otherBaselineShas?: readonly string[];
   /** Existing CI resource group. Must be supplied with `clusterName`. */
   readonly resourceGroup?: string;
   /** Existing CI AKS cluster. Must be supplied with `resourceGroup`. */
@@ -358,7 +370,8 @@ export async function createCloudFixture(
     commands,
     repository,
     defaultBranch,
-    baselineSha
+    baselineSha,
+    otherBaselineShas: options.otherBaselineShas ?? [FIXTURE_AWS_BASELINE_SHA]
   };
   const githubRunState: GitHubRunState = { environmentName, statePackage };
 
@@ -755,7 +768,7 @@ export async function createCloudFixture(
     defaultBranch,
     baselineSha,
 
-    async assertCleanSlate() {
+    async prepareCleanSlate() {
       const findings = [
         ...(await collectAzureLeakedState({
           commands,
@@ -765,14 +778,15 @@ export async function createCloudFixture(
         })),
         ...(await collectGitHubLeakedState(githubFixture, githubRunState))
       ];
-      if (findings.length === 0) return;
-      throw new Error(
-        "Leaked state from a previous run, not a product regression: " +
-          `the create-environment journey for ${repository} must start with none of the ` +
-          "artifacts the product is responsible for creating, but found:\n" +
-          findings.map((finding) => `  - ${finding}`).join("\n") +
-          "\nReclaim it before re-running; see the cloud E2E runbook."
-      );
+      if (findings.length > 0)
+        throw new Error(
+          "Leaked state from a previous run, not a product regression: " +
+            `the create-environment journey for ${repository} must start with none of the ` +
+            "artifacts the product is responsible for creating, but found:\n" +
+            findings.map((finding) => `  - ${finding}`).join("\n") +
+            "\nReclaim it before re-running; see the cloud E2E runbook."
+        );
+      await moveDefaultBranchToBaseline(githubFixture);
     },
 
     async assertAppRegistrationExists() {

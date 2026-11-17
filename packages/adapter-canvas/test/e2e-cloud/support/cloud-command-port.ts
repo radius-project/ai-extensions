@@ -43,7 +43,7 @@ export interface CloudCommandFailure {
  *
  * Implementations resolve with the exit code instead of rejecting, because a
  * non-zero exit is frequently the answer the fixture wants: `gh api` returning
- * 404 for an environment is how `assertCleanSlate` proves the environment is
+ * 404 for an environment is how `prepareCleanSlate` proves the environment is
  * absent.
  */
 export interface CloudCommandPort {

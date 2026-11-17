@@ -9,6 +9,7 @@ import {
   cloneFixtureAtBaseline,
   collectGitHubLeakedState,
   fixtureLeaseOwner,
+  moveDefaultBranchToBaseline,
   reclaimGitHubEnvironment,
   reclaimGitHubRunState,
   requireProbeEnvironmentAbsent,
@@ -22,6 +23,7 @@ import {
 const REPOSITORY = "fixture-owner/fixture-repo";
 const BRANCH = "main";
 const BASELINE = "a".repeat(40);
+const OTHER_BASELINE = "d".repeat(40);
 const BASELINE_TREE = "b".repeat(40);
 const LEASE_COMMIT = "c".repeat(40);
 const WORKSPACE = "/tmp/radtest-workspace";
@@ -153,7 +155,8 @@ function createHarness(
       commands: fake.ports.commands,
       repository: REPOSITORY,
       defaultBranch: BRANCH,
-      baselineSha: BASELINE
+      baselineSha: BASELINE,
+      otherBaselineShas: [OTHER_BASELINE]
     }
   };
 }
@@ -586,7 +589,7 @@ describe("collectGitHubLeakedState", () => {
     }
   );
 
-  it("reports a default branch that has moved off the pinned baseline", async () => {
+  it("reports a default branch that is at neither pinned baseline", async () => {
     await expect(
       collect([
         {
@@ -596,9 +599,22 @@ describe("collectGitHubLeakedState", () => {
         }
       ])
     ).resolves.toEqual([
-      `${REPOSITORY}@${BRANCH} is at ${"b".repeat(40)}, not the pinned baseline ${BASELINE} ` +
-        "(a previous run committed workflow files to the default branch)"
+      `${REPOSITORY}@${BRANCH} is at ${"b".repeat(40)}, not a pinned baseline ` +
+        `(${BASELINE} or ${OTHER_BASELINE}); a previous run committed workflow files to the default branch`
     ]);
+  });
+
+  // Every cloud shares the default branch, and each run's teardown leaves it
+  // at that run's own baseline.
+  it.each([
+    ["this run's baseline", BASELINE],
+    ["the other cloud's baseline", OTHER_BASELINE]
+  ])("treats a default branch at %s as clean", async (_label, head) => {
+    await expect(
+      collect([
+        { tool: "gh", match: ["api", COMMITS_PATH], respond: { stdout: head } }
+      ])
+    ).resolves.toEqual([]);
   });
 
   it("accepts a default branch head that differs only by casing or whitespace", async () => {
@@ -734,6 +750,84 @@ describe("collectGitHubLeakedState", () => {
         }
       ])
     ).rejects.toThrow(/matching-refs .* no usable "ref"/);
+  });
+});
+
+describe("moveDefaultBranchToBaseline", () => {
+  const head = (sha: string): FakeCommandStub => ({
+    tool: "gh",
+    match: ["api", COMMITS_PATH],
+    respond: { stdout: `${sha}\n` }
+  });
+  const patch = (respond: FakeCommandStub["respond"]): FakeCommandStub => ({
+    tool: "gh",
+    match: ["api", "--method", "PATCH", DEFAULT_REF_PATH],
+    respond
+  });
+  const writes = (fake: FakeFixturePorts) =>
+    fake.commands.commandLines("gh").filter((line) => line.includes("PATCH"));
+
+  it("writes nothing when the default branch is already at this run's baseline", async () => {
+    const { fake, fixture } = createHarness([head(BASELINE.toUpperCase())]);
+
+    await moveDefaultBranchToBaseline(fixture);
+
+    expect(writes(fake)).toEqual([]);
+  });
+
+  it("force-moves the default branch from the other cloud's baseline", async () => {
+    const { fake, fixture } = createHarness([
+      head(OTHER_BASELINE),
+      patch({ stdout: `${BASELINE}\n` })
+    ]);
+
+    await moveDefaultBranchToBaseline(fixture);
+
+    expect(writes(fake)).toEqual([
+      `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true --jq .object.sha`
+    ]);
+  });
+
+  // The clean-slate check read the branch earlier. Reading it again right
+  // before the write keeps a branch that changed since then where it is.
+  it("leaves a branch that moved since the clean-slate check where it is", async () => {
+    const { fake, fixture } = createHarness([head("e".repeat(40))]);
+
+    await expect(moveDefaultBranchToBaseline(fixture)).rejects.toThrow(
+      `${REPOSITORY}@${BRANCH} moved to ${"e".repeat(40)} after the clean-slate check, so it was left there.`
+    );
+    expect(writes(fake)).toEqual([]);
+  });
+
+  it.each([
+    [
+      "fails",
+      { code: 1, stderr: "HTTP 422: protected branch" },
+      /protected branch/
+    ],
+    [
+      "reports another commit",
+      { stdout: "e".repeat(40) },
+      `reported ${"e".repeat(40)} instead`
+    ],
+    ["reports no commit", { stdout: "" }, "reported no commit instead"]
+  ])("fails when the move %s", async (_label, respond, expected) => {
+    const { fixture } = createHarness([head(OTHER_BASELINE), patch(respond)]);
+
+    await expect(moveDefaultBranchToBaseline(fixture)).rejects.toThrow(
+      expected
+    );
+  });
+
+  it("fails without writing when the default branch can't be read", async () => {
+    const { fake, fixture } = createHarness([
+      failing("gh", ["api", COMMITS_PATH], "HTTP 502")
+    ]);
+
+    await expect(moveDefaultBranchToBaseline(fixture)).rejects.toThrow(
+      /HTTP 502/
+    );
+    expect(writes(fake)).toEqual([]);
   });
 });
 

@@ -153,7 +153,7 @@ gh api "repos/<fixture>/environments" --jq '.environments[].name'
 # Legacy per-run resource groups created by older suite revisions
 az group list --query "[?starts_with(name, 'radtest-canvas')].{name:name,tags:tags}"
 
-# Whether the fixture branch is still at the pinned baseline
+# Whether the fixture branch is at a pinned baseline, Azure's or AWS's
 gh api "repos/<fixture>/git/ref/heads/<default-branch>" --jq .object.sha
 ```
 
@@ -223,6 +223,50 @@ Selection changes only the runner checkout and the test environment. The local m
 
 The cloud workflow pins remote templates and actions to its own source commit, so both hosts use the matching workflow support. Older Radius versions must still support the commands, chart options, recipes, and application model used by the journey. Version selection does not add compatibility for removed or missing Radius features.
 
+## Run the journey locally
+
+A local run uses your own Azure subscription and your own copy of the fixture repository. Never point it at `radius-project/ai-extensions-fixture`: a local run and a CI run on one repository would share the product's app registration and delete each other's state.
+
+1. Copy the fixture. Create a private repository, keep GitHub Actions enabled on it, and push the shared fixture's `main` and `baselines/aws` branches to it. The copy then has the pinned commits under the same SHAs:
+
+   ```bash
+   gh repo create <you>/ai-extensions-fixture --private
+   git clone https://github.com/radius-project/ai-extensions-fixture.git
+   cd ai-extensions-fixture
+   git fetch origin baselines/aws:baselines/aws
+   git push https://github.com/<you>/ai-extensions-fixture.git main baselines/aws
+   ```
+
+2. Sign in with your own GitHub CLI session, and give it the package scopes the run needs to check and remove the state package:
+
+   ```bash
+   gh auth login -h github.com
+   gh auth refresh -h github.com -s read:packages,delete:packages
+   ```
+
+   The run reads this session itself with `gh auth token`, and ignores any `GH_TOKEN` or `GITHUB_TOKEN` you have set. It never writes the token to the log.
+
+3. Sign in to Azure with `az login`, then run the suite from `packages/adapter-canvas`:
+
+   ```bash
+   export RADIUS_CLOUD_E2E=1
+   export AZURE_SUBSCRIPTION_ID=<your-subscription>
+   export RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY=<you>/ai-extensions-fixture
+   export RADIUS_CLOUD_E2E_FIXTURE_BASELINE_SHA=<FIXTURE_BASELINE_SHA>
+   export RADIUS_CLOUD_E2E_FIXTURE_AWS_BASELINE_SHA=<FIXTURE_AWS_BASELINE_SHA>
+   export RADIUS_CLOUD_E2E_FIXTURE_AWS_FAILED_DEPLOY_SHA=<FIXTURE_AWS_FAILED_DEPLOY_SHA>
+   pnpm test:cloud
+   ```
+
+   Copy the three SHAs from [`fixture-repository.ts`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts), or use your own commits if your copy has different ones.
+
+The run stops before it changes anything when:
+
+- Only some of the four `RADIUS_CLOUD_E2E_FIXTURE_*` variables are set. Set all four or none.
+- Any of them is set while `CI` is set. They are for local runs only.
+
+The run signs in with your `gh` session only when `CI` isn't set and your copy's owner isn't `radius-project`. Otherwise it needs the fixture's GitHub App, which only CI has. No personal access token is used anywhere.
+
 ## Run the journey in the GitHub Copilot app
 
 By default, the suite drives this checkout's canvas in headless Chromium on Linux. This is the production path. Scheduled runs use it unless the optional host variable selects the app. The workflow gives both hosts 340 minutes; the harness keeps its existing Playwright test and suite limits.
@@ -265,7 +309,7 @@ The workflow reads these repository Actions variables:
 | `AIEXT_CLOUD_E2E_FOREIGN_APP_NAME`   | Not set                                | Optional. Names the seeded foreign app            |
 | `AIEXT_CLOUD_E2E_ORPHAN_APP_NAME`    | Not set                                | Optional. Names the seeded orphan app             |
 
-The fixture repository is pinned by [`FIXTURE_BASELINE_SHA`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts). CI requires both cluster variables, verifies the cluster through `az aks show`, and fails before the product journey if either value is absent, malformed, inaccessible, in a different location, not fully provisioned, or stopped. Local runs may omit both variables to provision disposable infrastructure in the developer's own subscription.
+The fixture repository is pinned by [`FIXTURE_BASELINE_SHA`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts). The AWS baseline and failed-deploy commits are pinned next to it, and the fixture's `baselines/aws` branch keeps them reachable. A run starts only when the fixture branch is at either baseline, and moves it to its own baseline after the rest of the clean-slate check passes. Cleanup resets the branch to the Azure baseline. CI requires both cluster variables, verifies the cluster through `az aks show`, and fails before the product journey if either value is absent, malformed, inaccessible, in a different location, not fully provisioned, or stopped. Local runs may omit both variables to provision disposable infrastructure in the developer's own subscription.
 
 ### AWS configuration
 

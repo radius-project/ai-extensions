@@ -24,25 +24,33 @@ import {
 } from "./support/cloud-command-port.js";
 import {
   describeUnprovisionedFixtureRepository,
-  FIXTURE_BASELINE_SHA,
   FIXTURE_RADIUS_DIRECTORY,
-  FIXTURE_REPOSITORY,
-  isFixtureRepositoryProvisioned
+  isFixtureRepositoryProvisioned,
+  PINNED_FIXTURE,
+  resolveFixtureSelection
 } from "./support/fixture-repository.js";
 
 const ENABLED =
   !!process.env.RADIUS_CLOUD_E2E && isFixtureRepositoryProvisioned();
+// The pinned commits, or a developer's own copy and its commits.
+const FIXTURE = ENABLED ? resolveFixtureSelection() : PINNED_FIXTURE;
+const PINNED_COMMITS = [
+  ["Azure baseline", FIXTURE.baselineSha],
+  ["AWS baseline", FIXTURE.awsBaselineSha],
+  ["AWS failed deploy", FIXTURE.awsFailedDeploySha]
+] as const;
 
 async function listBaselineFiles(
   commands: CloudCommandPort,
-  workspacePath: string
+  workspacePath: string,
+  sha: string
 ): Promise<string[]> {
   const paths = expectSuccess(
     await commands.runGit(
       ["ls-tree", "-r", "--name-only", "HEAD", "--", FIXTURE_RADIUS_DIRECTORY],
       workspacePath
     ),
-    `git ls-tree of ${FIXTURE_REPOSITORY}@${FIXTURE_BASELINE_SHA}`
+    `git ls-tree of ${FIXTURE.repository}@${sha}`
   )
     .stdout.split(/\r?\n/)
     .filter(Boolean);
@@ -52,10 +60,10 @@ async function listBaselineFiles(
     .map((entry) => entry.slice(prefix.length));
 }
 
-describe.skipIf(!ENABLED)(
-  `pinned baseline of ${FIXTURE_REPOSITORY}@${FIXTURE_BASELINE_SHA.slice(0, 8)}`,
-  () => {
-    it("carries every required staged file and still compiles", async () => {
+describe.skipIf(!ENABLED)(`pinned commits of ${FIXTURE.repository}`, () => {
+  it.each(PINNED_COMMITS)(
+    "%s %s carries every required staged file and still compiles",
+    async (_label, sha) => {
       const ports = createNodeCloudFixturePorts();
       const workspacePath = await ports.makeWorkspaceDir(
         "radtest-canvas-conformance"
@@ -66,22 +74,19 @@ describe.skipIf(!ENABLED)(
           await ports.commands.runGh([
             "repo",
             "clone",
-            FIXTURE_REPOSITORY,
+            FIXTURE.repository,
             workspacePath
           ]),
-          `gh repo clone ${FIXTURE_REPOSITORY}`
+          `gh repo clone ${FIXTURE.repository}`
         );
         expectSuccess(
-          await ports.commands.runGit(
-            ["reset", "--hard", FIXTURE_BASELINE_SHA],
-            workspacePath
-          ),
-          `git reset --hard ${FIXTURE_BASELINE_SHA}`
+          await ports.commands.runGit(["reset", "--hard", sha], workspacePath),
+          `git reset --hard ${sha}`
         );
 
         const result = await assertBaselineConformance({
           listBaselineFiles: () =>
-            listBaselineFiles(ports.commands, workspacePath),
+            listBaselineFiles(ports.commands, workspacePath, sha),
           compileBaseline: () =>
             compileBaselineWorkspace(workspacePath, FIXTURE_RADIUS_DIRECTORY, {
               readTextFile: (file) => fs.readFile(file, "utf8"),
@@ -112,9 +117,10 @@ describe.skipIf(!ENABLED)(
         );
       }
       if (failure) throw failure;
-    }, 300_000);
-  }
-);
+    },
+    300_000
+  );
+});
 
 // Always runs, credentials or not: the guard that keeps a placeholder from
 // masquerading as a passing cloud check is itself worth a test.

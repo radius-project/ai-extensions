@@ -22,6 +22,21 @@ export const FIXTURE_REPO_DEFAULT_BRANCH = "main";
  */
 export const FIXTURE_BASELINE_SHA = "c4aebc8271ded56e6915926ae650238804aa16c5";
 
+/**
+ * The AWS run's baseline: the Azure baseline's app replaced by one managed
+ * MySQL database and a client that signs in to it.
+ */
+export const FIXTURE_AWS_BASELINE_SHA =
+  "6e2c5e41af1ee60ac109025bb8e5ae7875a7273e";
+/** The AWS failed deploy's app, a child of the AWS baseline. */
+export const FIXTURE_AWS_FAILED_DEPLOY_SHA =
+  "44fc3dd1beb1ecee35f952ca5525ea801270ada7";
+/**
+ * Keeps the two AWS commits reachable. Cleanup force-resets the default branch
+ * to the Azure baseline, which would otherwise leave them unreferenced.
+ */
+export const FIXTURE_AWS_BASELINES_BRANCH = "baselines/aws";
+
 /** `owner/name`, the form both `gh` and the product's OIDC lookup use. */
 export const FIXTURE_REPOSITORY = `${FIXTURE_REPO_OWNER}/${FIXTURE_REPO_NAME}`;
 
@@ -149,6 +164,98 @@ export function describeUnprovisionedFixtureRepository(
   return missing.length === 0 ?
       "The fixture repository is provisioned."
     : `The fixture repository is not provisioned yet: ${missing.join(", ")} still hold placeholder values in test/e2e-cloud/support/fixture-repository.ts.`;
+}
+
+/** The fixture repository a run uses, and the commits pinned in it. */
+export interface FixtureSelection {
+  readonly repository: string;
+  readonly baselineSha: string;
+  readonly awsBaselineSha: string;
+  readonly awsFailedDeploySha: string;
+  /** Whether a developer pointed the run at their own copy. */
+  readonly overridden: boolean;
+}
+
+/** The shared fixture repository and its pinned commits. */
+export const PINNED_FIXTURE: FixtureSelection = {
+  repository: FIXTURE_REPOSITORY,
+  baselineSha: FIXTURE_BASELINE_SHA,
+  awsBaselineSha: FIXTURE_AWS_BASELINE_SHA,
+  awsFailedDeploySha: FIXTURE_AWS_FAILED_DEPLOY_SHA,
+  overridden: false
+};
+
+/**
+ * Point a local run at the developer's own fixture copy. A copy's commits are
+ * not the pinned ones, so all four are set together or not at all.
+ */
+export const FIXTURE_OVERRIDE_VARIABLES = [
+  "RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY",
+  "RADIUS_CLOUD_E2E_FIXTURE_BASELINE_SHA",
+  "RADIUS_CLOUD_E2E_FIXTURE_AWS_BASELINE_SHA",
+  "RADIUS_CLOUD_E2E_FIXTURE_AWS_FAILED_DEPLOY_SHA"
+] as const;
+
+// GitHub owners are letters, digits, and hyphens; repository names also allow
+// dots and underscores.
+const REPOSITORY_PATTERN = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
+
+/** Any non-empty `CI` counts, so an unusual value fails closed. */
+export function isContinuousIntegration(
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  return !!env.CI?.trim();
+}
+
+/**
+ * The fixture a run uses: the pinned one, or the developer's own copy.
+ *
+ * A partial override fails rather than mixing a copy with pinned commits it
+ * doesn't contain. An override in CI fails rather than being ignored: ignoring
+ * it could leave a developer testing the shared repository by mistake, and
+ * honoring it could point CI at somebody's copy.
+ */
+export function resolveFixtureSelection(
+  env: NodeJS.ProcessEnv = process.env
+): FixtureSelection {
+  const [repository, baselineSha, awsBaselineSha, awsFailedDeploySha] =
+    FIXTURE_OVERRIDE_VARIABLES.map((name) => env[name]?.trim() ?? "");
+  const values = [repository, baselineSha, awsBaselineSha, awsFailedDeploySha];
+  const set = FIXTURE_OVERRIDE_VARIABLES.filter((_name, i) => values[i]);
+  if (set.length === 0) return PINNED_FIXTURE;
+  if (isContinuousIntegration(env))
+    throw new Error(
+      `${set.join(", ")} must not be set when CI is set. They point a local run at your own fixture copy; unset them.`
+    );
+  const missing = FIXTURE_OVERRIDE_VARIABLES.filter((_name, i) => !values[i]);
+  if (missing.length > 0)
+    throw new Error(
+      `Set ${FIXTURE_OVERRIDE_VARIABLES.join(", ")} together. Missing: ${missing.join(", ")}.`
+    );
+  if (!REPOSITORY_PATTERN.test(repository))
+    throw new Error(
+      `RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY must be owner/name; received "${repository}".`
+    );
+  const shas = [baselineSha, awsBaselineSha, awsFailedDeploySha];
+  FIXTURE_OVERRIDE_VARIABLES.slice(1).forEach((name, i) => {
+    if (!COMMIT_SHA_PATTERN.test(shas[i]))
+      throw new Error(
+        `${name} must be a full 40-character commit SHA; received "${shas[i]}".`
+      );
+  });
+  const normalized = shas.map((sha) => sha.toLowerCase());
+  if (new Set(normalized).size !== normalized.length)
+    throw new Error(
+      `${FIXTURE_OVERRIDE_VARIABLES.slice(1).join(", ")} must name three different commits.`
+    );
+  return {
+    repository,
+    baselineSha: normalized[0],
+    awsBaselineSha: normalized[1],
+    awsFailedDeploySha: normalized[2],
+    overridden: true
+  };
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   RADIUS_WORKLOAD_RESOURCES
 } from "./deploy-journey.js";
 import {
+  FIXTURE_AWS_BASELINE_SHA,
   FIXTURE_BASELINE_SHA,
   FIXTURE_REPO_DEFAULT_BRANCH,
   FIXTURE_REPOSITORY
@@ -906,15 +907,209 @@ describe("createCloudFixture", () => {
     });
   });
 
-  describe("assertCleanSlate", () => {
+  describe("prepareCleanSlate", () => {
     it("resolves when every product-created artifact is absent", async () => {
       const { fixture } = await createHarness();
-      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      await expect(fixture.prepareCleanSlate()).resolves.toBeUndefined();
+    });
+
+    // The design's start order: take the lease, check the default branch and
+    // everything else, and only then move the branch to this run's baseline.
+    describe("start order", () => {
+      const OTHER_BASELINE = FIXTURE_AWS_BASELINE_SHA;
+      const headAt = (sha: string): FakeCommandStub => ({
+        tool: "gh",
+        match: ["api", COMMITS_PATH],
+        respond: { stdout: sha }
+      });
+      const moveStub: FakeCommandStub = {
+        tool: "gh",
+        match: ["api", "--method", "PATCH", DEFAULT_REF_PATH],
+        respond: { stdout: BASELINE }
+      };
+      const branchWrites = (fake: FakeFixturePorts) =>
+        fake.commands
+          .commandLines("gh")
+          .filter((line) => line.includes(`PATCH ${DEFAULT_REF_PATH}`));
+
+      it("moves a default branch at the other cloud's pinned baseline to this run's", async () => {
+        const { fixture, fake } = await createHarness([
+          headAt(OTHER_BASELINE),
+          moveStub
+        ]);
+        const leaseIndex = fake.commands
+          .commandLines("gh")
+          .indexOf(
+            `api --method POST repos/${REPOSITORY}/git/refs -f ref=${LEASE_REF} -f sha=${BASELINE}`
+          );
+
+        await fixture.prepareCleanSlate();
+
+        const lines = fake.commands.commandLines("gh");
+        expect(branchWrites(fake)).toEqual([
+          `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true --jq .object.sha`
+        ]);
+        // The lease came first, and the move came after every probe.
+        expect(leaseIndex).toBe(0);
+        expect(lines.at(-1)).toContain(`PATCH ${DEFAULT_REF_PATH}`);
+        expect(lines.slice(0, -1)).toContain(
+          `api --paginate --slurp ${PULLS_PATH}`
+        );
+      });
+
+      it("leaves a default branch already at this run's baseline alone", async () => {
+        const { fixture, fake } = await createHarness();
+
+        await fixture.prepareCleanSlate();
+
+        expect(branchWrites(fake)).toEqual([]);
+      });
+
+      it("fails and leaves a default branch at neither baseline where it is", async () => {
+        const { fixture, fake } = await createHarness([
+          headAt("e".repeat(40)),
+          moveStub
+        ]);
+
+        await expect(fixture.prepareCleanSlate()).rejects.toThrow(
+          `is at ${"e".repeat(40)}, not a pinned baseline (${BASELINE} or ${OTHER_BASELINE})`
+        );
+        expect(branchWrites(fake)).toEqual([]);
+      });
+
+      // Anything else the check finds fails the run with the branch where it
+      // is, even at the other cloud's baseline: its workflows are what the
+      // retry needs to remove the leftover.
+      it.each<[string, FakeCommandStub]>([
+        [
+          "an app registration",
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            }
+          }
+        ],
+        [
+          "a service principal",
+          { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-1"}]' } }
+        ],
+        [
+          "a role assignment",
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: { stdout: JSON.stringify([roleAssignment()]) }
+          }
+        ],
+        [
+          "this run's GitHub environment",
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: { stdout: "{}" }
+          }
+        ],
+        [
+          "an earlier run's GitHub environment",
+          {
+            tool: "gh",
+            match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
+            respond: { stdout: environmentPages(["radtest-aws-0123456789ab"]) }
+          }
+        ],
+        [
+          "a GHCR state package",
+          {
+            tool: "gh-package",
+            match: ["api", PACKAGE_PATH],
+            respond: {
+              stdout: JSON.stringify({
+                visibility: "private",
+                repository: { full_name: REPOSITORY }
+              })
+            }
+          }
+        ],
+        [
+          "a workflow fallback branch",
+          {
+            tool: "gh",
+            match: ["api", MATCHING_REFS_PATH],
+            respond: { stdout: '[{"ref":"refs/heads/radius/setup-x"}]' }
+          }
+        ],
+        [
+          "an open pull request",
+          {
+            tool: "gh",
+            match: ["api", PULLS_PATH],
+            respond: {
+              stdout: pullPages([{ number: 3, title: "t", head: { ref: "r" } }])
+            }
+          }
+        ]
+      ])(
+        "fails on %s and leaves the default branch at the other baseline",
+        async (_label, leftover) => {
+          const { fixture, fake } = await createHarness([
+            leftover,
+            headAt(OTHER_BASELINE),
+            moveStub
+          ]);
+
+          await expect(fixture.prepareCleanSlate()).rejects.toThrow(
+            "Leaked state from a previous run"
+          );
+          expect(branchWrites(fake)).toEqual([]);
+        }
+      );
+
+      it("fails when a probe can't run, before any write", async () => {
+        const { fixture, fake } = await createHarness([
+          headAt(OTHER_BASELINE),
+          moveStub,
+          failing("gh", ["api", PULLS_PATH], "HTTP 502")
+        ]);
+
+        await expect(fixture.prepareCleanSlate()).rejects.toThrow(/HTTP 502/);
+        expect(branchWrites(fake)).toEqual([]);
+      });
+
+      it("accepts the caller's own baseline set", async () => {
+        const custom = "f".repeat(40);
+        const { fixture, fake } = await createHarness(
+          [headAt(custom), moveStub],
+          {},
+          { otherBaselineShas: [custom] }
+        );
+
+        await fixture.prepareCleanSlate();
+
+        expect(branchWrites(fake)).toHaveLength(1);
+      });
+
+      it("teardown leaves the default branch at this run's baseline, not the one it started at", async () => {
+        const { fixture, fake } = await createHarness([
+          headAt(OTHER_BASELINE),
+          { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
+        ]);
+
+        await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+          `${BRANCH} reset to ${BASELINE}`
+        ]);
+        expect(branchWrites(fake)).toEqual([
+          `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true`
+        ]);
+      });
     });
 
     it("queries the exact app and service-principal name the product would choose", async () => {
       const { fixture, fake } = await createHarness();
-      await fixture.assertCleanSlate();
+      await fixture.prepareCleanSlate();
 
       const lines = fake.commands.commandLines("az");
       expect(lines).toContain(
@@ -945,7 +1140,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /app registration "radius-deploy-fixture-owner-fixture-repo" \(appId app-1, object obj-1\)/
       );
     });
@@ -955,7 +1150,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-1"}]' } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /Leaked state from a previous run, not a product regression/
       );
     });
@@ -965,7 +1160,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-9"}]' } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /service principal sp-9 for "radius-deploy-fixture-owner-fixture-repo"/
       );
     });
@@ -995,14 +1190,14 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /federated credential "gh-main" \(subject "repo:owner\/repo:ref:refs\/heads\/main"\) on app app-1/
       );
     });
 
     it("does not probe federated credentials when no app registration survived", async () => {
       const { fixture, fake } = await createHarness();
-      await fixture.assertCleanSlate();
+      await fixture.prepareCleanSlate();
 
       expect(
         fake.commands
@@ -1022,7 +1217,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         new RegExp(
           `role assignment "Contributor" for principal sp-1 at ${SCOPE.replace(
             /\//g,
@@ -1049,7 +1244,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         new RegExp(
           `role assignment "Azure Kubernetes Service RBAC Cluster Admin" for principal sp-cluster at ${CLUSTER_SCOPE.replace(
             /\//g,
@@ -1089,7 +1284,7 @@ describe("createCloudFixture", () => {
         }
       );
 
-      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      await expect(fixture.prepareCleanSlate()).resolves.toBeUndefined();
       expect(
         fake.commands
           .commandLines("az")
@@ -1114,7 +1309,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /role assignment "\(unnamed role\)" for principal sp-1/
       );
     });
@@ -1167,7 +1362,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      const error = await captureError(fixture.assertCleanSlate());
+      const error = await captureError(fixture.prepareCleanSlate());
 
       expect(error.message.split("\n  - ")).toHaveLength(10);
       for (const fragment of [
@@ -1176,7 +1371,7 @@ describe("createCloudFixture", () => {
         "federated credential",
         "role assignment",
         "GitHub environment",
-        "not the pinned baseline",
+        "not a pinned baseline",
         "workflow fallback branch",
         "open pull request"
       ])
@@ -1194,7 +1389,7 @@ describe("createCloudFixture", () => {
           failing(tool, match, "AADSTS700016: token expired")
         ]);
 
-        await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        await expect(fixture.prepareCleanSlate()).rejects.toThrow(
           /failed with exit code 2: AADSTS700016: token expired/
         );
       }
@@ -1209,7 +1404,7 @@ describe("createCloudFixture", () => {
         { tool, match, respond: { stdout: "{not json" } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /returned output that is not valid JSON/
       );
     });
@@ -1219,7 +1414,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: APP_LIST, respond: { stdout: '{"appId":"x"}' } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /returned a JSON object where a JSON array was expected/
       );
     });
@@ -1229,7 +1424,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: APP_LIST, respond: { stdout: "null" } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /returned null where a JSON array was expected/
       );
     });
@@ -1239,7 +1434,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: APP_LIST, respond: { stdout: '["app-1"]' } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /returned a non-object entry at index 0/
       );
     });
@@ -1253,7 +1448,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /entry at index 0 with no usable "id"/
       );
     });
@@ -1263,7 +1458,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: APP_LIST, respond: { stdout: "" } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      await expect(fixture.prepareCleanSlate()).resolves.toBeUndefined();
     });
   });
 
@@ -4870,7 +5065,7 @@ describe("createCloudFixture", () => {
     it("fetches no cluster credentials when no cluster assertion is made", async () => {
       const { fixture, fake } = await clusterHarness([]);
 
-      await fixture.assertCleanSlate();
+      await fixture.prepareCleanSlate();
 
       expect(
         fake.commands
