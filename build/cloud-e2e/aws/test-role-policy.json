@@ -36,6 +36,7 @@
         "iam:ListAttachedRolePolicies",
         "iam:GetPolicy",
         "iam:GetPolicyVersion",
+        "iam:ListPolicies",
         "iam:GetOpenIDConnectProvider",
         "iam:ListOpenIDConnectProviders"
       ],
@@ -62,6 +63,33 @@
       "Effect": "Allow",
       "Action": ["iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy"],
       "Resource": "arn:aws:iam::${ACCOUNT}:policy/radius-lock-${DEPLOY_ROLE}"
+    },
+    {
+      "Sid": "AppBoundaries",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetPolicy",
+        "iam:CreatePolicy",
+        "iam:TagPolicy",
+        "iam:GetPolicyVersion",
+        "iam:DeletePolicy"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT}:policy/radius/apps/${FIXTURE_REPO_ID}/*"
+    },
+    {
+      "Sid": "DeleteAppRoleLeftovers",
+      "Effect": "Allow",
+      "Action": ["iam:DeleteRolePolicy", "iam:DeleteRole"],
+      "Resource": "arn:aws:iam::${ACCOUNT}:role/radius/apps/${FIXTURE_REPO_ID}/*"
+    },
+    {
+      "Sid": "DeletePodIdentityLeftovers",
+      "Effect": "Allow",
+      "Action": "eks:DeletePodIdentityAssociation",
+      "Resource": [
+        "arn:aws:eks:${MAIN_REGION}:${ACCOUNT}:podidentityassociation/${MAIN_CLUSTER}/*",
+        "arn:aws:eks:${SECOND_REGION}:${ACCOUNT}:podidentityassociation/${SECOND_CLUSTER}/*"
+      ]
     },
     {
       "Sid": "CreateDeployRoleAccessEntries",

@@ -403,9 +403,32 @@ done
 aws iam simulate-custom-policy --policy-input-list "$(jq -c . "$WORK/test-role-policy.json")" \
   --action-names eks:DeleteCluster \
   --resource-arns "arn:aws:eks:$MAIN_REGION:$ACCOUNT:cluster/$MAIN_CLUSTER"
+# And the deploy role can't create an app role without its boundary, even
+# with an identity policy that allows everything.
+aws iam simulate-custom-policy \
+  --policy-input-list '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}' \
+  --permissions-boundary-policy-input-list "$(jq -c . "$WORK/deploy-role-boundary.json")" \
+  --action-names iam:CreateRole \
+  --resource-arns "arn:aws:iam::$ACCOUNT:role/radius/apps/$FIXTURE_REPO_ID/radtest-aws-1/radius-app-web"
 ```
 
+`packages/adapter-canvas/test/ci/cloud-e2e-aws-setup.test.ts` checks the same allow and deny cases on every pull request, with the product's own policies as the deploy role's.
+
 For a local run in your own account, use your account, your copy of the fixture, and the deploy role name the product gives it. Also add a statement to the test role's trust policy that lets your own IAM user assume the role, and sign in through it, so the run proves the policy is enough. Don't set the variables there.
+
+To apply a changed policy file to an existing setup, render the files as above, then:
+
+```bash
+# A managed policy keeps at most five versions. Delete the oldest
+# non-default one first if it already has five.
+aws iam create-policy-version \
+  --policy-arn "arn:aws:iam::$ACCOUNT:policy/ai-extensions-cloud-e2e-deploy-boundary" \
+  --policy-document "file://$WORK/deploy-role-boundary.json" --set-as-default
+aws iam put-role-policy --role-name ai-extensions-cloud-e2e --policy-name cloud-e2e \
+  --policy-document "file://$WORK/test-role-policy.json"
+```
+
+If you can't create a policy version, recreate the deploy role and its boundary instead: delete the role, delete the boundary, then run step 4 again. Do this only while the deploy role is empty: no environment uses it, so it has the deny-only trust policy, no inline policies, no access entries, and no lock. Otherwise environments lose their access.
 
 ### Seeded app registrations
 
