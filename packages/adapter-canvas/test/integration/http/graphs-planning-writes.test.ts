@@ -64,6 +64,7 @@ interface PipelineScript {
   afterCompile?: () => void;
   liveWorkspaceBranch?: string;
   commits?: Record<string, string>;
+  stageArtifacts?: GraphPipeline["stageArtifacts"];
 }
 
 interface Harness {
@@ -111,7 +112,9 @@ function start(
     selectAppBicep: (_entry, _repo, branch) =>
       Promise.resolve(scripted(active.selections, branch, "selectAppBicep")),
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
-    stageArtifacts: () => Promise.resolve({ dir: "", remote: false }),
+    stageArtifacts: (input) =>
+      active.stageArtifacts?.(input) ??
+      Promise.resolve({ dir: "", remote: false }),
     compileResources: ({ selection }) => {
       if (active.compileThrows) return Promise.reject(active.compileThrows);
       const compiled = scripted(
@@ -129,12 +132,13 @@ function start(
     discardStagedArtifacts: () => {}
   };
 
+  const entry = { state };
   const routes = createTestRouteTable(
     createGraphsPlanningWritesRoutes({
       // The real workflow service, so this suite still exercises the whole
       // stack from the socket down to the state machine.
       workflows: createGraphPlanningWorkflows({
-        readInstanceEntry: () => (entryMissing ? undefined : { state }),
+        readInstanceEntry: () => (entryMissing ? undefined : entry),
         resolveBranchForRequest: (
           entry,
           repo,
@@ -1128,6 +1132,67 @@ describe("graphs-planning writes real-loopback HIT", () => {
     );
     expect(harness.state.page).toBe("graphDiff");
     expect(harness.state.diffResources).toHaveLength(2);
+  });
+
+  it("keeps the newer same-selection diff when the older disposal finishes last", async () => {
+    let cleanupStarted = () => {};
+    let releaseCleanup = () => {};
+    const disposing = new Promise<void>((resolve) => {
+      cleanupStarted = resolve;
+    });
+    const heldCleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const resource = (id: string): CanvasGraphResource => ({
+      id,
+      name: id,
+      type: "Fixture/containers"
+    });
+    let holdFirst = true;
+    const harness = start({
+      selections: {
+        main: selectionOf("main", "resource base = {}"),
+        topic: selectionOf("topic", "resource head = {}")
+      },
+      compiled: { main: [], topic: [resource("older")] },
+      stageArtifacts: async () => {
+        const hold = holdFirst;
+        holdFirst = false;
+        return {
+          dir: "fixture-stage",
+          remote: true,
+          handle: {
+            dir: "fixture-stage",
+            owned: true,
+            fingerprint: "fixture",
+            async dispose() {
+              if (!hold) return;
+              cleanupStarted();
+              await heldCleanup;
+            }
+          }
+        };
+      }
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const compare = () =>
+      post(
+        entry.baseUrl,
+        "/api/diff-branches",
+        '{"repo":"octo/app","base":"main","head":"topic"}'
+      );
+    const older = compare();
+    try {
+      await disposing;
+      harness.script.compiled.topic = [resource("newer")];
+      expect(await (await compare()).json()).toMatchObject({ reload: true });
+    } finally {
+      releaseCleanup();
+    }
+    const stale = await older;
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({ stale: true });
+    expect(harness.state.diffResources?.map(({ id }) => id)).toEqual(["newer"]);
   });
 
   it("refuses a comparison whose selection moved on, with 409", async () => {

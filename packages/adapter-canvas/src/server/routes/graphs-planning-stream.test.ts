@@ -662,7 +662,7 @@ describe("graphs-planning load-graph-stream route", () => {
     }
   );
 
-  it("passes the empty graph-json path and skips workspace derivation for a remote selection", async () => {
+  it("omits a graph-json destination and workspace derivation for a remote selection", async () => {
     const { deps, calls } = fakes({
       selection: selection({ fromWorkspace: false, bicepPath: "" })
     });
@@ -677,7 +677,7 @@ describe("graphs-planning load-graph-stream route", () => {
       `radArtifactsDirForSelection(false|${REPO}|${DEFAULT_BRANCH}|${BICEP_PATH})`
     );
     expect(calls).toContain(
-      `buildGraphViaRad(${BICEP_PATH}|save=|dir=/tmp/rad|cleanup=false)`
+      `buildGraphViaRad(${BICEP_PATH}|save=undefined|dir=/tmp/rad|cleanup=false)`
     );
     expect(frames(recording.stream).at(-1)).toEqual({
       event: "done",

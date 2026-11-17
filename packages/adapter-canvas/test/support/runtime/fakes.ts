@@ -267,10 +267,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       // rests on it, so a hand-synced copy that drifted looser would let tests
       // assert behavior production cannot produce.
       isWorkspaceSelection: vi.fn(isWorkspaceSelection),
-      fetchWorkspaceBicep: vi.fn(
-        async (_state, repo: string, branch: string) =>
-          bicepByRepoBranch[`workspace:${repo}@${branch}`] ?? null
-      ),
       fetchWorkspaceTree: vi.fn(
         async (
           _state,
@@ -305,6 +301,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       getDefaultBranch: vi.fn(async () => options.defaultBranch ?? "main")
     },
     graphSources: {
+      assertWorkspaceSource: vi.fn(async () => {}),
       read: vi.fn(async (request): Promise<GraphSourceRead> => {
         const workspace = request.workspace;
         const local =
@@ -327,21 +324,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         try {
           if (request.definitionPath)
             return graphReadFile(source, request.definitionPath);
-          const content = await (local ?
-            deps.workspace.fetchWorkspaceBicep(
-              {
-                workspacePath: workspace?.path,
-                workspaceRepo: workspace?.repo,
-                workspaceBranch: workspace?.ref
-              },
-              request.repo,
-              request.ref
-            )
-          : deps.core.fetchBicepFromRepo(
-              deps.github,
-              request.repo,
-              request.ref
-            ));
+          const content =
+            bicepByRepoBranch[
+              `${local ? "workspace" : "remote"}:${request.repo}@${request.ref}`
+            ] ?? null;
           return content === null ?
               { status: "absent", source }
             : { status: "present", source, content };
@@ -361,10 +347,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       computeGraphDiff: vi.fn(
         (base: CanvasGraphResource[], head: CanvasGraphResource[]) =>
           computeGraphDiff(base, head)
-      ),
-      fetchBicepFromRepo: vi.fn(
-        async (_github, repo: string, branch: string) =>
-          bicepByRepoBranch[`remote:${repo}@${branch}`] ?? null
       ),
       filterGraphVisualizationResources: vi.fn(
         (resources: CanvasGraphResource[]) =>

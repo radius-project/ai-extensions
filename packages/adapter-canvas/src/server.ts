@@ -1356,16 +1356,17 @@ function triggerAppBicepHandoff(
   page: string,
   progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph",
   isCurrent?: () => boolean,
-  environmentKey?: string
+  environmentKey?: string,
+  onFailure?: (message: string) => void
 ): void {
-  try {
-    if (typeof appBicepHandoff !== "function") return;
-    if (!repo) return;
-    const list = (Array.isArray(branches) ? branches : [branches]).filter(
-      (branch): branch is string => Boolean(branch)
-    );
-    Promise.resolve(
-      appBicepHandoff({
+  const handoff = appBicepHandoff;
+  if (!handoff || !repo) return;
+  const list = (Array.isArray(branches) ? branches : [branches]).filter(
+    (branch): branch is string => Boolean(branch)
+  );
+  void Promise.resolve()
+    .then(() =>
+      handoff({
         repo,
         branches: list,
         page,
@@ -1374,10 +1375,14 @@ function triggerAppBicepHandoff(
         isCurrent,
         environmentKey
       })
-    ).catch(() => {});
-  } catch {
-    /* never let a handoff failure break the response */
-  }
+    )
+    .catch((error: unknown) => {
+      const message = redactGhCredentials(errorMessage(error));
+      console.error(
+        `[radius graph] Application model handoff failed: ${message}`
+      );
+      if (isCurrent?.() !== false) onFailure?.(message);
+    });
 }
 
 // Hand a failed deploy to the agent to repair and redeploy. Fires at most once
@@ -6025,8 +6030,8 @@ export function createProductionCanvasServerRuntime(
       setSourceRefResources(entry, "graph", resources, context, expectedToken),
     isCurrentSourceRef: (entry, expectedToken) =>
       isCurrentSourceRefToken(entry.state, "graph", expectedToken),
-    triggerAppBicepHandoff: (entry, repo, branch) =>
-      triggerAppBicepHandoff(entry, repo, branch, "graph"),
+    triggerAppBicepHandoff: (entry, repo, branch, isCurrent) =>
+      triggerAppBicepHandoff(entry, repo, branch, "graph", "graph", isCurrent),
     triggerGraphRepairHandoff: (entry, request) =>
       triggerGraphRepairHandoff(entry, request),
     clearGraphRepairAttempt: (entry) =>

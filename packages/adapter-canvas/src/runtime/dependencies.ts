@@ -44,11 +44,6 @@ export interface WorkspaceDependencies {
     repo: string | null | undefined,
     branch: string | null | undefined
   ): boolean;
-  fetchWorkspaceBicep(
-    state: CanvasState,
-    repo: string,
-    branch: string
-  ): Promise<string | null>;
   // Repo-relative paths in the local worktree, or null when the selection is not
   // the workspace or the tree could not be walked. Null is distinct from an
   // empty list on purpose: a listing that failed proves nothing about the
@@ -80,11 +75,6 @@ export interface CoreGraphDependencies {
     base: CanvasGraphResource[],
     head: CanvasGraphResource[]
   ): CanvasGraphResource[];
-  fetchBicepFromRepo(
-    github: GitHubContentReader,
-    repo: string,
-    branch: string
-  ): Promise<string | null>;
   filterGraphVisualizationResources(
     resources: CanvasGraphResource[]
   ): CanvasGraphResource[];

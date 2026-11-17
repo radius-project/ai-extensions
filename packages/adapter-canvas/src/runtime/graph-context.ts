@@ -41,6 +41,7 @@ export function createRuntimeGraphOrchestrator(
 export interface AppModelStatus {
   repo: string;
   branch: string;
+  source: GraphSourceIdentity;
   refreshable: boolean;
   freshness: AppModelFreshness;
 }
@@ -52,11 +53,6 @@ export interface GraphContextHelpers {
     branch: string,
     state: CanvasState
   ): Promise<GraphSourceRead>;
-  fetchBicepForBranch(
-    repo: string,
-    branch: string,
-    state: CanvasState
-  ): Promise<string | null>;
   evaluateAppSourceForBranch(
     repo: string,
     branch: string,
@@ -110,24 +106,6 @@ export function createGraphContextHelpers(
         authorized: deps.workspace.isWorkspaceSelection(state, repo, branch)
       }
     });
-  }
-
-  async function fetchBicepForBranch(
-    repo: string,
-    branch: string,
-    state: CanvasState
-  ): Promise<string | null> {
-    const read = await readBicepForBranch(repo, branch, state);
-    if (read.status === "unavailable") throw new Error(read.diagnostic);
-    if (read.status === "present") {
-      if (!read.content.trim()) {
-        throw new Error(
-          `Application definition ${read.source.definitionPath} is empty.`
-        );
-      }
-      return read.content;
-    }
-    return null;
   }
 
   // Picks the lister that can actually see the branch — the local worktree for
@@ -212,6 +190,9 @@ export function createGraphContextHelpers(
     state: CanvasState
   ): Promise<AppModelStatus> {
     const read = await readBicepForBranch(repo, branch, state);
+    const assertSource = () =>
+      deps.graphSources.assertWorkspaceSource(read.source);
+    await assertSource();
     if (read.status === "unavailable") throw new Error(read.diagnostic);
     const model = read.status === "present" ? read.content : null;
     if (model !== null && !model.trim()) {
@@ -220,18 +201,31 @@ export function createGraphContextHelpers(
       );
     }
     const fromWorkspace = read.source.kind === "workspace";
+    const workspacePath = read.source.workspacePath;
+    async function workspaceProbe<T>(probe: () => Promise<T>): Promise<T> {
+      await assertSource();
+      const result = await probe();
+      await assertSource();
+      return result;
+    }
 
-    const [originText, headCommit] = await Promise.all([
-      readAppOrigin(read.source),
+    const originText = await readAppOrigin(read.source).catch(
+      async (error: unknown) => {
+        await assertSource();
+        throw error;
+      }
+    );
+    const headCommit =
       // Only the worktree's head is worth fetching. On any other branch the
       // comparison it feeds cannot say anything useful, because committing an
       // app model is itself a commit past the one its record names, so the two
       // never match. Nothing consumes that verdict, and skipping it saves a
       // GitHub round trip per branch on the graph-diff path.
       fromWorkspace ?
-        deps.appModel.workspaceHeadCommit(state.workspacePath).catch(() => "")
-      : Promise.resolve("")
-    ]);
+        await workspaceProbe(() =>
+          deps.appModel.workspaceHeadCommit(workspacePath).catch(() => "")
+        )
+      : "";
 
     // Head equality alone is not a usable freshness test: committing a freshly
     // generated model advances the head past the commit that model recorded. The
@@ -243,9 +237,11 @@ export function createGraphContextHelpers(
     const recordedCommit = recorded?.sourceCommit;
     const sourceChanged =
       fromWorkspace && recordedCommit ?
-        await deps.appModel
-          .workspaceSourceChangedSince(state.workspacePath, recordedCommit)
-          .catch(() => undefined)
+        await workspaceProbe(() =>
+          deps.appModel
+            .workspaceSourceChangedSince(workspacePath, recordedCommit)
+            .catch(() => undefined)
+        )
       : undefined;
 
     // Only asked when there is no record to judge the model by, which is the one
@@ -255,9 +251,11 @@ export function createGraphContextHelpers(
     // branch nothing is regenerated at all, so the answer would go unused.
     const modelRecoverable =
       fromWorkspace && !recordedCommit ?
-        await deps.appModel
-          .workspaceModelRecoverable(state.workspacePath)
-          .catch(() => undefined)
+        await workspaceProbe(() =>
+          deps.appModel
+            .workspaceModelRecoverable(workspacePath)
+            .catch(() => undefined)
+        )
       : undefined;
 
     // Only asked when the record saved a Radius version to compare with. A
@@ -268,10 +266,12 @@ export function createGraphContextHelpers(
       recorded?.radiusVersion ?
         await deps.appModel.radiusVersion().catch(() => "")
       : "";
+    await assertSource();
 
     return {
       repo,
       branch,
+      source: read.source,
       refreshable: fromWorkspace && model !== null,
       freshness: evaluateAppModelFreshness({
         model,
@@ -289,7 +289,6 @@ export function createGraphContextHelpers(
   return {
     workspaceState,
     readBicepForBranch,
-    fetchBicepForBranch,
     evaluateAppSourceForBranch,
     listSourceTreeForBranch,
     resolveAppModelStatus

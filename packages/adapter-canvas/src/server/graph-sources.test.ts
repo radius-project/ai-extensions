@@ -30,6 +30,7 @@ function harness(selected: GraphSourceRead, branch = "topic") {
     dispose: async () => {}
   };
   const sources: GraphSourceBindings = {
+    assertWorkspaceSource: async () => {},
     read: async (request) => {
       reads.push(request);
       return selected;

@@ -8,6 +8,14 @@ import {
 } from "./graph-orchestration.js";
 import type { GraphSourceRead } from "./graph-source.js";
 
+function barrier() {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
 const selection = (
   ref: string,
   content: string | null = "model"
@@ -26,7 +34,11 @@ const selection = (
 
 function harness(
   failure?: string,
-  options: { borrowed?: boolean; cleanupFails?: boolean } = {}
+  options: {
+    borrowed?: boolean;
+    cleanupFails?: boolean;
+    beforeDispose?: (ref: string) => Promise<void>;
+  } = {}
 ) {
   const effects: string[] = [];
   const ports: GraphOrchestrationPorts<string, string> = {
@@ -39,6 +51,7 @@ function harness(
         fingerprint: "fingerprint",
         async dispose() {
           effects.push(`dispose:${read.source.ref}`);
+          await options.beforeDispose?.(read.source.ref);
           if (options.cleanupFails) throw new Error("cleanup denied");
         }
       };
@@ -253,6 +266,49 @@ describe("graph orchestration", () => {
     ).rejects.toThrow("cancelled");
     expect(effects).toEqual(["stage:a", "dispose:a"]);
   });
+
+  it.each(["authored", "compare", "compile-error"] as const)(
+    "checks cancellation after disposal without masking the result of %s",
+    async (scenario) => {
+      const disposing = barrier();
+      const cleanup = barrier();
+      let cancelled = false;
+      const { graph, effects } = harness(
+        scenario === "compile-error" ? "compile:a" : undefined,
+        {
+          cleanupFails: scenario === "compare",
+          async beforeDispose(ref) {
+            if (ref !== "a") return;
+            disposing.release();
+            await cleanup.promise;
+          }
+        }
+      );
+      const control = {
+        checkCancelled() {
+          if (cancelled) throw new Error("superseded");
+        }
+      };
+      const run =
+        scenario === "authored" ?
+          graph.authored(selection("a"), control)
+        : graph.compare(selection("a"), selection("b"), control);
+      const rejected = expect(run).rejects.toThrow(
+        scenario === "compile-error" ? "compile:a" : "superseded"
+      );
+      await disposing.promise;
+      cancelled = true;
+      cleanup.release();
+      await rejected;
+      expect(effects.filter((effect) => effect.startsWith("dispose:"))).toEqual(
+        scenario === "authored" ? ["dispose:a"] : ["dispose:a", "dispose:b"]
+      );
+      if (scenario === "compare")
+        expect(effects).toContain(
+          "Graph artifact cleanup failed: cleanup denied"
+        );
+    }
+  );
 
   it("keeps cleanup failures diagnostic-only and attempts all disposals", async () => {
     const { graph, effects } = harness("compile:a", { cleanupFails: true });

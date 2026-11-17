@@ -1,3 +1,4 @@
+import { stageWorkspaceGraphOutput } from "./workspace-graph-output.js";
 import {
   createGraphOrchestrator,
   computeGraphDiff,
@@ -751,7 +752,7 @@ export interface LoadGraphStreamRadArtifactsOptions {
 
 export interface LoadGraphStreamBuildOptions {
   log: (message: string) => void;
-  saveGraphJsonTo: string;
+  saveGraphJsonTo?: string;
   radArtifactsDir: string;
   cleanupRadArtifactsDir: boolean;
 }
@@ -807,7 +808,8 @@ export interface GraphsPlanningStreamDependencies {
   triggerAppBicepHandoff(
     entry: CanvasServerEntry,
     repo: string,
-    branch: string
+    branch: string,
+    isCurrent: () => boolean
   ): void;
   triggerGraphRepairHandoff(
     entry: CanvasServerEntry,
@@ -927,9 +929,11 @@ export async function handleLoadGraphStream(
     branch
   });
   const isCurrent = () =>
+    dependencies.readInstanceEntry(instanceId) === entry &&
     entry.state.graphBuildGeneration === requestGeneration &&
     dependencies.isCurrentSourceRef(entry, sourceRefContext.token);
 
+  let output: ReturnType<typeof stageWorkspaceGraphOutput>;
   try {
     sendProgress(`Checking ${repo} for existing app.bicep...`);
     const selection = await dependencies.fetchBicepSelection(
@@ -953,7 +957,7 @@ export async function handleLoadGraphStream(
       // A model that exists can still no longer describe its source. The runtime
       // classifies it and decides what, if anything, to say; the graph still
       // streams either way.
-      dependencies.triggerAppBicepHandoff(entry, repo, branch);
+      dependencies.triggerAppBicepHandoff(entry, repo, branch, isCurrent);
     } else {
       const source = evaluateAppSource(
         await dependencies.listBranchPaths(entry, repo, branch)
@@ -971,7 +975,7 @@ export async function handleLoadGraphStream(
         });
         return;
       }
-      dependencies.triggerAppBicepHandoff(entry, repo, branch);
+      dependencies.triggerAppBicepHandoff(entry, repo, branch, isCurrent);
       // Deliberately outside the terminal-failure contract that the JSON
       // load-graph/plan-graph routes implement: this stream has no restartWait,
       // so every connection is a fresh explicit open with no way to distinguish
@@ -992,6 +996,9 @@ export async function handleLoadGraphStream(
       selection.fromWorkspace ?
         dependencies.workspaceGraphJsonPath(entry.state, selection.bicepPath)
       : "";
+    const workspacePath = entry.state.workspacePath;
+    const isCurrentOutput = () =>
+      isCurrent() && entry.state.workspacePath === workspacePath;
     const graph = createGraphOrchestrator<
       CanvasGraphResource,
       CanvasGraphResource[]
@@ -1009,14 +1016,24 @@ export async function handleLoadGraphStream(
           }),
           dependencies.removeDirectory
         ),
-      compile: async (definition, definitionPath, options) =>
-        dependencies.canvasGraphResources(
-          await dependencies.buildGraphViaRad(definition, definitionPath, {
-            ...options,
-            log: sendProgress,
-            saveGraphJsonTo: graphJsonPath
-          })
-        ),
+      compile: async (definition, definitionPath, options) => {
+        output = stageWorkspaceGraphOutput(
+          graphJsonPath,
+          dependencies.logError
+        );
+        try {
+          return dependencies.canvasGraphResources(
+            await dependencies.buildGraphViaRad(definition, definitionPath, {
+              ...options,
+              log: sendProgress,
+              saveGraphJsonTo: output?.compilerPath
+            })
+          );
+        } catch (error) {
+          if (isCurrentOutput()) output?.invalidate();
+          throw error;
+        }
+      },
       diff: computeGraphDiff,
       diagnostic: (message) =>
         dependencies.logError(
@@ -1037,7 +1054,7 @@ export async function handleLoadGraphStream(
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (
-      !isCurrent() ||
+      !isCurrentOutput() ||
       !dependencies.commitSourceRef(
         entry,
         resources,
@@ -1048,6 +1065,7 @@ export async function handleLoadGraphStream(
       sendDone({ stale: true });
       return;
     }
+    output?.publish();
     entry.state.graphTargetRepo = repo;
     entry.state.graphBranch = branch;
     entry.state.graphFollowsWorkspaceBranch =
@@ -1083,6 +1101,8 @@ export async function handleLoadGraphStream(
       return;
     }
     sendDone({ error: dependencies.errorMessage(e) });
+  } finally {
+    output?.dispose();
   }
 }
 

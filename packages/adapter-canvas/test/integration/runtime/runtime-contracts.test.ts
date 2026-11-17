@@ -710,7 +710,7 @@ describe("P0-A Radius runtime registration contract", () => {
     expect(unrelatedResult).toBeUndefined();
     expect(unrelated.session.send).not.toHaveBeenCalled();
     expect(unrelated.session.rpc.canvas.open).not.toHaveBeenCalled();
-    expect(unrelated.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+    expect(unrelated.deps.graphSources.read).not.toHaveBeenCalled();
     expect(unrelated.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
     expect(enabledResult?.additionalContext).toContain("radius-panel");
     expect(enabledResult?.additionalContext).toContain(
@@ -1036,6 +1036,45 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
+  it("fences an old fallback Git lookup across registered close and reopen", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" }
+    });
+    let started = () => {};
+    let finish = () => {};
+    const lookupStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const lookup = new Promise<{ stdout: string; stderr: string }>(
+      (resolve) => {
+        finish = () =>
+          resolve({ stdout: "git@github.com:acme/old.git", stderr: "" });
+      }
+    );
+    vi.mocked(harness.deps.process.execFile).mockImplementationOnce(() => {
+      started();
+      return lookup;
+    });
+    const pending = harness.host.open("radius-panel", { page: "graph" });
+    try {
+      await lookupStarted;
+      await harness.host.close("radius-panel");
+      await harness.host.open("radius-panel", {
+        page: "planned",
+        repo: "acme/new",
+        branch: "topic"
+      });
+    } finally {
+      finish();
+      await pending;
+    }
+    expect(harness.servers.get("radius-panel")?.state).toMatchObject({
+      contextRepo: "acme/new",
+      contextBranch: "topic",
+      activeGraphView: "planned"
+    });
+  });
+
   it("uses the worktree branch when omitted and explicit base/head for graph diff", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
@@ -1060,15 +1099,19 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       headBranch: "feature/runtime-tests"
     });
 
-    expect(harness.deps.core.fetchBicepFromRepo).toHaveBeenCalledWith(
-      harness.deps.github,
-      "acme/widgets",
-      "main"
+    expect(harness.deps.graphSources.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: "acme/widgets",
+        ref: "main",
+        workspace: expect.objectContaining({ authorized: false })
+      })
     );
-    expect(harness.deps.workspace.fetchWorkspaceBicep).toHaveBeenCalledWith(
-      expect.any(Object),
-      "acme/widgets",
-      "feature/runtime-tests"
+    expect(harness.deps.graphSources.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: "acme/widgets",
+        ref: "feature/runtime-tests",
+        workspace: expect.objectContaining({ authorized: true })
+      })
     );
     expect(harness.servers.get("radius-panel")?.state).toMatchObject({
       diffTargetRepo: "acme/widgets",
@@ -2007,9 +2050,14 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
           (candidate) => candidate.name === "radius_report_modeling_failure"
         );
         if (!report) throw new Error("Missing failure reporting tool");
-        vi.mocked(harness.deps.workspace.fetchWorkspaceBicep).mockResolvedValue(
-          " \n"
-        );
+        const typedRead = vi.mocked(harness.deps.graphSources.read);
+        const readModel = typedRead.getMockImplementation();
+        if (!readModel) throw new Error("Missing typed graph reader");
+        typedRead.mockImplementationOnce(async (request) => ({
+          status: "present",
+          content: " \n",
+          source: (await readModel(request)).source
+        }));
         expect(
           await report.handler({
             instanceId: "radius-panel",
@@ -2021,9 +2069,6 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
           })
         ).toEqual({ recorded: true });
         expect(entry.state.appBicepHandoffKeys).toEqual({});
-        vi.mocked(harness.deps.workspace.fetchWorkspaceBicep).mockResolvedValue(
-          null
-        );
         const failed = await workflows[workflow]({
           instanceId: "radius-panel",
           body

@@ -33,6 +33,7 @@ export type GraphBytesRead =
   | { status: "unavailable"; diagnostic: string };
 
 export interface GraphSourceBindings {
+  assertWorkspaceSource(source: GraphSourceIdentity): Promise<void>;
   read(request: GraphSourceRequest): Promise<GraphSourceRead>;
   readFile(
     source: GraphSourceIdentity,
@@ -40,6 +41,8 @@ export interface GraphSourceBindings {
   ): Promise<GraphSourceRead>;
   stage(selection: PresentGraphSource): Promise<StagedGraphArtifacts>;
 }
+
+export class WorkspaceGraphBranchChanged extends Error {}
 
 export interface GraphSourceBindingOptions {
   execute: DeploymentCommandExecutor;
@@ -126,9 +129,16 @@ export function createGraphSourceBindings(
       );
     });
     if (branch !== source.ref)
-      throw new Error(
+      throw new WorkspaceGraphBranchChanged(
         `Workspace branch changed: expected ${source.ref}, found ${branch || "no branch"}.`
       );
+  }
+
+  async function assertWorkspaceSource(source: GraphSourceIdentity) {
+    if (source.kind !== "workspace") return;
+    if (!source.workspacePath)
+      throw new Error("Workspace path is unavailable.");
+    await assertWorkspaceBranch(source, source.workspacePath);
   }
 
   async function readBytes(
@@ -284,6 +294,7 @@ export function createGraphSourceBindings(
   }
 
   return {
+    assertWorkspaceSource,
     read,
     readFile,
     stage: (selection) =>

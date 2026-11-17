@@ -159,18 +159,20 @@ export function createGraphOrchestrator<Resource, Diff>(
     control: GraphOperationControl = {}
   ) {
     const prepared = await prepare(selection, control);
+    let resources: Resource[];
     try {
-      const resources = await compilePrepared(prepared, control);
-      return selection.status === "absent" ?
-          {
-            status: "definition-absent" as const,
-            source: selection.source,
-            resources
-          }
-        : { status: "authored" as const, source: selection.source, resources };
+      resources = await compilePrepared(prepared, control);
     } finally {
       await disposePrepared(prepared);
     }
+    control.checkCancelled?.();
+    return selection.status === "absent" ?
+        {
+          status: "definition-absent" as const,
+          source: selection.source,
+          resources
+        }
+      : { status: "authored" as const, source: selection.source, resources };
   }
 
   async function compare(
@@ -183,6 +185,7 @@ export function createGraphOrchestrator<Resource, Diff>(
       checkCancelled: control.checkCancelled,
       onPhase: (phase) => control.onPhase?.(phase, side)
     });
+    let result: Awaited<ReturnType<typeof comparePrepared>>;
     try {
       validate(base);
       validate(head);
@@ -190,10 +193,12 @@ export function createGraphOrchestrator<Resource, Diff>(
       acquired.push(preparedBase);
       const preparedHead = await prepare(head, sideControl("head"));
       acquired.push(preparedHead);
-      return await comparePrepared(preparedBase, preparedHead, control);
+      result = await comparePrepared(preparedBase, preparedHead, control);
     } finally {
       for (const prepared of acquired) await disposePrepared(prepared);
     }
+    control.checkCancelled?.();
+    return result;
   }
 
   /** Prepared inputs remain owned by the caller, including cache-hit paths. */

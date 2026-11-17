@@ -51,13 +51,11 @@ function start(): Harness {
   const handoffs: { repo: string; branch: string }[] = [];
   let entryMissing = false;
 
-  const entryFor = (
-    resolved: CanvasServerEntry | undefined
-  ): CanvasServerEntry | undefined => (entryMissing ? undefined : resolved);
+  const entry = { state } as CanvasServerEntry;
 
   const routes = createTestRouteTable(
     createGraphsPlanningStreamRoutes({
-      readInstanceEntry: () => entryFor({ state } as CanvasServerEntry),
+      readInstanceEntry: () => (entryMissing ? undefined : entry),
       resolveBranchForRequest: (_entry, _repo, requestedBranch) => {
         if (script.branchResolutionThrows) {
           return Promise.reject(script.branchResolutionThrows);

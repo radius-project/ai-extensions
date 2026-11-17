@@ -179,6 +179,8 @@ export function createRadiusExtension(
     resolveContext: () => workspaceState(),
     resolveStatus: (repo, branch, state) =>
       resolveAppModelStatus(repo, branch, state),
+    assertWorkspaceSource: (source) =>
+      deps.graphSources.assertWorkspaceSource(source),
     evaluateSource: (repo, branch, state) =>
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>

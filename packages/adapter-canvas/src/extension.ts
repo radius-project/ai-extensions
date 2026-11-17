@@ -22,7 +22,6 @@ import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
-  fetchBicepFromRepo,
   filterGraphVisualizationResources
 } from "@radius-project/core";
 import {
@@ -49,7 +48,6 @@ import {
 import {
   defaultBranchForState,
   detectWorkspaceContext,
-  fetchWorkspaceBicep,
   fetchWorkspaceFile,
   hasRadiusApplicationModel,
   fetchWorkspaceTree,
@@ -226,7 +224,6 @@ const dependencies: RadiusExtensionDependencies = {
     detectWorkspaceContext,
     defaultBranchForState,
     isWorkspaceSelection,
-    fetchWorkspaceBicep,
     fetchWorkspaceTree,
     parseRepoFromRemote,
     toSafeRepoRelPath,
@@ -237,7 +234,6 @@ const dependencies: RadiusExtensionDependencies = {
   graphSources,
   core: {
     computeGraphDiff,
-    fetchBicepFromRepo,
     filterGraphVisualizationResources
   },
   rad: {

@@ -13,6 +13,7 @@ import {
   createFakeDependencies,
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
+import { createDeferred } from "../../test/support/browser/fakes.js";
 
 function findTool(
   tools: ReturnType<typeof createRadiusTools>,
@@ -885,7 +886,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
 
   it("propagates a model read failure instead of recording an unverified failure", async () => {
     const { tools, deps, entry } = await currentAttempt();
-    vi.mocked(deps.workspace.fetchWorkspaceBicep).mockRejectedValue(
+    vi.mocked(deps.graphSources.read).mockRejectedValue(
       new Error("workspace unavailable")
     );
 
@@ -897,24 +898,24 @@ describe("TL-11: radius_report_modeling_failure", () => {
 
   it("rejects a report superseded while the model recheck is in flight", async () => {
     const { tools, deps, entry } = await currentAttempt();
-    let finishRead!: (content: string | null) => void;
-    vi.mocked(deps.workspace.fetchWorkspaceBicep).mockImplementation(
-      () =>
-        new Promise<string | null>((resolve) => {
-          finishRead = resolve;
-        })
-    );
+    const started = createDeferred<void>();
+    const finishRead = createDeferred<void>();
+    const read = vi.mocked(deps.graphSources.read).getMockImplementation();
+    if (!read) throw new Error("Missing typed graph reader");
+    vi.mocked(deps.graphSources.read).mockImplementation(async (request) => {
+      started.resolve();
+      await finishRead.promise;
+      return read(request);
+    });
 
     const pending = findTool(tools, "radius_report_modeling_failure").handler(
       report
     );
-    await vi.waitFor(() =>
-      expect(deps.workspace.fetchWorkspaceBicep).toHaveBeenCalledOnce()
-    );
+    await started.promise;
     const tokens = entry.state.appModelAttemptTokens;
     if (!tokens) throw new Error("expected current modeling attempt");
     tokens["acme/widgets::main"] = "attempt-2";
-    finishRead(null);
+    finishRead.resolve();
 
     await expect(pending).resolves.toMatchObject({ recorded: false });
     expect(entry.state.appModelFailures).toBeUndefined();

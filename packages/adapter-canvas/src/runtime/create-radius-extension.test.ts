@@ -314,7 +314,7 @@ describe("RU-19: onPreToolUse hook", () => {
 
   it("never inspects the application model for an open_canvas call", async () => {
     const { ext, deps } = setup();
-    const fetchBicep = deps.core.fetchBicepFromRepo as ReturnType<typeof vi.fn>;
+    const fetchBicep = vi.mocked(deps.graphSources.read);
     fetchBicep.mockClear();
 
     await ext.hooks.onPreToolUse({
@@ -413,7 +413,7 @@ describe("RU-19: onSessionStart hook", () => {
     expect(session.send).not.toHaveBeenCalled();
     expect(session.rpc.canvas.open).not.toHaveBeenCalled();
     expect(fake.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
-    expect(fake.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+    expect(fake.deps.graphSources.read).not.toHaveBeenCalled();
   });
 
   it("returns no context when the working directory is unavailable", async () => {

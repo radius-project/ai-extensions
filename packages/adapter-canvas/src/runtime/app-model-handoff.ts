@@ -26,6 +26,7 @@ import type { AppModelStatus } from "./graph-context.js";
 import type { CanvasState } from "../shared.js";
 import type { GraphProgressView } from "../shared.js";
 import type { AppSourceEvaluation } from "@radius-project/core";
+import { WorkspaceGraphBranchChanged } from "@radius-project/adapter-shared";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
@@ -60,6 +61,7 @@ export interface AppModelHandoffDependencies {
     branch: string,
     state: CanvasState
   ): Promise<AppModelStatus>;
+  assertWorkspaceSource(source: AppModelStatus["source"]): Promise<void>;
   // Consulted only when no branch has a model, because a model that already
   // exists answers "can this repository be modeled" by existing.
   evaluateSource(
@@ -188,7 +190,7 @@ export function createAppModelHandoff(
       Boolean(branch)
     );
     if (!targets.length) return;
-    const context = state ?? (await deps.resolveContext());
+    const context = state ? { ...state } : await deps.resolveContext();
     const modelProgressView =
       progressView ?? (page === "graph-diff" ? "diff" : "graph");
     // The app.bicep wait is measured from when the model was first found
@@ -197,9 +199,9 @@ export function createAppModelHandoff(
     // field is absent on the very first render, because the wait is only
     // recorded once the outcome settles; the claim then falls back to its
     // ordinary TTL, which is the same length the deadline would have imposed.
-    const waitStartedAtMs =
-      context.graphProgressRecords?.[modelProgressView]
-        ?.graphProgressWaitStartedAtMs;
+    const waitStartedAtMs = (state ?? context).graphProgressRecords?.[
+      modelProgressView
+    ]?.graphProgressWaitStartedAtMs;
     const recoveryDeadlineAtMs =
       waitStartedAtMs === undefined ? undefined : (
         waitStartedAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - RECOVERY_WINDOW_MS
@@ -212,9 +214,28 @@ export function createAppModelHandoff(
 
     // Unavailable workspace evidence abandons the handoff rather than allowing
     // regeneration from a partially resolved model or a changed checkout.
-    const statuses = await Promise.all(
-      targets.map((branch) => deps.resolveStatus(repo, branch, context))
-    );
+    async function resolveStatuses() {
+      try {
+        return await Promise.all(
+          targets.map((branch) => deps.resolveStatus(repo, branch, context))
+        );
+      } catch (error) {
+        if (!(error instanceof WorkspaceGraphBranchChanged)) throw error;
+        return null;
+      }
+    }
+    async function sourcesStillCurrent(statuses: AppModelStatus[]) {
+      try {
+        for (const status of statuses)
+          await deps.assertWorkspaceSource(status.source);
+        return true;
+      } catch (error) {
+        if (!(error instanceof WorkspaceGraphBranchChanged)) throw error;
+        return false;
+      }
+    }
+    const statuses = await resolveStatuses();
+    if (!statuses || !stillCurrent()) return;
     const key = appModelHandoffKey(repo, targets, statuses);
     if (state?.appBicepHandoffKeys?.[target] === key) return;
 
@@ -309,11 +330,9 @@ export function createAppModelHandoff(
       // The window is long enough for a run to have both started and finished
       // inside it, so the classification this handoff was built from has to be
       // re-read before it is acted on.
-      let settled: AppModelStatus[];
+      let settled: AppModelStatus[] | null;
       try {
-        settled = await Promise.all(
-          targets.map((branch) => deps.resolveStatus(repo, branch, context))
-        );
+        settled = await resolveStatuses();
       } catch (error) {
         releaseReservation();
         throw error;
@@ -322,7 +341,10 @@ export function createAppModelHandoff(
         releaseReservation();
         return;
       }
-      if (settled.some((status) => status.freshness.status !== "missing")) {
+      if (
+        !settled ||
+        settled.some((status) => status.freshness.status !== "missing")
+      ) {
         releaseReservation();
         return;
       }
@@ -333,14 +355,17 @@ export function createAppModelHandoff(
           deps.readSourceRevision(repo, branch, context).catch(() => "")
         )
       );
-      if (!ownsReservation()) {
-        releaseReservation();
-        return;
-      }
       // Last check before this handoff becomes observable. Everything above is
       // reversible; minting the tokens and sending the turn are not, and both
       // the source probe and the grace window gave the user time to move on.
-      if (!stillCurrent()) {
+      let currentSources;
+      try {
+        currentSources = await sourcesStillCurrent(settled);
+      } catch (error) {
+        releaseReservation();
+        throw error;
+      }
+      if (!currentSources || !stillCurrent() || !ownsReservation()) {
         releaseReservation();
         return;
       }
@@ -432,15 +457,21 @@ export function createAppModelHandoff(
     );
     if (unverified) {
       const refreshKey = refreshRequestKey(unverified);
-      if (!deps.shouldRequestRefresh(refreshKey)) {
-        releaseStateReservation();
-        return;
-      }
+      let memoOwned = false;
       try {
+        if (
+          !(await sourcesStillCurrent([unverified])) ||
+          !stillCurrent() ||
+          !ownsStateReservation() ||
+          !(memoOwned = deps.shouldRequestRefresh(refreshKey))
+        ) {
+          releaseStateReservation();
+          return;
+        }
         await deps.send(appModelUnverifiedMessage(unverified));
       } catch (sendError) {
         releaseStateReservation();
-        deps.releaseRefreshMemo(refreshKey);
+        if (memoOwned) deps.releaseRefreshMemo(refreshKey);
         throw sendError;
       }
       return;
@@ -451,15 +482,21 @@ export function createAppModelHandoff(
     );
     if (outdated) {
       const refreshKey = refreshRequestKey(outdated);
-      if (!deps.shouldRequestRefresh(refreshKey)) {
-        releaseStateReservation();
-        return;
-      }
+      let memoOwned = false;
       try {
+        if (
+          !(await sourcesStillCurrent([outdated])) ||
+          !stillCurrent() ||
+          !ownsStateReservation() ||
+          !(memoOwned = deps.shouldRequestRefresh(refreshKey))
+        ) {
+          releaseStateReservation();
+          return;
+        }
         await deps.send(appModelRefreshMessage(outdated));
       } catch (sendError) {
         releaseStateReservation();
-        deps.releaseRefreshMemo(refreshKey);
+        if (memoOwned) deps.releaseRefreshMemo(refreshKey);
         throw sendError;
       }
       return;

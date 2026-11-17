@@ -7,6 +7,7 @@ import {
 } from "../../test/support/runtime/fakes.js";
 import type { CanvasGraphResource } from "../shared.js";
 import { GRAPH_MODELING_FAILURE_MESSAGE } from "../graph-progress-contract.js";
+import { createDeferred } from "../../test/support/browser/fakes.js";
 
 interface CanvasContext {
   extensionId: string;
@@ -453,6 +454,36 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
     const state = deps.servers.get("radius-panel")!.state;
     expect(state.contextRepo).toBe("acme/widgets");
   });
+
+  it.each(["success", "rejection"])(
+    "ignores late fallback Git %s after a newer open",
+    async (outcome) => {
+      const { canvas, deps } = setup({
+        workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" }
+      });
+      const started = createDeferred<void>();
+      const lookup = createDeferred<{ stdout: string; stderr: string }>();
+      vi.mocked(deps.process.execFile).mockImplementationOnce(() => {
+        started.resolve();
+        return lookup.promise;
+      });
+      const prepare = vi.spyOn(deps.sourceRefs, "prepareSourceRefResources");
+      const oldOpen = canvas.open(ctx("radius-panel", { page: "graph" }));
+      await started.promise;
+      await canvas.open(
+        ctx("radius-panel", { page: "graph", repo: "other/new", branch: "new" })
+      );
+      if (outcome === "success")
+        lookup.resolve({ stdout: "git@github.com:acme/old.git", stderr: "" });
+      else lookup.reject(new Error("origin unavailable"));
+      await oldOpen;
+      expect(deps.servers.get("radius-panel")?.state).toMatchObject({
+        contextRepo: "other/new",
+        contextBranch: "new"
+      });
+      expect(prepare).toHaveBeenCalledOnce();
+    }
+  );
 
   it("does not attempt git-remote detection once a contextRepo is already set", async () => {
     const { canvas, deps } = setup();

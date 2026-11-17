@@ -266,6 +266,7 @@ export function createRadiusCanvas(
             ],
             { timeout: 5000, encoding: "utf8" }
           );
+          if (!isCurrentOpen()) return { title: "Radius", url: entry.url };
           const remoteUrl = stdout.trim();
           const repo = deps.workspace.parseRepoFromRemote(remoteUrl);
           if (repo) {
@@ -274,6 +275,7 @@ export function createRadiusCanvas(
         } catch (e) {
           /* ignore */
         }
+        if (!isCurrentOpen()) return { title: "Radius", url: entry.url };
       }
 
       if (page === "graph" || page === "planned") {

@@ -14,6 +14,7 @@ import {
   recordGraphBuildEvent
 } from "../../shared.js";
 import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
+import { stageWorkspaceGraphOutput } from "./workspace-graph-output.js";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -142,7 +143,8 @@ export interface GraphWorkflowDependencies<
     // It follows the selection, not the request, so the page's own automatic
     // polls for the same repo and branches do not end the handoff.
     isCurrent?: () => boolean,
-    environmentKey?: string
+    environmentKey?: string,
+    onFailure?: (message: string) => void
   ): void;
   triggerGraphRepairHandoff(
     entry: TEntry,
@@ -256,6 +258,7 @@ const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
 
 interface GraphProgressHandle {
   view: GraphProgressView;
+  key: string;
   generation: number;
   owner: number;
   record: GraphProgressRecord;
@@ -274,7 +277,8 @@ function beginGraphProgress(
   key: string,
   target: { repo: string; branches: string[] },
   nowMs: number,
-  restartExpired: boolean
+  restartExpired: boolean,
+  retryModeling: boolean
 ): GraphProgressHandle {
   const existing = graphProgressRecord(state, view);
   // A build that is already in flight for this view is continued rather than
@@ -283,15 +287,20 @@ function beginGraphProgress(
   // stages already reported — exactly the reset a user sees when they leave the
   // page and come back.
   const sameKey = existing?.graphProgressKey === key;
+  const handoffFailed =
+    typeof existing?.graphProgressHandoffFailure === "string";
   const continuing =
     sameKey &&
+    !retryModeling &&
+    !(handoffFailed && restartExpired) &&
     !(
       restartExpired &&
       typeof existing.graphProgressWaitExpiredMessage === "string"
     ) &&
     ((existing.graphProgressActive === true &&
       existing.graphProgressAwaitingModel === true) ||
-      typeof existing.graphProgressWaitExpiredMessage === "string");
+      typeof existing.graphProgressWaitExpiredMessage === "string" ||
+      handoffFailed);
   const record: GraphProgressRecord =
     continuing && existing ? existing : (
       {
@@ -308,7 +317,6 @@ function beginGraphProgress(
       }
     );
   record.graphProgressActive = true;
-  record.graphProgressAwaitingModel = false;
   record.graphProgressRepo = target.repo;
   record.graphProgressBranches = target.branches;
   record.graphProgressOwner += 1;
@@ -316,6 +324,7 @@ function beginGraphProgress(
   state.graphProgressRecords[view] = record;
   return {
     view,
+    key,
     generation: record.graphProgressGeneration,
     owner: record.graphProgressOwner,
     record
@@ -333,17 +342,18 @@ function isCurrentGraphProgress(
   );
 }
 
+function ownsGraphSelection(state: CanvasState, handle: GraphProgressHandle) {
+  const record = graphProgressRecord(state, handle.view);
+  return (
+    record === handle.record &&
+    record.graphProgressKey === handle.key &&
+    record.graphProgressGeneration === handle.generation
+  );
+}
+
 // True while the view still shows the selection a request started for. Unlike
 // `isCurrentGraphProgress`, a newer automatic request for the same selection
 // (the `needsAppBicep` poll) does not end it; only a selection change does.
-function isCurrentGraphSelection(
-  state: CanvasState,
-  view: GraphProgressView,
-  key: string
-): boolean {
-  return graphProgressRecord(state, view)?.graphProgressKey === key;
-}
-
 // Close the record so nothing still claims to be in flight. The stages stay
 // readable: a page that returns after the build finished sees what happened
 // rather than an empty panel.
@@ -360,6 +370,7 @@ function endGraphProgress(
   delete record.graphProgressWaitStartedAtMs;
   delete record.graphProgressLastActivityAtMs;
   delete record.graphProgressWaitExpiredMessage;
+  delete record.graphProgressHandoffFailure;
 }
 
 // Close the record for every outcome except the app.bicep handoff. That build
@@ -381,7 +392,27 @@ function settleGraphProgress(
   if (!handle || !isCurrentGraphProgress(state, handle)) return outcome;
   const record = graphProgressRecord(state, handle.view);
   if (!record) return outcome;
+  if (
+    outcome.payload.needsAppBicep === true &&
+    record.graphProgressHandoffFailure
+  ) {
+    record.graphProgressActive = false;
+    record.graphProgressAwaitingModel = false;
+    const payload = {
+      ...outcome.payload,
+      error: record.graphProgressHandoffFailure
+    };
+    Reflect.deleteProperty(payload, "needsAppBicep");
+    return { ...outcome, payload };
+  }
   if (outcome.payload.needsAppBicep !== true) {
+    if (
+      outcome.payload.error === record.graphProgressHandoffFailure &&
+      record.graphProgressHandoffFailure
+    ) {
+      record.graphProgressActive = false;
+      return outcome;
+    }
     endGraphProgress(state, handle);
     return outcome;
   }
@@ -531,7 +562,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     // probe, so the ordinary success and failure paths pay nothing for it.
     const target = hooks.modelingTarget();
     const modelingActivityAtMs =
-      outcome.payload.needsAppBicep === true ?
+      (
+        outcome.payload.needsAppBicep === true &&
+        !hooks.progressHandle()?.record.graphProgressHandoffFailure
+      ) ?
         await dependencies.observeModelingRun(
           state,
           target.repo,
@@ -597,6 +631,27 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     return headReason;
   }
 
+  function recordHandoffFailure(
+    handle: GraphProgressHandle,
+    isCurrent: () => boolean
+  ) {
+    return (message: string): void => {
+      const record = handle.record;
+      if (
+        !isCurrent() ||
+        !record.graphProgressActive ||
+        !modelCreationIsRunning(record)
+      )
+        return;
+      record.graphProgressHandoffFailure = message;
+      record.graphProgressActive = false;
+      record.graphProgressAwaitingModel = false;
+      delete record.graphProgressWaitStartedAtMs;
+      delete record.graphProgressLastActivityAtMs;
+      appendGraphEvent(record, "creating_model", "failed", message);
+    };
+  }
+
   async function appBicepHandoffOutcome(
     entry: TEntry,
     repo: string,
@@ -607,9 +662,16 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     // Forwarded to the handoff, which probes and waits long after this request
     // is replaced by the page's next automatic poll for the same selection.
     selectionIsCurrent: () => boolean,
-    retry: { userRequested?: boolean; environmentKey?: string }
+    retry: { userRequested?: boolean; environmentKey?: string },
+    handle: GraphProgressHandle
   ): Promise<GraphWorkflowOutcome> {
     if (!isCurrent()) return json(409, STALE_PAYLOAD);
+    if (handle.record.graphProgressHandoffFailure)
+      return json(200, {
+        error: handle.record.graphProgressHandoffFailure,
+        repo,
+        branch
+      });
     const sourceCheck = await reconcileAppModelAuthoringFailure(
       entry.state,
       repo,
@@ -640,6 +702,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     }
     const refusal = await branchRefusalReason(entry, repo, branch);
     if (!isCurrent()) return json(409, STALE_PAYLOAD);
+    if (handle.record.graphProgressHandoffFailure)
+      return json(200, {
+        error: handle.record.graphProgressHandoffFailure,
+        repo,
+        branch
+      });
     if (refusal) {
       reportRefusal(refusal);
       return json(200, {
@@ -660,7 +728,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       "graph",
       progressView,
       selectionIsCurrent,
-      retry.environmentKey
+      retry.environmentKey,
+      recordHandoffFailure(handle, selectionIsCurrent)
     );
     return json(200, {
       error: GENERATING_APP_BICEP_MESSAGE,
@@ -685,6 +754,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     let activeGeneration: number | undefined;
     let activeProgressHandle: GraphProgressHandle | undefined;
     let activeSourceToken: string | undefined;
+    let output: ReturnType<typeof stageWorkspaceGraphOutput>;
     const run = async (): Promise<GraphWorkflowOutcome> => {
       const data = dependencies.record(JSON.parse(body));
       const repo = dependencies.optionalString(data.repo);
@@ -737,7 +807,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         progressKey,
         { repo, branches: [branch] },
         dependencies.now(),
-        data.restartWait === true
+        data.restartWait === true,
+        data.retryModeling === true
       );
       activeProgressHandle = progressHandle;
       const isCurrentSourceRef = (): boolean =>
@@ -746,6 +817,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "graph",
           sourceRefContext.token
         );
+      const isCurrentSelection = (): boolean =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        ownsGraphSelection(state, progressHandle) &&
+        isCurrentSourceRef();
 
       // Every event is gated on the generation, so a superseded request stops
       // writing to the event stream the page is polling.
@@ -779,6 +854,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       }
       const content = selection.content;
       if (content) {
+        delete progressHandle.record.graphProgressHandoffFailure;
         clearAppModelAuthoringFailure(state, repo, branch);
         if (modelCreationIsRunning(progressHandle.record)) {
           addEvent(
@@ -796,7 +872,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           repo,
           branch,
           "graph",
-          "graph"
+          "graph",
+          isCurrentSelection
         );
       } else {
         addEvent(
@@ -819,15 +896,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             state.graphBuildGeneration === requestGeneration &&
             isCurrentGraphProgress(state, progressHandle) &&
             isCurrentSourceRef(),
-          () =>
-            isCurrentGraphSelection(state, "graph", progressKey) &&
-            isCurrentSourceRef(),
-          { userRequested: data.retryModeling === true }
+          isCurrentSelection,
+          { userRequested: data.retryModeling === true },
+          progressHandle
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
 
       const graphJsonPath = pipeline.graphJsonPathFor(entry, selection);
+      const workspacePath = state.workspacePath;
+      const isCurrentOutput = () =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        state.graphBuildGeneration === requestGeneration &&
+        isCurrentSourceRef() &&
+        state.workspacePath === workspacePath;
       const staged = await pipeline.stageArtifacts({
         entry,
         selection,
@@ -870,15 +952,24 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         "Compiling the application model and building the resource graph."
       );
-      const resources = await compileResources(
-        {
-          selection,
-          staged,
-          log: addBuildDetail,
-          saveGraphJsonTo: graphJsonPath
-        },
-        { repo, branch }
-      );
+      if (!isCurrentOutput()) return json(409, STALE_PAYLOAD);
+      output = stageWorkspaceGraphOutput(graphJsonPath, dependencies.logError);
+      let resources: CanvasGraphResource[];
+      try {
+        resources = await compileResources(
+          {
+            selection,
+            staged,
+            log: addBuildDetail,
+            saveGraphJsonTo: output?.compilerPath
+          },
+          { repo, branch }
+        );
+      } catch (error) {
+        if (!isCurrentOutput()) throw new GraphRequestSuperseded();
+        output?.invalidate();
+        throw error;
+      }
       addEvent(
         "building_graph",
         "succeeded",
@@ -896,7 +987,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // mutant, so this branch is structurally unreachable in coverage.
         // Re-checked after the compile, which is the slow stage: the generation
         // can have moved on while `rad` was running.
-        if (state.graphBuildGeneration !== requestGeneration) {
+        if (!isCurrentOutput()) {
           return json(409, STALE_PAYLOAD);
         }
         if (
@@ -910,6 +1001,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         ) {
           return json(409, STALE_PAYLOAD);
         }
+        output?.publish();
         state.graphTargetRepo = repo;
         state.graphBranch = branch;
         state.graphFollowsWorkspaceBranch =
@@ -937,40 +1029,44 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         resolvedBranch
       );
     };
-    return await settleWorkflow(run, {
-      stagedArtifacts,
-      state: () => activeState,
-      progressHandle: () => activeProgressHandle,
-      onError: (error) => {
-        if (activeState?.graphBuildGeneration === activeGeneration) {
-          failRunningGraphEvent(activeState, activeProgressHandle, error);
-        }
-      },
-      repair: () =>
-        activeRepair ?
-          {
-            entry: activeRepair.entry,
-            request: {
-              view: "graph",
-              repo: activeRepair.repo,
-              branches: [activeRepair.branch]
-            }
+    try {
+      return await settleWorkflow(run, {
+        stagedArtifacts,
+        state: () => activeState,
+        progressHandle: () => activeProgressHandle,
+        onError: (error) => {
+          if (activeState?.graphBuildGeneration === activeGeneration) {
+            failRunningGraphEvent(activeState, activeProgressHandle, error);
           }
-        : undefined,
-      shouldRepair: () =>
-        activeState !== undefined &&
-        activeState.graphBuildGeneration === activeGeneration &&
-        activeSourceToken !== undefined &&
-        dependencies.isCurrentSourceRefToken(
-          activeState,
-          "graph",
-          activeSourceToken
-        ),
-      modelingTarget: () => ({
-        repo: activeRepair?.repo || "",
-        branches: activeRepair ? [activeRepair.branch] : []
-      })
-    });
+        },
+        repair: () =>
+          activeRepair ?
+            {
+              entry: activeRepair.entry,
+              request: {
+                view: "graph",
+                repo: activeRepair.repo,
+                branches: [activeRepair.branch]
+              }
+            }
+          : undefined,
+        shouldRepair: () =>
+          activeState !== undefined &&
+          activeState.graphBuildGeneration === activeGeneration &&
+          activeSourceToken !== undefined &&
+          dependencies.isCurrentSourceRefToken(
+            activeState,
+            "graph",
+            activeSourceToken
+          ),
+        modelingTarget: () => ({
+          repo: activeRepair?.repo || "",
+          branches: activeRepair ? [activeRepair.branch] : []
+        })
+      });
+    } finally {
+      output?.dispose();
+    }
   }
 
   // The planned graph: the modeled application projected through a provider's
@@ -1059,7 +1155,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         progressKey,
         { repo, branches: [branch] },
         dependencies.now(),
-        data.restartWait === true
+        data.restartWait === true,
+        data.retryModeling === true
       );
       activeProgressHandle = progressHandle;
       const isCurrentPlan = (): boolean =>
@@ -1070,6 +1167,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "planned",
           sourceRefContext.token
         );
+      const isCurrentSelection = (): boolean =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        ownsGraphSelection(state, progressHandle) &&
+        isCurrentSourceRef();
 
       const addEvent = (
         stage: GraphBuildStage,
@@ -1118,16 +1219,16 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             isCurrentPlan() &&
             isCurrentGraphProgress(state, progressHandle) &&
             isCurrentSourceRef(),
-          () =>
-            isCurrentGraphSelection(state, "planned", progressKey) &&
-            isCurrentSourceRef(),
+          isCurrentSelection,
           {
             userRequested: data.retryModeling === true,
             environmentKey
-          }
+          },
+          progressHandle
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
+      delete progressHandle.record.graphProgressHandoffFailure;
       clearAppModelAuthoringFailure(state, repo, branch);
       if (modelCreationIsRunning(progressHandle.record)) {
         addEvent(
@@ -1145,7 +1246,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         repo,
         branch,
         "graph",
-        "planned"
+        "planned",
+        isCurrentSelection,
+        environmentKey
       );
 
       const staged = await pipeline.stageArtifacts({
@@ -1411,7 +1514,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         progressKey,
         { repo, branches: [data.base, data.head] },
         dependencies.now(),
-        data.restartWait === true
+        data.restartWait === true,
+        data.retryModeling === true
       );
       activeProgressHandle = progressHandle;
       // True while this request is still the comparison on screen. A selector
@@ -1439,6 +1543,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         baseBranch: data.base,
         headBranch: data.head
       });
+      const { token: handoffSourceToken } = sourceRefContext;
+      const isCurrentSelection = (): boolean =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        ownsGraphSelection(state, progressHandle) &&
+        dependencies.isCurrentSourceRefToken(state, "diff", handoffSourceToken);
       state.diffBase = data.base;
       state.diffHead = data.head;
       state.diffTargetRepo = repo;
@@ -1488,6 +1597,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
 
       if (!baseSelection.content && !headSelection.content) {
+        if (progressHandle.record.graphProgressHandoffFailure)
+          return json(200, {
+            error: progressHandle.record.graphProgressHandoffFailure,
+            repo
+          });
         addEvent(
           "checking_model",
           "succeeded",
@@ -1541,20 +1655,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // keeps probing and waiting after this response is written, through the
         // page's next automatic polls, so it ends only on a selection change.
         if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
-        const handoffSourceToken = sourceRefContext.token;
+        if (progressHandle.record.graphProgressHandoffFailure)
+          return json(200, {
+            error: progressHandle.record.graphProgressHandoffFailure,
+            repo
+          });
         dependencies.triggerAppBicepHandoff(
           entry,
           repo,
           [data.base, data.head],
           "graph-diff",
           "diff",
-          () =>
-            isCurrentGraphSelection(state, "diff", progressKey) &&
-            dependencies.isCurrentSourceRefToken(
-              state,
-              "diff",
-              handoffSourceToken
-            )
+          isCurrentSelection,
+          undefined,
+          recordHandoffFailure(progressHandle, isCurrentSelection)
         );
         // No `branch` key here, unlike the other two routes: the diff spans two.
         return json(200, {
@@ -1565,6 +1679,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       }
       // A model that arrived retires the failure recorded for its own branch,
       // exactly as the single-branch routes do for theirs.
+      delete progressHandle.record.graphProgressHandoffFailure;
       if (baseSelection.content) {
         clearAppModelAuthoringFailure(state, repo, data.base);
       }
@@ -1591,7 +1706,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         repo,
         [data.base, data.head],
         "graph-diff",
-        "diff"
+        "diff",
+        isCurrentSelection
       );
 
       const baseSource = graphSourceForSelection(
@@ -1674,6 +1790,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             );
         }
       });
+      if (!isCurrentRequest()) throw new GraphRequestSuperseded();
       if (compared.status === "definitions-absent")
         return json(200, {
           error: GENERATING_APP_BICEP_MESSAGE,

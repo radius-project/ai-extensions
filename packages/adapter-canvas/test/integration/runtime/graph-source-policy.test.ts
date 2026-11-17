@@ -10,6 +10,7 @@ import {
 import { execFileSync, execFile } from "node:child_process";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { APP_ORIGIN_REPO_PATH } from "@radius-project/core";
 import {
   createGraphSourceBindings,
   type DeploymentCommandExecutor
@@ -202,48 +203,85 @@ async function fixture(
 }
 
 describe("registered runtime graph source policy", () => {
-  it("abandons freshness handoff when the checkout changes before the origin read", async () => {
-    const f = await fixture("main");
-    try {
-      const readOrigin = f.sources.readFile;
-      vi.spyOn(f.sources, "readFile").mockImplementation(
-        async (source, file) => {
+  it.each(["before", "after"])(
+    "abandons freshness handoff when the checkout changes %s the origin read",
+    async (phase) => {
+      const f = await fixture("main");
+      try {
+        await writeFile(path.join(f.workspace, APP_ORIGIN_REPO_PATH), "{}");
+        const readOrigin = f.sources.readFile;
+        const changeBranch = () =>
           execFileSync(
             "git",
             ["-C", f.workspace, "symbolic-ref", "HEAD", "refs/heads/other"],
             { stdio: "pipe" }
           );
-          return readOrigin(source, file);
-        }
+        vi.spyOn(f.sources, "readFile").mockImplementation(
+          async (source, file) => {
+            if (phase === "before") changeBranch();
+            const result = await readOrigin(source, file);
+            if (phase === "after" && result.status === "present")
+              changeBranch();
+            return result;
+          }
+        );
+        const entry = await f.harness.deps.getOrCreateServer(
+          "radius-panel",
+          "graph"
+        );
+        Object.assign(entry.state, {
+          workspacePath: f.workspace,
+          workspaceRepo: REPO,
+          workspaceBranch: "main",
+          contextRepo: REPO,
+          contextBranch: "main"
+        });
+        const handoff = f.harness.capturedHostCallbacks.appBicepHandoff;
+        if (!handoff) throw new Error("Missing registered modeling handoff");
+        await expect(
+          handoff({
+            repo: REPO,
+            branches: ["main"],
+            page: "graph",
+            state: entry.state,
+            isCurrent: () => true
+          })
+        ).resolves.toBeUndefined();
+        expect(f.harness.session.send).not.toHaveBeenCalled();
+        expect(entry.state.appModelAttemptTokens).toBeUndefined();
+        expect(entry.state.appBicepHandoffKeys).toBeUndefined();
+        expect(
+          f.harness.deps.appModel.workspaceModelRecoverable
+        ).not.toHaveBeenCalled();
+      } finally {
+        await f.close();
+      }
+    }
+  );
+
+  it("rejects a missing-model handoff with an unreadable origin without claiming authoring", async () => {
+    const f = await fixture("main");
+    try {
+      await rm(path.join(f.workspace, MODEL_PATH));
+      await symlink(
+        path.join(f.workspace, "missing-origin.json"),
+        path.join(f.workspace, APP_ORIGIN_REPO_PATH),
+        "file"
       );
-      const entry = await f.harness.deps.getOrCreateServer(
-        "radius-panel",
-        "graph"
-      );
-      Object.assign(entry.state, {
+      const state = {
+        canvasInstanceId: "radius-panel",
         workspacePath: f.workspace,
         workspaceRepo: REPO,
-        workspaceBranch: "main",
-        contextRepo: REPO,
-        contextBranch: "main"
-      });
+        workspaceBranch: "main"
+      };
       const handoff = f.harness.capturedHostCallbacks.appBicepHandoff;
       if (!handoff) throw new Error("Missing registered modeling handoff");
       await expect(
-        handoff({
-          repo: REPO,
-          branches: ["main"],
-          page: "graph",
-          state: entry.state,
-          isCurrent: () => true
-        })
-      ).rejects.toThrow("Workspace branch changed");
+        handoff({ repo: REPO, branches: ["main"], page: "graph", state })
+      ).rejects.toThrow("unreadable");
       expect(f.harness.session.send).not.toHaveBeenCalled();
-      expect(entry.state.appModelAttemptTokens).toBeUndefined();
-      expect(entry.state.appBicepHandoffKeys).toBeUndefined();
-      expect(
-        f.harness.deps.appModel.workspaceModelRecoverable
-      ).not.toHaveBeenCalled();
+      expect(state).not.toHaveProperty("appModelAttemptTokens");
+      expect(state).not.toHaveProperty("appBicepHandoffKeys");
     } finally {
       await f.close();
     }
