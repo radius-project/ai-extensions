@@ -25,6 +25,44 @@ function optionalText(value: unknown, field: string): string | undefined {
   return value;
 }
 
+// Legacy Applications.Core applications share the live graph payload shape.
+const APPLICATION_TYPES: ReadonlySet<string> = new Set([
+  "radius.core/applications",
+  "applications.core/applications"
+]);
+const ICON_HASH_PATTERN = /^[0-9a-f]{64}$/;
+const SVG_ROOT = /^<svg(?:\s|\/?>)/;
+
+/**
+ * Returns the `<svg>` markup of an icon, without any leading XML prolog,
+ * comments or `<!DOCTYPE>`, or `undefined` when the value is not an SVG
+ * document. A `<!DOCTYPE>` with an internal subset (`[...]`) can define
+ * entities that the markup would still use, so it is not an icon. The scan
+ * moves forward once and never rereads text, so hostile input stays linear.
+ */
+function svgMarkup(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const source = value.trim();
+  const whitespace = /\s*/y;
+  let at = 0;
+  for (;;) {
+    const close =
+      source.startsWith("<?xml", at) ? "?>"
+      : source.startsWith("<!--", at) ? "-->"
+      : source.startsWith("<!DOCTYPE", at) ? ">"
+      : undefined;
+    if (close === undefined) break;
+    const end = source.indexOf(close, at);
+    if (end === -1) return undefined;
+    if (close === ">" && source.slice(at, end).includes("[")) return undefined;
+    whitespace.lastIndex = end + close.length;
+    whitespace.test(source);
+    at = whitespace.lastIndex;
+  }
+  const markup = source.slice(at);
+  return SVG_ROOT.test(markup) ? markup : undefined;
+}
+
 // UCP resource IDs, including plane segments, are case-insensitive.
 function sameUcpSegment(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
@@ -51,12 +89,12 @@ export function graphContextKey(context: GraphContext): string {
   if (
     !application?.plane ||
     application.segments.length !== 1 ||
-    application.type.toLowerCase() !== "radius.core/applications" ||
+    !APPLICATION_TYPES.has(application.type.toLowerCase()) ||
     !sameUcpSegment(application.plane.type, context.plane.type) ||
     !sameUcpSegment(application.plane.name, context.plane.name)
   ) {
     throw new TypeError(
-      "Live graph applicationId must be a Radius.Core/applications resource on the selected plane."
+      "Live graph applicationId must be a Radius.Core/applications or Applications.Core/applications resource on the selected plane."
     );
   }
   return JSON.stringify([
@@ -89,6 +127,10 @@ export function normalizeLiveGraph(
   const ids = new Set<string>();
   const signatures = new Map<string, string>();
   const warnings: LiveGraphWarning[] = [];
+  // `getGraph` returns `iconHash` on every resource but omits `icons` unless
+  // the request sets `includeIcons`. Without a map, no icon is expected.
+  const icons: Record<string, unknown> | undefined =
+    record(value.icons) ? value.icons : undefined;
   for (const raw of value.resources) {
     if (!record(raw))
       throw new TypeError("Live graph resource must be an object.");
@@ -96,10 +138,27 @@ export function normalizeLiveGraph(
     if (raw.connections !== undefined && !Array.isArray(raw.connections)) {
       throw new TypeError(`Live graph connections must be an array: ${id}`);
     }
+    let icon: string | undefined;
+    let iconInvalid = false;
+    const iconHash = raw.iconHash;
+    if (icons && iconHash !== undefined && iconHash !== null) {
+      const markup = svgMarkup(
+        (
+          typeof iconHash === "string" &&
+            ICON_HASH_PATTERN.test(iconHash) &&
+            Object.hasOwn(icons, iconHash)
+        ) ?
+          icons[iconHash]
+        : undefined
+      );
+      if (markup === undefined) iconInvalid = true;
+      else icon = markup;
+    }
     const resource: LiveGraphResource = {
       id,
       name: text(raw.name, "resource name"),
       type: text(raw.type, "resource type"),
+      ...(icon === undefined ? {} : { icon }),
       provider: optionalText(raw.provider, "provider"),
       provisioningState: optionalText(
         raw.provisioningState,
@@ -139,6 +198,11 @@ export function normalizeLiveGraph(
     signatures.set(id, signature);
     resources.push(resource);
     connections.set(id, entries);
+    if (iconInvalid) {
+      warnings.push(
+        warning("invalid-icon", id, `Unresolved resource icon ignored: ${id}`)
+      );
+    }
   }
   const edges = new Map<string, { source: string; target: string }>();
   for (const [owner, entries] of connections) {
