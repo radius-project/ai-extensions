@@ -32,6 +32,7 @@ import { CLOUD_CANVAS_HOSTS } from "../e2e-cloud/support/cloud-canvas-host.js";
 import { COPILOT_APP_SUITE_TIMEOUT_MS } from "../e2e-cloud/support/cloud-timeout-budget.js";
 import { COPILOT_APP_DEFAULT_CDP_PORT } from "../e2e-cloud/support/copilot-app-cdp.js";
 import {
+  AWS_ENVIRONMENT_NAME_PREFIX,
   ENVIRONMENT_NAME_PREFIX,
   RESOURCE_GROUP_PREFIX
 } from "../e2e-cloud/support/fixture-repository.js";
@@ -59,6 +60,8 @@ interface WorkflowStep {
 
 interface WorkflowJob {
   readonly if?: string;
+  readonly needs?: string | readonly string[];
+  readonly outputs?: Record<string, string>;
   readonly "runs-on"?: string;
   readonly "timeout-minutes"?: number;
   readonly permissions?: Record<string, string>;
@@ -820,9 +823,14 @@ ${remove}
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
+  const RESET_STEP = "Reset the fixture default branch under the shared lease";
+  const scopeSteps = (workflow: Workflow) => steps(workflow.jobs?.scope);
+  const resetSteps = (workflow: Workflow) =>
+    steps(workflow.jobs?.["reset-fixture"]);
+
   it("requests Actions write access for Radius cleanup dispatch without package write", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const token = steps(workflow.jobs?.purge).find((step) =>
+    const token = steps(workflow.jobs?.["purge-azure"]).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
     );
 
@@ -836,6 +844,20 @@ describe("cloud-e2e-cleanup.yml", () => {
     // cloud-e2e.yml mints its journey token with no permission inputs, so any
     // grant added to this installation widens that token too.
     expect(token?.with?.["permission-packages"]).toBeUndefined();
+    // Branch and pull request writes belong to reset-fixture alone.
+    expect(token?.with?.["permission-contents"]).toBe("read");
+    expect(token?.with?.["permission-pull-requests"]).toBeUndefined();
+
+    const resetToken = resetSteps(workflow).find((step) =>
+      step.uses?.startsWith("actions/create-github-app-token@")
+    );
+    expect(resetToken?.with).toMatchObject({
+      "permission-actions": "read",
+      "permission-contents": "write",
+      "permission-pull-requests": "write"
+    });
+    expect(resetToken?.with?.["permission-administration"]).toBeUndefined();
+    expect(resetToken?.with?.["permission-packages"]).toBeUndefined();
   });
 
   // GitHub expressions treat the number 0 as false, so a numeric input of 0
@@ -843,15 +865,16 @@ describe("cloud-e2e-cleanup.yml", () => {
   it("accepts max_age_hours as a string input that defaults to 6", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const text = await readWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge);
-    const validate = purge.find(
+    const validate = scopeSteps(workflow).find(
       (step) => step.name === "Validate max_age_hours"
     );
 
     expect(text).toMatch(
       /max_age_hours:\n\s+description: >-[\s\S]*?\n\s+type: string\n\s+required: false\n\s+default: "6"\n/
     );
-    expect(text).toContain("MAX_AGE_HOURS: ${{ inputs.max_age_hours || '6' }}");
+    expect((workflow as { env?: Record<string, string> }).env).toEqual({
+      MAX_AGE_HOURS: "${{ inputs.max_age_hours || '6' }}"
+    });
     expect(validate?.run).toContain("^[0-9]+$");
   });
 
@@ -865,7 +888,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     ["", 1]
   ] as const)("validates max_age_hours=%j", async (value, status) => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const validate = steps(workflow.jobs?.purge).find(
+    const validate = scopeSteps(workflow).find(
       (step) => step.name === "Validate max_age_hours"
     );
     const directory = await mkdtemp(path.join(tmpdir(), "max-age-"));
@@ -886,47 +909,54 @@ describe("cloud-e2e-cleanup.yml", () => {
     }
   });
 
-  it("gates the reset on a final check that ignores age", async () => {
+  it("gates the reset on final checks that ignore age", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge);
-    const gateIndex = purge.findIndex(
+    const azure = steps(workflow.jobs?.["purge-azure"]);
+    const reset = resetSteps(workflow);
+    const azureGate = azure.at(-1);
+    const gateIndex = reset.findIndex(
       (step) => step.id === "pre-reset-verification"
     );
-    const resetIndex = purge.findIndex(
-      (step) =>
-        step.name === "Reset the fixture default branch under the shared lease"
-    );
-    const script = purge[gateIndex]?.run ?? "";
+    const resetIndex = reset.findIndex((step) => step.name === RESET_STEP);
 
-    expect(gateIndex).toBeGreaterThanOrEqual(0);
-    expect(resetIndex).toBeGreaterThan(gateIndex);
-    for (const selector of [
-      "selectPrefixedEnvironments",
+    // Azure's cloud-side check is the Azure job's last step, so the job
+    // succeeds only when it passes.
+    expect(azureGate?.id).toBe("azure-verification");
+    for (const check of [
       "selectNamedApplications",
       "selectLeakedClusterWorkloads",
-      "selectStatePackages"
+      "cleanup_namespace_probe",
+      "max_age_hours=0"
     ])
-      expect(script).toContain(selector);
-    expect(script).toContain("cleanup_namespace_probe");
-    expect(script).toContain("max_age_hours=0");
+      expect(azureGate?.run).toContain(check);
+
+    // Every cloud's GitHub state is checked once, just before the reset.
+    expect(gateIndex).toBeGreaterThanOrEqual(0);
+    expect(resetIndex).toBe(gateIndex + 1);
+    for (const check of [
+      "selectPrefixedEnvironments",
+      "selectStatePackages",
+      "max_age_hours=0"
+    ])
+      expect(reset[gateIndex]?.run).toContain(check);
+    expect(reset[gateIndex]?.env).toMatchObject({
+      AZURE_ENVIRONMENT_PREFIX: "${{ needs.scope.outputs.environment-prefix }}",
+      AWS_ENVIRONMENT_PREFIX:
+        "${{ needs.scope.outputs.aws-environment-prefix }}"
+    });
   });
 
   // The gate deletes nothing, so it must report state that the delete steps
-  // safely skip: an application that setup did not tag, and a state package
-  // with no readable timestamp.
+  // safely skip: an application that setup did not tag.
   it.each([
-    {
-      case: "untagged application and undated package",
-      leaked: true,
-      status: 1
-    },
-    { case: "clean fixture", leaked: false, status: 0 }
-  ])("runs the reset gate: $case", async ({ leaked, status }) => {
+    { case: "untagged application", leaked: true, status: 1 },
+    { case: "clean cluster", leaked: false, status: 0 }
+  ])("runs the Azure gate: $case", async ({ leaked, status }) => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const gate = steps(workflow.jobs?.purge).find(
-      (step) => step.id === "pre-reset-verification"
+    const gate = steps(workflow.jobs?.["purge-azure"]).find(
+      (step) => step.id === "azure-verification"
     );
-    const directory = await mkdtemp(path.join(tmpdir(), "reset-gate-"));
+    const directory = await mkdtemp(path.join(tmpdir(), "azure-gate-"));
     const application = JSON.stringify(
       leaked ?
         [
@@ -939,14 +969,8 @@ describe("cloud-e2e-cleanup.yml", () => {
         ]
       : []
     );
-    const packages = JSON.stringify([
-      leaked ?
-        [{ name: "fixture-repo-radius-state-radtest-abc-0123456789ab" }]
-      : [{ name: "radius-project-canvas" }]
-    ]);
     const stubs = [
       'timeout() { shift; "$@"; }',
-      `gh() { case "$*" in *environments*) echo '[{"environments":[]}]' ;; *packages*) echo '${packages}' ;; *) return 99 ;; esac; }`,
       `az() { echo '${application}'; }`,
       'kubectl() { case "$1 $2" in "get namespace") ;; *) echo \'{"items":[]}\' ;; esac; }'
     ].join("\n");
@@ -958,36 +982,100 @@ describe("cloud-e2e-cleanup.yml", () => {
           PATH: process.env.PATH,
           RUNNER_TEMP: directory,
           GITHUB_STEP_SUMMARY: path.join(directory, "summary.md"),
-          GH_PACKAGES_TOKEN: "packages-token",
           APPLICATION_NAME: "radius-deploy-owner-fixture-repo",
           ENVIRONMENT_PREFIX: "radtest-",
           FIXTURE_APPLICATION: "fixture",
-          FIXTURE_OWNER: "owner",
-          FIXTURE_REPOSITORY: "owner/fixture-repo",
           RADIUS_ENVIRONMENT_NAMESPACE: "default"
         },
         input: `${stubs}\n${gate?.run}`
       });
       expect(result.stderr).not.toMatch(/error|unbound/i);
       expect(result.status).toBe(status);
-      if (leaked) {
+      if (leaked)
         expect(result.stdout).toContain(
           "Entra application untagged-object (appId untagged-app)"
         );
-        expect(result.stdout).toContain(
-          "GHCR state package fixture-repo-radius-state-radtest-abc-0123456789ab"
-        );
-      } else {
-        expect(result.stdout).not.toContain("Leaked state remains");
-      }
+      else expect(result.stdout).not.toContain("Leaked Azure state remains");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
 
+  // Each cloud's job leaves the other cloud's environments alone, so this is
+  // the one check that sees both. A package with no readable timestamp is
+  // state the delete steps skip, so it must still block the reset.
+  it.each([
+    {
+      case: "an Azure environment and an undated Azure package",
+      environments: ["radtest-abc"],
+      packages: ["fixture-repo-radius-state-radtest-abc-0123456789ab"],
+      status: 1
+    },
+    {
+      case: "an AWS environment and its package",
+      environments: ["radtest-aws-abc"],
+      packages: ["fixture-repo-radius-state-radtest-aws-abc-0123456789ab"],
+      status: 1
+    },
+    {
+      case: "a clean fixture",
+      environments: ["production"],
+      packages: ["radius-project-canvas"],
+      status: 0
+    }
+  ])(
+    "runs the final reset gate: $case",
+    async ({ environments, packages, status }) => {
+      const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+      const gate = resetSteps(workflow).find(
+        (step) => step.id === "pre-reset-verification"
+      );
+      const directory = await mkdtemp(path.join(tmpdir(), "reset-gate-"));
+      const environmentPage = JSON.stringify([
+        { environments: environments.map((name) => ({ name })) }
+      ]);
+      const packagePage = JSON.stringify([packages.map((name) => ({ name }))]);
+      const stubs = [
+        'timeout() { shift; "$@"; }',
+        `gh() { case "$*" in *environments*) echo '${environmentPage}' ;; *packages*) echo '${packagePage}' ;; *) return 99 ;; esac; }`
+      ].join("\n");
+      try {
+        const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+          cwd: REPOSITORY_ROOT,
+          encoding: "utf8",
+          env: {
+            PATH: process.env.PATH,
+            RUNNER_TEMP: directory,
+            GITHUB_STEP_SUMMARY: path.join(directory, "summary.md"),
+            GH_PACKAGES_TOKEN: "packages-token",
+            FIXTURE_OWNER: "owner",
+            FIXTURE_REPOSITORY: "owner/fixture-repo",
+            AZURE_ENVIRONMENT_PREFIX: ENVIRONMENT_NAME_PREFIX,
+            AWS_ENVIRONMENT_PREFIX: AWS_ENVIRONMENT_NAME_PREFIX
+          },
+          input: `${stubs}\n${gate?.run}`
+        });
+        expect(result.stderr).not.toMatch(/error|unbound/i);
+        expect(result.status).toBe(status);
+        if (status === 0)
+          expect(result.stdout).not.toContain("Leaked state remains");
+        else {
+          for (const name of environments)
+            expect(result.stdout).toContain(
+              `Radius environment (GitHub Environment) ${name}`
+            );
+          for (const name of packages)
+            expect(result.stdout).toContain(`GHCR state package ${name}`);
+        }
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("deletes legacy resource groups only after the Radius applications on them", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge);
+    const purge = steps(workflow.jobs?.["purge-azure"]);
     const radiusIndex = purge.findIndex(
       (step) =>
         step.name === "Delete stale Radius applications before recovery state"
@@ -1005,7 +1093,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("deletes stale Radius applications before recovery inputs", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge);
+    const purge = steps(workflow.jobs?.["purge-azure"]);
     const radiusCleanup = purge.find(
       (step) =>
         step.name === "Delete stale Radius applications before recovery state"
@@ -1014,13 +1102,8 @@ describe("cloud-e2e-cleanup.yml", () => {
       [
         "Purge leaked Entra service principals and applications",
         "Purge stale GitHub deployment records",
-        "List and delete Radius environments",
-        "Purge stale workflow fallback pull requests and branches"
+        "List and delete Radius environments"
       ].includes(step.name ?? "")
-    );
-    const reset = purge.find(
-      (step) =>
-        step.name === "Reset the fixture default branch under the shared lease"
     );
 
     expect(radiusCleanup?.run).toContain(
@@ -1049,7 +1132,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       status: 0,
       stderr: ""
     });
-    expect(fallbackProtectedSteps).toHaveLength(4);
+    expect(fallbackProtectedSteps).toHaveLength(3);
     for (const step of fallbackProtectedSteps) {
       expect(step.if).toContain(
         "steps.radius-app-cleanup.outcome == 'success'"
@@ -1061,18 +1144,61 @@ describe("cloud-e2e-cleanup.yml", () => {
         "steps.shared-resource-cleanup.outcome == 'success'"
       );
     }
+  });
+
+  // Fallback branches and the default branch hold the delete workflows a retry
+  // needs, and neither belongs to one cloud. So both wait for every cloud's
+  // job, and any failed step there keeps them.
+  // The alert treats a skipped job as fine, which is right only while it
+  // waits for every job: a failed cloud job skips reset-fixture.
+  it("alerts on a failure in any cleanup job", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const notify = workflow.jobs?.["notify-scheduled-result"];
+    const others = Object.keys(workflow.jobs ?? {}).filter(
+      (name) => name !== "notify-scheduled-result"
+    );
+
+    expect([notify?.needs].flat().sort()).toEqual([...others].sort());
+    expect(steps(notify)[0]?.env?.SCHEDULE_FAILED).toBe(
+      "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}"
+    );
+  });
+
+  it("touches recovery workflows only after every cloud's job succeeded", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const resetJob = workflow.jobs?.["reset-fixture"];
+    const reset = resetSteps(workflow);
+    const resetStep = reset.find((step) => step.name === RESET_STEP);
+    const recoverySteps = reset.filter(
+      (step) =>
+        step.run?.includes("-X DELETE") || step.run?.includes("-X PATCH")
+    );
+
+    // Every cloud's job, now and later, must be a prerequisite.
+    const cloudJobs = Object.keys(workflow.jobs ?? {}).filter((name) =>
+      name.startsWith("purge-")
+    );
+    expect(cloudJobs).toContain("purge-azure");
+    expect(resetJob?.needs).toEqual(["scope", ...cloudJobs]);
+    for (const job of cloudJobs)
+      expect(resetJob?.if).toContain(`needs.${job}.result == 'success'`);
+    // No status function, so GitHub also requires every listed need to pass.
+    expect(resetJob?.if).not.toMatch(/always\(\)|failure\(\)|cancelled\(\)/);
+    expect(recoverySteps.map((step) => step.name)).toEqual([
+      "Purge stale workflow fallback pull requests and branches",
+      RESET_STEP
+    ]);
     for (const prerequisite of [
-      "cluster-workload-cleanup",
-      "shared-resource-cleanup",
-      "entra-identity-cleanup",
-      "deployment-records-cleanup",
-      "environment-cleanup",
-      "stale-ghcr-state-cleanup",
-      "ghcr-state-cleanup",
       "fallback-ref-cleanup",
       "pre-reset-verification"
     ])
-      expect(reset?.if).toContain(`steps.${prerequisite}.outcome == 'success'`);
+      expect(resetStep?.if).toContain(
+        `steps.${prerequisite}.outcome == 'success'`
+      );
+    // The cloud jobs never write to branches or pull requests.
+    for (const job of ["scope", "purge-azure"])
+      for (const step of steps(workflow.jobs?.[job]))
+        expect(step.run ?? "").not.toMatch(/git\/refs|pulls\//);
   });
 
   // A deployment record is linked to its environment by name, so deleting the
@@ -1081,7 +1207,7 @@ describe("cloud-e2e-cleanup.yml", () => {
   // recognize, and GitHub rejects deleting a record that is still active.
   it("purges deployment records before the environments that name them", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge);
+    const purge = steps(workflow.jobs?.["purge-azure"]);
     const deploymentsIndex = purge.findIndex(
       (step) => step.name === "Purge stale GitHub deployment records"
     );
@@ -1102,7 +1228,7 @@ describe("cloud-e2e-cleanup.yml", () => {
   // environment anyway strands exactly the records this step exists to remove.
   it("holds back the environment purge when the record purge fails", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge);
+    const purge = steps(workflow.jobs?.["purge-azure"]);
     const deployments = purge.find(
       (step) => step.name === "Purge stale GitHub deployment records"
     );
@@ -1118,7 +1244,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("deletes only fixture-linked private GHCR state after Radius cleanup", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const stateCleanup = steps(workflow.jobs?.purge).find(
+    const stateCleanup = steps(workflow.jobs?.["purge-azure"]).find(
       (step) => step.name === "Purge stale GHCR deployment state"
     );
     const script = stateCleanup?.run ?? "";
@@ -1145,9 +1271,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
   });
 
-  it("sweeps every GHCR state package the fixture wrote", async () => {
+  it("sweeps every GHCR state package the fixture's Azure environments wrote", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge);
+    const purge = steps(workflow.jobs?.["purge-azure"]);
     const orphanCleanup = purge.find(
       (step) => step.name === "Purge orphaned GHCR deployment state"
     );
@@ -1164,7 +1290,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     expect(script).toContain("selectStaleStatePackages");
     expect(script).toContain(
-      'package_prefix="${repository_name,,}-radius-state-"'
+      'package_prefix="${repository_name,,}-radius-state-${ENVIRONMENT_PREFIX}"'
     );
     expect(script).toContain(
       '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
@@ -1180,7 +1306,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("retries and verifies Entra application deletion through the exact Graph object", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const identityCleanup = steps(workflow.jobs?.purge).find(
+    const identityCleanup = steps(workflow.jobs?.["purge-azure"]).find(
       (step) =>
         step.name === "Purge leaked Entra service principals and applications"
     );
@@ -1203,7 +1329,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("reclaims leaked cluster workloads with credentials for the shared cluster", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const clusterCleanup = steps(workflow.jobs?.purge).find(
+    const clusterCleanup = steps(workflow.jobs?.["purge-azure"]).find(
       (step) =>
         step.name === "Reclaim leaked Radius workloads from the shared cluster"
     );
@@ -1216,10 +1342,10 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(clusterCleanup?.if).not.toContain("steps.radius-app-cleanup");
     expect(script).toContain('cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago"');
     expect(clusterCleanup?.env?.FIXTURE_APPLICATION).toBe(
-      "${{ steps.pin.outputs.fixture-application }}"
+      "${{ needs.scope.outputs.fixture-application }}"
     );
     expect(clusterCleanup?.env?.RADIUS_ENVIRONMENT_NAMESPACE).toBe(
-      "${{ steps.pin.outputs.radius-environment-namespace }}"
+      "${{ needs.scope.outputs.radius-environment-namespace }}"
     );
     expect(clusterCleanup?.env?.AKS_CLUSTER_NAME).toBe(
       "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
@@ -1238,7 +1364,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("empties the shared resource group of everything but the cluster", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const groupCleanup = steps(workflow.jobs?.purge).find(
+    const groupCleanup = steps(workflow.jobs?.["purge-azure"]).find(
       (step) =>
         step.name ===
         "Reclaim Azure resources left in the shared resource group"
@@ -1280,7 +1406,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     "runs the shared resource group cleanup shell when $scenario with $lineEnding rows",
     async ({ scenario, lineEnding }) => {
       const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-      const groupCleanup = steps(workflow.jobs?.purge).find(
+      const groupCleanup = steps(workflow.jobs?.["purge-azure"]).find(
         (step) => step.id === "shared-resource-cleanup"
       );
       expect(groupCleanup?.run).toBeDefined();
@@ -1396,7 +1522,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("removes only allowlisted assignments before deleting leaked service principals", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge).find((step) =>
+    const purge = steps(workflow.jobs?.["purge-azure"]).find((step) =>
       step.run?.includes("selectExpectedRoleAssignments")
     );
     const script = purge?.run ?? "";
@@ -1435,7 +1561,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     // test leaks first. The fixture tag is what stops a prefix match from
     // becoming a broad subscription sweep.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge).find((step) =>
+    const purge = steps(workflow.jobs?.["purge-azure"]).find((step) =>
       step.run?.includes("selectTestResourceGroups")
     );
     const script = purge?.run ?? "";
@@ -1443,7 +1569,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(purge?.if).toContain("always()");
     expect(purge?.if).toContain("steps.azure-login.outcome == 'success'");
     expect(purge?.env?.RESOURCE_GROUP_PREFIX).toBe(
-      "${{ steps.pin.outputs.resource-group-prefix }}"
+      "${{ needs.scope.outputs.resource-group-prefix }}"
     );
     expect(purge?.env?.SHARED_RESOURCE_GROUP).toBe(
       "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
@@ -1475,7 +1601,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("exports cleanup scope constants from the fixture pin", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const pin = steps(workflow.jobs?.purge).find(
+    const pin = scopeSteps(workflow).find(
       (step) => step.name === "Resolve the pinned fixture repository"
     );
     const script = pin?.run ?? "";
@@ -1487,6 +1613,14 @@ describe("cloud-e2e-cleanup.yml", () => {
       "`environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`"
     );
     expect(script).toContain(
+      "`aws-environment-prefix=${pin.AWS_ENVIRONMENT_NAME_PREFIX}`"
+    );
+    // Every value a later job reads goes through the scope job's outputs.
+    const outputs = workflow.jobs?.scope?.outputs ?? {};
+    for (const [name, value] of Object.entries(outputs))
+      if (name !== "configured")
+        expect(value).toBe(`\${{ steps.pin.outputs.${name} }}`);
+    expect(script).toContain(
       "`workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`"
     );
     expect(script).toContain("`lease-ref=${pin.CLOUD_E2E_LEASE_REF}`");
@@ -1494,13 +1628,10 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("resets the fixture only while holding the shared lease", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const reset = steps(workflow.jobs?.purge).find(
-      (step) =>
-        step.name === "Reset the fixture default branch under the shared lease"
-    );
+    const reset = resetSteps(workflow).find((step) => step.name === RESET_STEP);
     const script = reset?.run ?? "";
 
-    expect(reset?.env?.LEASE_REF).toBe("${{ steps.pin.outputs.lease-ref }}");
+    expect(reset?.env?.LEASE_REF).toBe("${{ needs.scope.outputs.lease-ref }}");
     expect(reset?.env?.SOURCE_GH_TOKEN).toBe("${{ github.token }}");
     expect(script).toContain("parseCloudE2ELeaseOwnerRunId");
     expect(script).toContain("node --input-type=module -e");
@@ -1534,10 +1665,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     // build/scripts/cloud-e2e-lease_test.sh, which is what actually fails when
     // one of these paths regresses.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const reset = steps(workflow.jobs?.purge).find(
-      (step) =>
-        step.name === "Reset the fixture default branch under the shared lease"
-    );
+    const reset = resetSteps(workflow).find((step) => step.name === RESET_STEP);
     const script = reset?.run ?? "";
 
     expect(script).toContain("read_lease_sha()");
@@ -1580,59 +1708,72 @@ describe("cloud-e2e-cleanup.yml", () => {
     // Taken from the module, so a rename there cannot leave this sweeping a
     // prefix nothing uses - or, worse, one something else does.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge).find(
-      (step) => step.env?.ENVIRONMENT_PREFIX !== undefined
+    const azure = workflow.jobs?.["purge-azure"];
+    expect(azure?.env?.ENVIRONMENT_PREFIX).toBe(
+      "${{ needs.scope.outputs.environment-prefix }}"
     );
-    expect(purge?.env?.ENVIRONMENT_PREFIX).toBe(
-      "${{ steps.pin.outputs.environment-prefix }}"
-    );
+    // A step-level value would quietly override the job's.
+    for (const step of steps(azure))
+      expect(step.env?.ENVIRONMENT_PREFIX).toBeUndefined();
     expect(ENVIRONMENT_NAME_PREFIX).toBe("radtest-");
+    expect(AWS_ENVIRONMENT_NAME_PREFIX).toBe("radtest-aws-");
   });
 
   it("purges nothing until the pin and published repository agree", async () => {
     // The checked-in pin proves the target is intentional, while the published
     // variable proves infrastructure provisioning has selected the same
-    // repository. Both gates must open before any destructive step can run.
+    // repository. Both gates must open before any job that deletes can start.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const verify = steps(workflow.jobs?.purge).find(
+    const verify = scopeSteps(workflow).find(
       (step) => step.name === "Verify the published variable matches the pin"
-    );
-    const destructive = steps(workflow.jobs?.purge).filter(
-      (step) =>
-        step.run?.includes("az group delete") ||
-        step.run?.includes(
-          'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
-        ) ||
-        step.run?.includes("-X DELETE") ||
-        step.run?.includes("-X PATCH")
     );
     expect(verify?.run).toContain('echo "configured=false"');
     expect(verify?.run).toContain('echo "configured=true"');
-    expect(destructive.length).toBeGreaterThan(0);
-    for (const step of destructive) {
-      expect(step.if).toContain("always()");
-      expect(step.if).toContain("steps.pin.outputs.provisioned == 'true'");
-      expect(step.if).toContain(
-        "steps.verify-scope.outputs.configured == 'true'"
-      );
+    expect(workflow.jobs?.scope?.outputs?.configured).toBe(
+      "${{ steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' }}"
+    );
+
+    const destructiveJobs = Object.entries(workflow.jobs ?? {}).filter(
+      ([, job]) =>
+        steps(job).some(
+          (step) =>
+            step.run?.includes("az group delete") ||
+            step.run?.includes(
+              'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
+            ) ||
+            step.run?.includes("-X DELETE") ||
+            step.run?.includes("-X PATCH")
+        )
+    );
+    expect(destructiveJobs.map(([name]) => name).sort()).toEqual([
+      "purge-azure",
+      "reset-fixture"
+    ]);
+    for (const [, job] of destructiveJobs) {
+      expect([job.needs].flat()).toContain("scope");
+      expect(job.if).toContain("needs.scope.outputs.configured == 'true'");
     }
+    // The scope job itself only reads.
+    for (const step of scopeSteps(workflow))
+      expect(step.run ?? "").not.toMatch(/-X (DELETE|PATCH)|--method/);
   });
 
   it("keeps the age threshold for Entra and GitHub state", async () => {
     // Without a provable age a purge cannot tell leaked state from a run in
     // progress, and the shared concurrency group is only half that guarantee.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const job = workflow.jobs?.purge;
-    expect(job?.env?.MAX_AGE_HOURS).toBe("${{ inputs.max_age_hours || '6' }}");
+    const cleanupSteps = [
+      ...steps(workflow.jobs?.["purge-azure"]),
+      ...resetSteps(workflow)
+    ];
 
-    const ageGatedDestructiveSteps = steps(job).filter(
+    const ageGatedDestructiveSteps = cleanupSteps.filter(
       (candidate) =>
         (candidate.run?.includes(
           'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
         ) ||
           candidate.run?.includes("-X DELETE")) &&
-        candidate.name !==
-          "Reset the fixture default branch under the shared lease"
+        candidate.name !== RESET_STEP
     );
     expect(ageGatedDestructiveSteps).toHaveLength(3);
     for (const step of ageGatedDestructiveSteps)
@@ -1641,7 +1782,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("deletes age-eligible service principals before applications", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge).find((step) =>
+    const purge = steps(workflow.jobs?.["purge-azure"]).find((step) =>
       step.run?.includes("az ad sp delete")
     );
     const script = purge?.run ?? "";
@@ -1661,7 +1802,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("closes old fallback pull requests before deleting their exact head refs", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge).find((step) =>
+    const purge = resetSteps(workflow).find((step) =>
       step.run?.includes("selectExpiredFallbackPullRequests")
     );
     const script = purge?.run ?? "";
@@ -1675,7 +1816,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("failures+=");
     expect(script).toContain("git/matching-refs/heads/$FALLBACK_BRANCH_PREFIX");
     expect(purge?.env?.FALLBACK_BRANCH_PREFIX).toBe(
-      "${{ steps.pin.outputs.workflow-fallback-branch-prefix }}"
+      "${{ needs.scope.outputs.workflow-fallback-branch-prefix }}"
     );
     expect(script.indexOf("-f state=closed")).toBeLessThan(
       script.indexOf("-X DELETE")
@@ -1684,7 +1825,7 @@ describe("cloud-e2e-cleanup.yml", () => {
 
   it("selects stale environments through the fail-closed timestamp helper", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
-    const purge = steps(workflow.jobs?.purge).find((step) =>
+    const purge = steps(workflow.jobs?.["purge-azure"]).find((step) =>
       step.run?.includes("selectExpiredEnvironments")
     );
 

@@ -35,6 +35,7 @@ import {
   appRegistrationName,
   clusterName as buildClusterName,
   cloudE2ELeaseCommitMessage,
+  AWS_ENVIRONMENT_NAME_PREFIX,
   CLOUD_E2E_LEASE_REF,
   ENVIRONMENT_NAME_PREFIX,
   environmentName as buildEnvironmentName,
@@ -2084,10 +2085,13 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
     throw new Error(
       `${listingContext} returned an empty response instead of JSON.`
     );
-  for (const name of selectPrefixedEnvironments(
-    parseJsonArray(listing, listingContext),
-    ENVIRONMENT_NAME_PREFIX
-  ))
+  // Every cloud's runs share the fixture's default branch and delete
+  // workflows, so a leftover from either cloud blocks this run.
+  const environments = parseJsonArray(listing, listingContext);
+  for (const name of [
+    ENVIRONMENT_NAME_PREFIX,
+    AWS_ENVIRONMENT_NAME_PREFIX
+  ].flatMap((prefix) => selectPrefixedEnvironments(environments, prefix)))
     if (name !== input.environmentName)
       findings.push(
         `GitHub environment "${name}" in ${repository} from an earlier run ` +

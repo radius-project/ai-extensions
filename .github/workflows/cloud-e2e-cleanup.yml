@@ -27,7 +27,8 @@ name: Cloud E2E Cleanup
 #
 # Each delete is verified with a bounded wait. A failure that a retry cannot
 # fix, such as a missing permission, stops the step at once. The fixture
-# branch is reset only after a final gate finds no leaked state of any age.
+# branch is reset only after every cloud's job succeeds and a final gate finds
+# no leaked state of any age.
 #
 # See docs/eng/CLOUD_E2E_RUNBOOK.md. Like cloud-e2e.yml, this has never
 # executed. The fixture repository and source pin now exist, but the
@@ -65,27 +66,43 @@ concurrency:
   cancel-in-progress: false
   queue: max
 
+# A scheduled run has no inputs, so it always uses the default. The default
+# matches the safety-net Radius purge threshold, and is comfortably longer than
+# the time a Cloud E2E run can occupy. 0 is safe only because the shared
+# concurrency group keeps this workflow from running beside a Cloud E2E run.
+env:
+  MAX_AGE_HOURS: ${{ inputs.max_age_hours || '6' }}
+
+# `scope` reads the suite's pin and confirms the published variable agrees.
+# Each cloud's job then reclaims only its own environments and cloud state.
+# `reset-fixture` handles what no single cloud owns, the fallback branches and
+# the fixture default branch, and runs only when every cloud's job succeeded,
+# so a failed sweep keeps the workflows the next run needs to retry.
 jobs:
-  purge:
-    name: Reclaim leaked cloud and GitHub state
+  scope:
+    name: Resolve the cleanup scope
     # A fork that enables scheduled workflows would otherwise point a deletion
     # job at our subscription and our fixture repository.
     if: github.repository == 'radius-project/ai-extensions'
     runs-on: ubuntu-24.04
-    # Each delete type now waits until it can verify the object is gone, so
-    # the budget is larger than the sum of the delete steps alone.
-    timeout-minutes: 45
+    timeout-minutes: 5
     permissions:
-      actions: read # gh run view for CI-owned resource-group terminal checks
       contents: read # actions/checkout
-      id-token: write # OIDC token exchanged for an Azure token by azure/login
-    env:
-      # The default matches the safety-net Radius purge threshold, and is
-      # comfortably longer than the 90-minute ceiling a Cloud E2E run can
-      # occupy. A scheduled run has no inputs, so it always uses the default.
-      # 0 is safe only because the shared concurrency group keeps this job
-      # from running beside a Cloud E2E run.
-      MAX_AGE_HOURS: ${{ inputs.max_age_hours || '6' }}
+    outputs:
+      configured: ${{ steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' }}
+      repository: ${{ steps.pin.outputs.repository }}
+      owner: ${{ steps.pin.outputs.owner }}
+      name: ${{ steps.pin.outputs.name }}
+      default-branch: ${{ steps.pin.outputs.default-branch }}
+      baseline-sha: ${{ steps.pin.outputs.baseline-sha }}
+      application-name: ${{ steps.pin.outputs.application-name }}
+      resource-group-prefix: ${{ steps.pin.outputs.resource-group-prefix }}
+      environment-prefix: ${{ steps.pin.outputs.environment-prefix }}
+      aws-environment-prefix: ${{ steps.pin.outputs.aws-environment-prefix }}
+      fixture-application: ${{ steps.pin.outputs.fixture-application }}
+      radius-environment-namespace: ${{ steps.pin.outputs.radius-environment-namespace }}
+      workflow-fallback-branch-prefix: ${{ steps.pin.outputs.workflow-fallback-branch-prefix }}
+      lease-ref: ${{ steps.pin.outputs.lease-ref }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -137,6 +154,7 @@ jobs:
               `application-name=${pin.appRegistrationName()}`,
               `resource-group-prefix=${pin.RESOURCE_GROUP_PREFIX}`,
               `environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`,
+              `aws-environment-prefix=${pin.AWS_ENVIRONMENT_NAME_PREFIX}`,
               `fixture-application=${pin.FIXTURE_APPLICATION_NAME}`,
               `radius-environment-namespace=${pin.FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE}`,
               `workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`,
@@ -180,8 +198,35 @@ jobs:
           echo "::notice::$REASON Nothing to purge."
           echo "$REASON" >>"$GITHUB_STEP_SUMMARY"
 
+  purge-azure:
+    name: Reclaim leaked Azure state
+    needs: scope
+    if: github.repository == 'radius-project/ai-extensions' && needs.scope.outputs.configured == 'true'
+    runs-on: ubuntu-24.04
+    # Each delete type now waits until it can verify the object is gone, so
+    # the budget is larger than the sum of the delete steps alone.
+    timeout-minutes: 45
+    permissions:
+      actions: read # gh run view for CI-owned resource-group terminal checks
+      contents: read # actions/checkout
+      id-token: write # OIDC token exchanged for an Azure token by azure/login
+    env:
+      # Azure environments only. AWS environment names extend this prefix, and
+      # the selectors in cloud-cleanup.ts leave them to the AWS job.
+      ENVIRONMENT_PREFIX: ${{ needs.scope.outputs.environment-prefix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+
       - name: Sign in to Azure
-        if: steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true'
         id: azure-login
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
@@ -191,35 +236,35 @@ jobs:
 
       - name: Create a GitHub App token for the fixture repository
         id: app-token
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true'
+        if: always()
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
-          owner: ${{ steps.pin.outputs.owner }}
-          repositories: ${{ steps.pin.outputs.name }}
+          owner: ${{ needs.scope.outputs.owner }}
+          repositories: ${{ needs.scope.outputs.name }}
           permission-actions: write
           # `DELETE /repos/{owner}/{repo}/environments/{name}` needs
           # Administration write. Environments write alone answers 403. The
           # GitHub App installation must grant it, or this token step fails.
           permission-administration: write
-          permission-contents: write
+          # Read is enough here: the branch and pull request writes moved to
+          # reset-fixture.
+          permission-contents: read
           # Deleting a deployment record is a write. The records are linked to
           # their environment by name, so deleting the environment strands them
           # rather than removing them, and nothing else ever will.
           permission-deployments: write
           permission-environments: write
-          permission-pull-requests: write
 
       - name: Delete stale Radius applications before recovery state
         id: radius-app-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        if: always() && steps.app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          FIXTURE_APPLICATION: ${{ steps.pin.outputs.fixture-application }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
-          DEFAULT_BRANCH: ${{ steps.pin.outputs.default-branch }}
-          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+          FIXTURE_APPLICATION: ${{ needs.scope.outputs.fixture-application }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
+          DEFAULT_BRANCH: ${{ needs.scope.outputs.default-branch }}
         shell: bash
         run: |
           set -euo pipefail
@@ -341,10 +386,10 @@ jobs:
       # cluster credentials - which would then block every recovery-state step
       # gated on that dispatch succeeding.
       - name: Purge legacy Azure resource groups created by the suite
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        if: always() && steps.azure-login.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          RESOURCE_GROUP_PREFIX: ${{ steps.pin.outputs.resource-group-prefix }}
+          RESOURCE_GROUP_PREFIX: ${{ needs.scope.outputs.resource-group-prefix }}
           SHARED_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         shell: bash
@@ -412,13 +457,12 @@ jobs:
       # Packages write here would hand package-write to the journey token too.
       - name: Purge stale GHCR deployment state
         id: stale-ghcr-state-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        if: always() && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
-          FIXTURE_OWNER: ${{ steps.pin.outputs.owner }}
-          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
+          FIXTURE_OWNER: ${{ needs.scope.outputs.owner }}
         shell: bash
         run: |
           set -euo pipefail
@@ -536,11 +580,11 @@ jobs:
       # orphaned in the first place.
       - name: Purge orphaned GHCR deployment state
         id: ghcr-state-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        if: always() && steps.app-token.outcome == 'success'
         env:
           GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
-          FIXTURE_OWNER: ${{ steps.pin.outputs.owner }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
+          FIXTURE_OWNER: ${{ needs.scope.outputs.owner }}
         shell: bash
         run: |
           set -euo pipefail
@@ -553,7 +597,7 @@ jobs:
           # Matches the package name the deploy workflow writes for this
           # repository, whose shape the selector below re-checks in full.
           repository_name="${FIXTURE_REPOSITORY##*/}"
-          package_prefix="${repository_name,,}-radius-state-"
+          package_prefix="${repository_name,,}-radius-state-${ENVIRONMENT_PREFIX}"
           GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --paginate --slurp \
             "orgs/$FIXTURE_OWNER/packages?package_type=container" >"$packages"
 
@@ -653,12 +697,11 @@ jobs:
       # that failing is precisely what strands a workload here.
       - name: Reclaim leaked Radius workloads from the shared cluster
         id: cluster-workload-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
+        if: always() && steps.azure-login.outcome == 'success'
         env:
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
-          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
-          FIXTURE_APPLICATION: ${{ steps.pin.outputs.fixture-application }}
-          RADIUS_ENVIRONMENT_NAMESPACE: ${{ steps.pin.outputs.radius-environment-namespace }}
+          FIXTURE_APPLICATION: ${{ needs.scope.outputs.fixture-application }}
+          RADIUS_ENVIRONMENT_NAMESPACE: ${{ needs.scope.outputs.radius-environment-namespace }}
           RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         shell: bash
@@ -822,7 +865,7 @@ jobs:
       # if the configured cluster is not in it.
       - name: Reclaim Azure resources left in the shared resource group
         id: shared-resource-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
+        if: always() && steps.azure-login.outcome == 'success'
         env:
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
@@ -963,12 +1006,11 @@ jobs:
       # that still fails the next clean-slate probe.
       - name: Purge leaked Entra service principals and applications
         id: entra-identity-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success'))
+        if: always() && steps.azure-login.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success'))
         env:
-          APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
+          APPLICATION_NAME: ${{ needs.scope.outputs.application-name }}
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
-          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
           RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         shell: bash
@@ -1226,11 +1268,10 @@ jobs:
       # whose environment has already gone.
       - name: Purge stale GitHub deployment records
         id: deployment-records-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success'))
+        if: always() && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success'))
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
-          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1318,11 +1359,10 @@ jobs:
       # lets the next sweep retry both.
       - name: List and delete Radius environments
         id: environment-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success')) && steps.deployment-records-cleanup.outcome == 'success'
+        if: always() && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success')) && steps.deployment-records-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
-          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1400,19 +1440,152 @@ jobs:
             exit 1
           fi
 
+      # The age threshold lets a recent leak survive a sweep. This checks,
+      # whatever the age, that none of the Azure state the suite creates is
+      # left: the Entra application, workloads on the shared cluster, and the
+      # environment namespace. reset-fixture runs only when this job succeeds,
+      # and checks every cloud's GitHub state itself. Any check that cannot
+      # complete counts as a failure.
+      - name: Verify no leaked Azure state remains
+        id: azure-verification
+        if: always() && steps.azure-login.outcome == 'success'
+        env:
+          APPLICATION_NAME: ${{ needs.scope.outputs.application-name }}
+          FIXTURE_APPLICATION: ${{ needs.scope.outputs.fixture-application }}
+          RADIUS_ENVIRONMENT_NAMESPACE: ${{ needs.scope.outputs.radius-environment-namespace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
+          applications="$RUNNER_TEMP/gate-applications.json"
+          objects="$RUNNER_TEMP/gate-cluster-objects.json"
+          findings="$RUNNER_TEMP/gate-findings.txt"
+          : >"$findings"
+
+          # Each call has a time limit, so a stalled call cannot use the job budget.
+          timeout 120 az ad app list \
+            --filter "displayName eq '$APPLICATION_NAME'" \
+            --query '[].{id:id,appId:appId,displayName:displayName,createdDateTime:createdDateTime,tags:tags}' \
+            -o json >"$applications"
+          kubectl get \
+            deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
+            --all-namespaces \
+            --selector radapp.io/environment \
+            --request-timeout=60s \
+            --output json >"$objects"
+          # A cutoff in the future selects every workload, whatever its age.
+          any_age="$(date -u -d "1 day" +%Y-%m-%dT%H:%M:%SZ)"
+
+          node --input-type=module - \
+            "$applications" "$objects" \
+            "$ENVIRONMENT_PREFIX" "$APPLICATION_NAME" "$FIXTURE_APPLICATION" \
+            "$any_age" "$findings" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [applicationsFile, objectsFile, environmentPrefix, displayName, application, anyAge, findingsFile] =
+            process.argv.slice(2);
+          // The gate deletes nothing, so it reports all state by name. It does
+          // not need the age, tag, or timestamp checks that make a delete safe.
+          const { selectLeakedClusterWorkloads, selectNamedApplications } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const [applications, objects] = await Promise.all(
+            [applicationsFile, objectsFile].map(
+              async (file) => JSON.parse(await readFile(file, "utf8"))
+            )
+          );
+          const findings = [
+            ...selectNamedApplications(applications, displayName).map(
+              (entry) => `Entra application ${entry.id} (appId ${entry.appId})`
+            ),
+            ...selectLeakedClusterWorkloads(
+              objects,
+              environmentPrefix,
+              application,
+              anyAge
+            ).map(
+              (entry) => `cluster ${entry.kind} ${entry.namespace}/${entry.name}`
+            )
+          ];
+          await writeFile(findingsFile, findings.map((line) => `${line}\n`).join(""));
+          NODE
+
+          namespace_status=0
+          cleanup_namespace_probe "$RADIUS_ENVIRONMENT_NAMESPACE" || namespace_status=$?
+          case "$namespace_status" in
+            1) ;;
+            0) echo "cluster namespace $RADIUS_ENVIRONMENT_NAMESPACE" >>"$findings" ;;
+            *)
+              echo "::error::Could not check namespace $RADIUS_ENVIRONMENT_NAMESPACE. The fixture branch is not reset."
+              exit 1
+              ;;
+          esac
+
+          if [[ -s "$findings" ]]; then
+            echo "::error::Leaked Azure state remains, so the fixture branch is not reset. Its delete workflows are still needed to remove this state. To delete it whatever its age, run this workflow with max_age_hours=0."
+            echo "Leaked state that remains:"
+            sed 's/^/  - /' "$findings"
+            {
+              echo "### Leaked Azure state blocks the fixture reset"
+              echo
+              sed 's/^/- /' "$findings"
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "- Verified: no Entra application, cluster workload, or namespace remains" >>"$GITHUB_STEP_SUMMARY"
+
+  reset-fixture:
+    name: Reset the fixture once every cloud is clean
+    needs:
+      - scope
+      - purge-azure
+    # Runs only when every cloud's job succeeded. A failed sweep keeps the
+    # fixture branch, its delete workflows, and the fallback branches in place
+    # so the next run can retry.
+    if: github.repository == 'radius-project/ai-extensions' && needs.scope.outputs.configured == 'true' && needs.purge-azure.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read # gh run view for the lease owner
+      contents: read # actions/checkout
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Create a GitHub App token for the fixture repository
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          owner: ${{ needs.scope.outputs.owner }}
+          repositories: ${{ needs.scope.outputs.name }}
+          # Listing environments needs Actions read.
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: write
+
       # The workflow fallback leaves both an open pull request and a
       # `radius/setup-*` head ref. Close old fallback pull requests before
       # deleting old refs so cleanup never relies on GitHub changing PR state as
       # a side effect. Branch age comes from the referenced commit, not from a
-      # missing field on the refs API.
+      # missing field on the refs API. A fallback branch can't be tied to one
+      # cloud, so this runs here, after every cloud's sweep has passed.
       - name: Purge stale workflow fallback pull requests and branches
         id: fallback-ref-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success'))
+        if: always() && steps.app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
-          DEFAULT_BRANCH: ${{ steps.pin.outputs.default-branch }}
-          FALLBACK_BRANCH_PREFIX: ${{ steps.pin.outputs.workflow-fallback-branch-prefix }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
+          DEFAULT_BRANCH: ${{ needs.scope.outputs.default-branch }}
+          FALLBACK_BRANCH_PREFIX: ${{ needs.scope.outputs.workflow-fallback-branch-prefix }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1551,106 +1724,61 @@ jobs:
       # fixture branch while that leak exists removes delete-application.yml,
       # and then nothing can delete the leaked environment's application. A
       # leaked environment also keeps its claim on the fixture namespace, so
-      # the next Cloud E2E run's Create Environment refuses. This gate checks,
-      # whatever the age, that nothing the suite creates is left before the
-      # reset can run. Any check that cannot complete counts as a failure.
+      # the next Cloud E2E run's Create Environment refuses. Each cloud's job
+      # has already checked its own cloud state; this checks every cloud's
+      # GitHub state, whatever its age. Any check that cannot complete counts
+      # as a failure.
       - name: Verify no leaked state remains before the reset
         id: pre-reset-verification
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.azure-login.outcome == 'success'
+        if: always() && steps.app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
-          APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
-          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
-          FIXTURE_APPLICATION: ${{ steps.pin.outputs.fixture-application }}
-          FIXTURE_OWNER: ${{ steps.pin.outputs.owner }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
-          RADIUS_ENVIRONMENT_NAMESPACE: ${{ steps.pin.outputs.radius-environment-namespace }}
+          FIXTURE_OWNER: ${{ needs.scope.outputs.owner }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
+          AZURE_ENVIRONMENT_PREFIX: ${{ needs.scope.outputs.environment-prefix }}
+          AWS_ENVIRONMENT_PREFIX: ${{ needs.scope.outputs.aws-environment-prefix }}
         shell: bash
         run: |
           set -euo pipefail
-          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
-          source build/scripts/cloud-e2e-cleanup-lib.sh
           environments="$RUNNER_TEMP/gate-environments.json"
-          applications="$RUNNER_TEMP/gate-applications.json"
-          objects="$RUNNER_TEMP/gate-cluster-objects.json"
           packages="$RUNNER_TEMP/gate-packages.json"
           findings="$RUNNER_TEMP/gate-findings.txt"
           : >"$findings"
 
           # Each call has a time limit, so a stalled call cannot use the job budget.
           timeout 120 gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments?per_page=100" >"$environments"
-          timeout 120 az ad app list \
-            --filter "displayName eq '$APPLICATION_NAME'" \
-            --query '[].{id:id,appId:appId,displayName:displayName,createdDateTime:createdDateTime,tags:tags}' \
-            -o json >"$applications"
-          kubectl get \
-            deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
-            --all-namespaces \
-            --selector radapp.io/environment \
-            --request-timeout=60s \
-            --output json >"$objects"
-          repository_name="${FIXTURE_REPOSITORY##*/}"
-          package_prefix="${repository_name,,}-radius-state-"
           GH_TOKEN="$GH_PACKAGES_TOKEN" timeout 120 gh api --paginate --slurp \
             "orgs/$FIXTURE_OWNER/packages?package_type=container" >"$packages"
-          # A cutoff in the future selects every workload, whatever its age.
-          any_age="$(date -u -d "1 day" +%Y-%m-%dT%H:%M:%SZ)"
+          repository_name="${FIXTURE_REPOSITORY##*/}"
+          state_prefix="${repository_name,,}-radius-state-"
 
           node --input-type=module - \
-            "$environments" "$applications" "$objects" "$packages" \
-            "$ENVIRONMENT_PREFIX" "$APPLICATION_NAME" "$FIXTURE_APPLICATION" \
-            "$package_prefix" "$any_age" "$findings" <<'NODE'
+            "$environments" "$packages" "$state_prefix" "$findings" \
+            "$AZURE_ENVIRONMENT_PREFIX" "$AWS_ENVIRONMENT_PREFIX" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [environmentsFile, applicationsFile, objectsFile, packagesFile, environmentPrefix, displayName, application, packagePrefix, anyAge, findingsFile] =
+          const [environmentsFile, packagesFile, statePrefix, findingsFile, ...environmentPrefixes] =
             process.argv.slice(2);
           // The gate deletes nothing, so it reports all state by name. It does
-          // not need the age, tag, or timestamp checks that make a delete safe.
-          const {
-            selectLeakedClusterWorkloads,
-            selectNamedApplications,
-            selectPrefixedEnvironments,
-            selectStatePackages
-          } = await import(
+          // not need the age or timestamp checks that make a delete safe.
+          const { selectPrefixedEnvironments, selectStatePackages } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
           );
-          const [environments, applications, objects, packages] = await Promise.all(
-            [environmentsFile, applicationsFile, objectsFile, packagesFile].map(
+          const [environments, packages] = await Promise.all(
+            [environmentsFile, packagesFile].map(
               async (file) => JSON.parse(await readFile(file, "utf8"))
             )
           );
-          const findings = [
-            ...selectPrefixedEnvironments(environments, environmentPrefix).map(
+          const findings = environmentPrefixes.flatMap((prefix) => [
+            ...selectPrefixedEnvironments(environments, prefix).map(
               (name) => `Radius environment (GitHub Environment) ${name}`
             ),
-            ...selectNamedApplications(applications, displayName).map(
-              (entry) => `Entra application ${entry.id} (appId ${entry.appId})`
-            ),
-            ...selectLeakedClusterWorkloads(
-              objects,
-              environmentPrefix,
-              application,
-              anyAge
-            ).map(
-              (entry) => `cluster ${entry.kind} ${entry.namespace}/${entry.name}`
-            ),
-            ...selectStatePackages(packages, packagePrefix).map(
+            ...selectStatePackages(packages, `${statePrefix}${prefix}`).map(
               (name) => `GHCR state package ${name}`
             )
-          ];
+          ]);
           await writeFile(findingsFile, findings.map((line) => `${line}\n`).join(""));
           NODE
-
-          namespace_status=0
-          cleanup_namespace_probe "$RADIUS_ENVIRONMENT_NAMESPACE" || namespace_status=$?
-          case "$namespace_status" in
-            1) ;;
-            0) echo "cluster namespace $RADIUS_ENVIRONMENT_NAMESPACE" >>"$findings" ;;
-            *)
-              echo "::error::Could not check namespace $RADIUS_ENVIRONMENT_NAMESPACE. The fixture branch is not reset."
-              exit 1
-              ;;
-          esac
 
           if [[ -s "$findings" ]]; then
             echo "::error::Leaked state remains, so the fixture branch is not reset. Its delete workflows are still needed to remove this state. To delete it whatever its age, run this workflow with max_age_hours=0."
@@ -1663,23 +1791,24 @@ jobs:
             } >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          echo "- Verified: no Radius environment, Entra application, cluster workload, namespace, or GHCR state package remains" >>"$GITHUB_STEP_SUMMARY"
+          echo "- Verified: no Radius environment or GHCR state package remains for any cloud" >>"$GITHUB_STEP_SUMMARY"
 
       # The lease is the repository-scoped mutex used by both CI and local runs.
       # Cleanup may use an abandoned lease only after its recorded Actions owner
       # is provably complete. A local or malformed owner is unverifiable and is
       # deliberately left intact. When no lease exists, cleanup acquires its own
       # before touching the mutable default branch. Recovery workflows remain
-      # in place unless every preceding sweep completed successfully.
+      # in place unless every cloud's job and every step before this one
+      # succeeded.
       - name: Reset the fixture default branch under the shared lease
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success' && steps.entra-identity-cleanup.outcome == 'success' && steps.deployment-records-cleanup.outcome == 'success' && steps.environment-cleanup.outcome == 'success' && steps.stale-ghcr-state-cleanup.outcome == 'success' && steps.ghcr-state-cleanup.outcome == 'success' && steps.fallback-ref-cleanup.outcome == 'success' && steps.pre-reset-verification.outcome == 'success'
+        if: always() && steps.app-token.outcome == 'success' && steps.fallback-ref-cleanup.outcome == 'success' && steps.pre-reset-verification.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOURCE_GH_TOKEN: ${{ github.token }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
-          DEFAULT_BRANCH: ${{ steps.pin.outputs.default-branch }}
-          BASELINE_SHA: ${{ steps.pin.outputs.baseline-sha }}
-          LEASE_REF: ${{ steps.pin.outputs.lease-ref }}
+          FIXTURE_REPOSITORY: ${{ needs.scope.outputs.repository }}
+          DEFAULT_BRANCH: ${{ needs.scope.outputs.default-branch }}
+          BASELINE_SHA: ${{ needs.scope.outputs.baseline-sha }}
+          LEASE_REF: ${{ needs.scope.outputs.lease-ref }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1862,7 +1991,9 @@ jobs:
     # probe, which reads as a product regression until someone checks here.
     if: ${{ always() && github.event_name == 'schedule' && github.repository == 'radius-project/ai-extensions' }}
     needs:
-      - purge
+      - scope
+      - purge-azure
+      - reset-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1871,8 +2002,10 @@ jobs:
       - name: Report or clear scheduled failure
         env:
           GH_TOKEN: ${{ github.token }}
-          RESULT: purge=${{ needs.purge.result }}
-          SCHEDULE_FAILED: ${{ needs.purge.result != 'success' }}
+          RESULT: scope=${{ needs.scope.result }}, purge-azure=${{ needs.purge-azure.result }}, reset-fixture=${{ needs.reset-fixture.result }}
+          # A job is skipped when the fixture is not configured, or when an
+          # earlier job failed, which that job's own result already reports.
+          SCHEDULE_FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         shell: bash
         run: |
           title="Cloud E2E Cleanup scheduled failure"

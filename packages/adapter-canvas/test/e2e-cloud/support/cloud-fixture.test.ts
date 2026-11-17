@@ -1048,6 +1048,7 @@ describe("createCloudFixture", () => {
           respond: {
             stdout: environmentPages([
               "radtest-ecdb9f66c276",
+              "radtest-aws-ecdb9f66c276",
               "production",
               ENVIRONMENT
             ])
@@ -1056,9 +1057,12 @@ describe("createCloudFixture", () => {
       ]);
 
       const error = await captureError(fixture.assertCleanSlate());
-      expect(error.message).toMatch(
-        /GitHub environment "radtest-ecdb9f66c276" in fixture-owner\/fixture-repo from an earlier run/
-      );
+      // Both clouds share the fixture's default branch, so an AWS leftover
+      // blocks an Azure run too.
+      for (const leaked of ["radtest-ecdb9f66c276", "radtest-aws-ecdb9f66c276"])
+        expect(error.message).toContain(
+          `GitHub environment "${leaked}" in fixture-owner/fixture-repo from an earlier run`
+        );
       expect(error.message).not.toContain('"production"');
       expect(error.message).not.toContain(
         `"${ENVIRONMENT}" in fixture-owner/fixture-repo from an earlier run`
