@@ -36,10 +36,13 @@ const awsInput = {
   vpcId: "vpc",
   subnetIds: "subnet",
   namespace: "radius",
-  trustSubjects: ["repo:o/r:environment:dev", "repository_owner_id:1:x"]
+  trustSubjects: ["repo:o/r:environment:dev", "repository_owner_id:1:x"],
+  appBoundaryArn:
+    "arn:aws:iam::1:policy/radius/apps/2/dev/radius-app-boundary-2-dev"
 };
 const awsWrites = [
   ["AWS_ROLE_ARN", awsInput.roleArn],
+  ["AWS_APP_BOUNDARY_ARN", awsInput.appBoundaryArn],
   ["AWS_REGION", "eu-west-1"],
   ["AWS_ACCOUNT_ID", "1"],
   ["AWS_EKS_CLUSTER_NAME", "eks"],
@@ -227,6 +230,7 @@ describe("setup provider configuration", () => {
       ).toEqual({ provider: "aws", credentialsComplete: false });
       expect(calls.filter(([kind]) => kind === "write")).toEqual([
         ["write", "AWS_ROLE_ARN", ""],
+        ["write", "AWS_APP_BOUNDARY_ARN", ""],
         ["write", "AWS_REGION", "ap-south-1"],
         ["write", "AWS_ACCOUNT_ID", "stored-account"],
         ["write", "AWS_EKS_CLUSTER_NAME", ""],
