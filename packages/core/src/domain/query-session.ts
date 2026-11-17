@@ -84,6 +84,8 @@ export class QuerySession {
         this.waiting.add(ready);
         signal?.addEventListener("abort", aborted, { once: true });
       });
+      // Cancellation after a wake-up must pass the released slot onward.
+      if (signal?.aborted) this.waiting.values().next().value?.();
       signal?.throwIfAborted();
     }
     this.active++;

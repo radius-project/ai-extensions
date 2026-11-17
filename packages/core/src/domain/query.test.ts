@@ -379,6 +379,48 @@ describe("public Radius query operations", () => {
     await first;
     expect(bounded.calls).toHaveLength(1);
   });
+  it("passes a cancelled request's released slot to the next queued request", async () => {
+    const release = deferred();
+    const response = release.promise.then(() => discovery);
+    const controller = new AbortController();
+    const cancelled = new Error("cancelled during handoff");
+    const calls: RadiusQueryRequest[] = [];
+    const client = createRadiusQueryClient(
+      {
+        request<T>(request: RadiusQueryRequest): Promise<T> {
+          calls.push(request);
+          const result =
+            calls.length === 1 ? response : Promise.resolve(discovery);
+          return result as Promise<T>;
+        }
+      },
+      context,
+      { concurrency: 1 }
+    );
+    const first = client.getResourceType({
+      namespace: "Other",
+      typeName: "first"
+    });
+    void response.then(() => controller.abort(cancelled));
+    const second = client.getResourceType({
+      namespace: "Other",
+      typeName: "cancelled",
+      signal: controller.signal
+    });
+    const rejected = expect(second).rejects.toBe(cancelled);
+    const third = client.getResourceType({
+      namespace: "Other",
+      typeName: "third"
+    });
+
+    release.resolve();
+
+    await Promise.all([first, rejected, third]);
+    expect(calls.map(({ path }) => path)).toEqual([
+      `${prefix}${plane}/providers/Other/resourceTypes/first?api-version=2023-10-01-preview`,
+      `${prefix}${plane}/providers/Other/resourceTypes/third?api-version=2023-10-01-preview`
+    ]);
+  });
   it("bounds all requests including concurrent discovery and preserves deterministic list order", async () => {
     let active = 0;
     let peak = 0;

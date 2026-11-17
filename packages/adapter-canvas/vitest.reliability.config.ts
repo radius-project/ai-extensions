@@ -5,6 +5,7 @@ export default defineConfig({
     include: [
       "src/deploy-artifacts.test.ts",
       "../core/src/deployment-resource-status.test.ts",
+      "../core/src/domain/query.test.ts",
       "src/promote-app-model.test.ts",
       "../core/src/modeling/app-staging.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
