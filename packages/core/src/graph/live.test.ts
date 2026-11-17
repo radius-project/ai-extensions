@@ -360,4 +360,161 @@ describe("live UCP graph normalization", () => {
     expect(result.resources[0].provisioningState).toBe("");
     expect(result.resources[0].provider).toBe("");
   });
+  it.each(["Applications.Core/applications", "applications.core/applications"])(
+    "accepts a legacy %s context and keeps raw status and edges",
+    (type) => {
+      const legacy = { ...context, applicationId: id(type, "application") };
+      const owner = {
+        ...web,
+        id: id("Applications.Core/containers", "web"),
+        type: "Applications.Core/containers",
+        connections: [{ id: db.id, direction: "Outbound" }]
+      };
+      const result = normalizeLiveGraph({ resources: [owner, db] }, legacy);
+      expect(JSON.parse(graphContextKey(legacy))[3]).toBe(legacy.applicationId);
+      expect(result.context).toEqual(legacy);
+      expect(result.resources[0].provisioningState).toBe("Updating");
+      expect(result.resources[0].connections).toEqual([
+        { id: db.id, direction: "Outbound" }
+      ]);
+      expect(result.warnings).toEqual([]);
+    }
+  );
+  it("still rejects a legacy application on another plane or at a nested path", () => {
+    const type = "Applications.Core/applications";
+    expect(() =>
+      graphContextKey({
+        ...context,
+        applicationId: id(type, "application").replace("/local/", "/other/")
+      })
+    ).toThrow(TypeError);
+    expect(() =>
+      graphContextKey({
+        ...context,
+        applicationId: id(type, "application") + "/Applications.Core/x/y"
+      })
+    ).toThrow(TypeError);
+  });
+  describe("resource-definition icons", () => {
+    const hash = "a".repeat(64);
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>';
+    const withIcon = (iconHash: unknown) => ({
+      ...web,
+      iconHash
+    });
+    it("resolves a hashed icon from the response icon map", () => {
+      const result = normalizeLiveGraph(
+        { resources: [withIcon(hash), db], icons: { [hash]: svg } },
+        context
+      );
+      expect(result.resources[0].icon).toBe(svg);
+      expect(result.resources[1]).not.toHaveProperty("icon");
+      expect(result.warnings).toEqual([]);
+    });
+    it("removes an XML prolog, comments and a plain DOCTYPE before the svg element", () => {
+      const prefixed = `<?xml version="1.0"?>\n<!-- icon -->\n<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n${svg}`;
+      const result = normalizeLiveGraph(
+        { resources: [withIcon(hash)], icons: { [hash]: prefixed } },
+        context
+      );
+      expect(result.resources[0].icon).toBe(svg);
+      expect(result.warnings).toEqual([]);
+    });
+    it.each([
+      ["repeated comments", "<!--x-->".repeat(5000), "not-svg"],
+      ["repeated prologs", "<?xml?>".repeat(5000), "not-svg"],
+      ["repeated doctypes", "<!DOCTYPE svg>".repeat(5000), "not-svg"],
+      ["an unclosed comment", "<!-- never closed", "not-svg"],
+      ["an unclosed prolog", "<?xml never closed", "not-svg"],
+      ["an unclosed doctype", "<!DOCTYPE svg never closed", "not-svg"],
+      [
+        "a doctype with an internal subset",
+        '<!DOCTYPE svg [<!ENTITY a "b">]>',
+        svg
+      ]
+    ])("rejects %s in linear time", (_name, prefix, rest) => {
+      const started = performance.now();
+      const result = normalizeLiveGraph(
+        { resources: [withIcon(hash)], icons: { [hash]: `${prefix}${rest}` } },
+        context
+      );
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(result.resources[0]).not.toHaveProperty("icon");
+      expect(result.warnings).toHaveLength(1);
+    });
+    it.each([
+      ["a hash absent from the map", { [`${"b".repeat(64)}`]: svg }, hash],
+      ["a non-svg value", { [hash]: "<div>not an icon</div>" }, hash],
+      ["a non-string value", { [hash]: 4 }, hash],
+      ["a malformed hash", { [hash]: svg }, "not-a-hash"],
+      ["a non-string hash", { [hash]: svg }, 4]
+    ])("drops an icon with %s and reports it", (_name, icons, iconHash) => {
+      const result = normalizeLiveGraph(
+        { resources: [withIcon(iconHash)], icons },
+        context
+      );
+      expect(result.resources[0]).not.toHaveProperty("icon");
+      expect(result.warnings).toEqual([
+        {
+          code: "invalid-icon",
+          severity: "warning",
+          message: `Unresolved resource icon ignored: ${web.id}`,
+          resourceId: web.id
+        }
+      ]);
+    });
+    it.each([undefined, null, "not-a-map", 4])(
+      "treats an icon hash with %s as the icons map as no icon without a warning",
+      (icons) => {
+        const result = normalizeLiveGraph(
+          { resources: [withIcon(hash)], icons },
+          context
+        );
+        expect(result.resources[0]).not.toHaveProperty("icon");
+        expect(result.warnings).toEqual([]);
+      }
+    );
+    it("reports an icon problem only for resources that are kept", () => {
+      const bad = { [hash]: "<div/>" };
+      const result = normalizeLiveGraph(
+        {
+          resources: [
+            { ...web, id: "not-a-resource-id", iconHash: hash },
+            withIcon(hash),
+            withIcon(hash)
+          ],
+          icons: bad
+        },
+        context
+      );
+      expect(result.warnings.map(({ code }) => code)).toEqual([
+        "invalid-resource-id",
+        "invalid-icon",
+        "duplicate-resource"
+      ]);
+      expect(
+        result.warnings.filter(({ code }) => code === "invalid-icon")
+      ).toHaveLength(1);
+    });
+    it.each([undefined, null])(
+      "treats a %s icon hash as no icon without a warning",
+      (iconHash) => {
+        const result = normalizeLiveGraph(
+          { resources: [withIcon(iconHash)], icons: { [hash]: svg } },
+          context
+        );
+        expect(result.resources[0]).not.toHaveProperty("icon");
+        expect(result.warnings).toEqual([]);
+      }
+    );
+    it("does not read inherited properties of the icon map", () => {
+      const result = normalizeLiveGraph(
+        { resources: [withIcon(hash)], icons: Object.create({ [hash]: svg }) },
+        context
+      );
+      expect(result.resources[0]).not.toHaveProperty("icon");
+      expect(result.warnings).toHaveLength(1);
+    });
+  });
 });
