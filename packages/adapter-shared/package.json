@@ -16,7 +16,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "test:integration:windows-process": "vitest run src/rad-process.windows.test.ts",
+    "test:integration:windows-process": "vitest run src/rad-process.windows.test.ts src/graph-artifacts.test.ts src/graph-source-bindings.test.ts",
     "lint": "eslint \"src/**/*.{ts,mjs}\" \"test/**/*.mjs\" vitest.config.ts"
   },
   "dependencies": {

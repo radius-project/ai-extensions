@@ -2003,6 +2003,37 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
 
         expect(polled).toBe(true);
         expect(harness.session.send).toHaveBeenCalledTimes(1);
+        const report = harness.extension.tools.find(
+          (candidate) => candidate.name === "radius_report_modeling_failure"
+        );
+        if (!report) throw new Error("Missing failure reporting tool");
+        vi.mocked(harness.deps.workspace.fetchWorkspaceBicep).mockResolvedValue(
+          " \n"
+        );
+        expect(
+          await report.handler({
+            instanceId: "radius-panel",
+            repo: "acme/widgets",
+            branch: "main",
+            attemptToken:
+              entry.state.appModelAttemptTokens?.["acme/widgets::main"],
+            error: "Permanent fixture authoring failure"
+          })
+        ).toEqual({ recorded: true });
+        expect(entry.state.appBicepHandoffKeys).toEqual({});
+        vi.mocked(harness.deps.workspace.fetchWorkspaceBicep).mockResolvedValue(
+          null
+        );
+        const failed = await workflows[workflow]({
+          instanceId: "radius-panel",
+          body
+        });
+        expect(failed.payload).toMatchObject({
+          appModelAuthoringFailed: true,
+          modelingFailed: true
+        });
+        expect(failed.payload.needsAppBicep).toBeUndefined();
+        expect(harness.session.send).toHaveBeenCalledTimes(1);
       } finally {
         await harness.extension.shutdown("test");
       }

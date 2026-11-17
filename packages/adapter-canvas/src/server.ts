@@ -1,4 +1,5 @@
 import { workflowTempFile } from "@radius-project/adapter-shared";
+import { graphSourceOptions } from "./graph-source-options.js";
 import {
   createDeploymentLookup,
   createDeploymentRepository,
@@ -6001,12 +6002,7 @@ export function createProductionCanvasServerRuntime(
   const authorizeAzure = createAzureSetupService(azureSetupDependencies);
 
   const graphSources = createCanvasGraphSources(
-    createGraphSourceBindings({
-      execute: cliExecPort,
-      redactDiagnostic: redactGhCredentials,
-      stagingRoot: tmpdir(),
-      diagnostic: (message) => console.error(message)
-    }),
+    createGraphSourceBindings(graphSourceOptions(cliExecPort)),
     isWorkspaceSelection,
     currentWorkspaceBranch
   );

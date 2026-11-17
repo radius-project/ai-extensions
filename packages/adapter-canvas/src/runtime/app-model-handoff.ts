@@ -210,10 +210,8 @@ export function createAppModelHandoff(
     // newer missing-model owner that started while the read was in flight.
     const observedClaim = deps.missingModelHandoffs.current(target);
 
-    // resolveStatus absorbs every read failure into a "missing" classification,
-    // so a rejection here means the reader itself is broken. Letting it
-    // propagate abandons the handoff rather than acting on a half-resolved
-    // picture; every caller invokes this fire-and-forget.
+    // Unavailable workspace evidence abandons the handoff rather than allowing
+    // regeneration from a partially resolved model or a changed checkout.
     const statuses = await Promise.all(
       targets.map((branch) => deps.resolveStatus(repo, branch, context))
     );

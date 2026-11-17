@@ -4,7 +4,8 @@ import {
   writeFile,
   rm,
   readFile,
-  readdir
+  readdir,
+  symlink
 } from "node:fs/promises";
 import { execFileSync, execFile } from "node:child_process";
 import path from "node:path";
@@ -201,6 +202,75 @@ async function fixture(
 }
 
 describe("registered runtime graph source policy", () => {
+  it("abandons freshness handoff when the checkout changes before the origin read", async () => {
+    const f = await fixture("main");
+    try {
+      const readOrigin = f.sources.readFile;
+      vi.spyOn(f.sources, "readFile").mockImplementation(
+        async (source, file) => {
+          execFileSync(
+            "git",
+            ["-C", f.workspace, "symbolic-ref", "HEAD", "refs/heads/other"],
+            { stdio: "pipe" }
+          );
+          return readOrigin(source, file);
+        }
+      );
+      const entry = await f.harness.deps.getOrCreateServer(
+        "radius-panel",
+        "graph"
+      );
+      Object.assign(entry.state, {
+        workspacePath: f.workspace,
+        workspaceRepo: REPO,
+        workspaceBranch: "main",
+        contextRepo: REPO,
+        contextBranch: "main"
+      });
+      const handoff = f.harness.capturedHostCallbacks.appBicepHandoff;
+      if (!handoff) throw new Error("Missing registered modeling handoff");
+      await expect(
+        handoff({
+          repo: REPO,
+          branches: ["main"],
+          page: "graph",
+          state: entry.state,
+          isCurrent: () => true
+        })
+      ).rejects.toThrow("Workspace branch changed");
+      expect(f.harness.session.send).not.toHaveBeenCalled();
+      expect(entry.state.appModelAttemptTokens).toBeUndefined();
+      expect(entry.state.appBicepHandoffKeys).toBeUndefined();
+      expect(
+        f.harness.deps.appModel.workspaceModelRecoverable
+      ).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("refuses a dangling preferred model without using the root or remote model", async () => {
+    const f = await fixture("main");
+    try {
+      await rm(path.join(f.workspace, MODEL_PATH));
+      await symlink(
+        path.join(f.workspace, "missing.bicep"),
+        path.join(f.workspace, MODEL_PATH),
+        "file"
+      );
+      await writeFile(path.join(f.workspace, "app.bicep"), model("dirty"));
+      await f.open();
+      expect(f.harness.servers.get("radius-panel")?.state.diffError).toContain(
+        "unreadable"
+      );
+      expect(f.compiler).not.toHaveBeenCalled();
+      expect(f.effects).not.toContain(`read:/repos/${REPO}/commits/main`);
+      expect(f.harness.session.send).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  });
+
   it("rejects a stale captured workspace branch before compiling another checkout", async () => {
     const f = await fixture("feature");
     try {

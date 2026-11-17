@@ -57,6 +57,8 @@ export default defineConfig({
       "src/server/routes/graphs-planning-stream.test.ts",
       "src/server/services/deploy-planned-graph.test.ts",
       "src/runtime/graph-context.test.ts",
+      "src/graph-source-options.test.ts",
+      "src/runtime/create-radius-tools.test.ts",
       "test/integration/runtime/graph-source-policy.test.ts",
       "src/server/create-canvas-server.test.ts",
       "src/runtime/environment-execution-owner.test.ts",

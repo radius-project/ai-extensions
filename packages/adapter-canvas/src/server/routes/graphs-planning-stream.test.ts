@@ -592,6 +592,76 @@ describe("graphs-planning load-graph-stream route", () => {
     expect(calls).toContain(`fetchBicepSelection(${REPO}|${QUERY_BRANCH})`);
   });
 
+  it.each([
+    "selection",
+    "eligibility",
+    "staging",
+    "compilation",
+    "failure"
+  ] as const)(
+    "fences generation-only supersession during %s with an unchanged source token",
+    async (stage) => {
+      const { deps, entry, calls } = fakes({
+        selection: selection({
+          content: stage === "eligibility" ? null : "model"
+        })
+      });
+      if (!entry) throw new Error("Expected entry");
+      const supersede = () => {
+        entry.state.graphBuildGeneration =
+          (entry.state.graphBuildGeneration ?? 0) + 1;
+        entry.state.graphBranch = "newer";
+      };
+      const clearRepair = vi.spyOn(deps, "clearGraphRepairAttempt");
+      if (stage === "selection") {
+        deps.fetchBicepSelection = async () => {
+          supersede();
+          return selection();
+        };
+      } else if (stage === "eligibility") {
+        deps.listBranchPaths = async () => {
+          supersede();
+          return ["Dockerfile"];
+        };
+      } else if (stage === "staging") {
+        deps.radArtifactsDirForSelection = async () => {
+          supersede();
+          return { dir: "/tmp/old-generation", remote: true };
+        };
+      } else {
+        deps.buildGraphViaRad = async () => {
+          supersede();
+          if (stage === "failure")
+            throw new RadProcessError(
+              "rad failed",
+              "BCP035: invalid model",
+              ""
+            );
+          return RESOURCES;
+        };
+      }
+      const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+      expect(frames(recording.stream).at(-1)?.data).toEqual({ stale: true });
+      expect(recording.steps.filter((step) => step === "end")).toHaveLength(1);
+      expect(calls.some((call) => call.startsWith("commitSourceRef"))).toBe(
+        false
+      );
+      expect(calls).not.toContain("triggerGraphRepairHandoff");
+      expect(clearRepair).not.toHaveBeenCalled();
+      expect(entry.state.graphBranch).toBe("newer");
+      if (stage === "selection" || stage === "eligibility")
+        expect(
+          calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+        ).toBe(false);
+      if (stage === "staging")
+        expect(
+          calls.filter(
+            (call) => call === "removeDirectory(/tmp/old-generation)"
+          )
+        ).toHaveLength(1);
+    }
+  );
+
   it("passes the empty graph-json path and skips workspace derivation for a remote selection", async () => {
     const { deps, calls } = fakes({
       selection: selection({ fromWorkspace: false, bicepPath: "" })

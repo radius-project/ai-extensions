@@ -35,6 +35,7 @@ import {
   createGraphSourceBindings
 } from "@radius-project/adapter-shared";
 import { createRadiusCliVersionReader } from "./radius-cli-version.js";
+import { graphSourceOptions } from "./graph-source-options.js";
 import { readAwsSwitch } from "./aws-switch.js";
 import {
   github,
@@ -134,11 +135,7 @@ const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
 const awsEnabled = readAwsSwitch(process.env);
 const deploymentRuntime = createProductionDeploymentRuntime({ awsEnabled });
-const graphSources = createGraphSourceBindings({
-  execute: cliExec,
-  redactDiagnostic: redactGhCredentials,
-  stagingRoot: join(os.homedir(), ".copilot", "radius", "graph-staging")
-});
+const graphSources = createGraphSourceBindings(graphSourceOptions(cliExec));
 const readDeploymentModel = createDeployModelSource({
   readWorkspace: fetchWorkspaceFile,
   readRepository: createDeploymentRepository({

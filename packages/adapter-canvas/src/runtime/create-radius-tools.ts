@@ -46,7 +46,7 @@ export function createRadiusTools(
 ) {
   const {
     workspaceState,
-    fetchBicepForBranch,
+    readBicepForBranch,
     evaluateAppSourceForBranch,
     listSourceTreeForBranch
   } = createGraphContextHelpers(deps);
@@ -191,8 +191,16 @@ export function createRadiusTools(
               "The Canvas modeling attempt is no longer current; the failure was not recorded."
           };
         }
-        const content = await fetchBicepForBranch(repo, branch, entry.state);
-        if (content) {
+        const model = await readBicepForBranch(repo, branch, entry.state);
+        if (model.status === "unavailable") throw new Error(model.diagnostic);
+        if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
+          return {
+            recorded: false,
+            error:
+              "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
+          };
+        }
+        if (model.status === "present" && model.content.trim()) {
           clearAppModelAuthoringFailure(entry.state, repo, branch);
           return {
             recorded: false,

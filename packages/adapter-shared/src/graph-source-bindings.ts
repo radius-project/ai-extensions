@@ -79,7 +79,22 @@ export async function confinedGraphPath(
         error.code !== "ENOENT"
       )
         throw error;
-      ancestor = path.dirname(ancestor);
+      try {
+        await fs.lstat(ancestor);
+      } catch (entryError) {
+        if (
+          !entryError ||
+          typeof entryError !== "object" ||
+          !("code" in entryError) ||
+          entryError.code !== "ENOENT"
+        )
+          throw entryError;
+        ancestor = path.dirname(ancestor);
+        continue;
+      }
+      throw new Error(`Graph path is unreadable: ${repoPath}`, {
+        cause: error
+      });
     }
   }
 }
@@ -136,9 +151,10 @@ export function createGraphSourceBindings(
             typeof error === "object" &&
             "code" in error &&
             error.code === "ENOENT"
-          )
+          ) {
+            await confinedGraphPath(source.workspacePath, normalized);
             result = { status: "absent" };
-          else throw error;
+          } else throw error;
         }
         await assertWorkspaceBranch(source, source.workspacePath);
         return result;

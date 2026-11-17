@@ -493,7 +493,11 @@ describe("graph source bindings", () => {
     const root = await fixture();
     const outside = await fixture();
     await fs.writeFile(path.join(outside, "app.bicep"), "outside");
-    await fs.symlink(outside, path.join(root, "link"), "dir");
+    await fs.symlink(
+      outside,
+      path.join(root, "link"),
+      process.platform === "win32" ? "junction" : "dir"
+    );
     const { sources, calls } = harness(root);
     for (const definitionPath of ["link/app.bicep", "link/missing/app.bicep"]) {
       expect(
@@ -504,6 +508,72 @@ describe("graph source bindings", () => {
       });
     }
     expect(calls).toEqual([]);
+  });
+
+  it.each([
+    ".radius/app.bicep",
+    ".radius",
+    ".radius/bicepconfig.json",
+    ".radius/types.tgz"
+  ])("refuses dangling input %s instead of using a fallback", async (input) => {
+    const root = await fixture();
+    const target = path.join(root, input);
+    const directory = input === ".radius";
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    if (!directory)
+      await fs.mkdir(path.join(root, ".radius"), { recursive: true });
+    await fs.writeFile(path.join(root, "app.bicep"), "fallback model");
+    if (input !== ".radius/app.bicep" && !directory)
+      await fs.writeFile(path.join(root, ".radius", "app.bicep"), "preferred");
+    if (input === ".radius/types.tgz")
+      await fs.writeFile(
+        path.join(root, ".radius", "bicepconfig.json"),
+        '{"extensions":{"custom":"types.tgz"}}'
+      );
+    await fs.symlink(
+      path.join(root, "missing-target"),
+      target,
+      directory ?
+        process.platform === "win32" ?
+          "junction"
+        : "dir"
+      : "file"
+    );
+    const { sources, calls } = harness(root);
+    const selected = await sources.read(local(root));
+    if (input === ".radius/app.bicep" || directory) {
+      expect(selected).toMatchObject({
+        status: "unavailable",
+        diagnostic: expect.stringContaining("unreadable")
+      });
+    } else {
+      if (selected.status !== "present")
+        throw new Error("Expected preferred model");
+      await expect(sources.stage(selected)).rejects.toThrow("unreadable");
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("allows in-workspace links and genuine missing descendants", async () => {
+    const root = await fixture();
+    await fs.writeFile(path.join(root, "model.bicep"), "linked model");
+    await fs.mkdir(path.join(root, ".radius"));
+    await fs.symlink(
+      path.join(root, "model.bicep"),
+      path.join(root, ".radius", "app.bicep"),
+      "file"
+    );
+    const { sources } = harness(root);
+    expect(await sources.read(local(root))).toMatchObject({
+      status: "present",
+      content: "linked model"
+    });
+    expect(
+      await sources.read({
+        ...local(root),
+        definitionPath: "missing/deep/file"
+      })
+    ).toMatchObject({ status: "absent" });
   });
 
   it("reports missing workspace identity and malformed selection explicitly", async () => {

@@ -190,6 +190,7 @@ export function createGraphContextHelpers(
     for (const repoPath of [APP_ORIGIN_REPO_PATH, APP_ORIGIN_ROOT_PATH]) {
       const read = await deps.graphSources.readFile(source, repoPath);
       if (read.status === "unavailable") {
+        if (source.kind === "workspace") throw new Error(read.diagnostic);
         deps.logError(
           `Application model origin is unavailable: ${read.diagnostic}`
         );

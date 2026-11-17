@@ -574,6 +574,80 @@ describe("TL-11: radius_report_modeling_failure", () => {
     error: "The configured Recipe rejects the required credential shape."
   };
 
+  it.each(["", " \n\t"])(
+    "records a current blank-model failure (%j) and releases its activity",
+    async (content) => {
+      const { tools, entry, modelingActivity, missingModelHandoffs } =
+        await currentAttempt({
+          bicepByRepoBranch: { "workspace:acme/widgets@main": content }
+        });
+      const claim = missingModelHandoffs.claim("acme/widgets::main", "blank");
+      expect(claim).not.toBeNull();
+      expect(
+        await findTool(tools, "radius_report_modeling_failure").handler(report)
+      ).toEqual({ recorded: true });
+      expect(entry.state.appModelFailures?.["acme/widgets::main"]?.error).toBe(
+        report.error
+      );
+      expect(missingModelHandoffs.current("acme/widgets::main")).toBeNull();
+      expect(modelingActivity.release).toHaveBeenCalledWith({
+        repo: "acme/widgets",
+        branch: "main"
+      });
+    }
+  );
+
+  it("does not record or release claims when the workspace branch drifted", async () => {
+    const { tools, entry, deps, modelingActivity, missingModelHandoffs } =
+      await currentAttempt();
+    const claim = missingModelHandoffs.claim("acme/widgets::main", "current");
+    deps.graphSources.read = async () => ({
+      status: "unavailable",
+      source: {
+        kind: "workspace",
+        repo: report.repo,
+        ref: report.branch,
+        definitionPath: ".radius/app.bicep"
+      },
+      diagnostic: "Workspace branch changed"
+    });
+    await expect(
+      findTool(tools, "radius_report_modeling_failure").handler(report)
+    ).rejects.toThrow("Workspace branch changed");
+    expect(entry.state.appModelFailures).toBeUndefined();
+    expect(missingModelHandoffs.current("acme/widgets::main")).toBe(claim);
+    expect(modelingActivity.release).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a replacement attempt when an old read finds a nonblank model", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    deps.graphSources.read = async () => {
+      entry.state.appModelAttemptTokens = { "acme/widgets::main": "attempt-2" };
+      entry.state.appModelFailures = {
+        "acme/widgets::main": {
+          attemptToken: "attempt-2",
+          error: "new failure"
+        }
+      };
+      return {
+        status: "present",
+        content: "resource app = {}",
+        source: {
+          kind: "workspace",
+          repo: report.repo,
+          ref: report.branch,
+          definitionPath: ".radius/app.bicep"
+        }
+      };
+    };
+    expect(
+      await findTool(tools, "radius_report_modeling_failure").handler(report)
+    ).toMatchObject({ recorded: false });
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::main"]?.attemptToken
+    ).toBe("attempt-2");
+  });
+
   it("records a permanent failure for the current missing-model attempt", async () => {
     const { tools, entry } = await currentAttempt();
 

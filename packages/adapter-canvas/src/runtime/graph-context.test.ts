@@ -522,22 +522,56 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.requiresConfirmation).toBe(false);
   });
 
-  it("fails open when the origin record cannot be read", async () => {
+  it.each([APP_ORIGIN_REPO_PATH, APP_ORIGIN_ROOT_PATH])(
+    "stops reconciliation when workspace origin %s cannot be read",
+    async (failedPath) => {
+      const { resolveAppModelStatus, deps } = helpers({
+        bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+        headCommits: { "workspace:/workspace": COMMIT }
+      });
+      deps.graphSources.readFile = async (source, file) => {
+        const identity = { ...source, definitionPath: file };
+        return file === failedPath ?
+            {
+              status: "unavailable",
+              source: identity,
+              diagnostic: "worktree unreadable"
+            }
+          : { status: "absent", source: identity };
+      };
+
+      await expect(
+        resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE)
+      ).rejects.toThrow("worktree unreadable");
+      expect(deps.appModel.workspaceModelRecoverable).not.toHaveBeenCalled();
+      expect(deps.appModel.workspaceSourceChangedSince).not.toHaveBeenCalled();
+    }
+  );
+
+  it("keeps unavailable remote origin metadata advisory and reports its diagnostic", async () => {
     const { resolveAppModelStatus, deps } = helpers({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
-      headCommits: { "workspace:/workspace": COMMIT }
+      bicepByRepoBranch: { "remote:other/repo@main": MODEL }
     });
-    deps.appModel.fetchWorkspaceFile = async () => {
-      throw new Error("worktree unreadable");
-    };
+    vi.mocked(deps.graphSources.readFile).mockImplementation(
+      async (source, file) => ({
+        status: "unavailable",
+        source: { ...source, definitionPath: file },
+        diagnostic: "origin metadata unavailable"
+      })
+    );
 
     const status = await resolveAppModelStatus(
-      "acme/widgets",
+      "other/repo",
       "main",
       WORKSPACE_STATE
     );
 
     expect(status.freshness.status).toBe("unrecorded");
+    expect(status.refreshable).toBe(false);
+    expect(deps.logError).toHaveBeenCalledWith(
+      "Application model origin is unavailable: origin metadata unavailable"
+    );
+    expect(deps.appModel.workspaceModelRecoverable).not.toHaveBeenCalled();
   });
 
   it("reports an unreadable worktree model without reading GitHub", async () => {

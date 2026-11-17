@@ -926,6 +926,9 @@ export async function handleLoadGraphStream(
     repo,
     branch
   });
+  const isCurrent = () =>
+    entry.state.graphBuildGeneration === requestGeneration &&
+    dependencies.isCurrentSourceRef(entry, sourceRefContext.token);
 
   try {
     sendProgress(`Checking ${repo} for existing app.bicep...`);
@@ -935,7 +938,7 @@ export async function handleLoadGraphStream(
       branch
     );
     const content = selection.content;
-    if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+    if (!isCurrent()) {
       sendDone({ stale: true });
       return;
     }
@@ -955,7 +958,7 @@ export async function handleLoadGraphStream(
       const source = evaluateAppSource(
         await dependencies.listBranchPaths(entry, repo, branch)
       );
-      if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+      if (!isCurrent()) {
         sendDone({ stale: true });
         return;
       }
@@ -1024,7 +1027,7 @@ export async function handleLoadGraphStream(
       graphSourceForSelection(selection, repo, branch),
       {
         checkCancelled: () => {
-          if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+          if (!isCurrent()) {
             throw new GraphRequestSuperseded();
           }
         }
@@ -1034,6 +1037,7 @@ export async function handleLoadGraphStream(
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (
+      !isCurrent() ||
       !dependencies.commitSourceRef(
         entry,
         resources,
@@ -1056,7 +1060,7 @@ export async function handleLoadGraphStream(
 
     sendDone({ reload: true });
   } catch (e) {
-    if (e instanceof GraphRequestSuperseded) {
+    if (e instanceof GraphRequestSuperseded || !isCurrent()) {
       sendDone({ stale: true });
       return;
     }
@@ -1065,10 +1069,6 @@ export async function handleLoadGraphStream(
       dependencies.logError(
         `[radius graph] modeling failed for ${repo}@${branch}: ${failure.diagnostic}`
       );
-      if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
-        sendDone({ stale: true });
-        return;
-      }
       const attempt = dependencies.triggerGraphRepairHandoff(entry, {
         view: "graph",
         repo,

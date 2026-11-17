@@ -7,6 +7,7 @@ import {
   type GraphArtifactPorts
 } from "./graph-artifacts.js";
 import type { GraphBytesRead } from "./graph-source-bindings.js";
+import { writeBicepCompileConfig } from "./rad.js";
 
 const roots: string[] = [];
 async function fixture() {
@@ -114,8 +115,7 @@ describe("graph artifact staging", () => {
     ["array", present("[]")],
     ["invalid extensions", present('{"extensions":null}')],
     ["array extensions", present('{"extensions":[]}')],
-    ["non-string reference", present('{"extensions":{"x":23}}')],
-    ["empty reference", present('{"extensions":{"x":""}}')]
+    ["non-string reference", present('{"extensions":{"x":23}}')]
   ] satisfies Array<[string, GraphBytesRead]>)(
     "fails explicitly for %s config instead of treating it as optional",
     async (_name, config) => {
@@ -129,6 +129,72 @@ describe("graph artifact staging", () => {
       });
     }
   );
+
+  it.each(["", " \n", "  br:registry/radius:v1  ", "  ./types.tgz  "])(
+    "stages supported aliases and compiles the Radius pin %j",
+    async (radius) => {
+      const root = await fixture();
+      const config = `// captured JSONC\n${JSON.stringify({
+        extensions: {
+          radius,
+          empty: "",
+          blank: " \t",
+          az: "builtin:",
+          sys: "BUILTIN:sys",
+          remote: "oci:registry/other:v1",
+          local: "types.tgz"
+        }
+      })}`;
+      const { ports, calls } = harness(root, {
+        ".radius/bicepconfig.json": present(config),
+        ".radius/types.tgz": present("types")
+      });
+      const staged = await stageGraphArtifacts(selection(), ports);
+      try {
+        expect(
+          await fs.readFile(path.join(staged.dir, "bicepconfig.json"), "utf8")
+        ).toBe(config);
+        const output = path.join(root, "compile");
+        await fs.mkdir(output);
+        const logs: string[] = [];
+        const compiled = writeBicepCompileConfig(
+          output,
+          staged.dir,
+          (message) => logs.push(message),
+          "br:registry/radius:fallback"
+        );
+        expect(compiled.extensions.radius).toBe(
+          radius.trim() || "br:registry/radius:fallback"
+        );
+        expect(compiled.extensions.az).toBe("builtin:");
+        expect(await fs.readFile(path.join(output, "types.tgz"), "utf8")).toBe(
+          "types"
+        );
+        expect(logs.some((message) => message.startsWith("Warning:"))).toBe(
+          false
+        );
+        expect(calls.filter((file) => file.endsWith("types.tgz"))).toHaveLength(
+          radius.includes("types.tgz") ? 2 : 1
+        );
+      } finally {
+        await staged.dispose();
+      }
+    }
+  );
+
+  it("does not trim non-Radius artifact references", async () => {
+    const root = await fixture();
+    const { ports, calls } = harness(root, {
+      ".radius/bicepconfig.json": present(
+        '{"extensions":{"custom":" types.tgz "}}'
+      ),
+      ".radius/ types.tgz ": { status: "absent" }
+    });
+    await expect(stageGraphArtifacts(selection(), ports)).rejects.toThrow(
+      "absent"
+    );
+    expect(calls).toContain(".radius/ types.tgz ");
+  });
 
   it.each([
     "../escape.tgz",

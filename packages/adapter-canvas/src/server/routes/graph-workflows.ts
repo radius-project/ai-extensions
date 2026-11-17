@@ -488,22 +488,29 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     try {
       outcome = await run();
     } catch (e) {
-      if (e instanceof GraphRequestSuperseded) return json(409, STALE_PAYLOAD);
-      const error = dependencies.errorMessage(e);
-      hooks.onError(error);
-      const repair = hooks.repair();
-      if (e instanceof GraphModelingFailure && repair && hooks.shouldRepair()) {
-        const attempt = dependencies.triggerGraphRepairHandoff(repair.entry, {
-          ...repair.request,
-          diagnostic: e.diagnostic
-        });
-        outcome = json(400, {
-          error,
-          modelingFailed: true,
-          ...attempt
-        });
+      if (e instanceof GraphRequestSuperseded) {
+        outcome = json(409, STALE_PAYLOAD);
       } else {
-        outcome = json(400, { error });
+        const error = dependencies.errorMessage(e);
+        hooks.onError(error);
+        const repair = hooks.repair();
+        if (
+          e instanceof GraphModelingFailure &&
+          repair &&
+          hooks.shouldRepair()
+        ) {
+          const attempt = dependencies.triggerGraphRepairHandoff(repair.entry, {
+            ...repair.request,
+            diagnostic: e.diagnostic
+          });
+          outcome = json(400, {
+            error,
+            modelingFailed: true,
+            ...attempt
+          });
+        } else {
+          outcome = json(400, { error });
+        }
       }
     } finally {
       for (const staged of hooks.stagedArtifacts) {

@@ -9,6 +9,7 @@ import {
   type StagedGraphArtifacts
 } from "@radius-project/core";
 import type { GraphBytesRead } from "./graph-source-bindings.js";
+import { isNonFileExtensionReference } from "./bicep-extension-reference.js";
 
 export interface GraphArtifactPorts {
   readBytes(
@@ -80,13 +81,15 @@ async function stageArtifacts(
       Array.isArray(extensions)
     )
       fail("Graph bicepconfig.json extensions must be an object.");
-    for (const [alias, ref] of Object.entries(extensions).sort(([a], [b]) =>
+    for (const [alias, value] of Object.entries(extensions).sort(([a], [b]) =>
       a.localeCompare(b)
     )) {
-      if (typeof ref !== "string" || !ref)
+      if (typeof value !== "string")
         fail(`Invalid extension reference for ${alias}.`);
+      if (!value.trim()) continue;
+      const ref = alias === "radius" ? value.trim() : value;
       hash.update(alias).update(ref);
-      if (/^(br|oci):/i.test(ref)) continue;
+      if (isNonFileExtensionReference(ref)) continue;
       const relative = ref.replace(/^\.\//, "");
       if (
         !relative ||

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { ChildProcess } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
@@ -37,6 +38,139 @@ import {
 } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../../../src/graph-progress-contract.js";
+import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createDeferred } from "../../support/browser/fakes.js";
+
+async function concurrentGraphRuntime() {
+  const builds: Array<ReturnType<typeof createDeferred<void>>> = [];
+  const runtime = createTestCanvasServerRuntime({
+    executionOwner: createEnvironmentExecutionOwner(),
+    cliExec: (_command, args, _options, callback) => {
+      const endpoint = args.find((arg) => arg.startsWith("/repos/"));
+      let value: unknown;
+      if (endpoint?.includes("/commits/")) {
+        value = {
+          sha: endpoint.endsWith("/main") ? "a".repeat(40) : "b".repeat(40)
+        };
+      } else if (endpoint?.includes("/contents/.radius/app.bicep")) {
+        const content = "resource fixture";
+        value = {
+          encoding: "base64",
+          content: Buffer.from(content).toString("base64"),
+          size: Buffer.byteLength(content)
+        };
+      } else if (endpoint?.includes("/contents/.radius/bicepconfig.json")) {
+        callback(new Error("not found"), "", "Not Found (HTTP 404)");
+        return new ChildProcess();
+      } else {
+        throw new Error(`Unscripted graph command: ${args.join(" ")}`);
+      }
+      callback(null, JSON.stringify(value), "");
+      return new ChildProcess();
+    },
+    buildGraphViaRad: async () => {
+      const index = builds.length;
+      const gate = createDeferred<void>();
+      builds.push(gate);
+      await gate.promise;
+      return [
+        {
+          id: `build-${index}`,
+          name: `build-${index}`,
+          type: "Radius.Compute/containers"
+        }
+      ];
+    }
+  });
+  const entry = await runtime.getOrCreateServer("graph-races", "graph");
+  return {
+    entry,
+    builds,
+    load: () =>
+      fetch(`${entry.baseUrl}/api/load-graph`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: entry.baseUrl,
+          "Sec-Fetch-Site": "same-origin",
+          "X-Radius-Mutation-Nonce": String(
+            entry.state.browserMutationNonce || ""
+          )
+        },
+        body: JSON.stringify({ repo: "octo/app", branch: "main" })
+      }),
+    stream: (branch = "main") =>
+      fetch(
+        `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp&branch=${branch}`
+      ),
+    async close() {
+      builds.forEach((build) => build.resolve());
+      await runtime.stopServer("graph-races", true);
+    }
+  };
+}
+
+describe("graph concurrency through production HTTP routes", () => {
+  it("keeps the newer same-selection stream when the older compiler finishes last", async () => {
+    const h = await concurrentGraphRuntime();
+    try {
+      const older = await h.stream();
+      await vi.waitFor(() => expect(h.builds).toHaveLength(1));
+      const newer = await h.stream();
+      await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+      h.builds[1].resolve();
+      expect(await newer.text()).toContain('"reload":true');
+      h.builds[0].resolve();
+      const stale = await older.text();
+      expect(stale).toContain('"stale":true');
+      expect(stale.match(/event: done/g)).toHaveLength(1);
+      expect(h.entry.state.graphResources?.map(({ id }) => id)).toEqual([
+        "build-1"
+      ]);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it.each([false, true])(
+    "settles cancelled JSON progress without ending a replacement owner (%s)",
+    async (replaceOwner) => {
+      const h = await concurrentGraphRuntime();
+      try {
+        const older = h.load();
+        await vi.waitFor(() => expect(h.builds).toHaveLength(1));
+        if (replaceOwner) {
+          const replacement = h.load();
+          await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+          h.builds[0].resolve();
+          expect((await older).status).toBe(409);
+          const progress = await fetch(
+            `${h.entry.baseUrl}/api/progress?view=graph`
+          );
+          expect(await progress.json()).toMatchObject({ active: true });
+          h.builds[1].resolve();
+          expect((await replacement).status).toBe(200);
+        } else {
+          const stream = await h.stream("other");
+          await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+          h.builds[1].resolve();
+          await stream.text();
+          h.builds[0].resolve();
+          const stale = await older;
+          expect(stale.status).toBe(409);
+          expect(await stale.json()).toEqual({ stale: true });
+          const progress = await fetch(
+            `${h.entry.baseUrl}/api/progress?view=graph`
+          );
+          expect(await progress.json()).toMatchObject({ active: false });
+        }
+      } finally {
+        await h.close();
+      }
+    }
+  );
+});
 
 let container: CanvasServerContainer | undefined;
 

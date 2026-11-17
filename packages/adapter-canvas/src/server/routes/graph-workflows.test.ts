@@ -405,6 +405,62 @@ function replaceProgressRecord(
 }
 
 describe("graph planning workflows", () => {
+  it.each([
+    ["loadGraph", "graph"],
+    ["planGraph", "planned"],
+    ["diffBranches", "diff"]
+  ] as const)(
+    "settles only its owned progress after token-only cancellation in %s",
+    async (workflow, view) => {
+      for (const replaceOwner of [false, true]) {
+        const harness = start({
+          selections: {
+            main: selectionOf(),
+            feature: selectionOf({ branch: "feature" })
+          },
+          staged: { main: { dir: "/tmp/cancelled", remote: true } },
+          afterStage: () => {
+            prepareSourceRefResources(harness.entry, view, {
+              repo: "octo/other",
+              branch: "other"
+            });
+            if (replaceOwner)
+              replaceProgressRecord(harness.state, view, {
+                sequence: 1,
+                stage: "building_graph",
+                state: "running",
+                detail: "Newer progress"
+              });
+          }
+        });
+        harness.state.plannedProvider = "azure";
+        harness.state.plannedEnvironment = "dev";
+        const outcome = await harness.run(
+          workflow,
+          JSON.stringify({
+            repo: "octo/app",
+            branch: "main",
+            base: "main",
+            head: "feature",
+            provider: "azure",
+            environment: "dev"
+          })
+        );
+        expect(outcome).toMatchObject({
+          status: 409,
+          payload: { stale: true }
+        });
+        expect(
+          harness.state.graphProgressRecords?.[view]?.graphProgressActive
+        ).toBe(replaceOwner);
+        expect(
+          harness.order.filter((item) => item === "discard:/tmp/cancelled")
+        ).toHaveLength(1);
+        expect(harness.loggedErrors).toEqual([]);
+      }
+    }
+  );
+
   it.each(["loadGraph", "planGraph"] as const)(
     "does not author or stage a superseded %s selection",
     async (workflow) => {
