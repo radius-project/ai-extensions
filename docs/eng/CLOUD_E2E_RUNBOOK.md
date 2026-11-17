@@ -430,9 +430,9 @@ for file in build/cloud-e2e/aws/*; do envsubst <"$file" >"$WORK/${file##*/}"; do
      --notifications-with-subscribers "file://$WORK/budget-notifications.json"
    ```
 
-6. Have an organization administrator add an organization-level guard on `role/radius/apps/*`. AWS stays off in `radius-test` until it exists, so don't set the variables before then. The deploy role's boundary caps only the deploy role: the app roles it creates through EKS Pod Identity are capped by the product's app boundary, and the test role can write that boundary. A service control policy on the account that denies `iam:*`, `sts:AssumeRole`, `organizations:*`, `account:*`, and `s3:PutAccountPublicAccessBlock` to principals matching `arn:aws:iam::*:role/radius/apps/*` (an `ArnLike` condition on `aws:PrincipalArn`) closes this. See [How the test signs in to AWS](../design/2026-11-aws-cloud-e2e.md#how-the-test-signs-in-to-aws). [#1276](https://github.com/radius-project/ai-extensions/issues/1276) tracks the product change that removes the need.
+6. Set the [AWS variables](#aws-configuration).
 
-7. Set the [AWS variables](#aws-configuration).
+The deploy role's boundary caps only the deploy role. The app roles it creates through EKS Pod Identity are capped by the product's app boundary, and the test role can write that boundary, because IAM can't limit what a policy contains. This is an accepted risk for the shared test account, because the account already allows broader access to other CI. [#1276](https://github.com/radius-project/ai-extensions/issues/1276) is the fast follow that removes it: the deploy identity stops creating IAM roles. For further hardening, an organization administrator can add a service control policy that denies `iam:*`, `sts:AssumeRole`, `organizations:*`, `account:*`, and `s3:PutAccountPublicAccessBlock` to principals matching `arn:aws:iam::*:role/radius/apps/*` (an `ArnLike` condition on `aws:PrincipalArn`). See [How the test signs in to AWS](../design/2026-11-aws-cloud-e2e.md#how-the-test-signs-in-to-aws).
 
 Before applying a change to a policy file, validate it. These calls are read-only:
 
