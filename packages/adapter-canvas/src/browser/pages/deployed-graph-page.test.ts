@@ -2074,67 +2074,540 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
   });
 
-  it("offers stop tracking only after a failed teardown and sends its identity", async () => {
-    const {
-      browser,
-      action,
-      stopTrackingAction,
-      appSelect,
-      envSelect,
-      inlineStatus
-    } = fixture({
-      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
-    });
-    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
-    browser.net.handle("/api/abandon-deployment", () =>
-      jsonResponse({ outcome: "abandoned" })
-    );
-    initializeDeployedGraphPage(
-      browser.context,
-      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
-    );
-    await flushPromises();
+  it.each([false, true])(
+    "offers stop tracking after failed teardown with exact-run evidence: %s",
+    async (scoped) => {
+      const {
+        browser,
+        action,
+        stopTrackingAction,
+        appSelect,
+        envSelect,
+        inlineStatus
+      } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      });
+      const { createDialog, confirm, wasOpened } = createConfirmingDialog();
+      const recovery = {
+        runId: 42,
+        runAttempt: 1,
+        revision: "a".repeat(64),
+        confirmation: "app/dev",
+        canMarkCleanupComplete: true
+      };
+      const runUrl = "https://github.com/octo/app/actions/runs/42";
+      let cleaned = false;
+      browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+        jsonResponse({
+          deployments:
+            cleaned ?
+              []
+            : [
+                {
+                  app: "app",
+                  environment: "dev",
+                  status: "delete-failed",
+                  ...(scoped ?
+                    {
+                      identity: { state: "known", application: "app" },
+                      deploymentId: "101",
+                      runUrl,
+                      recovery
+                    }
+                  : {})
+                }
+              ]
+        })
+      );
 
-    expect(action.dataset.mode).toBe("delete");
-    expect(action.textContent).toBe("Retry Delete");
-    expect(stopTrackingAction.textContent).toBe("Stop tracking deployment");
-    expect(stopTrackingAction.style.display).toBe("");
-    expect(createDialog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        variant: "abandon",
-        modalId: "deploy-abandon-modal"
-      })
-    );
-    appSelect.value = "app";
-    envSelect.value = "dev";
-    stopTrackingAction.dispatch("click");
-    expect(wasOpened()).toBe(true);
-    confirm();
-    expect(stopTrackingAction.textContent).toBe("Stopping tracking…");
-    await flushPromises();
+      browser.net.handle("/api/abandon-deployment", () => {
+        cleaned = true;
+        return jsonResponse({ outcome: "abandoned" });
+      });
+      initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
 
-    const request = browser.net.calls.find(
-      (call) => call.url === "/api/abandon-deployment"
-    );
-    expect(request?.init).toEqual({
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Mutation-Nonce": "nonce-1"
-      },
-      body: JSON.stringify({
-        repo: "octo/app",
+      expect(action.dataset.mode).toBe("delete");
+      expect(action.textContent).toBe("Retry Delete");
+      expect(stopTrackingAction.textContent).toBe("Stop tracking deployment");
+      expect(stopTrackingAction.style.display).toBe("");
+      expect(createDialog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: "abandon",
+          modalId: "deploy-abandon-modal"
+        })
+      );
+      appSelect.value = "app";
+      envSelect.value = "dev";
+      stopTrackingAction.dispatch("click");
+      expect(wasOpened()).toBe(true);
+      confirm();
+      expect(stopTrackingAction.textContent).toBe("Stopping tracking…");
+      await flushPromises();
+
+      const request = browser.net.calls.find(
+        (call) => call.url === "/api/abandon-deployment"
+      );
+      expect(request?.init).toEqual({
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": "nonce-1"
+        },
+        body: JSON.stringify({
+          repo: "octo/app",
+          environment: "dev",
+          application: "app",
+          ...(scoped ? { ...recovery, deploymentId: "101", runUrl } : {})
+        })
+      });
+      expect(inlineStatus.textContent).toContain(
+        "Cloud resources were not deleted"
+      );
+      expect(inlineStatus.textContent).toContain("may still exist");
+      expect(action.dataset.mode).toBe("deploy");
+      expect(browser.nav.assigned).toEqual([]);
+    }
+  );
+
+  it.each([true, false])(
+    "only offers cleanup for a successful run when identity is unavailable: known %s",
+    async (known) => {
+      const { browser, action, stopTrackingAction, inlineStatus } = fixture();
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: "https://github.com/octo/app/actions/runs/42"
+      };
+      const deployment = {
+        app: known ? "app" : "",
         environment: "dev",
-        application: "app"
+        status: "success",
+        deploymentId: "7",
+        runUrl: selection.runUrl,
+        cleanupSelection: selection,
+        identity:
+          known ?
+            { state: "known", application: "app" }
+          : { state: "unavailable", reason: "Artifact expired" }
+      };
+      browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+        jsonResponse({ deployments: [deployment] })
+      );
+      browser.net.handle("/api/deployment-cleanup-details", () =>
+        jsonResponse({
+          deployment: {
+            ...deployment,
+            recovery: {
+              runId: 42,
+              runAttempt: 1,
+              revision: "a".repeat(64),
+              confirmation: "octo/app/run-42@1/dev",
+              canMarkCleanupComplete: true
+            }
+          },
+          selection,
+          prepared: true
+        })
+      );
+      const { createDialog, wasOpened } = createConfirmingDialog();
+      const stop = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      expect(stopTrackingAction.style.display).toBe(known ? "none" : "");
+      expect(action.disabled).toBe(!known);
+      if (!known) {
+        stopTrackingAction.dispatch("click");
+        await flushPromises();
+        expect(wasOpened()).toBe(false);
+        expect(inlineStatus.textContent).toContain("Deployments page");
+      }
+      stop();
+    }
+  );
+
+  it.each([
+    "prepared",
+    "discovery",
+    "unknown-discovery",
+    "absence",
+    "error",
+    "network",
+    "non-error",
+    "other-app",
+    "stale-error",
+    "stale",
+    "detached"
+  ] as const)(
+    "loads graph cleanup details without publishing %s results prematurely",
+    async (outcome) => {
+      const {
+        browser,
+        action,
+        stopTrackingAction,
+        appSelect,
+        envSelect,
+        inlineStatus
+      } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      });
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: "https://github.com/octo/app/actions/runs/42"
+      };
+      const deployment = {
+        app: "app",
+        environment: "dev",
+        status: "delete-failed",
+        identity: { state: "known", application: "app" },
+        deploymentId: "7",
+        runUrl: selection.runUrl,
+        cleanupSelection: selection
+      };
+      browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+        jsonResponse({
+          deployments: [deployment]
+        })
+      );
+      const pending = createDeferred<HttpResponse>();
+      browser.net.handle(
+        "/api/deployment-cleanup-details",
+        () => pending.promise
+      );
+      const { createDialog, wasOpened } = createConfirmingDialog();
+      const stop = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      appSelect.value = "app";
+      envSelect.value = "dev";
+      expect(stopTrackingAction.textContent).toBe("Load cleanup details");
+      stopTrackingAction.dispatch("click");
+      stopTrackingAction.dispatch("click");
+      expect(wasOpened()).toBe(false);
+      expect(
+        browser.net.calls.filter(
+          (call) => call.url === "/api/deployment-cleanup-details"
+        )
+      ).toHaveLength(1);
+      if (outcome === "detached") stop();
+      if (outcome === "stale" || outcome === "stale-error") {
+        envSelect.value = "other";
+        envSelect.dispatch("change");
+      }
+      if (outcome === "network" || outcome === "stale-error")
+        pending.reject(new Error("offline"));
+      else if (outcome === "non-error") pending.reject("offline");
+      else
+        pending.resolve(
+          jsonResponse(
+            {
+              error: outcome === "error" ? "Run changed" : undefined,
+              prepared:
+                outcome !== "discovery" &&
+                outcome !== "unknown-discovery" &&
+                outcome !== "absence",
+              selection,
+              deployment:
+                outcome === "absence" ? null : (
+                  {
+                    ...deployment,
+                    ...(outcome === "unknown-discovery" ?
+                      {
+                        app: "",
+                        identity: {
+                          state: "unavailable",
+                          reason: "Artifact expired"
+                        }
+                      }
+                    : {}),
+                    ...(outcome === "other-app" ?
+                      {
+                        app: "other-app",
+                        identity: { state: "known", application: "other-app" }
+                      }
+                    : {}),
+                    recovery: {
+                      runId: 42,
+                      runAttempt: 1,
+                      revision: "a".repeat(64),
+                      confirmation: "app/dev",
+                      canMarkCleanupComplete: true
+                    }
+                  }
+                )
+            },
+            outcome !== "error",
+            outcome === "error" ? 409 : 200
+          )
+        );
+      await flushPromises();
+      expect(wasOpened()).toBe(outcome === "prepared");
+      if (outcome === "error")
+        expect(inlineStatus.textContent).toBe("Run changed");
+      if (outcome === "absence") {
+        expect(action.dataset.mode).toBe("deploy");
+        expect(stopTrackingAction.style.display).toBe("none");
+      }
+      if (outcome === "unknown-discovery") {
+        expect(action.disabled).toBe(true);
+        expect(stopTrackingAction.textContent).toBe("Load cleanup details");
+      }
+      if (outcome === "other-app")
+        expect(inlineStatus.textContent).toContain("Select the current run");
+      stop();
+    }
+  );
+
+  it("keeps last-known affected state and healthy environments while history is unverified", async () => {
+    const { browser, action, stopTrackingAction, envSelect, inlineStatus } =
+      fixture({
+        deployments: [{ app: "app", environment: "dev", status: "pending" }]
+      });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({
+        environments: [
+          { name: "dev", provider: "azure" },
+          { name: "healthy", provider: "azure" }
+        ]
       })
-    });
-    expect(inlineStatus.textContent).toContain(
-      "Cloud resources were not deleted"
     );
-    expect(inlineStatus.textContent).toContain("may still exist");
+    const { createDialog } = createConfirmingDialog();
+    const stop = initializeDeployedGraphPage(
+      browser.context,
+      globals({
+        radiusCreateDeleteDeploymentDialog: createDialog
+      })
+    );
+    await flushPromises();
+    browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+      jsonResponse({
+        deployments: [
+          { app: "app", environment: "healthy", status: "success" }
+        ],
+        environmentDiagnostics: [
+          {
+            environment: "dev",
+            kind: "error",
+            message: "GitHub rate limit. Retry later."
+          }
+        ]
+      })
+    );
+    browser.clock.tick(DEPLOYED_STATE_POLL_MS);
+    await flushPromises();
+    expect(action.disabled).toBe(true);
+    expect(inlineStatus.textContent).toContain("GitHub rate limit");
+    expect(stopTrackingAction.textContent).toBe("Load cleanup details");
+    browser.net.handle("/api/deployment-cleanup-details", () =>
+      jsonResponse({
+        deployment: null,
+        prepared: false
+      })
+    );
+    stopTrackingAction.dispatch("click");
+    await flushPromises();
     expect(action.dataset.mode).toBe("deploy");
-    expect(browser.nav.assigned).toEqual([]);
+    envSelect.value = "healthy";
+    envSelect.dispatch("change");
+    await flushPromises();
+    expect(action.dataset.mode).toBe("delete");
+    expect(action.disabled).toBe(false);
+    stop();
   });
+
+  it.each(["success", "delete-failed", "pending", "deleting"])(
+    "reloads older %s history after cleanup and replaces its recovery target",
+    async (status) => {
+      const { browser, action, stopTrackingAction } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      });
+      const { createDialog, confirm } = createConfirmingDialog();
+      const teardown = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      const refresh = createDeferred<HttpResponse>();
+      browser.net.handle(
+        "/api/list-deployments?repo=octo%2Fapp",
+        () => refresh.promise
+      );
+      browser.net.handle("/api/abandon-deployment", () =>
+        jsonResponse({ outcome: "abandoned" })
+      );
+      stopTrackingAction.dispatch("click");
+      confirm();
+      await flushPromises();
+      expect(stopTrackingAction.disabled).toBe(true);
+      expect(stopTrackingAction.textContent).toBe("Stopping tracking…");
+      expect(action.dataset.mode).toBe("delete");
+      expect(action.disabled).toBe(false);
+      const older = {
+        app: "app",
+        environment: "dev",
+        status,
+        identity: { state: "known", application: "app" },
+        deploymentId: "100",
+        runUrl: "https://github.com/octo/app/actions/runs/41",
+        recovery: {
+          runId: 41,
+          runAttempt: 2,
+          revision: "b".repeat(64),
+          confirmation: "app/dev",
+          canMarkCleanupComplete: true
+        }
+      };
+      refresh.resolve(jsonResponse({ deployments: [older] }));
+      await flushPromises();
+      expect(action.dataset.mode).toBe("delete");
+      expect(action.disabled).toBe(
+        status === "pending" || status === "deleting"
+      );
+      expect(action.textContent).toBe(
+        status === "delete-failed" ? "Retry Delete"
+        : status === "pending" ? "Deploying…"
+        : status === "deleting" ? "Deleting…"
+        : "Delete Deployment"
+      );
+      expect(stopTrackingAction.style.display).toBe(
+        status === "delete-failed" ? "" : "none"
+      );
+      if (status === "delete-failed") {
+        stopTrackingAction.dispatch("click");
+        confirm();
+        await flushPromises();
+        const request = browser.net.calls
+          .filter((call) => call.url === "/api/abandon-deployment")
+          .at(-1);
+        expect(JSON.parse(String(request?.init?.body))).toMatchObject({
+          deploymentId: "100",
+          runUrl: older.runUrl,
+          ...older.recovery
+        });
+      }
+      teardown();
+    }
+  );
+
+  it.each(["payload", "transport"])(
+    "retains stale history after cleanup when the refresh fails with %s and recovers on polling",
+    async (failure) => {
+      const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      });
+      const { createDialog, confirm } = createConfirmingDialog();
+      const teardown = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+        failure === "payload" ?
+          jsonResponse({ deployments: [], error: "unavailable" })
+        : Promise.reject(new Error("listing unavailable"))
+      );
+      browser.net.handle("/api/abandon-deployment", () =>
+        jsonResponse({ outcome: "abandoned" })
+      );
+      stopTrackingAction.dispatch("click");
+      confirm();
+      await flushPromises();
+      expect(action.dataset.mode).toBe("delete");
+      expect(action.disabled).toBe(true);
+      expect(stopTrackingAction.disabled).toBe(true);
+      expect(action.getAttribute("title")).toContain("could not be loaded");
+      expect(inlineStatus.textContent).toContain(
+        "Cloud resources were not deleted"
+      );
+      expect(browser.logger.errors).toHaveLength(
+        failure === "transport" ? 1 : 0
+      );
+      browser.net.handle("/api/list-deployments?repo=octo%2Fapp", () =>
+        jsonResponse({
+          deployments: [{ app: "app", environment: "dev", status: "success" }]
+        })
+      );
+      browser.clock.tick(DEPLOYED_STATE_POLL_MS);
+      await flushPromises();
+      expect(action.textContent).toBe("Delete Deployment");
+      expect(action.disabled).toBe(false);
+      expect(stopTrackingAction.style.display).toBe("none");
+      teardown();
+    }
+  );
+
+  it.each(["teardown", "selection"])(
+    "does not restore the old target after cleanup refresh and %s",
+    async (change) => {
+      const { browser, appSelect, action, stopTrackingAction, inlineStatus } =
+        fixture({
+          deployments: [
+            { app: "app", environment: "dev", status: "delete-failed" }
+          ]
+        });
+      const { createDialog, confirm } = createConfirmingDialog();
+      const teardown = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      const refresh = createDeferred<HttpResponse>();
+      browser.net.handle(
+        "/api/list-deployments?repo=octo%2Fapp",
+        () => refresh.promise
+      );
+      browser.net.handle("/api/abandon-deployment", () =>
+        jsonResponse({ outcome: "abandoned" })
+      );
+      stopTrackingAction.dispatch("click");
+      confirm();
+      await flushPromises();
+      if (change === "teardown") teardown();
+      else {
+        appSelect.value = "other-app";
+        appSelect.dispatch("change");
+      }
+      const before = browser.net.calls.length;
+      refresh.resolve(
+        jsonResponse({
+          deployments: [
+            { app: "other-app", environment: "dev", status: "success" }
+          ]
+        })
+      );
+      await flushPromises();
+      if (change === "teardown") {
+        expect(browser.net.calls).toHaveLength(before);
+        expect(inlineStatus.textContent).toBe("");
+        expect(browser.clock.timeouts).toBe(0);
+      } else {
+        expect(appSelect.value).toBe("other-app");
+        expect(action.dataset.mode).toBe("delete");
+        expect(browser.net.calls.at(-1)?.url).toContain(
+          "application=other-app"
+        );
+        teardown();
+      }
+    }
+  );
 
   it("surfaces a stop-tracking refusal from the server", async () => {
     const { browser, action, stopTrackingAction, inlineStatus } = fixture({

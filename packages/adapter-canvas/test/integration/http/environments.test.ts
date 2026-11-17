@@ -16,6 +16,7 @@ import { createAwsEnvironmentAccess } from "../../../src/server/services/aws-env
 import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
 import { createEnvironmentTargetReader } from "../../../src/server/services/environment-target.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
+import { resolveEnvironmentDeployment } from "../../../src/server/services/deployment-resolver.js";
 import { redactGhCredentials } from "../../../src/gh.js";
 import type { GitHubJsonPayload } from "../../../src/azure-oidc.js";
 import {
@@ -467,6 +468,60 @@ describe("environment listing diagnostics", () => {
 });
 
 describe("environment listing configuration over HTTP", () => {
+  it("finds a live application beyond the listing window before allowing environment deletion", async () => {
+    const pages: number[] = [];
+    const h = await start(
+      {},
+      {
+        resolveEnvDeployment: (repo, environment, application) =>
+          resolveEnvironmentDeployment(repo, environment, application, {
+            deployWorkflowFile: "run-rad-commands.yml",
+            deleteWorkflowFile: "delete-application.yml",
+            maxParallelRecords: 10,
+            readApplicationIdentity: async () => ({
+              state: "known",
+              application: "live-app"
+            }),
+            ghOrThrow: async (args) => {
+              const path = args[1];
+              if (path.includes("/variables?")) return "AZURE_CLIENT_ID";
+              if (path.includes("/deployments?")) {
+                const page = Number(/&page=(\d+)/.exec(path)?.[1] ?? 1);
+                pages.push(page);
+                return page === 1 ?
+                    Array.from({ length: 100 }, (_, i) => String(i + 1)).join(
+                      "\n"
+                    )
+                  : "101";
+              }
+              const status = /\/deployments\/(\d+)\/statuses/.exec(path);
+              if (status)
+                return `in_progress\thttps://github.com/${repo}/actions/runs/${status[1]}\t`;
+              const run = /\/actions\/runs\/(\d+)$/.exec(path);
+              if (run)
+                return [
+                  run[1] === "101" ? "run-rad-commands.yml" : "unrelated.yml",
+                  "in_progress",
+                  "",
+                  "1",
+                  "a".repeat(40),
+                  "",
+                  run[1],
+                  repo,
+                  "workflow_dispatch"
+                ].join("\t");
+              throw new Error(`Unexpected history read: ${path}`);
+            }
+          })
+      }
+    );
+    const result = await h.deleteEnvironment("dev");
+    expect(result.status).toBe(409);
+    expect(JSON.stringify(result.body)).toContain("live-app");
+    expect(pages).toEqual([1, 2]);
+    expect(h.commands).toEqual([]);
+  });
+
   it.each([false, true])(
     "refuses environment deletion when application identity is unavailable (read failed: %s)",
     async (readFailed) => {

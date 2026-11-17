@@ -95,14 +95,14 @@ export function deleteDialogIntentSpecs(
       {
         tag: "p",
         className: "rad-ddlg__text",
-        text: "Stopping tracking removes this failed teardown from Radius Canvas and GitHub. It does not delete cloud resources."
+        text: "Mark cleanup complete records your assertion that you cleaned up outside Canvas. It does not delete cloud resources. Canvas will not contact the cloud, run Delete, or verify cleanup. Older deployments may still be tracked."
       },
       {
         tag: "button",
         id: DELETE_DIALOG_STEP1_BUTTON_ID,
         className: "rad-ddlg__btn",
         attrs: { type: "button" },
-        text: "I want to stop tracking this deployment"
+        text: "I completed cleanup outside Canvas"
       }
     ];
   }
@@ -232,7 +232,7 @@ export function deleteDialogEffectsSpecs(
         id: DELETE_DIALOG_STEP2_BUTTON_ID,
         className: "rad-ddlg__btn",
         attrs: { type: "button" },
-        text: "I understand cloud resources may remain"
+        text: "I understand Canvas did not verify or perform cleanup"
       }
     ];
   }
@@ -312,7 +312,7 @@ export function deleteDialogConfirmSpecs(
       attrs: { type: "button" },
       text:
         variant === "abandon" ?
-          "Stop tracking deployment"
+          "Mark cleanup complete"
         : "Delete this deployment"
     }
   ];
