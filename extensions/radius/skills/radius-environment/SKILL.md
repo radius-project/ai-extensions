@@ -110,7 +110,8 @@ The managed Contour Gateway supports HTTP and TLS routes. TCP and UDP routes req
 **AWS** — also set from the form for deploys (not read by verification):
 
 - `RADIUS_VPC_ID` (the EKS cluster's VPC), `RADIUS_SUBNET_IDS`
-- `AWS_APP_BOUNDARY_ARN`, set by setup, is the environment's permissions boundary under `policy/radius/apps/<repoId>/<env>/`, which the containers Recipe attaches to every IAM role it creates for an app.
+- `AWS_APP_BOUNDARY_ARN`, set by setup, is the environment's permissions boundary under `policy/radius/apps/<repoId>/<env>/`, which the containers Recipe attaches to every IAM role it creates for an app. An app role can do at most what the deploy role can do in the environment's region, minus IAM. In any region, it can't change account-wide security settings: S3 Block Public Access for the account, EBS default encryption and its default KMS key, EC2 image and snapshot Block Public Access, CloudTrail trails, and GuardDuty detectors.
+- The boundary limits what an app role can do, not who can assume it, and IAM can't limit what the deploy role writes in an app role's trust policy. Teams that need app roles locked to their AWS organization should add an organization-level resource control policy that denies `sts:AssumeRole` to principals outside the organization (`aws:PrincipalOrgID`), with AWS service principals exempt (`aws:PrincipalIsAWSService`) so EKS Pod Identity keeps working.
 
 **AWS**, recorded for environment deletion (not read by any workflow):
 
@@ -157,6 +158,7 @@ When setup or verification ends in failure and recovery stops, use the `radius-r
 - **AWS setup stops with `aws-role-limit-exceeded`** when the deploy role's inline policies reach IAM's 10,240-character limit. A role holds about 15 environments, so delete an environment that no longer uses the role or pick another role.
 - **AWS setup stops with `aws-pod-identity-agent-missing` or `aws-pod-identity-agent-unreadable`** before it changes anything. The first means the cluster has no `eks-pod-identity-agent` add-on, or its status is not ACTIVE or UPDATING. The second means Radius couldn't read the add-on, for example because the signed-in AWS identity lacks `eks:DescribeAddon`, and the message includes the AWS error. Setup skips this check on EKS Auto Mode clusters.
 - **AWS setup stops with `aws-app-boundary-denied`** when the signed-in AWS identity lacks `iam:GetPolicy`, `iam:CreatePolicy`, `iam:TagPolicy`, `iam:GetPolicyVersion`, or `iam:DeletePolicy` on `arn:aws:iam::<account>:policy/radius/apps/*`.
+- **AWS setup stops with `aws-app-boundary-failed` because the permissions boundary differs from the one setup writes** when the environment's boundary was written for another region or by an earlier version of Radius. Setup changed nothing on it. Delete the environment and create it again.
 - **GHCR package bootstrap fails** — refresh the stored `gh` credential with `read:packages` and `write:packages`. The extension pushes a harmless retained `bootstrap` artifact with an `org.opencontainers.image.source` annotation, then requires the package to be private/internal and linked to the target repository. It never uses a public repository's `GITHUB_TOKEN` to create the package because that can make the package public.
 
 ## Verifying after creation

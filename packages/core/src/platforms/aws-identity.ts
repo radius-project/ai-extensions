@@ -932,12 +932,30 @@ export function buildAwsEnvironmentPermissionPolicy(
   };
 }
 
+// Account-wide security settings an app never needs to change. A region
+// condition limits where a request is sent, not what it changes, so these are
+// denied outright.
+const ACCOUNT_SECURITY_SETTING_ACTIONS = [
+  "s3:PutAccountPublicAccessBlock",
+  "ec2:DisableEbsEncryptionByDefault",
+  "ec2:ModifyEbsDefaultKmsKeyId",
+  "ec2:DisableImageBlockPublicAccess",
+  "ec2:DisableSnapshotBlockPublicAccess",
+  "cloudtrail:StopLogging",
+  "cloudtrail:DeleteTrail",
+  "cloudtrail:UpdateTrail",
+  "guardduty:DeleteDetector",
+  "guardduty:UpdateDetector"
+];
+
 /**
  * The permissions boundary on an environment's app roles: the most an app
  * role's own policy can grant. It allows what the deploy role may do in the
  * environment's region, never IAM, and Bedrock models in other regions only
  * through an inference profile in the environment's region, because
- * cross-region inference runs the model in another region.
+ * cross-region inference runs the model in another region. It denies changing
+ * account-wide security settings such as S3 Block Public Access, EBS default
+ * encryption, CloudTrail, and GuardDuty.
  */
 export function buildAwsAppBoundaryPolicy(
   accountId: string,
@@ -959,6 +977,11 @@ export function buildAwsAppBoundaryPolicy(
             "bedrock:InferenceProfileArn": `arn:aws:bedrock:${region}:${accountId}:inference-profile/*`
           }
         }
+      },
+      {
+        Effect: "Deny",
+        Action: [...ACCOUNT_SECURITY_SETTING_ACTIONS],
+        Resource: "*"
       }
     ]
   };

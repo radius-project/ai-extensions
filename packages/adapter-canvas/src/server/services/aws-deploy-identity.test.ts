@@ -3866,19 +3866,40 @@ describe("setupAwsDeployIdentity and the environment's app boundary", () => {
     );
   });
 
-  it("stops without changing a boundary written for another region", async () => {
+  it.each([
+    [
+      "written for another region",
+      buildAwsAppBoundaryPolicy(ACCOUNT, "us-east-1")
+    ],
+    [
+      "written before setup denied account-wide security settings",
+      {
+        ...buildAwsAppBoundaryPolicy(ACCOUNT, "us-west-2"),
+        Statement: buildAwsAppBoundaryPolicy(
+          ACCOUNT,
+          "us-west-2"
+        ).Statement.filter((statement) => statement.Effect === "Allow")
+      }
+    ]
+  ])("stops without changing a boundary %s", async (_case, document) => {
     const aws = fakeAws({
       ...happyPath,
       "iam get-policy": ownedBoundary(),
-      "iam get-policy-version": boundaryVersion("us-east-1")
+      "iam get-policy-version": ok({
+        PolicyVersion: {
+          VersionId: "v1",
+          IsDefaultVersion: true,
+          Document: document
+        }
+      })
     });
     const result = await setupAwsDeployIdentity(request, aws.ports);
     expect(result).toMatchObject({
       ok: false,
       code: "aws-app-boundary-failed"
     });
-    expect(result.ok ? "" : result.message).toContain(
-      "To change the environment's region, delete the environment and create it again."
+    expect(result.ok ? "" : result.message).toBe(
+      `Permissions boundary ${BOUNDARY.arn} differs from the one setup writes for region us-west-2, so nothing was changed on it. It was written for another region or by an earlier version of Radius. Delete the environment and create it again.`
     );
     expect(iamWrites(aws)).not.toContain("create-policy");
   });
