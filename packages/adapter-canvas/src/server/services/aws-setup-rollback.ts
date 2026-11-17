@@ -24,6 +24,7 @@ import type { AwsEnvironmentAccess } from "./aws-environment-access.js";
 const AWS_ARTIFACT_TYPES: ReadonlySet<string> = new Set([
   "aws_access_entry",
   "aws_role_policy",
+  "aws_app_boundary",
   "aws_trust_subject",
   "aws_role"
 ]);
@@ -93,6 +94,14 @@ function rollbackTargets(
         );
         if (entry)
           found.push({ ...base, ...entry, artifactType: "aws_role_policy" });
+        break;
+      }
+      case "aws_app_boundary": {
+        const entry = ledger.awsAppBoundaries.find(
+          (item) => item.state === "created" && matches(item)
+        );
+        if (entry)
+          found.push({ ...base, ...entry, artifactType: "aws_app_boundary" });
         break;
       }
       case "aws_access_entry": {

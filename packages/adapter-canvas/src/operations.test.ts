@@ -2244,6 +2244,7 @@ describe("record shape", () => {
       },
       awsTrustSubjects: [],
       awsRolePolicies: [],
+      awsAppBoundaries: [],
       awsAccessEntries: [],
       githubEnvironmentVariables: [],
       commit: {

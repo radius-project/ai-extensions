@@ -22,8 +22,10 @@ export interface FakeManagedPolicy {
   PolicyName: string;
   PolicyId: string;
   Arn: string;
+  Path: string;
   CreateDate: string;
   Description: string;
+  Tags: Array<{ Key: string; Value: string }>;
   document: unknown;
 }
 
@@ -121,6 +123,17 @@ const WRITES: ReadonlySet<string> = new Set([
   "eks associate-access-policy"
 ]);
 
+// `--tags Key=k,Value=v ...`, as create-role and create-policy take them.
+function parseTags(
+  args: readonly string[]
+): Array<{ Key: string; Value: string }> {
+  return flagValues(args, "--tags").map((pair) => {
+    const match = /^Key=([^,]*),Value=(.*)$/.exec(pair);
+    if (!match) throw new Error(`fake aws: unreadable tag ${pair}`);
+    return { Key: match[1] ?? "", Value: match[2] ?? "" };
+  });
+}
+
 export function awsCommand(args: readonly string[]): string {
   return args[0] === "--version" ? "--version" : args.slice(0, 2).join(" ");
 }
@@ -196,6 +209,28 @@ export class FakeAws {
     };
     this.roles.set(input.name.toLowerCase(), role);
     return role;
+  }
+
+  // A managed policy that exists before the test starts, such as another
+  // environment's permissions boundary.
+  addManagedPolicy(input: {
+    path: string;
+    name: string;
+    document: unknown;
+    tags?: Array<{ Key: string; Value: string }>;
+  }): FakeManagedPolicy {
+    const policy: FakeManagedPolicy = {
+      PolicyName: input.name,
+      PolicyId: this.nextId("ANPA"),
+      Arn: `arn:aws:iam::${this.accountId}:policy${input.path}${input.name}`,
+      Path: input.path,
+      CreateDate: this.time(),
+      Description: "",
+      Tags: [...(input.tags ?? [])],
+      document: input.document
+    };
+    this.policies.set(policy.Arn, policy);
+    return policy;
   }
 
   addAccessEntry(
@@ -308,12 +343,34 @@ export class FakeAws {
         });
       case "eks describe-cluster":
         return this.describeCluster(args);
+      case "eks describe-addon":
+        return this.describeAddon(args);
       case "iam create-policy":
         return this.createPolicy(args);
       case "iam get-policy":
-        return this.getPolicy(args);
+        return this.withPolicy(args, "GetPolicy", (policy) =>
+          ok({ Policy: this.policyView(policy) })
+        );
       case "iam delete-policy":
         return this.deletePolicy(args);
+      case "iam get-policy-version":
+        return this.withPolicy(args, "GetPolicyVersion", (policy) => {
+          if (flag(args, "--version-id") !== "v1") {
+            return serviceError(
+              "NoSuchEntity",
+              "GetPolicyVersion",
+              `Policy ${policy.Arn} version ${flag(args, "--version-id")} does not exist or is not attachable.`
+            );
+          }
+          return ok({
+            PolicyVersion: {
+              Document: policy.document,
+              VersionId: "v1",
+              IsDefaultVersion: true,
+              CreateDate: policy.CreateDate
+            }
+          });
+        });
       case "iam get-role":
         return this.getRole(args);
       case "iam create-role":
@@ -482,19 +539,56 @@ export class FakeAws {
     });
   }
 
+  // Every fake cluster runs the EKS Pod Identity Agent.
+  private describeAddon(args: readonly string[]): AwsCommandResult {
+    const cluster = this.cluster(args);
+    const name = flag(args, "--addon-name");
+    if (!cluster || name !== "eks-pod-identity-agent") {
+      return serviceError(
+        "ResourceNotFoundException",
+        "DescribeAddon",
+        `No addon: ${name} found in cluster: ${flag(args, "--cluster-name")}`
+      );
+    }
+    return ok({
+      addon: { addonName: name, clusterName: cluster.name, status: "ACTIVE" }
+    });
+  }
+
   private policyView(policy: FakeManagedPolicy) {
     return {
       PolicyName: policy.PolicyName,
       PolicyId: policy.PolicyId,
       Arn: policy.Arn,
+      Path: policy.Path,
+      DefaultVersionId: "v1",
       CreateDate: policy.CreateDate,
-      Description: policy.Description
+      Description: policy.Description,
+      Tags: policy.Tags.map((tag) => ({ ...tag }))
     };
+  }
+
+  private withPolicy(
+    args: readonly string[],
+    operation: string,
+    work: (policy: FakeManagedPolicy) => AwsCommandResult
+  ): AwsCommandResult {
+    const arn = flag(args, "--policy-arn");
+    const policy = this.policies.get(arn);
+    if (!policy) {
+      return serviceError(
+        "NoSuchEntity",
+        operation,
+        `Policy ${arn} was not found.`
+      );
+    }
+    return work(policy);
   }
 
   private createPolicy(args: readonly string[]): AwsCommandResult {
     const name = flag(args, "--policy-name");
-    // IAM names ignore case, so one role always has one lock.
+    // IAM names ignore case and must be unique in the account, whatever the
+    // path, so one role always has one lock.
     const taken = [...this.policies.values()].some(
       (policy) => policy.PolicyName.toLowerCase() === name.toLowerCase()
     );
@@ -505,40 +599,26 @@ export class FakeAws {
         `A policy called ${name} already exists. Duplicate names are not allowed.`
       );
     }
+    const path = flag(args, "--path") || "/";
     const policy: FakeManagedPolicy = {
       PolicyName: name,
       PolicyId: this.nextId("ANPA"),
-      Arn: `arn:aws:iam::${this.accountId}:policy/${name}`,
+      Arn: `arn:aws:iam::${this.accountId}:policy${path}${name}`,
+      Path: path,
       CreateDate: this.time(),
       Description: flag(args, "--description"),
+      Tags: parseTags(args),
       document: JSON.parse(flag(args, "--policy-document"))
     };
     this.policies.set(policy.Arn, policy);
     return ok({ Policy: this.policyView(policy) });
   }
 
-  private getPolicy(args: readonly string[]): AwsCommandResult {
-    const policy = this.policies.get(flag(args, "--policy-arn"));
-    if (!policy) {
-      return serviceError(
-        "NoSuchEntity",
-        "GetPolicy",
-        `Policy ${flag(args, "--policy-arn")} was not found.`
-      );
-    }
-    return ok({ Policy: this.policyView(policy) });
-  }
-
   private deletePolicy(args: readonly string[]): AwsCommandResult {
-    const arn = flag(args, "--policy-arn");
-    if (!this.policies.delete(arn)) {
-      return serviceError(
-        "NoSuchEntity",
-        "DeletePolicy",
-        `Policy ${arn} was not found.`
-      );
-    }
-    return ok();
+    return this.withPolicy(args, "DeletePolicy", (policy) => {
+      this.policies.delete(policy.Arn);
+      return ok();
+    });
   }
 
   private getRole(args: readonly string[]): AwsCommandResult {
@@ -567,11 +647,7 @@ export class FakeAws {
         `Role with name ${name} already exists.`
       );
     }
-    const tags = flagValues(args, "--tags").map((pair) => {
-      const match = /^Key=([^,]*),Value=(.*)$/.exec(pair);
-      if (!match) throw new Error(`fake aws: unreadable tag ${pair}`);
-      return { Key: match[1] ?? "", Value: match[2] ?? "" };
-    });
+    const tags = parseTags(args);
     const role: FakeIamRole = {
       RoleName: name,
       RoleId: this.nextId("AROA"),
