@@ -933,8 +933,8 @@ export function buildAwsEnvironmentPermissionPolicy(
 }
 
 // Account-wide security settings an app never needs to change, including the
-// actions that weaken them indirectly: resetting the default EBS key, relaxing
-// snapshot Block Public Access, dropping a trail's event selectors, and hiding
+// actions that weaken them indirectly: resetting the default EBS key, changing
+// snapshot Block Public Access, changing a trail's event selectors, and hiding
 // GuardDuty findings with filters or trusted IP lists. A region condition
 // limits where a request is sent, not what it changes, so these are denied
 // outright.
@@ -963,9 +963,8 @@ const ACCOUNT_SECURITY_SETTING_ACTIONS = [
  * role's own policy can grant. It allows what the deploy role may do in the
  * environment's region, never IAM, and Bedrock models in other regions only
  * through an inference profile in the environment's region, because
- * cross-region inference runs the model in another region. It denies weakening
- * account-wide protections: S3 and EC2 Block Public Access, EBS default
- * encryption and its KMS key, CloudTrail trails, and GuardDuty.
+ * cross-region inference runs the model in another region. It denies the
+ * account-wide security setting changes in `ACCOUNT_SECURITY_SETTING_ACTIONS`.
  */
 export function buildAwsAppBoundaryPolicy(
   accountId: string,
