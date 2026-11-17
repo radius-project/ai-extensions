@@ -172,7 +172,7 @@ Two boundaries worth knowing before you go looking for a gap:
 1. Dispatches `delete-application.yml` and waits for it to succeed.
 2. Deletes the MySQL recipe's leftovers: `mysql-*` DB instances (with `--skip-final-snapshot`), then their DB subnet and parameter groups, then the final `rds-snapshot-*` snapshots that carry an AWS test environment's tag. It also deletes labelled workloads and the `default-cloud-e2e` namespace on both clusters.
 3. Checks that nothing of that environment is left.
-4. Deletes its deployment records and GHCR state package, then, under the deploy role's lock, removes its trust subjects, inline policy, and access entry with the product's own removal code, and deletes its GitHub environment.
+4. Deletes its deployment records and GHCR state package, then, under the deploy role's lock, removes its trust subjects, inline policy, app boundary, and access entry with the product's own removal code, and deletes its GitHub environment.
 
 If any of steps 1 to 3 fails, the environment keeps everything step 4 removes, so the next run can retry. The sweep also deletes deployment records and state packages of AWS environments that no longer exist, scales the main cluster's `default` and `isolated` node groups to zero, and removes a lock on the deploy role once it is 10 or more minutes old, the same rule the product uses.
 

@@ -152,13 +152,13 @@ Sharing the fixture with Azure changes `cloud-e2e-cleanup.yml` in two ways. Its 
 For each AWS test environment, the AWS job follows the same order as the Azure job:
 
 1. Asks the product to delete the app, and waits.
-2. Sweeps the environment's leftover RDS resources, app roles, Pod Identity associations, and Kubernetes resources.
+2. Sweeps the environment's leftover RDS and Kubernetes resources.
 3. Checks nothing is left.
 4. Only then removes the environment's trust subject, inline policy, app boundary, access entry, GitHub environment, and state.
 
 If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs. The AWS job also scales the node groups to zero if a run left them up.
 
-It deletes an AWS resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with a test environment, and in one of the clusters' VPCs. App roles and Pod Identity associations are deleted only when their path or role is under `role/radius/apps/<fixture repository ID>/` and their tag names a test environment. An environment's app boundary goes in step 4 with the product's removal; a boundary whose environment is already gone is deleted on its own. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the deploy role, the test role, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
+It deletes an AWS resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with a test environment, and in one of the clusters' VPCs. An environment's app boundary goes in step 4 with the product's removal. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the deploy role, the test role, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
 
 Like the Azure sweep, which also deletes in a subscription shared with Radius, it has no dry run. Its rules are unit-tested against resources shaped like Radius's.
 
