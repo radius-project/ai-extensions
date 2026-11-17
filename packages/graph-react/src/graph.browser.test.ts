@@ -329,6 +329,53 @@ describe("public host-neutral React API", () => {
     ).toContain("color-scheme: dark");
   });
 
+  it("renders a legacy application with its icon, raw status, details row and warnings", async () => {
+    const { root, element } = host();
+    const hash = "c".repeat(64);
+    const legacy = {
+      ...context,
+      applicationId: prefix + "Applications.Core/applications/app"
+    };
+    const svg = '<svg viewBox="0 0 8 8"><rect fill="#336699" /></svg>';
+    root.render(
+      h(RadiusGraph, {
+        graph: normalizeLiveGraph(
+          {
+            resources: [
+              {
+                ...resource,
+                id: prefix + "Applications.Core/containers/live-web",
+                type: "Applications.Core/containers",
+                iconHash: hash,
+                connections: [{ id: "missing", direction: "Inbound" }]
+              }
+            ],
+            icons: { [hash]: svg }
+          },
+          legacy
+        )
+      })
+    );
+    const node = await within(element).findByRole("group", {
+      name: "live-web"
+    });
+    expect(
+      within(node).getByLabelText("Provisioning status: CustomPending")
+    ).toBeTruthy();
+    expect(node.querySelector(".rad-node__icon")?.getAttribute("src")).toMatch(
+      /^data:image\/svg\+xml,/
+    );
+    expect(within(element).getByRole("status").textContent).toContain(
+      "missing"
+    );
+    await userEvent.click(
+      within(node).getByRole("button", { name: "Show details" })
+    );
+    expect(
+      await within(element).findByText("Provisioning status: CustomPending")
+    ).toBeTruthy();
+  });
+
   it("renders explicit empty and partial states and updates without replacing the React root", async () => {
     const { root, element } = host();
     root.render(

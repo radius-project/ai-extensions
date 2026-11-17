@@ -25,6 +25,15 @@ function optionalText(value: unknown, field: string): string | undefined {
   return value;
 }
 
+// Legacy Applications.Core applications share the live graph payload shape.
+const APPLICATION_TYPES: ReadonlySet<string> = new Set([
+  "radius.core/applications",
+  "applications.core/applications"
+]);
+const ICON_HASH_PATTERN = /^[0-9a-f]{64}$/;
+const SVG_START =
+  /^(?:<\?xml[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*<svg(?:\s|\/?>)/;
+
 // UCP resource IDs, including plane segments, are case-insensitive.
 function sameUcpSegment(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
@@ -51,12 +60,12 @@ export function graphContextKey(context: GraphContext): string {
   if (
     !application?.plane ||
     application.segments.length !== 1 ||
-    application.type.toLowerCase() !== "radius.core/applications" ||
+    !APPLICATION_TYPES.has(application.type.toLowerCase()) ||
     !sameUcpSegment(application.plane.type, context.plane.type) ||
     !sameUcpSegment(application.plane.name, context.plane.name)
   ) {
     throw new TypeError(
-      "Live graph applicationId must be a Radius.Core/applications resource on the selected plane."
+      "Live graph applicationId must be a Radius.Core/applications or Applications.Core/applications resource on the selected plane."
     );
   }
   return JSON.stringify([
@@ -89,6 +98,7 @@ export function normalizeLiveGraph(
   const ids = new Set<string>();
   const signatures = new Map<string, string>();
   const warnings: LiveGraphWarning[] = [];
+  const icons: Record<string, unknown> = record(value.icons) ? value.icons : {};
   for (const raw of value.resources) {
     if (!record(raw))
       throw new TypeError("Live graph resource must be an object.");
@@ -96,10 +106,30 @@ export function normalizeLiveGraph(
     if (raw.connections !== undefined && !Array.isArray(raw.connections)) {
       throw new TypeError(`Live graph connections must be an array: ${id}`);
     }
+    let icon: string | undefined;
+    const iconHash = raw.iconHash;
+    if (iconHash !== undefined && iconHash !== null) {
+      const candidate =
+        (
+          typeof iconHash === "string" &&
+          ICON_HASH_PATTERN.test(iconHash) &&
+          Object.hasOwn(icons, iconHash)
+        ) ?
+          icons[iconHash]
+        : undefined;
+      if (typeof candidate === "string" && SVG_START.test(candidate.trim())) {
+        icon = candidate;
+      } else {
+        warnings.push(
+          warning("invalid-icon", id, `Unresolved resource icon ignored: ${id}`)
+        );
+      }
+    }
     const resource: LiveGraphResource = {
       id,
       name: text(raw.name, "resource name"),
       type: text(raw.type, "resource type"),
+      ...(icon === undefined ? {} : { icon }),
       provider: optionalText(raw.provider, "provider"),
       provisioningState: optionalText(
         raw.provisioningState,
