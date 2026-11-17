@@ -19,6 +19,7 @@ import {
   FIXTURE_REPOSITORY,
   FIXTURE_REPOSITORY_PIN,
   FIXTURE_OVERRIDE_VARIABLES,
+  fixtureProjectName,
   isContinuousIntegration,
   isFixtureRepositoryProvisioned,
   parseCloudE2ELeaseOwnerRunId,
@@ -511,4 +512,23 @@ describe("isContinuousIntegration", () => {
   ])("treats CI=%j as %s", (ci, expected) => {
     expect(isContinuousIntegration({ CI: ci })).toBe(expected);
   });
+});
+
+describe("fixtureProjectName", () => {
+  // A local run uses the developer's copy, whose name can differ from the pin.
+  it.each([
+    [FIXTURE_REPOSITORY, "ai-extensions-fixture"],
+    ["kachawla/my-fixture-copy", "my-fixture-copy"]
+  ])("names the Copilot app project for %s", (repository, expected) => {
+    expect(fixtureProjectName(repository)).toBe(expected);
+  });
+
+  it.each(["", "owner", "owner/", "/name", "owner/name/extra"])(
+    "refuses %j",
+    (repository) => {
+      expect(() => fixtureProjectName(repository)).toThrow(
+        "A fixture repository must be owner/name"
+      );
+    }
+  );
 });

@@ -259,6 +259,19 @@ export function resolveFixtureSelection(
 }
 
 /**
+ * The Copilot app names a project after its repository, so this is the
+ * fixture's project name, whichever repository the run uses.
+ */
+export function fixtureProjectName(repository: string): string {
+  const [owner, name, ...rest] = repository.split("/");
+  if (!owner || !name || rest.length > 0)
+    throw new Error(
+      `A fixture repository must be owner/name; received "${repository}".`
+    );
+  return name;
+}
+
+/**
  * The per-run resource group. Everything the fixture creates lives here, so
  * teardown targets one name and never a wildcard.
  */

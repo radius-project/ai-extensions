@@ -180,7 +180,7 @@ import {
   FIXTURE_APPLICATION_NAME,
   FIXTURE_KUBERNETES_NAMESPACE,
   FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
-  FIXTURE_REPO_NAME,
+  fixtureProjectName,
   isFixtureRepositoryProvisioned,
   resolveFixtureClusterTarget,
   resolveFixtureLocation
@@ -855,9 +855,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       if (!cloud) throw new Error("The cloud fixture was not created.");
       const { appPage } = cloudCanvas.app;
 
-      await ensureFixtureProject(appPage, cloud.repository, FIXTURE_REPO_NAME);
+      const projectName = fixtureProjectName(cloud.repository);
+      await ensureFixtureProject(appPage, cloud.repository, projectName);
       const sessionId = await startSessionFromNewPage(appPage, {
-        projectName: FIXTURE_REPO_NAME,
+        projectName,
         prompt:
           "Reply Ready and stop. Do not read, change, commit, push, model, or deploy anything. The test will prepare this workspace first."
       });
