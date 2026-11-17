@@ -43,6 +43,8 @@ export interface LiveGraphResource {
   readonly id: string;
   readonly name: string;
   readonly type: string;
+  /** Untrusted SVG from the resource-type definition; render it as an image, never as HTML. */
+  readonly icon?: string;
   readonly provider?: string;
   readonly provisioningState?: string;
   readonly connections: readonly {
@@ -56,6 +58,7 @@ export type LiveGraphWarningCode =
   | "duplicate-resource"
   | "invalid-resource-id"
   | "invalid-connection"
+  | "invalid-icon"
   | "unresolved-connection";
 
 /**
