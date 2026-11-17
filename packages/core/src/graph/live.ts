@@ -34,8 +34,10 @@ const ICON_HASH_PATTERN = /^[0-9a-f]{64}$/;
 const SVG_ROOT = /^<svg(?:\s|\/?>)/;
 
 /**
- * Returns the `<svg>` markup of an icon, without any leading XML prolog or
- * comments, or `undefined` when the value is not an SVG document. The scan
+ * Returns the `<svg>` markup of an icon, without any leading XML prolog,
+ * comments or `<!DOCTYPE>`, or `undefined` when the value is not an SVG
+ * document. A `<!DOCTYPE>` with an internal subset (`[...]`) can define
+ * entities that the markup would still use, so it is not an icon. The scan
  * moves forward once and never rereads text, so hostile input stays linear.
  */
 function svgMarkup(value: unknown): string | undefined {
@@ -47,10 +49,12 @@ function svgMarkup(value: unknown): string | undefined {
     const close =
       source.startsWith("<?xml", at) ? "?>"
       : source.startsWith("<!--", at) ? "-->"
+      : source.startsWith("<!DOCTYPE", at) ? ">"
       : undefined;
     if (close === undefined) break;
     const end = source.indexOf(close, at);
     if (end === -1) return undefined;
+    if (close === ">" && source.slice(at, end).includes("[")) return undefined;
     whitespace.lastIndex = end + close.length;
     whitespace.test(source);
     at = whitespace.lastIndex;
@@ -123,7 +127,10 @@ export function normalizeLiveGraph(
   const ids = new Set<string>();
   const signatures = new Map<string, string>();
   const warnings: LiveGraphWarning[] = [];
-  const icons: Record<string, unknown> = record(value.icons) ? value.icons : {};
+  // `getGraph` returns `iconHash` on every resource but omits `icons` unless
+  // the request sets `includeIcons`. Without a map, no icon is expected.
+  const icons: Record<string, unknown> | undefined =
+    record(value.icons) ? value.icons : undefined;
   for (const raw of value.resources) {
     if (!record(raw))
       throw new TypeError("Live graph resource must be an object.");
@@ -132,8 +139,9 @@ export function normalizeLiveGraph(
       throw new TypeError(`Live graph connections must be an array: ${id}`);
     }
     let icon: string | undefined;
+    let iconInvalid = false;
     const iconHash = raw.iconHash;
-    if (iconHash !== undefined && iconHash !== null) {
+    if (icons && iconHash !== undefined && iconHash !== null) {
       const markup = svgMarkup(
         (
           typeof iconHash === "string" &&
@@ -143,13 +151,8 @@ export function normalizeLiveGraph(
           icons[iconHash]
         : undefined
       );
-      if (markup !== undefined) {
-        icon = markup;
-      } else {
-        warnings.push(
-          warning("invalid-icon", id, `Unresolved resource icon ignored: ${id}`)
-        );
-      }
+      if (markup === undefined) iconInvalid = true;
+      else icon = markup;
     }
     const resource: LiveGraphResource = {
       id,
@@ -195,6 +198,11 @@ export function normalizeLiveGraph(
     signatures.set(id, signature);
     resources.push(resource);
     connections.set(id, entries);
+    if (iconInvalid) {
+      warnings.push(
+        warning("invalid-icon", id, `Unresolved resource icon ignored: ${id}`)
+      );
+    }
   }
   const edges = new Map<string, { source: string; target: string }>();
   for (const [owner, entries] of connections) {

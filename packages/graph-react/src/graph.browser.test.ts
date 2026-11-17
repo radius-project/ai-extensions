@@ -336,8 +336,9 @@ describe("public host-neutral React API", () => {
       ...context,
       applicationId: prefix + "Applications.Core/applications/app"
     };
-    const svg = '<svg viewBox="0 0 8 8"><rect fill="#336699" /></svg>';
-    const prefixed = `<?xml version="1.0"?>\n<!-- icon -->\n${svg}`;
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 8 8"><rect width="8" height="8" fill="#336699" /></svg>';
+    const prefixed = `<?xml version="1.0"?>\n<!-- icon -->\n<!DOCTYPE svg>\n${svg}`;
     root.render(
       h(RadiusGraph, {
         graph: normalizeLiveGraph(
@@ -363,9 +364,12 @@ describe("public host-neutral React API", () => {
     expect(
       within(node).getByLabelText("Provisioning status: CustomPending")
     ).toBeTruthy();
-    const src = node.querySelector(".rad-node__icon")?.getAttribute("src");
+    const icon = node.querySelector<HTMLImageElement>(".rad-node__icon");
+    const src = icon?.getAttribute("src");
     expect(src).toMatch(/^data:image\/svg\+xml,/);
     expect(decodeURIComponent(src ?? "")).toContain("#336699");
+    await icon?.decode();
+    expect(icon?.naturalWidth).toBeGreaterThan(0);
     expect(within(element).getByRole("status").textContent).toContain(
       "missing"
     );

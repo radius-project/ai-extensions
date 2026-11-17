@@ -412,23 +412,31 @@ describe("live UCP graph normalization", () => {
       expect(result.resources[1]).not.toHaveProperty("icon");
       expect(result.warnings).toEqual([]);
     });
-    it("removes an XML prolog and comments before the svg element", () => {
-      const prefixed = `<?xml version="1.0"?>\n<!-- icon -->\n${svg}`;
+    it("removes an XML prolog, comments and a plain DOCTYPE before the svg element", () => {
+      const prefixed = `<?xml version="1.0"?>\n<!-- icon -->\n<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n${svg}`;
       const result = normalizeLiveGraph(
         { resources: [withIcon(hash)], icons: { [hash]: prefixed } },
         context
       );
       expect(result.resources[0].icon).toBe(svg);
+      expect(result.warnings).toEqual([]);
     });
     it.each([
-      ["repeated comments", "<!--x-->".repeat(5000)],
-      ["repeated prologs", "<?xml?>".repeat(5000)],
-      ["an unclosed comment", "<!-- never closed"],
-      ["an unclosed prolog", "<?xml never closed"]
-    ])("rejects %s without an svg element in linear time", (_name, prefix) => {
+      ["repeated comments", "<!--x-->".repeat(5000), "not-svg"],
+      ["repeated prologs", "<?xml?>".repeat(5000), "not-svg"],
+      ["repeated doctypes", "<!DOCTYPE svg>".repeat(5000), "not-svg"],
+      ["an unclosed comment", "<!-- never closed", "not-svg"],
+      ["an unclosed prolog", "<?xml never closed", "not-svg"],
+      ["an unclosed doctype", "<!DOCTYPE svg never closed", "not-svg"],
+      [
+        "a doctype with an internal subset",
+        '<!DOCTYPE svg [<!ENTITY a "b">]>',
+        svg
+      ]
+    ])("rejects %s in linear time", (_name, prefix, rest) => {
       const started = performance.now();
       const result = normalizeLiveGraph(
-        { resources: [withIcon(hash)], icons: { [hash]: `${prefix}not-svg` } },
+        { resources: [withIcon(hash)], icons: { [hash]: `${prefix}${rest}` } },
         context
       );
       expect(performance.now() - started).toBeLessThan(500);
@@ -436,7 +444,6 @@ describe("live UCP graph normalization", () => {
       expect(result.warnings).toHaveLength(1);
     });
     it.each([
-      ["a missing icons map", undefined, hash],
       ["a hash absent from the map", { [`${"b".repeat(64)}`]: svg }, hash],
       ["a non-svg value", { [hash]: "<div>not an icon</div>" }, hash],
       ["a non-string value", { [hash]: 4 }, hash],
@@ -456,6 +463,39 @@ describe("live UCP graph normalization", () => {
           resourceId: web.id
         }
       ]);
+    });
+    it.each([undefined, null, "not-a-map", 4])(
+      "treats an icon hash with %s as the icons map as no icon without a warning",
+      (icons) => {
+        const result = normalizeLiveGraph(
+          { resources: [withIcon(hash)], icons },
+          context
+        );
+        expect(result.resources[0]).not.toHaveProperty("icon");
+        expect(result.warnings).toEqual([]);
+      }
+    );
+    it("reports an icon problem only for resources that are kept", () => {
+      const bad = { [hash]: "<div/>" };
+      const result = normalizeLiveGraph(
+        {
+          resources: [
+            { ...web, id: "not-a-resource-id", iconHash: hash },
+            withIcon(hash),
+            withIcon(hash)
+          ],
+          icons: bad
+        },
+        context
+      );
+      expect(result.warnings.map(({ code }) => code)).toEqual([
+        "invalid-resource-id",
+        "invalid-icon",
+        "duplicate-resource"
+      ]);
+      expect(
+        result.warnings.filter(({ code }) => code === "invalid-icon")
+      ).toHaveLength(1);
     });
     it.each([undefined, null])(
       "treats a %s icon hash as no icon without a warning",
