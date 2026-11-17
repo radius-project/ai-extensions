@@ -953,9 +953,9 @@ const ACCOUNT_SECURITY_SETTING_ACTIONS = [
  * role's own policy can grant. It allows what the deploy role may do in the
  * environment's region, never IAM, and Bedrock models in other regions only
  * through an inference profile in the environment's region, because
- * cross-region inference runs the model in another region. It denies changing
- * account-wide security settings such as S3 Block Public Access, EBS default
- * encryption, CloudTrail, and GuardDuty.
+ * cross-region inference runs the model in another region. It denies turning
+ * off account-wide protections: S3 and EC2 Block Public Access, EBS default
+ * encryption and its KMS key, CloudTrail trails, and GuardDuty detectors.
  */
 export function buildAwsAppBoundaryPolicy(
   accountId: string,

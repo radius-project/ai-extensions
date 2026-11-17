@@ -3899,7 +3899,7 @@ describe("setupAwsDeployIdentity and the environment's app boundary", () => {
       code: "aws-app-boundary-failed"
     });
     expect(result.ok ? "" : result.message).toBe(
-      `Permissions boundary ${BOUNDARY.arn} differs from the one setup writes for region us-west-2, so nothing was changed on it. It was written for another region or by an earlier version of Radius. Delete the environment and create it again.`
+      `Permissions boundary ${BOUNDARY.arn} differs from the one setup writes for region us-west-2, so nothing was changed on it. It was written for another region or by an earlier version of Radius. Delete the environment's apps and the environment, then create it again.`
     );
     expect(iamWrites(aws)).not.toContain("create-policy");
   });
