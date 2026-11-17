@@ -34,12 +34,33 @@ function harness(
   errors: Record<string, string> = {}
 ) {
   const calls: string[] = [];
+  const checkout: { branch: string; error?: string; beforeRead(): void } = {
+    branch: "feature/branch",
+    beforeRead: () => {}
+  };
   const execute: DeploymentCommandExecutor = (
     command,
     args,
     _options,
     callback
   ) => {
+    if (command === "git") {
+      expect(args).toEqual([
+        "-C",
+        root,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD"
+      ]);
+      checkout.beforeRead();
+      callback(
+        checkout.error !== undefined ? new Error(checkout.error) : null,
+        checkout.branch,
+        checkout.error ?? ""
+      );
+      return {};
+    }
     expect(command).toBe("gh");
     const apiPath = args[1];
     calls.push(apiPath);
@@ -58,7 +79,7 @@ function harness(
     redactDiagnostic: (message) =>
       message.replace(/private-detail/g, "[redacted]")
   });
-  return { sources, calls, responses };
+  return { sources, calls, responses, checkout };
 }
 
 const commitPath = `/repos/${repo}/commits/feature%2Fbranch`;
@@ -86,6 +107,156 @@ const local = (root: string) => ({
 });
 
 describe("graph source bindings", () => {
+  it.each(["other", ""])(
+    "rejects a stale explicit workspace selection on checkout %j",
+    async (branch) => {
+      const root = await fixture();
+      await fs.writeFile(path.join(root, "app.bicep"), "wrong model");
+      const { sources, calls, checkout } = harness(root);
+      checkout.branch = branch;
+      expect(
+        await sources.read({ ...local(root), definitionPath: "app.bicep" })
+      ).toMatchObject({
+        status: "unavailable",
+        source: { kind: "workspace", ref: "feature/branch" },
+        diagnostic: expect.stringContaining("Workspace branch changed")
+      });
+      expect(calls).toEqual([]);
+    }
+  );
+
+  it.each(["present", "absent"] as const)(
+    "rejects checkout changes during a %s model read",
+    async (status) => {
+      const root = await fixture();
+      if (status === "present")
+        await fs.writeFile(path.join(root, "app.bicep"), "model");
+      const { sources, checkout } = harness(root);
+      let checks = 0;
+      checkout.beforeRead = () => {
+        if (++checks === 2) checkout.branch = "other";
+      };
+      expect(
+        await sources.read({ ...local(root), definitionPath: "app.bicep" })
+      ).toMatchObject({
+        status: "unavailable",
+        diagnostic: expect.stringContaining("Workspace branch changed")
+      });
+      expect(checks).toBe(2);
+    }
+  );
+
+  it("reports failed live branch reads without falling back to GitHub", async () => {
+    const root = await fixture();
+    const { sources, checkout, calls } = harness(root);
+    checkout.error = "private-detail";
+    expect(await sources.read(local(root))).toMatchObject({
+      status: "unavailable",
+      diagnostic: "[redacted]"
+    });
+    checkout.error = "";
+    expect(await sources.read(local(root))).toMatchObject({
+      status: "unavailable",
+      diagnostic: "Workspace branch is unavailable."
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects drift while reading supporting artifacts and captured origin files", async () => {
+    const root = await fixture();
+    await fs.mkdir(path.join(root, ".radius"));
+    await fs.writeFile(path.join(root, ".radius", "app.bicep"), "model");
+    await fs.writeFile(
+      path.join(root, ".radius", "bicepconfig.json"),
+      '{"extensions":{"x":"types.tgz"}}'
+    );
+    await fs.writeFile(path.join(root, ".radius", "types.tgz"), "types");
+    const { sources, checkout, calls } = harness(root);
+    const selected = await sources.read(local(root));
+    if (selected.status !== "present") throw new Error("Expected model");
+    let checks = 0;
+    checkout.beforeRead = () => {
+      if (++checks === 4) checkout.branch = "other";
+    };
+    await expect(sources.stage(selected)).rejects.toMatchObject({
+      code: "invalid-artifact",
+      message: expect.stringContaining("Workspace branch changed")
+    });
+    await expect(fs.stat(path.join(root, "staging"))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+    expect(
+      await sources.readFile(selected.source, ".radius/origin.json")
+    ).toMatchObject({
+      status: "unavailable",
+      diagnostic: expect.stringContaining("Workspace branch changed")
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it.each(["app.bicep", ".radius/app.bicep"])(
+    "compiles %s from the fingerprinted workspace snapshot after edits",
+    async (definitionPath) => {
+      const root = await fixture();
+      const dir = path.dirname(path.join(root, definitionPath));
+      await fs.mkdir(dir, { recursive: true });
+      const configPath = path.join(dir, "bicepconfig.json");
+      const artifactPath = path.join(dir, "types.tgz");
+      const config = '{"extensions":{"custom":"types.tgz"}}';
+      await fs.writeFile(path.join(root, definitionPath), "original model");
+      await fs.writeFile(configPath, config);
+      await fs.writeFile(artifactPath, "original types");
+      const { sources } = harness(root);
+      const graph = createGraphOrchestrator({
+        stage: sources.stage,
+        compile: async (content, _path, options) => {
+          expect(content).toBe("original model");
+          expect(
+            await fs.readFile(
+              path.join(options.radArtifactsDir, "bicepconfig.json"),
+              "utf8"
+            )
+          ).toBe(config);
+          expect(
+            await fs.readFile(
+              path.join(options.radArtifactsDir, "types.tgz"),
+              "utf8"
+            )
+          ).toBe("original types");
+          return ["original graph"];
+        },
+        diff: () => {
+          throw new Error("Unexpected comparison");
+        }
+      });
+      const prepared = await graph.prepare(
+        await sources.read({ ...local(root), definitionPath })
+      );
+      try {
+        await fs.writeFile(path.join(root, definitionPath), "edited model");
+        await fs.writeFile(configPath, '{"extensions":{}}');
+        await fs.writeFile(artifactPath, "edited types");
+        expect(await graph.compilePrepared(prepared)).toEqual([
+          "original graph"
+        ]);
+        const edited = await sources.stage({
+          status: "present",
+          source: prepared.selection.source,
+          content: "edited model"
+        });
+        try {
+          expect(edited.fingerprint).not.toBe(prepared.staged?.fingerprint);
+        } finally {
+          await edited.dispose();
+        }
+      } finally {
+        await graph.disposePrepared(prepared);
+      }
+      expect(await fs.readFile(artifactPath, "utf8")).toBe("edited types");
+      expect(await fs.readdir(path.join(root, "staging"))).toEqual([]);
+    }
+  );
+
   it("uses authorized saved workspace content, including empty preferred definitions", async () => {
     const root = await fixture();
     await fs.mkdir(path.join(root, ".radius"));
@@ -485,7 +656,7 @@ describe("graph source bindings", () => {
       if (selected.status !== "present") throw new Error("Expected model");
       const staged = await sources.stage(selected);
       try {
-        expect(staged.owned).toBe(kind === "github");
+        expect(staged.owned).toBe(true);
         expect(
           await fs.readFile(path.join(staged.dir, "bicepconfig.json"))
         ).toEqual(config);

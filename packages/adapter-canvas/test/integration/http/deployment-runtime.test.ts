@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ChildProcess, execFileSync } from "node:child_process";
+import { ChildProcess, execFileSync, execFile } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,7 +75,15 @@ function harness(
   });
   const cli = vi.fn<
     NonNullable<Parameters<typeof createTestCanvasServerRuntime>[0]["cliExec"]>
-  >((_command, args, _options, callback) => {
+  >((command, args, _options, callback) => {
+    if (command === "git") {
+      return execFile(
+        command,
+        args,
+        { timeout: 5000 },
+        (error, stdout, stderr) => callback(error, stdout, stderr)
+      );
+    }
     const endpoint = args
       .find((arg) => /^\/?repos\//.test(arg))
       ?.replace(/^\/?/, "/");
@@ -374,7 +382,10 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
           "models/custom.bicep not present"
         );
         expect(build).not.toHaveBeenCalled();
-        expect(h.cli.mock.calls).toEqual([]);
+        expect(h.cli.mock.calls.map(([command]) => command)).toEqual([
+          "git",
+          "git"
+        ]);
         expect(entry.state.plannedResources).toBeUndefined();
         return;
       }

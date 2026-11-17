@@ -16,7 +16,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   runArtifactSmoke,
@@ -308,6 +308,112 @@ describe("packaged Bicep literal credential detector", () => {
     expect(`${key}: { value: 'strict' }`).not.toMatch(
       LITERAL_CREDENTIAL_ASSIGNMENT
     );
+  });
+});
+
+describe("JSONC module compatibility", () => {
+  it.each(["playwright.config.ts", "playwright.visual.config.ts"])(
+    "loads production sources during native %s discovery",
+    (config) => {
+      const result = spawnSync(
+        process.execPath,
+        [
+          createRequire(import.meta.url).resolve("@playwright/test/cli"),
+          "test",
+          "--config",
+          join(REPO_ROOT, "packages", "adapter-canvas", config),
+          "--list",
+          "--reporter=line"
+        ],
+        { cwd: REPO_ROOT, encoding: "utf8", timeout: 15_000 }
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toMatch(/Total: [1-9]\d* tests in [1-9]\d* files?/);
+    }
+  );
+
+  it("stages and compiles JSONC configuration through the production Node bundle", () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-jsonc-bundle-")
+    );
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      writeFileSync(
+        join(buildDirectory, "src", "extension.ts"),
+        'export { stageGraphArtifacts } from "@radius-project/adapter-shared";\n' +
+          'export { writeBicepCompileConfig } from "../../adapter-shared/src/rad.js";\n'
+      );
+      const built = spawnSync(process.execPath, ["build.mjs"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        timeout: 20_000,
+        env: { ...process.env, RADIUS_SOURCE_REF: SOURCE_REF }
+      });
+      expect(built.error).toBeUndefined();
+      expect(built.status, built.stderr).toBe(0);
+
+      const artifact = pathToFileURL(
+        join(workspaceRoot, ".artifacts", "radius", ARTIFACT_RELATIVE_PATH)
+      ).href;
+      const config = `{
+        // Keep repository configuration and trailing commas.
+        "extensions": { "radius": "br:registry.example/radius:v1", },
+        "analyzers": { "core": { "enabled": false, }, },
+      }`;
+      const executed = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+            import assert from "node:assert/strict";
+            import fs from "node:fs";
+            import path from "node:path";
+            import { stageGraphArtifacts, writeBicepCompileConfig } from ${JSON.stringify(artifact)};
+            const config = ${JSON.stringify(config)};
+            const staged = await stageGraphArtifacts({
+              status: "present",
+              content: "model",
+              source: {
+                kind: "github",
+                repo: "owner/repository",
+                ref: "feature",
+                revision: "a".repeat(40),
+                definitionPath: ".radius/app.bicep"
+              }
+            }, {
+              readBytes: async () => ({ status: "present", bytes: Buffer.from(config) }),
+              stagingRoot: ".",
+              redactDiagnostic: (message) => message
+            });
+            try {
+              assert.equal(fs.readFileSync(path.join(staged.dir, "bicepconfig.json"), "utf8"), config);
+              const compiled = writeBicepCompileConfig(".", staged.dir);
+              assert.equal(compiled.extensions.radius, "br:registry.example/radius:v1");
+              assert.deepEqual(compiled.analyzers, { core: { enabled: false } });
+              assert.equal(compiled.experimentalFeaturesEnabled.extensibility, true);
+            } finally {
+              await staged.dispose();
+            }
+          `
+        ],
+        {
+          cwd: workspaceRoot,
+          encoding: "utf8",
+          timeout: 5_000,
+          env: {
+            ...process.env,
+            HOME: workspaceRoot,
+            USERPROFILE: workspaceRoot
+          }
+        }
+      );
+      expect(executed.error).toBeUndefined();
+      expect(executed.status, executed.stderr).toBe(0);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
   });
 });
 

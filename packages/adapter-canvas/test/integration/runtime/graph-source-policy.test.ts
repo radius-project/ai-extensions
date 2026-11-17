@@ -6,6 +6,7 @@ import {
   readFile,
   readdir
 } from "node:fs/promises";
+import { execFileSync, execFile } from "node:child_process";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -40,6 +41,11 @@ async function fixture(
     recursive: true
   });
   await writeFile(path.join(workspace, definitionPath), localContent);
+  execFileSync(
+    "git",
+    ["init", "--initial-branch", workspaceBranch, workspace],
+    { stdio: "pipe" }
+  );
   const configPath = path.posix.join(
     path.posix.dirname(definitionPath),
     "bicepconfig.json"
@@ -62,6 +68,12 @@ async function fixture(
   const effects: string[] = [];
   const execute = vi.fn<DeploymentCommandExecutor>(
     (command, args, _options, callback) => {
+      if (command === "git") {
+        execFile(command, args, { timeout: 5000 }, (error, stdout, stderr) =>
+          callback(error, stdout, stderr)
+        );
+        return {};
+      }
       expect(command).toBe("gh");
       const endpoint = args[1];
       effects.push(`read:${endpoint}`);
@@ -189,6 +201,26 @@ async function fixture(
 }
 
 describe("registered runtime graph source policy", () => {
+  it("rejects a stale captured workspace branch before compiling another checkout", async () => {
+    const f = await fixture("feature");
+    try {
+      execFileSync(
+        "git",
+        ["-C", f.workspace, "symbolic-ref", "HEAD", "refs/heads/other"],
+        { stdio: "pipe" }
+      );
+      await writeFile(path.join(f.workspace, MODEL_PATH), model("wrongBranch"));
+      await f.open();
+      expect(f.harness.servers.get("radius-panel")?.state.diffError).toContain(
+        "Workspace branch changed"
+      );
+      expect(f.compiler).not.toHaveBeenCalled();
+      expect(f.effects).not.toContain(`read:/repos/${REPO}/commits/feature`);
+    } finally {
+      await f.close();
+    }
+  });
+
   it.each(["main", "feature"])(
     "keeps dirty matching %s local in Canvas but compares GitHub commits in the PR tool",
     async (workspaceBranch) => {
@@ -531,7 +563,7 @@ describe("registered runtime graph source policy", () => {
         expect(entry?.state.diffError).toBeUndefined();
         expect(
           f.effects.filter((effect) => effect.startsWith("dispose:"))
-        ).toEqual(["dispose:main"]);
+        ).toEqual(["dispose:main", "dispose:feature"]);
         expect(await readdir(path.join(f.root, "staged"))).toEqual([]);
         expect(f.harness.session.send).not.toHaveBeenCalled();
       } finally {

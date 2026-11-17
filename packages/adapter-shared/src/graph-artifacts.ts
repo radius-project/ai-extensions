@@ -1,17 +1,14 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { parse, type ParseError } from "jsonc-parser/lib/esm/main.js";
+import { parse, type ParseError } from "jsonc-parser";
 import {
   GraphSourceError,
   type GraphSourceIdentity,
   type PresentGraphSource,
   type StagedGraphArtifacts
 } from "@radius-project/core";
-import {
-  confinedGraphPath,
-  type GraphBytesRead
-} from "./graph-source-bindings.js";
+import type { GraphBytesRead } from "./graph-source-bindings.js";
 
 export interface GraphArtifactPorts {
   readBytes(
@@ -114,19 +111,6 @@ async function stageArtifacts(
     }
   }
   const fingerprint = hash.digest("hex");
-  if (source.kind === "workspace") {
-    if (!source.workspacePath) fail("Workspace graph source has no directory.");
-    const dir =
-      definitionDir === "." ?
-        source.workspacePath
-      : await confinedGraphPath(source.workspacePath, definitionDir);
-    return {
-      dir,
-      owned: false,
-      fingerprint,
-      dispose: async () => {}
-    };
-  }
   if (config.status === "absent")
     return {
       dir: "",

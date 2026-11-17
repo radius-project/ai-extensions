@@ -193,35 +193,41 @@ describe("graph artifact staging", () => {
     expect(await fs.readdir(ports.stagingRoot)).toEqual([]);
   });
 
-  it("borrows a confined workspace directory and never removes its files", async () => {
-    const root = await fixture();
-    await fs.mkdir(path.join(root, ".radius"));
-    await fs.writeFile(path.join(root, ".radius", "app.bicep"), "saved");
-    const { ports } = harness(root, {
-      ".radius/bicepconfig.json": { status: "absent" }
-    });
-    const input = selection();
-    input.source = { ...input.source, kind: "workspace", workspacePath: root };
-    const staged = await stageGraphArtifacts(input, ports);
-    expect(staged).toMatchObject({
-      owned: false,
-      dir: path.join(root, ".radius")
-    });
-    await staged.dispose();
-    expect(await fs.readFile(path.join(staged.dir, "app.bicep"), "utf8")).toBe(
-      "saved"
-    );
-    input.source.definitionPath = "app.bicep";
-    ports.readBytes = async () => ({ status: "absent" });
-    expect(await stageGraphArtifacts(input, ports)).toMatchObject({
-      owned: false,
-      dir: root
-    });
-    input.source.workspacePath = undefined;
-    await expect(stageGraphArtifacts(input, ports)).rejects.toMatchObject({
-      code: "invalid-artifact"
-    });
-  });
+  it.each(["app.bicep", ".radius/app.bicep"])(
+    "keeps a no-config workspace result empty for %s without borrowing mutable files",
+    async (definitionPath) => {
+      const root = await fixture();
+      const model = path.join(root, definitionPath);
+      await fs.mkdir(path.dirname(model), { recursive: true });
+      await fs.writeFile(model, "saved");
+      const { ports } = harness(root, {
+        [path.posix.join(
+          path.posix.dirname(definitionPath),
+          "bicepconfig.json"
+        )]: { status: "absent" }
+      });
+      const input = selection(definitionPath);
+      input.source = {
+        ...input.source,
+        kind: "workspace",
+        workspacePath: root
+      };
+      const staged = await stageGraphArtifacts(input, ports);
+      expect(staged).toMatchObject({
+        owned: false,
+        dir: ""
+      });
+      await fs.writeFile(
+        path.join(path.dirname(model), "bicepconfig.json"),
+        "{}"
+      );
+      await staged.dispose();
+      expect(await fs.readFile(model, "utf8")).toBe("saved");
+      await expect(fs.stat(ports.stagingRoot)).rejects.toMatchObject({
+        code: "ENOENT"
+      });
+    }
+  );
 
   it("changes fingerprints when supporting binary content changes and isolates concurrent staging", async () => {
     const root = await fixture();

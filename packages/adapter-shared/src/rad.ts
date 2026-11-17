@@ -32,7 +32,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parse, type ParseError } from "jsonc-parser/lib/esm/main.js";
+import { parse, type ParseError } from "jsonc-parser";
 import type { IncomingMessage } from "node:http";
 import {
   applicationGraphToResources,

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { execFileSync, execFile } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -239,6 +240,11 @@ describe("graphs-planning writes real-loopback HIT", () => {
     async (workspaceBranch) => {
       const root = await mkdtemp(path.join(tmpdir(), "radius-http-graph-"));
       try {
+        execFileSync(
+          "git",
+          ["init", "--initial-branch", workspaceBranch, root],
+          { stdio: "pipe" }
+        );
         await mkdir(path.join(root, ".radius"));
         await writeFile(path.join(root, ".radius", "app.bicep"), "dirty-model");
         const effects: string[] = [];
@@ -246,7 +252,16 @@ describe("graphs-planning writes real-loopback HIT", () => {
         const sources = createGraphSourceBindings({
           stagingRoot: root,
           redactDiagnostic: (message) => message,
-          execute: (_command, args, _options, callback) => {
+          execute: (command, args, _options, callback) => {
+            if (command === "git") {
+              execFile(
+                command,
+                args,
+                { timeout: 5000 },
+                (error, stdout, stderr) => callback(error, stdout, stderr)
+              );
+              return {};
+            }
             const apiPath = args[1] || "";
             effects.push(apiPath);
             if (apiPath.startsWith("/repos/octo/app/commits/")) {
@@ -341,6 +356,25 @@ describe("graphs-planning writes real-loopback HIT", () => {
           compared.diff.some((resource) => resource.name === "dirty-model")
         ).toBe(true);
         expect(effects).toEqual(directEffects);
+        expect(effects).not.toContain(
+          `/repos/octo/app/commits/${workspaceBranch}`
+        );
+        effects.length = 0;
+        execFileSync(
+          "git",
+          ["-C", root, "symbolic-ref", "HEAD", "refs/heads/other"],
+          { stdio: "pipe" }
+        );
+        const stale = await post(
+          entry.baseUrl,
+          "/api/diff-branches",
+          JSON.stringify({ repo: "octo/app", base: "base", head: "head" })
+        );
+        expect(stale.ok).toBe(false);
+        expect(await stale.text()).toContain("Workspace branch changed");
+        expect(effects.some((effect) => effect.startsWith("compile:"))).toBe(
+          false
+        );
         expect(effects).not.toContain(
           `/repos/octo/app/commits/${workspaceBranch}`
         );

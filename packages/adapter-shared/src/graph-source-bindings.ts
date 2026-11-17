@@ -94,6 +94,28 @@ export function createGraphSourceBindings(
       error instanceof Error ? error.message : String(error)
     );
 
+  async function assertWorkspaceBranch(
+    source: GraphSourceIdentity,
+    workspacePath: string
+  ) {
+    const branch = await new Promise<string>((resolve, reject) => {
+      options.execute(
+        "git",
+        ["-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD"],
+        { timeout: 5000 },
+        (error, stdout, stderr) => {
+          if (error)
+            reject(new Error(stderr || "Workspace branch is unavailable."));
+          else resolve(stdout.trim());
+        }
+      );
+    });
+    if (branch !== source.ref)
+      throw new Error(
+        `Workspace branch changed: expected ${source.ref}, found ${branch || "no branch"}.`
+      );
+  }
+
   async function readBytes(
     source: GraphSourceIdentity,
     repoPath: string
@@ -103,9 +125,11 @@ export function createGraphSourceBindings(
       if (source.kind === "workspace") {
         if (!source.workspacePath)
           throw new Error("Workspace source has no authorized directory.");
+        await assertWorkspaceBranch(source, source.workspacePath);
         const file = await confinedGraphPath(source.workspacePath, normalized);
+        let result: GraphBytesRead;
         try {
-          return { status: "present", bytes: await fs.readFile(file) };
+          result = { status: "present", bytes: await fs.readFile(file) };
         } catch (error) {
           if (
             error &&
@@ -113,9 +137,11 @@ export function createGraphSourceBindings(
             "code" in error &&
             error.code === "ENOENT"
           )
-            return { status: "absent" };
-          throw error;
+            result = { status: "absent" };
+          else throw error;
         }
+        await assertWorkspaceBranch(source, source.workspacePath);
+        return result;
       }
       if (!source.revision || !/^[a-f0-9]{40}$/i.test(source.revision))
         throw new Error("GitHub graph source has no resolved revision.");
