@@ -19,10 +19,15 @@ export {
 } from "./deployed.js";
 export type { DeployStatus } from "./deployed.js";
 export { graphContextKey, normalizeLiveGraph } from "./live.js";
+export { normalizeLegacyLiveGraph } from "./legacy-live.js";
 export type {
   GraphContext,
   GraphResource,
   LiveGraph,
+  LegacyLiveGraph,
+  LegacyResource,
+  LegacyConnection,
+  LegacyAppGraphData,
   LiveGraphResource,
   LiveGraphWarning,
   LiveGraphWarningCode,

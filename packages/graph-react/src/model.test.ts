@@ -305,6 +305,15 @@ describe("radiusNormalizeIcon", () => {
 });
 
 describe("radiusNormalizeIconSource", () => {
+  it("isolates raw SVG with an XML declaration and comments without losing its paint policy", () => {
+    const raw =
+      '<?xml version="1.0"?>\n<!-- registered definition -->\n<svg width="8" height="8" fill="currentColor"/>';
+    const icon = radiusNormalizeIconSource(raw);
+    expect(
+      decodeURIComponent(icon.src.slice("data:image/svg+xml,".length))
+    ).toBe(raw);
+    expect(icon.monochrome).toBe(true);
+  });
   it("recognizes the Radius v0.61 mask and currentColor icon format", () => {
     const out = radiusNormalizeIconSource(
       '<svg viewBox="0 0 8 8" fill="none"><mask id="resource-icon"><path d="M1 1h6v6H1z" fill="white"/></mask><rect width="8" height="8" fill="currentColor" mask="url(#resource-icon)"/></svg>'

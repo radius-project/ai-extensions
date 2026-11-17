@@ -13,11 +13,16 @@ const graph = normalizeLiveGraph(
         id: prefix + "containers/web",
         name: "web",
         type: "Radius.Core/containers",
+        iconHash: "f".repeat(64),
         provisioningState: "CandidatePending",
         connections: [{ id: prefix + "databases/db", direction: "Outbound" }]
       },
       { id: prefix + "databases/db", name: "db", type: "Radius.Core/databases" }
-    ]
+    ],
+    icons: {
+      ["f".repeat(64)]:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" onload="document.body.dataset.iconExecuted = 1"><script>document.body.dataset.iconExecuted = 1</script><image href="https://icons.example.test/beacon"/><rect width="13" height="13" fill="#126789"/></svg>'
+    }
   },
   {
     connectionId: "isolated-packed-smoke",

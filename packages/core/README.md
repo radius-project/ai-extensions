@@ -4,6 +4,43 @@
 
 The `@radius-project/core` npm package exports only the browser-safe `@radius-project/core/graph` and `@radius-project/core/domain` subpaths, with compiled ESM and TypeScript declarations. The root barrel and the modeling, platform, remediation, and workflow modules are workspace-only APIs. See the [React graph library](../graph-react/README.md) for a consumer example and the [npm release guide](../../docs/eng/RELEASING.md#releasing-npm-graph-libraries) for publication.
 
+## Public Radius queries
+
+`@radius-project/core/domain` exports `createRadiusQueryClient`, resource and recipe types, exact equivalent-type helpers, and the pure `aggregateRecipes` function. The client owns query paths, version discovery, equivalent-type merging, and resource hydration. It imports no HTTP client, credentials, Backstage code, or browser globals. The host supplies a `RadiusQueryPort` that returns decoded responses and rejects HTTP failures.
+
+```typescript
+import { createRadiusQueryClient } from "@radius-project/core/domain";
+import type { RadiusQueryPort } from "@radius-project/core/domain";
+
+function applicationQueries(port: RadiusQueryPort, signal: AbortSignal) {
+  const client = createRadiusQueryClient(port, {
+    connectionId: "selected-connection",
+    plane: { type: "radius", name: "local" }
+  });
+  return client.listApplications({ signal });
+}
+```
+
+The port receives `{ connectionId, plane, method, path, signal, body? }`. Paths include `/apis/api.ucp.dev/v1alpha3` and the API version. When `body` is present, the host must serialize it as JSON and set `Content-Type: application/json`; do not add a body to other requests. The host maps the explicit connection to its transport; the client never chooses a cluster. Cancellation reaches discovery, inventory, resource, and graph requests. Hosts must stop their transport when the signal aborts and own timeout policy. The client limits in-flight requests across all operations, including nested discovery, to four by default; `concurrency` accepts integers from one to 32. It holds no cross-client cache.
+
+`getResourceById<T>({ id, signal? })` requires a full UCP resource ID on the selected plane and fills a missing environment from the referenced application. Typed lists return their records directly. `listResources<T>({ resourceType?, resourceGroup?, signal? })`, `listApplications<T>`, and `listEnvironments<T>` return `{ value, complete, errors }`. Equivalent application and environment lists merge legacy `Applications.Core` before `Radius.Core`, with the first exact ID retained. Untyped inventory lists groups, then resources, then retrieves each resource; it omits `Microsoft.Resources/deployments`. Partial group, type, or resource failures remain in `errors`; an operation with no successful requests rejects with its first error. Empty successful lists remain empty.
+
+`getResourceType({ namespace, typeName, signal? })` first uses the specific discovery endpoint, then the provider inventory if that endpoint fails. `listResourceTypes({ signal? })` includes all namespaces with at least one API version. Queries choose the first discovered API version, or `2023-10-01-preview` if discovery is unavailable or has no versions. This default is an explicit older-control-plane compatibility rule; cancellation never triggers it. Resource and graph transport failures propagate without fallback.
+
+`getApplicationGraph({ applicationId, signal? })` makes a POST and returns the raw `ApplicationGraphResponse` unchanged. For `Radius.Core/applications` with a discovered date-based API version at or after `2025-08-01` (including `-preview`), it sends `{ includeIcons: true }`. Legacy `Applications.Core`, older API versions, and unknown version formats keep the body-free request. This follows the [Radius graph request and response contract](https://github.com/radius-project/radius/blob/48e219b73b3a94dcfd26a25470d15813599aa42f/pkg/corerp/api/v20250801preview/zz_generated_models.go).
+
+The client validates the application context and resources array, but does not normalize direction, filter records, synthesize status, or repair connections. Hosts choose their explicit source adapter, then call `normalizeLiveGraph` or `normalizeLegacyLiveGraph` from `/graph`. Both resolve each resource's `iconHash` through the response's `icons` map into optional `LiveGraphResource.icon` raw SVG. References must be 64 lowercase hex characters with an own string map entry that starts with an SVG root. Missing or null references use existing renderer fallbacks; unresolved or invalid references add an `invalid-icon` warning without dropping the resource. Icons remain untrusted: render them as isolated images, never insert them as HTML. The graph guard accepts both single-segment `Applications.Core/applications` and `Radius.Core/applications` IDs on the selected plane and retains their original IDs. Modeled graph hash requirements do not change.
+
+`aggregateRecipes(environment, packsById)` uses only supplied data. It retains inline recipe order and duplicates, then linked-pack order. Pack lookup is case-insensitive, with the last matching key retained; missing packs are skipped. Hosts must load packs and report loading failures separately.
+
+## Legacy public contracts
+
+`parseLegacyResourceId` from `/domain` calls the canonical parser and projects `LegacyResourceId`: `{ plane, group, type, name }`. `plane` is the plane name, `group` is the resource group, and `type` is the full namespace/type. Values retain their original casing. This projection accepts only a Radius plane, one resource-group scope, and one resource segment. It rejects ARM, AWS, global, missing-group, and nested IDs rather than truncating them. Legal names with dots, underscores, and digits are accepted; rejecting these names was a defect in the old restricted parser. `isApplicationType` and `isEnvironmentType` accept an omitted type and return `false`.
+
+`normalizeLegacyLiveGraph` from `/graph` adapts the explicitly selected legacy graph policy once. Ordinary Outbound connections point from dependency to owner; ordinary Inbound connections point from owner to dependency. Only an Inbound connection whose ID parses to the exact full type `Applications.Core/gateways` or `Radius.Compute/routes`, compared case-insensitively, points from dependency to owner. The canonical ID determines this rule even when the supplied connection type is absent or conflicts with the ID. Similar names in other namespaces and nested types are ordinary types. This does not change `normalizeLiveGraph` direction semantics.
+
+Without a context, the legacy normalizer returns the explicit `legacy-live` graph variant; it does not invent an application or connection ID. With a real `GraphContext`, it applies the same strict context validation as `normalizeLiveGraph`. Both paths retain resource IDs, names, full types, and raw provisioning states without Canvas filtering. They never mutate the input. Self and dangling connections are dropped with warnings, identical resources are coalesced with a warning, conflicting duplicates fail, and duplicate presentation edges are coalesced. These are deliberate corrections to old graph defects, not preservation of invalid edges.
+
 ## Workspace architecture
 
 Radius Canvas is the application-modeling and deployment product for the GitHub Copilot app. This document describes how the code is laid out after the modularization refactor (see [`docs/design/radius-extension-modularization.md`](../../docs/design/radius-extension-modularization.md)) and gives step-by-step guides for the three changes contributors make most often: **adding a compute platform**, **adding a canvas action/tool**, and **adding a whole new UI adapter**.
@@ -48,7 +85,7 @@ rather than a fork.
 
 Everything provider-specific lives behind the `ComputePlatform` interface
 (`src/platforms/types.ts`): the platform's id, display name, cluster service
-name, and portal deep-links. Workflow selection is *not* behind the interface —
+name, and portal deep-links. Workflow selection is _not_ behind the interface —
 `workflows/verify.ts` keeps its own `VERIFY_FILE_BY_PLATFORM` map, so a platform
 registered without an entry there resolves no verify template.
 

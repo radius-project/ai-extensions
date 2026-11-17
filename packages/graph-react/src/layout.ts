@@ -12,6 +12,14 @@ export const GRAPH_NODE_WIDTH = 220;
 export const GRAPH_NODE_HEIGHT = 118;
 const STACK_GAP = 48;
 
+function compareIdentities(left: string, right: string): number {
+  return (
+    left < right ? -1
+    : left > right ? 1
+    : 0
+  );
+}
+
 export interface DagreNodeSize {
   width: number;
   height: number;
@@ -52,8 +60,16 @@ export function layoutGraph(
   nodes: readonly GraphNode[],
   edges: readonly GraphEdge[]
 ): string | null {
+  const orderedNodes = [...nodes].sort((left, right) =>
+    compareIdentities(left.id, right.id)
+  );
+  const orderedEdges = [...edges].sort((left, right) => {
+    const a = JSON.stringify([left.source, left.target]);
+    const b = JSON.stringify([right.source, right.target]);
+    return compareIdentities(a, b);
+  });
   if (!dagre) {
-    stack(nodes);
+    stack(orderedNodes);
     return "Layout unavailable. Resources are displayed in a vertical list.";
   }
   try {
@@ -67,13 +83,13 @@ export function layoutGraph(
       ranker: "network-simplex"
     });
     graph.setDefaultEdgeLabel(() => ({}));
-    for (const node of nodes) {
+    for (const node of orderedNodes) {
       graph.setNode(node.id, {
         width: GRAPH_NODE_WIDTH,
         height: GRAPH_NODE_HEIGHT
       });
     }
-    for (const edge of edges) {
+    for (const edge of orderedEdges) {
       if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
         graph.setEdge(edge.source, edge.target);
       }
@@ -105,7 +121,7 @@ export function layoutGraph(
   } catch {
     // A layout failure happens before dagre exposes usable placements. Stack the
     // whole graph so placeholder (0, 0) positions do not collapse every card.
-    stack(nodes);
+    stack(orderedNodes);
     return "Layout failed. Resources are displayed in a vertical list.";
   }
 }

@@ -43,6 +43,8 @@ export interface LiveGraphResource {
   readonly id: string;
   readonly name: string;
   readonly type: string;
+  /** Untrusted SVG from the resource-type definition; render as an image, not HTML. */
+  readonly icon?: string;
   readonly provider?: string;
   readonly provisioningState?: string;
   readonly connections: readonly {
@@ -56,6 +58,7 @@ export type LiveGraphWarningCode =
   | "duplicate-resource"
   | "invalid-resource-id"
   | "invalid-connection"
+  | "invalid-icon"
   | "unresolved-connection";
 
 /**
@@ -78,9 +81,42 @@ export interface LiveGraph {
   readonly warnings: readonly LiveGraphWarning[];
 }
 
+/** Explicit context-free compatibility input, not a selected live query. */
+export interface LegacyLiveGraph {
+  readonly kind: "legacy-live";
+  readonly resources: readonly LiveGraphResource[];
+  readonly warnings: readonly LiveGraphWarning[];
+}
+
+export interface LegacyConnection {
+  id: string;
+  name: string;
+  type: string;
+  provider: string;
+  direction: "Outbound" | "Inbound";
+}
+
+export interface LegacyResource {
+  id: string;
+  name: string;
+  type: string;
+  provider: string;
+  icon?: string;
+  iconHash?: string | null;
+  provisioningState: string;
+  resources?: LegacyResource[];
+  connections?: LegacyConnection[];
+}
+
+export interface LegacyAppGraphData {
+  name: string;
+  resources: LegacyResource[];
+  icons?: Record<string, string | null>;
+}
+
 export interface ModeledGraph {
   readonly kind: "modeled" | "planned" | "deployed-projection" | "diff";
   readonly resources: readonly GraphResource[];
 }
 
-export type RadiusGraphData = LiveGraph | ModeledGraph;
+export type RadiusGraphData = LiveGraph | LegacyLiveGraph | ModeledGraph;

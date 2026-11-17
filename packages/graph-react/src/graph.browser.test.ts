@@ -10,7 +10,10 @@ import { screen, waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { createElement as h, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { normalizeLiveGraph } from "@radius-project/core/graph";
+import {
+  normalizeLiveGraph,
+  normalizeLegacyLiveGraph
+} from "@radius-project/core/graph";
 import { RadiusGraph } from "./graph.js";
 import { buildGraph, resolveGraphSettings } from "./build.js";
 import { mountRadiusGraph } from "./mount.js";
@@ -141,6 +144,87 @@ describe("public host-neutral React API", () => {
     type: "Radius.Core/containers",
     provisioningState: "CustomPending"
   };
+
+  it.each(["live", "legacy-live"] as const)(
+    "renders %s definition SVG only in an isolated image, with no executable DOM or external loads",
+    async (kind) => {
+      const { root, element } = host();
+      const hash = "c".repeat(64);
+      const svg =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" onload="document.body.dataset.iconExecuted = 1"><script>document.body.dataset.iconExecuted = 1</script><image href="https://icons.example.test/beacon"/><rect width="16" height="16" fill="#126789"/></svg>';
+      const payload = {
+        resources: [{ ...resource, iconHash: hash }],
+        icons: { [hash]: svg }
+      };
+      const graph =
+        kind === "live" ?
+          normalizeLiveGraph(payload, context)
+        : normalizeLegacyLiveGraph(payload);
+      root.render(h(RadiusGraph, { graph }));
+      await within(element).findByRole("group", { name: resource.name });
+      const image = element.querySelector<HTMLImageElement>(
+        "[data-radius-part=icon]"
+      );
+      if (!image) throw new Error("Missing definition icon.");
+      await waitFor(() => {
+        expect(image.complete).toBe(true);
+        expect(image.naturalWidth).toBeGreaterThan(0);
+      });
+      expect(
+        decodeURIComponent(image.src.slice("data:image/svg+xml,".length))
+      ).toContain(svg.slice(svg.indexOf("<script>"), svg.indexOf("</svg>")));
+      expect(
+        element.querySelector(".rad-node svg,.rad-node script,.rad-node image")
+      ).toBeNull();
+      expect(document.body.dataset.iconExecuted).toBeUndefined();
+      expect(
+        element.querySelector("[data-node-id]")?.getAttribute("data-node-id")
+      ).toBe(resource.id);
+    }
+  );
+
+  it.each([false, true])(
+    "falls back after an unreadable definition image with currentColor=%s and accepts later artwork",
+    async (monochrome) => {
+      const { root, element } = host();
+      const hash = "d".repeat(64);
+      const render = (svg: string) =>
+        root.render(
+          h(RadiusGraph, {
+            graph: normalizeLiveGraph(
+              {
+                resources: [{ ...resource, iconHash: hash }],
+                icons: { [hash]: svg }
+              },
+              context
+            )
+          })
+        );
+      render(
+        `<svg xmlns="http://www.w3.org/2000/svg"${monochrome ? ' fill="currentColor"' : ""}><broken>`
+      );
+      await within(element).findByRole("group", { name: resource.name });
+      await waitFor(() => {
+        const image = element.querySelector<HTMLImageElement>(
+          "img[data-radius-part=icon]"
+        );
+        expect(image?.src).not.toContain("broken");
+        expect(image?.naturalWidth).toBeGreaterThan(0);
+      });
+      render(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="9" height="9"><rect width="9" height="9" fill="#123456"/></svg>'
+      );
+      await waitFor(() => {
+        const image = element.querySelector<HTMLImageElement>(
+          "img[data-radius-part=icon]"
+        );
+        expect(decodeURIComponent(image?.src || "")).toContain(
+          'fill="#123456"'
+        );
+        expect(image?.naturalWidth).toBeGreaterThan(0);
+      });
+    }
+  );
 
   it("rejects a non-DOM mount target", () => {
     expect(() =>
@@ -291,43 +375,121 @@ describe("public host-neutral React API", () => {
     expect(element.querySelector(".host-class")).not.toBeNull();
   });
 
-  it("renders live UCP without hashes, source controls or synthesized deployment success", async () => {
-    const { root, element } = host();
-    const selected: string[] = [];
-    const navigated: string[] = [];
-    root.render(
-      h(RadiusGraph, {
-        graph: normalizeLiveGraph({ resources: [resource] }, context),
-        theme: { background: "#101010", text: "#ffffff", colorScheme: "dark" },
-        callbacks: {
-          onSelect: (node) => selected.push(node.id),
-          onNavigate: (node) => navigated.push(node.id)
-        }
-      })
-    );
-    const node = await within(element).findByRole("group", {
-      name: "live-web"
-    });
-    expect(
-      within(node).getByLabelText("Provisioning status: CustomPending")
-    ).toBeTruthy();
-    expect(within(node).queryByText("View source code")).toBeNull();
-    expect(within(node).queryByAltText("Deployed")).toBeNull();
-    await userEvent.click(
-      within(node).getByRole("button", { name: "Show details" })
-    );
-    expect(selected).toEqual([resource.id]);
-    expect(
-      await within(element).findByText("Provisioning status: CustomPending")
-    ).toBeTruthy();
-    await userEvent.click(
-      within(node).getByRole("button", { name: "Open live-web" })
-    );
-    expect(navigated).toEqual([resource.id]);
-    expect(
-      element.querySelector(".radius-graph")?.getAttribute("style")
-    ).toContain("color-scheme: dark");
-  });
+  it.each(["Radius.Core", "Applications.Core"])(
+    "renders %s live UCP without hashes, source controls or synthesized deployment success",
+    async (namespace) => {
+      const { root, element } = host();
+      const selected: string[] = [];
+      const navigated: string[] = [];
+      root.render(
+        h(RadiusGraph, {
+          graph: normalizeLiveGraph(
+            { resources: [resource] },
+            {
+              ...context,
+              applicationId: prefix + namespace + "/applications/app"
+            }
+          ),
+          theme: {
+            background: "#101010",
+            text: "#ffffff",
+            colorScheme: "dark"
+          },
+          callbacks: {
+            onSelect: (node) => selected.push(node.id),
+            onNavigate: (node) => navigated.push(node.id)
+          }
+        })
+      );
+      const node = await within(element).findByRole("group", {
+        name: "live-web"
+      });
+
+      expect(
+        within(node).getByLabelText("Provisioning status: CustomPending")
+      ).toBeTruthy();
+      expect(within(node).queryByText("View source code")).toBeNull();
+      expect(within(node).queryByAltText("Deployed")).toBeNull();
+      await userEvent.click(
+        within(node).getByRole("button", { name: "Show details" })
+      );
+      expect(selected).toEqual([resource.id]);
+      expect(
+        await within(element).findByText("Provisioning status: CustomPending")
+      ).toBeTruthy();
+      await userEvent.click(
+        within(node).getByRole("button", { name: "Open live-web" })
+      );
+      expect(navigated).toEqual([resource.id]);
+      expect(
+        element.querySelector(".radius-graph")?.getAttribute("style")
+      ).toContain("color-scheme: dark");
+    }
+  );
+
+  it.each([
+    "Other.Core/applications",
+    "Applications.Core.Other/applications",
+    "Applications.Core/environments",
+    "Radius.Core/environments"
+  ])(
+    "reports invalid live context %s at the renderer boundary",
+    async (type) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { root, element } = host();
+      const errors: unknown[] = [];
+      root.render(
+        h(RadiusGraph, {
+          graph: {
+            kind: "live",
+            context: { ...context, applicationId: prefix + type + "/app" },
+            resources: [{ ...resource, connections: [] }],
+            warnings: []
+          },
+          callbacks: { onError: (error) => errors.push(error) }
+        })
+      );
+      await within(element).findByRole("alert");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(TypeError);
+      expect(
+        within(element).queryByRole("group", { name: "live-web" })
+      ).toBeNull();
+    }
+  );
+
+  it.each(["Radius.Core", "Applications.Core"])(
+    "reports wrong plane and nested %s application contexts",
+    async (namespace) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      for (const applicationId of [
+        prefix.replace("/radius/local/", "/radius/other/") +
+          namespace +
+          "/applications/app",
+        prefix.replace("/radius/local/", "/other/local/") +
+          namespace +
+          "/applications/app",
+        prefix + namespace + "/applications/app/children/nested"
+      ]) {
+        const { root, element } = host();
+        const errors: unknown[] = [];
+        root.render(
+          h(RadiusGraph, {
+            graph: {
+              kind: "live",
+              context: { ...context, applicationId },
+              resources: [{ ...resource, connections: [] }],
+              warnings: []
+            },
+            callbacks: { onError: (error) => errors.push(error) }
+          })
+        );
+        await within(element).findByRole("alert");
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toBeInstanceOf(TypeError);
+      }
+    }
+  );
 
   it("renders explicit empty and partial states and updates without replacing the React root", async () => {
     const { root, element } = host();
@@ -571,7 +733,7 @@ describe("public host-neutral React API", () => {
     expect(phases).toEqual([
       {
         flowMounted: false,
-        ids: ["app/web", "app/db"]
+        ids: ["app/db", "app/web"]
       }
     ]);
     expect(db.getBoundingClientRect().top).toBeGreaterThan(
@@ -1436,6 +1598,10 @@ describe("graph view in a real browser", () => {
       /^data:image\/svg\+xml/
     );
     expect(web.querySelector(".rad-node__badge")).toBeNull();
+    expect(web.getAttribute("data-radius-icon")).toBe(
+      web.querySelector(".rad-node__icon")?.getAttribute("src")
+    );
+    expect(web.hasAttribute("data-radius-badge")).toBe(false);
     expect(web.querySelector(".rad-node__head")?.className).toBe(
       "rad-node__head"
     );
@@ -1525,12 +1691,12 @@ describe("graph view in a real browser", () => {
   });
 
   it.each([
-    ["in_progress", "In progress"],
-    ["success", "Deployed"],
-    ["failed", "Failed"]
+    ["in_progress", "In progress", "progress"],
+    ["success", "Deployed", "success"],
+    ["failed", "Failed", "failed"]
   ])(
     "labels the %s badge for assistive technology",
-    async (deployStatus, alt) => {
+    async (deployStatus, alt, renderedKind) => {
       mount({
         deployMode: true,
         resources: [{ id: "web", name: "web", deployStatus }]
@@ -1539,6 +1705,7 @@ describe("graph view in a real browser", () => {
       const badge = within(web).getByAltText(alt);
       expect(badge.className).toBe("rad-node__badge");
       expect(badge.getAttribute("src")).toMatch(/^data:image\/svg\+xml/);
+      expect(web.getAttribute("data-radius-badge")).toBe(renderedKind);
       expect(web.querySelector(".rad-node__head")?.className).toBe(
         "rad-node__head rad-node__head--with-badge"
       );
@@ -1589,7 +1756,7 @@ describe("graph view in a real browser", () => {
           id: "app/models",
           name: "models",
           type: "Radius.Compute/containers",
-          icon: '<svg viewBox="0 0 8 8"><rect fill="currentColor" /></svg>'
+          icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect fill="currentColor" /></svg>'
         }
       ]
     });
