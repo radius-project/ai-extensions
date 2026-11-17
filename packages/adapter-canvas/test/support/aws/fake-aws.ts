@@ -119,9 +119,10 @@ export interface FakeEksCluster {
 // version) when it was created with one.
 // https://docs.aws.amazon.com/eks/latest/APIReference/API_Nodegroup.html
 // UpdateNodegroupVersion moves a group to the cluster's version when no
-// `version` is given, can't roll a group back to an earlier version
-// (InvalidParameterException), and, like UpdateNodegroupConfig, refuses a
-// group that is not ACTIVE (ResourceInUseException).
+// `version` is given, can't move a group back to an earlier version or past
+// the cluster's version (InvalidParameterException), and, like
+// UpdateNodegroupConfig, refuses a group that is not ACTIVE
+// (ResourceInUseException).
 // https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupVersion.html
 export interface FakeNodegroup {
   name: string;
@@ -890,6 +891,17 @@ export class FakeAws {
         "InvalidParameterException",
         "UpdateNodegroupVersion",
         `Requested Nodegroup version ${version} is older than the current version ${group.version}.`
+      );
+    }
+    const [planeMajor = 0, planeMinor = 0] = parts(cluster.version);
+    if (
+      toMajor > planeMajor ||
+      (toMajor === planeMajor && toMinor > planeMinor)
+    ) {
+      return serviceError(
+        "InvalidParameterException",
+        "UpdateNodegroupVersion",
+        `Requested Nodegroup version ${version} is newer than the cluster version ${cluster.version}.`
       );
     }
     Object.assign(group, {

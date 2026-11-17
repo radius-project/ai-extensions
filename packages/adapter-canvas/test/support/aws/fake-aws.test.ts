@@ -855,6 +855,21 @@ describe("FakeAws EKS clusters and node groups", () => {
     expect(group).toMatchObject({ version: "1.33", status: "ACTIVE" });
   });
 
+  it("refuses a node group version newer than the control plane's", () => {
+    const { fake, group } = cluster();
+    const result = fake.run([
+      "eks",
+      "update-nodegroup-version",
+      ...MAIN,
+      "--nodegroup-name",
+      "isolated",
+      "--kubernetes-version",
+      "1.34"
+    ]);
+    expect(result.stderr).toContain("(InvalidParameterException)");
+    expect(group).toMatchObject({ version: "1.33", status: "ACTIVE" });
+  });
+
   it("describes launch template versions by number, $Default, and $Latest", () => {
     const fake = new FakeAws({ accountId: ACCOUNT });
     fake.addLaunchTemplate("us-east-2", "lt-1", {
