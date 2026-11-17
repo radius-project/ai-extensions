@@ -522,6 +522,33 @@ export function normalizeGitHubPackageCommandResult(
   };
 }
 
+/** Narrows one entry of a JSON array to an object, naming where it failed. */
+export function asRecord(
+  value: unknown,
+  context: string,
+  index: number
+): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(
+      `${context} returned a non-object entry at index ${index}; cannot read the result.`
+    );
+  return value as Record<string, unknown>;
+}
+
+/** Reads a required non-empty string field from one JSON array entry. */
+export function requireString(
+  value: unknown,
+  field: string,
+  context: string,
+  index: number
+): string {
+  if (typeof value !== "string" || value.trim() === "")
+    throw new Error(
+      `${context} returned an entry at index ${index} with no usable "${field}".`
+    );
+  return value;
+}
+
 /** Raised when an external command the fixture depends on did not succeed. */
 export class CloudCommandError extends Error {
   readonly code: number;
