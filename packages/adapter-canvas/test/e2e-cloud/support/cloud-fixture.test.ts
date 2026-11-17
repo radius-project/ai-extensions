@@ -1218,12 +1218,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.prepareCleanSlate()).rejects.toThrow(
-        new RegExp(
-          `role assignment "Contributor" for principal sp-1 at ${SCOPE.replace(
-            /\//g,
-            "\\/"
-          )}`
-        )
+        `role assignment "Contributor" for principal sp-1 at ${SCOPE}`
       );
     });
 
@@ -1245,12 +1240,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.prepareCleanSlate()).rejects.toThrow(
-        new RegExp(
-          `role assignment "Azure Kubernetes Service RBAC Cluster Admin" for principal sp-cluster at ${CLUSTER_SCOPE.replace(
-            /\//g,
-            "\\/"
-          )}`
-        )
+        `role assignment "Azure Kubernetes Service RBAC Cluster Admin" for principal sp-cluster at ${CLUSTER_SCOPE}`
       );
     });
 
@@ -1887,12 +1877,7 @@ describe("createCloudFixture", () => {
       );
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        new RegExp(
-          `missing "Azure Kubernetes Service RBAC Cluster Admin" at ${CLUSTER_SCOPE.replace(
-            /\//g,
-            "\\/"
-          )}`
-        )
+        `missing "Azure Kubernetes Service RBAC Cluster Admin" at ${CLUSTER_SCOPE}`
       );
     });
   });
