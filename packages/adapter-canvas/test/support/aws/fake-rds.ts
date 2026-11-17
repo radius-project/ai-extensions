@@ -21,8 +21,12 @@ import type { AwsCommandResult } from "../../../src/server/services/aws-cli-sess
 //   https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DeleteDBParameterGroup.html
 // - DeleteDBSnapshot deletes only an `available` snapshot
 //   (InvalidDBSnapshotState otherwise), and an unknown one is
-//   DBSnapshotNotFound.
+//   DBSnapshotNotFound. Accepting the delete doesn't remove the snapshot at
+//   once: until RDS finishes, it is still listed, as `deleting`.
 //   https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DeleteDBSnapshot.html
+// - A describe filtered to one name answers that resource's NotFound fault
+//   when it doesn't exist: DBInstanceNotFound, DBSubnetGroupNotFoundFault,
+//   DBParameterGroupNotFound, or DBSnapshotNotFound.
 // - DescribeDBInstances and DescribeDBSnapshots return each resource's
 //   TagList. DescribeDBSubnetGroups and DescribeDBParameterGroups do not, so
 //   their tags come from ListTagsForResource.
@@ -70,6 +74,8 @@ export interface FakeDbSnapshot {
   createTime: string;
   // Describe reads left before a `creating` snapshot is `available`.
   creatingReads: number;
+  // Describe reads left before a `deleting` snapshot is gone.
+  deletingReads: number;
 }
 
 export interface FakeRdsSnapshot {
@@ -208,7 +214,8 @@ export class FakeRds {
       status: input.status ?? "available",
       tags: [...input.tags],
       createTime: this.time(),
-      creatingReads: this.creatingReads
+      creatingReads: this.creatingReads,
+      deletingReads: this.deletingReads
     });
   }
 
@@ -248,26 +255,48 @@ export class FakeRds {
       case "rds delete-db-instance":
         return this.deleteInstance(region, args);
       case "rds describe-db-subnet-groups":
-        return ok({
-          DBSubnetGroups: this.inRegion(this.subnetGroups, region).map(
-            (group) => ({
+        return (
+          this.named(
+            this.subnetGroups,
+            region,
+            flag(args, "--db-subnet-group-name"),
+            "DescribeDBSubnetGroups",
+            "DBSubnetGroupNotFoundFault"
+          ) ??
+          ok({
+            DBSubnetGroups: this.inRegion(
+              this.subnetGroups,
+              region,
+              flag(args, "--db-subnet-group-name")
+            ).map((group) => ({
               DBSubnetGroupName: group.name,
               VpcId: group.vpcId,
               SubnetGroupStatus: "Complete",
               DBSubnetGroupArn: this.arn(group.region, "subgrp", group.name)
-            })
-          )
-        });
+            }))
+          })
+        );
       case "rds describe-db-parameter-groups":
-        return ok({
-          DBParameterGroups: this.inRegion(this.parameterGroups, region).map(
-            (group) => ({
+        return (
+          this.named(
+            this.parameterGroups,
+            region,
+            flag(args, "--db-parameter-group-name"),
+            "DescribeDBParameterGroups",
+            "DBParameterGroupNotFound"
+          ) ??
+          ok({
+            DBParameterGroups: this.inRegion(
+              this.parameterGroups,
+              region,
+              flag(args, "--db-parameter-group-name")
+            ).map((group) => ({
               DBParameterGroupName: group.name,
               DBParameterGroupFamily: "mysql8.4",
               DBParameterGroupArn: this.arn(group.region, "pg", group.name)
-            })
-          )
-        });
+            }))
+          })
+        );
       case "rds list-tags-for-resource":
         return this.listTags(region, flag(args, "--resource-name"));
       case "rds delete-db-subnet-group":
@@ -305,11 +334,30 @@ export class FakeRds {
     return `arn:aws:rds:${region}:${this.accountId}:${type}:${name}`;
   }
 
+  // Every resource in `region`, or only the one named `name`.
   private inRegion<T extends { region: string }>(
     map: Map<string, T>,
-    region: string
+    region: string,
+    name = ""
   ): T[] {
-    return [...map.values()].filter((item) => item.region === region);
+    return [...map.entries()]
+      .filter(
+        ([mapKey, item]) =>
+          item.region === region && (!name || mapKey === key(region, name))
+      )
+      .map(([, item]) => item);
+  }
+
+  // The NotFound fault for a describe filtered to a name that doesn't exist.
+  private named<T>(
+    map: Map<string, T>,
+    region: string,
+    name: string,
+    operation: string,
+    notFound: string
+  ): AwsCommandResult | null {
+    if (!name || map.has(key(region, name))) return null;
+    return serviceError(notFound, operation, `${name} not found.`);
   }
 
   private instanceView(instance: FakeDbInstance) {
@@ -342,10 +390,14 @@ export class FakeRds {
       if (instance.deletingReads <= 0) this.instances.delete(id);
       else instance.deletingReads -= 1;
     }
-    for (const snapshot of this.snapshots.values()) {
-      if (snapshot.status !== "creating") continue;
-      if (snapshot.creatingReads <= 0) snapshot.status = "available";
-      else snapshot.creatingReads -= 1;
+    for (const [id, snapshot] of this.snapshots) {
+      if (snapshot.status === "creating") {
+        if (snapshot.creatingReads <= 0) snapshot.status = "available";
+        else snapshot.creatingReads -= 1;
+      } else if (snapshot.status === "deleting") {
+        if (snapshot.deletingReads <= 0) this.snapshots.delete(id);
+        else snapshot.deletingReads -= 1;
+      }
     }
   }
 
@@ -494,8 +546,17 @@ export class FakeRds {
   ): AwsCommandResult {
     this.advance();
     const type = flag(args, "--snapshot-type");
+    const id = flag(args, "--db-snapshot-identifier");
+    const missing = this.named(
+      this.snapshots,
+      region,
+      id,
+      "DescribeDBSnapshots",
+      "DBSnapshotNotFound"
+    );
+    if (missing) return missing;
     return ok({
-      DBSnapshots: this.inRegion(this.snapshots, region)
+      DBSnapshots: this.inRegion(this.snapshots, region, id)
         // Every snapshot here is manual, as a final snapshot is.
         .filter(() => type === "" || type === "manual")
         .map((snapshot) => ({
@@ -527,7 +588,8 @@ export class FakeRds {
         `Snapshot ${id} is ${snapshot.status}, not available.`
       );
     }
-    this.snapshots.delete(key(region, id));
+    snapshot.status = "deleting";
+    snapshot.deletingReads = this.deletingReads;
     return ok({ DBSnapshot: { DBSnapshotIdentifier: id, Status: "deleted" } });
   }
 }

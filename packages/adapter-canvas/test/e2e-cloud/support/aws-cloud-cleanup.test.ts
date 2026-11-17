@@ -27,6 +27,7 @@ import {
   awsEnvironmentFromTag,
   awsStatePackagePrefix,
   findAwsLeftovers,
+  LEFTOVER_SETTLE_MS,
   RDS_DELETE_TIMEOUT_MS,
   recipeEnvironment,
   resolveAwsCleanupConfig,
@@ -614,13 +615,15 @@ describe("sweepAwsCloudE2E", () => {
   });
 
   it.each([
-    ["deleting", "is deleting, and only an available snapshot can be deleted"],
-    ["creating", "was still being created after 20 minutes"]
+    ["deleting", "was still being deleted after 20 minutes"],
+    ["creating", "was still being created after 20 minutes"],
+    ["failed", "is failed, and only an available snapshot can be deleted"]
   ])(
     "keeps the environment when a final snapshot stays %s",
     async (status, message) => {
       const s = await twoEnvironments();
       s.aws.rds.creatingReads = 1_000_000;
+      s.aws.rds.deletingReads = 1_000_000;
       s.aws.rds.addSnapshot({
         id: "rds-snapshot-x",
         region: REGION,
@@ -634,6 +637,79 @@ describe("sweepAwsCloudE2E", () => {
       );
       expect(retryInputs(s, OLD)).toHaveLength(6);
       expect(retryInputs(s, SECOND_ENV)).toHaveLength(5);
+    }
+  );
+
+  it("waits for a deleted snapshot to disappear before checking what is left", async () => {
+    const s = await twoEnvironments();
+    // RDS takes a while to finish a snapshot delete it accepted.
+    s.aws.rds.deletingReads = 8;
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([]);
+    expect(s.aws.rds.snapshot().snapshots).toEqual([]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+  });
+
+  it("waits out a snapshot an earlier run already started deleting", async () => {
+    const s = await twoEnvironments();
+    s.aws.rds.deletingReads = 8;
+    s.aws.rds.addSnapshot({
+      id: "rds-snapshot-x",
+      region: REGION,
+      vpcId: MAIN_VPC,
+      tags: recipeTags(OLD),
+      status: "deleting"
+    });
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([]);
+    expect(
+      s.outside.calls.filter(
+        (call) =>
+          call.command === "rds delete-db-snapshot" &&
+          call.args.includes("rds-snapshot-x")
+      )
+    ).toEqual([]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+  });
+
+  it.each([
+    ["delete-db-subnet-group", "describe-db-subnet-groups", "subnet"],
+    ["delete-db-parameter-group", "describe-db-parameter-groups", "parameter"]
+  ])(
+    "waits for a %s to show as gone, and keeps the environment if it never does",
+    async (verb, describe, kind) => {
+      const s = await twoEnvironments();
+      s.appDelete.set(OLD, "leave");
+      // A read that still lists the group just after its delete.
+      let stale = 3;
+      const run = s.aws.run.bind(s.aws);
+      let deleted = false;
+      s.aws.run = (args) => {
+        if (args[1] === verb) deleted = true;
+        if (args[1] === describe && deleted && stale > 0) {
+          stale -= 1;
+          return run(
+            args.filter(
+              (arg, index, all) =>
+                !arg.endsWith("-name") && !all[index - 1]?.endsWith("-name")
+            )
+          );
+        }
+        return run(args);
+      };
+      expect((await runSweep(s)).failures).toEqual([]);
+      expect(retryInputs(s, OLD)).toEqual([]);
+
+      const t = await twoEnvironments();
+      t.appDelete.set(OLD, "leave");
+      const runT = t.aws.run.bind(t.aws);
+      t.aws.run = (args) =>
+        args[1] === verb ? { code: 0, stdout: "", stderr: "" } : runT(args);
+      const report = await runSweep(t);
+      expect(report.failures).toContain(
+        `RDS DB ${kind} group ${databaseName(OLD)} in ${REGION} was still there after 5 minutes.`
+      );
+      expect(retryInputs(t, OLD)).toHaveLength(6);
     }
   );
 
@@ -1249,9 +1325,20 @@ describe("findAwsLeftovers", () => {
 
   it("counts a check it can't finish as a finding", async () => {
     const s = createCleanupScenario();
-    s.aws.refuseOnce("rds describe-db-instances", "AccessDenied");
-    s.aws.refuseOnce("eks describe-access-entry", "AccessDenied");
-    s.aws.refuseOnce("iam list-role-policies", "AccessDenied");
+    const run = s.aws.run.bind(s.aws);
+    const denied = [
+      "describe-db-instances",
+      "describe-access-entry",
+      "list-role-policies"
+    ];
+    s.aws.run = (args) =>
+      denied.includes(args[1] ?? "") && !args.includes(SECOND.name) ?
+        {
+          code: 254,
+          stdout: "",
+          stderr: `An error occurred (AccessDenied) when calling the ${args[1]} operation`
+        }
+      : run(args);
     s.ports.kubernetes.namespaceExists = async () => {
       throw new Error("timeout");
     };
@@ -1271,6 +1358,12 @@ describe("findAwsLeftovers", () => {
         )
       )
     ]);
+  });
+
+  it("checks again after a read that fails once", async () => {
+    const s = createCleanupScenario();
+    s.aws.refuseOnce("iam list-role-policies", "ServiceFailure");
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
   });
 
   it("checks nothing else in another account", async () => {
@@ -1420,5 +1513,74 @@ describe("AWS answers the sweep can't use", () => {
       `RDS DB snapshot rds-snapshot-x (available) in ${SECOND.region}`,
       `Could not check deploy role ${ROLE}: IAM returned no PolicyNames.`
     ]);
+  });
+});
+
+describe("reads that lag a delete", () => {
+  // After `deleteVerb`, the next `stale` reads by `readVerb` still answer as
+  // they did before it, as an eventually consistent service does.
+  function lagging(
+    s: CleanupScenario,
+    deleteVerb: string,
+    readVerb: string,
+    stale: number
+  ): { left: () => number } {
+    const run = s.aws.run.bind(s.aws);
+    let before: ReturnType<typeof run> | null = null;
+    let remaining = 0;
+    s.aws.run = (args) => {
+      if (args[1] === readVerb && remaining > 0 && before) {
+        remaining -= 1;
+        return before;
+      }
+      const result = run(args);
+      if (args[1] === readVerb) before = result;
+      if (args[1] === deleteVerb && result.code === 0) remaining = stale;
+      return result;
+    };
+    return { left: () => remaining };
+  }
+
+  it("waits for a removed lock to show as gone", async () => {
+    const s = createCleanupScenario();
+    s.aws.run([
+      "iam",
+      "create-policy",
+      "--policy-name",
+      `radius-lock-${ROLE}`,
+      "--policy-document",
+      "{}"
+    ]);
+    s.clock.now += AWS_LOCK_REMOVABLE_AFTER_MS;
+    const lag = lagging(s, "delete-policy", "get-policy", 3);
+    expect((await runSweep(s)).failures).toEqual([]);
+    expect(lag.left()).toBe(0);
+    expect((await runVerify(s)).findings).toEqual([]);
+  });
+
+  it("gives the leftover check time to see the deploy role's deletes", async () => {
+    const s = await twoEnvironments();
+    expect((await runSweep(s)).failures).toEqual([]);
+    // IAM still lists a policy the removal just deleted.
+    s.aws.role(ROLE)!.inline.set("radius-deploy-stale", {});
+    const run = s.aws.run.bind(s.aws);
+    let reads = 0;
+    s.aws.run = (args) => {
+      if (args[1] === "list-role-policies" && (reads += 1) === 3)
+        s.aws.role(ROLE)!.inline.delete("radius-deploy-stale");
+      return run(args);
+    };
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+    expect(reads).toBe(3);
+  });
+
+  it("reports what is still left once the leftover check stops waiting", async () => {
+    const s = createCleanupScenario();
+    s.aws.role(ROLE)!.inline.set("radius-deploy-stuck", {});
+    const start = s.clock.now;
+    expect((await runVerify(s)).findings).toEqual([
+      `inline policy radius-deploy-stuck on ${ROLE}`
+    ]);
+    expect(s.clock.now - start).toBeGreaterThanOrEqual(LEFTOVER_SETTLE_MS);
   });
 });

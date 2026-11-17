@@ -9,7 +9,11 @@ import {
   runAwsCleanup,
   type AwsCleanupMainDependencies
 } from "./aws-cloud-cleanup-main.js";
-import type { CommandResult } from "./aws-cloud-cleanup-ports.js";
+import {
+  AWS_CLEANUP_APP_TOKEN_PERMISSIONS,
+  type CommandResult
+} from "./aws-cloud-cleanup-ports.js";
+import { resolveAwsCleanupConfig } from "./aws-cloud-cleanup.js";
 
 const ACCOUNT = "123456789012";
 const ENV = {
@@ -126,6 +130,9 @@ function dependencies(
       run,
       sleep: async () => {},
       now: () => Date.parse("2026-11-14T02:23:00Z"),
+      mintAppToken: async () => {
+        throw new Error("No App token mint is expected.");
+      },
       log: (line: string) => log.push(line),
       summary: async (markdown: string) => {
         summaries.push(markdown);
@@ -233,6 +240,95 @@ describe("runAwsCleanup", () => {
     const partial = dependencies({ ...ENV, AWS_SECOND_CLUSTER: "" }, cli().run);
     expect(await runAwsCleanup("verify", partial.deps)).toBe(1);
     expect(partial.log[0]).toContain("must be set together");
+  });
+
+  it("renews the App token for gh calls once the first one nears expiry", async () => {
+    const clock = { now: Date.parse("2026-11-14T02:23:00Z") };
+    const tokens: string[] = [];
+    const mints: Array<Record<string, string>> = [];
+    const { run } = cli();
+    const deps: AwsCleanupMainDependencies = {
+      ...dependencies(
+        {
+          ...ENV,
+          CLOUD_E2E_BOT_CLIENT_ID: "Iv1.cleanup",
+          CLOUD_E2E_BOT_INSTALLATION_ID: "42",
+          CLOUD_E2E_BOT_PRIVATE_KEY: "key"
+        },
+        async (command, args, options) => {
+          if (command === "gh") tokens.push(options?.env?.GH_TOKEN ?? "");
+          return run(command, args, options);
+        }
+      ).deps,
+      now: () => clock.now,
+      mintAppToken: async (config, permissions) => {
+        mints.push({ ...permissions, repository: config.repository });
+        return `ghs_renewed_${mints.length}`;
+      }
+    };
+    const ports = createAwsCleanupPorts(
+      resolveAwsCleanupConfig(ENV, clock.now)!,
+      deps
+    );
+    await ports.github.listEnvironments();
+    clock.now += 2 * 60 * 60 * 1000;
+    await ports.github.listEnvironments();
+    expect(tokens).toEqual(["app-token", "ghs_renewed_1"]);
+    expect(mints).toEqual([
+      { ...AWS_CLEANUP_APP_TOKEN_PERMISSIONS, repository: "octo/fixture" }
+    ]);
+  });
+
+  it.each([new Error("HTTP 401"), "HTTP 401"])(
+    "answers a gh call with the reason when the App token can't be minted (%s)",
+    async (failure) => {
+      const { run } = cli();
+      const deps: AwsCleanupMainDependencies = {
+        ...dependencies(
+          {
+            ...ENV,
+            GH_TOKEN: undefined,
+            CLOUD_E2E_BOT_CLIENT_ID: "Iv1.cleanup",
+            CLOUD_E2E_BOT_INSTALLATION_ID: "42",
+            CLOUD_E2E_BOT_PRIVATE_KEY: "key"
+          },
+          run
+        ).deps,
+        mintAppToken: () => Promise.reject(failure)
+      };
+      const ports = createAwsCleanupPorts(
+        resolveAwsCleanupConfig(ENV, 0)!,
+        deps
+      );
+      await expect(ports.github.listEnvironments()).rejects.toThrow(
+        "Could not renew the GitHub App token: HTTP 401"
+      );
+    }
+  );
+
+  it("sends an empty token when a local run has none", async () => {
+    const { run, calls } = cli();
+    const { deps } = dependencies(
+      { ...ENV, GH_TOKEN: undefined, GH_PACKAGES_TOKEN: undefined },
+      run
+    );
+    const ports = createAwsCleanupPorts(resolveAwsCleanupConfig(ENV, 0)!, deps);
+    await ports.github.listEnvironments();
+    await ports.github.listPackages();
+    expect(
+      calls.filter((call) => call.command === "gh").map((call) => call.env)
+    ).toEqual([{ GH_TOKEN: "" }, { GH_TOKEN: "" }, { GH_TOKEN: "" }]);
+  });
+
+  it("fails before any call when the App credentials are set only in part", async () => {
+    const { deps, log } = dependencies(
+      { ...ENV, CLOUD_E2E_BOT_CLIENT_ID: "Iv1.cleanup" },
+      async () => {
+        throw new Error("nothing may run");
+      }
+    );
+    expect(await runAwsCleanup("sweep", deps)).toBe(1);
+    expect(log[0]).toContain("CLOUD_E2E_BOT_INSTALLATION_ID is required");
   });
 
   it("defaults the fixture branch to main", () => {

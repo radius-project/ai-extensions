@@ -374,6 +374,7 @@ export function createCleanupScenario(): CleanupScenario {
   });
   const github = new FakeGitHub(REPO, REPO_ID, 7);
   const kube = new FakeKubernetes();
+  for (const cluster of [MAIN, SECOND]) kube.addCluster(clusterKey(cluster));
   const outside = new OutsideWorld(aws, github, new MemoryDisk());
   const log: string[] = [];
   const scenario = {

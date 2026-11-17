@@ -1,7 +1,9 @@
 // A stand-in for the Kubernetes reads and deletes the Cloud E2E cleanup
 // sweep makes on each cluster: Radius-rendered workloads, listed as
 // `kubectl get -o json` lists them, and namespaces. Deleting a namespace
-// deletes the workloads in it, as the namespace controller does.
+// deletes the workloads in it, as the namespace controller does. A test adds
+// each cluster first, and any call to a cluster it didn't add throws, as
+// kubectl fails for a cluster it can't reach.
 
 export interface FakeWorkload {
   kind: string;
@@ -19,12 +21,15 @@ interface FakeCluster {
 export class FakeKubernetes {
   readonly clusters = new Map<string, FakeCluster>();
 
+  addCluster(key: string): void {
+    if (this.clusters.has(key))
+      throw new Error(`The fake already has cluster ${key}.`);
+    this.clusters.set(key, { workloads: [], namespaces: new Set(["default"]) });
+  }
+
   private cluster(key: string): FakeCluster {
-    let cluster = this.clusters.get(key);
-    if (!cluster) {
-      cluster = { workloads: [], namespaces: new Set(["default"]) };
-      this.clusters.set(key, cluster);
-    }
+    const cluster = this.clusters.get(key);
+    if (!cluster) throw new Error(`The fake has no cluster ${key}.`);
     return cluster;
   }
 

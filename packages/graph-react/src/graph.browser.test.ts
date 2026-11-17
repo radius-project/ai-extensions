@@ -329,6 +329,58 @@ describe("public host-neutral React API", () => {
     ).toContain("color-scheme: dark");
   });
 
+  it("renders a legacy application with its icon, raw status, details row and warnings", async () => {
+    const { root, element } = host();
+    const hash = "c".repeat(64);
+    const legacy = {
+      ...context,
+      applicationId: prefix + "Applications.Core/applications/app"
+    };
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 8 8"><rect width="8" height="8" fill="#336699" /></svg>';
+    const prefixed = `<?xml version="1.0"?>\n<!-- icon -->\n<!DOCTYPE svg>\n${svg}`;
+    root.render(
+      h(RadiusGraph, {
+        graph: normalizeLiveGraph(
+          {
+            resources: [
+              {
+                ...resource,
+                id: prefix + "Applications.Core/containers/live-web",
+                type: "Applications.Core/containers",
+                iconHash: hash,
+                connections: [{ id: "missing", direction: "Inbound" }]
+              }
+            ],
+            icons: { [hash]: prefixed }
+          },
+          legacy
+        )
+      })
+    );
+    const node = await within(element).findByRole("group", {
+      name: "live-web"
+    });
+    expect(
+      within(node).getByLabelText("Provisioning status: CustomPending")
+    ).toBeTruthy();
+    const icon = node.querySelector<HTMLImageElement>(".rad-node__icon");
+    const src = icon?.getAttribute("src");
+    expect(src).toMatch(/^data:image\/svg\+xml,/);
+    expect(decodeURIComponent(src ?? "")).toContain("#336699");
+    await icon?.decode();
+    expect(icon?.naturalWidth).toBeGreaterThan(0);
+    expect(within(element).getByRole("status").textContent).toContain(
+      "missing"
+    );
+    await userEvent.click(
+      within(node).getByRole("button", { name: "Show details" })
+    );
+    expect(
+      await within(element).findByText("Provisioning status: CustomPending")
+    ).toBeTruthy();
+  });
+
   it("renders explicit empty and partial states and updates without replacing the React root", async () => {
     const { root, element } = host();
     root.render(

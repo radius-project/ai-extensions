@@ -32,6 +32,7 @@ import { CLOUD_CANVAS_HOSTS } from "../e2e-cloud/support/cloud-canvas-host.js";
 import { COPILOT_APP_SUITE_TIMEOUT_MS } from "../e2e-cloud/support/cloud-timeout-budget.js";
 import { COPILOT_APP_DEFAULT_CDP_PORT } from "../e2e-cloud/support/copilot-app-cdp.js";
 import { resolveAwsCleanupConfig } from "../e2e-cloud/support/aws-cloud-cleanup.js";
+import { AWS_CLEANUP_APP_TOKEN_PERMISSIONS } from "../e2e-cloud/support/aws-cloud-cleanup-ports.js";
 import {
   AWS_ENVIRONMENT_NAME_PREFIX,
   ENVIRONMENT_NAME_PREFIX,
@@ -2042,9 +2043,15 @@ describe("cloud-e2e-cleanup.yml purge-aws", () => {
     expect(sweep?.run).toBe('node "$RUNNER_TEMP/aws-cloud-cleanup.mjs" sweep');
     for (const prerequisite of ["bundle", "aws-login", "app-token"])
       expect(sweep?.if).toContain(`steps.${prerequisite}.outcome == 'success'`);
+    // The sweep can outlast the hour an installation token lives, so it
+    // renews the token with the App's own credentials.
     expect(sweep?.env).toEqual({
       GH_TOKEN: "${{ steps.app-token.outputs.token }}",
-      GH_PACKAGES_TOKEN: "${{ secrets.GH_RAD_CI_BOT_PAT }}"
+      GH_PACKAGES_TOKEN: "${{ secrets.GH_RAD_CI_BOT_PAT }}",
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
+      CLOUD_E2E_BOT_INSTALLATION_ID:
+        "${{ steps.app-token.outputs.installation-id }}"
     });
     expect(verify?.id).toBe("aws-verification");
     expect(verify?.run).toBe(
@@ -2066,6 +2073,17 @@ describe("cloud-e2e-cleanup.yml purge-aws", () => {
       "permission-environments": "read"
     });
     expect(Object.keys(token?.with ?? {})).not.toContain("permission-packages");
+    // The sweep renews this token with the same permissions.
+    expect(
+      Object.fromEntries(
+        Object.entries(token?.with ?? {})
+          .filter(([name]) => name.startsWith("permission-"))
+          .map(([name, value]) => [
+            name.slice("permission-".length).replace(/-/g, "_"),
+            value
+          ])
+      )
+    ).toEqual(AWS_CLEANUP_APP_TOKEN_PERMISSIONS);
   });
 
   it("names every cleanup job in the scheduled failure issue", async () => {

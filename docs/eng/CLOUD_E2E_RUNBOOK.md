@@ -172,21 +172,22 @@ Two boundaries worth knowing before you go looking for a gap:
 1. Dispatches `delete-application.yml` and waits for it to succeed.
 2. Deletes the MySQL recipe's leftovers: `mysql-*` DB instances (with `--skip-final-snapshot`), then their DB subnet and parameter groups, then the final `rds-snapshot-*` snapshots that carry an AWS test environment's tag. It also deletes labelled workloads and the `default-cloud-e2e` namespace on both clusters.
 3. Checks that nothing of that environment is left.
-4. Deletes its deployment records and GHCR state package, then, under the deploy role's lock, removes its trust subjects, inline policy, and access entry with the product's own removal code, and deletes its GitHub environment.
+4. Deletes its deployment records and GHCR state package, then, under the deploy role's lock, removes its trust subjects, inline policy, app boundary, and access entry with the product's own removal code, and deletes its GitHub environment.
 
 If any of steps 1 to 3 fails, the environment keeps everything step 4 removes, so the next run can retry. The sweep also deletes deployment records and state packages of AWS environments that no longer exist, scales the main cluster's `default` and `isolated` node groups to zero, and removes a lock on the deploy role once it is 10 or more minutes old, the same rule the product uses.
 
-It deletes an RDS resource only when it is in one of the two test regions, named the way the recipe names it, tagged with a `radtest-aws-` environment, not tagged `RadiusCreationTimestamp`, and, for instances, subnet groups, and snapshots, in one of the clusters' VPCs. It never deletes a group that another instance uses, a role, the identity provider, a cluster, a node group, or a VPC. A read that fails stops that sweep before it deletes anything.
+It deletes an RDS resource only when it is in one of the two test regions, named the way the recipe names it, tagged with a `radtest-aws-` environment, not tagged `RadiusCreationTimestamp`, and, for instances, subnet groups, and snapshots, in one of the clusters' VPCs. It never deletes a group that another instance uses, a role, the identity provider, a cluster, a node group, or a VPC. A read that fails stops that sweep before it deletes anything. RDS deletes finish in the background, so after each delete the sweep waits for the resource to be gone, and a run that finds a snapshot still `deleting` waits for it instead of deleting it again. The sweep can run longer than the hour its GitHub App token lives, so it mints a new token with the same permissions every 45 minutes.
 
 The job's last step checks, whatever their age, the recipe's RDS resources, workloads and the namespace on both clusters, the node groups' size, the deploy role's lock, and the deploy role's trust subjects, inline policies, and access entries.
 
-| Error in the job log                                                                                      | What to do                                                                                                                                                                                                                           |
-|-----------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Deleting the Radius application in <env> failed`                                                         | Open the fixture's `delete-application.yml` run. If it failed with `Could not assume role` and the deploy role no longer trusts `<env>`, an earlier sweep stopped part way through step 4. Finish it by hand, below                  |
-| `Removing <env> from deploy role ... failed` or `Removed <env>'s access, but kept its GitHub environment` | The role is partly cleaned up and the app delete can no longer sign in. Finish it by hand, below                                                                                                                                     |
-| `RDS DB snapshot <id> ... has no environment tag`                                                         | A warning only. The sweep can't tie the snapshot to the suite. Check its source instance and creation time, and delete it by hand if it is the suite's: `aws rds delete-db-snapshot --region <region> --db-snapshot-identifier <id>` |
-| `The lock on <role> ... is less than 10 minutes old`                                                      | A run stopped while it held the lock. The next sweep removes it                                                                                                                                                                      |
-| `<env>: Kept the access entry ...`                                                                        | The removal couldn't read the entry twice. The message ends with the exact `aws eks delete-access-entry` command; run it once you have checked nothing else uses the entry                                                           |
+| Error in the job log                                                                                                  | What to do                                                                                                                                                                                                                           |
+|-----------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Deleting the Radius application in <env> failed`                                                                     | Open the fixture's `delete-application.yml` run. If it failed with `Could not assume role` and the deploy role no longer trusts `<env>`, an earlier sweep stopped part way through step 4. Finish it by hand, below                  |
+| `Removing <env> from deploy role ... failed` or `Removed <env>'s access, but kept its GitHub environment`             | The role is partly cleaned up and the app delete can no longer sign in. Finish it by hand, below                                                                                                                                     |
+| `RDS DB snapshot <id> ... has no environment tag`                                                                     | A warning only. The sweep can't tie the snapshot to the suite. Check its source instance and creation time, and delete it by hand if it is the suite's: `aws rds delete-db-snapshot --region <region> --db-snapshot-identifier <id>` |
+| `RDS DB ... was still there after <n> minutes` or `RDS DB snapshot <id> ... was still being deleted after 20 minutes` | RDS hasn't finished the delete. The environment keeps its retry inputs, so the next sweep waits again. If it repeats, check the resource's status with the reads below                                                               |
+| `The lock on <role> ... is less than 10 minutes old`                                                                  | A run stopped while it held the lock. The next sweep removes it                                                                                                                                                                      |
+| `<env>: Kept the access entry ...`                                                                                    | The removal couldn't read the entry twice. The message ends with the exact `aws eks delete-access-entry` command; run it once you have checked nothing else uses the entry                                                           |
 
 To finish a partial step 4 by hand, first confirm that the environment has no app resources left, with the RDS and `kubectl` reads below. Then delete its inline policy (`aws iam delete-role-policy --role-name <role> --policy-name <policy>`), remove its subjects from the role's trust policy (`aws iam update-assume-role-policy`), delete its access entry if no other environment uses that cluster, and delete the GitHub environment. The next sweep reclaims its records and state package.
 
@@ -446,9 +447,32 @@ done
 aws iam simulate-custom-policy --policy-input-list "$(jq -c . "$WORK/test-role-policy.json")" \
   --action-names eks:DeleteCluster \
   --resource-arns "arn:aws:eks:$MAIN_REGION:$ACCOUNT:cluster/$MAIN_CLUSTER"
+# And the deploy role can't create an app role without its boundary, even
+# with an identity policy that allows everything.
+aws iam simulate-custom-policy \
+  --policy-input-list '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}' \
+  --permissions-boundary-policy-input-list "$(jq -c . "$WORK/deploy-role-boundary.json")" \
+  --action-names iam:CreateRole \
+  --resource-arns "arn:aws:iam::$ACCOUNT:role/radius/apps/$FIXTURE_REPO_ID/radtest-aws-1/radius-app-web"
 ```
 
+`packages/adapter-canvas/test/ci/cloud-e2e-aws-setup.test.ts` checks the same allow and deny cases on every pull request, with the product's own policies as the deploy role's.
+
 For a local run in your own account, use your account, your copy of the fixture, and the deploy role name the product gives it. Also add a statement to the test role's trust policy that lets your own IAM user assume the role, and sign in through it, so the run proves the policy is enough. Don't set the variables there.
+
+To apply a changed policy file to an existing setup, render the files as above, then:
+
+```bash
+# A managed policy keeps at most five versions. Delete the oldest
+# non-default one first if it already has five.
+aws iam create-policy-version \
+  --policy-arn "arn:aws:iam::$ACCOUNT:policy/ai-extensions-cloud-e2e-deploy-boundary" \
+  --policy-document "file://$WORK/deploy-role-boundary.json" --set-as-default
+aws iam put-role-policy --role-name ai-extensions-cloud-e2e --policy-name cloud-e2e \
+  --policy-document "file://$WORK/test-role-policy.json"
+```
+
+If you can't create a policy version, recreate the deploy role and its boundary instead: delete the role, delete the boundary, then run step 4 again. Do this only while the deploy role is empty: no environment uses it, so it has the deny-only trust policy, no inline policies, no access entries, and no lock. Otherwise environments lose their access.
 
 ### Seeded app registrations
 
