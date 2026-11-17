@@ -107,7 +107,7 @@ A boundary caps only the role it's on, not the roles that role creates. The app 
 - The deploy role can create an app role that acts outside its own boundary in the two regions, or that trusts another account.
 - The test role must create the app boundaries setup writes, so it can write one that allows everything and have the deploy role create an app role under it. In effect, this repository's `main` CI can become an administrator of the account.
 
-So before AWS runs in `radius-test`, an organization administrator adds a guard above IAM: a service control policy that denies IAM, `sts:AssumeRole`, organizations, account, and `s3:PutAccountPublicAccessBlock` to roles under `role/radius/apps/`, or a dedicated account for these tests. The product change that stops the deploy identity from creating roles is tracked in #1276.
+So AWS stays off in `radius-test` until there's an organization-level guard on `role/radius/apps/*`: a service control policy that denies IAM, `sts:AssumeRole`, organizations, account, and `s3:PutAccountPublicAccessBlock` to those roles. A dedicated account for these tests also works. [#1276](https://github.com/radius-project/ai-extensions/issues/1276) tracks the product change that stops the deploy identity from creating roles.
 
 The deploy role can't create service-linked roles. RDS's already exists; a new service's recipe may need an administrator to create one. If the deploy role is missing, setup stops and changes nothing, because the test role can't create roles.
 
@@ -187,7 +187,7 @@ Azure's 150 minutes is still twice its longest recent run. The app host's limits
 ### Rollout
 
 1. This design is reviewed.
-2. Administrators create the two roles and clusters in `radius-test`, and the `ai-extensions` secrets and variables. No repository or GitHub App install is needed. An organization administrator adds the guard for app roles described in [How the test signs in to AWS](#how-the-test-signs-in-to-aws), or the tests move to a dedicated account.
+2. Administrators create the two roles and clusters in `radius-test`, and the `ai-extensions` secrets and variables. No repository or GitHub App install is needed. AWS stays off in `radius-test` until an organization administrator adds the guard on `role/radius/apps/*` described in [How the test signs in to AWS](#how-the-test-signs-in-to-aws), or the tests move to a dedicated account ([#1276](https://github.com/radius-project/ai-extensions/issues/1276)).
 3. The AWS cleanup lands first, so AWS never runs in the daily job without cleanup.
 4. The AWS steps land in `cloud-e2e.yml`, with Azure's lower limits, after a local run in the developer's own AWS account and a fork of the fixture repository, as the lifecycle design allows.
 5. On `main`, a manual cleanup run, then a manual Cloud E2E run on each host. Until the AWS variables are set, the AWS steps skip and the job runs Azure only.
