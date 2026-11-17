@@ -14,6 +14,7 @@ import {
   handleDeployStatus,
   handleListApplications,
   handleListDeployments,
+  handleCleanupDetails,
   type DeployListCacheEntry,
   type DeploymentsInstanceEntry,
   type DeploymentsDependencies,
@@ -78,6 +79,7 @@ function dependencies(
   overrides: Partial<DeploymentsDependencies> = {}
 ): DeploymentsDependencies {
   return {
+    id: () => "fixture",
     isValidRepoSlug: (value) => value === "octo/todolist",
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
@@ -94,6 +96,14 @@ function dependencies(
     },
     resolveEnvDeployment: () => {
       throw new Error("resolveEnvDeployment not stubbed");
+    },
+    listEnvDeployment: async (...args) => {
+      if (!overrides.resolveEnvDeployment)
+        throw new Error("listEnvDeployment not stubbed");
+      return {
+        deployment: await overrides.resolveEnvDeployment(...args),
+        incomplete: false
+      };
     },
     ghOrThrow: () => {
       throw new Error("ghOrThrow not stubbed");
@@ -244,7 +254,7 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the ten routes it owns", () => {
+  it("declares exactly the eleven routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
@@ -252,12 +262,70 @@ describe("deployments routes (SU-06)", () => {
       "GET /api/deploy-notification",
       "GET /api/list-applications",
       "GET /api/list-deployments",
+      "POST /api/deployment-cleanup-details",
       "GET /api/delete-conflict",
       "POST /api/deploy",
       "POST /api/deploy-reset",
       "POST /api/delete-deployment",
       "POST /api/abandon-deployment"
     ]);
+  });
+
+  it.each(["error", "incomplete"] as const)(
+    "keeps healthy rows visible when another environment has %s history",
+    async (kind) => {
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/list-deployments?repo=octo/todolist"
+      );
+      const resolveEnvDeployment = vi.fn(async () => null);
+      await handleListDeployments(
+        ctx,
+        dependencies({
+          deployListCache: new Map(),
+          deployListTtlMs: 15000,
+          ghOrThrow: async () => "dev\nprod",
+          resolveEnvDeployment,
+          listEnvDeployment: async (_repo, environment) => {
+            if (environment === "dev") {
+              if (kind === "error") throw new Error("rate limit exceeded");
+              return { deployment: null, incomplete: true };
+            }
+            return {
+              deployment: {
+                app: "app",
+                environment,
+                provider: "azure",
+                status: "success",
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/todolist/actions/runs/42"
+              },
+              incomplete: false
+            };
+          }
+        })
+      );
+      expect(JSON.parse(recording.body)).toMatchObject({
+        deployments: [{ app: "app", environment: "prod" }],
+        environmentDiagnostics: [
+          { environment: "dev", kind, message: expect.any(String) }
+        ]
+      });
+      expect(resolveEnvDeployment).not.toHaveBeenCalled();
+    }
+  );
+
+  it("refuses malformed cleanup details JSON before any resolver call", async () => {
+    const { recording, context: ctx } = context(
+      "POST",
+      "/api/deployment-cleanup-details",
+      "{"
+    );
+    await handleCleanupDetails(ctx, dependencies());
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Invalid cleanup request."
+    });
   });
 
   it("dispatches each declared key to its own handler", async () => {
@@ -2084,6 +2152,43 @@ describe("deployments routes (SU-06)", () => {
       }
     );
 
+    it.each([0, 1])(
+      "admits the delete title boundary and releases ownership on overflow by %s",
+      async (overflow) => {
+        const fixed = "Radius - Delete  [radius:v1 app=todolist] dep-fixture"
+          .length;
+        const environment = "e".repeat(256 - fixed + overflow);
+        const { recording, context: ctx } = deleteContext(
+          JSON.stringify({
+            repo: "octo/todolist",
+            environment,
+            application: "todolist"
+          })
+        );
+        const runGh = vi.fn(async () => ({
+          code: 0,
+          stdout: "",
+          stderr: ""
+        }));
+        const release = vi.fn();
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({ runGh, releaseDeploymentMutation: release })
+        );
+        expect(recording.status).toBe(overflow ? 400 : 200);
+        if (overflow) {
+          expect(JSON.parse(recording.body).error).toContain(
+            "supported run-title contract"
+          );
+          expect(runGh).not.toHaveBeenCalled();
+          expect(release).toHaveBeenCalledOnce();
+        } else {
+          expect(runGh).toHaveBeenCalledOnce();
+          expect(release).not.toHaveBeenCalled();
+        }
+      }
+    );
+
     it("dispatches, evicts the cached listing and reports the run URL", async () => {
       const { recording, context: ctx } = deleteContext();
       const cache = new Map<string, DeployListCacheEntry>();
@@ -2119,6 +2224,8 @@ describe("deployments routes (SU-06)", () => {
           "environment=dev",
           "-f",
           "application=todolist",
+          "-f",
+          "correlation_id=dep-fixture",
           "--repo",
           "octo/todolist"
         ]
@@ -2697,6 +2804,8 @@ describe("deployments routes (SU-06)", () => {
             "-f",
             "application=todolist",
             "-f",
+            "correlation_id=dep-fixture",
+            "-f",
             "force=true",
             "--repo",
             "octo/todolist"
@@ -2970,9 +3079,7 @@ describe("deployments routes (SU-06)", () => {
         expect(recording.status).toBe(400);
       });
 
-      // The 422 retry exists only because a just-committed workflow may not
-      // declare `force` yet, so an ordinary delete must not inherit it.
-      it("does not retry an unforced dispatch refused as an unexpected input", async () => {
+      it("retries the new correlation input schema after an ordinary dispatcher update", async () => {
         const attempts: string[] = [];
         const { recording, context: ctx } = deleteContext();
         await handleDeleteDeployment(
@@ -2993,7 +3100,7 @@ describe("deployments routes (SU-06)", () => {
           })
         );
 
-        expect(attempts).toHaveLength(1);
+        expect(attempts).toHaveLength(3);
         expect(recording.status).toBe(400);
       });
 

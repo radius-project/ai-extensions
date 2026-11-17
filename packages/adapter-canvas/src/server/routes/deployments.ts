@@ -4,6 +4,8 @@ import type { RouteHandlerRegistry } from "../route-table.js";
 import type { DeploymentAbandonmentService } from "../services/deployment-abandonment.js";
 import type { DeployRequestService } from "../services/deploy-request.js";
 import type { DeploymentRow } from "../services/deployment-resolver.js";
+import { prepareDeploymentCleanup } from "../services/deployment-cleanup-details.js";
+import type { EnvironmentDeploymentListing } from "@radius-project/adapter-shared";
 import type {
   DeleteConflictProbe,
   DeleteConflictRequest
@@ -93,6 +95,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  id(): string;
   ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
@@ -115,6 +118,11 @@ export interface DeploymentsDependencies {
     environment: string,
     appName: string
   ): Promise<DeploymentRow | null>;
+  listEnvDeployment(
+    repo: string,
+    environment: string,
+    appName: string
+  ): Promise<EnvironmentDeploymentListing>;
   // The gh runner that REJECTS on failure, so a GitHub outage surfaces as an
   // error payload rather than as a definitive empty listing.
   ghOrThrow(args: string[]): Promise<string>;
@@ -158,7 +166,8 @@ export interface DeploymentsDependencies {
     repo: string,
     workflowFile: string,
     sinceMs: number,
-    knownId: number | string | null
+    knownId: number | string | null,
+    correlationId?: string
   ): Promise<number | string | null>;
   // Resolves rather than rejects on a non-zero exit, so the handler can inspect
   // stderr and choose the failure message.
@@ -459,15 +468,61 @@ export async function handleListDeployments(
     ]);
     const envNames =
       envNamesRaw ? [...new Set(envNamesRaw.split("\n").filter(Boolean))] : [];
-    const resolved = await Promise.all(
-      envNames.map((name) => dependencies.resolveEnvDeployment(repo, name, ""))
+    const resolved = await Promise.allSettled(
+      envNames.map((name) => dependencies.listEnvDeployment(repo, name, ""))
     );
-    const payload = { deployments: resolved.filter(Boolean) };
+    const deployments = [];
+    const environmentDiagnostics = [];
+    for (const [index, result] of resolved.entries()) {
+      const environment = envNames[index];
+      if (result.status === "rejected") {
+        environmentDiagnostics.push({
+          environment,
+          kind: "error",
+          message: redactGhCredentials(
+            errorMessage(result.reason),
+            dependencies.readProcessEnv()
+          )
+        });
+        continue;
+      }
+      if (result.value.deployment)
+        deployments.push({
+          ...result.value.deployment,
+          cleanupSelection: result.value.selection
+        });
+      if (result.value.incomplete)
+        environmentDiagnostics.push({
+          environment,
+          kind: "incomplete",
+          message:
+            "Only the first 100 deployment records were checked. Load cleanup details to verify older history."
+        });
+    }
+    const payload = {
+      deployments,
+      ...(environmentDiagnostics.length ? { environmentDiagnostics } : {})
+    };
     dependencies.deployListCache.set(repo, { at: Date.now(), payload });
     respond(payload);
   } catch (e) {
     respond({ deployments: [], error: errorMessage(e) });
   }
+}
+
+export async function handleCleanupDetails(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): Promise<void> {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(await context.readTextBody());
+  } catch {
+    context.json(400, { error: "Invalid cleanup request." });
+    return;
+  }
+  const result = await prepareDeploymentCleanup(payload, dependencies);
+  context.json(result.status, result.body, { "Cache-Control": "no-store" });
 }
 
 // Clears the client-visible remains of a finished deploy attempt. Declared with
@@ -754,6 +809,15 @@ export async function handleDeleteDeployment(
       (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
     );
     const dispatchedAt = Date.now();
+    const correlationId = `dep-${dependencies.id()}`;
+    if (
+      !/^dep-[a-zA-Z0-9-]{1,64}$/.test(correlationId) ||
+      `Radius - Delete ${environment} [radius:v1 app=${application}] ${correlationId}`
+        .length > 256
+    )
+      throw new Error(
+        "The delete identity cannot fit the supported run-title contract. No workflow was dispatched."
+      );
     const dispatchArgs = [
       "workflow",
       "run",
@@ -762,6 +826,8 @@ export async function handleDeleteDeployment(
       "environment=" + environment,
       "-f",
       "application=" + application,
+      "-f",
+      "correlation_id=" + correlationId,
       ...(force ? ["-f", "force=true"] : []),
       "--repo",
       repo
@@ -773,7 +839,7 @@ export async function handleDeleteDeployment(
     // from the default branch. Give that the same bounded retry the
     // not-yet-registered workflow gets, rather than reporting a failure the
     // user cannot act on.
-    const dispatchDelays = justCreated || force ? [0, 2000, 5000] : [0];
+    const dispatchDelays = [0, 2000, 5000];
     if (justCreated) await sleep(dependencies, 3000);
     for (const delay of dispatchDelays) {
       // `> 0` vs `> 1` is equivalent over the fixed delay set {0, 2000, 5000}:
@@ -787,7 +853,7 @@ export async function handleDeleteDeployment(
       // stop retrying.
       if (
         !/not found|HTTP 404/i.test(dispatch.stderr || "") &&
-        !(force && /unexpected inputs?|HTTP 422/i.test(dispatch.stderr || ""))
+        !/unexpected inputs?/i.test(dispatch.stderr || "")
       ) {
         break;
       }
@@ -814,10 +880,12 @@ export async function handleDeleteDeployment(
       // An exhausted unexpected-input retry is a stale dispatcher, not a
       // permissions or Actions problem, so it says so instead of sending the
       // user to check settings that are already correct.
-      const staleForceInput = force && /unexpected inputs?|HTTP 422/i.test(de);
+      const staleForceInput = /unexpected inputs?/i.test(de);
       const hint =
         staleForceInput ?
-          " GitHub is still rejecting the `force` input, which means the copy" +
+          " GitHub is still rejecting " +
+          (force ? "the `force` input" : "the workflow inputs") +
+          ", which means the copy" +
           " of " +
           DELETE_APP_DISPATCHER_FILE +
           " on the default branch of " +
@@ -865,7 +933,8 @@ export async function handleDeleteDeployment(
         repo,
         DELETE_APP_DISPATCHER_FILE,
         dispatchedAt,
-        null
+        null,
+        correlationId
       );
       if (runId)
         runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
@@ -1069,6 +1138,8 @@ export function createDeploymentsRoutes(
       handleListApplications(context, dependencies),
     "GET /api/list-deployments": (context) =>
       handleListDeployments(context, dependencies),
+    "POST /api/deployment-cleanup-details": (context) =>
+      handleCleanupDetails(context, dependencies),
     "GET /api/delete-conflict": (context) =>
       handleDeleteConflict(context, dependencies),
     "POST /api/deploy": (context) => handleDeploy(context, dependencies),

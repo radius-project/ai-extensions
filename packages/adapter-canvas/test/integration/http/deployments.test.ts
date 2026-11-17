@@ -118,6 +118,7 @@ interface Harness {
   dispatches: string[][];
   workflowSyncs: unknown[][];
   ghApiCalls: string[][];
+  setGhOrThrow(run: (args: string[]) => Promise<string>): void;
   setEntryMissing(missing: boolean): void;
   setDeploymentStatus(status: string): void;
   setDeploymentResolver(
@@ -161,7 +162,9 @@ function start(
   callbacks: Partial<
     Pick<
       DeploymentsDependencies,
-      "triggerDeployRepairHandoff" | "triggerDeployFailureNotice"
+      | "triggerDeployRepairHandoff"
+      | "triggerDeployFailureNotice"
+      | "listEnvDeployment"
     >
   > = {},
   { awsEnabled = true }: { awsEnabled?: boolean } = {}
@@ -197,11 +200,11 @@ function start(
     application: string
   ): Promise<DeploymentRow | null> =>
     deploymentResolver(repo, environment, application);
+  let runGh = (args: string[]): Promise<string> =>
+    Promise.resolve(args.includes("--method") ? "" : environments.join("\n"));
   const ghOrThrow = (args: string[]): Promise<string> => {
     ghApiCalls.push(args);
-    return Promise.resolve(
-      args.includes("--method") ? "" : environments.join("\n")
-    );
+    return runGh(args);
   };
   let environmentTarget: EnvironmentTarget = {
     provider: "aws",
@@ -249,6 +252,7 @@ function start(
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      id: () => "fixture",
       isValidRepoSlug,
       readInstanceEntry: (instanceId) => {
         if (entryMissing) return undefined;
@@ -268,6 +272,12 @@ function start(
       resolveRepoAppName: (_repo, branch) =>
         Promise.resolve(`todo-app@${branch}`),
       resolveEnvDeployment,
+      listEnvDeployment:
+        callbacks.listEnvDeployment ??
+        (async (...args) => ({
+          deployment: await resolveEnvDeployment(...args),
+          incomplete: false
+        })),
       ghOrThrow,
       resetDeploymentViewState: (_target, attemptId) => {
         resets.push(attemptId);
@@ -359,6 +369,9 @@ function start(
     dispatches,
     workflowSyncs,
     ghApiCalls,
+    setGhOrThrow(run) {
+      runGh = run;
+    },
     setEntryMissing(missing) {
       entryMissing = missing;
     },
@@ -397,6 +410,223 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
+  it("keeps healthy environments visible over HTTP when peers are incomplete or unreadable", async () => {
+    const h = start({
+      listEnvDeployment: async (_repo, environment) => {
+        if (environment === "failed")
+          throw new Error("GitHub rate limit. Retry later.");
+        if (environment === "incomplete")
+          return { deployment: null, incomplete: true };
+        return { deployment: row(environment, "success"), incomplete: false };
+      }
+    });
+    h.environments.push("healthy", "incomplete", "failed");
+    h.setDeploymentResolver(async () => {
+      throw new Error("A listing must not run complete verification");
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(
+      `${entry.baseUrl}/api/list-deployments?repo=octo/todo`
+    );
+    expect(await response.json()).toMatchObject({
+      deployments: [{ environment: "healthy", status: "success" }],
+      environmentDiagnostics: [
+        { environment: "incomplete", kind: "incomplete" },
+        {
+          environment: "failed",
+          kind: "error",
+          message: "GitHub rate limit. Retry later."
+        }
+      ]
+    });
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
+  it("checks complete history beyond record 100 before admitting application deletion or conflict clearance", async () => {
+    const h = start();
+    const pages: number[] = [];
+    h.setDeploymentResolver((repo, environment, application) =>
+      resolveEnvironmentDeployment(repo, environment, application, {
+        deployWorkflowFile: "run-rad-commands.yml",
+        deleteWorkflowFile: "delete-application.yml",
+        maxParallelRecords: 10,
+        readApplicationIdentity: async () => ({
+          state: "known",
+          application: "todo-app"
+        }),
+        ghOrThrow: async (args) => {
+          const path = args[1];
+          if (path.includes("/variables?")) return "AZURE_CLIENT_ID";
+          if (path.includes("/deployments?")) {
+            const page = Number(/&page=(\d+)/.exec(path)?.[1] ?? 1);
+            pages.push(page);
+            return page === 1 ?
+                Array.from({ length: 100 }, (_, i) => String(i + 1)).join("\n")
+              : "101";
+          }
+          const status = /\/deployments\/(\d+)\/statuses/.exec(path);
+          if (status)
+            return `in_progress\thttps://github.com/${repo}/actions/runs/${status[1]}\t`;
+          const run = /\/actions\/runs\/(\d+)$/.exec(path);
+          if (run)
+            return [
+              run[1] === "101" ? "run-rad-commands.yml" : "unrelated.yml",
+              "in_progress",
+              "",
+              "1",
+              "a".repeat(40),
+              "",
+              run[1],
+              repo,
+              "workflow_dispatch"
+            ].join("\t");
+          throw new Error(`Unexpected history read: ${path}`);
+        }
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+    expect(response.status).toBe(409);
+    const conflict = await fetch(
+      `${entry.baseUrl}/api/delete-conflict?repo=octo%2Ftodo&environment=dev&application=todo-app`
+    );
+    expect(await conflict.json()).toMatchObject({ conflict: false });
+    expect(pages).toEqual([1, 2, 1, 2]);
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
+  it("prepares exact-run cleanup over HTTP without writes and rejects a superseded selection", async () => {
+    const h = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const selection = {
+      runId: 42,
+      runAttempt: 1,
+      deploymentId: "7",
+      runUrl: "https://github.com/octo/todo/actions/runs/42"
+    };
+    const current: DeploymentRow = {
+      ...row("dev", "failed"),
+      deploymentId: selection.deploymentId,
+      runUrl: selection.runUrl,
+      recovery: {
+        ...selection,
+        revision: "a".repeat(64),
+        deploymentIds: ["7", "6"],
+        confirmation: "todo-app/dev",
+        canMarkCleanupComplete: true
+      }
+    };
+    h.setDeploymentResolver(async () => current);
+    const target = { repo: "octo/todo", environment: "dev" };
+    const discovery = await post(
+      entry.baseUrl,
+      "/api/deployment-cleanup-details",
+      JSON.stringify(target)
+    );
+    expect(await discovery.json()).toMatchObject({
+      prepared: false,
+      selection
+    });
+    const prepared = await post(
+      entry.baseUrl,
+      "/api/deployment-cleanup-details",
+      JSON.stringify({ ...target, ...selection })
+    );
+    expect(prepared.status).toBe(200);
+    expect(await prepared.json()).toMatchObject({
+      prepared: true,
+      deployment: { recovery: current.recovery }
+    });
+    h.setDeploymentResolver(async () => ({
+      ...current,
+      runUrl: "https://github.com/octo/todo/actions/runs/43"
+    }));
+    const stale = await post(
+      entry.baseUrl,
+      "/api/deployment-cleanup-details",
+      JSON.stringify({ ...target, ...selection })
+    );
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: expect.stringContaining("changed")
+    });
+    expect(h.ghApiCalls).toEqual([]);
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
+  it("retains the local attempt when marker writes race an active rerun without recovery metadata", async () => {
+    const h = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const recovery = {
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      deploymentIds: ["7"],
+      confirmation: "todo-app/dev",
+      canMarkCleanupComplete: true
+    };
+    const current: DeploymentRow = {
+      ...row("dev", "failed"),
+      deploymentId: "7",
+      runUrl: "https://github.com/octo/todo/actions/runs/42",
+      recovery
+    };
+    Object.assign(h.state, {
+      deployStatus: "failed",
+      deployAppName: "todo-app",
+      deployRunUrl: current.runUrl,
+      deployRunId: "42",
+      deployAttempt: {
+        id: "original",
+        targetRepo: "octo/todo",
+        environment: "dev"
+      }
+    });
+    let rerunning = false;
+    h.setDeploymentResolver(async () =>
+      rerunning ?
+        {
+          ...current,
+          deploymentId: "new",
+          status: "pending",
+          recovery: undefined
+        }
+      : current
+    );
+    h.setGhOrThrow(async (args) => {
+      if (args.includes("POST")) rerunning = true;
+      return "";
+    });
+    const response = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app",
+        deploymentId: "7",
+        runUrl: current.runUrl,
+        ...recovery
+      })
+    );
+    expect(response.status).toBe(502);
+    expect(h.state.deployAttempt?.id).toBe("original");
+    expect(h.state.deployStatus).toBe("failed");
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
   it.each([
     {
       workspaceRepo: "acme/workspace",
@@ -1577,6 +1807,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         "environment=dev",
         "-f",
         "application=todo-app",
+        "-f",
+        "correlation_id=dep-fixture",
         "--repo",
         "octo/todo"
       ]
@@ -1925,6 +2157,68 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.cache.has("octo/todo")).toBe(false);
   });
 
+  it("attests an unknown terminal run over HTTP only with a fresh revision and exact typed token", async () => {
+    const h = start();
+    const runUrl = "https://github.com/octo/todo/actions/runs/42";
+    const recovery = {
+      runId: 42,
+      runAttempt: 1,
+      revision: "a".repeat(64),
+      deploymentIds: ["7", "8"],
+      confirmation: "octo/todo/run-42@1/dev",
+      canMarkCleanupComplete: true
+    };
+    h.setDeploymentResolver(async () =>
+      h.ghApiCalls.some((args) => args.includes("POST")) ?
+        null
+      : {
+          app: "",
+          environment: "dev",
+          status: "failed",
+          provider: "azure",
+          runUrl,
+          deploymentId: "7",
+          identity: { state: "unavailable", reason: "Artifact expired" },
+          recovery
+        }
+    );
+    const entry = await container!.getOrCreate("panel-a");
+    const body = {
+      repo: "octo/todo",
+      environment: "dev",
+      application: "",
+      deploymentId: "7",
+      runUrl,
+      ...recovery
+    };
+    const wrong = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({ ...body, confirmation: "wrong" })
+    );
+    expect(wrong.status).toBe(400);
+    await wrong.text();
+    const stale = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({ ...body, revision: "b".repeat(64) })
+    );
+    expect(stale.status).toBe(409);
+    await stale.text();
+    const accepted = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify(body)
+    );
+    expect(accepted.status).toBe(200);
+    await accepted.text();
+    expect(h.ghApiCalls.filter((args) => args.includes("POST"))).toHaveLength(
+      2
+    );
+    expect(h.dispatches).toEqual([]);
+    expect(h.workflowSyncs).toEqual([]);
+  });
+
   it("rejects malformed and non-failed abandonment over a real socket", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
@@ -1957,6 +2251,245 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.workflowSyncs).toEqual([]);
     expect(harness.dispatches).toEqual([]);
   });
+
+  it("lists active and healthy environments despite unreadable older history and refuses active cleanup", async () => {
+    const harness = start();
+    harness.environments.push("dev", "healthy");
+    harness.setDeploymentResolver((repo, environment, application) =>
+      resolveEnvironmentDeployment(repo, environment, application, {
+        readApplicationIdentity: async () => ({
+          state: "known",
+          application: "todo-app"
+        }),
+        ghOrThrow: async (args) => {
+          const endpoint = args[1];
+          if (endpoint.includes("/variables?")) return "AZURE_CLIENT_ID";
+          if (endpoint.includes("/deployments?"))
+            return environment === "dev" ? "2\n1" : "3";
+          const deployment = /\/deployments\/(\d+)\/statuses/.exec(endpoint);
+          if (deployment) {
+            const id = deployment[1];
+            return `${id === "2" ? "in_progress" : "success"}\thttps://github.com/${repo}/actions/runs/${id}\t`;
+          }
+          const run = /\/actions\/runs\/(\d+)$/.exec(endpoint);
+          if (run) {
+            if (run[1] === "1") throw new Error("HTTP 404: older run missing");
+            return [
+              ".github/workflows/run-rad-commands.yml",
+              run[1] === "2" ? "waiting" : "completed",
+              run[1] === "2" ? "" : "success",
+              "1",
+              "a".repeat(40),
+              "",
+              run[1],
+              repo,
+              "workflow_dispatch"
+            ].join("\t");
+          }
+          throw new Error(`Unexpected resolver operation: ${endpoint}`);
+        },
+        deployWorkflowFile: "run-rad-commands.yml",
+        deleteWorkflowFile: "delete-application.yml",
+        maxParallelRecords: 10
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+    const listing = await fetch(
+      `${entry.baseUrl}/api/list-deployments?repo=octo/todo`
+    );
+    expect(listing.status).toBe(200);
+    expect(await listing.json()).toEqual({
+      deployments: [
+        {
+          app: "todo-app",
+          identity: { state: "known", application: "todo-app" },
+          environment: "dev",
+          provider: "azure",
+          status: "pending",
+          deploymentId: "2",
+          runUrl: "https://github.com/octo/todo/actions/runs/2"
+        },
+        {
+          app: "todo-app",
+          identity: { state: "known", application: "todo-app" },
+          environment: "healthy",
+          provider: "azure",
+          status: "success",
+          deploymentId: "3",
+          runUrl: "https://github.com/octo/todo/actions/runs/3"
+        }
+      ]
+    });
+    for (const recovery of [
+      {},
+      {
+        runId: 2,
+        runAttempt: 1,
+        revision: "a".repeat(64),
+        confirmation: "todo-app/dev",
+        deploymentId: "2",
+        runUrl: "https://github.com/octo/todo/actions/runs/2"
+      }
+    ]) {
+      const cleanup = await post(
+        entry.baseUrl,
+        "/api/abandon-deployment",
+        JSON.stringify({
+          repo: "octo/todo",
+          environment: "dev",
+          application: "todo-app",
+          ...recovery
+        })
+      );
+      expect(cleanup.status).toBe(409);
+      expect(await cleanup.json()).toMatchObject({ error: expect.any(String) });
+    }
+    expect(harness.ghApiCalls.some((args) => args.includes("--method"))).toBe(
+      false
+    );
+    expect(harness.state.deploymentMutation).toBeUndefined();
+  });
+
+  it.each([false, true])(
+    "rescans real history after grouped cleanup with partial failure: %s",
+    async (partial) => {
+      const harness = start();
+      const markers = new Map<string, string>();
+      const writes: string[][] = [];
+      const gh = async (args: string[]): Promise<string> => {
+        const endpoint = args.find((arg) => arg.startsWith("/repos/"));
+        if (endpoint === "/repos/octo/todo/environments?per_page=100")
+          return "dev";
+        if (
+          endpoint ===
+          "/repos/octo/todo/environments/dev/variables?per_page=100"
+        )
+          return "AZURE_CLIENT_ID";
+        if (
+          endpoint ===
+          "/repos/octo/todo/deployments?per_page=100&environment=dev"
+        )
+          return "8\n7\n6";
+        const deployment = /\/deployments\/([678])\/statuses/.exec(
+          endpoint ?? ""
+        );
+        if (deployment) {
+          const id = deployment[1];
+          if (args.includes("POST")) {
+            writes.push(args);
+            if (partial && id === "7")
+              throw new Error("Fixture marker write refused");
+            const description = args.find((arg) =>
+              arg.startsWith("description=")
+            );
+            if (!description) throw new Error("Missing marker description");
+            markers.set(id, description.slice("description=".length));
+            return "";
+          }
+          if (args.at(-1) === '.[0].description // ""')
+            return markers.get(id) ?? "";
+          return [
+            markers.has(id) ? "inactive"
+            : id === "6" ? "success"
+            : "failure",
+            `https://github.com/octo/todo/actions/runs/${id === "6" ? 41 : 42}`,
+            markers.get(id) ?? ""
+          ].join("\t");
+        }
+        const run = /\/actions\/runs\/(41|42)$/.exec(endpoint ?? "");
+        if (run)
+          return [
+            ".github/workflows/run-rad-commands.yml",
+            "completed",
+            run[1] === "41" ? "success" : "failure",
+            "1",
+            "a".repeat(40),
+            "",
+            run[1],
+            "octo/todo",
+            "workflow_dispatch"
+          ].join("\t");
+        throw new Error(`Unexpected GitHub operation: ${JSON.stringify(args)}`);
+      };
+      harness.setGhOrThrow(gh);
+      harness.setDeploymentResolver((repo, environment, application) =>
+        resolveEnvironmentDeployment(repo, environment, application, {
+          readApplicationIdentity: async (_repo, _environment, runId) =>
+            runId === 42 ?
+              { state: "unavailable", reason: "Identity artifacts expired." }
+            : { state: "known", application: "todo-app" },
+          ghOrThrow: gh,
+          deployWorkflowFile: "run-rad-commands.yml",
+          deleteWorkflowFile: "delete-application.yml",
+          maxParallelRecords: 10
+        })
+      );
+      const entry = await container!.getOrCreate("panel-a");
+      const list = () =>
+        fetch(`${entry.baseUrl}/api/list-deployments?repo=octo%2Ftodo`);
+      const initial = await list();
+      expect(initial.status).toBe(200);
+      const current: DeploymentRow = (await initial.json()).deployments[0];
+      expect(current.recovery).toMatchObject({
+        runId: 42,
+        runAttempt: 1,
+        canMarkCleanupComplete: true,
+        confirmation: "octo/todo/run-42@1/dev"
+      });
+      if (!current.recovery) throw new Error("Missing recovery evidence");
+      expect(harness.cache.has("octo/todo")).toBe(true);
+      const response = await post(
+        entry.baseUrl,
+        "/api/abandon-deployment",
+        JSON.stringify({
+          repo: "octo/todo",
+          environment: "dev",
+          application: current.app,
+          deploymentId: current.deploymentId,
+          runUrl: current.runUrl,
+          ...current.recovery
+        })
+      );
+      expect(response.status).toBe(partial ? 502 : 200);
+      expect(await response.json()).toMatchObject(
+        partial ?
+          { error: expect.stringContaining("Cloud resources were not changed") }
+        : { outcome: "abandoned" }
+      );
+      expect(harness.cache.has("octo/todo")).toBe(false);
+      const marker = `Radius cleanup v1 run:42 attempt:1 rev:${current.recovery.revision}`;
+      expect(writes).toHaveLength(2);
+      for (const [index, args] of writes.entries())
+        expect(args).toEqual([
+          "api",
+          "--method",
+          "POST",
+          `/repos/octo/todo/deployments/${index === 0 ? 8 : 7}/statuses`,
+          "-f",
+          "state=inactive",
+          "-F",
+          "auto_inactive=false",
+          "-f",
+          `description=${marker}`,
+          "-f",
+          "log_url=https://github.com/octo/todo/actions/runs/42"
+        ]);
+      expect(markers.get("8")).toBe(marker);
+      expect(markers.get("7")).toBe(partial ? undefined : marker);
+      expect(markers.has("6")).toBe(false);
+      const refreshed = await list();
+      expect(refreshed.status).toBe(200);
+      expect((await refreshed.json()).deployments).toMatchObject([
+        {
+          deploymentId: partial ? "8" : "6",
+          runUrl: `https://github.com/octo/todo/actions/runs/${partial ? 42 : 41}`,
+          status: partial ? "failed" : "success"
+        }
+      ]);
+      expect(harness.dispatches).toEqual([]);
+      expect(harness.workflowSyncs).toEqual([]);
+    }
+  );
 
   it("fails closed over a real socket when the newest deployment cannot be identified", async () => {
     const harness = start();
@@ -2266,6 +2799,7 @@ function startDeploy(
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      id: () => "fixture",
       isValidRepoSlug,
       deleteApplicationWorkflowFiles: [],
       readInstanceEntry: (instanceId) => {
@@ -2283,6 +2817,8 @@ function startDeploy(
       }),
       resolveRepoAppName: () => Promise.resolve("todo-app"),
       resolveEnvDeployment: () => Promise.resolve(null),
+      listEnvDeployment: () =>
+        Promise.resolve({ deployment: null, incomplete: false }),
       ghOrThrow: () => Promise.resolve(""),
       resetDeploymentViewState: views.reset,
       captureDeletedDeployment: views.captureDeletion,
@@ -3465,7 +4001,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
 
         dispatchDone.resolve();
         await expect.poll(() => releases).toBe(1);
-        expect(harness.runtime.owner.hasActiveWork()).toBe(true);
+        await expect
+          .poll(() => harness.runtime.owner.hasActiveWork())
+          .toBe(false);
         const terminal = await fetch(`${entry.baseUrl}/api/deploy-status`);
         await terminal.json();
         expect(observed.reads).toHaveLength(reads);

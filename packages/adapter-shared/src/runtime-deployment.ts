@@ -132,7 +132,7 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
         return;
       const invocation = current.invocation;
       void owner
-        .run(invocation, async () => {
+        .observeDelivery(invocation, async () => {
           await wait(milliseconds, invocation.signal);
           if (!invocation.signal.aborted && owner.isCurrent(invocation))
             await publishDelivery(invocation, callback);
@@ -452,18 +452,22 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
             }
             owner.publish(invocation);
           }
+        })
+        .then(() => {
           if (isCurrent())
-            await publishDelivery(invocation, () =>
-              repair.coordinate({
-                appFile: invocation.target.appFile,
-                state,
-                attemptId: invocation.attemptId,
-                generation: invocation.generation,
-                repo,
-                branch: target.branch,
-                instanceId: context.instanceId,
-                isCurrent
-              })
+            return owner.observeDelivery(invocation, () =>
+              publishDelivery(invocation, () =>
+                repair.coordinate({
+                  appFile: invocation.target.appFile,
+                  state,
+                  attemptId: invocation.attemptId,
+                  generation: invocation.generation,
+                  repo,
+                  branch: target.branch,
+                  instanceId: context.instanceId,
+                  isCurrent
+                })
+              )
             );
         })
         .catch(ports.reportError);

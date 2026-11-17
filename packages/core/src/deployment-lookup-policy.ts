@@ -13,6 +13,14 @@ export interface DeploymentRow {
   deploymentId: string;
   runUrl: string;
   identity?: DeploymentApplicationIdentity;
+  recovery?: {
+    runId: number;
+    runAttempt: number;
+    revision: string;
+    deploymentIds: string[];
+    confirmation: string;
+    canMarkCleanupComplete: boolean;
+  };
 }
 
 export interface DeploymentRecord {
@@ -23,6 +31,13 @@ export interface DeploymentRecord {
   workflow: "deploy" | "delete" | "unrelated" | "unknown";
   runStatus: string;
   runConclusion: string;
+  runAttempt?: number;
+  headSha?: string;
+  runTitle?: string;
+  runPath?: string;
+  runEvent?: string;
+  runRepository?: string;
+  runId?: number;
 }
 
 export function classifyDeploymentWorkflow(
