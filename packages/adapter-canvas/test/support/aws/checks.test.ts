@@ -183,7 +183,8 @@ describe("lostLocks", () => {
       CreateDate: "2026-11-09T12:00:00Z",
       Description: "",
       Tags: [],
-      document: {}
+      document: {},
+      extraVersions: 0
     });
     expect(lostLocks(s, "op-1", "crash-before", 0)).toEqual([
       `radius-lock-${ROLE} (ANPAHAND) held by ? (no operation)`

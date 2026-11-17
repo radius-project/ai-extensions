@@ -331,3 +331,381 @@ describe("FakeAws", () => {
     ]);
   });
 });
+
+describe("FakeAws app roles and boundaries", () => {
+  const BOUNDARY_PATH = "/radius/apps/7/dev/";
+  const boundaryArn = `arn:aws:iam::${ACCOUNT}:policy${BOUNDARY_PATH}radius-app-boundary-7-dev`;
+
+  function withBoundary() {
+    const fake = aws();
+    fake.addManagedPolicy({
+      path: BOUNDARY_PATH,
+      name: "radius-app-boundary-7-dev",
+      document: TRUST,
+      tags: [{ Key: "radius-repository-id", Value: "7" }]
+    });
+    return fake;
+  }
+
+  const createAppRole = (boundary: string, path = BOUNDARY_PATH) => [
+    "iam",
+    "create-role",
+    "--role-name",
+    "radius-app-web-1",
+    "--path",
+    path,
+    "--permissions-boundary",
+    boundary,
+    "--assume-role-policy-document",
+    JSON.stringify(TRUST)
+  ];
+
+  it("creates a role under a path with its boundary, and shows both", () => {
+    const fake = withBoundary();
+    const created = json(fake.run(createAppRole(boundaryArn)).stdout).Role;
+    expect(created.Arn).toBe(
+      `arn:aws:iam::${ACCOUNT}:role${BOUNDARY_PATH}radius-app-web-1`
+    );
+    const read = json(
+      fake.run(["iam", "get-role", "--role-name", "radius-app-web-1"]).stdout
+    ).Role;
+    expect(read).toMatchObject({
+      Path: BOUNDARY_PATH,
+      PermissionsBoundary: {
+        PermissionsBoundaryType: "Policy",
+        PermissionsBoundaryArn: boundaryArn
+      }
+    });
+  });
+
+  it("refuses a boundary that doesn't exist, a bad path, and a name taken under another path", () => {
+    const fake = withBoundary();
+    expect(fake.run(createAppRole(`${boundaryArn}-gone`)).stderr).toContain(
+      "(NoSuchEntity)"
+    );
+    expect(
+      fake.run(createAppRole(boundaryArn, "radius/apps")).stderr
+    ).toContain("(ValidationError)");
+    fake.addRole({ name: "RADIUS-APP-WEB-1", trust: TRUST });
+    expect(fake.run(createAppRole(boundaryArn)).stderr).toContain(
+      "(EntityAlreadyExists)"
+    );
+  });
+
+  it("lists roles and policies under a path, without tags or boundaries", () => {
+    const fake = withBoundary();
+    fake.run(createAppRole(boundaryArn));
+    fake.addRole({ name: "elsewhere", trust: TRUST });
+    const roles = json(
+      fake.run(["iam", "list-roles", "--path-prefix", "/radius/apps/7/"]).stdout
+    ).Roles;
+    expect(roles.map((role: { RoleName: string }) => role.RoleName)).toEqual([
+      "radius-app-web-1"
+    ]);
+    expect(roles[0]).not.toHaveProperty("PermissionsBoundary");
+    expect(roles[0]).not.toHaveProperty("Tags");
+    expect(json(fake.run(["iam", "list-roles"]).stdout).Roles.length).toBe(2);
+    const policies = json(
+      fake.run([
+        "iam",
+        "list-policies",
+        "--scope",
+        "Local",
+        "--path-prefix",
+        "/radius/apps/7/"
+      ]).stdout
+    ).Policies;
+    expect(policies).toEqual([
+      expect.objectContaining({
+        Arn: boundaryArn,
+        AttachmentCount: 0,
+        PermissionsBoundaryUsageCount: 1
+      })
+    ]);
+    expect(policies[0]).not.toHaveProperty("Tags");
+    expect(
+      json(
+        fake.run([
+          "iam",
+          "list-policies",
+          "--scope",
+          "Local",
+          "--path-prefix",
+          "/other/"
+        ]).stdout
+      ).Policies
+    ).toEqual([]);
+    expect(() => fake.run(["iam", "list-policies"])).toThrow("--scope Local");
+  });
+
+  it("lists a role's tags", () => {
+    const fake = aws();
+    fake.addRole({
+      name: "tagged",
+      trust: TRUST,
+      tags: [{ Key: "radapp.io/environment", Value: "/x/dev" }]
+    });
+    expect(
+      json(fake.run(["iam", "list-role-tags", "--role-name", "tagged"]).stdout)
+    ).toEqual({
+      Tags: [{ Key: "radapp.io/environment", Value: "/x/dev" }],
+      IsTruncated: false
+    });
+    expect(
+      fake.run(["iam", "list-role-tags", "--role-name", "gone"]).stderr
+    ).toContain("(NoSuchEntity)");
+  });
+
+  it("deletes a boundary only once no role uses it, and a policy only without extra versions or attachments", () => {
+    const fake = withBoundary();
+    fake.run(createAppRole(boundaryArn));
+    const deletePolicy = (arn: string) =>
+      fake.run(["iam", "delete-policy", "--policy-arn", arn]);
+    expect(deletePolicy(boundaryArn).stderr).toContain("(DeleteConflict)");
+    // A boundary doesn't stop the role's own delete.
+    expect(
+      fake.run(["iam", "delete-role", "--role-name", "radius-app-web-1"]).code
+    ).toBe(0);
+    expect(deletePolicy(boundaryArn).code).toBe(0);
+
+    const versioned = fake.addManagedPolicy({
+      path: "/",
+      name: "versioned",
+      document: TRUST,
+      extraVersions: 1
+    });
+    expect(
+      json(
+        fake.run(["iam", "get-policy", "--policy-arn", versioned.Arn]).stdout
+      ).Policy.DefaultVersionId
+    ).toBe("v2");
+    expect(
+      fake.run([
+        "iam",
+        "get-policy-version",
+        "--policy-arn",
+        versioned.Arn,
+        "--version-id",
+        "v2"
+      ]).code
+    ).toBe(0);
+    expect(deletePolicy(versioned.Arn).stderr).toContain("(DeleteConflict)");
+
+    const attached = fake.addManagedPolicy({
+      path: "/",
+      name: "attached",
+      document: TRUST
+    });
+    fake.addRole({ name: "user", trust: TRUST, attached: [attached.Arn] });
+    expect(deletePolicy(attached.Arn).stderr).toContain("(DeleteConflict)");
+  });
+});
+
+describe("FakeAws Pod Identity associations", () => {
+  const ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role/radius/apps/7/dev/radius-app-web-1`;
+
+  function withAssociation() {
+    const fake = aws();
+    const association = fake.addPodIdentityAssociation("us-west-2", "shop", {
+      namespace: "default-app",
+      serviceAccount: "radius-app-web",
+      roleArn: ROLE_ARN,
+      tags: { "radapp.io/environment": "/x/dev" }
+    });
+    return { fake, association };
+  }
+
+  const target = (id: string, cluster = "shop") => [
+    "--cluster-name",
+    cluster,
+    "--region",
+    "us-west-2",
+    "--association-id",
+    id
+  ];
+
+  it("lists associations without their role or tags, and describes them with both", () => {
+    const { fake, association } = withAssociation();
+    const listed = json(
+      fake.run([
+        "eks",
+        "list-pod-identity-associations",
+        "--cluster-name",
+        "shop",
+        "--region",
+        "us-west-2"
+      ]).stdout
+    ).associations;
+    expect(listed).toEqual([
+      {
+        clusterName: "shop",
+        namespace: "default-app",
+        serviceAccount: "radius-app-web",
+        associationArn: association.associationArn,
+        associationId: association.associationId
+      }
+    ]);
+    expect(association.associationArn).toBe(
+      `arn:aws:eks:us-west-2:${ACCOUNT}:podidentityassociation/shop/${association.associationId}`
+    );
+    expect(
+      json(
+        fake.run([
+          "eks",
+          "list-pod-identity-associations",
+          "--cluster-name",
+          "shop",
+          "--region",
+          "us-west-2",
+          "--namespace",
+          "other"
+        ]).stdout
+      ).associations
+    ).toEqual([]);
+    expect(
+      json(
+        fake.run([
+          "eks",
+          "describe-pod-identity-association",
+          ...target(association.associationId)
+        ]).stdout
+      ).association
+    ).toMatchObject({
+      roleArn: ROLE_ARN,
+      tags: { "radapp.io/environment": "/x/dev" }
+    });
+  });
+
+  it("deletes an association once, and refuses an unknown one or cluster", () => {
+    const { fake, association } = withAssociation();
+    const remove = (id: string, cluster?: string) =>
+      fake.run([
+        "eks",
+        "delete-pod-identity-association",
+        ...target(id, cluster)
+      ]);
+    expect(isFakeAwsWrite(["eks", "delete-pod-identity-association"])).toBe(
+      true
+    );
+    expect(
+      json(remove(association.associationId).stdout).association.roleArn
+    ).toBe(ROLE_ARN);
+    expect(remove(association.associationId).stderr).toContain(
+      "(ResourceNotFoundException)"
+    );
+    expect(remove("a-1", "gone").stderr).toContain(
+      "(ResourceNotFoundException)"
+    );
+    expect(
+      fake.run([
+        "eks",
+        "list-pod-identity-associations",
+        "--cluster-name",
+        "gone",
+        "--region",
+        "us-west-2"
+      ]).stderr
+    ).toContain("(ResourceNotFoundException)");
+  });
+
+  it("allows one association per service account in a namespace", () => {
+    const { fake } = withAssociation();
+    expect(() =>
+      fake.addPodIdentityAssociation("us-west-2", "shop", {
+        namespace: "default-app",
+        serviceAccount: "radius-app-web",
+        roleArn: ROLE_ARN
+      })
+    ).toThrow("already has an association");
+    expect(() =>
+      fake.addPodIdentityAssociation("us-east-1", "shop", {
+        namespace: "default-app",
+        serviceAccount: "radius-app-web",
+        roleArn: ROLE_ARN
+      })
+    ).toThrow("no cluster");
+  });
+});
+
+describe("FakeAws policy simulator", () => {
+  const regional = (region: string) => ({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: "rds:*",
+        Resource: "*",
+        Condition: { StringEquals: { "aws:RequestedRegion": region } }
+      }
+    ]
+  });
+
+  function simulate(fake: FakeAws, region: string, role = "deploy") {
+    return fake.run([
+      "iam",
+      "simulate-principal-policy",
+      "--policy-source-arn",
+      fake.roleArn(role),
+      "--action-names",
+      "rds:CreateDBInstance",
+      "eks:DescribeCluster",
+      "--context-entries",
+      JSON.stringify([
+        {
+          ContextKeyName: "aws:RequestedRegion",
+          ContextKeyValues: [region],
+          ContextKeyType: "string"
+        }
+      ])
+    ]);
+  }
+
+  it("decides with the role's own policies capped by its boundary", () => {
+    const fake = aws();
+    const boundary = fake.addManagedPolicy({
+      path: "/",
+      name: "boundary",
+      document: {
+        Version: "2012-10-17",
+        Statement: [
+          { Effect: "Allow", Action: ["rds:*", "eks:*"], Resource: "*" }
+        ]
+      }
+    });
+    fake.addRole({
+      name: "deploy",
+      trust: TRUST,
+      boundary: boundary.Arn,
+      inline: { east: regional("us-east-2") }
+    });
+    const decisions = (region: string) =>
+      json(simulate(fake, region).stdout).EvaluationResults.map(
+        (item: { EvalActionName: string; EvalDecision: string }) =>
+          `${item.EvalActionName} ${item.EvalDecision}`
+      );
+    expect(decisions("us-east-2")).toEqual([
+      "rds:CreateDBInstance allowed",
+      "eks:DescribeCluster implicitDeny"
+    ]);
+    expect(decisions("us-west-1")).toEqual([
+      "rds:CreateDBInstance implicitDeny",
+      "eks:DescribeCluster implicitDeny"
+    ]);
+    expect(simulate(fake, "us-east-2", "gone").stderr).toContain(
+      "(NoSuchEntity)"
+    );
+  });
+
+  it("counts attached policies, and a role with no boundary", () => {
+    const fake = aws();
+    const attached = fake.addManagedPolicy({
+      path: "/",
+      name: "west",
+      document: regional("us-west-1")
+    });
+    fake.addRole({ name: "deploy", trust: TRUST, attached: [attached.Arn] });
+    expect(
+      json(simulate(fake, "us-west-1").stdout).EvaluationResults[0].EvalDecision
+    ).toBe("allowed");
+  });
+});
