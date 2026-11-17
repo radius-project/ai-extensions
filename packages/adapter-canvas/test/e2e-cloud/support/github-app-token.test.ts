@@ -188,6 +188,21 @@ describe("mintGitHubAppToken", () => {
     });
   });
 
+  it("requests only the permissions a caller names", async () => {
+    const fake = ports(
+      response({ token: "ghs_narrow", expires_at: "2026-09-04T21:00:00Z" })
+    );
+    await mintGitHubAppToken(CONFIG, fake, {
+      actions: "write",
+      environments: "read"
+    });
+    const [, init] = fake.request.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body)).permissions).toEqual({
+      actions: "write",
+      environments: "read"
+    });
+  });
+
   it("builds a short-lived app JWT with the configured client id", async () => {
     const fake = ports(
       response({

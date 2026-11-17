@@ -63,11 +63,21 @@ const RDS_ARN_PATTERN = /^arn:aws:rds:([a-z0-9-]+):\d{12}:[a-z]+:/;
 // How long the sweep waits on AWS and Kubernetes to finish what it started.
 export const RDS_DELETE_TIMEOUT_MS = 40 * 60 * 1000;
 export const SNAPSHOT_READY_TIMEOUT_MS = 20 * 60 * 1000;
+export const SNAPSHOT_DELETE_TIMEOUT_MS = 20 * 60 * 1000;
+// RDS deletes a group at once, but a read just after can still list it.
+export const GROUP_GONE_TIMEOUT_MS = 5 * 60 * 1000;
 export const NODE_GROUP_READY_TIMEOUT_MS = 15 * 60 * 1000;
 export const WORKLOAD_GONE_TIMEOUT_MS = 5 * 60 * 1000;
 const RDS_POLL_MS = 30 * 1000;
 const NODE_GROUP_POLL_MS = 15 * 1000;
 const WORKLOAD_POLL_MS = 10 * 1000;
+const GROUP_POLL_MS = 10 * 1000;
+// IAM and EKS are eventually consistent: a read just after a delete can still
+// find what was deleted.
+export const LOCK_GONE_TIMEOUT_MS = 60 * 1000;
+export const LEFTOVER_SETTLE_MS = 2 * 60 * 1000;
+const LOCK_POLL_MS = 5 * 1000;
+const LEFTOVER_POLL_MS = 15 * 1000;
 
 export interface AwsCleanupCluster {
   readonly region: string;
@@ -796,6 +806,36 @@ async function instanceGone(
   return (await instanceStatus(ports, region, id)) === "gone";
 }
 
+// Whether RDS no longer lists one named resource: a describe filtered to the
+// name answers its NotFound fault. Any other failure is a failed read.
+async function rdsResourceGone(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  region: string,
+  describe: { verb: string; nameFlag: string; notFound: string },
+  name: string
+): Promise<boolean> {
+  const result = await ports.runAws([
+    "rds",
+    describe.verb,
+    "--region",
+    region,
+    describe.nameFlag,
+    name,
+    "--output",
+    "json"
+  ]);
+  if (awsError(result, describe.notFound)) return true;
+  if (!succeeded(result))
+    throw new ReadFailure(`aws rds ${describe.verb}: ${awsDetail(result)}`);
+  return false;
+}
+
+const SNAPSHOT_DESCRIBE = {
+  verb: "describe-db-snapshots",
+  nameFlag: "--db-snapshot-identifier",
+  notFound: "DBSnapshotNotFound"
+};
+
 /**
  * Delete one region's recipe resources of the environments `sweepable`
  * accepts. Instances first, without a final snapshot, then, once they are
@@ -873,33 +913,53 @@ async function sweepRds(
     ...footprint.parameterGroups.map((group) => ({
       ...group,
       kind: "parameter",
-      args: ["delete-db-parameter-group", "--db-parameter-group-name"],
-      notFound: "DBParameterGroupNotFound"
+      verb: "delete-db-parameter-group",
+      describe: {
+        verb: "describe-db-parameter-groups",
+        nameFlag: "--db-parameter-group-name",
+        notFound: "DBParameterGroupNotFound"
+      }
     })),
     ...footprint.subnetGroups.map((group) => ({
       ...group,
       kind: "subnet",
-      args: ["delete-db-subnet-group", "--db-subnet-group-name"],
-      notFound: "DBSubnetGroupNotFoundFault"
+      verb: "delete-db-subnet-group",
+      describe: {
+        verb: "describe-db-subnet-groups",
+        nameFlag: "--db-subnet-group-name",
+        notFound: "DBSubnetGroupNotFoundFault"
+      }
     }))
   ].filter((group) => sweepable(group.environment));
   for (const group of groups) {
-    const [verb = "", name = ""] = group.args;
     const result = await ports.runAws([
       "rds",
-      verb,
+      group.verb,
       "--region",
       region,
-      name,
+      group.describe.nameFlag,
       group.name
     ]);
-    if (succeeded(result) || awsError(result, group.notFound)) {
+    if (!succeeded(result) && !awsError(result, group.describe.notFound)) {
+      report.fail(
+        `Deleting RDS DB ${group.kind} group ${group.name} in ${region}: ${awsDetail(result)}`
+      );
+      clean = false;
+      continue;
+    }
+    const gone = await waitFor(
+      ports,
+      GROUP_GONE_TIMEOUT_MS,
+      GROUP_POLL_MS,
+      () => rdsResourceGone(ports, region, group.describe, group.name)
+    );
+    if (gone) {
       report.did(
         `Deleted RDS DB ${group.kind} group ${group.name} in ${region}`
       );
     } else {
       report.fail(
-        `Deleting RDS DB ${group.kind} group ${group.name} in ${region}: ${awsDetail(result)}`
+        `RDS DB ${group.kind} group ${group.name} in ${region} was still there after ${GROUP_GONE_TIMEOUT_MS / 60000} minutes.`
       );
       clean = false;
     }
@@ -926,18 +986,7 @@ async function deleteSnapshot(
       SNAPSHOT_READY_TIMEOUT_MS,
       RDS_POLL_MS,
       async () => {
-        const listed = selectFinalSnapshots(
-          await readAws(ports, [
-            "rds",
-            "describe-db-snapshots",
-            "--region",
-            region,
-            "--snapshot-type",
-            "manual"
-          ]),
-          scope
-        ).tagged.find((item) => item.id === snapshot.id);
-        status = listed?.status ?? "gone";
+        status = await snapshotStatus(ports, scope, snapshot.id);
         return status !== "creating";
       }
     );
@@ -949,28 +998,72 @@ async function deleteSnapshot(
     }
   }
   if (status === "gone") return true;
-  if (status !== "available") {
+  if (status === "available") {
+    const result = await ports.runAws([
+      "rds",
+      "delete-db-snapshot",
+      "--region",
+      region,
+      "--db-snapshot-identifier",
+      snapshot.id
+    ]);
+    // RDS refuses a snapshot it is already deleting, as when an earlier
+    // request landed with its answer lost.
+    const refused =
+      !succeeded(result) &&
+      !awsError(result, "DBSnapshotNotFound") &&
+      !(
+        awsError(result, "InvalidDBSnapshotState") &&
+        (await snapshotStatus(ports, scope, snapshot.id)) === "deleting"
+      );
+    if (refused) {
+      report.fail(
+        `Deleting RDS DB snapshot ${snapshot.id} in ${region}: ${awsDetail(result)}`
+      );
+      return false;
+    }
+  } else if (status !== "deleting") {
     report.fail(
       `RDS DB snapshot ${snapshot.id} in ${region} is ${status}, and only an available snapshot can be deleted.`
     );
     return false;
   }
-  const result = await ports.runAws([
-    "rds",
-    "delete-db-snapshot",
-    "--region",
-    region,
-    "--db-snapshot-identifier",
-    snapshot.id
-  ]);
-  if (succeeded(result) || awsError(result, "DBSnapshotNotFound")) {
-    report.did(`Deleted RDS DB snapshot ${snapshot.id} in ${region}`);
-    return true;
-  }
-  report.fail(
-    `Deleting RDS DB snapshot ${snapshot.id} in ${region}: ${awsDetail(result)}`
+  // An accepted delete leaves the snapshot listed as `deleting` for a while,
+  // and the check that follows must not find it.
+  const gone = await waitFor(
+    ports,
+    SNAPSHOT_DELETE_TIMEOUT_MS,
+    RDS_POLL_MS,
+    () => rdsResourceGone(ports, region, SNAPSHOT_DESCRIBE, snapshot.id)
   );
-  return false;
+  if (!gone) {
+    report.fail(
+      `RDS DB snapshot ${snapshot.id} in ${region} was still being deleted after ${SNAPSHOT_DELETE_TIMEOUT_MS / 60000} minutes.`
+    );
+    return false;
+  }
+  report.did(`Deleted RDS DB snapshot ${snapshot.id} in ${region}`);
+  return true;
+}
+
+// The snapshot's status, or "gone" once RDS no longer lists it.
+async function snapshotStatus(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  scope: AwsRdsScope,
+  id: string
+): Promise<string> {
+  const listed = selectFinalSnapshots(
+    await readAws(ports, [
+      "rds",
+      "describe-db-snapshots",
+      "--region",
+      scope.region,
+      "--snapshot-type",
+      "manual"
+    ]),
+    scope
+  ).tagged.find((item) => item.id === id);
+  return listed?.status ?? "gone";
 }
 
 // A cutoff in the future selects every workload, whatever its age.
@@ -1637,6 +1730,19 @@ async function clearStaleLock(
     ports.runAws
   );
   if (removal.ok) {
+    const removed = lock;
+    const gone = await waitFor(
+      ports,
+      LOCK_GONE_TIMEOUT_MS,
+      LOCK_POLL_MS,
+      async () => (await readLock(config, ports))?.policyId !== removed.policyId
+    );
+    if (!gone) {
+      report.fail(
+        `IAM still listed the lock on ${config.deployRoleName} ${LOCK_GONE_TIMEOUT_MS / 1000} seconds after it was removed.`
+      );
+      return;
+    }
     if (removal.removed)
       report.did(
         `Removed the abandoned lock on ${config.deployRoleName}, held by ${lock.holder}`
@@ -1659,6 +1765,25 @@ export async function findAwsLeftovers(
   config: AwsCleanupConfig,
   ports: AwsCleanupPorts
 ): Promise<{ findings: string[]; warnings: string[] }> {
+  // A delete the sweep just made can take a moment to show, so findings get
+  // a short while to clear. A wrong account is final.
+  const deadline = ports.now() + LEFTOVER_SETTLE_MS;
+  for (;;) {
+    const result = await readAwsLeftovers(config, ports);
+    if (
+      result.findings.length === 0 ||
+      result.wrongAccount ||
+      ports.now() >= deadline
+    )
+      return { findings: result.findings, warnings: result.warnings };
+    await ports.sleep(LEFTOVER_POLL_MS);
+  }
+}
+
+async function readAwsLeftovers(
+  config: AwsCleanupConfig,
+  ports: AwsCleanupPorts
+): Promise<{ findings: string[]; warnings: string[]; wrongAccount: boolean }> {
   const findings: string[] = [];
   const warnings: string[] = [];
   const check = async (what: string, work: () => Promise<void>) => {
@@ -1675,7 +1800,7 @@ export async function findAwsLeftovers(
         `AWS is signed in to account ${account || "(unknown)"}, not ${config.accountId}.`
       );
   });
-  if (findings.length > 0) return { findings, warnings };
+  if (findings.length > 0) return { findings, warnings, wrongAccount: true };
   await check("RDS", async () => {
     for (const scope of await rdsScopes(config, ports)) {
       const footprint = await readRdsFootprint(ports, scope);
@@ -1770,5 +1895,5 @@ export async function findAwsLeftovers(
         throw new Error(awsDetail(result));
     });
   }
-  return { findings, warnings };
+  return { findings, warnings, wrongAccount: false };
 }

@@ -154,8 +154,82 @@ describe("FakeRds", () => {
         "--db-snapshot-identifier",
         "rds-snapshot-1"
       ).stderr
-    ).toContain("(DBSnapshotNotFound)");
+    ).toContain("(InvalidDBSnapshotState)");
   });
+
+  it("keeps listing a deleted snapshot as deleting until RDS finishes", () => {
+    const fake = new FakeAws();
+    fake.rds.deletingReads = 1;
+    fake.rds.addSnapshot({
+      id: "rds-snapshot-1",
+      region: REGION,
+      vpcId: "vpc-1",
+      tags: TAGS
+    });
+    const one = () =>
+      rds(
+        fake,
+        "describe-db-snapshots",
+        "--db-snapshot-identifier",
+        "rds-snapshot-1"
+      );
+    expect(
+      json(
+        rds(
+          fake,
+          "delete-db-snapshot",
+          "--db-snapshot-identifier",
+          "rds-snapshot-1"
+        ).stdout
+      ).DBSnapshot.Status
+    ).toBe("deleted");
+    expect(json(one().stdout).DBSnapshots[0].Status).toBe("deleting");
+    expect(one().stderr).toContain("(DBSnapshotNotFound)");
+    expect(
+      json(
+        rds(fake, "describe-db-snapshots", "--snapshot-type", "manual").stdout
+      ).DBSnapshots
+    ).toEqual([]);
+  });
+
+  it.each([
+    [
+      "describe-db-subnet-groups",
+      "--db-subnet-group-name",
+      "DBSubnetGroups",
+      "DBSubnetGroupNotFoundFault"
+    ],
+    [
+      "describe-db-parameter-groups",
+      "--db-parameter-group-name",
+      "DBParameterGroups",
+      "DBParameterGroupNotFound"
+    ],
+    [
+      "describe-db-instances",
+      "--db-instance-identifier",
+      "DBInstances",
+      "DBInstanceNotFound"
+    ]
+  ])(
+    "filters %s to one name, and answers its NotFound fault",
+    (verb, nameFlag, list, notFound) => {
+      const fake = aws();
+      fake.rds.addRecipeDatabase({
+        name: "mysql-other",
+        region: REGION,
+        vpcId: "vpc-1",
+        tags: []
+      });
+      expect(
+        json(rds(fake, verb, nameFlag, "MYSQL-ABC").stdout)[list]
+      ).toHaveLength(1);
+      expect(json(rds(fake, verb).stdout)[list]).toHaveLength(2);
+      expect(rds(fake, verb, nameFlag, "mysql-gone").stderr).toContain(
+        `(${notFound})`
+      );
+    }
+  );
 
   it("deletes a failed instance only without a final snapshot", () => {
     const fake = new FakeAws();

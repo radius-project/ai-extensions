@@ -9,6 +9,13 @@ import {
   type AwsCleanupPorts
 } from "./aws-cloud-cleanup.js";
 import {
+  mintGitHubAppToken,
+  readGitHubAppTokenConfig,
+  type GitHubAppTokenConfig
+} from "./github-app-token.js";
+import {
+  AWS_CLEANUP_APP_TOKEN_PERMISSIONS,
+  createAppTokenSource,
   createAwsCleanupAccessRemoval,
   createGhCleanupGitHub,
   createKubectlCleanupKubernetes,
@@ -16,6 +23,7 @@ import {
   ghNamespaceClaims,
   runCommand,
   temporaryDirectory,
+  type CommandResult,
   type CommandRunner
 } from "./aws-cloud-cleanup-ports.js";
 
@@ -28,6 +36,11 @@ export interface AwsCleanupMainDependencies {
   readonly run: CommandRunner;
   sleep(milliseconds: number): Promise<void>;
   now(): number;
+  // Mint a fixture installation token with the GitHub App's credentials.
+  mintAppToken(
+    config: GitHubAppTokenConfig,
+    permissions: Readonly<Record<string, string>>
+  ): Promise<string>;
   log(line: string): void;
   summary(markdown: string): Promise<void>;
 }
@@ -37,12 +50,37 @@ export function createAwsCleanupPorts(
   dependencies: AwsCleanupMainDependencies
 ): AwsCleanupPorts {
   const { env, run, sleep, now } = dependencies;
-  const gh = (args: readonly string[], packages = false) =>
-    run("gh", args, {
-      env: {
-        GH_TOKEN: (packages ? env.GH_PACKAGES_TOKEN : env.GH_TOKEN) ?? ""
-      }
-    });
+  // In CI the App's credentials are set, and the token is renewed before it
+  // expires. A local run uses the GH_TOKEN it was given.
+  const app = readGitHubAppTokenConfig({
+    ...env,
+    AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: config.repository
+  });
+  const fixtureToken =
+    app ?
+      createAppTokenSource({
+        initial: env.GH_TOKEN ?? "",
+        mint: () =>
+          dependencies.mintAppToken(app, AWS_CLEANUP_APP_TOKEN_PERMISSIONS),
+        now
+      })
+    : async () => env.GH_TOKEN ?? "";
+  const gh = async (
+    args: readonly string[],
+    packages = false
+  ): Promise<CommandResult> => {
+    let token: string;
+    try {
+      token = packages ? (env.GH_PACKAGES_TOKEN ?? "") : await fixtureToken();
+    } catch (error) {
+      return {
+        code: 1,
+        stdout: "",
+        stderr: `Could not renew the GitHub App token: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+    return run("gh", args, { env: { GH_TOKEN: token } });
+  };
   const runAws = (args: string[]) => run("aws", args);
   return {
     runAws,
@@ -90,19 +128,20 @@ export async function runAwsCleanup(
     return 2;
   }
   let config: AwsCleanupConfig | null;
+  let ports: AwsCleanupPorts;
   try {
     config = resolveAwsCleanupConfig(dependencies.env, dependencies.now());
+    if (!config) {
+      log(
+        "::notice::The AWS Cloud E2E variables are not set, so there is no AWS state to reclaim."
+      );
+      return 0;
+    }
+    ports = createAwsCleanupPorts(config, dependencies);
   } catch (error) {
     log(`::error::${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
-  if (!config) {
-    log(
-      "::notice::The AWS Cloud E2E variables are not set, so there is no AWS state to reclaim."
-    );
-    return 0;
-  }
-  const ports = createAwsCleanupPorts(config, dependencies);
   if (mode === "sweep") {
     const report = await sweepAwsCloudE2E(config, ports);
     await dependencies.summary(
@@ -142,6 +181,8 @@ if (
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now: () => Date.now(),
+    mintAppToken: (config, permissions) =>
+      mintGitHubAppToken(config, undefined, permissions),
     log: (line) => console.log(line),
     summary: async (markdown) => {
       if (summaryFile && markdown) await appendFile(summaryFile, markdown);

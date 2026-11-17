@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  APP_TOKEN_RENEW_AFTER_MS,
   APPLICATION_DELETE_TIMEOUT_MS,
+  createAppTokenSource,
   createAwsCleanupAccessRemoval,
   createGhCleanupGitHub,
   createKubectlCleanupKubernetes,
@@ -587,6 +589,17 @@ describe("runCommand", () => {
         }
       )
     ).toEqual({ code: 3, stdout: "", stderr: "from env" });
+    process.env.CLOUD_E2E_BOT_PRIVATE_KEY = "a private key";
+    try {
+      expect(
+        await runCommand(node, [
+          "-e",
+          "process.stdout.write(String(process.env.CLOUD_E2E_BOT_PRIVATE_KEY))"
+        ])
+      ).toMatchObject({ code: 0, stdout: "undefined" });
+    } finally {
+      delete process.env.CLOUD_E2E_BOT_PRIVATE_KEY;
+    }
     const missing = await runCommand("definitely-not-a-command-here", []);
     expect(missing.code).toBe(1);
     expect(missing.stderr).toContain("ENOENT");
@@ -604,5 +617,48 @@ describe("temporaryDirectory", () => {
     } finally {
       await rm(first, { recursive: true, force: true });
     }
+  });
+});
+
+describe("createAppTokenSource", () => {
+  it("renews the App token before an hour-long installation token expires", async () => {
+    const clock = { now: 0 };
+    const minted: string[] = [];
+    const token = createAppTokenSource({
+      initial: "ghs_from_the_action",
+      mint: async () => {
+        const next = `ghs_minted_${minted.length + 1}`;
+        minted.push(next);
+        return next;
+      },
+      now: () => clock.now
+    });
+    expect(await token()).toBe("ghs_from_the_action");
+    clock.now += APP_TOKEN_RENEW_AFTER_MS - 1;
+    expect(await token()).toBe("ghs_from_the_action");
+    clock.now += 1;
+    expect(await Promise.all([token(), token()])).toEqual([
+      "ghs_minted_1",
+      "ghs_minted_1"
+    ]);
+    clock.now += 2 * 60 * 60 * 1000;
+    expect(await token()).toBe("ghs_minted_2");
+    expect(minted).toHaveLength(2);
+    expect(APP_TOKEN_RENEW_AFTER_MS).toBeLessThan(59 * 60 * 1000);
+  });
+
+  it("mints at once with no starting token, and tries again after a failed mint", async () => {
+    let attempts = 0;
+    const token = createAppTokenSource({
+      initial: "",
+      mint: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("HTTP 502");
+        return "ghs_second";
+      },
+      now: () => 0
+    });
+    await expect(token()).rejects.toThrow("HTTP 502");
+    expect(await token()).toBe("ghs_second");
   });
 });

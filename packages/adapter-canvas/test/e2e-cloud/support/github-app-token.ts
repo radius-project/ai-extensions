@@ -100,9 +100,23 @@ export function createNodeGitHubAppTokenPorts(): GitHubAppTokenPorts {
   };
 }
 
+// What the cloud journey's token may do.
+const JOURNEY_PERMISSIONS: Readonly<Record<string, string>> = {
+  actions: "write",
+  actions_variables: "write",
+  administration: "write",
+  contents: "write",
+  deployments: "write",
+  environments: "write",
+  pull_requests: "write",
+  secrets: "write",
+  workflows: "write"
+};
+
 export async function mintGitHubAppToken(
   config: GitHubAppTokenConfig,
-  ports: GitHubAppTokenPorts = createNodeGitHubAppTokenPorts()
+  ports: GitHubAppTokenPorts = createNodeGitHubAppTokenPorts(),
+  permissions: Readonly<Record<string, string>> = JOURNEY_PERMISSIONS
 ): Promise<string> {
   const nowSeconds = Math.floor(ports.now().getTime() / 1000);
   const unsignedJwt = [
@@ -132,17 +146,7 @@ export async function mintGitHubAppToken(
       },
       body: JSON.stringify({
         repositories: [repositoryName],
-        permissions: {
-          actions: "write",
-          actions_variables: "write",
-          administration: "write",
-          contents: "write",
-          deployments: "write",
-          environments: "write",
-          pull_requests: "write",
-          secrets: "write",
-          workflows: "write"
-        }
+        permissions
       })
     }
   );

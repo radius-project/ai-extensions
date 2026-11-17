@@ -42,6 +42,14 @@ export type CommandRunner = (
   options?: { env?: Record<string, string>; timeoutMs?: number }
 ) => Promise<CommandResult>;
 
+// This process's environment without the GitHub App's private key, which only
+// this process uses to renew its token.
+function childEnvironment(): NodeJS.ProcessEnv {
+  const inherited = { ...process.env };
+  delete inherited.CLOUD_E2E_BOT_PRIVATE_KEY;
+  return inherited;
+}
+
 /** Run a CLI with an argv array, never a shell. Never throws. */
 export const runCommand: CommandRunner = (command, args, options = {}) =>
   new Promise((resolve) => {
@@ -52,7 +60,7 @@ export const runCommand: CommandRunner = (command, args, options = {}) =>
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
         timeout: options.timeoutMs ?? 120_000,
-        env: { ...process.env, ...options.env }
+        env: { ...childEnvironment(), ...options.env }
       },
       (error, stdout, stderr) => {
         const code =
@@ -90,6 +98,52 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ?
       (value as Record<string, unknown>)
     : null;
+}
+
+// What the sweep's fixture token may do. The workflow's token step asks for
+// the same, and a test keeps the two equal.
+export const AWS_CLEANUP_APP_TOKEN_PERMISSIONS: Readonly<
+  Record<string, string>
+> = {
+  actions: "write",
+  administration: "write",
+  contents: "read",
+  deployments: "write",
+  environments: "read"
+};
+
+// An installation token lives one hour. The sweep can run for two, so it
+// renews its token well before the hour is up.
+export const APP_TOKEN_RENEW_AFTER_MS = 45 * 60 * 1000;
+
+/**
+ * The fixture token for each `gh` call: `initial` until it is due for
+ * renewal, then a freshly minted one. Calls that arrive together share one
+ * mint, and a failed mint is tried again on the next call.
+ */
+export function createAppTokenSource(options: {
+  initial: string;
+  mint(): Promise<string>;
+  now(): number;
+}): () => Promise<string> {
+  let token = options.initial;
+  let mintedAt = options.now();
+  let pending: Promise<string> | null = null;
+  return () => {
+    if (token && options.now() - mintedAt < APP_TOKEN_RENEW_AFTER_MS)
+      return Promise.resolve(token);
+    pending ??= options
+      .mint()
+      .then((minted) => {
+        token = minted;
+        mintedAt = options.now();
+        return minted;
+      })
+      .finally(() => {
+        pending = null;
+      });
+    return pending;
+  };
 }
 
 export interface GhCleanupOptions {
