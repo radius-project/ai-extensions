@@ -326,7 +326,7 @@ A `concurrency` group only serializes runs _within the CI repository_, so it doe
 | `RADIUS_CLOUD_E2E_FIXTURE_AWS_BASELINE_SHA`      | The AWS baseline commit in that fork      |
 | `RADIUS_CLOUD_E2E_FIXTURE_AWS_FAILED_DEPLOY_SHA` | The AWS failed-deploy commit in that fork |
 
-Setting only some of them is a hard failure rather than a partial override. A fork's commits are not the upstream commits, so a run pointed at a fork while still carrying the upstream pin would try to reset the fork to a SHA it does not contain — and because that pinned SHA is also the cleanup reset target, the failure would surface during cleanup, after the run had already created cloud resources. Failing at startup instead costs nothing and is unambiguous.
+Setting only some of them is a hard failure rather than a partial override. A fork's commits are not the upstream commits, so a run pointed at a fork while still carrying the upstream pin would try to reset the fork to a SHA it does not contain. Because that pinned SHA is also the cleanup reset target, the failure would surface during cleanup, after the run had already created cloud resources. Failing at startup instead costs nothing and is unambiguous.
 
 **The suite refuses these variables when `CI` is set**, and fails rather than ignoring them. Ignoring would be worse than either alternative: in CI a stray value could repoint the nightly run at somebody's fork, and locally a silently-ignored override would leave a developer believing they were testing their fork while actually operating on the shared repository — which is precisely the contention this paragraph exists to prevent.
 
