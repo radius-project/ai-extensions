@@ -9,6 +9,7 @@ const LABELS = {
 describe("FakeKubernetes", () => {
   it("lists only labelled workloads, as the selector does", () => {
     const kube = new FakeKubernetes();
+    kube.addCluster("c");
     kube.addWorkload("c", {
       kind: "Deployment",
       name: "web",
@@ -41,6 +42,8 @@ describe("FakeKubernetes", () => {
 
   it("deletes one workload by kind in any case, and a namespace with its workloads", () => {
     const kube = new FakeKubernetes();
+    kube.addCluster("c");
+    kube.addCluster("d");
     for (const name of ["a", "b"])
       kube.addWorkload("c", {
         kind: "Deployment",
@@ -57,5 +60,33 @@ describe("FakeKubernetes", () => {
     expect(kube.snapshot()).toEqual([]);
     kube.addNamespace("d", "x");
     expect(kube.namespaceExists("d", "x")).toBe(true);
+  });
+
+  it("refuses a cluster it wasn't given, so a mistyped target can't pass", () => {
+    const kube = new FakeKubernetes();
+    kube.addCluster("us-east-2/main");
+    const workload = {
+      kind: "Deployment",
+      name: "web",
+      namespace: "ns",
+      labels: LABELS,
+      creationTimestamp: ""
+    };
+    kube.addWorkload("us-east-2/main", workload);
+    const typo = "us-east-2/mian";
+    for (const call of [
+      () => kube.list(typo),
+      () => kube.delete(typo, "Deployment", "web", "ns"),
+      () => kube.namespaceExists(typo, "ns"),
+      () => kube.deleteNamespace(typo, "ns"),
+      () => kube.addWorkload(typo, workload),
+      () => kube.addNamespace(typo, "ns")
+    ])
+      expect(call).toThrow(`The fake has no cluster ${typo}.`);
+    expect(kube.snapshot()).toEqual(["us-east-2/main Deployment ns/web"]);
+    expect(kube.namespaceExists("us-east-2/main", "default")).toBe(true);
+    expect(() => kube.addCluster("us-east-2/main")).toThrow(
+      "The fake already has cluster us-east-2/main."
+    );
   });
 });
