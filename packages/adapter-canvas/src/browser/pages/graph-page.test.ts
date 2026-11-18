@@ -1115,26 +1115,29 @@ describe("initializeGraphPage", () => {
     expect(status?.textContent).toBe(generating);
   });
 
-  it("ends a superseded load without retrying", async () => {
-    const { browser, status } = fixture({ loaded: false });
-    let calls = 0;
-    browser.net.handle("/api/load-graph", () => {
-      calls++;
-      return calls === 1 ?
-          jsonResponse({ stale: true })
-        : jsonResponse({ resources: [{ id: "app/current" }] });
-    });
-    initializeGraphPage(browser.context, globals());
-    await flushPromises();
+  it.each([true, false])(
+    "ends a superseded load without retrying (wrapper: %s)",
+    async (withWrapper) => {
+      const { browser, status } = fixture({ loaded: false, withWrapper });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return calls === 1 ?
+            jsonResponse({ stale: true })
+          : jsonResponse({ resources: [{ id: "app/current" }] });
+      });
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
 
-    expect(status?.textContent).toContain("superseded");
-    expect(browser.clock.timeouts).toBe(0);
+      expect(status?.textContent).toContain("superseded");
+      expect(browser.clock.timeouts).toBe(0);
 
-    browser.clock.tick(5_000);
-    await flushPromises();
-    expect(calls).toBe(1);
-    expect(browser.nav.reloads).toBe(0);
-  });
+      browser.clock.tick(5_000);
+      await flushPromises();
+      expect(calls).toBe(1);
+      expect(browser.nav.reloads).toBe(0);
+    }
+  );
 
   // Copilot usually finishes authoring the model within the first few seconds.
   // The wait between polls therefore starts short and only lengthens for a

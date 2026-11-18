@@ -846,7 +846,7 @@ describe("initializeGraphDiffPage", () => {
   });
 
   it("ignores diagnostics and navigation on a superseded comparison", async () => {
-    const { browser, status } = fixture({ resources: [{ id: "app/web" }] });
+    const { browser, head, status } = fixture();
     browser.net.handle("/api/diff-branches", () =>
       jsonResponse({
         stale: true,
@@ -858,6 +858,7 @@ describe("initializeGraphDiffPage", () => {
       radiusRenderGraph: vi.fn()
     });
     await flushPromises();
+    head.dispatch("change");
     browser.clock.tick(DIFF_DEBOUNCE_MS);
     await flushPromises();
     expect(status.textContent).not.toContain("Discarded comparison");
