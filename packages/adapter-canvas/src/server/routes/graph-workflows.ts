@@ -933,6 +933,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         data.refresh &&
         dependencies.canReuseModeledGraph(state, repo, branch, definitionHash)
       ) {
+        if (
+          !(await ownsWorkspaceGraphOutput(
+            isCurrentOutput,
+            selection.verifyWorkspaceBranch
+          )) ||
+          !isCurrentOutput()
+        )
+          return json(409, STALE_PAYLOAD);
         // Keep persisted provenance in step with what this response reports, so
         // a later page render cannot disagree with the page it just answered.
         state.graphFollowsWorkspaceBranch =
@@ -1185,6 +1193,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         dependencies.readInstanceEntry(instanceId) === entry &&
         ownsGraphSelection(state, progressHandle) &&
         isCurrentSourceRef();
+      const workspacePath = state.workspacePath;
+      const ownsPlan = () =>
+        isCurrentSelection() &&
+        isCurrentPlan() &&
+        isCurrentGraphProgress(state, progressHandle) &&
+        state.workspacePath === workspacePath;
 
       const addEvent = (
         stage: GraphBuildStage,
@@ -1286,6 +1300,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         previousPlanSelection.environment === state.plannedEnvironment &&
         state.plannedDefinitionHash === definitionHash;
       if (canReusePlannedGraph) {
+        if (
+          !(await ownsWorkspaceGraphOutput(
+            ownsPlan,
+            selection.verifyWorkspaceBranch
+          )) ||
+          !ownsPlan()
+        )
+          return json(409, STALE_PAYLOAD);
         state.plannedResources = previousPlannedResources;
         state.plannedFollowsWorkspaceBranch =
           branchResolution.followsWorkspaceBranch;
@@ -1376,6 +1398,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         }
       );
       const { recipes, resources: plannedResources } = enriched;
+      if (
+        !(await ownsWorkspaceGraphOutput(
+          ownsPlan,
+          selection.verifyWorkspaceBranch
+        )) ||
+        !ownsPlan()
+      )
+        return json(409, STALE_PAYLOAD);
       addEvent(
         "resolving_recipes",
         "succeeded",
@@ -1389,9 +1419,6 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
 
       if (sourceRefContext) {
         // Equivalent mutant, as in load-graph: retained verbatim, unreachable.
-        if (!isCurrentPlan()) {
-          return json(409, STALE_PAYLOAD);
-        }
         if (
           !dependencies.setSourceRefResources(
             entry,
@@ -1537,7 +1564,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // source-reference token; anything this one writes afterwards — progress
       // events, authoring-failure state, a handoff — would belong to a
       // comparison the user already left.
+      const workspacePath = state.workspacePath;
       const isCurrentRequest = (): boolean =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        state.workspacePath === workspacePath &&
         isCurrentGraphProgress(state, progressHandle) &&
         dependencies.isCurrentSourceRefToken(
           state,
@@ -1804,7 +1834,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             );
         }
       });
-      if (!isCurrentRequest()) throw new GraphRequestSuperseded();
+      if (
+        !(await ownsWorkspaceGraphOutput(
+          isCurrentRequest,
+          baseSelection.verifyWorkspaceBranch,
+          headSelection.verifyWorkspaceBranch
+        )) ||
+        !isCurrentRequest()
+      )
+        throw new GraphRequestSuperseded();
       if (compared.status === "definitions-absent")
         return json(200, {
           error: GENERATING_APP_BICEP_MESSAGE,

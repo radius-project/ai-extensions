@@ -1231,6 +1231,50 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(harness.state.activeGraphView).toBe("planned");
   });
 
+  it.each(["compile", "cached refresh"])(
+    "rejects a workspace plan after a checkout during %s",
+    async (phase) => {
+      let liveBranch = "main";
+      const harness = start({
+        selections: {
+          main: {
+            ...selectionOf("main", "resource app = {}"),
+            fromWorkspace: true,
+            verifyWorkspaceBranch: async () => liveBranch === "main"
+          }
+        },
+        compiled: {
+          main: [{ id: "res-a", name: "api", type: "Fixture/containers" }]
+        }
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const plan = (refresh: boolean) =>
+        post(
+          entry.baseUrl,
+          "/api/plan-graph",
+          JSON.stringify({ repo: "octo/app", branch: "main", refresh })
+        );
+      if (phase === "cached refresh") {
+        expect((await plan(false)).status).toBe(200);
+        harness.script.stageArtifacts = async () => {
+          liveBranch = "topic";
+          return { dir: "", remote: false };
+        };
+      } else {
+        harness.script.afterCompile = () => {
+          liveBranch = "topic";
+        };
+      }
+
+      const response = await plan(phase === "cached refresh");
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ stale: true });
+      if (phase === "compile")
+        expect(harness.state.plannedRepo).toBeUndefined();
+    }
+  );
+
   it("compares two branches over a real socket", async () => {
     const harness = start({
       selections: {
@@ -1260,6 +1304,50 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(harness.state.page).toBe("graphDiff");
     expect(harness.state.diffResources).toHaveLength(2);
   });
+
+  it.each(["main", "topic"])(
+    "rejects the diff when the workspace side %s changes branch during disposal",
+    async (workspaceBranch) => {
+      let liveBranch = workspaceBranch;
+      const workspaceSelection = {
+        ...selectionOf(workspaceBranch, "workspace model"),
+        fromWorkspace: true,
+        verifyWorkspaceBranch: async () => liveBranch === workspaceBranch
+      };
+      const harness = start({
+        selections: {
+          main: selectionOf("main", "base model"),
+          topic: selectionOf("topic", "head model"),
+          [workspaceBranch]: workspaceSelection
+        },
+        compiled: { main: [], topic: [] },
+        stageArtifacts: async () => ({
+          dir: "fixture-stage",
+          remote: true,
+          handle: {
+            dir: "fixture-stage",
+            owned: true,
+            fingerprint: "fixture",
+            async dispose() {
+              liveBranch = "other";
+            }
+          }
+        })
+      });
+      const entry = await container!.getOrCreate("panel-a");
+
+      const stale = await post(
+        entry.baseUrl,
+        "/api/diff-branches",
+        '{"repo":"octo/app","base":"main","head":"topic"}'
+      );
+
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toEqual({ stale: true });
+      expect(harness.state.diffResources).toBeUndefined();
+      expect(harness.state.activeGraphView).toBeUndefined();
+    }
+  );
 
   it("keeps the newer same-selection diff when the older disposal finishes last", async () => {
     let cleanupStarted = () => {};

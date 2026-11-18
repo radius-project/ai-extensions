@@ -12,13 +12,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { redactGhCredentials } from "../../gh.js";
 
-/** Call publication and invalidation only after synchronous request admission. */
+/** Recheck request ownership after verifying the selected workspace branches. */
 export async function ownsWorkspaceGraphOutput(
   isCurrent: () => boolean,
-  verifyBranch?: () => Promise<boolean>
+  ...verifyBranches: Array<(() => Promise<boolean>) | undefined>
 ): Promise<boolean> {
   if (!isCurrent()) return false;
-  if (verifyBranch && !(await verifyBranch().catch(() => false))) return false;
+  for (const verifyBranch of verifyBranches) {
+    if (verifyBranch && !(await verifyBranch().catch(() => false)))
+      return false;
+  }
   return isCurrent();
 }
 

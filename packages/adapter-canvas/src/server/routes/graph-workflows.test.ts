@@ -1353,6 +1353,44 @@ describe("graph planning workflows", () => {
       expect(JSON.stringify(outcome.payload)).toBe('{"stale":true}');
     });
 
+    it("does not return a cached modeled graph after a checkout during staging", async () => {
+      let liveBranch = "main";
+      const harness = start({
+        selections: {
+          main: selectionOf({
+            fromWorkspace: true,
+            verifyWorkspaceBranch: async () => liveBranch === "main"
+          })
+        },
+        staged: { main: { dir: "/tmp/staged", remote: true } },
+        definitionHash: "hash-a",
+        afterStage: () => {
+          liveBranch = "topic";
+        }
+      });
+      Object.assign(harness.state, {
+        graphLoaded: true,
+        graphTargetRepo: "octo/app",
+        graphBranch: "main",
+        graphDefinitionHash: "hash-a",
+        graphModelRevision: "prior-revision",
+        graphResources: [{ id: "cached" }]
+      });
+
+      const outcome = await harness.run(
+        "loadGraph",
+        '{"repo":"octo/app","refresh":true}'
+      );
+
+      expect(outcome).toMatchObject({ status: 409, payload: { stale: true } });
+      expect(harness.state.graphModelRevision).toBe("prior-revision");
+      expect(harness.order).toEqual([
+        "select:main",
+        "stage:main",
+        "discard:/tmp/staged"
+      ]);
+    });
+
     it("serves the cached graph on a refresh of an unchanged model", async () => {
       const harness = start({
         selections: { main: selectionOf() },
@@ -2354,6 +2392,28 @@ describe("graph planning workflows", () => {
       expect(messages(harness.state)).not.toContain(
         "Laying out and rendering the planned graph."
       );
+    });
+
+    it("rejects a plan superseded during the final workspace branch verification", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({
+            fromWorkspace: true,
+            verifyWorkspaceBranch: async () => {
+              await Promise.resolve();
+              beginPlannedGraphRequest(harness.state);
+              return true;
+            }
+          })
+        },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [] }
+      });
+
+      const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(outcome).toMatchObject({ status: 409, payload: { stale: true } });
+      expect(harness.state.plannedRepo).toBeUndefined();
     });
 
     it("answers 409 when the planned selection changed under the request", async () => {
