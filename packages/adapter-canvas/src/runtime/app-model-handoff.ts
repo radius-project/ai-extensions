@@ -71,6 +71,11 @@ export interface AppModelHandoffDependencies {
     state: CanvasState
   ): Promise<AppSourceEvaluation>;
   send(message: HandoffMessage): Promise<void>;
+  // The radius-app-bicep skill bootstrap, the same JSON radius_generate_app
+  // returns. Each modeling handoff embeds it, so the agent starts the skill
+  // without finding and calling the tool. A rejection abandons the handoff the
+  // same way a failed send does.
+  skillHandoff(): Promise<string>;
   // Source evidence for one branch, captured when an attempt starts so the
   // failure it may report is compared with the source the agent modeled. An
   // empty answer or an error means unknown.
@@ -88,6 +93,12 @@ export interface AppModelHandoffDependencies {
     context: CanvasState,
     waitStartedAtMs?: number
   ): Promise<boolean>;
+  // Records that a modeling run was requested for these branches, so a later
+  // render of an overlapping view, such as a diff that includes one of them,
+  // waits for that run instead of asking again. The agent never calls
+  // radius_generate_app for a run the Canvas requests, so nothing else records
+  // it before the run creates its staging directory.
+  announceModelingRun(repo: string, branches: ReadonlyArray<string>): void;
   // Injected so the grace window below is driven by a fake clock in tests, and
   // so nothing here owns a timer.
   wait(ms: number): Promise<void>;
@@ -349,6 +360,13 @@ export function createAppModelHandoff(
         releaseReservation();
         return;
       }
+      let skillHandoff: string;
+      try {
+        skillHandoff = await deps.skillHandoff();
+      } catch (error) {
+        releaseReservation();
+        throw error;
+      }
       // Read before the attempt token exists, so an edit saved while the agent
       // models is newer than this baseline and a later render can retry it.
       const sourceRevisions = await Promise.all(
@@ -399,6 +417,7 @@ export function createAppModelHandoff(
         await deps.send(
           appBicepHandoffMessage(
             repo,
+            skillHandoff,
             page,
             targets,
             state?.canvasInstanceId,
@@ -430,6 +449,7 @@ export function createAppModelHandoff(
       // runs. Keep the extension claim until its bounded expiry, while clearing
       // the panel reservation so this same view can retry after that expiry.
       deps.missingModelHandoffs.markDelivered(claim);
+      deps.announceModelingRun(repo, targets);
       releaseStateReservation();
       return;
     }
@@ -467,11 +487,12 @@ export function createAppModelHandoff(
           releaseStateReservation();
           return;
         }
-        await deps.send(appModelUnverifiedMessage(unverified));
-      } catch (sendError) {
+        const skillHandoff = await deps.skillHandoff();
+        await deps.send(appModelUnverifiedMessage(unverified, skillHandoff));
+      } catch (error) {
         releaseStateReservation();
         if (memoOwned) deps.releaseRefreshMemo(refreshKey);
-        throw sendError;
+        throw error;
       }
       return;
     }
@@ -492,11 +513,12 @@ export function createAppModelHandoff(
           releaseStateReservation();
           return;
         }
-        await deps.send(appModelRefreshMessage(outdated));
-      } catch (sendError) {
+        const skillHandoff = await deps.skillHandoff();
+        await deps.send(appModelRefreshMessage(outdated, skillHandoff));
+      } catch (error) {
         releaseStateReservation();
         if (memoOwned) deps.releaseRefreshMemo(refreshKey);
-        throw sendError;
+        throw error;
       }
       return;
     }

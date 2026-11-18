@@ -60,6 +60,10 @@ const TOOL_NAMES = [
   "radius_environment_control"
 ];
 
+// The skillBase the fake radiusAppBicepSkill reports. A handoff that carries
+// it embeds the skill bootstrap instead of asking the agent to call a tool.
+const SKILL_BASE = "/test/skills/radius-app-bicep";
+
 function parseSkillHandoff(value: unknown): Record<string, unknown> {
   if (typeof value !== "string") {
     throw new Error("Expected the skill handoff to be JSON text.");
@@ -1285,7 +1289,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       .map((call) => JSON.stringify(call[0]))
       .join("\n");
     expect(sent).toContain("source has changed since");
-    expect(sent).toContain("radius_generate_app");
+    expect(sent).toContain(SKILL_BASE);
+    expect(sent).not.toContain("radius_generate_app");
 
     // The skill regenerates and rewrites the origin record against the branch's
     // current commit, so the worktree now reports no source change beyond the
@@ -1623,7 +1628,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     // the tool runs, because handing the skill over starts a run the handoff is
     // then right to defer to.
     const handedOff = await handOff(harness);
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
+    expect(handedOff).not.toContain("radius_generate_app");
     expect(handedOff).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
 
     const generated = String(await generateApp(harness));
@@ -1674,7 +1680,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     });
 
     // The graph render that finds no model comes first and legitimately asks.
-    expect(await handOff(harness)).toContain("radius_generate_app");
+    expect(await handOff(harness)).toContain(SKILL_BASE);
 
     // Then the agent acts on it, which is the run the next render must defer to
     // rather than ask for a second time. Panel state carries no dedupe key
@@ -1705,10 +1711,51 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       page: "graph"
     });
 
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
 
     await harness.extension.shutdown("test");
   });
+
+  // The agent does not call radius_generate_app for a run the Canvas
+  // requests, so the assembled runtime must record that run when it delivers
+  // the handoff. Otherwise an overlapping view, such as a diff that includes
+  // the same branch, asks for the same model again before the run stages.
+  it.each([
+    {
+      name: "a diff that includes the requested branch waits for its run",
+      second: {
+        repo: "acme/widgets",
+        branches: ["main", "feat"],
+        page: "graph-diff"
+      },
+      asksAgain: false
+    },
+    {
+      name: "a view of an unrelated branch still asks",
+      second: { repo: "acme/widgets", branches: ["feat"], page: "graph" },
+      asksAgain: true
+    }
+  ])(
+    "after the Canvas requests a model, $name",
+    async ({ second, asksAgain }) => {
+      const harness = await createRuntimeSdkHarness({
+        workspaceTreeByRepoBranch: {
+          "acme/widgets@main": ["src/index.ts", "Dockerfile"]
+        },
+        remoteTreeByRepoBranch: {
+          "acme/widgets@feat": ["src/index.ts", "Dockerfile"]
+        }
+      });
+
+      expect(await handOff(harness)).toContain(SKILL_BASE);
+      const again = await handOff(harness, second);
+
+      if (asksAgain) expect(again).toContain(SKILL_BASE);
+      else expect(again).toBe("");
+
+      await harness.extension.shutdown("test");
+    }
+  );
 
   it("does not re-ask once the user answers with a directory inside the worktree", async () => {
     const harness = await createRuntimeSdkHarness({
@@ -1771,7 +1818,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 
     const handedOff = await handOff(harness);
 
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
     expect(harness.deps.github.treePaths).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
@@ -1785,7 +1832,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 
     // Asked before the tool runs: handing the skill over starts a run the
     // handoff is then right to defer to.
-    expect(await handOff(harness)).toContain("radius_generate_app");
+    expect(await handOff(harness)).toContain(SKILL_BASE);
 
     const generated = await generateApp(harness);
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);

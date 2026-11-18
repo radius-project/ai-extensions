@@ -8,9 +8,11 @@
 //
 // Two signals, because neither covers the whole run on its own:
 //
-//   * `radius_generate_app` handing the skill over is the earliest moment the
-//     extension can observe, but it says nothing about when the run ends, so it
-//     is only trusted for a bounded window.
+//   * Handing the skill over is the earliest moment the extension can observe:
+//     the Canvas delivering a missing-model handoff, or `radius_generate_app`
+//     returning the bootstrap to an agent that called it. Neither says
+//     anything about when the run ends, so the announcement is only trusted
+//     for a bounded window.
 //   * `.radius/.staging-<runId>/` is definitive at both ends — a run creates it
 //     before it writes anything and removes it when it publishes or aborts —
 //     but it does not exist until the run calls `--begin`, and it exists only

@@ -44,14 +44,25 @@ interface DeployRepairDetails {
   attemptId?: string;
 }
 
-// Shared instruction lines for the two handoff prompts below. The radius-app-bicep
-// skill owns the full authoring workflow (namespaces, types, structure, and
-// writing the file to the working tree), so these hooks only point the agent at that
-// skill and state the graph's data source. They never restate the skill's steps,
-// so they cannot drift from it or short-circuit it (for example, stopping before
-// the model is written).
-const SKILL_HANDOFF =
-  "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
+// Shared instruction lines for the three modeling handoff prompts below. The
+// radius-app-bicep skill owns the full authoring workflow (namespaces, types,
+// structure, and writing the file to the working tree), so these hooks only
+// point the agent at that skill and state the graph's data source. They never
+// restate the skill's steps, so they cannot drift from it or short-circuit it
+// (for example, stopping before the model is written).
+//
+// The Canvas embeds the skill bootstrap that radius_generate_app returns, so the
+// queued turn can start the skill without finding and calling a tool. Asking
+// the agent to call it failed whenever the turn could not see the tool: a
+// custom agent's tool list left it out, tool search reported it as missing, or
+// the extension was reconnecting (#1243).
+function skillHandoffInstruction(skillHandoff: string): string {
+  return [
+    "Author the application model with the radius-app-bicep skill, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.",
+    "Do not call or search for a tool to start the skill. Use this handoff from the Canvas:",
+    skillHandoff
+  ].join("\n");
+}
 const RECIPE_PACK_NOTE =
   "Recipes are supplied by recipe packs, not by inline per-type recipes fabricated in app.bicep or in the graph. When no built-in type fits, the radius-app-bicep skill generates a custom resource type together with a recipe pack for it; follow the skill rather than inventing a singleton recipe here.";
 // Canvas supplies no Environment contract; the user's request can still name
@@ -175,11 +186,13 @@ function failureReportInstruction(
 
 // Prompt sent to the agent when a Radius graph canvas is opened but no
 // .radius/app.bicep exists on the branch. This half is agent-facing: it names
-// the skill and the graph's data source so recovery needs no extra round trip.
-// It is not what the timeline shows — always send it through
-// appBicepHandoffMessage() so a display prompt travels with it.
+// the skill, carries the skill handoff, and states the graph's data source so
+// recovery needs no extra round trip. It is not what the timeline shows —
+// always send it through appBicepHandoffMessage() so a display prompt travels
+// with it.
 export function appBicepHandoffPrompt(
   repo: string,
+  skillHandoff: string,
   page = "graph",
   branches: Array<string | undefined> = [],
   canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID,
@@ -196,7 +209,7 @@ export function appBicepHandoffPrompt(
     "",
     staleHandoffGuard(page, branches, canvasInstanceId, rendersInPlace),
     "",
-    SKILL_HANDOFF,
+    skillHandoffInstruction(skillHandoff),
     graphSourceNote(page, repo, branches, canvasInstanceId, !rendersInPlace),
     rendersInPlace ?
       `Do not open another Radius canvas. The view at instanceId \`${canvasInstanceId}\` is already waiting and renders the model in place once it is available.`
@@ -231,6 +244,7 @@ export function appBicepHandoffDisplayPrompt(
 // swapped.
 export function appBicepHandoffMessage(
   repo: string,
+  skillHandoff: string,
   page = "graph",
   branches: Array<string | undefined> = [],
   canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID,
@@ -239,6 +253,7 @@ export function appBicepHandoffMessage(
   return {
     prompt: appBicepHandoffPrompt(
       repo,
+      skillHandoff,
       page,
       branches,
       canvasInstanceId,
@@ -253,14 +268,17 @@ export function appBicepHandoffMessage(
 // render — tool-driven opens, direct panel opens, programmatic reloads after
 // source refs are attached, and refreshes alike — so a stale model is never
 // shown with no signal at all.
-export function appModelRefreshPrompt(status: AppModelStatus): string {
+export function appModelRefreshPrompt(
+  status: AppModelStatus,
+  skillHandoff: string
+): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [
     `The Radius graph${where} on branch \`${status.branch}\` just rendered from an application model that needs to be regenerated.`,
     "",
     status.freshness.reason,
     "",
-    `Refresh it. ${SKILL_HANDOFF}`,
+    `Refresh it. ${skillHandoffInstruction(skillHandoff)}`,
     "Regenerate from the current source rather than editing the existing file, and tell the user the graph they are looking at predates the refresh so they know to reopen it.",
     "The model is on the current workspace branch, so writing the working tree is enough. Do not commit or push it as part of the refresh.",
     "",
@@ -276,9 +294,12 @@ export function appModelRefreshDisplayPrompt(status: AppModelStatus): string {
   return `Regenerating the application model${where} (branch \`${status.branch}\`) before showing the graph.`;
 }
 
-export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
+export function appModelRefreshMessage(
+  status: AppModelStatus,
+  skillHandoff: string
+): HandoffMessage {
   return {
-    prompt: appModelRefreshPrompt(status),
+    prompt: appModelRefreshPrompt(status, skillHandoff),
     displayPrompt: appModelRefreshDisplayPrompt(status)
   };
 }
@@ -292,7 +313,10 @@ export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
 // exists nowhere else, so the refresh is offered rather than taken. A hand edit
 // on a model that needs no refresh never reaches here, and a model with no record
 // that IS committed and clean does not either: git has that one.
-export function appModelUnverifiedPrompt(status: AppModelStatus): string {
+export function appModelUnverifiedPrompt(
+  status: AppModelStatus,
+  skillHandoff: string
+): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [
     `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model needs to be regenerated and doing so would discard content that exists nowhere else.`,
@@ -301,7 +325,7 @@ export function appModelUnverifiedPrompt(status: AppModelStatus): string {
     "",
     "Tell the user what this means for the graph they are looking at, and ask whether they want the model regenerated from current source.",
     "Regenerating overwrites .radius/app.bicep, so any changes they made by hand (tuned properties, custom types, recipe pack references) would be lost. Say that plainly and wait for their answer. Do not regenerate first and report afterwards.",
-    `If they agree: ${SKILL_HANDOFF}`,
+    `If they agree: ${skillHandoffInstruction(skillHandoff)}`,
     "If they would rather keep their edits, leave the file alone. Repairing one specific problem in place is the alternative that preserves them.",
     "",
     RECIPE_PACK_NOTE,
@@ -319,10 +343,11 @@ export function appModelUnverifiedDisplayPrompt(
 }
 
 export function appModelUnverifiedMessage(
-  status: AppModelStatus
+  status: AppModelStatus,
+  skillHandoff: string
 ): HandoffMessage {
   return {
-    prompt: appModelUnverifiedPrompt(status),
+    prompt: appModelUnverifiedPrompt(status, skillHandoff),
     displayPrompt: appModelUnverifiedDisplayPrompt(status)
   };
 }

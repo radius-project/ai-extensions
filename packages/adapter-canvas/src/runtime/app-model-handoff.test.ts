@@ -23,6 +23,7 @@ import {
   MISSING_MODEL_HANDOFF_CLAIM_TTL_MS
 } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
+import { createModelingActivity } from "./modeling-activity.js";
 
 interface StatusOverrides {
   status?: AppModelFreshnessStatus;
@@ -80,6 +81,8 @@ const MODELABLE: AppSourceEvaluation = {
   dockerfiles: ["Dockerfile"]
 };
 const UNMODELABLE: AppSourceEvaluation = { status: "none", dockerfiles: [] };
+// Stands in for the skill bootstrap each handoff embeds.
+const SKILL_HANDOFF = '{"skill":"radius-app-bicep","skillBase":"/plugin"}';
 
 function progressRecord(
   view: GraphProgressView,
@@ -125,12 +128,16 @@ function harness(
       overrides.sources?.[branch] ?? MODELABLE
   );
   const modelingInFlight = vi.fn(async () => false);
+  const announced: Array<{ repo: string; branches: string[] }> = [];
   const deps: AppModelHandoffDependencies = {
     resolveContext,
     resolveStatus,
     assertWorkspaceSource: vi.fn(async () => {}),
     evaluateSource,
     modelingInFlight,
+    announceModelingRun: (repo, branches) => {
+      announced.push({ repo, branches: [...branches] });
+    },
     // Resolves immediately: the grace window's duration is expressed in the
     // recorded waits, so no test has to spend real time on it.
     wait: async (ms: number) => {
@@ -139,6 +146,7 @@ function harness(
     send: async (message) => {
       sent.push(message);
     },
+    skillHandoff: async () => SKILL_HANDOFF,
     readSourceRevision: async (_repo, branch) => `remote:${branch}-sha`,
     log: (message) => {
       logged.push(message);
@@ -157,6 +165,7 @@ function harness(
   return {
     handOff: createAppModelHandoff(deps),
     sent,
+    announced,
     logged,
     waits,
     modelingInFlight,
@@ -359,17 +368,66 @@ describe("createAppModelHandoff", () => {
   });
 
   it("asks the agent to author a model when no branch has one", async () => {
-    const { handOff, sent } = harness({
+    const { handOff, sent, announced } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
     });
 
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
 
+    expect(announced).toEqual([{ repo: "a/b", branches: ["feat"] }]);
     expect(sent).toHaveLength(1);
-    expect(sent[0].prompt).toContain("radius_generate_app");
+    expect(sent[0].prompt).toContain(SKILL_HANDOFF);
     expect(sent[0].prompt).toContain("`feat`");
     expect(sent[0].displayPrompt).toContain("Generating the application model");
   });
+
+  it.each([
+    {
+      name: "a diff that includes the requested branch waits for its run",
+      second: ["main", "feat"],
+      page: "graph-diff",
+      expected: 1
+    },
+    {
+      name: "a view of an unrelated branch still asks",
+      second: ["release"],
+      page: "graph",
+      expected: 2
+    }
+  ])(
+    "after the Canvas requests a model, $name",
+    async ({ second, page, expected }) => {
+      // The agent never calls radius_generate_app for a run the Canvas
+      // requests, so the delivered handoff is the only record of that run
+      // until it creates its staging directory.
+      let nowMs = 1_000_000;
+      const activity = createModelingActivity({
+        now: () => nowMs,
+        observeStagedRun: async () => null
+      });
+      const workspace = { repo: "a/b", branch: "feat" };
+      const { handOff, sent } = harness({
+        statuses: {
+          main: modelStatus("a/b", "main", { status: "missing" }),
+          feat: modelStatus("a/b", "feat", { status: "missing" }),
+          release: modelStatus("a/b", "release", { status: "missing" })
+        },
+        modelingInFlight: (repo, branches) =>
+          activity.inFlight(repo, branches, workspace),
+        announceModelingRun: (repo, branches) => {
+          for (const branch of branches) activity.announce({ repo, branch });
+        },
+        wait: async (ms) => {
+          nowMs += ms;
+        }
+      });
+
+      await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
+      await handOff({ repo: "a/b", branches: second, page });
+
+      expect(sent).toHaveLength(expected);
+    }
+  );
 
   it("watches for a run starting before it asks, and abandons the handoff when one does", async () => {
     const state: CanvasState = {};
@@ -379,7 +437,7 @@ describe("createAppModelHandoff", () => {
       // radius_generate_app, so the first probe legitimately sees nothing.
       .mockResolvedValueOnce(false)
       .mockResolvedValue(true);
-    const { handOff, sent, waits } = harness({
+    const { handOff, sent, waits, announced } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
       modelingInFlight
     });
@@ -387,6 +445,7 @@ describe("createAppModelHandoff", () => {
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
     expect(sent).toHaveLength(0);
+    expect(announced).toEqual([]);
     expect(waits).toEqual([MODELING_GRACE_POLL_MS]);
   });
 
@@ -1306,7 +1365,7 @@ describe("createAppModelHandoff", () => {
   });
 
   it("asks for a refresh when a worktree model no longer matches its source", async () => {
-    const { handOff, sent } = harness({
+    const { handOff, sent, announced } = harness({
       statuses: {
         feat: modelStatus("a/b", "feat", {
           status: "source-changed",
@@ -1316,10 +1375,13 @@ describe("createAppModelHandoff", () => {
     });
 
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
-
     expect(sent).toHaveLength(1);
     expect(sent[0].prompt).toContain("the branch moved to commit deadbeef");
     expect(sent[0].prompt).toContain("Do not commit or push");
+    expect(sent[0].prompt).toContain(SKILL_HANDOFF);
+    // A refresh replaces a model that exists, so no missing-model render can
+    // be waiting on it.
+    expect(announced).toEqual([]);
   });
 
   it("asks the user before regenerating a model it cannot verify", async () => {
@@ -1333,6 +1395,7 @@ describe("createAppModelHandoff", () => {
 
     expect(sent).toHaveLength(1);
     expect(sent[0].prompt).toContain("ask whether they want the model");
+    expect(sent[0].prompt).toContain(SKILL_HANDOFF);
     expect(sent[0].displayPrompt).toContain("Asking before regenerating");
   });
 
@@ -1688,7 +1751,7 @@ describe("createAppModelHandoff", () => {
   it("releases the panel reservation when send fails for a missing model, allowing retry", async () => {
     const state: CanvasState = { canvasInstanceId: "radius-panel" };
     let sendAttempt = 0;
-    const { handOff, sent } = harness({
+    const { handOff, sent, announced } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
       send: async (message) => {
         sendAttempt++;
@@ -1706,10 +1769,11 @@ describe("createAppModelHandoff", () => {
     await expect(handOff(request)).rejects.toThrow("session closed");
     expect(state.appBicepHandoffKey).toBeUndefined();
     expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeUndefined();
+    expect(announced).toEqual([]);
 
     await handOff(request);
     expect(sent).toHaveLength(1);
-    expect(sent[0].prompt).toContain("radius_generate_app");
+    expect(sent[0].prompt).toContain(SKILL_HANDOFF);
   });
 
   it("does not release a superseding panel reservation when an older send fails for a missing model", async () => {
@@ -1854,4 +1918,71 @@ describe("createAppModelHandoff", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0].prompt).toContain("would discard content");
   });
+
+  it("sends nothing and frees the missing-model handoff for a retry when the skill handoff cannot be built", async () => {
+    const state: CanvasState = { canvasInstanceId: "radius-panel" };
+    const skillHandoff = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error("no usable radius-app-bicep skill"))
+      .mockResolvedValue(SKILL_HANDOFF);
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      skillHandoff
+    });
+    const request = {
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    };
+
+    await expect(handOff(request)).rejects.toThrow(
+      "no usable radius-app-bicep skill"
+    );
+    expect(sent).toEqual([]);
+    expect(state.appBicepHandoffKey).toBeUndefined();
+    expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeUndefined();
+
+    await handOff(request);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].prompt).toContain(SKILL_HANDOFF);
+  });
+
+  it.each([
+    ["stale", "source-changed", "needs to be regenerated"],
+    ["unverified", "manually-edited", "would discard content"]
+  ] as const)(
+    "sends nothing and frees the %s-model refresh for a retry when the skill handoff cannot be built",
+    async (_name, status, expected) => {
+      const state: CanvasState = {};
+      const skillHandoff = vi
+        .fn<() => Promise<string>>()
+        .mockRejectedValueOnce(new Error("no usable radius-app-bicep skill"))
+        .mockResolvedValue(SKILL_HANDOFF);
+      const { handOff, sent } = harness({
+        statuses: {
+          feat: modelStatus("a/b", "feat", { status, sourceCommit: "aaa" })
+        },
+        skillHandoff
+      });
+      const request = {
+        repo: "a/b",
+        branches: ["feat"],
+        page: "graph",
+        state
+      };
+
+      await expect(handOff(request)).rejects.toThrow(
+        "no usable radius-app-bicep skill"
+      );
+      expect(sent).toEqual([]);
+      expect(state.appBicepHandoffKey).toBeUndefined();
+
+      // The refresh memo was released too, or this retry would be suppressed.
+      await handOff(request);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].prompt).toContain(expected);
+      expect(sent[0].prompt).toContain(SKILL_HANDOFF);
+    }
+  );
 });

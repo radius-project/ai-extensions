@@ -535,13 +535,23 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       .calls[0][0] as { prompt: string; displayPrompt: string };
     const attemptToken = state?.appModelAttemptTokens?.["acme/widgets::main"];
     if (!attemptToken) throw new Error("expected current modeling attempt");
+    // The Canvas embeds the skill bootstrap, so the agent never has to find
+    // and call radius_generate_app to start modeling.
+    const skillHandoff = deps.radiusAppBicepSkill();
     // The agent half must carry the full instructions...
     expect(sent.prompt).toBe(
-      appBicepHandoffPrompt("acme/widgets", "graph", ["main"], "app-graph", {
-        attemptToken,
-        instanceId: "app-graph",
-        branches: ["main"]
-      })
+      appBicepHandoffPrompt(
+        "acme/widgets",
+        skillHandoff,
+        "graph",
+        ["main"],
+        "app-graph",
+        {
+          attemptToken,
+          instanceId: "app-graph",
+          branches: ["main"]
+        }
+      )
     );
     // ...and the timeline half must be the short stand-in, not the reverse.
     expect(sent.displayPrompt).toBe(
