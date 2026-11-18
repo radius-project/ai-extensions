@@ -89,7 +89,9 @@ function harness(
       ?.replace(/^\/?/, "/");
     const graphRevision = "a".repeat(40);
     if (
-      endpoint?.match(/^\/repos\/acme\/(?:widgets|other)\/commits\/feature$/)
+      endpoint?.match(
+        /^\/repos\/acme\/(?:widgets|other)\/commits\/(?:feature|a{40})$/
+      )
     ) {
       callback(null, JSON.stringify({ sha: graphRevision }), "");
       return new ChildProcess();

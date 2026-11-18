@@ -62,9 +62,15 @@ async function concurrentGraphRuntime(workspace?: string) {
       }
       const endpoint = args.find((arg) => arg.startsWith("/repos/"));
       let value: unknown;
-      if (endpoint?.includes("/commits/")) {
+      const commit = endpoint?.match(
+        /^\/repos\/octo\/app\/commits\/(main|other|a{40}|b{40})$/
+      )?.[1];
+      if (commit) {
         value = {
-          sha: endpoint.endsWith("/main") ? "a".repeat(40) : "b".repeat(40)
+          sha:
+            commit === "main" ? "a".repeat(40)
+            : commit === "other" ? "b".repeat(40)
+            : commit
         };
       } else if (endpoint?.includes("/contents/.radius/app.bicep")) {
         const content = "resource fixture";
