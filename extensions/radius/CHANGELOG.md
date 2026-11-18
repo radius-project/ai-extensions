@@ -1,5 +1,69 @@
 # radius
 
+## 0.6.0
+
+### Minor Changes
+
+- [#1255](https://github.com/radius-project/ai-extensions/pull/1255) [@nellshamrell](https://github.com/nellshamrell) - **Added:** Recover terminal deployments with missing application evidence by loading cleanup details and confirming external cleanup for the exact workflow run, without dispatching cloud cleanup or hiding older deployments in listings or graph controls. Long histories no longer block ordinary listings, and a failed read in one environment leaves healthy environments visible.
+
+- [#1229](https://github.com/radius-project/ai-extensions/pull/1229) [@nellshamrell](https://github.com/nellshamrell) - **Added:** Deploy and monitor applications without opening Canvas. Each deployment returns an observation-only handle; repair handoffs retain a separate attempt ID. Omitting the start attempt ID or passing an empty string starts a fresh attempt, not a repair. Attempts are not restored after an extension restart.
+
+### Patch Changes
+
+- [#1255](https://github.com/radius-project/ai-extensions/pull/1255) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep active deployments visible when older workflow history is unreadable, without enabling cleanup during an active operation.
+
+- [#1227](https://github.com/radius-project/ai-extensions/pull/1227) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Preserve an application's deployment status, repair handles and attached panels when stopping tracking of another application's failed teardown. Cleanup also preserves unidentified deployments and newer attempts.
+
+- [#1228](https://github.com/radius-project/ai-extensions/pull/1228) [@kachawla](https://github.com/kachawla) - **Fixed:** An AWS environment deletion that the extension stopped part way now takes back its own deploy role lock when you click **Retry deletion**, instead of waiting on it and asking you to remove it. A **Delete setup** that the extension stopped part way also keeps every removal AWS already confirmed, so it no longer lists those resources as still there.
+
+- [#1238](https://github.com/radius-project/ai-extensions/pull/1238) [@kachawla](https://github.com/kachawla) - **Security:** AWS deploy roles that Radius creates are now tagged with the GitHub repository ID, and setup, Repair, environment delete, and the role picker use that tag alone to decide which repository owns a role. A new repository created at a renamed repository's old name can no longer reuse that repository's deploy role. The `radius-repository` name tag stays as a readable label only.
+
+  AWS support is still behind `RADIUS_CANVAS_AWS`, so existing roles are not migrated. A role created by an earlier build has no ID tag and belongs to no repository: setup refuses it by name and accepts it only when you pick it with "use an existing role…", and delete keeps its access entry.
+
+- [#1216](https://github.com/radius-project/ai-extensions/pull/1216) [@AzureMike](https://github.com/AzureMike) - **Added:** AWS environment setup now lets the `aws-eks` containers Recipe give each app its own IAM role through EKS Pod Identity. Setup creates a permissions boundary for the environment, records it in `AWS_APP_BOUNDARY_ARN`, and adds a `radius-app-roles-<repoId>` inline policy to the deploy role. That policy lets deployments manage IAM roles only under `/radius/apps/<repoId>/`, only with one of the repository's boundaries, and pass them only to EKS Pod Identity. Setup stops when the cluster has no ready `eks-pod-identity-agent` add-on or Radius can't read it, unless EKS Auto Mode is on. The new policy uses inline-policy space, so a deploy role now holds about 15 environments instead of about 17.
+
+  Environments set up by an earlier build must be set up again, because the pinned `aws-eks` recipe pack now requires `appPermissionsBoundaryArn`.
+
+- [#1224](https://github.com/radius-project/ai-extensions/pull/1224) [@nellshamrell](https://github.com/nellshamrell) - **Security:** Prevent excessive processing time when deployment models or copied PowerShell commands contain long repeated input.
+
+- [#1225](https://github.com/radius-project/ai-extensions/pull/1225) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep simultaneous deployments to different environments attached to their own workflow runs, so one deployment cannot report another's result or request repair for it.
+
+  Deployment and environment-deletion discovery require an exact correlation token and refuse ambiguous matches. A correlated run remains discoverable despite clock skew or a delayed listing.
+
+- [#1227](https://github.com/radius-project/ai-extensions/pull/1227) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Stop status polling from restoring a deleted application's graph. Once GitHub accepts a matching delete, its old deployment handles stop resolving and attached panels clear the old result without hiding later deployments. If the delete's run URL is unavailable, report the accepted dispatch with an empty URL and retain the operation lock rather than inviting a duplicate delete.
+
+- [#1227](https://github.com/radius-project/ai-extensions/pull/1227) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep deployment monitoring and repair delivery running when an active Canvas panel closes or resets in the same extension session. Reopened panels can attach to the shared deployment; attempts are not restored after an extension restart, and closing a panel does not cancel its remote workflow.
+
+- [#1227](https://github.com/radius-project/ai-extensions/pull/1227) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Show the current repository's unambiguous deployment when reusing a Canvas panel, even when its environment differs from the previous repository's. Keep explicitly targeted deployments visible until the panel context changes, and never reuse another repository's projected environment, provider, or model as defaults for a new deployment.
+
+- [#1229](https://github.com/radius-project/ai-extensions/pull/1229) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Report missing, ambiguous or stale deployment attempts and invalid service results explicitly instead of claiming that a deployment started or is still running.
+
+- [#1227](https://github.com/radius-project/ai-extensions/pull/1227) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Prevent overlapping local deploy, delete and abandon operations for the same repository and environment across tools and panels, including differently cased names. Preserve environment spelling for workflow and OIDC inputs. Refuse deployment when its default branch cannot be resolved instead of silently choosing `main`. Offer branch-push actions only when the deployment's repository and branch match the verified local workspace.
+
+- [#1229](https://github.com/radius-project/ai-extensions/pull/1229) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Return the documented `in_progress`, `success` and `failed` values from `radius_deploy_status`, so callers stop polling when deployment completes. An unconfirmed workflow outcome remains `failed` with guidance against automatic repair.
+
+- [#1225](https://github.com/radius-project/ai-extensions/pull/1225) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Refuse deployment before writing parameter secrets when installed workflows cannot accept the deployment model and correlation inputs. Install the current Radius release and regenerate the deployment workflows before retrying an incompatible workflow.
+
+  Deployments without an explicit model path continue to select `.radius/app.bicep` first, then `app.bicep` at the repository root. Explicit paths and repair attempts stay bound to the selected model rather than falling back to another file.
+
+  Unavailable or incomplete repository content now stops deployment instead of being mistaken for an empty model and silently selecting another file. Missing or malformed workflow inputs include upgrade guidance, and malformed GitHub response diagnostics use the host's credential redaction.
+
+- [#1254](https://github.com/radius-project/ai-extensions/pull/1254) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Preserve command failure details during resource discovery so a timeout can be distinguished from a failed command.
+
+- [#1227](https://github.com/radius-project/ai-extensions/pull/1227) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Restore per-resource deployment progress when deploying from Canvas without first opening the Planned page. Recover the graph from the selected application model without requiring the panel to stay open.
+
+- [#1225](https://github.com/radius-project/ai-extensions/pull/1225) [@nellshamrell](https://github.com/nellshamrell) - **Security:** Prevent long hyphen runs in deployment artifact names from causing excessive processing time while preserving existing name normalization.
+
+- [#1257](https://github.com/radius-project/ai-extensions/pull/1257) [@AzureMike](https://github.com/AzureMike) - **Fixed:** **Retry setup** after a failed credential check now runs the check again in a new GitHub Actions run, so a fix you made since the failure is verified. Before, Azure setups stopped with "The setup operation cannot be resumed with these inputs" and AWS setups stopped because the verify workflow on the default branch "does not match the exact content from this operation". **Continue setup** after a pause follows the verification run that setup already started.
+
+- [#1224](https://github.com/radius-project/ai-extensions/pull/1224) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Preserve empty arguments, quotes, and shell-special characters when copying CLI guidance into POSIX shells or PowerShell.
+
+- [#1227](https://github.com/radius-project/ai-extensions/pull/1227) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Deploy the selected application model consistently, including its parameters and workflow artifacts, instead of substituting a default model. Canvas resolves `.radius/app.bicep` or root `app.bicep` for the selected repository and branch. Explicit selections and repairs remain strict; missing paths and filenames reserved for generated setup stop before dispatch.
+
+- [#1255](https://github.com/radius-project/ai-extensions/pull/1255) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Allow later deployment and cleanup actions while a terminal repair or notification delivery remains unresolved, without resending unknown-outcome messages.
+
+- [#1227](https://github.com/radius-project/ai-extensions/pull/1227) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Use each deployment's workflow evidence to identify its application instead of the repository's current default model. Keep deployments with missing, expired or unreadable identity evidence visible, but block Delete, Force Delete and Abandon until their identity can be verified. Reject stale selections and preserve newer deployment state during deletion.
+
 ## 0.5.0
 
 ### Minor Changes
