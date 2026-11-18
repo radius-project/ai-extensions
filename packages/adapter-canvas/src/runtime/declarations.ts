@@ -226,7 +226,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_report_modeling_failure",
     description:
-      "Reports a permanent radius-app-bicep authoring failure to the Radius Canvas attempt that requested it. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures, cancellations, or a run that wrote app.bicep.",
+      "Reports a permanent radius-app-bicep authoring failure that left the application definition missing or blank. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures or cancellations.",
     parameters: {
       type: "object",
       properties: {

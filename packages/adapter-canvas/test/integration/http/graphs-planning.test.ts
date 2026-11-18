@@ -353,7 +353,7 @@ describe("graph concurrency through production HTTP routes", () => {
             writeFileSync(path.join(workspace, "app.bicep"), "  \n");
           };
         }
-        const completed = createDeferred<void>();
+        let completed = createDeferred<void>();
         setAppBicepHandoff(async (input) => {
           try {
             await handoff(input);
@@ -371,6 +371,48 @@ describe("graph concurrency through production HTTP routes", () => {
           expect(await (await h.load()).json()).toMatchObject({
             error: expect.stringContaining("app.bicep is empty")
           });
+          const tool = sdk.extension.tools.find(
+            ({ name }) => name === "radius_report_modeling_failure"
+          );
+          if (!tool) throw new Error("Missing registered failure tool");
+          const target = "octo/app::main";
+          // Simulate the admitted run whose blank output is still on disk.
+          h.entry.state.appModelAttemptTokens = { [target]: "blank-attempt" };
+          sdk.servers.set("graph-races", h.entry);
+          const failure = "The fixture model has no supported resource.";
+          expect(
+            await tool.handler({
+              instanceId: "graph-races",
+              repo: "octo/app",
+              branch: "main",
+              attemptToken: "blank-attempt",
+              error: failure
+            })
+          ).toEqual({ recorded: true });
+          expect(await (await h.load()).json()).toMatchObject({
+            error: `${failure} Fix or remove the empty app.bicep in the workspace, then select Refresh.`,
+            appModelAuthoringFailed: true,
+            modelingFailed: true
+          });
+          expect(await (await h.stream()).text()).toContain(
+            '"appModelAuthoringFailed":true'
+          );
+          expect(
+            await (await h.load({ retryModeling: true })).json()
+          ).toMatchObject({ appModelAuthoringFailed: true });
+          expect(sdk.session.send).not.toHaveBeenCalled();
+
+          // A blank saved file is not absence: retry only once the user
+          // removes it, rather than silently authoring over it.
+          rmSync(path.join(workspace, "app.bicep"));
+          sdk.deps.clock.wait = async () => {};
+          completed = createDeferred<void>();
+          expect(
+            await (await h.load({ retryModeling: true })).json()
+          ).toMatchObject({ needsAppBicep: true });
+          await completed.promise;
+          expect(sdk.session.send).toHaveBeenCalledOnce();
+          sdk.servers.delete("graph-races");
         } else {
           expect(sdk.session.send).toHaveBeenCalledOnce();
         }

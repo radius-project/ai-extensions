@@ -307,6 +307,10 @@ export interface CanvasState {
   appBicepHandoffKeys?: Record<string, string>;
   appBicepHandoffKey?: string;
   appModelAttemptGeneration?: number;
+  appModelAttemptClaims?: Record<
+    string,
+    import("./runtime/missing-model-handoff-claims.js").MissingModelHandoffClaim
+  >;
   appModelAttemptTokens?: Record<string, string>;
   appModelAttemptEnvironments?: Record<string, string>;
   // Source evidence read when each attempt started, keyed like the tokens.

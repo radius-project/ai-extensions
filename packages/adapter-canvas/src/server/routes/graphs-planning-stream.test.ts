@@ -740,7 +740,7 @@ describe("graphs-planning load-graph-stream route", () => {
       expect(frames(recording.stream).at(-1)).toEqual({
         event: "done",
         data: {
-          error: `formatted:${BICEP_PATH} is empty; the graph is unavailable.`
+          error: `formatted:${REPO}@${DEFAULT_BRANCH}:${BICEP_PATH} is empty; the graph is unavailable.`
         }
       });
       expect(

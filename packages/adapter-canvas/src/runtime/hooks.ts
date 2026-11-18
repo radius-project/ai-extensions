@@ -170,7 +170,7 @@ function failureReportInstruction(
     : `instanceId \`${instanceId}\`, repo \`${repo}\`, attemptToken \`${attemptToken}\`, the actionable failure summary, and branch set to each branch it could not model (${branches
         .map((branch) => `\`${branch}\``)
         .join(", ")}) — one call per branch`;
-  return `If the radius-app-bicep skill classifies this attempt as a permanent failure and leaves .radius/app.bicep missing, call radius_report_modeling_failure with ${callArguments}. Do not report transient failures, cancellations, or a run that wrote the model.`;
+  return `If the radius-app-bicep skill classifies this attempt as a permanent failure and leaves the application definition missing or blank, call radius_report_modeling_failure with ${callArguments}. Do not report transient failures, cancellations, or a run that wrote a nonblank model.`;
 }
 
 // Prompt sent to the agent when a Radius graph canvas is opened but no

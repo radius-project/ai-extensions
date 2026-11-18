@@ -175,6 +175,7 @@ export function createAppModelHandoff(
     }
   }
 
+  let nextAttempt = 0;
   return async function handOffAppModel({
     repo,
     branches,
@@ -377,17 +378,19 @@ export function createAppModelHandoff(
       // two-branch protocol that could disagree with the first.
       const attemptToken =
         state && state.canvasInstanceId ?
-          `${state.canvasInstanceId}::attempt-${(state.appModelAttemptGeneration ?? 0) + 1}`
+          `${state.canvasInstanceId}::attempt-${++nextAttempt}`
         : undefined;
       if (state && attemptToken) {
         state.appModelAttemptGeneration =
           (state.appModelAttemptGeneration ?? 0) + 1;
         state.appModelAttemptTokens ??= {};
+        state.appModelAttemptClaims ??= {};
         state.appModelAttemptEnvironments ??= {};
         state.appModelAttemptSourceRevisions ??= {};
         for (const [index, branch] of targets.entries()) {
           const tokenKey = appModelTargetKey(repo, branch);
           state.appModelAttemptTokens[tokenKey] = attemptToken;
+          state.appModelAttemptClaims[tokenKey] = claim;
           state.appModelAttemptEnvironments[tokenKey] = environmentKey ?? "";
           const sourceRevision = sourceRevisions[index];
           if (sourceRevision) {
@@ -419,6 +422,7 @@ export function createAppModelHandoff(
             const tokenKey = appModelTargetKey(repo, branch);
             if (state.appModelAttemptTokens?.[tokenKey] === attemptToken) {
               delete state.appModelAttemptTokens[tokenKey];
+              delete state.appModelAttemptClaims?.[tokenKey];
               delete state.appModelAttemptEnvironments?.[tokenKey];
               delete state.appModelAttemptSourceRevisions?.[tokenKey];
             }

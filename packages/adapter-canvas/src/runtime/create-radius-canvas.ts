@@ -317,6 +317,15 @@ export function createRadiusCanvas(
             readBicepForBranch(repo, baseBranch, selection),
             readBicepForBranch(repo, headBranch, selection)
           ]);
+          const assertCurrentSources = async () => {
+            checkCancelled();
+            await Promise.all(
+              [baseRead, headRead].map(({ source }) =>
+                deps.graphSources.assertWorkspaceSource(source)
+              )
+            );
+            checkCancelled();
+          };
           checkCancelled();
           const session = deps.session.get();
           const log = (m: string) => {
@@ -350,9 +359,7 @@ export function createRadiusCanvas(
               branches: [baseBranch, headBranch],
               diagnostic: failure.diagnostic
             };
-            if (!isCurrent()) {
-              throw failure;
-            }
+            await assertCurrentSources();
             const attempt = beginGraphRepairAttempt(entry.state, request);
             entry.state.diffModelingFailed = true;
             if (attempt.repairing) {
@@ -368,7 +375,7 @@ export function createRadiusCanvas(
             }
             throw failure;
           }
-          checkCancelled();
+          await assertCurrentSources();
           const committed = deps.sourceRefs.setSourceRefResources(
             entry,
             "diff",

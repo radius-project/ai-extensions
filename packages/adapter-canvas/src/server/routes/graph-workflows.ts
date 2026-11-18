@@ -8,6 +8,7 @@ import {
   graphArtifactHandle,
   graphSourceForSelection,
   GraphRequestSuperseded,
+  BlankModelAuthoringFailed,
   type AppBicepSelection
 } from "./graph-pipeline.js";
 import {
@@ -571,7 +572,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const error = dependencies.errorMessage(failure);
       hooks.onError(error);
       const repair = hooks.repair();
-      if (
+      if (failure instanceof BlankModelAuthoringFailed) {
+        outcome = json(200, {
+          error,
+          modelingFailed: true,
+          appModelAuthoringFailed: true
+        });
+      } else if (
         failure instanceof GraphModelingFailure &&
         repair &&
         hooks.shouldRepair()

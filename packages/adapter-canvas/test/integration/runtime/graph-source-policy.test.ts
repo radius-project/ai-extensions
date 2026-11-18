@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import { APP_ORIGIN_REPO_PATH } from "@radius-project/core";
 import {
   createGraphSourceBindings,
+  RadProcessError,
   type DeploymentCommandExecutor
 } from "@radius-project/adapter-shared";
 import type { CanvasGraphResource } from "../../../src/shared.js";
@@ -164,6 +165,9 @@ async function fixture(
         workspacePath: workspace,
         repo: REPO,
         branch: workspaceBranch
+      },
+      workspaceTreeByRepoBranch: {
+        [`${REPO}@${workspaceBranch}`]: ["Dockerfile"]
       }
     },
     (deps) => {
@@ -680,6 +684,104 @@ describe("registered runtime graph source policy", () => {
       }
     }
   );
+
+  it.each(["success", "failure"])(
+    "does not publish or request repair after a checkout switch during %s",
+    async (outcome) => {
+      const f = await fixture();
+      const entered = createDeferred<void>();
+      const resume = createDeferred<void>();
+      f.compiler.mockImplementationOnce(async () => {
+        entered.resolve();
+        await resume.promise;
+        if (outcome === "failure")
+          throw new RadProcessError(
+            "Old compiler failed",
+            "BCP035: invalid model",
+            ""
+          );
+        return [resource("old")];
+      });
+      const pending = f.open();
+      try {
+        await Promise.race([entered.promise, pending]);
+        expect(f.compiler).toHaveBeenCalledOnce();
+        execFileSync(
+          "git",
+          ["-C", f.workspace, "symbolic-ref", "HEAD", "refs/heads/other"],
+          { stdio: "pipe" }
+        );
+        resume.resolve();
+        await pending;
+        const state = f.harness.servers.get("radius-panel")?.state;
+        expect(state?.diffResources).toBeUndefined();
+        expect(state?.diffError).toContain("Workspace branch changed");
+        expect(f.harness.session.send).not.toHaveBeenCalled();
+        expect(await readdir(path.join(f.root, "staged"))).toEqual([]);
+      } finally {
+        resume.resolve();
+        await pending;
+        await f.close();
+      }
+    }
+  );
+
+  it("rejects a pending failure report for a closed and reopened instance", async () => {
+    const f = await fixture();
+    const started = createDeferred<void>();
+    const resumed = createDeferred<void>();
+    try {
+      await f.harness.host.open("radius-panel", { page: "graph" });
+      const old = f.harness.servers.get("radius-panel");
+      if (!old) throw new Error("Missing old panel");
+      const target = `${REPO}::feature`;
+      old.state.appModelAttemptTokens = { [target]: "previous" };
+      const read = f.sources.read;
+      vi.spyOn(f.sources, "read").mockImplementationOnce(async (input) => {
+        started.resolve();
+        await resumed.promise;
+        return read(input);
+      });
+      const tool = f.harness.extension.tools.find(
+        ({ name }) => name === "radius_report_modeling_failure"
+      );
+      if (!tool) throw new Error("Missing registered failure tool");
+      const report = tool.handler({
+        instanceId: "radius-panel",
+        repo: REPO,
+        branch: "feature",
+        attemptToken: "previous",
+        error: "Old modeling failure"
+      });
+      await Promise.race([started.promise, report]);
+      await f.harness.host.close("radius-panel");
+      await f.harness.host.open("radius-panel", { page: "graph" });
+      const replacement = f.harness.servers.get("radius-panel");
+      if (!replacement) throw new Error("Missing replacement panel");
+      expect(replacement).not.toBe(old);
+      await rm(path.join(f.workspace, MODEL_PATH));
+      const handoff = f.harness.capturedHostCallbacks.appBicepHandoff;
+      if (!handoff) throw new Error("Missing registered modeling handoff");
+      const request = {
+        repo: REPO,
+        branches: ["feature"],
+        page: "graph",
+        state: replacement.state
+      };
+      await handoff(request);
+      expect(f.harness.session.send).toHaveBeenCalledOnce();
+      resumed.resolve();
+      await expect(report).resolves.toMatchObject({
+        recorded: false,
+        error: expect.stringContaining("stale failure")
+      });
+      await handoff(request);
+      expect(f.harness.session.send).toHaveBeenCalledOnce();
+    } finally {
+      resumed.resolve();
+      await f.close();
+    }
+  });
 
   it("reports remote failure without falling back to matching local content or opening a panel", async () => {
     const f = await fixture("main");

@@ -18,6 +18,8 @@ import {
   graphArtifactHandle,
   graphSourceForSelection,
   GraphRequestSuperseded,
+  BlankModelAuthoringFailed,
+  requireNonblankGraphModel,
   type AppBicepSelection,
   type StagedRadArtifacts
 } from "./graph-pipeline.js";
@@ -951,11 +953,7 @@ export async function handleLoadGraphStream(
       sendDone({ stale: true });
       return;
     }
-    if (content !== null && !content.trim()) {
-      throw new Error(
-        `${selection.bicepPath || ".radius/app.bicep"} is empty; the graph is unavailable.`
-      );
-    }
+    requireNonblankGraphModel(selection, entry.state, repo, branch);
 
     if (content) {
       sendProgress("Found existing app.bicep — parsing resources...");
@@ -1120,6 +1118,14 @@ export async function handleLoadGraphStream(
   } catch (e) {
     if (e instanceof GraphRequestSuperseded || !isCurrent()) {
       sendDone({ stale: true });
+      return;
+    }
+    if (e instanceof BlankModelAuthoringFailed) {
+      sendDone({
+        error: e.message,
+        modelingFailed: true,
+        appModelAuthoringFailed: true
+      });
       return;
     }
     const failure = asGraphModelingFailure(e);

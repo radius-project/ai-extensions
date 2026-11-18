@@ -583,7 +583,8 @@ describe("TL-11: radius_report_modeling_failure", () => {
           bicepByRepoBranch: { "workspace:acme/widgets@main": content }
         });
       const claim = missingModelHandoffs.claim("acme/widgets::main", "blank");
-      expect(claim).not.toBeNull();
+      if (!claim) throw new Error("Missing claim");
+      entry.state.appModelAttemptClaims = { "acme/widgets::main": claim };
       expect(
         await findTool(tools, "radius_report_modeling_failure").handler(report)
       ).toEqual({ recorded: true });
@@ -815,14 +816,15 @@ describe("TL-11: radius_report_modeling_failure", () => {
   });
 
   it("releases the dead run's handoff claim so the promised retry can be sent", async () => {
-    const { tools, missingModelHandoffs, modelingActivity } =
+    const { tools, entry, missingModelHandoffs, modelingActivity } =
       await currentAttempt();
     const delivered = missingModelHandoffs.claim(
       "acme/widgets::main",
       "missing-model-key"
     );
-    expect(delivered).not.toBeNull();
-    missingModelHandoffs.markDelivered(delivered!);
+    if (!delivered) throw new Error("Missing claim");
+    entry.state.appModelAttemptClaims = { "acme/widgets::main": delivered };
+    missingModelHandoffs.markDelivered(delivered);
     expect(missingModelHandoffs.current("acme/widgets::main")).toBe(delivered);
 
     await findTool(tools, "radius_report_modeling_failure").handler(report);
@@ -838,7 +840,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
   });
 
   it("also releases the two-branch diff claim that covers the failed branch", async () => {
-    const { tools, missingModelHandoffs } = await currentAttempt();
+    const { tools, entry, missingModelHandoffs } = await currentAttempt();
     const diffTarget = missingModelHandoffTarget("acme/widgets", [
       "release",
       "main"
@@ -847,8 +849,9 @@ describe("TL-11: radius_report_modeling_failure", () => {
       diffTarget,
       "missing-model-key"
     );
-    expect(diffClaim).not.toBeNull();
-    missingModelHandoffs.markDelivered(diffClaim!);
+    if (!diffClaim) throw new Error("Missing claim");
+    entry.state.appModelAttemptClaims = { "acme/widgets::main": diffClaim };
+    missingModelHandoffs.markDelivered(diffClaim);
 
     await findTool(tools, "radius_report_modeling_failure").handler(report);
 

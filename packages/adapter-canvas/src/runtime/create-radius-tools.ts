@@ -191,15 +191,18 @@ export function createRadiusTools(
               "The Canvas modeling attempt is no longer current; the failure was not recorded."
           };
         }
+        const stillCurrent = () =>
+          deps.servers.get(instanceId) === entry &&
+          entry.state.appModelAttemptTokens?.[target] === attemptToken;
         const model = await readBicepForBranch(repo, branch, entry.state);
-        if (model.status === "unavailable") throw new Error(model.diagnostic);
-        if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
+        if (!stillCurrent()) {
           return {
             recorded: false,
             error:
               "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
           };
         }
+        if (model.status === "unavailable") throw new Error(model.diagnostic);
         if (model.status === "present" && model.content.trim()) {
           clearAppModelAuthoringFailure(entry.state, repo, branch);
           return {
@@ -215,7 +218,7 @@ export function createRadiusTools(
             workspaceSourceRevision: deps.appModel.workspaceSourceRevision,
             branchHeadCommit: deps.appModel.branchHeadCommit
           }).catch(() => ""));
-        if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
+        if (!stillCurrent()) {
           return {
             recorded: false,
             error:
@@ -231,16 +234,8 @@ export function createRadiusTools(
             { environmentKey: entry.state.appModelAttemptEnvironments[target] }
           : {})
         };
-        // The run this claim belongs to just ended, so the claim can only
-        // suppress the retry the failure message tells the user to make. A diff
-        // claim covers both compared branches under one target, while this
-        // failure is keyed `repo::branch`, so releasing by branch — not by
-        // exact target — is what frees both the single-branch claim and the
-        // diff claim that covers it. Without this a source-change retry asks
-        // for a handoff and is dropped by the dead run's claim until it
-        // expires. `missingModelHandoffTarget` owns the target
-        // encoding; do not rebuild or parse it here.
-        missingModelHandoffs.releaseForBranch(repo, branch);
+        const claim = entry.state.appModelAttemptClaims?.[target];
+        if (claim) missingModelHandoffs.release(claim);
         for (const [handoffTarget, key] of Object.entries(
           entry.state.appBicepHandoffKeys ?? {}
         )) {
