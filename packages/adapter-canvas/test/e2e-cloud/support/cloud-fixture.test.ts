@@ -17,6 +17,7 @@ import {
   RADIUS_WORKLOAD_RESOURCES
 } from "./deploy-journey.js";
 import {
+  FIXTURE_AWS_BASELINE_SHA,
   FIXTURE_BASELINE_SHA,
   FIXTURE_REPO_DEFAULT_BRANCH,
   FIXTURE_REPOSITORY
@@ -62,8 +63,6 @@ const STATE_PACKAGE =
   "ghcr.io/fixture-owner/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
 const PACKAGE_PATH =
   "orgs/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
-const USER_PACKAGE_PATH =
-  "users/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
 const DELETE_RUN_LIST: readonly string[] = [
   "run",
   "list",
@@ -706,70 +705,6 @@ describe("createCloudFixture", () => {
       }
     );
 
-    it("releases the lease when its owner marker cannot be created", async () => {
-      const { fake, attempt } = expectConstructionToFail(
-        [
-          {
-            tool: "gh",
-            match: [
-              "api",
-              "--method",
-              "POST",
-              `repos/${REPOSITORY}/git/commits`
-            ],
-            respond: { code: 1, stderr: "commit rejected" }
-          }
-        ],
-        {},
-        { githubRunId: "123456" }
-      );
-
-      await expect(attempt).rejects.toThrow(/commit rejected/);
-      expect(fake.commands.commandLines("gh").at(-1)).toBe(
-        `api --method DELETE ${LEASE_REF_PATH}`
-      );
-    });
-
-    it.each([
-      [
-        "baseline tree lookup",
-        {
-          tool: "gh" as const,
-          match: ["api", `repos/${REPOSITORY}/git/commits/${BASELINE}`],
-          respond: { stdout: "not-an-object-id" }
-        },
-        "baseline tree lookup returned an invalid Git object id"
-      ],
-      [
-        "marker commit response",
-        {
-          tool: "gh" as const,
-          match: ["api", "--method", "POST", `repos/${REPOSITORY}/git/commits`],
-          respond: { stdout: "not-an-object-id" }
-        },
-        "lease marker creation returned an invalid Git object id"
-      ],
-      [
-        "marker ref update",
-        failing("gh", ["api", "--method", "PATCH", LEASE_REF_PATH], "conflict"),
-        "conflict"
-      ]
-    ])(
-      "releases the lease after an invalid %s",
-      async (_label, override, expected) => {
-        const { fake, attempt } = expectConstructionToFail(
-          [override],
-          {},
-          { githubRunId: "123456" }
-        );
-
-        await expect(attempt).rejects.toThrow(expected);
-        expect(fake.commands.commandLines("gh").at(-1)).toBe(
-          `api --method DELETE ${LEASE_REF_PATH}`
-        );
-      }
-    );
-
     it("formats creation time for cleanup's integer comparison", () => {
       const sixHoursAgo = Math.floor(NOW.getTime() / 1_000) - 6 * 60 * 60;
       const creationTime = radiusPurgeCreationTime(
@@ -972,15 +907,209 @@ describe("createCloudFixture", () => {
     });
   });
 
-  describe("assertCleanSlate", () => {
+  describe("prepareCleanSlate", () => {
     it("resolves when every product-created artifact is absent", async () => {
       const { fixture } = await createHarness();
-      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      await expect(fixture.prepareCleanSlate()).resolves.toBeUndefined();
+    });
+
+    // The design's start order: take the lease, check the default branch and
+    // everything else, and only then move the branch to this run's baseline.
+    describe("start order", () => {
+      const OTHER_BASELINE = FIXTURE_AWS_BASELINE_SHA;
+      const headAt = (sha: string): FakeCommandStub => ({
+        tool: "gh",
+        match: ["api", COMMITS_PATH],
+        respond: { stdout: sha }
+      });
+      const moveStub: FakeCommandStub = {
+        tool: "gh",
+        match: ["api", "--method", "PATCH", DEFAULT_REF_PATH],
+        respond: { stdout: BASELINE }
+      };
+      const branchWrites = (fake: FakeFixturePorts) =>
+        fake.commands
+          .commandLines("gh")
+          .filter((line) => line.includes(`PATCH ${DEFAULT_REF_PATH}`));
+
+      it("moves a default branch at the other cloud's pinned baseline to this run's", async () => {
+        const { fixture, fake } = await createHarness([
+          headAt(OTHER_BASELINE),
+          moveStub
+        ]);
+        const leaseIndex = fake.commands
+          .commandLines("gh")
+          .indexOf(
+            `api --method POST repos/${REPOSITORY}/git/refs -f ref=${LEASE_REF} -f sha=${BASELINE}`
+          );
+
+        await fixture.prepareCleanSlate();
+
+        const lines = fake.commands.commandLines("gh");
+        expect(branchWrites(fake)).toEqual([
+          `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true --jq .object.sha`
+        ]);
+        // The lease came first, and the move came after every probe.
+        expect(leaseIndex).toBe(0);
+        expect(lines.at(-1)).toContain(`PATCH ${DEFAULT_REF_PATH}`);
+        expect(lines.slice(0, -1)).toContain(
+          `api --paginate --slurp ${PULLS_PATH}`
+        );
+      });
+
+      it("leaves a default branch already at this run's baseline alone", async () => {
+        const { fixture, fake } = await createHarness();
+
+        await fixture.prepareCleanSlate();
+
+        expect(branchWrites(fake)).toEqual([]);
+      });
+
+      it("fails and leaves a default branch at neither baseline where it is", async () => {
+        const { fixture, fake } = await createHarness([
+          headAt("e".repeat(40)),
+          moveStub
+        ]);
+
+        await expect(fixture.prepareCleanSlate()).rejects.toThrow(
+          `is at ${"e".repeat(40)}, not a pinned baseline (${BASELINE} or ${OTHER_BASELINE})`
+        );
+        expect(branchWrites(fake)).toEqual([]);
+      });
+
+      // Anything else the check finds fails the run with the branch where it
+      // is, even at the other cloud's baseline: its workflows are what the
+      // retry needs to remove the leftover.
+      it.each<[string, FakeCommandStub]>([
+        [
+          "an app registration",
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            }
+          }
+        ],
+        [
+          "a service principal",
+          { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-1"}]' } }
+        ],
+        [
+          "a role assignment",
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: { stdout: JSON.stringify([roleAssignment()]) }
+          }
+        ],
+        [
+          "this run's GitHub environment",
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: { stdout: "{}" }
+          }
+        ],
+        [
+          "an earlier run's GitHub environment",
+          {
+            tool: "gh",
+            match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
+            respond: { stdout: environmentPages(["radtest-aws-0123456789ab"]) }
+          }
+        ],
+        [
+          "a GHCR state package",
+          {
+            tool: "gh-package",
+            match: ["api", PACKAGE_PATH],
+            respond: {
+              stdout: JSON.stringify({
+                visibility: "private",
+                repository: { full_name: REPOSITORY }
+              })
+            }
+          }
+        ],
+        [
+          "a workflow fallback branch",
+          {
+            tool: "gh",
+            match: ["api", MATCHING_REFS_PATH],
+            respond: { stdout: '[{"ref":"refs/heads/radius/setup-x"}]' }
+          }
+        ],
+        [
+          "an open pull request",
+          {
+            tool: "gh",
+            match: ["api", PULLS_PATH],
+            respond: {
+              stdout: pullPages([{ number: 3, title: "t", head: { ref: "r" } }])
+            }
+          }
+        ]
+      ])(
+        "fails on %s and leaves the default branch at the other baseline",
+        async (_label, leftover) => {
+          const { fixture, fake } = await createHarness([
+            leftover,
+            headAt(OTHER_BASELINE),
+            moveStub
+          ]);
+
+          await expect(fixture.prepareCleanSlate()).rejects.toThrow(
+            "Leaked state from a previous run"
+          );
+          expect(branchWrites(fake)).toEqual([]);
+        }
+      );
+
+      it("fails when a probe can't run, before any write", async () => {
+        const { fixture, fake } = await createHarness([
+          headAt(OTHER_BASELINE),
+          moveStub,
+          failing("gh", ["api", PULLS_PATH], "HTTP 502")
+        ]);
+
+        await expect(fixture.prepareCleanSlate()).rejects.toThrow(/HTTP 502/);
+        expect(branchWrites(fake)).toEqual([]);
+      });
+
+      it("accepts the caller's own baseline set", async () => {
+        const custom = "f".repeat(40);
+        const { fixture, fake } = await createHarness(
+          [headAt(custom), moveStub],
+          {},
+          { otherBaselineShas: [custom] }
+        );
+
+        await fixture.prepareCleanSlate();
+
+        expect(branchWrites(fake)).toHaveLength(1);
+      });
+
+      it("teardown leaves the default branch at this run's baseline, not the one it started at", async () => {
+        const { fixture, fake } = await createHarness([
+          headAt(OTHER_BASELINE),
+          { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
+        ]);
+
+        await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+          `${BRANCH} reset to ${BASELINE}`
+        ]);
+        expect(branchWrites(fake)).toEqual([
+          `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true`
+        ]);
+      });
     });
 
     it("queries the exact app and service-principal name the product would choose", async () => {
       const { fixture, fake } = await createHarness();
-      await fixture.assertCleanSlate();
+      await fixture.prepareCleanSlate();
 
       const lines = fake.commands.commandLines("az");
       expect(lines).toContain(
@@ -1011,7 +1140,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /app registration "radius-deploy-fixture-owner-fixture-repo" \(appId app-1, object obj-1\)/
       );
     });
@@ -1021,7 +1150,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-1"}]' } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /Leaked state from a previous run, not a product regression/
       );
     });
@@ -1031,69 +1160,8 @@ describe("createCloudFixture", () => {
         { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-9"}]' } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /service principal sp-9 for "radius-deploy-fixture-owner-fixture-repo"/
-      );
-    });
-
-    // The run's own environment name is unique, so only the full listing can
-    // see an environment an earlier run leaked. The wizard refuses to create an
-    // environment in a namespace a listed one owns, which hung run 39901220095
-    // for the whole test timeout.
-    it("reports a GitHub environment an earlier run leaked", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
-          respond: {
-            stdout: environmentPages([
-              "radtest-ecdb9f66c276",
-              "radtest-aws-ecdb9f66c276",
-              "production",
-              ENVIRONMENT
-            ])
-          }
-        }
-      ]);
-
-      const error = await captureError(fixture.assertCleanSlate());
-      // Both clouds share the fixture's default branch, so an AWS leftover
-      // blocks an Azure run too.
-      for (const leaked of ["radtest-ecdb9f66c276", "radtest-aws-ecdb9f66c276"])
-        expect(error.message).toContain(
-          `GitHub environment "${leaked}" in fixture-owner/fixture-repo from an earlier run`
-        );
-      expect(error.message).not.toContain('"production"');
-      expect(error.message).not.toContain(
-        `"${ENVIRONMENT}" in fixture-owner/fixture-repo from an earlier run`
-      );
-    });
-
-    it("fails closed when the GitHub environment listing fails", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
-          respond: { code: 1, stderr: "gh: Forbidden (HTTP 403)" }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /Listing GitHub environments in fixture-owner\/fixture-repo/
-      );
-    });
-
-    it("fails closed when the GitHub environment listing is empty", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", "--paginate", "--slurp", ENVIRONMENTS_LIST_PATH],
-          respond: { stdout: "" }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        "returned an empty response instead of JSON"
       );
     });
 
@@ -1122,14 +1190,14 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /federated credential "gh-main" \(subject "repo:owner\/repo:ref:refs\/heads\/main"\) on app app-1/
       );
     });
 
     it("does not probe federated credentials when no app registration survived", async () => {
       const { fixture, fake } = await createHarness();
-      await fixture.assertCleanSlate();
+      await fixture.prepareCleanSlate();
 
       expect(
         fake.commands
@@ -1149,13 +1217,8 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        new RegExp(
-          `role assignment "Contributor" for principal sp-1 at ${SCOPE.replace(
-            /\//g,
-            "\\/"
-          )}`
-        )
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
+        `role assignment "Contributor" for principal sp-1 at ${SCOPE}`
       );
     });
 
@@ -1176,13 +1239,8 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        new RegExp(
-          `role assignment "Azure Kubernetes Service RBAC Cluster Admin" for principal sp-cluster at ${CLUSTER_SCOPE.replace(
-            /\//g,
-            "\\/"
-          )}`
-        )
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
+        `role assignment "Azure Kubernetes Service RBAC Cluster Admin" for principal sp-cluster at ${CLUSTER_SCOPE}`
       );
     });
 
@@ -1216,7 +1274,7 @@ describe("createCloudFixture", () => {
         }
       );
 
-      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      await expect(fixture.prepareCleanSlate()).resolves.toBeUndefined();
       expect(
         fake.commands
           .commandLines("az")
@@ -1241,301 +1299,8 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /role assignment "\(unnamed role\)" for principal sp-1/
-      );
-    });
-
-    it("reports a leaked GitHub environment", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", ENVIRONMENT_PATH],
-          respond: { stdout: '{"name":"radtest"}' }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        new RegExp(`GitHub environment "${ENVIRONMENT}" in ${REPOSITORY}`)
-      );
-    });
-
-    it("reports a leaked GHCR state package", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: {
-            stdout: JSON.stringify({
-              visibility: "private",
-              repository: { full_name: REPOSITORY }
-            })
-          }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        `GHCR state package "${STATE_PACKAGE}" (private visibility, linked to "${REPOSITORY}")`
-      );
-    });
-
-    it("fails when the GHCR state package cannot be probed", async () => {
-      const { fixture } = await createHarness([
-        failing("gh-package", ["api", PACKAGE_PATH], "HTTP 403")
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /read GHCR package .*HTTP 403/
-      );
-    });
-
-    it("uses the user package endpoint for a user-owned fixture repository", async () => {
-      const { fixture, fake } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", "users/fixture-owner", "--jq", ".type"],
-          respond: { stdout: "User" },
-          times: 1
-        },
-        {
-          tool: "gh-package",
-          match: ["api", USER_PACKAGE_PATH],
-          respond: NOT_FOUND
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
-      expect(fake.commands.commandLines("gh-package")).toContain(
-        `api ${USER_PACKAGE_PATH}`
-      );
-    });
-
-    it("rejects an unsupported package-owner type", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", "users/fixture-owner", "--jq", ".type"],
-          respond: { stdout: "Enterprise" },
-          times: 1
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /unsupported type "Enterprise"/
-      );
-    });
-
-    it.each([
-      ["invalid JSON", "{not-json", /returned invalid JSON/],
-      ["a non-object response", "[]", /returned a non-object response/]
-    ])("rejects %s from the package API", async (_label, stdout, expected) => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: { stdout }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(expected);
-    });
-
-    it("refuses to read a non-404 environment probe failure as absence", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stderr: "HTTP 401: Bad credentials" }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /Could not probe GitHub environment .* gh exited 1: HTTP 401: Bad credentials/
-      );
-    });
-
-    it("refuses to read execFile's empty-stream failure message as absence", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", ENVIRONMENT_PATH],
-          respond: {
-            code: 1,
-            stderr: `Command failed: gh api ${ENVIRONMENT_PATH}\n`
-          }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /Could not probe GitHub environment .* Command failed: gh api repos\//
-      );
-    });
-
-    it("reports an environment probe failure that gh wrote to stdout", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stdout: '{"message":"Server Error"}' }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /Could not probe GitHub environment .* gh exited 1: \{"message":"Server Error"\}/
-      );
-    });
-
-    it("reports a default branch that has moved off the pinned baseline", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", COMMITS_PATH],
-          respond: { stdout: `${"b".repeat(40)}\n` }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        new RegExp(
-          `${REPOSITORY}@${BRANCH} is at ${"b".repeat(40)}, not the pinned baseline ${BASELINE}`
-        )
-      );
-    });
-
-    it("accepts a default branch head that differs only by casing or whitespace", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", COMMITS_PATH],
-          respond: { stdout: `  ${BASELINE.toUpperCase()}\n` }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
-    });
-
-    it("fails when the default branch head cannot be read at all", async () => {
-      const { fixture } = await createHarness([
-        { tool: "gh", match: ["api", COMMITS_PATH], respond: { stdout: "  " } }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /returned no commit SHA/
-      );
-    });
-
-    // The product falls back to a pull request when its token lacks `workflow`
-    // scope, which leaves the default branch pristine. Without these two probes
-    // that path reports a clean slate while leaking a branch and a pull request.
-    it("reports a leaked workflow fallback branch even though the default branch is clean", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", MATCHING_REFS_PATH],
-          respond: {
-            stdout: JSON.stringify([
-              { ref: "refs/heads/radius/setup-radtest-abc-workflows-1a2b" }
-            ])
-          }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /workflow fallback branch "radius\/setup-radtest-abc-workflows-1a2b"/
-      );
-    });
-
-    it("reports a leaked open pull request", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", PULLS_PATH],
-          respond: {
-            stdout: pullPages(
-              [
-                {
-                  number: 7,
-                  title: "Add Radius workflows",
-                  head: { ref: "radius/setup-radtest-abc-workflows-1a2b" }
-                }
-              ],
-              [
-                {
-                  number: 8,
-                  title: "Second page",
-                  head: { ref: "radius/setup-second" }
-                }
-              ]
-            )
-          }
-        }
-      ]);
-
-      const error = await captureError(fixture.assertCleanSlate());
-      expect(error.message).toMatch(
-        /open pull request #7 \("Add Radius workflows", head "radius\/setup-radtest-abc-workflows-1a2b"\)/
-      );
-      expect(error.message).toMatch(
-        /open pull request #8 \("Second page", head "radius\/setup-second"\)/
-      );
-    });
-
-    it("reports placeholders when an open pull request omits optional details", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", PULLS_PATH],
-          respond: { stdout: pullPages([{ number: 7 }]) }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull request #7 \("\(untitled\)", head "\(unknown\)"\)/
-      );
-    });
-
-    it.each([
-      ["a missing number", undefined],
-      ["a non-integer number", 1.5],
-      ["a non-positive number", 0]
-    ])("rejects an open pull request with %s", async (_label, number) => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", PULLS_PATH],
-          respond: { stdout: pullPages([{ number }]) }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull requests .* no usable "number"/
-      );
-    });
-
-    it("rejects an empty successful pull-request response", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", PULLS_PATH],
-          respond: { stdout: "" }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull requests .* empty response instead of JSON/
-      );
-    });
-
-    it("rejects a paginated pull-request response whose page is not an array", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", PULLS_PATH],
-          respond: { stdout: JSON.stringify([{ number: 7 }]) }
-        }
-      ]);
-
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull requests .* page 0 with JSON type "object"/
       );
     });
 
@@ -1587,7 +1352,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      const error = await captureError(fixture.assertCleanSlate());
+      const error = await captureError(fixture.prepareCleanSlate());
 
       expect(error.message.split("\n  - ")).toHaveLength(10);
       for (const fragment of [
@@ -1596,7 +1361,7 @@ describe("createCloudFixture", () => {
         "federated credential",
         "role assignment",
         "GitHub environment",
-        "not the pinned baseline",
+        "not a pinned baseline",
         "workflow fallback branch",
         "open pull request"
       ])
@@ -1614,7 +1379,7 @@ describe("createCloudFixture", () => {
           failing(tool, match, "AADSTS700016: token expired")
         ]);
 
-        await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        await expect(fixture.prepareCleanSlate()).rejects.toThrow(
           /failed with exit code 2: AADSTS700016: token expired/
         );
       }
@@ -1629,7 +1394,7 @@ describe("createCloudFixture", () => {
         { tool, match, respond: { stdout: "{not json" } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /returned output that is not valid JSON/
       );
     });
@@ -1639,7 +1404,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: APP_LIST, respond: { stdout: '{"appId":"x"}' } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /returned a JSON object where a JSON array was expected/
       );
     });
@@ -1649,7 +1414,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: APP_LIST, respond: { stdout: "null" } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /returned null where a JSON array was expected/
       );
     });
@@ -1659,7 +1424,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: APP_LIST, respond: { stdout: '["app-1"]' } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /returned a non-object entry at index 0/
       );
     });
@@ -1673,7 +1438,7 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      await expect(fixture.prepareCleanSlate()).rejects.toThrow(
         /entry at index 0 with no usable "id"/
       );
     });
@@ -1683,7 +1448,7 @@ describe("createCloudFixture", () => {
         { tool: "az", match: APP_LIST, respond: { stdout: "" } }
       ]);
 
-      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      await expect(fixture.prepareCleanSlate()).resolves.toBeUndefined();
     });
   });
 
@@ -2112,12 +1877,7 @@ describe("createCloudFixture", () => {
       );
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        new RegExp(
-          `missing "Azure Kubernetes Service RBAC Cluster Admin" at ${CLUSTER_SCOPE.replace(
-            /\//g,
-            "\\/"
-          )}`
-        )
+        `missing "Azure Kubernetes Service RBAC Cluster Admin" at ${CLUSTER_SCOPE}`
       );
     });
   });
@@ -3202,16 +2962,6 @@ describe("createCloudFixture", () => {
       }
     );
 
-    it.each(["", " ", ENVIRONMENT])(
-      "refuses an unsafe probe target %j",
-      async (name) => {
-        const { fixture } = await createHarness();
-        await expect(
-          fixture.registerProbeEnvironmentCleanupTarget(name)
-        ).rejects.toThrow("Probe cleanup needs");
-      }
-    );
-
     it("does not delete an environment the probe never registered", async () => {
       const { fixture, fake } = await createHarness([
         { tool: "gh", match: ["api", probePath], respond: { stdout: "{}" } }
@@ -4049,175 +3799,6 @@ describe("createCloudFixture", () => {
       }
     );
 
-    // Deleting the GitHub Environment leaves its deployment records behind,
-    // because the two are linked by name rather than id. The extension never
-    // removes one -- to the product it is history, not a resource it owns --
-    // so the run that caused them has to.
-    it("purges the deployment records the run left on its environment", async () => {
-      const { fixture, fake } = await createHarness([
-        {
-          tool: "gh",
-          match: [
-            "api",
-            "--paginate",
-            "--slurp",
-            `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
-          ],
-          // Two pages: an environment can accumulate more records than a
-          // single page holds, and stopping at the first would strand the rest.
-          respond: { stdout: '[[{"id":41}],[{"id":42}]]' }
-        },
-        {
-          tool: "gh",
-          match: [
-            "api",
-            "--method",
-            "POST",
-            `repos/${REPOSITORY}/deployments/41/statuses`
-          ],
-          respond: {}
-        },
-        {
-          tool: "gh",
-          match: [
-            "api",
-            "--method",
-            "DELETE",
-            `repos/${REPOSITORY}/deployments/41`
-          ],
-          respond: {}
-        },
-        {
-          tool: "gh",
-          match: [
-            "api",
-            "--method",
-            "POST",
-            `repos/${REPOSITORY}/deployments/42/statuses`
-          ],
-          respond: {}
-        },
-        {
-          tool: "gh",
-          match: [
-            "api",
-            "--method",
-            "DELETE",
-            `repos/${REPOSITORY}/deployments/42`
-          ],
-          respond: {}
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
-        `2 GitHub deployment record(s) for ${ENVIRONMENT}`
-      );
-      // GitHub refuses to delete an active deployment, and a record whose job
-      // never reported a status is active, so the deactivation has to come
-      // first or the delete is rejected.
-      const lines = fake.commands.commandLines("gh");
-      expect(
-        lines.findIndex((line) => line.includes("POST") && line.includes("41"))
-      ).toBeLessThan(
-        lines.findIndex(
-          (line) => line.includes("DELETE") && line.includes("deployments/41")
-        )
-      );
-    });
-
-    it("reports a deployment listing it could not read instead of assuming none", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: [
-            "api",
-            "--paginate",
-            "--slurp",
-            `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
-          ],
-          respond: { stdout: '[[{"environment":"radtest"}]]' }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /probe GitHub deployment records for radtest-run0000000a: .*no usable numeric "id"/s
-      );
-    });
-
-    // A deployment record names its environment but outlives it, so deleting
-    // the environment while a record survives strands that record behind a
-    // name nothing will ever match again -- the exact leak this step exists to
-    // prevent.
-    it.each([
-      [
-        "deactivation",
-        [
-          "api",
-          "--method",
-          "POST",
-          `repos/${REPOSITORY}/deployments/41/statuses`
-        ],
-        "POST deployments/41/statuses"
-      ],
-      [
-        "delete",
-        ["api", "--method", "DELETE", `repos/${REPOSITORY}/deployments/41`],
-        "DELETE deployments/41"
-      ]
-    ])(
-      "preserves the environment when a deployment record %s fails",
-      async (_label, match, context) => {
-        const { fixture, fake } = await createHarness([
-          {
-            tool: "gh",
-            match: [
-              "api",
-              "--paginate",
-              "--slurp",
-              `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
-            ],
-            respond: { stdout: '[[{"id":41}]]' }
-          },
-          failing(
-            "gh",
-            match,
-            "HTTP 403: Resource not accessible by integration"
-          ),
-          {
-            tool: "gh",
-            match: [
-              "api",
-              "--method",
-              "POST",
-              `repos/${REPOSITORY}/deployments/41/statuses`
-            ],
-            respond: {}
-          }
-        ]);
-
-        const error = await captureError(
-          fixture.reclaimLeakedProductArtifacts()
-        );
-
-        expect(error.message).toContain(
-          `1 GitHub deployment record(s) for ${ENVIRONMENT}`
-        );
-        expect(error.message).toContain(context);
-        expect(error.message).toContain(
-          `preserve GitHub environment ${ENVIRONMENT}`
-        );
-        expect(
-          fake.commands
-            .commandLines("gh")
-            .some(
-              (line) =>
-                line.includes("DELETE") &&
-                line.includes(`environments/${ENVIRONMENT}`)
-            )
-        ).toBe(false);
-      }
-    );
-
     it("keeps reclaiming the remaining artifacts after a deployment record fails", async () => {
       const { fixture, fake } = await createHarness([
         {
@@ -4657,72 +4238,6 @@ describe("createCloudFixture", () => {
         fake.commands
           .commandLines("gh")
           .some((line) => line.includes(ENVIRONMENT_PATH))
-      ).toBe(false);
-    });
-
-    it("closes an open pull request even when its branch is already gone", async () => {
-      const { fixture, fake } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", PULLS_PATH],
-          respond: {
-            stdout: pullPages([
-              {
-                number: 9,
-                title: "Stale setup",
-                head: { ref: "radius/setup-deleted" }
-              }
-            ])
-          }
-        },
-        {
-          tool: "gh",
-          match: ["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/9`],
-          respond: {}
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
-        "pull request #9"
-      ]);
-      expect(fake.commands.commandLines("gh")).toContain(
-        `api --method PATCH repos/${REPOSITORY}/pulls/9 -f state=closed`
-      );
-    });
-
-    it("does not close an open pull request the product did not create", async () => {
-      const { fixture, fake } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", PULLS_PATH],
-          respond: {
-            stdout: pullPages([
-              {
-                number: 10,
-                title: "Human change",
-                head: { ref: "feature/human" }
-              }
-            ])
-          }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
-        []
-      );
-      expect(
-        fake.commands
-          .commandLines("gh")
-          .some((line) => line.includes("pulls/10"))
-      ).toBe(false);
-    });
-
-    it("leaves a default branch already at the baseline alone", async () => {
-      const { fixture, fake } = await createHarness();
-
-      await fixture.reclaimLeakedProductArtifacts();
-      expect(
-        fake.commands.commandLines("gh").some((line) => line.includes("PATCH"))
       ).toBe(false);
     });
 
@@ -5262,301 +4777,6 @@ describe("createCloudFixture", () => {
         "rest --method DELETE --url https://graph.microsoft.com/v1.0/applications/obj-1 --output none"
       );
     });
-
-    it("records an unreadable environment probe instead of silently skipping it", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stderr: "HTTP 403: Forbidden" }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /probe GitHub environment .* gh exited 1: HTTP 403: Forbidden/
-      );
-    });
-
-    it("records an unreadable environment probe reported on stdout", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stdout: '{"message":"Bad gateway"}' }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /probe GitHub environment .* gh exited 1: \{"message":"Bad gateway"\}/
-      );
-    });
-
-    it("refuses to delete a package that is not private or internal", async () => {
-      const { fixture, fake } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: {
-            stdout: JSON.stringify({
-              visibility: "public",
-              repository: { full_name: REPOSITORY }
-            })
-          }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /refuse GHCR state package .* visibility is "public"/
-      );
-      expect(
-        fake.commands
-          .commandLines("gh-package")
-          .some((line) => line.includes("--method DELETE"))
-      ).toBe(false);
-    });
-
-    it("refuses to delete a package linked to another repository", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: {
-            stdout: JSON.stringify({
-              visibility: "private",
-              repository: { full_name: "other/repository" }
-            })
-          }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /linked to "other\/repository", not "fixture-owner\/fixture-repo"/
-      );
-    });
-
-    it("refuses to delete a package that is not linked to the fixture repository", async () => {
-      const { fixture, fake } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: {
-            stdout: JSON.stringify({ visibility: "private" })
-          }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /refuse GHCR state package .* it is not linked to a repository/
-      );
-      expect(
-        fake.commands
-          .commandLines("gh-package")
-          .some((line) => line.includes("--method DELETE"))
-      ).toBe(false);
-    });
-
-    it("records a failing GHCR state package deletion", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: {
-            stdout: JSON.stringify({
-              visibility: "internal",
-              repository: { full_name: REPOSITORY }
-            })
-          },
-          times: 1
-        },
-        failing(
-          "gh-package",
-          ["api", "--method", "DELETE", PACKAGE_PATH],
-          "HTTP 403"
-        )
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /GHCR state package .*HTTP 403/
-      );
-    });
-
-    it("accepts a GHCR state package that disappeared before deletion", async () => {
-      const { fixture, fake } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: {
-            stdout: JSON.stringify({
-              visibility: "internal",
-              repository: { full_name: REPOSITORY }
-            })
-          },
-          times: 1
-        },
-        {
-          tool: "gh-package",
-          match: ["api", "--method", "DELETE", PACKAGE_PATH],
-          respond: NOT_FOUND
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
-        expect.arrayContaining([`GHCR state package ${STATE_PACKAGE}`])
-      );
-      expect(fake.commands.commandLines("gh-package")).toContain(
-        `api --method DELETE ${PACKAGE_PATH}`
-      );
-    });
-
-    it("rejects a delete 404 when the GHCR state package is still readable", async () => {
-      const packageBody = JSON.stringify({
-        visibility: "internal",
-        repository: { full_name: REPOSITORY }
-      });
-      const { fixture } = await createHarness([
-        {
-          tool: "gh-package",
-          match: ["api", "--method", "DELETE", PACKAGE_PATH],
-          respond: NOT_FOUND
-        },
-        {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: { stdout: packageBody },
-          times: 2
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /returned HTTP 404, but the package is still readable.*does not have effective delete access/s
-      );
-    });
-
-    it("records an unreadable GHCR state package probe and continues cleanup", async () => {
-      const { fixture, fake } = await createHarness([
-        failing("gh-package", ["api", PACKAGE_PATH], "HTTP 502"),
-        {
-          tool: "gh",
-          match: ["api", MATCHING_REFS_PATH],
-          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
-        },
-        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /probe GHCR state package .*HTTP 502.*Reclaimed before failing: branch radius\/setup-a/s
-      );
-      expect(fake.commands.commandLines("gh")).toContain(
-        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
-      );
-    });
-
-    it("records a failing branch listing", async () => {
-      const { fixture } = await createHarness([
-        failing("gh", ["api", MATCHING_REFS_PATH], "HTTP 500")
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /list workflow fallback branches: .*HTTP 500/
-      );
-    });
-
-    it("records a failing pull-request listing", async () => {
-      const { fixture } = await createHarness([
-        failing("gh", ["api", PULLS_PATH], "HTTP 500")
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /list open pull requests: .*HTTP 500/
-      );
-    });
-
-    it("records a failing pull-request close and continues cleanup", async () => {
-      const { fixture, fake } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", PULLS_PATH],
-          respond: {
-            stdout: pullPages([
-              {
-                number: 9,
-                title: "Stale setup",
-                head: { ref: "radius/setup-deleted" }
-              }
-            ])
-          }
-        },
-        {
-          tool: "gh",
-          match: ["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/9`],
-          respond: { code: 1, stderr: "HTTP 403" }
-        },
-        {
-          tool: "gh",
-          match: ["api", COMMITS_PATH],
-          respond: { stdout: "e".repeat(40) }
-        },
-        { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /pull request #9: .*HTTP 403/s
-      );
-      expect(
-        fake.commands
-          .commandLines("gh")
-          .some((line) => line.includes(`PATCH ${DEFAULT_REF_PATH}`))
-      ).toBe(false);
-    });
-
-    it("records a failing default branch read", async () => {
-      const { fixture } = await createHarness([
-        failing("gh", ["api", COMMITS_PATH], "HTTP 502")
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        new RegExp(`read ${BRANCH} head: .*HTTP 502`)
-      );
-    });
-
-    it("records a failing environment deletion", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", ENVIRONMENT_PATH],
-          respond: { stdout: "{}" },
-          times: 1
-        },
-        {
-          tool: "gh",
-          match: ["api", "--method", "DELETE"],
-          respond: { code: 1, stderr: "HTTP 403" }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        new RegExp(`GitHub environment ${ENVIRONMENT}: .*HTTP 403`)
-      );
-    });
-
-    it("records a failing default branch reset", async () => {
-      const { fixture } = await createHarness([
-        {
-          tool: "gh",
-          match: ["api", COMMITS_PATH],
-          respond: { stdout: "e".repeat(40) }
-        },
-        {
-          tool: "gh",
-          match: ["api", "--method", "PATCH"],
-          respond: { code: 1, stderr: "protected branch" }
-        }
-      ]);
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /main reset to .*: .*protected branch/
-      );
-    });
   });
 
   describe("dispose", () => {
@@ -5830,7 +5050,7 @@ describe("createCloudFixture", () => {
     it("fetches no cluster credentials when no cluster assertion is made", async () => {
       const { fixture, fake } = await clusterHarness([]);
 
-      await fixture.assertCleanSlate();
+      await fixture.prepareCleanSlate();
 
       expect(
         fake.commands
