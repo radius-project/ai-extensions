@@ -18,6 +18,7 @@ import {
 import type { CanvasGraphResource } from "../../../src/shared.js";
 import { PR_GRAPH_DIFF_MARKDOWN_HEADING } from "../../../src/pr-diff-markdown.js";
 import { graphDiffResultText } from "../../../src/runtime/pr-graph-diff-result.js";
+import { createDeferred } from "../../support/browser/fakes.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 
 const REPO = "acme/widgets";
@@ -647,24 +648,23 @@ describe("registered runtime graph source policy", () => {
     "fences an in-flight runtime comparison after %s and disposes its staged input",
     async (navigation) => {
       const f = await fixture("feature");
-      let release: (() => void) | undefined;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
+      const enteredCompilation = createDeferred<void>();
+      const held = createDeferred<void>();
       const compile = f.compiler.getMockImplementation();
       if (!compile) throw new Error("Missing compiler");
       f.compiler.mockImplementationOnce(async (...args) => {
+        enteredCompilation.resolve();
         const resources = await compile(...args);
-        await held;
+        await held.promise;
         return resources;
       });
       try {
         const pending = f.open();
-        await vi.waitFor(() => expect(f.compiler).toHaveBeenCalledTimes(1));
+        await enteredCompilation.promise;
         const entry = f.harness.servers.get("radius-panel");
         if (navigation === "close") await f.harness.host.close("radius-panel");
         else await f.harness.host.open("radius-panel", { page: "graph" });
-        release?.();
+        held.resolve();
         await pending;
         expect(f.compiler).toHaveBeenCalledTimes(1);
         expect(entry?.state.diffResources).toBeUndefined();
@@ -675,7 +675,7 @@ describe("registered runtime graph source policy", () => {
         expect(await readdir(path.join(f.root, "staged"))).toEqual([]);
         expect(f.harness.session.send).not.toHaveBeenCalled();
       } finally {
-        release?.();
+        held.resolve();
         await f.close();
       }
     }
