@@ -433,7 +433,7 @@ describe("graph concurrency through production HTTP routes", () => {
             })
           ).toEqual({ recorded: true });
           expect(await (await h.load()).json()).toMatchObject({
-            error: `${failure} Fix or remove the empty app.bicep in the workspace, then select Refresh.`,
+            error: `Model generation failed and left app.bicep empty. Fix or remove the file, then select Refresh. Diagnostic: ${failure}`,
             appModelAuthoringFailed: true,
             modelingFailed: true
           });

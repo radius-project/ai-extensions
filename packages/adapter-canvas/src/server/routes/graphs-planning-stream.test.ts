@@ -783,7 +783,7 @@ describe("graphs-planning load-graph-stream route", () => {
           data:
             ownership === "current" ?
               {
-                error: `Authoring failed. Fix or remove the empty ${BICEP_PATH} in the workspace, then select Refresh.`,
+                error: `Model generation failed and left ${BICEP_PATH} empty. Fix or remove the file, then select Refresh. Diagnostic: Authoring failed.`,
                 modelingFailed: true,
                 appModelAuthoringFailed: true
               }

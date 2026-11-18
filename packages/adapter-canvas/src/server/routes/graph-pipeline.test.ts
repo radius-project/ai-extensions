@@ -265,7 +265,7 @@ describe("graph pipeline", () => {
             BlankModelAuthoringFailed
           );
           await expect(selected).rejects.toThrow(
-            "No supported resource. Fix or remove the empty .radius/app.bicep in the workspace, then select Refresh."
+            "Model generation failed and left .radius/app.bicep empty. Fix or remove the file, then select Refresh. Diagnostic: No supported resource."
           );
         } else {
           await expect(selected).rejects.not.toBeInstanceOf(

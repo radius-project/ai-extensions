@@ -48,7 +48,7 @@ export function requireNonblankGraphModel(
     selection.fromWorkspace && appModelAuthoringFailure(state, repo, branch);
   if (failure)
     throw new BlankModelAuthoringFailed(
-      `${failure.error} Fix or remove the empty ${selection.bicepPath || DEFAULT_APP_BICEP_PATH} in the workspace, then select Refresh.`,
+      `Model generation failed and left ${selection.bicepPath || DEFAULT_APP_BICEP_PATH} empty. Fix or remove the file, then select Refresh. Diagnostic: ${failure.error}`,
       selection.verifyWorkspaceBranch
     );
   throw new Error(

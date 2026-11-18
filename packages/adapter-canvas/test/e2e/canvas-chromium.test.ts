@@ -4204,6 +4204,48 @@ test.describe("Radius Canvas in Chromium", () => {
     }
   });
 
+  test("names the empty model and only retries after the file is removed @safety", async ({
+    page,
+    canvas
+  }) => {
+    const model = path.join(canvas.workspacePath, ".radius", "app.bicep");
+    const target = `${REPOSITORY}::${WORKTREE_BRANCH}`;
+    await fs.writeFile(model, " \n");
+    await fs.writeFile(
+      path.join(canvas.workspacePath, "Dockerfile"),
+      "FROM scratch\n"
+    );
+    Object.assign(canvas.entry.state, {
+      appModelAttemptTokens: { [target]: "blank-attempt" },
+      appModelFailures: {
+        [target]: {
+          attemptToken: "blank-attempt",
+          error: "The service configuration did not specify a listening port."
+        }
+      }
+    });
+    const refresh = page.getByRole("button", { name: "Refresh", exact: true });
+    const status = page.getByRole("alert");
+    const message =
+      "Model generation failed and left .radius/app.bicep empty. Fix or remove the file, then select Refresh. Diagnostic: The service configuration did not specify a listening port.";
+    let handoffs = 0;
+    canvas.setAppBicepHandoff(async () => {
+      handoffs++;
+    });
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      await expect(status).toHaveText(message);
+      await refresh.click();
+      await expect(status).toHaveText(message);
+      expect(handoffs).toBe(0);
+      await fs.unlink(model);
+      await refresh.click();
+      await expect.poll(() => handoffs).toBe(1);
+    } finally {
+      canvas.setAppBicepHandoff(null);
+    }
+  });
+
   test("keeps a modeling failure on reload and retries once after a saved source edit @safety", async ({
     page,
     canvas
