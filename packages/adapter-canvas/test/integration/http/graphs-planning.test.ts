@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { ChildProcess, execFileSync } from "node:child_process";
+import { ChildProcess, execFile, execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -10,7 +10,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
+import {
+  createGraphSourceBindings,
+  createWorkflowArtifactReader
+} from "@radius-project/adapter-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createWorkflowObservationScope,
@@ -320,10 +323,24 @@ describe("graph concurrency through production HTTP routes", () => {
       const workspace = mkdtempSync(
         path.join(tmpdir(), "radius-handoff-http-")
       );
-      const sdk = await createRuntimeSdkHarness({
-        bicepByRepoBranch: { "remote:octo/app@main": "committed model" },
-        workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] }
+      const execute = vi.fn<
+        Parameters<typeof createGraphSourceBindings>[0]["execute"]
+      >((command, args, options, callback) => {
+        if (command !== "git")
+          throw new Error(`Unexpected remote handoff read: ${args.join(" ")}`);
+        return execFile(command, args, options, callback);
       });
+      const sources = createGraphSourceBindings({
+        execute,
+        redactDiagnostic: (message) => message,
+        stagingRoot: workspace
+      });
+      const sdk = await createRuntimeSdkHarness(
+        { workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] } },
+        (deps) => {
+          deps.graphSources = sources;
+        }
+      );
       let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
       try {
         initCommittedGraphWorkspace(workspace);
@@ -357,7 +374,12 @@ describe("graph concurrency through production HTTP routes", () => {
         } else {
           expect(sdk.session.send).toHaveBeenCalledOnce();
         }
-        expect(sdk.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalledWith(
+          "gh",
+          expect.anything(),
+          expect.anything(),
+          expect.anything()
+        );
       } finally {
         setAppBicepHandoff(null);
         await h?.close();
