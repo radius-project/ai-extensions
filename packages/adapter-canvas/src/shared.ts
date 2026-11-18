@@ -166,6 +166,7 @@ export interface GraphProgressRecord {
   // browser may already have one retry in flight when progress polling expires
   // the wait; retaining the verdict prevents that request from restarting it.
   graphProgressWaitExpiredMessage?: string;
+  graphProgressHandoffFailure?: string;
 }
 
 // Append one event to the instance's build record.

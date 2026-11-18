@@ -1,15 +1,21 @@
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync, execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applicationGraphToResources,
   computeGraphDiff,
-  deploymentGraphResources as canvasGraphResources,
+  createGraphOrchestrator,
+  deploymentGraphResources,
   projectSafeApplicationGraph
 } from "@radius-project/core";
-import { RadProcessError } from "@radius-project/adapter-shared";
+import {
+  RadProcessError,
+  createGraphSourceBindings
+} from "@radius-project/adapter-shared";
+import { createCanvasGraphSources } from "../../../src/server/graph-sources.js";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createGraphsPlanningWritesRoutes } from "../../../src/server/routes/graphs-planning-writes.js";
@@ -20,10 +26,6 @@ import {
   type AppBicepSelection,
   type GraphPipeline
 } from "../../../src/server/routes/graph-pipeline.js";
-import {
-  radArtifactsDirForSelection,
-  radArtifactsFingerprint
-} from "../../../src/remote-rad-artifacts.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
   prepareSourceRefResources,
@@ -31,6 +33,7 @@ import {
 } from "../../../src/source-refs.js";
 import {
   commitWorkspaceBranchResolution,
+  isWorkspaceSelection,
   resolveGraphBranchForRequest,
   workspaceGraphJsonPath
 } from "../../../src/workspace.js";
@@ -63,6 +66,7 @@ interface PipelineScript {
   afterCompile?: () => void;
   liveWorkspaceBranch?: string;
   commits?: Record<string, string>;
+  stageArtifacts?: GraphPipeline["stageArtifacts"];
 }
 
 interface Harness {
@@ -84,7 +88,7 @@ function selectionOf(
 // an empty graph.
 function start(
   script: Partial<PipelineScript> = {},
-  pipelineOverride?: GraphPipeline
+  productionPipeline?: GraphPipeline
 ): Harness {
   const state: CanvasState = {};
   let entryMissing = false;
@@ -105,11 +109,13 @@ function start(
     return value;
   }
 
-  const pipeline: GraphPipeline = pipelineOverride ?? {
+  const pipeline: GraphPipeline = productionPipeline ?? {
     selectAppBicep: (_entry, _repo, branch) =>
       Promise.resolve(scripted(active.selections, branch, "selectAppBicep")),
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
-    stageArtifacts: () => Promise.resolve({ dir: "", remote: false }),
+    stageArtifacts: (input) =>
+      active.stageArtifacts?.(input) ??
+      Promise.resolve({ dir: "", remote: false }),
     compileResources: ({ selection }) => {
       if (active.compileThrows) return Promise.reject(active.compileThrows);
       const compiled = scripted(
@@ -127,12 +133,13 @@ function start(
     discardStagedArtifacts: () => {}
   };
 
+  const entry = { state };
   const routes = createTestRouteTable(
     createGraphsPlanningWritesRoutes({
       // The real workflow service, so this suite still exercises the whole
       // stack from the socket down to the state machine.
       workflows: createGraphPlanningWorkflows({
-        readInstanceEntry: () => (entryMissing ? undefined : { state }),
+        readInstanceEntry: () => (entryMissing ? undefined : entry),
         resolveBranchForRequest: (
           entry,
           repo,
@@ -233,6 +240,155 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("graphs-planning writes real-loopback HIT", () => {
+  it.each(["base", "head"])(
+    "shares production source/graph coordination with a direct caller when %s is dirty",
+    async (workspaceBranch) => {
+      const root = await mkdtemp(path.join(tmpdir(), "radius-http-graph-"));
+      try {
+        execFileSync(
+          "git",
+          ["init", "--initial-branch", workspaceBranch, root],
+          { stdio: "pipe" }
+        );
+        await mkdir(path.join(root, ".radius"));
+        await writeFile(path.join(root, ".radius", "app.bicep"), "dirty-model");
+        const effects: string[] = [];
+        const sha = "a".repeat(40);
+        const sources = createGraphSourceBindings({
+          stagingRoot: root,
+          redactDiagnostic: (message) => message,
+          execute: (command, args, _options, callback) => {
+            if (command === "git") {
+              execFile(
+                command,
+                args,
+                { timeout: 5000 },
+                (error, stdout, stderr) => callback(error, stdout, stderr)
+              );
+              return {};
+            }
+            const apiPath = args[1] || "";
+            effects.push(apiPath);
+            if (apiPath.startsWith("/repos/octo/app/commits/")) {
+              callback(null, JSON.stringify({ sha }), "");
+            } else if (
+              apiPath ===
+              `/repos/octo/app/contents/.radius/app.bicep?ref=${sha}`
+            ) {
+              const bytes = Buffer.from("committed-model");
+              callback(
+                null,
+                JSON.stringify({
+                  encoding: "base64",
+                  size: bytes.length,
+                  content: bytes.toString("base64")
+                }),
+                ""
+              );
+            } else if (
+              apiPath ===
+              `/repos/octo/app/contents/.radius/bicepconfig.json?ref=${sha}`
+            ) {
+              callback(new Error("not found"), "", "gh: Not Found (HTTP 404)");
+            } else {
+              throw new Error(`Unscripted GitHub read: ${apiPath}`);
+            }
+            return {};
+          }
+        });
+        const state: CanvasState = {
+          workspaceRepo: "octo/app",
+          workspaceBranch,
+          workspacePath: root
+        };
+        const compile = async (
+          content: string
+        ): Promise<CanvasGraphResource[]> => {
+          if (content !== "dirty-model" && content !== "committed-model")
+            throw new Error("Unscripted model");
+          effects.push(`compile:${content}`);
+          return [
+            { id: content, name: content, type: "Radius.Compute/containers" }
+          ];
+        };
+        const direct = createGraphOrchestrator({
+          stage: sources.stage,
+          compile,
+          diff: computeGraphDiff
+        });
+        const workspace = {
+          repo: "octo/app",
+          ref: workspaceBranch,
+          path: root,
+          authorized: true
+        };
+        const compared = await direct.compare(
+          await sources.read({ repo: "octo/app", ref: "base", workspace }),
+          await sources.read({ repo: "octo/app", ref: "head", workspace })
+        );
+        expect(compared.status).toBe("compared");
+        if (compared.status !== "compared")
+          throw new Error("Expected a comparison.");
+        const directEffects = [...effects];
+        effects.length = 0;
+        const binding = createCanvasGraphSources(
+          sources,
+          isWorkspaceSelection,
+          async () => workspaceBranch
+        );
+        const pipeline = createGraphPipeline({
+          fetchBicepSelection: binding.select,
+          resolveRadArtifactsDir: binding.stage,
+          buildGraphViaRad: compile,
+          canvasGraphResources: deploymentGraphResources,
+          workspaceGraphJsonPath: () => "",
+          graphDefinitionHash: (content, fingerprint) => content + fingerprint,
+          removeDirectory: () => {
+            throw new Error("The shared handle must own cleanup.");
+          }
+        });
+        const harness = start({}, pipeline);
+        Object.assign(harness.state, state);
+        const entry = await container!.getOrCreate("panel-a");
+        const response = await post(
+          entry.baseUrl,
+          "/api/diff-branches",
+          JSON.stringify({ repo: "octo/app", base: "base", head: "head" })
+        );
+        expect(response.status).toBe(200);
+        expect(harness.state.diffResources).toEqual(compared.diff);
+        expect(
+          compared.diff.some((resource) => resource.name === "dirty-model")
+        ).toBe(true);
+        expect(effects).toEqual(directEffects);
+        expect(effects).not.toContain(
+          `/repos/octo/app/commits/${workspaceBranch}`
+        );
+        effects.length = 0;
+        execFileSync(
+          "git",
+          ["-C", root, "symbolic-ref", "HEAD", "refs/heads/other"],
+          { stdio: "pipe" }
+        );
+        const stale = await post(
+          entry.baseUrl,
+          "/api/diff-branches",
+          JSON.stringify({ repo: "octo/app", base: "base", head: "head" })
+        );
+        expect(stale.ok).toBe(false);
+        expect(await stale.text()).toContain("Workspace branch changed");
+        expect(effects.some((effect) => effect.startsWith("compile:"))).toBe(
+          false
+        );
+        expect(effects).not.toContain(
+          `/repos/octo/app/commits/${workspaceBranch}`
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("serves the modeled graph and its state transition over a real socket", async () => {
     const harness = start({
       selections: { main: selectionOf("main", "resource app = {}") },
@@ -258,46 +414,68 @@ describe("graphs-planning writes real-loopback HIT", () => {
   it("reuses a workspace graph until a referenced JSONC artifact changes", async () => {
     const workspacePath = await mkdtemp(path.join(tmpdir(), "radius-refresh-"));
     try {
+      execFileSync("git", ["init", "--initial-branch", "main", workspacePath], {
+        stdio: "pipe"
+      });
       const artifactsDir = path.join(workspacePath, ".radius");
       const artifact = path.join(artifactsDir, "types.tgz");
       await mkdir(artifactsDir);
       await writeFile(
-        path.join(artifactsDir, "bicepconfig.json"),
+        path.join(artifactsDir, "app.bicep"),
+        "resource app = {}"
+      );
+      const config = path.join(artifactsDir, "bicepconfig.json");
+      await writeFile(
+        config,
         `{
-          // A malformed Radius pin must not prevent use of the fallback.
-          "extensions": {"radius": {"toString": null}, "types": "./types.tgz",},
+          // Bicep permits comments and trailing commas.
+          "extensions": {"types": "./types.tgz",},
         }`
       );
       await writeFile(artifact, "original");
-      let compileCount = 0;
+      const compiledArtifacts: string[] = [];
+      const sources = createGraphSourceBindings({
+        stagingRoot: workspacePath,
+        redactDiagnostic: (message) => message,
+        execute: (command, args, _options, callback) => {
+          if (command !== "git") throw new Error("expected a workspace read");
+          return execFile(
+            command,
+            args,
+            { timeout: 5000 },
+            (error, stdout, stderr) => callback(error, stdout, stderr)
+          );
+        }
+      });
+      const binding = createCanvasGraphSources(
+        sources,
+        isWorkspaceSelection,
+        async () => "main"
+      );
       const pipeline = createGraphPipeline({
-        fetchBicepSelection: async (_entry, _repo, branch) => ({
-          content: "resource app = {}",
-          fromWorkspace: true,
-          branch,
-          bicepPath: ".radius/app.bicep"
-        }),
-        resolveRadArtifactsDir: (request) => {
-          if (!request.isLocal || !request.state)
-            throw new Error("expected a local workspace selection");
-          return radArtifactsDirForSelection({
-            ...request,
-            isLocal: true,
-            state: request.state
-          });
-        },
+        fetchBicepSelection: binding.select,
+        resolveRadArtifactsDir: binding.stage,
         buildGraphViaRad: async (_content, _definition, options) => {
-          if (options.radArtifactsDir !== artifactsDir)
-            throw new Error("expected workspace artifacts");
-          compileCount++;
+          if (
+            !options.radArtifactsDir ||
+            options.radArtifactsDir === artifactsDir
+          )
+            throw new Error(
+              "expected a staged snapshot of workspace artifacts"
+            );
+          compiledArtifacts.push(
+            await readFile(
+              path.join(options.radArtifactsDir, "types.tgz"),
+              "utf8"
+            )
+          );
           return [
             { id: "res-a", name: "api", type: "Radius.Compute/containers" }
           ];
         },
-        canvasGraphResources,
+        canvasGraphResources: deploymentGraphResources,
         workspaceGraphJsonPath,
         graphDefinitionHash,
-        radArtifactsFingerprint,
         removeDirectory: () => {
           throw new Error("workspace artifacts must not be deleted");
         }
@@ -324,21 +502,36 @@ describe("graphs-planning writes real-loopback HIT", () => {
         reload: false,
         fromWorkspace: true
       });
-      expect(compileCount).toBe(1);
+      expect(compiledArtifacts).toEqual(["original"]);
       const { graphDefinitionHash: initialHash, graphModelRevision } = state;
       expect(initialHash).toBeTruthy();
       expect(graphModelRevision).toBeTruthy();
       expect(await refresh()).toMatchObject({ reload: false, cached: true });
-      expect(compileCount).toBe(1);
+      expect(compiledArtifacts).toEqual(["original"]);
 
       await writeFile(artifact, "updated");
       expect(await refresh()).toMatchObject({
         reload: false,
         fromWorkspace: true
       });
-      expect(compileCount).toBe(2);
+      expect(compiledArtifacts).toEqual(["original", "updated"]);
       expect(state.graphDefinitionHash).not.toBe(initialHash);
       expect(state.graphModelRevision).toBe(graphModelRevision);
+
+      await writeFile(
+        config,
+        '{"extensions":{"radius":{"toString":null},"types":"./types.tgz"}}'
+      );
+      const rejected = await post(
+        baseUrl,
+        "/api/load-graph",
+        '{"repo":"octo/app","refresh":true}'
+      );
+      expect(rejected.status).toBe(400);
+      expect(await rejected.json()).toMatchObject({
+        error: expect.stringContaining("radius")
+      });
+      expect(compiledArtifacts).toEqual(["original", "updated"]);
     } finally {
       await rm(workspacePath, { recursive: true, force: true });
     }
@@ -1066,6 +1259,67 @@ describe("graphs-planning writes real-loopback HIT", () => {
     );
     expect(harness.state.page).toBe("graphDiff");
     expect(harness.state.diffResources).toHaveLength(2);
+  });
+
+  it("keeps the newer same-selection diff when the older disposal finishes last", async () => {
+    let cleanupStarted = () => {};
+    let releaseCleanup = () => {};
+    const disposing = new Promise<void>((resolve) => {
+      cleanupStarted = resolve;
+    });
+    const heldCleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const resource = (id: string): CanvasGraphResource => ({
+      id,
+      name: id,
+      type: "Fixture/containers"
+    });
+    let holdFirst = true;
+    const harness = start({
+      selections: {
+        main: selectionOf("main", "resource base = {}"),
+        topic: selectionOf("topic", "resource head = {}")
+      },
+      compiled: { main: [], topic: [resource("older")] },
+      stageArtifacts: async () => {
+        const hold = holdFirst;
+        holdFirst = false;
+        return {
+          dir: "fixture-stage",
+          remote: true,
+          handle: {
+            dir: "fixture-stage",
+            owned: true,
+            fingerprint: "fixture",
+            async dispose() {
+              if (!hold) return;
+              cleanupStarted();
+              await heldCleanup;
+            }
+          }
+        };
+      }
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const compare = () =>
+      post(
+        entry.baseUrl,
+        "/api/diff-branches",
+        '{"repo":"octo/app","base":"main","head":"topic"}'
+      );
+    const older = compare();
+    try {
+      await disposing;
+      harness.script.compiled.topic = [resource("newer")];
+      expect(await (await compare()).json()).toMatchObject({ reload: true });
+    } finally {
+      releaseCleanup();
+    }
+    const stale = await older;
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({ stale: true });
+    expect(harness.state.diffResources?.map(({ id }) => id)).toEqual(["newer"]);
   });
 
   it("refuses a comparison whose selection moved on, with 409", async () => {

@@ -4150,6 +4150,29 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toContainText("Application graph ready");
   });
 
+  test("announces a rejected modeling handoff without waiting for authoring timeout @safety", async ({
+    page,
+    canvas
+  }) => {
+    await fs.unlink(path.join(canvas.workspacePath, ".radius", "app.bicep"));
+    await fs.writeFile(
+      path.join(canvas.workspacePath, "Dockerfile"),
+      "FROM scratch\n"
+    );
+    canvas.setAppBicepHandoff(async () => {
+      throw new Error("The workspace application model origin is unreadable.");
+    });
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      await expect(page.getByRole("alert")).toContainText(
+        "The workspace application model origin is unreadable."
+      );
+      await expectNoWcagViolations(page);
+    } finally {
+      canvas.setAppBicepHandoff(null);
+    }
+  });
+
   test("keeps a modeling failure on reload and retries once after a saved source edit @safety", async ({
     page,
     canvas

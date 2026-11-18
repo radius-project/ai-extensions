@@ -237,6 +237,9 @@ function fakes(options: Options = {}): Fakes {
         normalized: true
       }));
     },
+    removeDirectory: (dir) => {
+      calls.push(`removeDirectory(${dir})`);
+    },
     // Distinct from the raw message so a handler that formats the error itself
     // instead of using the injected formatter is detectable.
     errorMessage: (error) =>
@@ -589,7 +592,77 @@ describe("graphs-planning load-graph-stream route", () => {
     expect(calls).toContain(`fetchBicepSelection(${REPO}|${QUERY_BRANCH})`);
   });
 
-  it("passes the empty graph-json path and skips workspace derivation for a remote selection", async () => {
+  it.each([
+    "selection",
+    "eligibility",
+    "staging",
+    "compilation",
+    "failure"
+  ] as const)(
+    "fences generation-only supersession during %s with an unchanged source token",
+    async (stage) => {
+      const { deps, entry, calls } = fakes({
+        selection: selection({
+          content: stage === "eligibility" ? null : "model"
+        })
+      });
+      if (!entry) throw new Error("Expected entry");
+      const supersede = () => {
+        entry.state.graphBuildGeneration =
+          (entry.state.graphBuildGeneration ?? 0) + 1;
+        entry.state.graphBranch = "newer";
+      };
+      const clearRepair = vi.spyOn(deps, "clearGraphRepairAttempt");
+      if (stage === "selection") {
+        deps.fetchBicepSelection = async () => {
+          supersede();
+          return selection();
+        };
+      } else if (stage === "eligibility") {
+        deps.listBranchPaths = async () => {
+          supersede();
+          return ["Dockerfile"];
+        };
+      } else if (stage === "staging") {
+        deps.radArtifactsDirForSelection = async () => {
+          supersede();
+          return { dir: "/tmp/old-generation", remote: true };
+        };
+      } else {
+        deps.buildGraphViaRad = async () => {
+          supersede();
+          if (stage === "failure")
+            throw new RadProcessError(
+              "rad failed",
+              "BCP035: invalid model",
+              ""
+            );
+          return RESOURCES;
+        };
+      }
+      const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+      expect(frames(recording.stream).at(-1)?.data).toEqual({ stale: true });
+      expect(recording.steps.filter((step) => step === "end")).toHaveLength(1);
+      expect(calls.some((call) => call.startsWith("commitSourceRef"))).toBe(
+        false
+      );
+      expect(calls).not.toContain("triggerGraphRepairHandoff");
+      expect(clearRepair).not.toHaveBeenCalled();
+      expect(entry.state.graphBranch).toBe("newer");
+      if (stage === "selection" || stage === "eligibility")
+        expect(
+          calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+        ).toBe(false);
+      if (stage === "staging")
+        expect(
+          calls.filter(
+            (call) => call === "removeDirectory(/tmp/old-generation)"
+          )
+        ).toHaveLength(1);
+    }
+  );
+
+  it("omits a graph-json destination and workspace derivation for a remote selection", async () => {
     const { deps, calls } = fakes({
       selection: selection({ fromWorkspace: false, bicepPath: "" })
     });
@@ -604,7 +677,7 @@ describe("graphs-planning load-graph-stream route", () => {
       `radArtifactsDirForSelection(false|${REPO}|${DEFAULT_BRANCH}|${BICEP_PATH})`
     );
     expect(calls).toContain(
-      `buildGraphViaRad(${BICEP_PATH}|save=|dir=/tmp/rad|cleanup=true)`
+      `buildGraphViaRad(${BICEP_PATH}|save=undefined|dir=/tmp/rad|cleanup=false)`
     );
     expect(frames(recording.stream).at(-1)).toEqual({
       event: "done",
@@ -633,6 +706,96 @@ describe("graphs-planning load-graph-stream route", () => {
       event: "done",
       data: { error: "formatted:boom" }
     });
+  });
+
+  it("does not author a missing model when its source changes during eligibility lookup", async () => {
+    const { deps, calls } = fakes({ selection: selection({ content: null }) });
+    let current = true;
+    deps.isCurrentSourceRef = () => current;
+    deps.listBranchPaths = async () => {
+      current = false;
+      return ["Dockerfile"];
+    };
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+    expect(frames(recording.stream).at(-1)?.data).toEqual({ stale: true });
+    expect(
+      calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+    ).toBe(false);
+  });
+
+  it.each(["", " \n\t"])(
+    "rejects a present blank model before staging or authoring",
+    async (content) => {
+      const { deps, calls } = fakes({ selection: selection({ content }) });
+      const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+      expect(frames(recording.stream).at(-1)).toEqual({
+        event: "done",
+        data: {
+          error: `formatted:${BICEP_PATH} is empty; the graph is unavailable.`
+        }
+      });
+      expect(
+        calls.some((call) => call.startsWith("radArtifactsDirForSelection"))
+      ).toBe(false);
+      expect(
+        calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+      ).toBe(false);
+    }
+  );
+
+  it("disposes staging when its source becomes stale before compilation", async () => {
+    const { deps, calls } = fakes();
+    let current = true;
+    deps.isCurrentSourceRef = () => current;
+    deps.radArtifactsDirForSelection = async () => {
+      current = false;
+      return { dir: "/tmp/stale", remote: true };
+    };
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+    expect(frames(recording.stream).at(-1)?.data).toEqual({ stale: true });
+    expect(calls).toContain("removeDirectory(/tmp/stale)");
+    expect(calls.some((call) => call.startsWith("buildGraphViaRad"))).toBe(
+      false
+    );
+  });
+
+  it("keeps a successful stream result when staging cleanup fails", async () => {
+    const { deps, calls } = fakes();
+    deps.removeDirectory = () => {
+      throw new Error("EBUSY");
+    };
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+    expect(frames(recording.stream).at(-1)?.data).toEqual({ reload: true });
+    expect(calls).toContain(
+      "logError([radius graph] could not remove staged artifacts: Graph artifact cleanup failed: EBUSY)"
+    );
+  });
+
+  it("waits for an in-flight compiler before disposing a superseded stream's artifacts", async () => {
+    const { deps, calls } = fakes();
+    let finish: ((resources: unknown[]) => void) | undefined;
+    let started = false;
+    let current = true;
+    deps.buildGraphViaRad = () => {
+      started = true;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    };
+    deps.isCurrentSourceRef = () => current;
+    deps.commitSourceRef = () => current;
+    const pending = run(`/api/load-graph-stream?repo=${REPO}`, deps);
+    await vi.waitFor(() => {
+      expect(started).toBe(true);
+    });
+    current = false;
+    expect(calls).not.toContain("removeDirectory(/tmp/rad)");
+    finish?.(RESOURCES);
+    const recording = await pending;
+    expect(
+      calls.filter((call) => call === "removeDirectory(/tmp/rad)")
+    ).toHaveLength(1);
+    expect(frames(recording.stream).at(-1)?.data).toEqual({ stale: true });
   });
 
   it("keeps compile diagnostics out of the terminal done frame", async () => {

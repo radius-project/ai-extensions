@@ -1,5 +1,14 @@
 import { createServer } from "node:http";
-import { existsSync, writeFileSync } from "node:fs";
+import { ChildProcess, execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +46,253 @@ import {
 } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../../../src/graph-progress-contract.js";
+import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createDeferred } from "../../support/browser/fakes.js";
+import { setAppBicepHandoff } from "../../../src/server.js";
+
+async function concurrentGraphRuntime(workspace?: string) {
+  const builds: Array<ReturnType<typeof createDeferred<void>>> = [];
+  const runtime = createTestCanvasServerRuntime({
+    executionOwner: createEnvironmentExecutionOwner(),
+    cliExec: (command, args, _options, callback) => {
+      if (workspace && command === "git" && args.includes("symbolic-ref")) {
+        callback(null, "main\n", "");
+        return new ChildProcess();
+      }
+      const endpoint = args.find((arg) => arg.startsWith("/repos/"));
+      let value: unknown;
+      if (endpoint?.includes("/commits/")) {
+        value = {
+          sha: endpoint.endsWith("/main") ? "a".repeat(40) : "b".repeat(40)
+        };
+      } else if (endpoint?.includes("/contents/.radius/app.bicep")) {
+        const content = "resource fixture";
+        value = {
+          encoding: "base64",
+          content: Buffer.from(content).toString("base64"),
+          size: Buffer.byteLength(content)
+        };
+      } else if (endpoint?.includes("/contents/.radius/bicepconfig.json")) {
+        callback(new Error("not found"), "", "Not Found (HTTP 404)");
+        return new ChildProcess();
+      } else {
+        throw new Error(`Unscripted graph command: ${args.join(" ")}`);
+      }
+      callback(null, JSON.stringify(value), "");
+      return new ChildProcess();
+    },
+    buildGraphViaRad: async (_content, _definition, options) => {
+      const index = builds.length;
+      const gate = createDeferred<void>();
+      builds.push(gate);
+      await gate.promise;
+      if (workspace) {
+        if (!options?.saveGraphJsonTo)
+          throw new Error("Missing staged compiler output path");
+        expect(options.saveGraphJsonTo).not.toBe(
+          path.join(workspace, ".radius", "app-graph.json")
+        );
+        writeFileSync(
+          options.saveGraphJsonTo,
+          JSON.stringify({
+            application: { name: `application-${index}` },
+            resources: [{ id: `build-${index}` }]
+          })
+        );
+      }
+      return [
+        {
+          id: `build-${index}`,
+          name: `build-${index}`,
+          type: "Radius.Compute/containers"
+        }
+      ];
+    }
+  });
+  const entry = await runtime.getOrCreateServer("graph-races", "graph");
+  if (workspace)
+    Object.assign(entry.state, {
+      workspacePath: workspace,
+      workspaceRepo: "octo/app",
+      workspaceBranch: "main",
+      contextRepo: "octo/app",
+      contextBranch: "main"
+    });
+  return {
+    entry,
+    builds,
+    load: (extra = {}) =>
+      fetch(`${entry.baseUrl}/api/load-graph`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: entry.baseUrl,
+          "Sec-Fetch-Site": "same-origin",
+          "X-Radius-Mutation-Nonce": String(
+            entry.state.browserMutationNonce || ""
+          )
+        },
+        body: JSON.stringify({ repo: "octo/app", branch: "main", ...extra })
+      }),
+    stream: (branch = "main") =>
+      fetch(
+        `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp&branch=${branch}`
+      ),
+    async close() {
+      builds.forEach((build) => build.resolve());
+      await runtime.stopServer("graph-races", true);
+    }
+  };
+}
+
+describe("graph concurrency through production HTTP routes", () => {
+  it.each(["success", "failure"])(
+    "keeps newer persisted and in-memory graph when an older JSON build finishes with %s",
+    async (result) => {
+      const workspace = mkdtempSync(path.join(tmpdir(), "radius-graph-http-"));
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      try {
+        execFileSync("git", ["init", "--initial-branch", "main", workspace], {
+          stdio: "pipe"
+        });
+        const directory = path.join(workspace, ".radius");
+        mkdirSync(directory);
+        writeFileSync(path.join(directory, "app.bicep"), "resource local");
+        const destination = path.join(directory, "app-graph.json");
+        writeFileSync(destination, "previous output");
+        h = await concurrentGraphRuntime(workspace);
+        const { builds } = h;
+        const old = h.load();
+        await vi.waitFor(() => expect(builds).toHaveLength(1));
+        expect(readFileSync(destination, "utf8")).toBe("previous output");
+        const current = await h.stream();
+        await vi.waitFor(() => expect(builds).toHaveLength(2));
+        builds[1].resolve();
+        expect(await current.text()).toContain('"reload":true');
+        if (result === "failure")
+          builds[0].reject(new Error("old compiler failed"));
+        else builds[0].resolve();
+        expect((await old).status).toBe(409);
+        expect(JSON.parse(readFileSync(destination, "utf8"))).toEqual({
+          application: { name: "application-1" },
+          resources: [{ id: "build-1" }]
+        });
+        expect(h.entry.state.graphResources?.map(({ id }) => id)).toEqual([
+          "build-1"
+        ]);
+      } finally {
+        await h?.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
+  it("reports a rejected modeling handoff to the next poll and respects explicit retry", async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "radius-handoff-http-"));
+    let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+    const rejection = createDeferred<void>();
+    const handoff = vi.fn(() => rejection.promise);
+    setAppBicepHandoff(handoff);
+    try {
+      execFileSync("git", ["init", "--initial-branch", "main", workspace], {
+        stdio: "pipe"
+      });
+      writeFileSync(path.join(workspace, "Dockerfile"), "FROM scratch");
+      h = await concurrentGraphRuntime(workspace);
+      expect(await (await h.load()).json()).toMatchObject({
+        needsAppBicep: true
+      });
+      expect(await (await h.load()).json()).toMatchObject({
+        needsAppBicep: true
+      });
+      rejection.reject(new Error("Application model origin is unreadable."));
+      const { entry, load } = h;
+      await vi.waitFor(() =>
+        expect(
+          entry.state.graphProgressRecords?.graph?.graphProgressHandoffFailure
+        ).toBe("Application model origin is unreadable.")
+      );
+      const dispatched = handoff.mock.calls.length;
+      const terminal = await (await load()).json();
+      expect(terminal).toMatchObject({
+        error: "Application model origin is unreadable."
+      });
+      expect(terminal.needsAppBicep).toBeUndefined();
+      expect(handoff).toHaveBeenCalledTimes(dispatched);
+      expect(
+        await (await fetch(`${entry.baseUrl}/api/progress?view=graph`)).json()
+      ).toMatchObject({ active: false });
+      setAppBicepHandoff(async () => {});
+      expect(await (await load({ retryModeling: true })).json()).toMatchObject({
+        needsAppBicep: true
+      });
+    } finally {
+      setAppBicepHandoff(null);
+      await h?.close();
+      rmSync(workspace, { force: true, recursive: true });
+    }
+  });
+
+  it("keeps the newer same-selection stream when the older compiler finishes last", async () => {
+    const h = await concurrentGraphRuntime();
+    try {
+      const older = await h.stream();
+      await vi.waitFor(() => expect(h.builds).toHaveLength(1));
+      const newer = await h.stream();
+      await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+      h.builds[1].resolve();
+      expect(await newer.text()).toContain('"reload":true');
+      h.builds[0].resolve();
+      const stale = await older.text();
+      expect(stale).toContain('"stale":true');
+      expect(stale.match(/event: done/g)).toHaveLength(1);
+      expect(h.entry.state.graphResources?.map(({ id }) => id)).toEqual([
+        "build-1"
+      ]);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it.each([false, true])(
+    "settles cancelled JSON progress without ending a replacement owner (%s)",
+    async (replaceOwner) => {
+      const h = await concurrentGraphRuntime();
+      try {
+        const older = h.load();
+        await vi.waitFor(() => expect(h.builds).toHaveLength(1));
+        if (replaceOwner) {
+          const replacement = h.load();
+          await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+          h.builds[0].resolve();
+          expect((await older).status).toBe(409);
+          const progress = await fetch(
+            `${h.entry.baseUrl}/api/progress?view=graph`
+          );
+          expect(await progress.json()).toMatchObject({ active: true });
+          h.builds[1].resolve();
+          expect((await replacement).status).toBe(200);
+        } else {
+          const stream = await h.stream("other");
+          await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+          h.builds[1].resolve();
+          await stream.text();
+          h.builds[0].resolve();
+          const stale = await older;
+          expect(stale.status).toBe(409);
+          expect(await stale.json()).toEqual({ stale: true });
+          const progress = await fetch(
+            `${h.entry.baseUrl}/api/progress?view=graph`
+          );
+          expect(await progress.json()).toMatchObject({ active: false });
+        }
+      } finally {
+        await h.close();
+      }
+    }
+  );
+});
 
 let container: CanvasServerContainer | undefined;
 

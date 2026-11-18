@@ -1,12 +1,20 @@
 import {
+  createGraphOrchestrator,
+  enrichPlannedGraph,
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
+import {
+  graphArtifactHandle,
+  graphSourceForSelection,
+  GraphRequestSuperseded
+} from "./graph-pipeline.js";
 import {
   expireGraphProgressWait,
   recordGraphBuildEvent
 } from "../../shared.js";
 import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
+import { stageWorkspaceGraphOutput } from "./workspace-graph-output.js";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -25,7 +33,11 @@ import type {
   GraphView,
   SourceRefContext
 } from "../../shared.js";
-import type { GraphInstanceEntry, GraphPipeline } from "./graph-pipeline.js";
+import type {
+  GraphInstanceEntry,
+  GraphPipeline,
+  StagedRadArtifacts
+} from "./graph-pipeline.js";
 import type {
   ResolvedWorkspaceBranch,
   WorkspaceBranchResolution
@@ -131,7 +143,8 @@ export interface GraphWorkflowDependencies<
     // It follows the selection, not the request, so the page's own automatic
     // polls for the same repo and branches do not end the handoff.
     isCurrent?: () => boolean,
-    environmentKey?: string
+    environmentKey?: string,
+    onFailure?: (message: string) => void
   ): void;
   triggerGraphRepairHandoff(
     entry: TEntry,
@@ -245,6 +258,7 @@ const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
 
 interface GraphProgressHandle {
   view: GraphProgressView;
+  key: string;
   generation: number;
   owner: number;
   record: GraphProgressRecord;
@@ -263,7 +277,8 @@ function beginGraphProgress(
   key: string,
   target: { repo: string; branches: string[] },
   nowMs: number,
-  restartExpired: boolean
+  restartExpired: boolean,
+  retryModeling: boolean
 ): GraphProgressHandle {
   const existing = graphProgressRecord(state, view);
   // A build that is already in flight for this view is continued rather than
@@ -272,15 +287,20 @@ function beginGraphProgress(
   // stages already reported — exactly the reset a user sees when they leave the
   // page and come back.
   const sameKey = existing?.graphProgressKey === key;
+  const handoffFailed =
+    typeof existing?.graphProgressHandoffFailure === "string";
   const continuing =
     sameKey &&
+    !retryModeling &&
+    !(handoffFailed && restartExpired) &&
     !(
       restartExpired &&
       typeof existing.graphProgressWaitExpiredMessage === "string"
     ) &&
     ((existing.graphProgressActive === true &&
       existing.graphProgressAwaitingModel === true) ||
-      typeof existing.graphProgressWaitExpiredMessage === "string");
+      typeof existing.graphProgressWaitExpiredMessage === "string" ||
+      handoffFailed);
   const record: GraphProgressRecord =
     continuing && existing ? existing : (
       {
@@ -297,7 +317,6 @@ function beginGraphProgress(
       }
     );
   record.graphProgressActive = true;
-  record.graphProgressAwaitingModel = false;
   record.graphProgressRepo = target.repo;
   record.graphProgressBranches = target.branches;
   record.graphProgressOwner += 1;
@@ -305,6 +324,7 @@ function beginGraphProgress(
   state.graphProgressRecords[view] = record;
   return {
     view,
+    key,
     generation: record.graphProgressGeneration,
     owner: record.graphProgressOwner,
     record
@@ -322,17 +342,18 @@ function isCurrentGraphProgress(
   );
 }
 
+function ownsGraphSelection(state: CanvasState, handle: GraphProgressHandle) {
+  const record = graphProgressRecord(state, handle.view);
+  return (
+    record === handle.record &&
+    record.graphProgressKey === handle.key &&
+    record.graphProgressGeneration === handle.generation
+  );
+}
+
 // True while the view still shows the selection a request started for. Unlike
 // `isCurrentGraphProgress`, a newer automatic request for the same selection
 // (the `needsAppBicep` poll) does not end it; only a selection change does.
-function isCurrentGraphSelection(
-  state: CanvasState,
-  view: GraphProgressView,
-  key: string
-): boolean {
-  return graphProgressRecord(state, view)?.graphProgressKey === key;
-}
-
 // Close the record so nothing still claims to be in flight. The stages stay
 // readable: a page that returns after the build finished sees what happened
 // rather than an empty panel.
@@ -349,6 +370,7 @@ function endGraphProgress(
   delete record.graphProgressWaitStartedAtMs;
   delete record.graphProgressLastActivityAtMs;
   delete record.graphProgressWaitExpiredMessage;
+  delete record.graphProgressHandoffFailure;
 }
 
 // Close the record for every outcome except the app.bicep handoff. That build
@@ -370,7 +392,27 @@ function settleGraphProgress(
   if (!handle || !isCurrentGraphProgress(state, handle)) return outcome;
   const record = graphProgressRecord(state, handle.view);
   if (!record) return outcome;
+  if (
+    outcome.payload.needsAppBicep === true &&
+    record.graphProgressHandoffFailure
+  ) {
+    record.graphProgressActive = false;
+    record.graphProgressAwaitingModel = false;
+    const payload = {
+      ...outcome.payload,
+      error: record.graphProgressHandoffFailure
+    };
+    Reflect.deleteProperty(payload, "needsAppBicep");
+    return { ...outcome, payload };
+  }
   if (outcome.payload.needsAppBicep !== true) {
+    if (
+      outcome.payload.error === record.graphProgressHandoffFailure &&
+      record.graphProgressHandoffFailure
+    ) {
+      record.graphProgressActive = false;
+      return outcome;
+    }
     endGraphProgress(state, handle);
     return outcome;
   }
@@ -460,6 +502,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   async function settleWorkflow(
     run: () => Promise<GraphWorkflowOutcome>,
     hooks: {
+      stagedArtifacts: StagedRadArtifacts[];
       state: () => CanvasState | undefined;
       progressHandle: () => GraphProgressHandle | undefined;
       onError: (error: string) => void;
@@ -476,21 +519,40 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     try {
       outcome = await run();
     } catch (e) {
-      const error = dependencies.errorMessage(e);
-      hooks.onError(error);
-      const repair = hooks.repair();
-      if (e instanceof GraphModelingFailure && repair && hooks.shouldRepair()) {
-        const attempt = dependencies.triggerGraphRepairHandoff(repair.entry, {
-          ...repair.request,
-          diagnostic: e.diagnostic
-        });
-        outcome = json(400, {
-          error,
-          modelingFailed: true,
-          ...attempt
-        });
+      if (e instanceof GraphRequestSuperseded) {
+        outcome = json(409, STALE_PAYLOAD);
       } else {
-        outcome = json(400, { error });
+        const error = dependencies.errorMessage(e);
+        hooks.onError(error);
+        const repair = hooks.repair();
+        if (
+          e instanceof GraphModelingFailure &&
+          repair &&
+          hooks.shouldRepair()
+        ) {
+          const attempt = dependencies.triggerGraphRepairHandoff(repair.entry, {
+            ...repair.request,
+            diagnostic: e.diagnostic
+          });
+          outcome = json(400, {
+            error,
+            modelingFailed: true,
+            ...attempt
+          });
+        } else {
+          outcome = json(400, { error });
+        }
+      }
+    } finally {
+      for (const staged of hooks.stagedArtifacts) {
+        if (!staged.remote || !staged.dir) continue;
+        try {
+          await pipeline.discardStagedArtifacts(staged);
+        } catch (error) {
+          dependencies.logError(
+            `[radius graph] could not remove staged artifacts: ${dependencies.errorMessage(error)}`
+          );
+        }
       }
     }
 
@@ -500,7 +562,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     // probe, so the ordinary success and failure paths pay nothing for it.
     const target = hooks.modelingTarget();
     const modelingActivityAtMs =
-      outcome.payload.needsAppBicep === true ?
+      (
+        outcome.payload.needsAppBicep === true &&
+        !hooks.progressHandle()?.record.graphProgressHandoffFailure
+      ) ?
         await dependencies.observeModelingRun(
           state,
           target.repo,
@@ -566,6 +631,27 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     return headReason;
   }
 
+  function recordHandoffFailure(
+    handle: GraphProgressHandle,
+    isCurrent: () => boolean
+  ) {
+    return (message: string): void => {
+      const record = handle.record;
+      if (
+        !isCurrent() ||
+        !record.graphProgressActive ||
+        !modelCreationIsRunning(record)
+      )
+        return;
+      record.graphProgressHandoffFailure = message;
+      record.graphProgressActive = false;
+      record.graphProgressAwaitingModel = false;
+      delete record.graphProgressWaitStartedAtMs;
+      delete record.graphProgressLastActivityAtMs;
+      appendGraphEvent(record, "creating_model", "failed", message);
+    };
+  }
+
   async function appBicepHandoffOutcome(
     entry: TEntry,
     repo: string,
@@ -576,9 +662,16 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     // Forwarded to the handoff, which probes and waits long after this request
     // is replaced by the page's next automatic poll for the same selection.
     selectionIsCurrent: () => boolean,
-    retry: { userRequested?: boolean; environmentKey?: string }
+    retry: { userRequested?: boolean; environmentKey?: string },
+    handle: GraphProgressHandle
   ): Promise<GraphWorkflowOutcome> {
     if (!isCurrent()) return json(409, STALE_PAYLOAD);
+    if (handle.record.graphProgressHandoffFailure)
+      return json(200, {
+        error: handle.record.graphProgressHandoffFailure,
+        repo,
+        branch
+      });
     const sourceCheck = await reconcileAppModelAuthoringFailure(
       entry.state,
       repo,
@@ -609,6 +702,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     }
     const refusal = await branchRefusalReason(entry, repo, branch);
     if (!isCurrent()) return json(409, STALE_PAYLOAD);
+    if (handle.record.graphProgressHandoffFailure)
+      return json(200, {
+        error: handle.record.graphProgressHandoffFailure,
+        repo,
+        branch
+      });
     if (refusal) {
       reportRefusal(refusal);
       return json(200, {
@@ -629,7 +728,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       "graph",
       progressView,
       selectionIsCurrent,
-      retry.environmentKey
+      retry.environmentKey,
+      recordHandoffFailure(handle, selectionIsCurrent)
     );
     return json(200, {
       error: GENERATING_APP_BICEP_MESSAGE,
@@ -647,12 +747,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     instanceId,
     body
   }: GraphWorkflowRequest): Promise<GraphWorkflowOutcome> {
+    const stagedArtifacts: StagedRadArtifacts[] = [];
     let activeState: CanvasState | undefined;
     let activeRepair:
       { entry: TEntry; repo: string; branch: string } | undefined;
     let activeGeneration: number | undefined;
     let activeProgressHandle: GraphProgressHandle | undefined;
     let activeSourceToken: string | undefined;
+    let output: ReturnType<typeof stageWorkspaceGraphOutput>;
     const run = async (): Promise<GraphWorkflowOutcome> => {
       const data = dependencies.record(JSON.parse(body));
       const repo = dependencies.optionalString(data.repo);
@@ -705,7 +807,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         progressKey,
         { repo, branches: [branch] },
         dependencies.now(),
-        data.restartWait === true
+        data.restartWait === true,
+        data.retryModeling === true
       );
       activeProgressHandle = progressHandle;
       const isCurrentSourceRef = (): boolean =>
@@ -714,6 +817,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "graph",
           sourceRefContext.token
         );
+      const isCurrentSelection = (): boolean =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        ownsGraphSelection(state, progressHandle) &&
+        isCurrentSourceRef();
 
       // Every event is gated on the generation, so a superseded request stops
       // writing to the event stream the page is polling.
@@ -739,8 +846,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         `Checking ${repo} for .radius/app.bicep.`
       );
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
+      if (
+        state.graphBuildGeneration !== requestGeneration ||
+        !isCurrentSourceRef()
+      ) {
+        return json(409, STALE_PAYLOAD);
+      }
       const content = selection.content;
       if (content) {
+        delete progressHandle.record.graphProgressHandoffFailure;
         clearAppModelAuthoringFailure(state, repo, branch);
         if (modelCreationIsRunning(progressHandle.record)) {
           addEvent(
@@ -758,7 +872,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           repo,
           branch,
           "graph",
-          "graph"
+          "graph",
+          isCurrentSelection
         );
       } else {
         addEvent(
@@ -781,15 +896,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             state.graphBuildGeneration === requestGeneration &&
             isCurrentGraphProgress(state, progressHandle) &&
             isCurrentSourceRef(),
-          () =>
-            isCurrentGraphSelection(state, "graph", progressKey) &&
-            isCurrentSourceRef(),
-          { userRequested: data.retryModeling === true }
+          isCurrentSelection,
+          { userRequested: data.retryModeling === true },
+          progressHandle
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
 
       const graphJsonPath = pipeline.graphJsonPathFor(entry, selection);
+      const workspacePath = state.workspacePath;
+      const isCurrentOutput = () =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        state.graphBuildGeneration === requestGeneration &&
+        isCurrentSourceRef() &&
+        state.workspacePath === workspacePath;
       const staged = await pipeline.stageArtifacts({
         entry,
         selection,
@@ -797,25 +917,19 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         branch,
         log: addBuildDetail
       });
+      stagedArtifacts.push(staged);
       const definitionHash = pipeline.definitionHashFor(selection, staged);
       const modelRevision = pipeline.modelRevisionFor(selection);
-      if (state.graphBuildGeneration !== requestGeneration) {
-        // Best-effort: a superseded request must still answer 409 even if the
-        // temp directory cannot be removed.
-        try {
-          pipeline.discardStagedArtifacts(staged);
-        } catch {
-          /* best-effort */
-        }
+      if (
+        state.graphBuildGeneration !== requestGeneration ||
+        !isCurrentSourceRef()
+      ) {
         return bare(409, STALE_PAYLOAD);
       }
       if (
         data.refresh &&
         dependencies.canReuseModeledGraph(state, repo, branch, definitionHash)
       ) {
-        // Deliberately *not* best-effort, unlike the stale exit above: a failure
-        // here falls into the catch and answers 400. Preserved as-is.
-        pipeline.discardStagedArtifacts(staged);
         // Keep persisted provenance in step with what this response reports, so
         // a later page render cannot disagree with the page it just answered.
         state.graphFollowsWorkspaceBranch =
@@ -838,15 +952,24 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         "Compiling the application model and building the resource graph."
       );
-      const resources = await compileResources(
-        {
-          selection,
-          staged,
-          log: addBuildDetail,
-          saveGraphJsonTo: graphJsonPath
-        },
-        { repo, branch }
-      );
+      if (!isCurrentOutput()) return json(409, STALE_PAYLOAD);
+      output = stageWorkspaceGraphOutput(graphJsonPath, dependencies.logError);
+      let resources: CanvasGraphResource[];
+      try {
+        resources = await compileResources(
+          {
+            selection,
+            staged,
+            log: addBuildDetail,
+            saveGraphJsonTo: output?.compilerPath
+          },
+          { repo, branch }
+        );
+      } catch (error) {
+        if (!isCurrentOutput()) throw new GraphRequestSuperseded();
+        output?.invalidate();
+        throw error;
+      }
       addEvent(
         "building_graph",
         "succeeded",
@@ -864,7 +987,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // mutant, so this branch is structurally unreachable in coverage.
         // Re-checked after the compile, which is the slow stage: the generation
         // can have moved on while `rad` was running.
-        if (state.graphBuildGeneration !== requestGeneration) {
+        if (!isCurrentOutput()) {
           return json(409, STALE_PAYLOAD);
         }
         if (
@@ -878,6 +1001,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         ) {
           return json(409, STALE_PAYLOAD);
         }
+        output?.publish();
         state.graphTargetRepo = repo;
         state.graphBranch = branch;
         state.graphFollowsWorkspaceBranch =
@@ -905,39 +1029,44 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         resolvedBranch
       );
     };
-    return await settleWorkflow(run, {
-      state: () => activeState,
-      progressHandle: () => activeProgressHandle,
-      onError: (error) => {
-        if (activeState?.graphBuildGeneration === activeGeneration) {
-          failRunningGraphEvent(activeState, activeProgressHandle, error);
-        }
-      },
-      repair: () =>
-        activeRepair ?
-          {
-            entry: activeRepair.entry,
-            request: {
-              view: "graph",
-              repo: activeRepair.repo,
-              branches: [activeRepair.branch]
-            }
+    try {
+      return await settleWorkflow(run, {
+        stagedArtifacts,
+        state: () => activeState,
+        progressHandle: () => activeProgressHandle,
+        onError: (error) => {
+          if (activeState?.graphBuildGeneration === activeGeneration) {
+            failRunningGraphEvent(activeState, activeProgressHandle, error);
           }
-        : undefined,
-      shouldRepair: () =>
-        activeState !== undefined &&
-        activeState.graphBuildGeneration === activeGeneration &&
-        activeSourceToken !== undefined &&
-        dependencies.isCurrentSourceRefToken(
-          activeState,
-          "graph",
-          activeSourceToken
-        ),
-      modelingTarget: () => ({
-        repo: activeRepair?.repo || "",
-        branches: activeRepair ? [activeRepair.branch] : []
-      })
-    });
+        },
+        repair: () =>
+          activeRepair ?
+            {
+              entry: activeRepair.entry,
+              request: {
+                view: "graph",
+                repo: activeRepair.repo,
+                branches: [activeRepair.branch]
+              }
+            }
+          : undefined,
+        shouldRepair: () =>
+          activeState !== undefined &&
+          activeState.graphBuildGeneration === activeGeneration &&
+          activeSourceToken !== undefined &&
+          dependencies.isCurrentSourceRefToken(
+            activeState,
+            "graph",
+            activeSourceToken
+          ),
+        modelingTarget: () => ({
+          repo: activeRepair?.repo || "",
+          branches: activeRepair ? [activeRepair.branch] : []
+        })
+      });
+    } finally {
+      output?.dispose();
+    }
   }
 
   // The planned graph: the modeled application projected through a provider's
@@ -947,6 +1076,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     instanceId,
     body
   }: GraphWorkflowRequest): Promise<GraphWorkflowOutcome> {
+    const stagedArtifacts: StagedRadArtifacts[] = [];
     let activeState: CanvasState | undefined;
     let activeRepair:
       { entry: TEntry; repo: string; branch: string } | undefined;
@@ -1025,7 +1155,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         progressKey,
         { repo, branches: [branch] },
         dependencies.now(),
-        data.restartWait === true
+        data.restartWait === true,
+        data.retryModeling === true
       );
       activeProgressHandle = progressHandle;
       const isCurrentPlan = (): boolean =>
@@ -1036,6 +1167,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "planned",
           sourceRefContext.token
         );
+      const isCurrentSelection = (): boolean =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        ownsGraphSelection(state, progressHandle) &&
+        isCurrentSourceRef();
 
       const addEvent = (
         stage: GraphBuildStage,
@@ -1060,7 +1195,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         `Checking ${repo} for .radius/app.bicep.`
       );
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
-      if (!isCurrentPlan()) return json(409, STALE_PAYLOAD);
+      if (!isCurrentPlan() || !isCurrentSourceRef())
+        return json(409, STALE_PAYLOAD);
       const content = selection.content;
       if (!content) {
         addEvent(
@@ -1083,16 +1219,16 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             isCurrentPlan() &&
             isCurrentGraphProgress(state, progressHandle) &&
             isCurrentSourceRef(),
-          () =>
-            isCurrentGraphSelection(state, "planned", progressKey) &&
-            isCurrentSourceRef(),
+          isCurrentSelection,
           {
             userRequested: data.retryModeling === true,
             environmentKey
-          }
+          },
+          progressHandle
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
+      delete progressHandle.record.graphProgressHandoffFailure;
       clearAppModelAuthoringFailure(state, repo, branch);
       if (modelCreationIsRunning(progressHandle.record)) {
         addEvent(
@@ -1110,7 +1246,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         repo,
         branch,
         "graph",
-        "planned"
+        "planned",
+        isCurrentSelection,
+        environmentKey
       );
 
       const staged = await pipeline.stageArtifacts({
@@ -1120,13 +1258,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         branch,
         log: addBuildDetail
       });
+      stagedArtifacts.push(staged);
       const definitionHash = pipeline.definitionHashFor(selection, staged);
-      if (!isCurrentPlan()) {
-        try {
-          pipeline.discardStagedArtifacts(staged);
-        } catch {
-          /* best-effort */
-        }
+      if (!isCurrentPlan() || !isCurrentSourceRef()) {
         return json(409, STALE_PAYLOAD);
       }
       const canReusePlannedGraph =
@@ -1138,7 +1272,6 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         previousPlanSelection.environment === state.plannedEnvironment &&
         state.plannedDefinitionHash === definitionHash;
       if (canReusePlannedGraph) {
-        pipeline.discardStagedArtifacts(staged);
         state.plannedResources = previousPlannedResources;
         state.plannedFollowsWorkspaceBranch =
           branchResolution.followsWorkspaceBranch;
@@ -1176,36 +1309,59 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         `Resolving ${provider} recipes for the planned resources.`
       );
-      const recipes: unknown[] = await dependencies.fetchRecipePack(provider);
-
-      // Surface pack recipes we couldn't map to a concrete resource so the gap
-      // is visible (rather than silently rendering the abstract type). Empty
-      // today for the Azure pack; fires if the pack adds a recipe source the
-      // curated map doesn't yet cover.
-      const unmappedRecipes = recipes.filter((recipe) => {
-        const concrete = dependencies.record(recipe).concreteResources;
-        return !Array.isArray(concrete) || concrete.length === 0;
-      });
-      if (unmappedRecipes.length) {
-        addEvent(
-          "resolving_recipes",
-          "running",
-          `Note: ${
-            unmappedRecipes.length
-          } pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes
-            .map((recipe) =>
-              dependencies.optionalString(
-                dependencies.record(recipe).resourceType
+      const enriched = await enrichPlannedGraph(
+        resources,
+        provider,
+        {
+          fetchRecipePack: async (selectedProvider) => {
+            const recipes =
+              await dependencies.fetchRecipePack(selectedProvider);
+            // Surface pack recipes we couldn't map to a concrete resource so the gap
+            // is visible (rather than silently rendering the abstract type). Empty
+            // today for the Azure pack; fires if the pack adds a recipe source the
+            // curated map doesn't yet cover.
+            const unmappedRecipes = recipes.filter((recipe) => {
+              const concrete = dependencies.record(recipe).concreteResources;
+              return !Array.isArray(concrete) || concrete.length === 0;
+            });
+            if (unmappedRecipes.length) {
+              addEvent(
+                "resolving_recipes",
+                "running",
+                `Note: ${
+                  unmappedRecipes.length
+                } pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes
+                  .map((recipe) =>
+                    dependencies.optionalString(
+                      dependencies.record(recipe).resourceType
+                    )
+                  )
+                  .join(", ")}); those nodes show their abstract Radius type.`
+              );
+            }
+            return recipes;
+          },
+          resolveRecipeOutputs: async (
+            authoredResources,
+            recipes,
+            selectedProvider
+          ) =>
+            pipeline.toCanvasResources(
+              await dependencies.resolveRecipeOutputs(
+                authoredResources,
+                recipes,
+                selectedProvider
               )
             )
-            .join(", ")}); those nodes show their abstract Radius type.`
-        );
-      }
-
-      // For each abstract resource, resolve its recipe and concrete outputs.
-      const plannedResources = pipeline.toCanvasResources(
-        await dependencies.resolveRecipeOutputs(resources, recipes, provider)
+        },
+        {
+          checkCancelled: () => {
+            if (!isCurrentPlan() || !isCurrentSourceRef())
+              throw new GraphRequestSuperseded();
+          }
+        }
       );
+      const { recipes, resources: plannedResources } = enriched;
       addEvent(
         "resolving_recipes",
         "succeeded",
@@ -1266,6 +1422,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       );
     };
     return await settleWorkflow(run, {
+      stagedArtifacts,
       state: () => activeState,
       progressHandle: () => activeProgressHandle,
       onError: (error) => {
@@ -1319,6 +1476,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     instanceId,
     body
   }: GraphWorkflowRequest): Promise<GraphWorkflowOutcome> {
+    const stagedArtifacts: StagedRadArtifacts[] = [];
     // Declared outside the `try` so the catch can tell whether the failure
     // belongs to the selection still on screen before it writes `diffError`.
     let sourceRefContext: SourceRefContext | null = null;
@@ -1356,7 +1514,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         progressKey,
         { repo, branches: [data.base, data.head] },
         dependencies.now(),
-        data.restartWait === true
+        data.restartWait === true,
+        data.retryModeling === true
       );
       activeProgressHandle = progressHandle;
       // True while this request is still the comparison on screen. A selector
@@ -1384,6 +1543,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         baseBranch: data.base,
         headBranch: data.head
       });
+      const { token: handoffSourceToken } = sourceRefContext;
+      const isCurrentSelection = (): boolean =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        ownsGraphSelection(state, progressHandle) &&
+        dependencies.isCurrentSourceRefToken(state, "diff", handoffSourceToken);
       state.diffBase = data.base;
       state.diffHead = data.head;
       state.diffTargetRepo = repo;
@@ -1433,6 +1597,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
 
       if (!baseSelection.content && !headSelection.content) {
+        if (progressHandle.record.graphProgressHandoffFailure)
+          return json(200, {
+            error: progressHandle.record.graphProgressHandoffFailure,
+            repo
+          });
         addEvent(
           "checking_model",
           "succeeded",
@@ -1486,20 +1655,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // keeps probing and waiting after this response is written, through the
         // page's next automatic polls, so it ends only on a selection change.
         if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
-        const handoffSourceToken = sourceRefContext.token;
+        if (progressHandle.record.graphProgressHandoffFailure)
+          return json(200, {
+            error: progressHandle.record.graphProgressHandoffFailure,
+            repo
+          });
         dependencies.triggerAppBicepHandoff(
           entry,
           repo,
           [data.base, data.head],
           "graph-diff",
           "diff",
-          () =>
-            isCurrentGraphSelection(state, "diff", progressKey) &&
-            dependencies.isCurrentSourceRefToken(
-              state,
-              "diff",
-              handoffSourceToken
-            )
+          isCurrentSelection,
+          undefined,
+          recordHandoffFailure(progressHandle, isCurrentSelection)
         );
         // No `branch` key here, unlike the other two routes: the diff spans two.
         return json(200, {
@@ -1510,6 +1679,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       }
       // A model that arrived retires the failure recorded for its own branch,
       // exactly as the single-branch routes do for theirs.
+      delete progressHandle.record.graphProgressHandoffFailure;
       if (baseSelection.content) {
         clearAppModelAuthoringFailure(state, repo, data.base);
       }
@@ -1536,75 +1706,98 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         repo,
         [data.base, data.head],
         "graph-diff",
-        "diff"
+        "diff",
+        isCurrentSelection
       );
 
-      // Ordering is load-bearing and matches legacy exactly: BOTH sides are
-      // staged before EITHER is compiled. Interleaving stage/compile per side
-      // would let the base side's staged temp directory be cleaned up before the
-      // head side is staged, which is observable in the artifacts on disk.
-      const baseStaged = await pipeline.stageArtifacts({
-        entry,
-        selection: baseSelection,
+      const baseSource = graphSourceForSelection(
+        baseSelection,
         repo,
-        branch: data.base
-      });
-      const headStaged = await pipeline.stageArtifacts({
-        entry,
-        selection: headSelection,
+        data.base
+      );
+      const headSource = graphSourceForSelection(
+        headSelection,
         repo,
-        branch: data.head
+        data.head
+      );
+      let compilingSide: "base" | "head" = "base";
+      const graph = createGraphOrchestrator<
+        CanvasGraphResource,
+        CanvasGraphResource[]
+      >({
+        stage: async (selected) => {
+          const side = selected.source === baseSource.source ? "base" : "head";
+          const selection = side === "base" ? baseSelection : headSelection;
+          const staged = await pipeline.stageArtifacts({
+            entry,
+            selection,
+            repo,
+            branch: side === "base" ? data.base : data.head
+          });
+          return graphArtifactHandle(staged, () =>
+            pipeline.discardStagedArtifacts(staged)
+          );
+        },
+        compile: async (_content, _definitionPath, options) => {
+          const branch = compilingSide === "base" ? data.base : data.head;
+          const resources = await compileResources(
+            {
+              selection:
+                compilingSide === "base" ? baseSelection : headSelection,
+              staged: { dir: options.radArtifactsDir, remote: false }
+            },
+            { repo, branch }
+          );
+          addEvent(
+            compilingSide === "base" ?
+              "building_base_graph"
+            : "building_head_graph",
+            "succeeded",
+            `Built ${resources.length} resource(s) from ${branch}.`
+          );
+          return resources;
+        },
+        diff: (base, head) => {
+          const resources = dependencies.computeGraphDiff(base, head);
+          addEvent(
+            "comparing_graphs",
+            "succeeded",
+            `Compared ${resources.length} resource(s).`
+          );
+          return resources;
+        },
+        diagnostic: (message) =>
+          dependencies.logError(`[radius graph] ${message}`)
       });
-      addEvent(
-        "building_base_graph",
-        "running",
-        `Building the graph for ${data.base}.`
-      );
-      const baseResources = await compileResources(
-        {
-          selection: baseSelection,
-          staged: baseStaged
+      const compared = await graph.compare(baseSource, headSource, {
+        checkCancelled: () => {
+          if (!isCurrentRequest()) throw new GraphRequestSuperseded();
         },
-        { repo, branch: data.base }
-      );
-      addEvent(
-        "building_base_graph",
-        "succeeded",
-        `Built ${baseResources.length} resource(s) from ${data.base}.`
-      );
-      addEvent(
-        "building_head_graph",
-        "running",
-        `Building the graph for ${data.head}.`
-      );
-      const headResources = await compileResources(
-        {
-          selection: headSelection,
-          staged: headStaged
-        },
-        { repo, branch: data.head }
-      );
-      addEvent(
-        "building_head_graph",
-        "succeeded",
-        `Built ${headResources.length} resource(s) from ${data.head}.`
-      );
-
-      // Compute diff using the shared algorithm (see computeGraphDiff).
-      addEvent(
-        "comparing_graphs",
-        "running",
-        `Comparing ${data.base} with ${data.head}.`
-      );
-      const diffResources = dependencies.computeGraphDiff(
-        baseResources,
-        headResources
-      );
-      addEvent(
-        "comparing_graphs",
-        "succeeded",
-        `Compared ${diffResources.length} resource(s).`
-      );
+        onPhase: (phase, side) => {
+          if (phase === "compiling" && side) {
+            compilingSide = side;
+            addEvent(
+              side === "base" ? "building_base_graph" : "building_head_graph",
+              "running",
+              `Building the graph for ${side === "base" ? data.base : data.head}.`
+            );
+          }
+          if (phase === "comparing")
+            addEvent(
+              "comparing_graphs",
+              "running",
+              `Comparing ${data.base} with ${data.head}.`
+            );
+        }
+      });
+      if (!isCurrentRequest()) throw new GraphRequestSuperseded();
+      if (compared.status === "definitions-absent")
+        return json(200, {
+          error: GENERATING_APP_BICEP_MESSAGE,
+          needsAppBicep: true,
+          repo
+        });
+      const diffResources = compared.diff;
       addEvent(
         "rendering_graph",
         "running",
@@ -1652,6 +1845,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       });
     };
     return await settleWorkflow(run, {
+      stagedArtifacts,
       state: () => activeState,
       progressHandle: () => activeProgressHandle,
       onError: (error) => {
