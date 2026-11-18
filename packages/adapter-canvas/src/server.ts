@@ -6038,8 +6038,18 @@ export function createProductionCanvasServerRuntime(
       environmentKey,
       onFailure,
       entry ?
-        (selectedRepo, branch) =>
-          fetchBicepSelection(entry, selectedRepo, branch)
+        async (selectedRepo, branch) => {
+          const selection = await fetchBicepSelection(
+            entry,
+            selectedRepo,
+            branch
+          );
+          if (selection.content !== null && !selection.content.trim())
+            throw new Error(
+              `${selectedRepo}@${branch}:${selection.bicepPath} is empty; the graph is unavailable.`
+            );
+          return selection;
+        }
       : undefined
     );
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({

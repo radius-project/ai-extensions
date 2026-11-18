@@ -256,32 +256,58 @@ describe("graph concurrency through production HTTP routes", () => {
     }
   );
 
-  it("requests authoring through the real runtime when only GitHub has a model", async () => {
-    const workspace = mkdtempSync(path.join(tmpdir(), "radius-handoff-http-"));
-    const sdk = await createRuntimeSdkHarness({
-      bicepByRepoBranch: { "remote:octo/app@main": "committed model" },
-      workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] }
-    });
-    let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
-    try {
-      initCommittedGraphWorkspace(workspace);
-      writeFileSync(path.join(workspace, "Dockerfile"), "FROM scratch");
-      const handoff = sdk.capturedHostCallbacks.appBicepHandoff;
-      if (!handoff) throw new Error("Runtime registered no authoring callback");
-      setAppBicepHandoff(handoff);
-      h = await concurrentGraphRuntime(workspace);
-      expect(await (await h.load()).json()).toMatchObject({
-        needsAppBicep: true
+  it.each([false, true])(
+    "uses strict workspace source reads in the runtime handoff (blank model appears: %s)",
+    async (blankAppears) => {
+      const workspace = mkdtempSync(
+        path.join(tmpdir(), "radius-handoff-http-")
+      );
+      const sdk = await createRuntimeSdkHarness({
+        bicepByRepoBranch: { "remote:octo/app@main": "committed model" },
+        workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] }
       });
-      await vi.waitFor(() => expect(sdk.session.send).toHaveBeenCalledOnce());
-      expect(sdk.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
-    } finally {
-      setAppBicepHandoff(null);
-      await h?.close();
-      await sdk.extension.shutdown("test");
-      rmSync(workspace, { force: true, recursive: true });
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      try {
+        initCommittedGraphWorkspace(workspace);
+        writeFileSync(path.join(workspace, "Dockerfile"), "FROM scratch");
+        const handoff = sdk.capturedHostCallbacks.appBicepHandoff;
+        if (!handoff)
+          throw new Error("Runtime registered no authoring callback");
+        if (blankAppears) {
+          sdk.deps.clock.wait = async () => {
+            writeFileSync(path.join(workspace, "app.bicep"), "  \n");
+          };
+        }
+        const completed = createDeferred<void>();
+        setAppBicepHandoff(async (input) => {
+          try {
+            await handoff(input);
+          } finally {
+            completed.resolve();
+          }
+        });
+        h = await concurrentGraphRuntime(workspace);
+        expect(await (await h.load()).json()).toMatchObject({
+          needsAppBicep: true
+        });
+        await completed.promise;
+        if (blankAppears) {
+          expect(sdk.session.send).not.toHaveBeenCalled();
+          expect(await (await h.load()).json()).toMatchObject({
+            error: expect.stringContaining("app.bicep is empty")
+          });
+        } else {
+          expect(sdk.session.send).toHaveBeenCalledOnce();
+        }
+        expect(sdk.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+      } finally {
+        setAppBicepHandoff(null);
+        await h?.close();
+        await sdk.extension.shutdown("test");
+        rmSync(workspace, { force: true, recursive: true });
+      }
     }
-  });
+  );
 
   it("reports a rejected modeling handoff to the next poll and respects explicit retry", async () => {
     const workspace = mkdtempSync(path.join(tmpdir(), "radius-handoff-http-"));

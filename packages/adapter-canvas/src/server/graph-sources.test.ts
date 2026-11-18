@@ -63,13 +63,16 @@ describe("Canvas graph source composition", () => {
       content: "model"
     };
     const { bindings, reads } = harness(selected);
-    expect(await bindings.select({ state }, "acme/app", "topic")).toEqual({
+    const selection = await bindings.select({ state }, "acme/app", "topic");
+    expect(selection).toEqual({
       content: "model",
       fromWorkspace: true,
       branch: "topic",
       bicepPath: "app.bicep",
-      sourceRead: selected
+      sourceRead: selected,
+      verifyWorkspaceBranch: expect.any(Function)
     });
+    await expect(selection.verifyWorkspaceBranch?.()).resolves.toBe(true);
     expect(reads[0]?.workspace).toEqual({
       repo: "acme/app",
       ref: "topic",
