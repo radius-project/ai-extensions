@@ -50,31 +50,75 @@ function cleanup(dir: string | null) {
   }
 }
 
-test("artifact fingerprint changes with config and local extension content", () => {
-  const dir = fs.mkdtempSync(path.join(process.cwd(), "rad-fingerprint-"));
-  try {
-    fs.writeFileSync(path.join(dir, "bicepconfig.json"), CONFIG);
-    fs.writeFileSync(path.join(dir, "custom-types.tgz"), "one");
-    const first = radArtifactsFingerprint(dir);
-    fs.writeFileSync(path.join(dir, "custom-types.tgz"), "two");
-    const second = radArtifactsFingerprint(dir);
-    assert.notEqual(first, second);
+test.each([
+  ["JSON", CONFIG],
+  [
+    "JSONC",
+    `{
+      // Use the workspace's custom types.
+      "extensions": { "customTypes": "./custom-types.tgz", },
+    }`
+  ],
+  [
+    "JSONC with a padded local Radius pin",
+    `{"extensions": {"radius": "  ./custom-types.tgz  ",},}`
+  ],
+  [
+    "JSONC with a backslash-prefixed local artifact",
+    JSON.stringify({ extensions: { customTypes: ".\\custom-types.tgz" } })
+  ]
+])(
+  "artifact fingerprint changes with %s config and local extension content",
+  (_format, config) => {
+    const dir = fs.mkdtempSync(path.join(process.cwd(), "rad-fingerprint-"));
+    try {
+      fs.writeFileSync(path.join(dir, "bicepconfig.json"), config);
+      fs.writeFileSync(path.join(dir, "custom-types.tgz"), "one");
+      const first = radArtifactsFingerprint(dir);
+      fs.writeFileSync(path.join(dir, "custom-types.tgz"), "two");
+      const second = radArtifactsFingerprint(dir);
+      assert.notEqual(first, second);
 
-    fs.writeFileSync(
-      path.join(dir, "bicepconfig.json"),
-      JSON.stringify({
-        experimentalFeaturesEnabled: { extensibility: true },
-        extensions: {
-          radius: "br:biceptypes.azurecr.io/radius:v2",
-          customTypes: "./custom-types.tgz"
-        }
-      })
-    );
-    assert.notEqual(second, radArtifactsFingerprint(dir));
-  } finally {
-    cleanup(dir);
+      fs.writeFileSync(
+        path.join(dir, "bicepconfig.json"),
+        JSON.stringify({
+          experimentalFeaturesEnabled: { extensibility: true },
+          extensions: {
+            radius: "br:biceptypes.azurecr.io/radius:v2",
+            customTypes: "./custom-types.tgz"
+          }
+        })
+      );
+      assert.notEqual(second, radArtifactsFingerprint(dir));
+    } finally {
+      cleanup(dir);
+    }
   }
+);
+
+test("legacy remote staging still requires strict JSON", async () => {
+  const gh = mockGithub({ [CONFIG_API]: `// config\n${CONFIG}` });
+  assert.equal(
+    await stageRemoteRadArtifacts(gh, "acme/app", "dev", ".radius/app.bicep"),
+    null
+  );
+  assert.deepEqual(gh.calls.getContentBytes, []);
 });
+
+test.each(["null", "{}", '{"extensions":null}', '{"extensions":[]}'])(
+  "ignores unrelated artifact edits for configuration %s",
+  (config) => {
+    const dir = fs.mkdtempSync(path.join(process.cwd(), "rad-fingerprint-"));
+    try {
+      fs.writeFileSync(path.join(dir, "bicepconfig.json"), config);
+      const before = radArtifactsFingerprint(dir);
+      fs.writeFileSync(path.join(dir, "custom-types.tgz"), "unreferenced");
+      assert.equal(radArtifactsFingerprint(dir), before);
+    } finally {
+      cleanup(dir);
+    }
+  }
+);
 
 test("artifact fingerprint is stable for absent, invalid, and incomplete artifacts", () => {
   const dir = fs.mkdtempSync(path.join(process.cwd(), "rad-fingerprint-"));
@@ -92,7 +136,9 @@ test("artifact fingerprint is stable for absent, invalid, and incomplete artifac
           missing: "./missing.tgz",
           invalid: "../outside.tgz",
           nonString: 42,
-          oci: "oci:ghcr.io/acme/extension:v1"
+          oci: "oci:ghcr.io/acme/extension:v1",
+          builtin: "builtin:sys",
+          blank: "   "
         }
       })
     );

@@ -9,6 +9,10 @@ import {
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import {
+  isNonFileExtensionReference,
+  readBicepConfigJsonc
+} from "@radius-project/adapter-shared";
 import { workspaceRadArtifactsDir } from "./workspace.js";
 import type { CanvasState } from "./shared.js";
 
@@ -87,21 +91,30 @@ export function radArtifactsFingerprint(dir?: string): string {
   }
   hash.update(configBytes);
 
-  let config;
+  let config: unknown;
   try {
-    config = JSON.parse(configBytes.toString("utf8"));
+    config = readBicepConfigJsonc(configBytes.toString("utf8"));
   } catch {
     return hash.digest("hex");
   }
-  const extensions =
-    config && typeof config.extensions === "object" ? config.extensions : {};
+  if (!config || typeof config !== "object" || !("extensions" in config))
+    return hash.digest("hex");
+  const { extensions } = config;
+  if (
+    !extensions ||
+    typeof extensions !== "object" ||
+    Array.isArray(extensions)
+  )
+    return hash.digest("hex");
   for (const [alias, ref] of Object.entries(extensions).sort(([a], [b]) =>
     a.localeCompare(b)
   )) {
     hash.update(alias);
     hash.update(String(ref));
-    if (typeof ref !== "string" || isOciExtensionRef(ref)) continue;
-    const rel = safeLocalRef(ref);
+    if (typeof ref !== "string" || !ref.trim()) continue;
+    const reference = alias === "radius" ? ref.trim() : ref;
+    if (isNonFileExtensionReference(reference)) continue;
+    const rel = safeLocalRef(reference.replace(/^\.\\/, ""));
     if (!rel) continue;
     const artifactPath = path.join(dir, rel);
     if (!existsSync(artifactPath)) {
