@@ -164,7 +164,7 @@ export async function runAwsCleanup(
     return 1;
   }
   await dependencies.summary(
-    "- Verified: no RDS resource, workload, namespace, node, lock, or deploy-role grant of the AWS stage remains\n"
+    "- Verified: no RDS resource, app boundary, workload, namespace, node, lock, or deploy-role grant of the AWS stage remains\n"
   );
   return 0;
 }

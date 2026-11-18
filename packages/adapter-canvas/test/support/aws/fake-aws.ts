@@ -7,6 +7,17 @@ import { FakeRds, RDS_WRITES } from "./fake-rds.js";
 // Unlike scripted answers, a write changes what later reads see, so a test can
 // stop a run anywhere and compare what AWS holds with what Radius saved.
 
+// Managed policies follow the IAM API reference:
+// - DeletePolicy refuses a policy that is attached to a role (DeleteConflict).
+//   It also refuses one a role uses as its permissions boundary: GetPolicy
+//   counts those uses in PermissionsBoundaryUsageCount, and the product's
+//   environment removal relies on the refusal to keep a boundary an app role
+//   still uses.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_DeletePolicy.html
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_Policy.html
+// - ListPolicies filters by scope and path prefix and leaves out Description
+//   and Tags.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_ListPolicies.html
 export interface FakeIamRole {
   RoleName: string;
   RoleId: string;
@@ -15,6 +26,8 @@ export interface FakeIamRole {
   Description: string;
   Tags: Array<{ Key: string; Value: string }>;
   AssumeRolePolicyDocument: unknown;
+  // The ARN of the role's permissions boundary, or "" for none.
+  boundary: string;
   inline: Map<string, unknown>;
   attached: string[];
 }
@@ -234,6 +247,7 @@ export class FakeAws {
     tags?: Array<{ Key: string; Value: string }>;
     inline?: Record<string, unknown>;
     attached?: string[];
+    boundary?: string;
   }): FakeIamRole {
     const role: FakeIamRole = {
       RoleName: input.name,
@@ -243,6 +257,7 @@ export class FakeAws {
       Description: "",
       Tags: [...(input.tags ?? [])],
       AssumeRolePolicyDocument: input.trust,
+      boundary: input.boundary ?? "",
       inline: new Map(Object.entries(input.inline ?? {})),
       attached: [...(input.attached ?? [])]
     };
@@ -394,6 +409,8 @@ export class FakeAws {
         );
       case "iam delete-policy":
         return this.deletePolicy(args);
+      case "iam list-policies":
+        return this.listPolicies(args);
       case "iam get-policy-version":
         return this.withPolicy(args, "GetPolicyVersion", (policy) => {
           if (flag(args, "--version-id") !== "v1") {
@@ -624,6 +641,19 @@ export class FakeAws {
     });
   }
 
+  // How many roles use the policy: attached, or as their boundary.
+  private policyUse(policy: FakeManagedPolicy) {
+    const roles = [...this.roles.values()];
+    return {
+      AttachmentCount: roles.filter((role) =>
+        role.attached.includes(policy.Arn)
+      ).length,
+      PermissionsBoundaryUsageCount: roles.filter(
+        (role) => role.boundary === policy.Arn
+      ).length
+    };
+  }
+
   private policyView(policy: FakeManagedPolicy) {
     return {
       PolicyName: policy.PolicyName,
@@ -631,6 +661,8 @@ export class FakeAws {
       Arn: policy.Arn,
       Path: policy.Path,
       DefaultVersionId: "v1",
+      ...this.policyUse(policy),
+      IsAttachable: true,
       CreateDate: policy.CreateDate,
       Description: policy.Description,
       Tags: policy.Tags.map((tag) => ({ ...tag }))
@@ -685,8 +717,39 @@ export class FakeAws {
 
   private deletePolicy(args: readonly string[]): AwsCommandResult {
     return this.withPolicy(args, "DeletePolicy", (policy) => {
+      const use = this.policyUse(policy);
+      if (use.AttachmentCount > 0 || use.PermissionsBoundaryUsageCount > 0) {
+        return serviceError(
+          "DeleteConflict",
+          "DeletePolicy",
+          "Cannot delete a policy attached to entities."
+        );
+      }
       this.policies.delete(policy.Arn);
       return ok();
+    });
+  }
+
+  // Customer managed policies under `--path-prefix`, without Description
+  // and Tags. Only `--scope Local` is modeled.
+  private listPolicies(args: readonly string[]): AwsCommandResult {
+    if (flag(args, "--scope") !== "Local")
+      throw new Error("fake aws: list-policies needs --scope Local");
+    const prefix = flag(args, "--path-prefix") || "/";
+    return ok({
+      Policies: [...this.policies.values()]
+        .filter((policy) => policy.Path.startsWith(prefix))
+        .map((policy) => ({
+          PolicyName: policy.PolicyName,
+          PolicyId: policy.PolicyId,
+          Arn: policy.Arn,
+          Path: policy.Path,
+          DefaultVersionId: "v1",
+          ...this.policyUse(policy),
+          IsAttachable: true,
+          CreateDate: policy.CreateDate
+        })),
+      IsTruncated: false
     });
   }
 
@@ -727,6 +790,7 @@ export class FakeAws {
       AssumeRolePolicyDocument: JSON.parse(
         flag(args, "--assume-role-policy-document")
       ),
+      boundary: "",
       inline: new Map(),
       attached: []
     };

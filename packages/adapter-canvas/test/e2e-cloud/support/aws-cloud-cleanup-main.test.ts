@@ -89,6 +89,8 @@ function cli(account = ACCOUNT) {
       });
     if (line.startsWith("aws iam list-role-policies"))
       return OK({ PolicyNames: [] });
+    if (line.startsWith("aws iam list-policies --scope Local"))
+      return OK({ Policies: [], IsTruncated: false });
     if (line.startsWith("aws eks describe-access-entry"))
       return NOT_FOUND("ResourceNotFoundException");
     if (line.startsWith("aws eks update-kubeconfig")) return OK({});
@@ -107,6 +109,7 @@ function cli(account = ACCOUNT) {
       )
     )
       return OK([[]]);
+    if (line.startsWith("gh api repos/octo/fixture -H")) return OK({ id: 42 });
     if (line.startsWith("gh api users/octo"))
       return OK({ type: "Organization" });
     if (line.startsWith("gh api --paginate --slurp orgs/octo/packages"))
@@ -178,6 +181,43 @@ describe("runAwsCleanup", () => {
     expect(verify.summaries.join("")).toContain(
       "### Leaked AWS state blocks the fixture reset"
     );
+  });
+
+  it("fails verification on an app boundary, reading the repository's ID with the App token", async () => {
+    const { run, calls } = cli();
+    const boundary = `arn:aws:iam::${ACCOUNT}:policy/radius/apps/42/radtest-aws-1/b-1`;
+    const withBoundary: AwsCleanupMainDependencies["run"] = async (
+      command,
+      args,
+      options
+    ) =>
+      args[1] === "list-policies" ?
+        OK({
+          Policies: [
+            {
+              PolicyName: "b-1",
+              Path: "/radius/apps/42/radtest-aws-1/",
+              Arn: boundary
+            }
+          ]
+        })
+      : run(command, args, options);
+    const { deps, log } = dependencies(ENV, withBoundary);
+    // The check reads again until its settle time is up.
+    let now = deps.now();
+    expect(
+      await runAwsCleanup("verify", {
+        ...deps,
+        now: () => now,
+        sleep: async (milliseconds) => {
+          now += milliseconds;
+        }
+      })
+    ).toBe(1);
+    expect(log.join("\n")).toContain(`permissions boundary ${boundary}`);
+    expect(
+      calls.find((call) => call.args.includes("repos/octo/fixture"))?.env
+    ).toEqual({ GH_TOKEN: "app-token" });
   });
 
   it("logs a warning in each mode", async () => {

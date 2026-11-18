@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addAwsEnvironment,
+  appBoundaryArn,
   appResources,
   createCleanupScenario,
   APPLICATION,
@@ -94,11 +95,39 @@ interface Point {
 
 const KINDS: readonly StopKind[] = ["fail", "crash-before", "crash-after"];
 
-async function discover(): Promise<Point[]> {
+// The same world, where an app role the app delete left still uses the
+// second environment's app boundary, so IAM refuses to delete it. Step 4
+// keeps it through both removal attempts, then deletes the environment.
+const KEPT_BOUNDARY = appBoundaryArn(SECOND_ENV);
+const KEPT_ROLE = `radius-app-web-${SECOND_ENV}`;
+
+async function keptBoundaryWorld(): Promise<CleanupScenario> {
   const s = await world();
+  s.aws.addRole({
+    name: KEPT_ROLE,
+    trust: { Version: "2012-10-17", Statement: [] },
+    boundary: KEPT_BOUNDARY
+  });
+  return s;
+}
+
+// The managed policies left under the fixture repository's app path.
+function appBoundaries(s: CleanupScenario): string[] {
+  return [...s.aws.policies.values()]
+    .filter((policy) => policy.Path.startsWith("/radius/apps/"))
+    .map((policy) => policy.Arn);
+}
+
+async function discover(
+  build: () => Promise<CleanupScenario> = world,
+  expectedFailures = 0
+): Promise<Point[]> {
+  const s = await build();
   const report = await runSweep(s);
-  if (report.failures.length > 0)
-    throw new Error(`The clean sweep failed: ${report.failures.join("; ")}`);
+  if (report.failures.length !== expectedFailures)
+    throw new Error(
+      `The first sweep had ${report.failures.length} failures, not ${expectedFailures}: ${report.failures.join("; ")}`
+    );
   return s.outside.calls.flatMap((call) =>
     KINDS.filter((kind) => kind !== "crash-after" || call.write).map(
       (kind) => ({ at: call.index, command: call.command, kind })
@@ -119,6 +148,7 @@ function accessPartlyRemoved(s: CleanupScenario, name: string): boolean {
 }
 
 const points = await discover();
+const keptBoundaryPoints = await discover(keptBoundaryWorld, 1);
 
 describe("AWS cleanup sweep, stopped at each outside call", () => {
   it("has a write of every kind the sweep makes", () => {
@@ -198,7 +228,44 @@ describe("AWS cleanup sweep, stopped at each outside call", () => {
     }
     expect(rerun.failures).toEqual([]);
     expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+    // A clean check means the outside world holds nothing of the suite.
     expect(s.deployments).toEqual([]);
     expect([...s.packages.keys()]).toEqual([]);
+    expect(appBoundaries(s)).toEqual([]);
+    for (const name of ENVIRONMENTS) {
+      expect(retryInputs(s, name)).toEqual([]);
+      expect(appResources(s, name)).toEqual([]);
+    }
+  });
+});
+
+describe("AWS cleanup sweep with an app boundary step 4 must keep, stopped at each outside call", () => {
+  it.each(keptBoundaryPoints)("$at $command ($kind)", async ({ at, kind }) => {
+    const s = await keptBoundaryWorld();
+    s.outside.arm(at, kind);
+    await s.outside.until(async () => {
+      await runSweep(s);
+    });
+    // Whatever the stop, the boundary stays while its app role uses it, and
+    // no later run's check passes until it is gone.
+    for (let day = 0; day < 2; day += 1) {
+      nextDay(s);
+      await runSweep(s);
+      expect(appBoundaries(s)).toContain(KEPT_BOUNDARY);
+      expect((await runVerify(s)).findings).toContain(
+        `permissions boundary ${KEPT_BOUNDARY}`
+      );
+    }
+    // Once a person deletes the app role and the boundary, the check no
+    // longer reports it. A stop partway through step 4 can leave other state
+    // that a person finishes by hand, which the matrix above covers.
+    s.aws.roles.delete(KEPT_ROLE.toLowerCase());
+    expect(
+      s.aws.run(["iam", "delete-policy", "--policy-arn", KEPT_BOUNDARY]).code
+    ).toBe(0);
+    nextDay(s);
+    expect((await runVerify(s)).findings).not.toContain(
+      `permissions boundary ${KEPT_BOUNDARY}`
+    );
   });
 });

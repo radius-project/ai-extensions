@@ -3,6 +3,7 @@ import { AWS_LOCK_REMOVABLE_AFTER_MS } from "@radius-project/core";
 import {
   ACCOUNT,
   addAwsEnvironment,
+  appBoundaryArn,
   appResources,
   APPLICATION,
   cleanupConfig,
@@ -24,6 +25,7 @@ import {
 } from "../../support/aws/cleanup-scenario.js";
 import {
   AWS_MAIN_NODE_GROUPS,
+  appPathRoot,
   awsEnvironmentFromTag,
   awsStatePackagePrefix,
   findAwsLeftovers,
@@ -31,6 +33,7 @@ import {
   RDS_DELETE_TIMEOUT_MS,
   recipeEnvironment,
   resolveAwsCleanupConfig,
+  selectAppBoundaries,
   selectAwsDeployments,
   selectFinalSnapshots,
   selectRecipeDbInstances,
@@ -137,6 +140,49 @@ describe("resolveAwsCleanupConfig", () => {
 });
 
 describe("AWS cleanup selectors", () => {
+  it("selects only managed policies under the fixture repository's app path", () => {
+    const scope = {
+      accountId: ACCOUNT,
+      repositoryId: 1361595003,
+      prefix: "radtest-aws-"
+    };
+    const policy = (path: string, name: string, account = ACCOUNT) => ({
+      PolicyName: name,
+      Path: path,
+      Arn: `arn:aws:iam::${account}:policy${path}${name}`,
+      CreateDate: "2026-11-01T00:00:00Z"
+    });
+    const root = appPathRoot(scope.repositoryId);
+    expect(root).toBe("/radius/apps/1361595003/");
+    const mine = policy(`${root}radtest-aws-1/`, "b-1");
+    expect(
+      selectAppBoundaries(
+        {
+          Policies: [
+            mine,
+            policy("/radius/apps/42/radtest-aws-1/", "b-42"),
+            policy("/radius/apps/13615950030/radtest-aws-1/", "b-prefix"),
+            policy("/", "radius-lock-deploy"),
+            policy(`${root}radtest-aws-1/`, "b-other", "999999999999"),
+            { ...mine, Arn: `${mine.Arn}-renamed` },
+            { Path: root, Arn: "" }
+          ]
+        },
+        scope
+      )
+    ).toEqual([
+      {
+        arn: mine.Arn,
+        name: "b-1",
+        path: `${root}radtest-aws-1/`,
+        createdAt: "2026-11-01T00:00:00Z"
+      }
+    ]);
+    expect(() => selectAppBoundaries({}, scope)).toThrow(
+      "aws iam list-policies did not include a Policies array."
+    );
+  });
+
   function instance(
     id: string,
     options: {
@@ -378,6 +424,8 @@ describe("sweepAwsCloudE2E", () => {
       "iam create-policy",
       "iam delete-role-policy",
       "iam update-assume-role-policy",
+      // The app boundary, then the access entry.
+      "iam delete-policy",
       "eks delete-access-entry",
       `DELETE environment ${OLD}`,
       "iam delete-policy",
@@ -385,6 +433,7 @@ describe("sweepAwsCloudE2E", () => {
       "iam create-policy",
       "iam delete-role-policy",
       "iam update-assume-role-policy",
+      "iam delete-policy",
       "eks delete-access-entry",
       `DELETE environment ${SECOND_ENV}`,
       "iam delete-policy"
@@ -1308,6 +1357,7 @@ describe("findAwsLeftovers", () => {
       `RDS DB parameter group ${name} in ${REGION}`,
       `Deployment ${NAMESPACE}/web on cluster ${MAIN.name}`,
       `namespace ${NAMESPACE} on cluster ${MAIN.name}`,
+      `permissions boundary ${appBoundaryArn(OLD)}`,
       `node group isolated on cluster ${MAIN.name} at 1 nodes`,
       expect.stringMatching(
         new RegExp(`^lock ANPA\\w+ on ${ROLE}, held by an unknown holder$`)
@@ -1329,7 +1379,8 @@ describe("findAwsLeftovers", () => {
     const denied = [
       "describe-db-instances",
       "describe-access-entry",
-      "list-role-policies"
+      "list-role-policies",
+      "list-policies"
     ];
     s.aws.run = (args) =>
       denied.includes(args[1] ?? "") && !args.includes(SECOND.name) ?
@@ -1350,6 +1401,9 @@ describe("findAwsLeftovers", () => {
       `Could not check cluster ${MAIN.name}: timeout`,
       `Could not check cluster ${SECOND.name}: timeout`,
       expect.stringMatching(
+        /^Could not check app permissions boundaries: aws iam list-policies: .*AccessDenied/
+      ),
+      expect.stringMatching(
         new RegExp(`^Could not check deploy role ${ROLE}: .*AccessDenied`)
       ),
       expect.stringMatching(
@@ -1358,6 +1412,49 @@ describe("findAwsLeftovers", () => {
         )
       )
     ]);
+  });
+
+  it("counts app boundaries it can't check when the repository's ID can't be read", async () => {
+    const s = createCleanupScenario();
+    s.ports.github.readRepositoryId = async () => {
+      throw new Error("Could not read the ID of the fixture (HTTP 401).");
+    };
+    expect((await runVerify(s)).findings).toEqual([
+      "Could not check app permissions boundaries: Could not read the ID of the fixture (HTTP 401)."
+    ]);
+  });
+
+  it("keeps the reset blocked while an app boundary outlives its environment", async () => {
+    const s = createCleanupScenario();
+    await addAwsEnvironment(s, OLD, {
+      deployed: true,
+      appRoleKeepsBoundary: true
+    });
+    const boundary = appBoundaryArn(OLD);
+    // IAM refuses the boundary while the app role uses it, so the product's
+    // removal warns on both attempts, and the environment goes anyway.
+    const first = await runSweep(s);
+    expect(first.failures).toEqual([
+      expect.stringContaining(
+        `${OLD}: Kept permissions boundary ${boundary}, because IAM reported it is still in use`
+      )
+    ]);
+    expect(s.github.environment(OLD)).toBeUndefined();
+    expect(s.aws.policies.has(boundary)).toBe(true);
+    // A fresh run no longer has the environment to retry, but its leftover
+    // check still finds the boundary, so the fixture isn't reset.
+    nextDay(s);
+    expect((await runSweep(s)).failures).toEqual([]);
+    expect((await runVerify(s)).findings).toEqual([
+      `permissions boundary ${boundary}`
+    ]);
+    // Once the app role and the boundary are gone, the reset may run.
+    s.aws.roles.delete(`radius-app-web-${OLD}`.toLowerCase());
+    expect(
+      s.aws.run(["iam", "delete-policy", "--policy-arn", boundary]).code
+    ).toBe(0);
+    nextDay(s);
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
   });
 
   it("checks again after a read that fails once", async () => {
@@ -1442,8 +1539,11 @@ describe("AWS answers the sweep can't use", () => {
     const s = createCleanupScenario();
     await addAwsEnvironment(s, OLD);
     let releases = 0;
-    answer(s, "delete-policy", () =>
-      (releases += 1) === 1 ?
+    answer(s, "delete-policy", (args) =>
+      (
+        args.some((arg) => arg.includes(`radius-lock-${ROLE}`)) &&
+        (releases += 1) === 1
+      ) ?
         {
           code: 254,
           stdout: "",

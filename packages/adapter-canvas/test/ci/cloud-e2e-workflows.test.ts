@@ -2059,6 +2059,11 @@ describe("cloud-e2e-cleanup.yml purge-aws", () => {
     );
     expect(verify?.if).toContain("always()");
     expect(verify?.if).toContain("steps.aws-login.outcome == 'success'");
+    // The check reads the fixture repository's ID to find its app
+    // boundaries. Without a token that read fails, and so does the check.
+    expect(verify?.env).toEqual({
+      GH_TOKEN: "${{ steps.app-token.outputs.token }}"
+    });
   });
 
   it("mints a fixture token that can dispatch, delete environments and records, and read variables", async () => {

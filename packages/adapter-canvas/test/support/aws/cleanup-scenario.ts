@@ -5,6 +5,7 @@ import {
   removeGitHubTrustSubject
 } from "@radius-project/core";
 import {
+  awsAppBoundary,
   awsEnvironmentPolicyName,
   defaultAwsDeployRoleName
 } from "../../../src/aws-deploy-role-name.js";
@@ -19,7 +20,10 @@ import {
   type AwsCleanupPorts,
   type AwsCleanupReport
 } from "../../e2e-cloud/support/aws-cloud-cleanup.js";
-import { createAwsCleanupAccessRemoval } from "../../e2e-cloud/support/aws-cloud-cleanup-ports.js";
+import {
+  createAwsCleanupAccessRemoval,
+  readRepositoryId
+} from "../../e2e-cloud/support/aws-cloud-cleanup-ports.js";
 import { FakeAws } from "./fake-aws.js";
 import { FakeGitHub } from "./fake-github.js";
 import { FakeKubernetes } from "./fake-kubernetes.js";
@@ -153,6 +157,8 @@ function rebuildTrust(scenario: CleanupScenario): void {
 function githubPort(scenario: CleanupScenario): AwsCleanupGitHub {
   const { outside, github } = scenario;
   return {
+    // As the workflow's port reads it: `gh api repos/<repo>`.
+    readRepositoryId: () => readRepositoryId(outside.readGitHubJson, REPO),
     listEnvironments: () =>
       outside.outside("GET environments", false, () => [
         {
@@ -401,12 +407,20 @@ export interface AwsEnvironmentOptions {
   readonly ageHours?: number;
   // Deployed: a database, its workloads, a deployment record, and state.
   readonly deployed?: boolean;
+  // An app role the app delete left, which still uses the environment's app
+  // boundary, so IAM refuses to delete the boundary.
+  readonly appRoleKeepsBoundary?: boolean;
+}
+
+/** The ARN of the app boundary setup writes for an environment. */
+export function appBoundaryArn(name: string): string {
+  return awsAppBoundary(ACCOUNT, REPO_ID, name).arn;
 }
 
 /**
  * An AWS environment as setup and a deploy leave it: the GitHub environment
- * and its variables, the role's trust subjects, inline policy, and the
- * cluster's access entry, and, once deployed, the recipe's database, the
+ * and its variables, the role's trust subjects, inline policy, app boundary,
+ * and the cluster's access entry, and, once deployed, the recipe's database, the
  * app's workloads, a deployment record, and the state package.
  */
 export async function addAwsEnvironment(
@@ -435,6 +449,24 @@ export async function addAwsEnvironment(
     Version: "2012-10-17",
     Statement: []
   });
+  // The product's setup tags the boundary it creates as the repository's.
+  const boundary = awsAppBoundary(ACCOUNT, REPO_ID, name);
+  scenario.aws.addManagedPolicy({
+    path: boundary.path,
+    name: boundary.name,
+    document: { Version: "2012-10-17", Statement: [] },
+    tags: [
+      { Key: "radius-managed", Value: "true" },
+      { Key: "radius-repository", Value: REPO },
+      { Key: "radius-repository-id", Value: String(REPO_ID) }
+    ]
+  });
+  if (options.appRoleKeepsBoundary)
+    scenario.aws.addRole({
+      name: `radius-app-web-${name}`,
+      trust: { Version: "2012-10-17", Statement: [] },
+      boundary: boundary.arn
+    });
   const entries = scenario.aws.clusters.get(
     `${cluster.region}:${cluster.name}`
   )?.entries;

@@ -147,6 +147,79 @@ describe("FakeAws", () => {
     ).toEqual([{ PolicyName: "admin", PolicyArn: "arn:p/admin" }]);
   });
 
+  it("lists customer managed policies by path, without their tags", () => {
+    const fake = aws();
+    fake.addManagedPolicy({
+      path: "/radius/apps/7/env-a/",
+      name: "boundary-a",
+      document: TRUST,
+      tags: [{ Key: "radius-managed", Value: "true" }]
+    });
+    fake.addManagedPolicy({ path: "/other/", name: "other", document: TRUST });
+    const listed = json(
+      fake.run([
+        "iam",
+        "list-policies",
+        "--scope",
+        "Local",
+        "--path-prefix",
+        "/radius/apps/7/",
+        "--output",
+        "json"
+      ]).stdout
+    );
+    expect(listed.Policies).toEqual([
+      {
+        PolicyName: "boundary-a",
+        PolicyId: expect.stringMatching(/^ANPA/),
+        Arn: `arn:aws:iam::${ACCOUNT}:policy/radius/apps/7/env-a/boundary-a`,
+        Path: "/radius/apps/7/env-a/",
+        DefaultVersionId: "v1",
+        AttachmentCount: 0,
+        PermissionsBoundaryUsageCount: 0,
+        IsAttachable: true,
+        CreateDate: expect.any(String)
+      }
+    ]);
+    expect(listed.IsTruncated).toBe(false);
+  });
+
+  it("refuses to delete a managed policy a role uses as its boundary or has attached", () => {
+    const fake = aws();
+    const boundary = fake.addManagedPolicy({
+      path: "/radius/apps/7/env-a/",
+      name: "boundary-a",
+      document: TRUST
+    });
+    const attached = fake.addManagedPolicy({
+      path: "/",
+      name: "attached",
+      document: TRUST
+    });
+    fake.addRole({ name: "app", trust: TRUST, boundary: boundary.Arn });
+    fake.addRole({ name: "other", trust: TRUST, attached: [attached.Arn] });
+    expect(
+      json(fake.run(["iam", "get-policy", "--policy-arn", boundary.Arn]).stdout)
+        .Policy
+    ).toMatchObject({ PermissionsBoundaryUsageCount: 1, AttachmentCount: 0 });
+    for (const policy of [boundary, attached]) {
+      const refused = fake.run([
+        "iam",
+        "delete-policy",
+        "--policy-arn",
+        policy.Arn
+      ]);
+      expect(refused.code).toBe(254);
+      expect(refused.stderr).toContain("(DeleteConflict)");
+      expect(fake.policies.has(policy.Arn)).toBe(true);
+    }
+    fake.roles.delete("app");
+    expect(
+      fake.run(["iam", "delete-policy", "--policy-arn", boundary.Arn]).code
+    ).toBe(0);
+    expect(fake.policies.has(boundary.Arn)).toBe(false);
+  });
+
   it("lets one caller create a lock policy, whatever the name's case", () => {
     const fake = aws();
     const create = (name: string) =>

@@ -99,6 +99,9 @@ export interface AwsCleanupConfig {
 }
 
 export interface AwsCleanupGitHub {
+  // GitHub's ID for the fixture repository. Its app roles and their
+  // boundaries are under `/radius/apps/<id>/`. Throws when it can't be read.
+  readRepositoryId(): Promise<number>;
   // `gh api --paginate --slurp repos/<repo>/environments` pages.
   listEnvironments(): Promise<unknown>;
   readEnvironmentVariables(
@@ -517,6 +520,75 @@ export function statePackageName(
 export function awsStatePackagePrefix(config: AwsCleanupConfig): string {
   const repository = config.repository.split("/")[1] ?? "";
   return `${repository.toLowerCase()}-radius-state-${config.environmentPrefix}`;
+}
+
+// --- App boundaries -------------------------------------------------------
+
+// The product's setup writes each AWS environment a permissions boundary for
+// its app roles, under the fixture repository's app path. Step 4's removal
+// deletes it, but keeps one it can't read or that an app role still uses, and
+// the environment goes anyway. The leftover check finds what it kept.
+
+export interface AwsAppScope {
+  readonly accountId: string;
+  readonly repositoryId: number;
+  readonly prefix: string;
+}
+
+// The app scope of the fixture repository, or null with a message when its
+// ID can't be read.
+async function readAppScope(
+  config: AwsCleanupConfig,
+  ports: AwsCleanupPorts
+): Promise<{ scope: AwsAppScope } | { scope: null; message: string }> {
+  try {
+    return {
+      scope: {
+        accountId: config.accountId,
+        repositoryId: await ports.github.readRepositoryId(),
+        prefix: config.environmentPrefix
+      }
+    };
+  } catch (error) {
+    return { scope: null, message: errorMessage(error) };
+  }
+}
+
+/** The IAM path the repository's app roles and boundaries are under. */
+export function appPathRoot(repositoryId: number): string {
+  return `/radius/apps/${repositoryId}/`;
+}
+
+export interface AppBoundary {
+  readonly arn: string;
+  readonly name: string;
+  readonly path: string;
+  readonly createdAt: string;
+}
+
+/**
+ * Managed policies under the repository's app path, from `aws iam
+ * list-policies --scope Local --path-prefix`. ListPolicies leaves out tags.
+ */
+export function selectAppBoundaries(
+  payload: unknown,
+  scope: AwsAppScope
+): AppBoundary[] {
+  const root = appPathRoot(scope.repositoryId);
+  return requireList(payload, "Policies", "aws iam list-policies")
+    .map(asRecord)
+    .flatMap((item) => {
+      const name = text(item?.PolicyName);
+      const path = text(item?.Path);
+      const arn = text(item?.Arn);
+      return (
+          name &&
+            path.startsWith(root) &&
+            arn === `arn:aws:iam::${scope.accountId}:policy${path}${name}`
+        ) ?
+          [{ arn, name, path, createdAt: text(item?.CreateDate) }]
+        : [];
+    });
 }
 
 // --- The sweep ------------------------------------------------------------
@@ -1825,6 +1897,27 @@ async function readAwsLeftovers(
         findings.push(
           `namespace ${config.namespace} on cluster ${cluster.name}`
         );
+    });
+  }
+  // Every app boundary under the repository's app path, whatever its age.
+  const app = await readAppScope(config, ports);
+  const scope = app.scope;
+  if (scope === null) {
+    findings.push(`Could not check app permissions boundaries: ${app.message}`);
+  } else {
+    await check("app permissions boundaries", async () => {
+      for (const boundary of selectAppBoundaries(
+        await readAws(ports, [
+          "iam",
+          "list-policies",
+          "--scope",
+          "Local",
+          "--path-prefix",
+          appPathRoot(scope.repositoryId)
+        ]),
+        scope
+      ))
+        findings.push(`permissions boundary ${boundary.arn}`);
     });
   }
   for (const name of AWS_MAIN_NODE_GROUPS) {

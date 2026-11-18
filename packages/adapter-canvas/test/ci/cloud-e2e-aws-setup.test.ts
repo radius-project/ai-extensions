@@ -127,8 +127,16 @@ function requestTags(args: readonly string[]): Record<string, string> {
 
 // The request IAM authorizes for one AWS CLI call: its action, the resource
 // it names, and the context keys the committed policies' conditions read.
-// A command it doesn't know fails the test, so a new sweep call gets mapped.
-function cliRequest(args: readonly string[]): IamRequest {
+// `policyTags` are the tags of each managed policy before the run, which IAM
+// reads as aws:ResourceTag. A command it doesn't know fails the test, so a
+// new sweep call gets mapped.
+function cliRequest(
+  args: readonly string[],
+  policyTags: ReadonlyMap<
+    string,
+    ReadonlyArray<{ Key: string; Value: string }>
+  > = new Map()
+): IamRequest {
   const [service, operation] = args;
   const command = `${service} ${operation}`;
   const region = flag(args, "--region") || GLOBAL;
@@ -187,8 +195,12 @@ function cliRequest(args: readonly string[]): IamRequest {
       break;
     case "iam get-policy":
     case "iam get-policy-version":
+      resource = flag(args, "--policy-arn");
+      break;
     case "iam delete-policy":
       resource = flag(args, "--policy-arn");
+      for (const tag of policyTags.get(resource) ?? [])
+        context[`aws:ResourceTag/${tag.Key}`] = tag.Value;
       break;
     case "iam create-policy":
       resource = `${IAM}policy${flag(args, "--path") || "/"}${flag(args, "--policy-name")}`;
@@ -675,12 +687,15 @@ describe("build/cloud-e2e/aws", () => {
       maxSize: 2,
       desiredSize: 1
     });
+    const policyTags = new Map(
+      [...s.aws.policies.values()].map((item) => [item.Arn, item.Tags])
+    );
     expect((await runSweep(s)).failures).toEqual([]);
     expect((await runVerify(s)).findings).toEqual([]);
     const policy = await rendered("test-role-policy.json");
     const requests = s.outside.calls
       .filter((call) => call.service === "aws" && call.command !== "--version")
-      .map((call) => cliRequest(call.args));
+      .map((call) => cliRequest(call.args, policyTags));
     expect(requests.map((item) => item.action)).toEqual(
       expect.arrayContaining([
         "rds:deletedbinstance",
@@ -688,9 +703,19 @@ describe("build/cloud-e2e/aws", () => {
         "eks:updatenodegroupconfig",
         "eks:deleteaccessentry",
         "iam:updateassumerolepolicy",
-        "iam:createpolicy"
+        "iam:createpolicy",
+        "iam:deletepolicy",
+        "iam:listpolicies"
       ])
     );
+    // The product's removal deletes each environment's app boundary.
+    expect(
+      requests.filter(
+        (item) =>
+          item.action === "iam:deletepolicy" &&
+          item.resource.includes(":policy/radius/apps/")
+      )
+    ).toHaveLength(2);
     // Each call against the resource it names, in its region.
     expect(
       requests.filter((item) => evaluateIam(item, [policy]) !== "allowed")

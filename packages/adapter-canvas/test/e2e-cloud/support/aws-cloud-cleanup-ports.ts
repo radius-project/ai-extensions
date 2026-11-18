@@ -232,6 +232,12 @@ export function createGhCleanupGitHub(
   }
 
   return {
+    readRepositoryId: () =>
+      readRepositoryId(
+        ghJsonRunner((args) => gh(args)),
+        repo
+      ),
+
     listEnvironments: () =>
       api(
         ["--paginate", "--slurp", `repos/${repo}/environments?per_page=100`],
@@ -540,6 +546,23 @@ export function ghJsonRunner(
   };
 }
 
+/**
+ * GitHub's numeric ID for the repository, which names its app roles' IAM
+ * path and tags its deploy-role grants. Throws when it can't be read.
+ */
+export async function readRepositoryId(
+  runGitHubJson: (apiPath: string) => Promise<GitHubJsonResponse>,
+  repository: string
+): Promise<number> {
+  const response = await runGitHubJson(`/repos/${repository}`);
+  const id = Number(response.json?.id);
+  if (!response.ok || !Number.isSafeInteger(id) || id <= 0)
+    throw new Error(
+      `Could not read the ID of ${repository} (${response.stderr || `HTTP ${response.status ?? "unknown"}`}).`
+    );
+  return id;
+}
+
 function unexpected(name: string): never {
   throw new Error(`The cleanup sweep does not use ${name}.`);
 }
@@ -587,16 +610,7 @@ export function createAwsCleanupAccessRemoval(
   });
   let repoId: Promise<number> | null = null;
   return async (request) => {
-    repoId ??= options
-      .runGitHubJson(`/repos/${options.repository}`)
-      .then((response) => {
-        const id = Number(response.json?.id);
-        if (!response.ok || !Number.isSafeInteger(id) || id <= 0)
-          throw new Error(
-            `Could not read the ID of ${options.repository} (${response.stderr || `HTTP ${response.status ?? "unknown"}`}).`
-          );
-        return id;
-      });
+    repoId ??= readRepositoryId(options.runGitHubJson, options.repository);
     repoId.catch(() => {
       repoId = null;
     });
