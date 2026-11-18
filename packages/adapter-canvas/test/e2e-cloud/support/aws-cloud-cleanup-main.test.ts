@@ -127,14 +127,18 @@ function dependencies(
 ) {
   const log: string[] = [];
   const summaries: string[] = [];
+  // Sleeping moves the clock, so every wait reaches its deadline.
+  let now = Date.parse("2026-11-14T02:23:00Z");
   return {
     log,
     summaries,
     deps: {
       env,
       run,
-      sleep: async () => {},
-      now: () => Date.parse("2026-11-14T02:23:00Z"),
+      sleep: async (milliseconds: number) => {
+        now += milliseconds;
+      },
+      now: () => now,
       mintAppToken: async () => {
         throw new Error("No App token mint is expected.");
       },
