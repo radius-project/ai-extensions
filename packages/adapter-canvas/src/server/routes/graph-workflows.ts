@@ -14,7 +14,10 @@ import {
   recordGraphBuildEvent
 } from "../../shared.js";
 import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
-import { stageWorkspaceGraphOutput } from "./workspace-graph-output.js";
+import {
+  ownsWorkspaceGraphOutput,
+  stageWorkspaceGraphOutput
+} from "./workspace-graph-output.js";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -966,7 +969,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           { repo, branch }
         );
       } catch (error) {
-        if (!isCurrentOutput()) throw new GraphRequestSuperseded();
+        if (
+          !(await ownsWorkspaceGraphOutput(
+            isCurrentOutput,
+            selection.verifyWorkspaceBranch
+          ))
+        )
+          throw new GraphRequestSuperseded();
         output?.invalidate();
         throw error;
       }
@@ -987,7 +996,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // mutant, so this branch is structurally unreachable in coverage.
         // Re-checked after the compile, which is the slow stage: the generation
         // can have moved on while `rad` was running.
-        if (!isCurrentOutput()) {
+        if (
+          !(await ownsWorkspaceGraphOutput(
+            isCurrentOutput,
+            selection.verifyWorkspaceBranch
+          ))
+        ) {
           return json(409, STALE_PAYLOAD);
         }
         if (

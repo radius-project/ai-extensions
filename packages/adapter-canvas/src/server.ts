@@ -611,7 +611,11 @@ interface OpenSourceInput {
   state?: CanvasState;
 }
 
-type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
+type AppBicepHandoff = (
+  input: AppBicepHandoffInput & {
+    readSelectedModel?: import("./shared.js").ReadSelectedGraphModel;
+  }
+) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
 type DeployFailureNotice = (input: DeployFailureNoticeInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
@@ -1357,7 +1361,8 @@ function triggerAppBicepHandoff(
   progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph",
   isCurrent?: () => boolean,
   environmentKey?: string,
-  onFailure?: (message: string) => void
+  onFailure?: (message: string) => void,
+  readSelectedModel?: import("./shared.js").ReadSelectedGraphModel
 ): void {
   const handoff = appBicepHandoff;
   if (!handoff || !repo) return;
@@ -1373,7 +1378,8 @@ function triggerAppBicepHandoff(
         progressView,
         state: entry?.state,
         isCurrent,
-        environmentKey
+        environmentKey,
+        ...(readSelectedModel ? { readSelectedModel } : {})
       })
     )
     .catch((error: unknown) => {
@@ -6012,6 +6018,30 @@ export function createProductionCanvasServerRuntime(
     currentWorkspaceBranch
   );
   const fetchBicepSelection = graphSources.select;
+  const handOffGraphModel: typeof triggerAppBicepHandoff = (
+    entry,
+    repo,
+    branches,
+    page,
+    view,
+    isCurrent,
+    environmentKey,
+    onFailure
+  ) =>
+    triggerAppBicepHandoff(
+      entry,
+      repo,
+      branches,
+      page,
+      view,
+      isCurrent,
+      environmentKey,
+      onFailure,
+      entry ?
+        (selectedRepo, branch) =>
+          fetchBicepSelection(entry, selectedRepo, branch)
+      : undefined
+    );
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     resolveBranchForRequest: (entry, repo, requestedBranch) =>
@@ -6031,7 +6061,7 @@ export function createProductionCanvasServerRuntime(
     isCurrentSourceRef: (entry, expectedToken) =>
       isCurrentSourceRefToken(entry.state, "graph", expectedToken),
     triggerAppBicepHandoff: (entry, repo, branch, isCurrent) =>
-      triggerAppBicepHandoff(entry, repo, branch, "graph", "graph", isCurrent),
+      handOffGraphModel(entry, repo, branch, "graph", "graph", isCurrent),
     triggerGraphRepairHandoff: (entry, request) =>
       triggerGraphRepairHandoff(entry, request),
     clearGraphRepairAttempt: (entry) =>
@@ -6080,7 +6110,7 @@ export function createProductionCanvasServerRuntime(
           rmSync(dir, { recursive: true, force: true });
         }
       }),
-      triggerAppBicepHandoff,
+      triggerAppBicepHandoff: handOffGraphModel,
       triggerGraphRepairHandoff: (entry, request) =>
         triggerGraphRepairHandoff(entry, request),
       clearGraphRepairAttempt: (entry, view) => {

@@ -50,6 +50,31 @@ import { createTestCanvasServerRuntime } from "../../support/server/production-r
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createDeferred } from "../../support/browser/fakes.js";
 import { setAppBicepHandoff } from "../../../src/server.js";
+import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
+
+function initCommittedGraphWorkspace(workspace: string) {
+  execFileSync("git", ["init", "--initial-branch", "main"], {
+    cwd: workspace,
+    stdio: "pipe"
+  });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Radius Fixture",
+      "-c",
+      "user.email=radius-fixture@example.invalid",
+      "-c",
+      "commit.gpgSign=false",
+      "commit",
+      "--allow-empty",
+      "--no-verify",
+      "-m",
+      "fixture"
+    ],
+    { cwd: workspace, stdio: "pipe" }
+  );
+}
 
 async function concurrentGraphRuntime(workspace?: string) {
   const builds: Array<ReturnType<typeof createDeferred<void>>> = [];
@@ -159,9 +184,7 @@ describe("graph concurrency through production HTTP routes", () => {
       const workspace = mkdtempSync(path.join(tmpdir(), "radius-graph-http-"));
       let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
       try {
-        execFileSync("git", ["init", "--initial-branch", "main", workspace], {
-          stdio: "pipe"
-        });
+        initCommittedGraphWorkspace(workspace);
         const directory = path.join(workspace, ".radius");
         mkdirSync(directory);
         writeFileSync(path.join(directory, "app.bicep"), "resource local");
@@ -193,6 +216,72 @@ describe("graph concurrency through production HTTP routes", () => {
       }
     }
   );
+
+  it.each([
+    ["JSON", "success"],
+    ["JSON", "failure"],
+    ["stream", "success"],
+    ["stream", "failure"]
+  ])(
+    "preserves checkout output when an old %s build finishes with %s",
+    async (transport, outcome) => {
+      const workspace = mkdtempSync(path.join(tmpdir(), "radius-graph-http-"));
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      try {
+        initCommittedGraphWorkspace(workspace);
+        const directory = path.join(workspace, ".radius");
+        mkdirSync(directory);
+        writeFileSync(path.join(directory, "app.bicep"), "resource local");
+        const destination = path.join(directory, "app-graph.json");
+        h = await concurrentGraphRuntime(workspace);
+        const response = transport === "JSON" ? h.load() : h.stream();
+        const { builds } = h;
+        await vi.waitFor(() => expect(builds).toHaveLength(1));
+        execFileSync("git", ["switch", "-c", "other"], {
+          cwd: workspace,
+          stdio: "pipe"
+        });
+        writeFileSync(destination, "other branch graph");
+        if (outcome === "success") builds[0].resolve();
+        else builds[0].reject(new Error("Old compiler failed"));
+        const result = await response;
+        if (transport === "JSON") expect(result.status).toBe(409);
+        else expect(await result.text()).toContain('"stale":true');
+        expect(readFileSync(destination, "utf8")).toBe("other branch graph");
+        expect(h.entry.state.graphResources).toBeUndefined();
+      } finally {
+        await h?.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
+  it("requests authoring through the real runtime when only GitHub has a model", async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "radius-handoff-http-"));
+    const sdk = await createRuntimeSdkHarness({
+      bicepByRepoBranch: { "remote:octo/app@main": "committed model" },
+      workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] }
+    });
+    let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+    try {
+      initCommittedGraphWorkspace(workspace);
+      writeFileSync(path.join(workspace, "Dockerfile"), "FROM scratch");
+      const handoff = sdk.capturedHostCallbacks.appBicepHandoff;
+      if (!handoff) throw new Error("Runtime registered no authoring callback");
+      setAppBicepHandoff(handoff);
+      h = await concurrentGraphRuntime(workspace);
+      expect(await (await h.load()).json()).toMatchObject({
+        needsAppBicep: true
+      });
+      await vi.waitFor(() => expect(sdk.session.send).toHaveBeenCalledOnce());
+      expect(sdk.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+    } finally {
+      setAppBicepHandoff(null);
+      await h?.close();
+      await sdk.extension.shutdown("test");
+      rmSync(workspace, { force: true, recursive: true });
+    }
+  });
 
   it("reports a rejected modeling handoff to the next poll and respects explicit retry", async () => {
     const workspace = mkdtempSync(path.join(tmpdir(), "radius-handoff-http-"));

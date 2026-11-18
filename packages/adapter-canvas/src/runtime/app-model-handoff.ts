@@ -23,7 +23,7 @@ import {
 } from "./hooks.js";
 import type { HandoffMessage } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
-import type { CanvasState } from "../shared.js";
+import type { CanvasState, ReadSelectedGraphModel } from "../shared.js";
 import type { GraphProgressView } from "../shared.js";
 import type { AppSourceEvaluation } from "@radius-project/core";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
@@ -48,6 +48,7 @@ export interface AppModelHandoffRequest {
   // agent to model branches nobody is looking at.
   isCurrent?: () => boolean;
   environmentKey?: string;
+  readSelectedModel?: ReadSelectedGraphModel;
 }
 
 export interface AppModelHandoffDependencies {
@@ -58,7 +59,8 @@ export interface AppModelHandoffDependencies {
   resolveStatus(
     repo: string,
     branch: string,
-    state: CanvasState
+    state: CanvasState,
+    readSelectedModel?: ReadSelectedGraphModel
   ): Promise<AppModelStatus>;
   // Consulted only when no branch has a model, because a model that already
   // exists answers "can this repository be modeled" by existing.
@@ -180,7 +182,8 @@ export function createAppModelHandoff(
     progressView,
     state,
     isCurrent,
-    environmentKey
+    environmentKey,
+    readSelectedModel
   }: AppModelHandoffRequest): Promise<void> {
     if (!repo) return;
     const stillCurrent = (): boolean => isCurrent === undefined || isCurrent();
@@ -210,13 +213,17 @@ export function createAppModelHandoff(
     // newer missing-model owner that started while the read was in flight.
     const observedClaim = deps.missingModelHandoffs.current(target);
 
-    // resolveStatus absorbs every read failure into a "missing" classification,
-    // so a rejection here means the reader itself is broken. Letting it
-    // propagate abandons the handoff rather than acting on a half-resolved
-    // picture; every caller invokes this fire-and-forget.
-    const statuses = await Promise.all(
-      targets.map((branch) => deps.resolveStatus(repo, branch, context))
-    );
+    // A strict route read can reject. Do not start authoring if the selected
+    // source was unreadable rather than confirmed absent.
+    const readStatuses = () =>
+      Promise.all(
+        targets.map((branch) =>
+          readSelectedModel ?
+            deps.resolveStatus(repo, branch, context, readSelectedModel)
+          : deps.resolveStatus(repo, branch, context)
+        )
+      );
+    const statuses = await readStatuses();
     const key = appModelHandoffKey(repo, targets, statuses);
     if (state?.appBicepHandoffKeys?.[target] === key) return;
 
@@ -313,9 +320,7 @@ export function createAppModelHandoff(
       // re-read before it is acted on.
       let settled: AppModelStatus[];
       try {
-        settled = await Promise.all(
-          targets.map((branch) => deps.resolveStatus(repo, branch, context))
-        );
+        settled = await readStatuses();
       } catch (error) {
         releaseReservation();
         throw error;

@@ -10,7 +10,34 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { stageWorkspaceGraphOutput } from "./workspace-graph-output.js";
+import {
+  ownsWorkspaceGraphOutput,
+  stageWorkspaceGraphOutput
+} from "./workspace-graph-output.js";
+
+it("rechecks request ownership after awaiting workspace branch verification", async () => {
+  let current = true;
+  expect(
+    await ownsWorkspaceGraphOutput(
+      () => current,
+      async () => {
+        current = false;
+        return true;
+      }
+    )
+  ).toBe(false);
+});
+
+it("refuses publication when workspace branch verification is unavailable", async () => {
+  expect(
+    await ownsWorkspaceGraphOutput(
+      () => true,
+      async () => {
+        throw new Error("Checkout metadata unavailable");
+      }
+    )
+  ).toBe(false);
+});
 
 const cleanup: Array<() => void> = [];
 afterEach(() => {

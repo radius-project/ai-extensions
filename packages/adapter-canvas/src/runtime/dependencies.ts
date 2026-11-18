@@ -197,6 +197,7 @@ export interface HostCallbackDependencies {
       progressView?: GraphProgressView;
       isCurrent?: () => boolean;
       environmentKey?: string;
+      readSelectedModel?: import("../shared.js").ReadSelectedGraphModel;
       // The canvas instance's state, so the runtime resolves each branch's model
       // against the same workspace context the route rendered from and can
       // deduplicate against this panel's last handoff.

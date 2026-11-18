@@ -1,4 +1,7 @@
-import { stageWorkspaceGraphOutput } from "./workspace-graph-output.js";
+import {
+  ownsWorkspaceGraphOutput,
+  stageWorkspaceGraphOutput
+} from "./workspace-graph-output.js";
 import {
   createGraphOrchestrator,
   computeGraphDiff,
@@ -10,6 +13,7 @@ import {
   graphArtifactHandle,
   graphSourceForSelection,
   GraphRequestSuperseded,
+  type AppBicepSelection,
   type StagedRadArtifacts
 } from "./graph-pipeline.js";
 import {
@@ -730,13 +734,7 @@ export function createGraphsPlanningRoutes(
 // The app.bicep selection `fetchBicepSelection` returns, narrowed to the members
 // this route reads. A null `content` is the "no app.bicep on this branch" signal
 // that triggers the generation handoff.
-export interface LoadGraphStreamBicepSelection {
-  sourceRead?: GraphSourceRead;
-  content: string | null;
-  fromWorkspace: boolean;
-  branch: string;
-  bicepPath: string;
-}
+export type LoadGraphStreamBicepSelection = AppBicepSelection;
 
 export type LoadGraphStreamRadArtifacts = StagedRadArtifacts;
 
@@ -1030,7 +1028,14 @@ export async function handleLoadGraphStream(
             })
           );
         } catch (error) {
-          if (isCurrentOutput()) output?.invalidate();
+          if (
+            !(await ownsWorkspaceGraphOutput(
+              isCurrentOutput,
+              selection.verifyWorkspaceBranch
+            ))
+          )
+            throw new GraphRequestSuperseded();
+          output?.invalidate();
           throw error;
         }
       },
@@ -1054,7 +1059,10 @@ export async function handleLoadGraphStream(
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (
-      !isCurrentOutput() ||
+      !(await ownsWorkspaceGraphOutput(
+        isCurrentOutput,
+        selection.verifyWorkspaceBranch
+      )) ||
       !dependencies.commitSourceRef(
         entry,
         resources,

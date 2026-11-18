@@ -65,6 +65,7 @@ export interface AppBicepSelection {
   branch: string;
   bicepPath: string;
   sourceRead?: GraphSourceRead;
+  verifyWorkspaceBranch?: () => Promise<boolean>;
 }
 
 // `remote` is true only when `dir` is a staged temp directory this process must

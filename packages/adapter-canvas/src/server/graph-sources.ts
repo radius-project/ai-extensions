@@ -24,6 +24,7 @@ export function createCanvasGraphSources(
       definitionPath?: string
     ): Promise<AppBicepSelection> {
       const { state } = entry;
+      const workspacePath = state.workspacePath;
       const selected = await sources.read({
         repo,
         ref: branch,
@@ -46,7 +47,13 @@ export function createCanvasGraphSources(
         fromWorkspace: selected.source.kind === "workspace",
         branch,
         bicepPath: selected.source.definitionPath,
-        sourceRead: selected
+        sourceRead: selected,
+        ...(selected.source.kind === "workspace" && workspacePath ?
+          {
+            verifyWorkspaceBranch: () =>
+              currentBranch(workspacePath).then((live) => live === branch)
+          }
+        : {})
       };
     },
     async readForRecovery(

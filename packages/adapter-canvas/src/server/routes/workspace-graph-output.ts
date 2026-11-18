@@ -13,6 +13,15 @@ import { dirname, join } from "node:path";
 import { redactGhCredentials } from "../../gh.js";
 
 /** Call publication and invalidation only after synchronous request admission. */
+export async function ownsWorkspaceGraphOutput(
+  isCurrent: () => boolean,
+  verifyBranch?: () => Promise<boolean>
+): Promise<boolean> {
+  if (!isCurrent()) return false;
+  if (verifyBranch && !(await verifyBranch().catch(() => false))) return false;
+  return isCurrent();
+}
+
 export function stageWorkspaceGraphOutput(
   destination: string,
   logError: (message: string) => void
