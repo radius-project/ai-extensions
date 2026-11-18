@@ -13,6 +13,7 @@
 // so it can be tested directly: given a repo, its branches and the injected
 // readers, it resolves each branch's model status and sends at most one message.
 
+import { randomUUID } from "node:crypto";
 import {
   appBicepHandoffMessage,
   appModelRadiusCliOutdatedNotice,
@@ -175,7 +176,6 @@ export function createAppModelHandoff(
     }
   }
 
-  let nextAttempt = 0;
   return async function handOffAppModel({
     repo,
     branches,
@@ -376,13 +376,8 @@ export function createAppModelHandoff(
       // single-branch fencing protocol — an attempt token and a recorded
       // failure are always keyed `repo::branch` — rather than gaining a second,
       // two-branch protocol that could disagree with the first.
-      const attemptToken =
-        state && state.canvasInstanceId ?
-          `${state.canvasInstanceId}::attempt-${++nextAttempt}`
-        : undefined;
+      const attemptToken = state?.canvasInstanceId ? randomUUID() : undefined;
       if (state && attemptToken) {
-        state.appModelAttemptGeneration =
-          (state.appModelAttemptGeneration ?? 0) + 1;
         state.appModelAttemptTokens ??= {};
         state.appModelAttemptClaims ??= {};
         state.appModelAttemptEnvironments ??= {};

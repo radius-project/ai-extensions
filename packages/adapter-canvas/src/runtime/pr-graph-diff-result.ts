@@ -23,8 +23,10 @@ function withSourceIdentities(
 ): string {
   if (!sources) return text;
   const identity = (source: GraphSourceIdentity) =>
-    `${source.repo}@${source.revision ?? source.ref}`;
-  return `${text}\n\nBase source: \`${identity(sources.base)}\`\n\nHead source: \`${identity(sources.head)}\``;
+    source.revision ?
+      `\`${source.repo}@${source.revision}\``
+    : `unresolved ref \`${source.ref}\` in \`${source.repo}\``;
+  return `${text}\n\nBase source: ${identity(sources.base)}\n\nHead source: ${identity(sources.head)}`;
 }
 
 export function successfulGraphDiffResult(

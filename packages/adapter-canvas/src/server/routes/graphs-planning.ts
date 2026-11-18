@@ -939,6 +939,9 @@ export async function handleLoadGraphStream(
     dependencies.readInstanceEntry(instanceId) === entry &&
     entry.state.graphBuildGeneration === requestGeneration &&
     dependencies.isCurrentSourceRef(entry, sourceRefContext.token);
+  const workspacePath = entry.state.workspacePath;
+  const isCurrentOutput = () =>
+    isCurrent() && entry.state.workspacePath === workspacePath;
 
   let output: ReturnType<typeof stageWorkspaceGraphOutput>;
   try {
@@ -999,9 +1002,6 @@ export async function handleLoadGraphStream(
       selection.fromWorkspace ?
         dependencies.workspaceGraphJsonPath(entry.state, selection.bicepPath)
       : "";
-    const workspacePath = entry.state.workspacePath;
-    const isCurrentOutput = () =>
-      isCurrent() && entry.state.workspacePath === workspacePath;
     let artifactsFingerprint = "";
     const graph = createGraphOrchestrator<
       CanvasGraphResource,
@@ -1121,6 +1121,16 @@ export async function handleLoadGraphStream(
       return;
     }
     if (e instanceof BlankModelAuthoringFailed) {
+      if (
+        !(await ownsWorkspaceGraphOutput(
+          isCurrentOutput,
+          e.verifyWorkspaceBranch
+        )) ||
+        !isCurrentOutput()
+      ) {
+        sendDone({ stale: true });
+        return;
+      }
       sendDone({
         error: e.message,
         modelingFailed: true,

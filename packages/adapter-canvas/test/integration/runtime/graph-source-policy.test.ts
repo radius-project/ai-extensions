@@ -382,6 +382,13 @@ describe("registered runtime graph source policy", () => {
         expect(f.harness.getOrCreateServer).not.toHaveBeenCalled();
         expect(f.harness.session.rpc.canvas.open).not.toHaveBeenCalled();
         const reads = f.execute.mock.calls.map(([, args]) => args[1]);
+        for (const sha of [BASE, HEAD]) {
+          const proof = `/repos/${REPO}/commits/${sha}`;
+          expect(reads.filter((entry) => entry === proof)).toEqual([proof]);
+          expect(reads.indexOf(proof)).toBeLessThan(
+            reads.indexOf(`/repos/${REPO}/contents/${f.configPath}?ref=${sha}`)
+          );
+        }
         expect(
           reads
             .filter((entry) => entry.includes("/contents/"))
@@ -783,6 +790,63 @@ describe("registered runtime graph source policy", () => {
     }
   });
 
+  it("does not accept an old failure after a fresh runtime starts the same panel's first attempt", async () => {
+    async function begin(f: Awaited<ReturnType<typeof fixture>>) {
+      await rm(path.join(f.workspace, MODEL_PATH));
+      await f.harness.host.open("radius-panel", { page: "graph" });
+      const state = f.harness.servers.get("radius-panel")?.state;
+      const handoff = f.harness.capturedHostCallbacks.appBicepHandoff;
+      const tool = f.harness.extension.tools.find(
+        ({ name }) => name === "radius_report_modeling_failure"
+      );
+      if (!state || !handoff || !tool)
+        throw new Error("Missing runtime wiring");
+      const request = {
+        repo: REPO,
+        branches: ["feature"],
+        page: "graph",
+        state
+      };
+      await handoff(request);
+      expect(f.harness.session.send).toHaveBeenCalledOnce();
+      const attemptToken = state.appModelAttemptTokens?.[`${REPO}::feature`];
+      if (!attemptToken) throw new Error("Missing attempt token");
+      return { tool, attemptToken, state, retry: () => handoff(request) };
+    }
+
+    const first = await fixture();
+    let previousToken: string;
+    try {
+      previousToken = (await begin(first)).attemptToken;
+    } finally {
+      await first.close();
+    }
+    const second = await fixture();
+    try {
+      const current = await begin(second);
+      const report = {
+        instanceId: "radius-panel",
+        repo: REPO,
+        branch: "feature",
+        error: "Modeling cannot continue"
+      };
+      await expect(
+        current.tool.handler({ ...report, attemptToken: previousToken })
+      ).resolves.toMatchObject({ recorded: false });
+      expect(current.state.appModelFailures).toBeUndefined();
+      expect(current.state.appModelAttemptTokens?.[`${REPO}::feature`]).toBe(
+        current.attemptToken
+      );
+      await current.retry();
+      expect(second.harness.session.send).toHaveBeenCalledOnce();
+      await expect(
+        current.tool.handler({ ...report, attemptToken: current.attemptToken })
+      ).resolves.toEqual({ recorded: true });
+    } finally {
+      await second.close();
+    }
+  });
+
   it("reports remote failure without falling back to matching local content or opening a panel", async () => {
     const f = await fixture("main");
     f.failures.set(
@@ -795,6 +859,12 @@ describe("registered runtime graph source policy", () => {
         resultType: "failure",
         error: expect.stringContaining("permission denied")
       });
+      expect(graphDiffResultText(result)).toContain(
+        `Base source: unresolved ref \`main\` in \`${REPO}\``
+      );
+      expect(graphDiffResultText(result)).toContain(
+        `Head source: \`${REPO}@${HEAD}\``
+      );
       expect(f.compiler).not.toHaveBeenCalled();
       expect(
         f.harness.deps.workspace.detectWorkspaceContext

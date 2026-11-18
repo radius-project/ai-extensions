@@ -457,7 +457,6 @@ describe("createAppModelHandoff", () => {
 
     const token = state.appModelAttemptTokens?.["a/b::feat"];
     expect(token).toBeTruthy();
-    expect(state.appModelAttemptGeneration).toBe(1);
     expect(state.appModelAttemptEnvironments?.["a/b::feat"]).toBe(
       '["azure","dev"]'
     );
@@ -489,7 +488,6 @@ describe("createAppModelHandoff", () => {
       "a/b::main": "",
       "a/b::feat": ""
     });
-    expect(state.appModelAttemptGeneration).toBe(1);
     expect(sent[0].prompt).toContain("radius_report_modeling_failure");
     expect(sent[0].prompt).toContain(`attemptToken \`${token}\``);
     expect(sent[0].prompt).toContain("(`main`, `feat`) — one call per branch");

@@ -80,7 +80,7 @@ describe("PR graph diff tool results", () => {
       `Base source: \`acme/widgets@${"a".repeat(40)}\``
     );
     expect(result.textResultForLlm).toContain(
-      "Head source: `acme/widgets@feature`"
+      "Head source: unresolved ref `feature` in `acme/widgets`"
     );
   });
   it("classifies a rendered diff through structured telemetry", () => {

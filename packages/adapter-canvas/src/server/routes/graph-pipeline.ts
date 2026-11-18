@@ -28,7 +28,14 @@ export const DEFAULT_APP_BICEP_PATH = ".radius/app.bicep";
 
 export class GraphRequestSuperseded extends Error {}
 
-export class BlankModelAuthoringFailed extends Error {}
+export class BlankModelAuthoringFailed extends Error {
+  constructor(
+    message: string,
+    readonly verifyWorkspaceBranch?: AppBicepSelection["verifyWorkspaceBranch"]
+  ) {
+    super(message);
+  }
+}
 
 export function requireNonblankGraphModel(
   selection: AppBicepSelection,
@@ -41,7 +48,8 @@ export function requireNonblankGraphModel(
     selection.fromWorkspace && appModelAuthoringFailure(state, repo, branch);
   if (failure)
     throw new BlankModelAuthoringFailed(
-      `${failure.error} Fix or remove the empty ${selection.bicepPath || DEFAULT_APP_BICEP_PATH} in the workspace, then select Refresh.`
+      `${failure.error} Fix or remove the empty ${selection.bicepPath || DEFAULT_APP_BICEP_PATH} in the workspace, then select Refresh.`,
+      selection.verifyWorkspaceBranch
     );
   throw new Error(
     `${repo}@${branch}:${selection.bicepPath || DEFAULT_APP_BICEP_PATH} is empty; the graph is unavailable.`

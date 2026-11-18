@@ -752,6 +752,51 @@ describe("graphs-planning load-graph-stream route", () => {
     }
   );
 
+  it.each(["current", "checkout", "superseded"] as const)(
+    "publishes one terminal blank model outcome for the owning stream (%s)",
+    async (ownership) => {
+      let current = true;
+      const verify = vi.fn(async () => {
+        if (ownership === "superseded") current = false;
+        return ownership !== "checkout";
+      });
+      const { deps, calls } = fakes({
+        state: {
+          appModelAttemptTokens: { [`${REPO}::${DEFAULT_BRANCH}`]: "attempt" },
+          appModelFailures: {
+            [`${REPO}::${DEFAULT_BRANCH}`]: {
+              attemptToken: "attempt",
+              error: "Authoring failed."
+            }
+          }
+        },
+        selection: selection({ content: " ", verifyWorkspaceBranch: verify })
+      });
+      deps.isCurrentSourceRef = () => current;
+      const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+      expect(verify).toHaveBeenCalledOnce();
+      expect(
+        frames(recording.stream).filter(({ event }) => event === "done")
+      ).toEqual([
+        {
+          event: "done",
+          data:
+            ownership === "current" ?
+              {
+                error: `Authoring failed. Fix or remove the empty ${BICEP_PATH} in the workspace, then select Refresh.`,
+                modelingFailed: true,
+                appModelAuthoringFailed: true
+              }
+            : { stale: true }
+        }
+      ]);
+      expect(recording.steps.filter((step) => step === "end")).toHaveLength(1);
+      expect(
+        calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+      ).toBe(false);
+    }
+  );
+
   it("disposes staging when its source becomes stale before compilation", async () => {
     const { deps, calls } = fakes();
     let current = true;

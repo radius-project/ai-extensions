@@ -557,22 +557,25 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     } else {
       const { error: failure } = result;
       const owner = hooks.errorOwner?.();
+      const blankFailure = failure instanceof BlankModelAuthoringFailed;
       if (
         failure instanceof GraphRequestSuperseded ||
         (owner &&
           (!(await ownsWorkspaceGraphOutput(
             owner.isCurrent,
-            ...owner.verifyBranches
+            ...owner.verifyBranches,
+            blankFailure ? failure.verifyWorkspaceBranch : undefined
           )) ||
             !owner.isCurrent()))
       ) {
-        endGraphProgress(hooks.state(), hooks.progressHandle());
+        if (!blankFailure)
+          endGraphProgress(hooks.state(), hooks.progressHandle());
         return json(409, STALE_PAYLOAD);
       }
       const error = dependencies.errorMessage(failure);
       hooks.onError(error);
       const repair = hooks.repair();
-      if (failure instanceof BlankModelAuthoringFailed) {
+      if (blankFailure) {
         outcome = json(200, {
           error,
           modelingFailed: true,
@@ -790,6 +793,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     let activeGeneration: number | undefined;
     let activeProgressHandle: GraphProgressHandle | undefined;
     let activeSourceToken: string | undefined;
+    let ownsGraphRequest: (() => boolean) | undefined;
     let output: ReturnType<typeof stageWorkspaceGraphOutput>;
     const run = async (): Promise<GraphWorkflowOutcome> => {
       const data = dependencies.record(JSON.parse(body));
@@ -858,6 +862,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         dependencies.readInstanceEntry(instanceId) === entry &&
         ownsGraphSelection(state, progressHandle) &&
         isCurrentSourceRef();
+      const workspacePath = state.workspacePath;
+      const isCurrentOutput = () =>
+        dependencies.readInstanceEntry(instanceId) === entry &&
+        state.graphBuildGeneration === requestGeneration &&
+        isCurrentSourceRef() &&
+        state.workspacePath === workspacePath;
+      ownsGraphRequest = () =>
+        isCurrentOutput() && isCurrentGraphProgress(state, progressHandle);
 
       // Every event is gated on the generation, so a superseded request stops
       // writing to the event stream the page is polling.
@@ -941,12 +953,6 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       }
 
       const graphJsonPath = pipeline.graphJsonPathFor(entry, selection);
-      const workspacePath = state.workspacePath;
-      const isCurrentOutput = () =>
-        dependencies.readInstanceEntry(instanceId) === entry &&
-        state.graphBuildGeneration === requestGeneration &&
-        isCurrentSourceRef() &&
-        state.workspacePath === workspacePath;
       const staged = await pipeline.stageArtifacts({
         entry,
         selection,
@@ -1098,6 +1104,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         stagedArtifacts,
         state: () => activeState,
         progressHandle: () => activeProgressHandle,
+        errorOwner: () =>
+          ownsGraphRequest ?
+            { isCurrent: ownsGraphRequest, verifyBranches: [] }
+          : undefined,
         onError: (error) => {
           if (activeState?.graphBuildGeneration === activeGeneration) {
             failRunningGraphEvent(activeState, activeProgressHandle, error);

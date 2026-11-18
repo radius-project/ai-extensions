@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Compare committed pull request revisions in application graph diff descriptions, report the compared revisions, and ignore uncommitted workspace models.
+**Fixed:** Generate pull request graph diffs from the commits currently pushed to GitHub and report their exact SHAs. Unpublished branches cannot be compared, and saved worktree edits or unpushed commits do not appear in the diff.

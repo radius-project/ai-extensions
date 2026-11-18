@@ -81,13 +81,15 @@ function initCommittedGraphWorkspace(workspace: string) {
 
 async function concurrentGraphRuntime(
   workspace?: string,
-  invalidOutputBuilds: ReadonlySet<number> = new Set()
+  invalidOutputBuilds: ReadonlySet<number> = new Set(),
+  afterWorkspaceBranchRead?: () => void
 ) {
   const builds: Array<ReturnType<typeof createDeferred<void>>> = [];
   const runtime = createTestCanvasServerRuntime({
     executionOwner: createEnvironmentExecutionOwner(),
     cliExec: (command, args, _options, callback) => {
       if (workspace && command === "git" && args.includes("symbolic-ref")) {
+        afterWorkspaceBranchRead?.();
         callback(null, "main\n", "");
         return new ChildProcess();
       }
@@ -186,6 +188,47 @@ async function concurrentGraphRuntime(
 }
 
 describe("graph concurrency through production HTTP routes", () => {
+  it.each(["JSON", "SSE"] as const)(
+    "reports stale instead of blank-model recovery after another request takes ownership (%s)",
+    async (transport) => {
+      const workspace = mkdtempSync(path.join(tmpdir(), "radius-blank-race-"));
+      const supersede = vi.fn(() => {
+        h.entry.state.graphBuildGeneration =
+          (h.entry.state.graphBuildGeneration ?? 0) + 1;
+      });
+      const h = await concurrentGraphRuntime(workspace, new Set(), supersede);
+      try {
+        initCommittedGraphWorkspace(workspace);
+        mkdirSync(path.join(workspace, ".radius"));
+        writeFileSync(path.join(workspace, ".radius", "app.bicep"), "  \n");
+        h.entry.state.appModelAttemptTokens = { "octo/app::main": "attempt" };
+        h.entry.state.appModelFailures = {
+          "octo/app::main": {
+            attemptToken: "attempt",
+            error: "Authoring failed."
+          }
+        };
+        const response =
+          transport === "JSON" ? await h.load() : await h.stream();
+        if (transport === "JSON") {
+          expect(response.status).toBe(409);
+          expect(await response.json()).toEqual({ stale: true });
+        } else {
+          expect(response.status).toBe(200);
+          const text = await response.text();
+          expect(text.match(/event: done\ndata: .+/g)).toEqual([
+            'event: done\ndata: {"stale":true}'
+          ]);
+        }
+        expect(supersede).toHaveBeenCalled();
+        expect(h.builds).toEqual([]);
+      } finally {
+        await h.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
   it.each(["JSON", "stream"])(
     "keeps the previous file and retains the %s save warning on reload and cache hits",
     async (transport) => {

@@ -306,7 +306,6 @@ export interface CanvasState {
   // deduplicate both targets.
   appBicepHandoffKeys?: Record<string, string>;
   appBicepHandoffKey?: string;
-  appModelAttemptGeneration?: number;
   appModelAttemptClaims?: Record<
     string,
     import("./runtime/missing-model-handoff-claims.js").MissingModelHandoffClaim

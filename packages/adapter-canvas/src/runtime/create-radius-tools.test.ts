@@ -839,24 +839,47 @@ describe("TL-11: radius_report_modeling_failure", () => {
     });
   });
 
-  it("also releases the two-branch diff claim that covers the failed branch", async () => {
-    const { tools, entry, missingModelHandoffs } = await currentAttempt();
-    const diffTarget = missingModelHandoffTarget("acme/widgets", [
-      "release",
-      "main"
-    ]);
-    const diffClaim = missingModelHandoffs.claim(
-      diffTarget,
-      "missing-model-key"
-    );
-    if (!diffClaim) throw new Error("Missing claim");
-    entry.state.appModelAttemptClaims = { "acme/widgets::main": diffClaim };
-    missingModelHandoffs.markDelivered(diffClaim);
+  it.each(["main", "release"])(
+    "releases the shared diff claim on failure of %s without releasing another attempt on that branch",
+    async (branch) => {
+      const { tools, entry, missingModelHandoffs } = await currentAttempt();
+      const diffTarget = missingModelHandoffTarget("acme/widgets", [
+        "release",
+        "main"
+      ]);
+      const diffClaim = missingModelHandoffs.claim(
+        diffTarget,
+        "missing-model-key"
+      );
+      const separateTarget = missingModelHandoffTarget("acme/widgets", [
+        branch
+      ]);
+      const separateClaim = missingModelHandoffs.claim(
+        separateTarget,
+        "another"
+      );
+      if (!diffClaim || !separateClaim) throw new Error("Missing claim");
+      entry.state.appModelAttemptTokens = {
+        "acme/widgets::main": report.attemptToken,
+        "acme/widgets::release": report.attemptToken
+      };
+      entry.state.appModelAttemptClaims = {
+        "acme/widgets::main": diffClaim,
+        "acme/widgets::release": diffClaim
+      };
+      missingModelHandoffs.markDelivered(diffClaim);
 
-    await findTool(tools, "radius_report_modeling_failure").handler(report);
+      await expect(
+        findTool(tools, "radius_report_modeling_failure").handler({
+          ...report,
+          branch
+        })
+      ).resolves.toEqual({ recorded: true });
 
-    expect(missingModelHandoffs.current(diffTarget)).toBeNull();
-  });
+      expect(missingModelHandoffs.current(diffTarget)).toBeNull();
+      expect(missingModelHandoffs.current(separateTarget)).toBe(separateClaim);
+    }
+  );
 
   it("leaves an unrelated target's claim alone when a failure is recorded", async () => {
     const { tools, missingModelHandoffs } = await currentAttempt();
