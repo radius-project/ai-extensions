@@ -32,7 +32,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parse, type ParseError } from "jsonc-parser";
 import type { IncomingMessage } from "node:http";
 import {
   applicationGraphToResources,
@@ -58,6 +57,7 @@ import {
 } from "./rad-release.js";
 import { RADIUS_RELEASE_TAG } from "./radius-release.js";
 import { isNonFileExtensionReference } from "./bicep-extension-reference.js";
+import { readBicepConfigJsonc } from "./bicep-config-jsonc.js";
 
 export { killChildTree, RadProcessError, spawnRad };
 export type { ProcessResult, SpawnRadOptions };
@@ -1419,14 +1419,7 @@ function readRepositoryBicepConfig(
   const wsConfigPath = path.join(radArtifactsDir, "bicepconfig.json");
   try {
     if (!fs.existsSync(wsConfigPath)) return { kind: "absent" };
-    const errors: ParseError[] = [];
-    const parsed: unknown = parse(
-      fs.readFileSync(wsConfigPath, "utf8"),
-      errors,
-      { allowTrailingComma: true, disallowComments: false }
-    );
-    if (errors.length)
-      throw new Error("Repository bicepconfig.json is not valid JSON.");
+    const parsed = readBicepConfigJsonc(fs.readFileSync(wsConfigPath, "utf8"));
     if (isPlainObject(parsed)) return { kind: "parsed", config: parsed };
     return { kind: "unreadable", detail: "its root is not a JSON object" };
   } catch (err) {

@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { parse, type ParseError } from "jsonc-parser";
 import {
   GraphSourceError,
   type GraphSourceIdentity,
@@ -10,6 +9,7 @@ import {
 } from "@radius-project/core";
 import type { GraphBytesRead } from "./graph-source-bindings.js";
 import { isNonFileExtensionReference } from "./bicep-extension-reference.js";
+import { readBicepConfigJsonc } from "./bicep-config-jsonc.js";
 
 export interface GraphArtifactPorts {
   readBytes(
@@ -62,16 +62,20 @@ async function stageArtifacts(
   const config = await ports.readBytes(source, repoPath("bicepconfig.json"));
   const hash = createHash("sha256").update("radius-base-config");
   if (config.status === "unavailable") fail(config.diagnostic);
-  const artifacts: Array<{ relative: string; bytes: Uint8Array }> = [];
+  const artifacts = new Map<string, Uint8Array>();
+  const destinations = new Map([["bicepconfig.json", "bicepconfig.json"]]);
+  // Fixed-length digests keep adjacent fields and files from sharing boundaries.
+  const hashField = (field: string | Uint8Array) =>
+    hash.update(createHash("sha256").update(field).digest());
   if (config.status === "present") {
-    hash.update(config.bytes);
-    const errors: ParseError[] = [];
-    const parsed: unknown = parse(
-      Buffer.from(config.bytes).toString("utf8"),
-      errors,
-      { allowTrailingComma: true, disallowComments: false }
-    );
-    if (errors.length) fail("Graph bicepconfig.json is not valid JSON.");
+    hashField(config.bytes);
+    let parsed: unknown;
+    try {
+      parsed = readBicepConfigJsonc(Buffer.from(config.bytes).toString("utf8"));
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      fail("Graph bicepconfig.json is not valid JSON.");
+    }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       fail("Graph bicepconfig.json must be an object.");
     const extensions = "extensions" in parsed ? parsed.extensions : {};
@@ -88,7 +92,6 @@ async function stageArtifacts(
         fail(`Invalid extension reference for ${alias}.`);
       if (!value.trim()) continue;
       const ref = alias === "radius" ? value.trim() : value;
-      hash.update(alias).update(ref);
       if (isNonFileExtensionReference(ref)) continue;
       const relative = ref.replace(/^\.\//, "");
       if (
@@ -102,6 +105,23 @@ async function stageArtifacts(
         relative === "bicepconfig.json"
       )
         fail(`Unsafe graph extension reference for ${alias}.`);
+      const destination =
+        process.platform === "win32" ?
+          relative
+            .split("/")
+            .map((part) => part.replace(/[ .]+$/, "").toLowerCase())
+            .join("/")
+        : relative;
+      if (
+        process.platform === "win32" &&
+        (destination.includes(":") || destination.split("/").includes(""))
+      )
+        fail(`Unsafe graph extension reference for ${alias}.`);
+      const previous = destinations.get(destination);
+      if (previous !== undefined && previous !== relative)
+        fail(`Conflicting graph extension destination for ${alias}.`);
+      if (artifacts.has(relative)) continue;
+      destinations.set(destination, relative);
       const artifact = await ports.readBytes(source, repoPath(relative));
       if (artifact.status !== "present")
         fail(
@@ -109,8 +129,9 @@ async function stageArtifacts(
             artifact.diagnostic
           : `Required graph extension artifact ${relative} is absent.`
         );
-      hash.update(artifact.bytes);
-      artifacts.push({ relative, bytes: artifact.bytes });
+      hashField(relative);
+      hashField(artifact.bytes);
+      artifacts.set(relative, artifact.bytes);
     }
   }
   const fingerprint = hash.digest("hex");
@@ -131,10 +152,10 @@ async function stageArtifacts(
   };
   try {
     await files.writeFile(path.join(dir, "bicepconfig.json"), config.bytes);
-    for (const artifact of artifacts) {
-      const target = path.join(dir, artifact.relative);
+    for (const [relative, bytes] of artifacts) {
+      const target = path.join(dir, relative);
       await files.mkdir(path.dirname(target), { recursive: true });
-      await files.writeFile(target, artifact.bytes);
+      await files.writeFile(target, bytes, { flag: "wx" });
     }
     return { dir, owned: true, fingerprint, dispose };
   } catch (error) {

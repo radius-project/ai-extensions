@@ -107,6 +107,29 @@ const local = (root: string) => ({
 });
 
 describe("graph source bindings", () => {
+  it("rechecks the selected workspace branch before a later graph operation", async () => {
+    const root = await fixture();
+    const { sources, checkout } = harness(root);
+    const source: GraphSourceIdentity = {
+      ...remoteSource,
+      kind: "workspace",
+      workspacePath: root
+    };
+    await expect(
+      sources.assertWorkspaceSource(source)
+    ).resolves.toBeUndefined();
+    checkout.branch = "different/branch";
+    await expect(sources.assertWorkspaceSource(source)).rejects.toThrow(
+      "Workspace branch changed"
+    );
+    await expect(
+      sources.assertWorkspaceSource({ ...source, workspacePath: undefined })
+    ).rejects.toThrow("Workspace path is unavailable");
+    await expect(
+      sources.assertWorkspaceSource(remoteSource)
+    ).resolves.toBeUndefined();
+  });
+
   it.each(["other", ""])(
     "rejects a stale explicit workspace selection on checkout %j",
     async (branch) => {
@@ -343,11 +366,14 @@ describe("graph source bindings", () => {
     }
   );
 
-  it("confirms ref readability before interpreting model 404 as absence", async () => {
+  it("confirms ref readability after each model 404 before treating it as absence", async () => {
     const root = await fixture();
     const { sources, calls } = harness(
       root,
-      { [commitPath]: { sha: revision } },
+      {
+        [commitPath]: { sha: revision },
+        [`/repos/${repo}/commits/${revision}`]: { sha: revision }
+      },
       {
         [filePath(".radius/app.bicep")]: "Not Found (HTTP 404)",
         [filePath("app.bicep")]: "Not Found (HTTP 404)"
@@ -360,7 +386,9 @@ describe("graph source bindings", () => {
     expect(calls).toEqual([
       commitPath,
       filePath(".radius/app.bicep"),
-      filePath("app.bicep")
+      `/repos/${repo}/commits/${revision}`,
+      filePath("app.bicep"),
+      `/repos/${repo}/commits/${revision}`
     ]);
     const denied = harness(
       root,
@@ -374,6 +402,30 @@ describe("graph source bindings", () => {
       diagnostic: "[redacted] (HTTP 404)"
     });
     expect(denied.calls).toEqual([commitPath]);
+  });
+
+  it("reports lost access to a previously readable revision as unavailable", async () => {
+    const root = await fixture();
+    const model = filePath(".radius/app.bicep");
+    const proof = `/repos/${repo}/commits/${revision}`;
+    const errors: Record<string, string> = {};
+    const { sources, calls } = harness(
+      root,
+      { [commitPath]: { sha: revision }, [model]: encoded("model") },
+      errors
+    );
+    expect(await sources.read({ repo, ref: "feature/branch" })).toMatchObject({
+      status: "present"
+    });
+    errors[model] = "Not Found (HTTP 404)";
+    errors[proof] = "private-detail (HTTP 404)";
+    expect(
+      await sources.readFile(remoteSource, ".radius/app.bicep")
+    ).toMatchObject({
+      status: "unavailable",
+      diagnostic: "[redacted] (HTTP 404)"
+    });
+    expect(calls).toEqual([commitPath, model, model, proof]);
   });
 
   it.each([null, { sha: "not-a-revision" }, [], { sha: 42 }])(

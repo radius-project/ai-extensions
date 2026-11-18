@@ -112,6 +112,22 @@ export function createGraphSourceBindings(
       error instanceof Error ? error.message : String(error)
     );
 
+  async function requireReadableRevision(repo: string, revision: string) {
+    const proof = await repository.readJson(
+      `/repos/${repo}/commits/${encodeURIComponent(revision)}`
+    );
+    if (
+      !proof.ok ||
+      !proof.json ||
+      typeof proof.json !== "object" ||
+      !("sha" in proof.json) ||
+      proof.json.sha !== revision
+    )
+      throw new Error(
+        proof.stderr || "GitHub graph revision is no longer readable."
+      );
+  }
+
   async function assertWorkspaceBranch(
     source: GraphSourceIdentity,
     workspacePath: string
@@ -173,26 +189,20 @@ export function createGraphSourceBindings(
         throw new Error("GitHub graph source has no resolved revision.");
       const revisionKey = `${source.repo.toLowerCase()}@${source.revision}`;
       if (!readableRevisions.has(revisionKey)) {
-        const proof = await repository.readJson(
-          `/repos/${source.repo}/commits/${encodeURIComponent(source.revision)}`
-        );
-        if (
-          !proof.ok ||
-          !proof.json ||
-          typeof proof.json !== "object" ||
-          !("sha" in proof.json) ||
-          proof.json.sha !== source.revision
-        )
-          throw new Error(
-            proof.stderr || "GitHub graph revision is no longer readable."
-          );
+        await requireReadableRevision(source.repo, source.revision);
         readableRevisions.add(revisionKey);
       }
       const response = await repository.readJson(
         `/repos/${source.repo}/contents/${normalized.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(source.revision)}`
       );
       if (!response.ok) {
-        if (response.status === 404) return { status: "absent" };
+        if (response.status === 404) {
+          // GitHub also returns 404 when access has been lost.
+          readableRevisions.delete(revisionKey);
+          await requireReadableRevision(source.repo, source.revision);
+          readableRevisions.add(revisionKey);
+          return { status: "absent" };
+        }
         throw new Error(response.stderr || "GitHub graph file unavailable.");
       }
       const value = response.json;
@@ -254,7 +264,7 @@ export function createGraphSourceBindings(
       if (!request.repo || !request.ref)
         throw new Error("Graph source requires a repository and ref.");
       if (source.kind === "github") {
-        // The successful commit read proves ref readability before any file 404.
+        // Resolve the moving ref once; supporting files use the captured SHA.
         const response = await repository.readJson(
           `/repos/${request.repo}/commits/${encodeURIComponent(request.ref)}`
         );

@@ -173,9 +173,10 @@ describe("graph artifact staging", () => {
         expect(logs.some((message) => message.startsWith("Warning:"))).toBe(
           false
         );
-        expect(calls.filter((file) => file.endsWith("types.tgz"))).toHaveLength(
-          radius.includes("types.tgz") ? 2 : 1
-        );
+        expect(calls).toEqual([
+          ".radius/bicepconfig.json",
+          ".radius/types.tgz"
+        ]);
       } finally {
         await staged.dispose();
       }
@@ -213,12 +214,79 @@ describe("graph artifact staging", () => {
         JSON.stringify({ extensions: { custom: ref } })
       )
     });
+
     await expect(stageGraphArtifacts(selection(), ports)).rejects.toMatchObject(
       { code: "invalid-artifact" }
     );
     expect(calls).toEqual([".radius/bicepconfig.json"]);
   });
 
+  it
+    .runIf(process.platform === "win32")
+    .each([
+      { custom: "BicepConfig.json" },
+      { first: "Types.tgz", second: "types.tgz" },
+      { first: "types.tgz", second: "types.tgz." }
+    ])(
+    "rejects Windows destination aliases %j before writing",
+    async (extensions) => {
+      const root = await fixture();
+      const { ports } = harness(root, {
+        ".radius/bicepconfig.json": present(JSON.stringify({ extensions })),
+        ".radius/Types.tgz": present("first"),
+        ".radius/types.tgz": present("first")
+      });
+      await expect(
+        stageGraphArtifacts(selection(), ports)
+      ).rejects.toMatchObject({
+        code: "invalid-artifact",
+        message: expect.stringContaining("Conflicting")
+      });
+      await expect(fs.stat(ports.stagingRoot)).rejects.toMatchObject({
+        code: "ENOENT"
+      });
+    }
+  );
+
+  it
+    .runIf(process.platform === "win32")
+    .each(["nested/.. /types.tgz", "nested/types.tgz:stream"])(
+    "rejects unsafe Windows artifact path %j before reading",
+    async (ref) => {
+      const root = await fixture();
+      const { ports, calls } = harness(root, {
+        ".radius/bicepconfig.json": present(
+          JSON.stringify({ extensions: { custom: ref } })
+        )
+      });
+      await expect(
+        stageGraphArtifacts(selection(), ports)
+      ).rejects.toMatchObject({
+        code: "invalid-artifact",
+        message: expect.stringContaining("Unsafe")
+      });
+      expect(calls).toEqual([".radius/bicepconfig.json"]);
+    }
+  );
+
+  it("distinguishes content changes across adjacent artifact boundaries", async () => {
+    const root = await fixture();
+    const marker = "secondsecond.tgz";
+    const values = {
+      ".radius/bicepconfig.json": present(
+        '{"extensions":{"first":"first.tgz","second":"second.tgz"}}'
+      ),
+      ".radius/first.tgz": present(`a${marker}`),
+      ".radius/second.tgz": present("b")
+    };
+    const { ports } = harness(root, values);
+    const first = await stageGraphArtifacts(selection(), ports);
+    values[".radius/first.tgz"] = present("a");
+    values[".radius/second.tgz"] = present(`${marker}b`);
+    const second = await stageGraphArtifacts(selection(), ports);
+    expect(first.fingerprint).not.toBe(second.fingerprint);
+    await Promise.all([first.dispose(), second.dispose()]);
+  });
   it.each([
     { status: "absent" },
     { status: "unavailable", diagnostic: "private-detail" }

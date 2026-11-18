@@ -1995,6 +1995,17 @@ describe("writeBicepCompileConfig", () => {
     );
   });
 
+  it.each([
+    '{"__proto__":{"extensions":{"radius":"br:registry/unexpected:v1"}}}',
+    '{"extensions":{"__proto__":{"radius":"br:registry/unexpected:v1"}}}'
+  ])("only accepts explicit Radius pins in JSONC %j", (config) => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), `// config\n${config}`);
+
+    writeBicepCompileConfig(dir, ws, undefined, DERIVED);
+
+    expect(readConfig().extensions.radius).toBe(DERIVED);
+  });
+
   it("keeps a missing local extension alias while reporting that no artifact was copied", () => {
     fs.writeFileSync(
       path.join(ws, "bicepconfig.json"),
