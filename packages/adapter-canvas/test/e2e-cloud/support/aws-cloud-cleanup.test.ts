@@ -9,6 +9,7 @@ import {
   cleanupConfig,
   createCleanupScenario,
   databaseName,
+  deployRoleTrust,
   environmentId,
   MAIN,
   MAIN_VPC,
@@ -1126,6 +1127,75 @@ describe("sweepAwsCloudE2E", () => {
       `access entry for ${ROLE} on cluster ${MAIN.name}`
     ]);
   });
+
+  // Whatever the removal keeps after its second attempt, the environment
+  // goes, so a fresh run's leftover check must still name it.
+  it.each([
+    {
+      kept: "a trust subject other environments may present",
+      setup: (s: CleanupScenario) => {
+        const shared = `repo:${REPO}:ref:refs/heads/main`;
+        s.subjects.get(OLD)!.push(shared);
+        s.github
+          .environment(OLD)!
+          .variables.set(
+            "AWS_TRUST_SUBJECTS",
+            JSON.stringify(s.subjects.get(OLD))
+          );
+        s.aws.role(ROLE)!.AssumeRolePolicyDocument = deployRoleTrust(
+          [...s.subjects.values()].flat()
+        );
+        // The role still lets the subject in, so its access entry stays too.
+        return {
+          findings: [
+            `trust subject ${shared} on ${ROLE}`,
+            `access entry for ${ROLE} on cluster ${MAIN.name}`
+          ],
+          restore() {}
+        };
+      }
+    },
+    {
+      kept: "the app-roles policy, when the role's policies can't be listed",
+      setup: (s: CleanupScenario) => {
+        const name = "radius-app-roles-1361595003";
+        s.aws.role(ROLE)!.inline.set(name, {
+          Version: "2012-10-17",
+          Statement: []
+        });
+        const run = s.aws.run.bind(s.aws);
+        s.aws.run = (args) =>
+          args[1] === "list-role-policies" ?
+            {
+              code: 254,
+              stdout: "",
+              stderr:
+                "An error occurred (ServiceFailure) when calling the ListRolePolicies operation"
+            }
+          : run(args);
+        return {
+          findings: [`inline policy ${name} on ${ROLE}`],
+          restore: () => {
+            s.aws.run = run;
+          }
+        };
+      }
+    }
+  ])(
+    "keeps the reset blocked while the removal keeps $kept",
+    async ({ setup }) => {
+      const s = createCleanupScenario();
+      await addAwsEnvironment(s, OLD, { deployed: true });
+      const { findings, restore } = setup(s);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([expect.stringMatching(`^${OLD}: Kept`)]);
+      expect(s.github.environment(OLD)).toBeUndefined();
+      restore();
+      nextDay(s);
+      expect((await runSweep(s)).failures).toEqual([]);
+      expect((await runVerify(s)).findings).toEqual(findings);
+    }
+  );
 
   it("keeps the GitHub environment when the removal fails, naming the runbook", async () => {
     const s = await twoEnvironments();
