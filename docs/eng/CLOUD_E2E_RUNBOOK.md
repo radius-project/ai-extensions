@@ -248,6 +248,8 @@ A local run uses your own Azure subscription and your own copy of the fixture re
 
    The run reads this session itself with `gh auth token`, and ignores any `GH_TOKEN` or `GITHUB_TOKEN` you have set. It never writes the token to the log.
 
+   The session must not expire, because the run uses the token it read at the start for hours. Before it starts, the run calls `GET /user` once and refuses a token whose response has a `GitHub-Authentication-Token-Expiration` header, or a response it can't read. A web-browser `gh auth login` gives a session that doesn't expire; a fine-grained or expiring personal access token is refused.
+
 3. Sign in to Azure with `az login`, then run the suite from `packages/adapter-canvas`:
 
    ```bash
