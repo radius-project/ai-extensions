@@ -112,3 +112,7 @@ export {
 } from "./runtime-deployment.js";
 export * from "./deployment-repair.js";
 export * from "./production-deployment.js";
+export * from "./graph-source-bindings.js";
+export * from "./graph-artifacts.js";
+export { readBicepConfigJsonc } from "./bicep-config-jsonc.js";
+export { isNonFileExtensionReference } from "./bicep-extension-reference.js";

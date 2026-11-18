@@ -56,6 +56,8 @@ import {
   radiusVersionFromExtensionRef
 } from "./rad-release.js";
 import { RADIUS_RELEASE_TAG } from "./radius-release.js";
+import { isNonFileExtensionReference } from "./bicep-extension-reference.js";
+import { readBicepConfigJsonc } from "./bicep-config-jsonc.js";
 
 export { killChildTree, RadProcessError, spawnRad };
 export type { ProcessResult, SpawnRadOptions };
@@ -1358,12 +1360,6 @@ export function saveGraphJson(
   }
 }
 
-// isOciExtensionRef - true when a bicepconfig extension alias points at an OCI
-// registry (br:/oci:) rather than a local artifact file.
-function isOciExtensionRef(ref: string): boolean {
-  return /^(br|oci):/i.test(ref);
-}
-
 // copyLocalExtensionArtifact - copy a local extension artifact (e.g. the
 // custom-types .tgz a bicepconfig alias references) from the workspace `.radius/`
 // into the compile dir, preserving its relative path so bicep resolves it next
@@ -1423,7 +1419,7 @@ function readRepositoryBicepConfig(
   const wsConfigPath = path.join(radArtifactsDir, "bicepconfig.json");
   try {
     if (!fs.existsSync(wsConfigPath)) return { kind: "absent" };
-    const parsed: unknown = JSON.parse(fs.readFileSync(wsConfigPath, "utf8"));
+    const parsed = readBicepConfigJsonc(fs.readFileSync(wsConfigPath, "utf8"));
     if (isPlainObject(parsed)) return { kind: "parsed", config: parsed };
     return { kind: "unreadable", detail: "its root is not a JSON object" };
   } catch (err) {
@@ -1532,7 +1528,7 @@ export function writeBicepCompileConfig(
       // artifacts: `path.resolve(root, "")` is the workspace directory itself,
       // which the copier would report as an unreadable artifact.
       if (typeof ref !== "string" || !ref.trim()) continue;
-      if (!isOciExtensionRef(ref))
+      if (!isNonFileExtensionReference(ref))
         copyLocalExtensionArtifact(radArtifactsDir, dir, ref, log);
     }
 

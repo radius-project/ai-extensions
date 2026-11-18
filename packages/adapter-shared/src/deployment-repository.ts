@@ -33,10 +33,12 @@ export function createDeploymentRepository(ports: {
     apiPath: string,
     {
       headers = {},
-      timeout = 15000
+      timeout = 15000,
+      readErrorJson = false
     }: {
       headers?: Record<string, string>;
       timeout?: number;
+      readErrorJson?: boolean;
     } = {}
   ): Promise<DeploymentJsonResult> {
     const args = ["api", apiPath];
@@ -74,10 +76,18 @@ export function createDeploymentRepository(ports: {
           const status =
             detail.match(/\(HTTP (\d{3})\)/) ||
             detail.match(/\bHTTP (\d{3})\b/);
+          let json: unknown = null;
+          if (readErrorJson && stdout) {
+            try {
+              json = JSON.parse(stdout);
+            } catch {
+              // Keep the command diagnostic when no JSON error body is available.
+            }
+          }
           resolve({
             ok: false,
             status: status ? Number(status[1]) : null,
-            json: null,
+            json,
             stderr: detail
           });
         }
