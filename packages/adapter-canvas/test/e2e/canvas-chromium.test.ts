@@ -6,6 +6,7 @@ import {
   type DeploymentRow
 } from "@radius-project/core";
 import { remediationView } from "@radius-project/core/remediations";
+import { createHash } from "node:crypto";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
@@ -28,7 +29,9 @@ import {
   VERIFICATION_WORKFLOW_CONTENT,
   WORKTREE_BRANCH,
   type CanvasHarness,
-  type FakeCliCommand
+  type FakeCliCall,
+  type FakeCliCommand,
+  type FakeCliScenario
 } from "./support/canvas-harness.js";
 import type { Locator, Page, TestInfo } from "@playwright/test";
 import {
@@ -39,7 +42,10 @@ import {
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { AWS_SUBNET_NOTE } from "../../src/browser/environment/aws-infrastructure.js";
-import { defaultAwsDeployRoleName } from "../../src/aws-deploy-role-name.js";
+import {
+  awsAppBoundary,
+  defaultAwsDeployRoleName
+} from "../../src/aws-deploy-role-name.js";
 import {
   generateDeleteWorkflow,
   generateDeployWorkflow,
@@ -788,6 +794,582 @@ async function openEnvironmentWizard(page: Page): Promise<void> {
   await next.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("#env-step-details")).toBeVisible();
+}
+
+// The Retry setup journeys run the production setup runner against the fake
+// CLI. These helpers model the GitHub state it reads: the Radius workflows are
+// already on the default branch from an earlier setup, so their content does
+// not depend on the new operation's id.
+const RETRY_ENVIRONMENT = "fixture-environment";
+const RETRY_FAILED_RUN_ID = 39;
+const RETRY_NEW_RUN_ID = 41;
+const RETRY_REPOSITORY_ID = 42;
+const GH_NOT_FOUND = { exitCode: 1, stderr: "gh: Not Found (HTTP 404)" };
+
+function ghCommand(
+  args: string[],
+  stdout: string,
+  fields: Partial<FakeCliCommand> = {}
+): FakeCliCommand {
+  return { tool: "gh", args, stdout, ...fields };
+}
+
+async function workflowTemplateCommands(): Promise<FakeCliCommand[]> {
+  const directory = path.join(REPOSITORY_ROOT, ".github", "extension");
+  const files = (await fs.readdir(directory)).filter((file) =>
+    file.endsWith(".yml")
+  );
+  const commands: FakeCliCommand[] = [];
+  for (const file of files) {
+    const content = await fs.readFile(path.join(directory, file));
+    for (const ref of new Set([RADIUS_REF, DELETE_RADIUS_REF])) {
+      commands.push(
+        ghCommand(
+          [
+            "api",
+            `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=${ref}`
+          ],
+          JSON.stringify({
+            content: content.toString("base64"),
+            encoding: "base64",
+            size: content.length
+          })
+        )
+      );
+    }
+  }
+  return commands;
+}
+
+// Requires the workflow templates in the active scenario, because the
+// production generators fetch them through the fake `gh`.
+async function existingWorkflowCommands(
+  provider: "azure" | "aws",
+  includeAws: boolean
+): Promise<FakeCliCommand[]> {
+  const workflows = {
+    ...(await generateDeployWorkflow(RETRY_ENVIRONMENT, ".radius/app.bicep", {
+      includeAws
+    })),
+    ...(await generateDeleteWorkflow(RETRY_ENVIRONMENT, { includeAws })),
+    "radius-verify-credentials.yml": await generateVerifyWorkflow(
+      RETRY_ENVIRONMENT,
+      provider
+    )
+  };
+  const contents = (file: string) =>
+    `/repos/${REPOSITORY}/contents/.github/workflows/${file}`;
+  const commands: FakeCliCommand[] = [];
+  for (const [file, content] of Object.entries(workflows)) {
+    const bytes = Buffer.from(content);
+    const base64 = bytes.toString("base64");
+    const sha = createHash("sha1")
+      .update(`blob ${bytes.length}\0`)
+      .update(bytes)
+      .digest("hex");
+    commands.push(
+      ghCommand(
+        ["api", `${contents(file)}?ref=main`],
+        JSON.stringify({
+          sha,
+          content: base64,
+          encoding: "base64",
+          size: bytes.length
+        })
+      ),
+      ghCommand(
+        ["api", `${contents(file)}?ref=main`, "--jq", ".content"],
+        base64
+      ),
+      ghCommand(["api", contents(file), "--jq", ".sha"], sha)
+    );
+  }
+  for (const file of [...Object.keys(workflows), "radius-deploy.yml"]) {
+    commands.push(
+      ghCommand(
+        ["api", `${contents(file)}?ref=${WORKTREE_BRANCH}`],
+        "",
+        GH_NOT_FOUND
+      )
+    );
+  }
+  commands.push(
+    ghCommand(
+      ["api", `${contents("radius-deploy.yml")}?ref=main`, "--jq", ".content"],
+      "",
+      GH_NOT_FOUND
+    ),
+    ghCommand(
+      ["api", contents("radius-deploy.yml"), "--jq", ".sha"],
+      "",
+      GH_NOT_FOUND
+    )
+  );
+  return commands;
+}
+
+function retrySetupGitHubCommands(
+  variables: readonly string[]
+): FakeCliCommand[] {
+  const environmentPath = `/repos/${REPOSITORY}/environments/${RETRY_ENVIRONMENT}`;
+  return [
+    ghCommand(
+      ["api", `/repos/${REPOSITORY}`, "--jq", ".default_branch"],
+      "main\n"
+    ),
+    ghCommand(
+      ["api", `/repos/${REPOSITORY}`],
+      JSON.stringify({
+        full_name: REPOSITORY,
+        id: RETRY_REPOSITORY_ID,
+        owner: { id: 7, login: "fixture" },
+        default_branch: "main",
+        permissions: { admin: true, push: true }
+      })
+    ),
+    ghCommand(
+      ["api", `/repos/${REPOSITORY}/actions/oidc/customization/sub`],
+      JSON.stringify({ use_default: true })
+    ),
+    ghCommand(["api", environmentPath], "", { ...GH_NOT_FOUND, times: 1 }),
+    ghCommand(
+      ["api", environmentPath],
+      JSON.stringify({ id: 123, name: RETRY_ENVIRONMENT })
+    ),
+    {
+      tool: "gh",
+      argsPrefix: ["api", "--method", "PUT", environmentPath],
+      // GitHub reports when it created the environment, which proves this
+      // setup created it.
+      stdout: JSON.stringify({
+        id: 123,
+        name: RETRY_ENVIRONMENT,
+        created_at: new Date().toISOString()
+      })
+    },
+    {
+      tool: "gh",
+      argsPrefix: [
+        "api",
+        "--paginate",
+        `${environmentPath}/variables?per_page=100`
+      ],
+      stdout: ""
+    },
+    ...variables.map((name) =>
+      ghCommand(
+        ["api", `${environmentPath}/variables/${name}`],
+        "",
+        GH_NOT_FOUND
+      )
+    ),
+    { tool: "gh", argsPrefix: ["variable", "set"], stdout: "" },
+    ghCommand(
+      [
+        "run",
+        "list",
+        "--workflow=radius-verify-credentials.yml",
+        "--limit",
+        "1",
+        "--json",
+        "databaseId",
+        "--repo",
+        REPOSITORY
+      ],
+      '[{"databaseId":38}]'
+    ),
+    {
+      tool: "gh",
+      argsPrefix: ["workflow", "run", "radius-verify-credentials.yml"],
+      stdout: `https://github.com/${REPOSITORY}/actions/runs/${RETRY_FAILED_RUN_ID}\n`,
+      times: 1
+    },
+    {
+      tool: "gh",
+      argsPrefix: ["workflow", "run", "radius-verify-credentials.yml"],
+      stdout: `https://github.com/${REPOSITORY}/actions/runs/${RETRY_NEW_RUN_ID}\n`
+    }
+  ];
+}
+
+function verifyRunCommands(
+  runId: number,
+  run: { status: string; conclusion: string | null },
+  failed?: { step: string; log: string }
+): FakeCliCommand[] {
+  return [
+    ghCommand(
+      ["run", "view", String(runId), "--log", "--repo", REPOSITORY],
+      failed ? `verify\t${failed.step}\t${failed.log}\n` : ""
+    ),
+    ghCommand(
+      [
+        "api",
+        `repos/${REPOSITORY}/actions/runs/${runId}`,
+        "--include",
+        "--method",
+        "GET"
+      ],
+      `HTTP/2 200\n\n${JSON.stringify(run)}`
+    ),
+    ghCommand(
+      [
+        "api",
+        `repos/${REPOSITORY}/actions/runs/${runId}/jobs?per_page=100&page=1`,
+        "--include",
+        "--method",
+        "GET"
+      ],
+      `HTTP/2 200\n\n${JSON.stringify({
+        total_count: 1,
+        jobs: [
+          {
+            name: "verify",
+            ...run,
+            steps:
+              failed ?
+                [
+                  {
+                    name: failed.step,
+                    number: 4,
+                    status: "completed",
+                    conclusion: "failure"
+                  }
+                ]
+              : []
+          }
+        ]
+      })}`
+    )
+  ];
+}
+
+// Retry setup reads back what the first attempt wrote. Each write the fake CLI
+// answered becomes the state a later read returns.
+function stateWrittenBy(calls: readonly FakeCliCall[]): FakeCliCommand[] {
+  const option = (args: readonly string[], name: string) =>
+    args[args.indexOf(name) + 1] ?? "";
+  const tags = (args: readonly string[]) => {
+    const start = args.indexOf("--tags") + 1;
+    const end = args.indexOf("--output", start);
+    return args.slice(start, end < 0 ? undefined : end).map((tag) => {
+      const [key = "", value = ""] = tag.split(",");
+      return {
+        Key: key.replace(/^Key=/, ""),
+        Value: value.replace(/^Value=/, "")
+      };
+    });
+  };
+  // The account of the IAM objects the first attempt created.
+  let account = "";
+  const commands: FakeCliCommand[] = [];
+  for (const { tool, args, matched } of calls) {
+    if (!matched) continue;
+    if (tool === "gh" && args[0] === "variable" && args[1] === "set") {
+      const name = args[2] ?? "";
+      commands.push(
+        ghCommand(
+          [
+            "api",
+            `/repos/${option(args, "--repo")}/environments/${option(args, "--env")}/variables/${name}`
+          ],
+          JSON.stringify({ name, value: option(args, "--body") })
+        )
+      );
+    }
+    if (tool === "aws" && args[0] === "iam" && args[1] === "create-role") {
+      const roleName = option(args, "--role-name");
+      const trust = option(args, "--assume-role-policy-document");
+      // The trust policy names the account through its identity provider ARN.
+      account =
+        /arn:aws:iam::(\d{12}):oidc-provider\//.exec(trust)?.[1] ?? account;
+      commands.push({
+        tool: "aws",
+        argsPrefix: ["iam", "get-role", "--role-name", roleName],
+        stdout: JSON.stringify({
+          Role: {
+            RoleName: roleName,
+            RoleId: "AROA1",
+            Arn: `arn:aws:iam::${account}:role/${roleName}`,
+            Path: "/",
+            Description: option(args, "--description"),
+            AssumeRolePolicyDocument: JSON.parse(trust) as unknown,
+            Tags: tags(args)
+          }
+        })
+      });
+    }
+    if (
+      tool === "aws" &&
+      args[0] === "iam" &&
+      args[1] === "create-policy" &&
+      args[2] === "--path"
+    ) {
+      const arn = `arn:aws:iam::${account}:policy${option(args, "--path")}${option(args, "--policy-name")}`;
+      commands.push(
+        {
+          tool: "aws",
+          argsPrefix: ["iam", "get-policy", "--policy-arn", arn],
+          stdout: JSON.stringify({
+            Policy: {
+              PolicyName: option(args, "--policy-name"),
+              Arn: arn,
+              DefaultVersionId: "v1",
+              Tags: tags(args)
+            }
+          })
+        },
+        {
+          tool: "aws",
+          argsPrefix: [
+            "iam",
+            "get-policy-version",
+            "--policy-arn",
+            arn,
+            "--version-id",
+            "v1"
+          ],
+          stdout: JSON.stringify({
+            PolicyVersion: {
+              VersionId: "v1",
+              IsDefaultVersion: true,
+              Document: JSON.parse(option(args, "--policy-document")) as unknown
+            }
+          })
+        }
+      );
+    }
+    if (tool === "aws" && args[0] === "iam" && args[1] === "put-role-policy") {
+      const roleName = option(args, "--role-name");
+      const policyName = option(args, "--policy-name");
+      commands.push({
+        tool: "aws",
+        argsPrefix: [
+          "iam",
+          "get-role-policy",
+          "--role-name",
+          roleName,
+          "--policy-name",
+          policyName
+        ],
+        stdout: JSON.stringify({
+          RoleName: roleName,
+          PolicyName: policyName,
+          PolicyDocument: JSON.parse(
+            option(args, "--policy-document")
+          ) as unknown
+        })
+      });
+    }
+    if (
+      tool === "az" &&
+      args.slice(0, 3).join(" ") === "role assignment create"
+    ) {
+      const name = option(args, "--name");
+      const scope = option(args, "--scope");
+      commands.push({
+        tool: "az",
+        args: [
+          "role",
+          "assignment",
+          "list",
+          "--scope",
+          scope,
+          "--query",
+          `[?name=='${name}'].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}`,
+          "-o",
+          "json"
+        ],
+        stdout: JSON.stringify([
+          {
+            id: `${scope}/providers/Microsoft.Authorization/roleAssignments/${name}`,
+            principalId: option(args, "--assignee-object-id"),
+            roleDefinitionName: option(args, "--role"),
+            scope
+          }
+        ])
+      });
+    }
+  }
+  return commands;
+}
+
+// GitHub Packages and the registry are reached with `fetch`, not `gh`. The
+// harness answers the registry token and upload-session calls; this answers the
+// rest of the state-package bootstrap and fails any other GitHub request.
+function installOfflineStatePackageRegistry(): () => void {
+  const delegate = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url =
+      typeof input === "string" ? input
+      : input instanceof URL ? input.href
+      : input.url;
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url === "https://api.github.com/users/fixture") {
+      return Response.json({ type: "User" });
+    }
+    if (
+      url.startsWith("https://api.github.com/users/fixture/packages/container/")
+    ) {
+      return Response.json({
+        visibility: "private",
+        repository: { full_name: REPOSITORY }
+      });
+    }
+    if (url === "https://ghcr.io/v2/" && method === "GET") {
+      return new Response(null, {
+        status: 401,
+        headers: {
+          "WWW-Authenticate":
+            'Bearer realm="https://ghcr.io/token",service="ghcr.io"'
+        }
+      });
+    }
+    if (url.startsWith("https://ghcr.io/v2/") && method === "HEAD") {
+      return new Response(null, { status: 404 });
+    }
+    if (url.startsWith("https://ghcr.io/v2/") && method === "PUT") {
+      const body = init?.body;
+      const digest =
+        new URL(url).searchParams.get("digest") ??
+        `sha256:${createHash("sha256")
+          .update(
+            typeof body === "string" || body instanceof Uint8Array ? body : ""
+          )
+          .digest("hex")}`;
+      return new Response(null, {
+        status: 201,
+        headers: { "Docker-Content-Digest": digest }
+      });
+    }
+    if (
+      url.startsWith("https://ghcr.io/token?") ||
+      (url.startsWith("https://ghcr.io/v2/") &&
+        (method === "POST" || method === "DELETE"))
+    ) {
+      return delegate(input, init);
+    }
+    if (
+      url.startsWith("https://ghcr.io/") ||
+      url.startsWith("https://api.github.com/")
+    ) {
+      throw new Error(`Unmodeled GitHub request: ${method} ${url}`);
+    }
+    return delegate(input, init);
+  };
+  return () => {
+    globalThis.fetch = delegate;
+  };
+}
+
+// The extension entry point configures this store; the harness imports the
+// server directly, so a journey that writes Azure credentials configures it.
+async function useCredentialProvenanceStore(directory: string): Promise<void> {
+  const { configureCredentialProvenanceStore } =
+    await import("../../src/credential-provenance.js");
+  const { createFileCredentialProvenanceStore } =
+    await import("../../src/credential-provenance-store.js");
+  await configureCredentialProvenanceStore(
+    createFileCredentialProvenanceStore({ directory, report: () => {} })
+  );
+}
+
+function workflowDispatches(calls: readonly FakeCliCall[]): string[][] {
+  return calls
+    .filter(
+      (call) =>
+        call.matched &&
+        call.tool === "gh" &&
+        call.args[0] === "workflow" &&
+        call.args[1] === "run"
+    )
+    .map((call) => call.args);
+}
+
+// Drives the journey both providers share once the first verification run
+// failed: Retry setup dispatches exactly one new run, and Pause then Continue
+// follow that run to a ready environment without dispatching another.
+async function retryAfterFailedVerification(
+  page: Page,
+  canvas: CanvasHarness,
+  {
+    scenario,
+    newRunStatus,
+    operationId,
+    failure
+  }: {
+    scenario: FakeCliScenario;
+    newRunStatus: FakeCliCommand[];
+    operationId: string;
+    failure: { code: string; message: string };
+  }
+): Promise<void> {
+  const record = () => canvas.operationRecord(operationId);
+  // The first run fails, so setup offers Retry setup.
+  const retrySetup = page.locator("#env-progress-command-retry-setup");
+  await expect(retrySetup).toBeVisible({ timeout: 30_000 });
+  expect((await record()).failure).toMatchObject(failure);
+  expect(workflowDispatches(await canvas.cliCalls())).toEqual([
+    expect.arrayContaining([`radius_operation=${operationId}`])
+  ]);
+
+  // The first attempt used its one-time answers: the environment now
+  // exists and the next dispatch starts the new run.
+  scenario.commands = [
+    ...stateWrittenBy(await canvas.cliCalls()),
+    ...scenario.commands.filter((command) => command.times === undefined)
+  ];
+  await canvas.setScenario(scenario);
+
+  // Retry setup runs the deploy identity again and dispatches one new run
+  // with its own marker.
+  await retrySetup.click();
+  await expect
+    .poll(async () => workflowDispatches(await canvas.cliCalls()), {
+      timeout: 30_000
+    })
+    .toHaveLength(2);
+  expect(workflowDispatches(await canvas.cliCalls())[1]).toContain(
+    `radius_operation=${operationId}:attempt-2`
+  );
+  await expect
+    .poll(async () => (await record()).verification, { timeout: 15_000 })
+    .toMatchObject({
+      runId: String(RETRY_NEW_RUN_ID),
+      operationMarker: `${operationId}:attempt-2`
+    });
+
+  // Pause while the new run is still in progress.
+  await page.getByRole("button", { name: "Pause setup" }).click();
+  const continueSetup = page.locator("#env-progress-command-continue-setup");
+  await expect(continueSetup).toBeVisible({ timeout: 30_000 });
+  expect((await record()).setupRetryAttempt).toBe(2);
+
+  // The run passes while setup is paused. Continue follows that run and
+  // does not dispatch another one.
+  const passed = verifyRunCommands(RETRY_NEW_RUN_ID, {
+    status: "completed",
+    conclusion: "success"
+  });
+  newRunStatus.forEach((command, index) => {
+    command.stdout = passed[index]?.stdout;
+  });
+  await canvas.setScenario(scenario);
+  await continueSetup.click();
+  await expect
+    .poll(async () => (await record()).state, { timeout: 30_000 })
+    .toBe("succeeded");
+  await expect(page.locator("#env-progress-title")).toContainText(
+    `Environment "${RETRY_ENVIRONMENT}" is ready.`
+  );
+  const finished = await record();
+  expect(finished.setupRetryAttempt).toBe(2);
+  expect(finished.verification).toMatchObject({
+    runId: String(RETRY_NEW_RUN_ID),
+    operationMarker: `${operationId}:attempt-2`
+  });
+  expect(workflowDispatches(await canvas.cliCalls())).toHaveLength(2);
+  await expectNoWcagViolations(page);
 }
 
 test.describe("Radius Canvas in Chromium", () => {
@@ -6711,6 +7293,190 @@ test.describe("Radius Canvas in Chromium", () => {
       await expectNoWcagViolations(page);
     });
 
+    // The cloud side of an AWS setup that creates its deploy identity: the
+    // identity provider and the EKS Pod Identity Agent add-on exist, the role
+    // and the app roles' permissions boundary do not yet, and the deploy
+    // identity lock is free.
+    function awsDeployIdentityCommands(): FakeCliCommand[] {
+      const roleName = defaultAwsDeployRoleName(REPOSITORY);
+      const lockPolicy = {
+        Policy: {
+          PolicyName: `radius-lock-${roleName}`,
+          PolicyId: "LOCK1",
+          Arn: `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-${roleName}`,
+          CreateDate: new Date().toISOString()
+        }
+      };
+      const boundary = awsAppBoundary(
+        AWS_ACCOUNT,
+        RETRY_REPOSITORY_ID,
+        RETRY_ENVIRONMENT
+      );
+      const notFound = (operation: string) => ({
+        exitCode: 254,
+        stderr: `An error occurred (NoSuchEntity) when calling the ${operation} operation: The entity cannot be found.`
+      });
+      const aws = (
+        argsPrefix: string[],
+        stdout: unknown,
+        fields: Partial<FakeCliCommand> = {}
+      ): FakeCliCommand => ({
+        tool: "aws",
+        argsPrefix,
+        stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout),
+        ...fields
+      });
+      return [
+        aws(["eks", "describe-cluster"], {
+          cluster: {
+            name: "eks-1",
+            arn: `arn:aws:eks:us-west-2:${AWS_ACCOUNT}:cluster/eks-1`,
+            status: "ACTIVE",
+            accessConfig: { authenticationMode: "API" },
+            resourcesVpcConfig: {
+              vpcId: "vpc-1",
+              subnetIds: ["subnet-a", "subnet-b"]
+            }
+          }
+        }),
+        aws(["eks", "describe-addon"], {
+          addon: { addonName: "eks-pod-identity-agent", status: "ACTIVE" }
+        }),
+        aws(
+          [
+            "iam",
+            "create-policy",
+            "--policy-name",
+            lockPolicy.Policy.PolicyName
+          ],
+          lockPolicy
+        ),
+        aws(
+          ["iam", "get-policy", "--policy-arn", lockPolicy.Policy.Arn],
+          lockPolicy
+        ),
+        // The permissions boundary for the environment's app roles.
+        aws(
+          ["iam", "get-policy", "--policy-arn", boundary.arn],
+          "",
+          notFound("GetPolicy")
+        ),
+        aws(["iam", "create-policy", "--path", boundary.path], {
+          Policy: {
+            PolicyName: boundary.name,
+            Arn: boundary.arn,
+            DefaultVersionId: "v1"
+          }
+        }),
+        aws(["iam", "delete-policy"], ""),
+        aws(["iam", "list-open-id-connect-providers"], {
+          OpenIDConnectProviderList: [
+            {
+              Arn: `arn:aws:iam::${AWS_ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`
+            }
+          ]
+        }),
+        aws(["iam", "get-open-id-connect-provider"], {
+          Url: "token.actions.githubusercontent.com",
+          ClientIDList: ["sts.amazonaws.com"],
+          ThumbprintList: []
+        }),
+        aws(["iam", "get-role"], "", notFound("GetRole")),
+        aws(["iam", "create-role"], {
+          Role: {
+            RoleName: roleName,
+            RoleId: "AROA1",
+            Arn: `arn:aws:iam::${AWS_ACCOUNT}:role/${roleName}`,
+            Path: "/"
+          }
+        }),
+        aws(["iam", "get-role-policy"], "", notFound("GetRolePolicy")),
+        aws(["iam", "put-role-policy"], ""),
+        aws(["eks", "create-access-entry"], {
+          accessEntry: {
+            principalArn: `arn:aws:iam::${AWS_ACCOUNT}:role/${roleName}`
+          }
+        }),
+        aws(["eks", "associate-access-policy"], {})
+      ];
+    }
+
+    test("retries an AWS setup after failed verification with one new run that Pause and Continue keep @safety", async ({
+      page,
+      canvas
+    }) => {
+      test.setTimeout(120_000);
+      const restoreFetch = installOfflineStatePackageRegistry();
+      try {
+        await routeAwsProfileAndDiscovery(page);
+        const scenario = defaultFakeCliScenario();
+        scenario.commands.push(...(await workflowTemplateCommands()));
+        await canvas.setScenario(scenario);
+        const newRunStatus = verifyRunCommands(RETRY_NEW_RUN_ID, {
+          status: "in_progress",
+          conclusion: null
+        });
+        scenario.commands.push(
+          ...(await existingWorkflowCommands("aws", true)),
+          ...retrySetupGitHubCommands([
+            "RADIUS_MANAGED",
+            "RADIUS_STATE_BACKEND",
+            "RADIUS_STATE_REGISTRY",
+            "RADIUS_STATE_ARCHIVE",
+            "RADIUS_CREDENTIAL_PROFILE"
+          ]),
+          ghCommand(
+            [
+              "api",
+              `/repos/${REPOSITORY}/environments/${RETRY_ENVIRONMENT}/variables?per_page=100`
+            ],
+            JSON.stringify({ total_count: 0, variables: [] })
+          ),
+          ...awsDeployIdentityCommands(),
+          ghCommand(
+            ["api", `/repos/${REPOSITORY}/environments?per_page=100&page=1`],
+            JSON.stringify({
+              total_count: 1,
+              environments: [{ id: 123, name: RETRY_ENVIRONMENT }]
+            })
+          ),
+          ...verifyRunCommands(
+            RETRY_FAILED_RUN_ID,
+            { status: "completed", conclusion: "failure" },
+            {
+              step: "Verify EKS Access",
+              log: "Unable to connect to the server: dial tcp 192.0.2.10:443: i/o timeout"
+            }
+          ),
+          ...newRunStatus
+        );
+        await canvas.setScenario(scenario);
+
+        await gotoCanvas(page, canvas, "environment");
+        await openAwsEnvironmentWizard(page);
+        await page.getByLabel("Environment name").fill(RETRY_ENVIRONMENT);
+        const started = page.waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname === "/api/operations" &&
+            response.request().method() === "POST"
+        );
+        await page.locator("#deploy-btn:not([disabled])").click();
+        const { operationId } = await (await started).json();
+        await retryAfterFailedVerification(page, canvas, {
+          scenario,
+          newRunStatus,
+          operationId,
+          failure: {
+            code: "verify-run-failed",
+            message:
+              "Credential verification failed. Failed step: Verify EKS Access."
+          }
+        });
+      } finally {
+        restoreFetch();
+      }
+    });
+
     test("pauses an AWS setup during the deploy identity lock wait and continues from Authorize deploy identity by keyboard @safety", async ({
       page,
       canvas
@@ -7741,6 +8507,178 @@ test.describe("Radius Canvas in Chromium", () => {
       await expectNoWcagViolations(page);
     });
   }
+
+  test("retries an Azure setup after failed verification with one new run that Pause and Continue keep @safety", async ({
+    page,
+    canvas
+  }) => {
+    test.setTimeout(120_000);
+    const clientId = "33333333-3333-3333-3333-333333333333";
+    const callerId = "44444444-4444-4444-4444-444444444444";
+    const subscriptionId = PROFILE_SUBSCRIPTION_ID;
+    const restoreFetch = installOfflineStatePackageRegistry();
+    const { resetCredentialProvenanceForTest } =
+      await import("../../src/credential-provenance.js");
+    try {
+      await useCredentialProvenanceStore(
+        path.join(canvas.rootDir, "credential-provenance")
+      );
+      const selected = {
+        id: "fixture-cluster",
+        name: "Fixture Cluster",
+        resourceGroup: "fixture-resource-group"
+      };
+      const scenario = defaultFakeCliScenario();
+      scenario.commands.push(
+        ...azureDiscoveryCommands({
+          subscriptionId,
+          clusters: [selected],
+          selected,
+          namespaces: ["default"]
+        }),
+        ...(await workflowTemplateCommands())
+      );
+      await canvas.setScenario(scenario);
+      const az = (
+        args: string[],
+        stdout: string,
+        prefix = false
+      ): FakeCliCommand =>
+        prefix ?
+          { tool: "az", argsPrefix: args, stdout }
+        : { tool: "az", args, stdout };
+      // The deploy identity, its service principal, and its federated
+      // credentials exist from an earlier setup. This setup reuses them and
+      // assigns the identity's roles.
+      const fedCredential = (name: string, subject: string) => ({
+        id: name,
+        name,
+        subject,
+        issuer: "https://token.actions.githubusercontent.com",
+        audiences: ["api://AzureADTokenExchange"],
+        claimsMatchingExpression: null
+      });
+      const newRunStatus = verifyRunCommands(RETRY_NEW_RUN_ID, {
+        status: "in_progress",
+        conclusion: null
+      });
+      scenario.commands.push(
+        ...(await existingWorkflowCommands("azure", false)),
+        ...retrySetupGitHubCommands([
+          "RADIUS_MANAGED",
+          "RADIUS_STATE_BACKEND",
+          "RADIUS_STATE_REGISTRY",
+          "RADIUS_STATE_ARCHIVE",
+          "RADIUS_CREDENTIAL_PROFILE",
+          "AZURE_TENANT_ID",
+          "AZURE_SUBSCRIPTION_ID",
+          "AZURE_RESOURCE_GROUP",
+          "AZURE_AKS_CLUSTER_NAME",
+          "AZURE_AKS_RESOURCE_GROUP",
+          "KUBERNETES_NAMESPACE"
+        ]),
+        ghCommand(
+          [
+            "api",
+            `/repos/${REPOSITORY}/environments/${RETRY_ENVIRONMENT}/variables/AZURE_CLIENT_ID`
+          ],
+          JSON.stringify({ name: "AZURE_CLIENT_ID", value: clientId })
+        ),
+        az(
+          ["account", "show", "--output", "json"],
+          JSON.stringify({
+            id: subscriptionId,
+            tenantId: VALID_TENANT_ID,
+            user: { type: "user", name: "fixture@example.test" }
+          })
+        ),
+        az(["account", "set"], "", true),
+        az(["ad", "signed-in-user", "show"], `${callerId}\n`, true),
+        az(
+          ["ad", "app", "show", "--id", clientId, "--query", "id", "-o", "tsv"],
+          "app-object\n"
+        ),
+        az(["ad", "app", "owner", "list"], `${callerId}\n`, true),
+        az(
+          [
+            "ad",
+            "app",
+            "show",
+            "--id",
+            clientId,
+            "--query",
+            "tags",
+            "-o",
+            "json"
+          ],
+          JSON.stringify([
+            "radius-managed",
+            `radius-repo:${REPOSITORY}`,
+            `radius-environment:${RETRY_ENVIRONMENT}`
+          ])
+        ),
+        az(
+          ["ad", "sp", "show", "--id", clientId, "--query", "id", "-o", "tsv"],
+          "principal-object\n"
+        ),
+        az(
+          ["ad", "app", "federated-credential", "list"],
+          JSON.stringify([
+            fedCredential(
+              "github-fixture-radius-app-fixture-environment-immutable",
+              `repo:fixture@7/radius-app@42:environment:${RETRY_ENVIRONMENT}`
+            ),
+            fedCredential(
+              "github-fixture-radius-app-fixture-environment-mutable",
+              `repo:${REPOSITORY}:environment:${RETRY_ENVIRONMENT}`
+            )
+          ]),
+          true
+        ),
+        az(["role", "assignment", "create"], "{}", true),
+        ...verifyRunCommands(
+          RETRY_FAILED_RUN_ID,
+          { status: "completed", conclusion: "failure" },
+          {
+            step: "Verify AKS Access",
+            log: "ERROR: (AuthorizationFailed) The client does not have authorization to perform action 'Microsoft.ContainerService/managedClusters/listClusterUserCredential/action'."
+          }
+        ),
+        ...newRunStatus
+      );
+      await canvas.setScenario(scenario);
+
+      await gotoCanvas(page, canvas, "environment");
+      await openEnvironmentWizard(page);
+      await expect(page.locator("#env-gh-identity-note")).toContainText(
+        "Ready to configure deployments"
+      );
+      await page.getByLabel("Environment name").fill(RETRY_ENVIRONMENT);
+      await page
+        .getByLabel("Resource Group", { exact: true })
+        .selectOption(selected.resourceGroup);
+      const started = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/operations" &&
+          response.request().method() === "POST"
+      );
+      await page.locator("#deploy-btn:not([disabled])").click();
+      const { operationId } = await (await started).json();
+      await retryAfterFailedVerification(page, canvas, {
+        scenario,
+        newRunStatus,
+        operationId,
+        failure: {
+          code: "verify-run-rbac-failed",
+          message:
+            "Credential verification failed. Failed step: Verify AKS Access."
+        }
+      });
+    } finally {
+      restoreFetch();
+      resetCredentialProvenanceForTest();
+    }
+  });
 
   // After Pause or a reload the panel starts a new poller. A pause can land
   // before that poller's first read, so the first record it sees may already
