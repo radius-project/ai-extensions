@@ -362,14 +362,14 @@ Declare `extension radius`. It provides every predefined Radius type (`Radius.Co
 
 ## bicepconfig.json
 
-After type resolution succeeds, `show-radius-type.mjs` reads an existing `<staging-dir>/bicepconfig.json`; if none exists, it reads the current `.radius/bicepconfig.json`; if neither exists, it starts with an empty object. It preserves unrelated settings and extension aliases, enables `experimentalFeaturesEnabled.extensibility`, and fills an absent or blank `extensions.radius` with the extension derived from the managed Radius CLI's stamped release identity. A different nonblank `radius` alias is handled by comparing it with the `radiusVersion` saved in `.radius/app.origin.json`:
+After type resolution succeeds, `show-radius-type.mjs` reads an existing `<staging-dir>/bicepconfig.json`; if none exists, it reads the current `.radius/bicepconfig.json`; if neither exists, it starts with an empty object. It preserves unrelated settings and extension aliases, enables `experimentalFeaturesEnabled.extensibility`, and fills an absent or blank `extensions.radius` with the extension derived from the managed Radius CLI's stamped release identity. Modeling owns release pins from `br:biceptypes.azurecr.io/radius`. An older release pin can move forward without a saved `radiusVersion` in `.radius/app.origin.json`, including for legacy models. A different nonblank `radius` alias is handled as follows:
 
 | Configured `radius` alias                                                        | Result                                                                   |
 |----------------------------------------------------------------------------------|--------------------------------------------------------------------------|
-| Older than the managed CLI's, and equal to the saved `radiusVersion`             | Moved to the managed CLI's extension. An earlier modeling run wrote it.  |
+| Recognized Radius release older than the managed CLI's                           | Moved to the managed CLI's extension, regardless of origin metadata.     |
 | A `latest` alias equal to the saved `radiusVersion`, with a released managed CLI | Moved to the managed CLI's extension.                                    |
 | Newer than the managed CLI's                                                     | Version conflict. The error says to update the Radius plugin.            |
-| Anything else, including no saved version or an unreadable origin record         | Version conflict. The error asks the user to update or remove the alias. |
+| Anything else, including custom references and an unverified `latest` alias      | Version conflict. The error asks the user to update or remove the alias. |
 
 On a version conflict the command exits `1`, leaves the configuration unchanged, and prints no contract JSON. Report the error and stop; do not edit the alias yourself. A moved alias is written only to the staged configuration, so `.radius/` is unchanged until the run publishes. Successful partial and all-missing results still update the staged configuration.
 

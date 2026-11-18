@@ -1440,6 +1440,63 @@ describe("P0-C built Radius extension artifact", () => {
     );
   });
 
+  it("updates a legacy Radius pin with the packaged resolver without changing published files", () => {
+    assertCurrentArtifact();
+    const workspace = mkdtempSync(join(tmpdir(), "radius-legacy-pin-"));
+    try {
+      const radiusDir = join(workspace, ".radius");
+      const staging = join(radiusDir, ".staging-legacy");
+      mkdirSync(staging, { recursive: true });
+      writeFileSync(
+        join(staging, "run.json"),
+        JSON.stringify({ baseline: {} })
+      );
+      const current = join(radiusDir, "bicepconfig.json");
+      const origin = join(radiusDir, "app.origin.json");
+      const config = JSON.stringify({
+        extensions: {
+          radius: "br:biceptypes.azurecr.io/radius:0.61",
+          customTypes: "./custom-types.tgz"
+        }
+      });
+      const originText = JSON.stringify({ skillVersion: "0.1.1" });
+      writeFileSync(current, config);
+      writeFileSync(origin, originText);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `import { pathToFileURL } from "node:url";
+const resolver = await import(pathToFileURL(process.argv[2]).href);
+await resolver.writeStagedBicepConfig(
+  process.argv[3], "br:biceptypes.azurecr.io/radius:0.62"
+);`,
+          "packaged-resolver-test",
+          join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
+          staging
+        ],
+        { cwd: workspace, encoding: "utf8", timeout: 10_000 }
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        JSON.parse(readFileSync(join(staging, "bicepconfig.json"), "utf8"))
+      ).toEqual({
+        experimentalFeaturesEnabled: { extensibility: true },
+        extensions: {
+          radius: "br:biceptypes.azurecr.io/radius:0.62",
+          customTypes: "./custom-types.tgz"
+        }
+      });
+      expect(readFileSync(current, "utf8")).toBe(config);
+      expect(readFileSync(origin, "utf8")).toBe(originText);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("packages the checker's secure-value remedies", () => {
     assertCurrentArtifact();
     const checkerScript = readFileSync(
