@@ -1435,3 +1435,63 @@ describe("direct operation control service", () => {
     expect(current.control.commands).toEqual([]);
   });
 });
+
+describe("setup retry attempt", () => {
+  it("gives Retry setup the new setup attempt before saving it", async () => {
+    const operation = retryableSetup();
+    const saved: unknown[] = [];
+    const { dependencies } = fixture({
+      get: () => operation,
+      persistOperations: vi.fn(async () => {
+        saved.push(operation.setupRetryAttempt);
+      })
+    });
+
+    expect(
+      await createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "retry",
+        retryKind: "setup"
+      })
+    ).toMatchObject({ status: 202, body: { attempt: 2 } });
+    expect(operation.setupRetryAttempt).toBe(2);
+    expect(saved[0]).toBe(2);
+  });
+
+  it("keeps the saved retry attempt when setup continues", async () => {
+    const operation = stoppedSetup();
+    operation.setupRetryAttempt = 2;
+    const { dependencies } = fixture({ get: () => operation });
+
+    expect(
+      await createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "continue"
+      })
+    ).toMatchObject({ status: 202 });
+    expect(operation.setupRetryAttempt).toBe(2);
+  });
+
+  it("restores the earlier retry attempt when Retry setup cannot be saved", async () => {
+    const operation = retryableSetup();
+    const { dependencies } = fixture({
+      get: () => operation,
+      persistOperations: vi.fn(async () => {
+        throw new Error("disk full");
+      })
+    });
+
+    expect(
+      await createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "retry",
+        retryKind: "setup"
+      })
+    ).toMatchObject({
+      status: 500,
+      body: { code: "operation-retry-persist-failed" }
+    });
+    expect(operation).not.toHaveProperty("setupRetryAttempt");
+    expect(dependencies.schedule).not.toHaveBeenCalled();
+  });
+});
