@@ -1,7 +1,12 @@
 import {
   ownsWorkspaceGraphOutput,
+  recordModeledGraphSave,
   stageWorkspaceGraphOutput
 } from "./workspace-graph-output.js";
+import {
+  clearGraphSaveWarningForSelection,
+  modeledGraphSaveWarning
+} from "../../graph-save-warning.js";
 import {
   createGraphOrchestrator,
   computeGraphDiff,
@@ -825,6 +830,7 @@ export interface GraphsPlanningStreamDependencies {
     branch: string
   ): Promise<string[]>;
   workspaceGraphJsonPath(state: CanvasState, bicepRepoPath: string): string;
+  graphDefinitionHash(content: string, artifactsFingerprint: string): string;
   radArtifactsDirForSelection(
     options: LoadGraphStreamRadArtifactsOptions
   ): Promise<LoadGraphStreamRadArtifacts>;
@@ -926,6 +932,7 @@ export async function handleLoadGraphStream(
     repo,
     branch
   });
+  clearGraphSaveWarningForSelection(entry.state, repo, branch);
   const isCurrent = () =>
     dependencies.readInstanceEntry(instanceId) === entry &&
     entry.state.graphBuildGeneration === requestGeneration &&
@@ -997,12 +1004,13 @@ export async function handleLoadGraphStream(
     const workspacePath = entry.state.workspacePath;
     const isCurrentOutput = () =>
       isCurrent() && entry.state.workspacePath === workspacePath;
+    let artifactsFingerprint = "";
     const graph = createGraphOrchestrator<
       CanvasGraphResource,
       CanvasGraphResource[]
     >({
-      stage: async (selected) =>
-        graphArtifactHandle(
+      stage: async (selected) => {
+        const handle = graphArtifactHandle(
           await dependencies.radArtifactsDirForSelection({
             selection: selected,
             isLocal: selection.fromWorkspace,
@@ -1013,7 +1021,10 @@ export async function handleLoadGraphStream(
             log: sendProgress
           }),
           dependencies.removeDirectory
-        ),
+        );
+        artifactsFingerprint = handle.fingerprint;
+        return handle;
+      },
       compile: async (definition, definitionPath, options) => {
         output = stageWorkspaceGraphOutput(
           graphJsonPath,
@@ -1056,6 +1067,14 @@ export async function handleLoadGraphStream(
       }
     );
     const resources = authored.resources;
+    const definitionHash = dependencies.graphDefinitionHash(
+      selection.content || "",
+      artifactsFingerprint
+    );
+    const modelRevision = dependencies.graphDefinitionHash(
+      selection.content || "",
+      ""
+    );
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (
@@ -1063,6 +1082,7 @@ export async function handleLoadGraphStream(
         isCurrentOutput,
         selection.verifyWorkspaceBranch
       )) ||
+      !isCurrentOutput() ||
       !dependencies.commitSourceRef(
         entry,
         resources,
@@ -1073,7 +1093,13 @@ export async function handleLoadGraphStream(
       sendDone({ stale: true });
       return;
     }
-    output?.publish();
+    recordModeledGraphSave(
+      entry.state,
+      repo,
+      branch,
+      definitionHash,
+      output?.publish()
+    );
     entry.state.graphTargetRepo = repo;
     entry.state.graphBranch = branch;
     entry.state.graphFollowsWorkspaceBranch =
@@ -1082,9 +1108,15 @@ export async function handleLoadGraphStream(
     // supplied the app.bicep content (file is on disk).
     entry.state.graphFromWorkspace = selection.fromWorkspace;
     entry.state.activeGraphView = "graph";
+    entry.state.graphLoaded = true;
+    entry.state.graphDefinitionHash = definitionHash;
+    entry.state.graphModelRevision = modelRevision;
     dependencies.clearGraphRepairAttempt(entry);
 
-    sendDone({ reload: true });
+    sendDone({
+      reload: true,
+      ...modeledGraphSaveWarning(entry.state, repo, branch)
+    });
   } catch (e) {
     if (e instanceof GraphRequestSuperseded || !isCurrent()) {
       sendDone({ stale: true });

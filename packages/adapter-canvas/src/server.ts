@@ -6082,6 +6082,7 @@ export function createProductionCanvasServerRuntime(
       listBranchPaths(entry, repo, branch),
     workspaceGraphJsonPath: (state, bicepRepoPath) =>
       workspaceGraphJsonPath(state, bicepRepoPath),
+    graphDefinitionHash,
     radArtifactsDirForSelection: graphSources.stage,
     buildGraphViaRad: buildGraphPort,
     canvasGraphResources,

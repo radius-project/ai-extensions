@@ -215,6 +215,8 @@ function fakes(options: Options = {}): Fakes {
       calls.push(`workspaceGraphJsonPath(${bicepRepoPath})`);
       return `/ws/${bicepRepoPath}.graph.json`;
     },
+    graphDefinitionHash: (content, fingerprint) =>
+      JSON.stringify([content, fingerprint]),
     radArtifactsDirForSelection: (opts) => {
       calls.push(
         `radArtifactsDirForSelection(${opts.isLocal}|${opts.repo}|${opts.branch}|${opts.bicepRepoPath})`
@@ -492,7 +494,13 @@ describe("graphs-planning load-graph-stream route", () => {
       event: "progress",
       data: { message: "Mapped 1 resource(s) — rendering graph..." }
     });
-    expect(parsed[3]).toEqual({ event: "done", data: { reload: true } });
+    expect(parsed[3]).toEqual({
+      event: "done",
+      data: {
+        reload: true,
+        saveWarning: expect.stringContaining("may be stale")
+      }
+    });
 
     // Provenance mutations on the captured entry's state.
     expect(entry?.state.graphTargetRepo).toBe(REPO);
@@ -533,6 +541,7 @@ describe("graphs-planning load-graph-stream route", () => {
       event: "done",
       data: {
         reload: true,
+        saveWarning: expect.stringContaining("may be stale"),
         resolvedBranch: "renamed-worktree"
       }
     });
@@ -765,7 +774,10 @@ describe("graphs-planning load-graph-stream route", () => {
       throw new Error("EBUSY");
     };
     const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
-    expect(frames(recording.stream).at(-1)?.data).toEqual({ reload: true });
+    expect(frames(recording.stream).at(-1)?.data).toEqual({
+      reload: true,
+      saveWarning: expect.stringContaining("may be stale")
+    });
     expect(calls).toContain(
       "logError([radius graph] could not remove staged artifacts: Graph artifact cleanup failed: EBUSY)"
     );

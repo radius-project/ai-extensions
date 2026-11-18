@@ -76,7 +76,10 @@ function initCommittedGraphWorkspace(workspace: string) {
   );
 }
 
-async function concurrentGraphRuntime(workspace?: string) {
+async function concurrentGraphRuntime(
+  workspace?: string,
+  invalidOutputBuilds: ReadonlySet<number> = new Set()
+) {
   const builds: Array<ReturnType<typeof createDeferred<void>>> = [];
   const runtime = createTestCanvasServerRuntime({
     executionOwner: createEnvironmentExecutionOwner(),
@@ -126,10 +129,12 @@ async function concurrentGraphRuntime(workspace?: string) {
         );
         writeFileSync(
           options.saveGraphJsonTo,
-          JSON.stringify({
-            application: { name: `application-${index}` },
-            resources: [{ id: `build-${index}` }]
-          })
+          invalidOutputBuilds.has(index) ? '{"resources":[' : (
+            JSON.stringify({
+              application: { name: `application-${index}` },
+              resources: [{ id: `build-${index}` }]
+            })
+          )
         );
       }
       return [
@@ -178,6 +183,59 @@ async function concurrentGraphRuntime(workspace?: string) {
 }
 
 describe("graph concurrency through production HTTP routes", () => {
+  it.each(["JSON", "stream"])(
+    "keeps the previous file and retains the %s save warning on reload and cache hits",
+    async (transport) => {
+      const workspace = mkdtempSync(
+        path.join(tmpdir(), "radius-graph-save-http-")
+      );
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      try {
+        initCommittedGraphWorkspace(workspace);
+        const directory = path.join(workspace, ".radius");
+        mkdirSync(directory);
+        writeFileSync(path.join(directory, "app.bicep"), "resource local");
+        const destination = path.join(directory, "app-graph.json");
+        writeFileSync(destination, '{"resources":[{"id":"previous"}]}');
+        h = await concurrentGraphRuntime(workspace, new Set([0]));
+        const { builds, entry } = h;
+        const response = transport === "JSON" ? h.load() : h.stream();
+        await vi.waitFor(() => expect(builds).toHaveLength(1));
+        builds[0].resolve();
+        const result = await response;
+        const body = await result.text();
+        expect(result.ok).toBe(true);
+        expect(body).toContain('"saveWarning":');
+        if (transport === "stream")
+          expect(body.match(/event: done/g)).toHaveLength(1);
+        expect(readFileSync(destination, "utf8")).toBe(
+          '{"resources":[{"id":"previous"}]}'
+        );
+        expect(entry.state.graphResources?.[0]?.id).toBe("build-0");
+        const page = () =>
+          fetch(`${entry.baseUrl}/?page=graph`).then((res) => res.text());
+        expect(await page()).toContain("saved app-graph.json may be stale");
+        expect(await (await h.load({ refresh: true })).json()).toMatchObject({
+          cached: true,
+          saveWarning: expect.stringContaining("may be stale")
+        });
+        const replacement = h.load();
+        await vi.waitFor(() => expect(builds).toHaveLength(2));
+        builds[1].resolve();
+        expect(await (await replacement).json()).not.toHaveProperty(
+          "saveWarning"
+        );
+        expect(await page()).not.toContain("saved app-graph.json may be stale");
+        expect(JSON.parse(readFileSync(destination, "utf8")).resources).toEqual(
+          [{ id: "build-1" }]
+        );
+      } finally {
+        await h?.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
   it.each(["success", "failure"])(
     "keeps newer persisted and in-memory graph when an older JSON build finishes with %s",
     async (result) => {
@@ -316,9 +374,7 @@ describe("graph concurrency through production HTTP routes", () => {
     const handoff = vi.fn(() => rejection.promise);
     setAppBicepHandoff(handoff);
     try {
-      execFileSync("git", ["init", "--initial-branch", "main", workspace], {
-        stdio: "pipe"
-      });
+      initCommittedGraphWorkspace(workspace);
       writeFileSync(path.join(workspace, "Dockerfile"), "FROM scratch");
       h = await concurrentGraphRuntime(workspace);
       expect(await (await h.load()).json()).toMatchObject({

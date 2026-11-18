@@ -7,7 +7,8 @@ import {
 import {
   graphArtifactHandle,
   graphSourceForSelection,
-  GraphRequestSuperseded
+  GraphRequestSuperseded,
+  type AppBicepSelection
 } from "./graph-pipeline.js";
 import {
   expireGraphProgressWait,
@@ -16,8 +17,13 @@ import {
 import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
 import {
   ownsWorkspaceGraphOutput,
+  recordModeledGraphSave,
   stageWorkspaceGraphOutput
 } from "./workspace-graph-output.js";
+import {
+  clearGraphSaveWarningForSelection,
+  modeledGraphSaveWarning
+} from "../../graph-save-warning.js";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -508,6 +514,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       stagedArtifacts: StagedRadArtifacts[];
       state: () => CanvasState | undefined;
       progressHandle: () => GraphProgressHandle | undefined;
+      errorOwner?: () =>
+        | {
+            isCurrent: () => boolean;
+            verifyBranches: Array<(() => Promise<boolean>) | undefined>;
+          }
+        | undefined;
       onError: (error: string) => void;
       repair: () =>
         | { entry: TEntry; request: Omit<GraphRepairRequest, "diagnostic"> }
@@ -518,34 +530,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       modelingTarget: () => { repo: string; branches: string[] };
     }
   ): Promise<GraphWorkflowOutcome> {
-    let outcome: GraphWorkflowOutcome;
+    let result:
+      | { ok: true; outcome: GraphWorkflowOutcome }
+      | { ok: false; error: unknown };
     try {
-      outcome = await run();
-    } catch (e) {
-      if (e instanceof GraphRequestSuperseded) {
-        outcome = json(409, STALE_PAYLOAD);
-      } else {
-        const error = dependencies.errorMessage(e);
-        hooks.onError(error);
-        const repair = hooks.repair();
-        if (
-          e instanceof GraphModelingFailure &&
-          repair &&
-          hooks.shouldRepair()
-        ) {
-          const attempt = dependencies.triggerGraphRepairHandoff(repair.entry, {
-            ...repair.request,
-            diagnostic: e.diagnostic
-          });
-          outcome = json(400, {
-            error,
-            modelingFailed: true,
-            ...attempt
-          });
-        } else {
-          outcome = json(400, { error });
-        }
-      }
+      result = { ok: true, outcome: await run() };
+    } catch (error) {
+      result = { ok: false, error };
     } finally {
       for (const staged of hooks.stagedArtifacts) {
         if (!staged.remote || !staged.dir) continue;
@@ -559,6 +550,41 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       }
     }
 
+    let outcome: GraphWorkflowOutcome;
+    if (result.ok) {
+      outcome = result.outcome;
+    } else {
+      const { error: failure } = result;
+      const owner = hooks.errorOwner?.();
+      if (
+        failure instanceof GraphRequestSuperseded ||
+        (owner &&
+          (!(await ownsWorkspaceGraphOutput(
+            owner.isCurrent,
+            ...owner.verifyBranches
+          )) ||
+            !owner.isCurrent()))
+      ) {
+        endGraphProgress(hooks.state(), hooks.progressHandle());
+        return json(409, STALE_PAYLOAD);
+      }
+      const error = dependencies.errorMessage(failure);
+      hooks.onError(error);
+      const repair = hooks.repair();
+      if (
+        failure instanceof GraphModelingFailure &&
+        repair &&
+        hooks.shouldRepair()
+      ) {
+        const attempt = dependencies.triggerGraphRepairHandoff(repair.entry, {
+          ...repair.request,
+          diagnostic: failure.diagnostic
+        });
+        outcome = json(400, { error, modelingFailed: true, ...attempt });
+      } else {
+        outcome = json(400, { error });
+      }
+    }
     const state = hooks.state();
     if (!state) return outcome;
     // Only an answer that asks the page to keep waiting needs the liveness
@@ -802,6 +828,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "graph",
         { repo, branch }
       );
+      clearGraphSaveWarningForSelection(state, repo, branch);
       activeSourceToken = sourceRefContext.token;
       const progressKey = JSON.stringify({ repo, branch });
       const progressHandle = beginGraphProgress(
@@ -952,7 +979,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             reload: false,
             resources: state.graphResources,
             fromWorkspace: selection.fromWorkspace,
-            cached: true
+            cached: true,
+            ...modeledGraphSaveWarning(state, repo, branch)
           }),
           resolvedBranch
         );
@@ -1023,7 +1051,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         ) {
           return json(409, STALE_PAYLOAD);
         }
-        output?.publish();
+        recordModeledGraphSave(
+          state,
+          repo,
+          branch,
+          definitionHash,
+          output?.publish()
+        );
         state.graphTargetRepo = repo;
         state.graphBranch = branch;
         state.graphFollowsWorkspaceBranch =
@@ -1046,7 +1080,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         json(200, {
           reload: !data.refresh,
           resources,
-          fromWorkspace: selection.fromWorkspace
+          fromWorkspace: selection.fromWorkspace,
+          ...modeledGraphSaveWarning(state, repo, branch)
         }),
         resolvedBranch
       );
@@ -1105,6 +1140,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     let activeGeneration: number | undefined;
     let activeProgressHandle: GraphProgressHandle | undefined;
     let activeSourceToken: string | undefined;
+    let ownsPlanRequest: (() => boolean) | undefined;
+    let verifyPlanBranch: AppBicepSelection["verifyWorkspaceBranch"];
     const run = async (): Promise<GraphWorkflowOutcome> => {
       const data = dependencies.record(JSON.parse(body));
       const repo = dependencies.optionalString(data.repo);
@@ -1199,6 +1236,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         isCurrentPlan() &&
         isCurrentGraphProgress(state, progressHandle) &&
         state.workspacePath === workspacePath;
+      ownsPlanRequest = ownsPlan;
 
       const addEvent = (
         stage: GraphBuildStage,
@@ -1223,6 +1261,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         `Checking ${repo} for .radius/app.bicep.`
       );
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
+      verifyPlanBranch = selection.verifyWorkspaceBranch;
       if (!isCurrentPlan() || !isCurrentSourceRef())
         return json(409, STALE_PAYLOAD);
       const content = selection.content;
@@ -1466,6 +1505,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       stagedArtifacts,
       state: () => activeState,
       progressHandle: () => activeProgressHandle,
+      errorOwner: () =>
+        ownsPlanRequest ?
+          { isCurrent: ownsPlanRequest, verifyBranches: [verifyPlanBranch] }
+        : undefined,
       onError: (error) => {
         if (
           activeState &&
@@ -1525,6 +1568,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     let activeRepair:
       { entry: TEntry; repo: string; base: string; head: string } | undefined;
     let activeProgressHandle: GraphProgressHandle | undefined;
+    let ownsDiffRequest: (() => boolean) | undefined;
+    const verifyDiffBranches: Array<
+      AppBicepSelection["verifyWorkspaceBranch"]
+    > = [];
     const run = async (): Promise<GraphWorkflowOutcome> => {
       const data = JSON.parse(body);
       const repo = data.repo || "";
@@ -1592,6 +1639,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         dependencies.readInstanceEntry(instanceId) === entry &&
         ownsGraphSelection(state, progressHandle) &&
         dependencies.isCurrentSourceRefToken(state, "diff", handoffSourceToken);
+      ownsDiffRequest = isCurrentRequest;
       state.diffBase = data.base;
       state.diffHead = data.head;
       state.diffTargetRepo = repo;
@@ -1606,10 +1654,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         `Checking ${data.base} and ${data.head} for application models.`
       );
-      const [baseSelection, headSelection] = await Promise.all([
-        pipeline.selectAppBicep(entry, repo, data.base),
-        pipeline.selectAppBicep(entry, repo, data.head)
+      const [baseResult, headResult] = await Promise.allSettled([
+        pipeline.selectAppBicep(entry, repo, data.base).then((selection) => {
+          verifyDiffBranches[0] = selection.verifyWorkspaceBranch;
+          return selection;
+        }),
+        pipeline.selectAppBicep(entry, repo, data.head).then((selection) => {
+          verifyDiffBranches[1] = selection.verifyWorkspaceBranch;
+          return selection;
+        })
       ]);
+      if (baseResult.status === "rejected") throw baseResult.reason;
+      if (headResult.status === "rejected") throw headResult.reason;
+      const baseSelection = baseResult.value;
+      const headSelection = headResult.value;
 
       // The selections were awaited, so a newer comparison may now own the
       // fencing state for these branches. Writing to it from here would clear
@@ -1900,6 +1958,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       stagedArtifacts,
       state: () => activeState,
       progressHandle: () => activeProgressHandle,
+      errorOwner: () =>
+        ownsDiffRequest ?
+          { isCurrent: ownsDiffRequest, verifyBranches: verifyDiffBranches }
+        : undefined,
       onError: (error) => {
         // The entry is re-read rather than reused: the failure may have
         // happened before one was ever resolved.

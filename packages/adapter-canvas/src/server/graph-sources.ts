@@ -1,6 +1,7 @@
 import type { GraphSourceBindings } from "@radius-project/adapter-shared";
 import { GraphSourceError } from "@radius-project/core";
 import type { CanvasState } from "../shared.js";
+import { GraphRequestSuperseded } from "./routes/graph-pipeline.js";
 import type {
   AppBicepSelection,
   RadArtifactsRequest,
@@ -9,7 +10,7 @@ import type {
 
 export function createCanvasGraphSources(
   sources: GraphSourceBindings,
-  workspaceAuthorized: (
+  recoveryWorkspaceAuthorized: (
     state: CanvasState,
     repo: string,
     branch: string
@@ -25,17 +26,35 @@ export function createCanvasGraphSources(
     ): Promise<AppBicepSelection> {
       const { state } = entry;
       const workspacePath = state.workspacePath;
+      const workspaceRepo = state.workspaceRepo;
+      const eligible =
+        !!workspacePath && !!workspaceRepo && workspaceRepo === repo;
+      const liveBranch =
+        eligible ? await currentBranch(workspacePath).catch(() => "") : "";
+      const ownsWorkspace = () =>
+        entry.state === state &&
+        state.workspacePath === workspacePath &&
+        state.workspaceRepo === workspaceRepo;
+      if (eligible && (!liveBranch || !ownsWorkspace()))
+        throw new GraphRequestSuperseded();
+      const local = eligible && liveBranch === branch;
+      const verifyWorkspaceBranch = async () =>
+        ownsWorkspace() &&
+        (await currentBranch(workspacePath || "").catch(() => "")) === branch &&
+        ownsWorkspace();
       const selected = await sources.read({
         repo,
         ref: branch,
         definitionPath,
         workspace: {
-          repo: state.workspaceRepo || "",
-          ref: state.workspaceBranch || "",
-          path: state.workspacePath || "",
-          authorized: workspaceAuthorized(state, repo, branch)
+          repo: workspaceRepo || "",
+          ref: liveBranch,
+          path: workspacePath || "",
+          authorized: local
         }
       });
+      if (local && !(await verifyWorkspaceBranch()))
+        throw new GraphRequestSuperseded();
       if (selected.status === "unavailable")
         throw new GraphSourceError(
           "unavailable",
@@ -48,12 +67,7 @@ export function createCanvasGraphSources(
         branch,
         bicepPath: selected.source.definitionPath,
         sourceRead: selected,
-        ...(selected.source.kind === "workspace" && workspacePath ?
-          {
-            verifyWorkspaceBranch: () =>
-              currentBranch(workspacePath).then((live) => live === branch)
-          }
-        : {})
+        ...(local ? { verifyWorkspaceBranch } : {})
       };
     },
     async readForRecovery(
@@ -62,7 +76,7 @@ export function createCanvasGraphSources(
       branch: string,
       definitionPath: string
     ) {
-      const local = workspaceAuthorized(entry.state, repo, branch);
+      const local = recoveryWorkspaceAuthorized(entry.state, repo, branch);
       const assertBranch = async () => {
         if (
           local &&

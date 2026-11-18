@@ -11,6 +11,33 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { redactGhCredentials } from "../../gh.js";
+import type { CanvasState } from "../../shared.js";
+
+type GraphSaveOutcome =
+  | { status: "saved" }
+  | {
+      status: "failed";
+      phase: "stage" | "read" | "validate" | "write" | "rename";
+    };
+
+export function recordModeledGraphSave(
+  state: CanvasState,
+  repo: string,
+  branch: string,
+  definitionHash: string,
+  outcome: GraphSaveOutcome | undefined
+): void {
+  if (outcome?.status === "failed") {
+    state.graphSaveWarning = {
+      workspacePath: state.workspacePath,
+      repo,
+      branch,
+      definitionHash
+    };
+  } else {
+    delete state.graphSaveWarning;
+  }
+}
 
 /** Recheck request ownership after verifying the selected workspace branches. */
 export async function ownsWorkspaceGraphOutput(
@@ -53,18 +80,28 @@ export function stageWorkspaceGraphOutput(
     invalidate() {
       remove(destination);
     },
-    publish() {
+    publish(): GraphSaveOutcome {
       if (!compilerPath) {
-        remove(destination);
-        return;
+        return { status: "failed", phase: "stage" };
       }
       let bytes: Buffer;
       try {
         bytes = readFileSync(compilerPath);
       } catch (error) {
         report("read staged graph output", error);
-        remove(destination);
-        return;
+        return { status: "failed", phase: "read" };
+      }
+      try {
+        const document: unknown = JSON.parse(bytes.toString("utf8"));
+        if (
+          !document ||
+          typeof document !== "object" ||
+          Array.isArray(document)
+        )
+          throw new Error("Expected a graph JSON object.");
+      } catch {
+        report("validate staged graph output", "Invalid graph JSON.");
+        return { status: "failed", phase: "validate" };
       }
       const sibling = join(
         dirname(destination),
@@ -73,6 +110,7 @@ export function stageWorkspaceGraphOutput(
       // The compiler's temporary directory may be on a different filesystem.
       // Only this sibling rename replaces the published file.
       let owned = false;
+      let phase: "write" | "rename" = "write";
       try {
         // A random name is not an ownership guarantee; exclusive creation is.
         // A failed write after creation is cleaned up by the descriptor owner.
@@ -83,10 +121,13 @@ export function stageWorkspaceGraphOutput(
         } finally {
           closeSync(fd);
         }
+        phase = "rename";
         renameSync(sibling, destination);
         owned = false;
+        return { status: "saved" };
       } catch (error) {
         report("publish graph output", error);
+        return { status: "failed", phase };
       } finally {
         if (owned) remove(sibling);
       }

@@ -69,7 +69,7 @@ describe("workspace graph output", () => {
     writeFileSync(old.compilerPath, "old");
     const projected = '{"application":{"name":"model"},"resources":[]}';
     writeFileSync(current.compilerPath, projected);
-    current.publish();
+    expect(current.publish()).toEqual({ status: "saved" });
     old.dispose();
     current.dispose();
     expect(existsSync(old.compilerPath)).toBe(false);
@@ -77,11 +77,11 @@ describe("workspace graph output", () => {
     expect(readFileSync(destination, "utf8")).toBe(projected);
   });
 
-  it("discards a previous artifact for a current build with missing compiler output", () => {
+  it("preserves previous bytes when compiler output is missing", () => {
     const { destination, log, stage } = fixture();
     writeFileSync(destination, "previous");
-    stage().publish();
-    expect(existsSync(destination)).toBe(false);
+    expect(stage().publish()).toEqual({ status: "failed", phase: "read" });
+    expect(readFileSync(destination, "utf8")).toBe("previous");
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("read staged graph output")
     );
@@ -91,13 +91,29 @@ describe("workspace graph output", () => {
     const { destination, root, log, stage } = fixture();
     mkdirSync(destination);
     const output = stage();
-    writeFileSync(output.compilerPath, "graph");
-    output.publish();
+    writeFileSync(output.compilerPath, '{"resources":[]}');
+    expect(output.publish()).toEqual({ status: "failed", phase: "rename" });
     expect(readdirSync(root)).toEqual(["app-graph.json"]);
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("publish graph output")
     );
   });
+
+  it.each(['{"resources":[', "null", "[]"])(
+    "does not replace a saved graph with invalid compiler output (%s)",
+    (document) => {
+      const { destination, log, stage, root } = fixture();
+      writeFileSync(destination, "previous");
+      const output = stage();
+      writeFileSync(output.compilerPath, document);
+      expect(output.publish()).toEqual({ status: "failed", phase: "validate" });
+      expect(readFileSync(destination, "utf8")).toBe("previous");
+      expect(readdirSync(root)).toEqual(["app-graph.json"]);
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining("validate staged graph output")
+      );
+    }
+  );
 
   it("does not stage output without a destination", () => {
     expect(stageWorkspaceGraphOutput("", vi.fn())).toBeUndefined();

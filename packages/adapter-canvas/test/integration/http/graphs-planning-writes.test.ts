@@ -1275,6 +1275,42 @@ describe("graphs-planning writes real-loopback HIT", () => {
     }
   );
 
+  it.each(["planned", "diff"] as const)(
+    "fences a %s compile failure after the admitted workspace branch changes",
+    async (view) => {
+      let branch = "main";
+      const harness = start({
+        selections: {
+          main: {
+            ...selectionOf("main", "resource app = {}"),
+            fromWorkspace: true,
+            verifyWorkspaceBranch: async () => branch === "main"
+          },
+          topic: selectionOf("topic", "resource other = {}")
+        },
+        compiled: { main: [], topic: [] },
+        afterCompile: () => {
+          branch = "topic";
+          throw new Error("compiler failed after checkout");
+        }
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await post(
+        entry.baseUrl,
+        view === "planned" ? "/api/plan-graph" : "/api/diff-branches",
+        view === "planned" ?
+          '{"repo":"octo/app","branch":"main"}'
+        : '{"repo":"octo/app","base":"topic","head":"main"}'
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ stale: true });
+      expect(harness.state.diffError).toBeUndefined();
+      expect(
+        harness.state.graphProgressRecords?.[view]?.graphBuildEvents ?? []
+      ).not.toContainEqual(expect.objectContaining({ state: "failed" }));
+    }
+  );
+
   it("compares two branches over a real socket", async () => {
     const harness = start({
       selections: {

@@ -128,6 +128,74 @@ describe("Canvas graph source composition", () => {
     expect(reads[0]?.workspace?.authorized).toBe(false);
   });
 
+  it("uses the live checkout in both directions without rewriting cached branch state", async () => {
+    const localSource = { ...source, ref: "new-topic" };
+    const { sources, reads } = harness(
+      { status: "present", source: localSource, content: "local" },
+      "new-topic"
+    );
+    const read = sources.read;
+    sources.read = async (request) => {
+      if (request.workspace?.authorized) return read(request);
+      return {
+        status: "present",
+        source: { ...source, kind: "github", revision: "a".repeat(40) },
+        content: "older pushed model"
+      };
+    };
+    const bindings = createCanvasGraphSources(
+      sources,
+      isWorkspaceSelection,
+      async () => "new-topic"
+    );
+    expect(await bindings.select({ state }, "acme/app", "topic")).toMatchObject(
+      {
+        fromWorkspace: false,
+        content: "older pushed model",
+        sourceRead: { source: { revision: "a".repeat(40) } }
+      }
+    );
+    expect(
+      await bindings.select({ state }, "acme/app", "new-topic")
+    ).toMatchObject({
+      fromWorkspace: true,
+      content: "local"
+    });
+    expect(reads[0]?.workspace).toMatchObject({
+      ref: "new-topic",
+      authorized: true
+    });
+    expect(state.workspaceBranch).toBe("topic");
+  });
+
+  it("does not fall back when a same-repo checkout probe is unavailable", async () => {
+    const { bindings, reads } = harness({ status: "absent", source }, "");
+    await expect(
+      bindings.select({ state }, "acme/app", "topic")
+    ).rejects.toMatchObject({
+      constructor: expect.objectContaining({ name: "GraphRequestSuperseded" })
+    });
+    expect(reads).toEqual([]);
+  });
+
+  it("rejects a workspace model if the branch changes during the admitted read", async () => {
+    const { sources } = harness({ status: "absent", source });
+    let branch = "topic";
+    sources.read = async () => {
+      branch = "other";
+      return { status: "absent", source };
+    };
+    const bindings = createCanvasGraphSources(
+      sources,
+      isWorkspaceSelection,
+      async () => branch
+    );
+    await expect(
+      bindings.select({ state }, "acme/app", "topic")
+    ).rejects.toMatchObject({
+      constructor: expect.objectContaining({ name: "GraphRequestSuperseded" })
+    });
+  });
   it("stages the exact captured source and retains its ownership handle", async () => {
     const selection: GraphSourceRead = {
       status: "present",

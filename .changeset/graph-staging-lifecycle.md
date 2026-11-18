@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Clean up temporary graph compilation files after Canvas builds fail or are superseded, without deleting workspace files or hiding the original result. Keep saved graphs in step with the latest request, and discard plans and interactive comparisons if the workspace switches branches while they are being prepared.
+**Fixed:** If Canvas cannot save a newly built application graph, it keeps the previous saved file and shows a warning alongside the new graph. Canvas also cleans up temporary compilation files and discards plans and interactive comparisons that are superseded by a workspace checkout.

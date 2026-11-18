@@ -3,6 +3,10 @@ import { isWorkspaceSelection } from "../workspace.js";
 import { browserScriptTag } from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
+import {
+  GRAPH_SAVE_WARNING_ID,
+  modeledGraphSaveWarning
+} from "../graph-save-warning.js";
 import { GRAPH_PAGE_STATE_ID } from "./browser-state-ids.js";
 import { renderPageState } from "./page-state.js";
 
@@ -10,6 +14,11 @@ export function graphPage(state: CanvasState = {}): string {
   const resources = state.graphResources || [];
   const targetRepo = state.graphTargetRepo || state.contextRepo || "";
   const graphBranch = state.graphBranch || state.contextBranch || "main";
+  const { saveWarning = "" } = modeledGraphSaveWarning(
+    state,
+    targetRepo,
+    graphBranch
+  );
   const localSource =
     typeof state.graphFromWorkspace === "boolean" ?
       state.graphFromWorkspace
@@ -69,6 +78,7 @@ ${graphHeader("graph")}
   <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;"${loaded ? "" : " disabled"}>Plan Deployment</button>
   <button id="modeling-refresh" type="button" class="rad-btn rad-btn--neutral" style="margin-top:0;" hidden>Refresh</button>
 </div>
+<div id="${GRAPH_SAVE_WARNING_ID}" class="graph-save-warning" role="status">${escapeHtml(saveWarning)}</div>
 ${graphBody}
 ${renderPageState(GRAPH_PAGE_STATE_ID, {
   repo: targetRepo,

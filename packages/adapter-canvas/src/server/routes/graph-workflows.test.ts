@@ -1258,7 +1258,8 @@ describe("graph planning workflows", () => {
       expect(outcome.payload).toEqual({
         reload: true,
         resources: [{ id: "res-a" }],
-        fromWorkspace: true
+        fromWorkspace: true,
+        saveWarning: expect.stringContaining("may be stale")
       });
       expect(harness.order).toEqual([
         "select:feature/x",

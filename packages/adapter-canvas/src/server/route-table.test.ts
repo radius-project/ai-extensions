@@ -308,6 +308,7 @@ const productionHandlers = {
       }),
     listBranchPaths: () => Promise.resolve([]),
     workspaceGraphJsonPath: () => "",
+    graphDefinitionHash: () => "",
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "", remote: false }),
     buildGraphViaRad: () => Promise.resolve([]),

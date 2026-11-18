@@ -4150,6 +4150,33 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toContainText("Application graph ready");
   });
 
+  test("shows the usable graph and its save warning after reload @safety", async ({
+    page,
+    canvas
+  }) => {
+    const destination = path.join(
+      canvas.workspacePath,
+      ".radius",
+      "app-graph.json"
+    );
+    await fs.rm(destination, { force: true });
+    await fs.mkdir(destination);
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      const warning = page.locator("#graph-save-warning");
+      await expect(warning).toHaveRole("status");
+      await expect(warning).toContainText("saved app-graph.json may be stale");
+      await expect(
+        page.getByRole("button", { name: "Plan Deployment" })
+      ).toBeEnabled();
+      await page.reload();
+      await expect(warning).toContainText("saved app-graph.json may be stale");
+      await expectNoWcagViolations(page);
+    } finally {
+      await fs.rmdir(destination);
+    }
+  });
+
   test("announces a rejected modeling handoff without waiting for authoring timeout @safety", async ({
     page,
     canvas

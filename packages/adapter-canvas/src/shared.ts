@@ -296,6 +296,7 @@ export interface CanvasState {
   pendingSourceRefs?: PendingSourceRef[];
   page?: string;
   graphDefinitionHash?: string;
+  graphSaveWarning?: import("./graph-save-warning.js").GraphSaveWarningIdentity;
   graphModelRevision?: string;
   graphBuildGeneration?: number;
   progressMessages?: string[];
