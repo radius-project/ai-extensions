@@ -89,7 +89,7 @@ export function radArtifactsFingerprint(dir?: string): string {
     hash.update("unreadable-config");
     return hash.digest("hex");
   }
-  hash.update(configBytes);
+  hash.update(createHash("sha256").update(configBytes).digest());
 
   let config: unknown;
   try {
@@ -109,8 +109,6 @@ export function radArtifactsFingerprint(dir?: string): string {
   for (const [alias, ref] of Object.entries(extensions).sort(([a], [b]) =>
     a.localeCompare(b)
   )) {
-    hash.update(alias);
-    hash.update(String(ref));
     if (typeof ref !== "string" || !ref.trim()) continue;
     const reference = alias === "radius" ? ref.trim() : ref;
     if (isNonFileExtensionReference(reference)) continue;
@@ -118,13 +116,17 @@ export function radArtifactsFingerprint(dir?: string): string {
     if (!rel) continue;
     const artifactPath = path.join(dir, rel);
     if (!existsSync(artifactPath)) {
-      hash.update("missing");
+      hash.update("M");
       continue;
     }
     try {
-      hash.update(readFileSync(artifactPath));
+      const digest = createHash("sha256")
+        .update(readFileSync(artifactPath))
+        .digest();
+      // Tag each result; fixed-length file digests keep adjacent entries separate.
+      hash.update("F").update(digest);
     } catch {
-      hash.update("unreadable");
+      hash.update("U");
     }
   }
   return hash.digest("hex");

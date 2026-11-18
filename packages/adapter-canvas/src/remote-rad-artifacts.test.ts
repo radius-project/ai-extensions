@@ -64,6 +64,13 @@ test.each([
     `{"extensions": {"radius": "  ./custom-types.tgz  ",},}`
   ],
   [
+    "JSONC with a malformed Radius pin",
+    `{
+      // The compiler falls back when the Radius pin is not a string.
+      "extensions": { "radius": {"toString": null}, "customTypes": "./custom-types.tgz", },
+    }`
+  ],
+  [
     "JSONC with a backslash-prefixed local artifact",
     JSON.stringify({ extensions: { customTypes: ".\\custom-types.tgz" } })
   ]
@@ -95,6 +102,29 @@ test.each([
     }
   }
 );
+
+test("distinguishes artifact contents from missing files and adjacent artifact bytes", () => {
+  const dir = fs.mkdtempSync(path.join(process.cwd(), "rad-fingerprint-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "bicepconfig.json"),
+      JSON.stringify({ extensions: { a: "./a.tgz", b: "./b.tgz" } })
+    );
+    const absent = radArtifactsFingerprint(dir);
+    fs.writeFileSync(path.join(dir, "a.tgz"), "missing");
+    const present = radArtifactsFingerprint(dir);
+    assert.notEqual(present, absent);
+
+    fs.writeFileSync(path.join(dir, "a.tgz"), "ab");
+    fs.writeFileSync(path.join(dir, "b.tgz"), "c");
+    const first = radArtifactsFingerprint(dir);
+    fs.writeFileSync(path.join(dir, "a.tgz"), "a");
+    fs.writeFileSync(path.join(dir, "b.tgz"), "bc");
+    assert.notEqual(radArtifactsFingerprint(dir), first);
+  } finally {
+    cleanup(dir);
+  }
+});
 
 test("legacy remote staging still requires strict JSON", async () => {
   const gh = mockGithub({ [CONFIG_API]: `// config\n${CONFIG}` });

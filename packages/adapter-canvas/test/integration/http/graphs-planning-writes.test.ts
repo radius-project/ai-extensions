@@ -1,8 +1,12 @@
 import { createServer } from "node:http";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applicationGraphToResources,
   computeGraphDiff,
+  deploymentGraphResources as canvasGraphResources,
   projectSafeApplicationGraph
 } from "@radius-project/core";
 import { RadProcessError } from "@radius-project/adapter-shared";
@@ -11,10 +15,15 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { createGraphsPlanningWritesRoutes } from "../../../src/server/routes/graphs-planning-writes.js";
 import { createGraphPlanningWorkflows } from "../../../src/server/routes/graph-workflows.js";
 import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../../src/graph-progress-contract.js";
-import type {
-  AppBicepSelection,
-  GraphPipeline
+import {
+  createGraphPipeline,
+  type AppBicepSelection,
+  type GraphPipeline
 } from "../../../src/server/routes/graph-pipeline.js";
+import {
+  radArtifactsDirForSelection,
+  radArtifactsFingerprint
+} from "../../../src/remote-rad-artifacts.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
   prepareSourceRefResources,
@@ -22,12 +31,14 @@ import {
 } from "../../../src/source-refs.js";
 import {
   commitWorkspaceBranchResolution,
-  resolveGraphBranchForRequest
+  resolveGraphBranchForRequest,
+  workspaceGraphJsonPath
 } from "../../../src/workspace.js";
 import {
   addGraphProgress,
   beginPlannedGraphRequest,
   canReuseModeledGraph,
+  graphDefinitionHash,
   isCurrentPlannedGraphRequest,
   isCurrentSourceRefToken
 } from "../../../src/server.js";
@@ -68,11 +79,13 @@ function selectionOf(
   return { content, fromWorkspace: false, branch, bicepPath: "" };
 }
 
-// Only the pipeline is faked: every one of its stages shells out to `rad` or
-// reaches GitHub. Each stage throws on an unscripted branch, so a handler that
-// compiles a side the scenario did not model fails loudly instead of silently
-// producing an empty graph. Every pure seam is the real production function.
-function start(script: Partial<PipelineScript> = {}): Harness {
+// Most scenarios script the pipeline; those testing cache inputs use the real
+// pipeline with controlled I/O. Unscripted branches fail instead of returning
+// an empty graph.
+function start(
+  script: Partial<PipelineScript> = {},
+  pipelineOverride?: GraphPipeline
+): Harness {
   const state: CanvasState = {};
   let entryMissing = false;
   let nowMs = 1_000;
@@ -92,7 +105,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     return value;
   }
 
-  const pipeline: GraphPipeline = {
+  const pipeline: GraphPipeline = pipelineOverride ?? {
     selectAppBicep: (_entry, _repo, branch) =>
       Promise.resolve(scripted(active.selections, branch, "selectAppBicep")),
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
@@ -240,6 +253,95 @@ describe("graphs-planning writes real-loopback HIT", () => {
     );
     expect(harness.state.graphLoaded).toBe(true);
     expect(harness.state.graphTargetRepo).toBe("octo/app");
+  });
+
+  it("reuses a workspace graph until a referenced JSONC artifact changes", async () => {
+    const workspacePath = await mkdtemp(path.join(tmpdir(), "radius-refresh-"));
+    try {
+      const artifactsDir = path.join(workspacePath, ".radius");
+      const artifact = path.join(artifactsDir, "types.tgz");
+      await mkdir(artifactsDir);
+      await writeFile(
+        path.join(artifactsDir, "bicepconfig.json"),
+        `{
+          // A malformed Radius pin must not prevent use of the fallback.
+          "extensions": {"radius": {"toString": null}, "types": "./types.tgz",},
+        }`
+      );
+      await writeFile(artifact, "original");
+      let compileCount = 0;
+      const pipeline = createGraphPipeline({
+        fetchBicepSelection: async (_entry, _repo, branch) => ({
+          content: "resource app = {}",
+          fromWorkspace: true,
+          branch,
+          bicepPath: ".radius/app.bicep"
+        }),
+        resolveRadArtifactsDir: (request) => {
+          if (!request.isLocal || !request.state)
+            throw new Error("expected a local workspace selection");
+          return radArtifactsDirForSelection({
+            ...request,
+            isLocal: true,
+            state: request.state
+          });
+        },
+        buildGraphViaRad: async (_content, _definition, options) => {
+          if (options.radArtifactsDir !== artifactsDir)
+            throw new Error("expected workspace artifacts");
+          compileCount++;
+          return [
+            { id: "res-a", name: "api", type: "Radius.Compute/containers" }
+          ];
+        },
+        canvasGraphResources,
+        workspaceGraphJsonPath,
+        graphDefinitionHash,
+        radArtifactsFingerprint,
+        removeDirectory: () => {
+          throw new Error("workspace artifacts must not be deleted");
+        }
+      });
+      const { state } = start({ liveWorkspaceBranch: "main" }, pipeline);
+      Object.assign(state, {
+        workspacePath,
+        workspaceRepo: "octo/app",
+        workspaceBranch: "main"
+      });
+      const { baseUrl } = await container!.getOrCreate("panel-a");
+      const refresh = async () => {
+        const response = await post(
+          baseUrl,
+          "/api/load-graph",
+          '{"repo":"octo/app","refresh":true}'
+        );
+        const body: unknown = await response.json();
+        expect(response.status, JSON.stringify(body)).toBe(200);
+        return body;
+      };
+
+      expect(await refresh()).toMatchObject({
+        reload: false,
+        fromWorkspace: true
+      });
+      expect(compileCount).toBe(1);
+      const { graphDefinitionHash: initialHash, graphModelRevision } = state;
+      expect(initialHash).toBeTruthy();
+      expect(graphModelRevision).toBeTruthy();
+      expect(await refresh()).toMatchObject({ reload: false, cached: true });
+      expect(compileCount).toBe(1);
+
+      await writeFile(artifact, "updated");
+      expect(await refresh()).toMatchObject({
+        reload: false,
+        fromWorkspace: true
+      });
+      expect(compileCount).toBe(2);
+      expect(state.graphDefinitionHash).not.toBe(initialHash);
+      expect(state.graphModelRevision).toBe(graphModelRevision);
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
   });
 
   it("does not expose rejected icon entries in the modeled graph response", async () => {
