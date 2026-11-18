@@ -221,14 +221,12 @@ describe("graph artifact staging", () => {
     expect(calls).toEqual([".radius/bicepconfig.json"]);
   });
 
-  it
-    .runIf(process.platform === "win32")
-    .each([
-      { custom: "BicepConfig.json" },
-      { first: "Types.tgz", second: "types.tgz" },
-      { first: "types.tgz", second: "types.tgz." }
-    ])(
-    "rejects Windows destination aliases %j before writing",
+  it.each([
+    { custom: "BicepConfig.json" },
+    { first: "Types.tgz", second: "types.tgz" },
+    { first: "types.tgz", second: "types.tgz." }
+  ])(
+    "rejects destination aliases %j on every host before writing",
     async (extensions) => {
       const root = await fixture();
       const { ports } = harness(root, {
@@ -248,10 +246,8 @@ describe("graph artifact staging", () => {
     }
   );
 
-  it
-    .runIf(process.platform === "win32")
-    .each(["nested/.. /types.tgz", "nested/types.tgz:stream"])(
-    "rejects unsafe Windows artifact path %j before reading",
+  it.each(["nested/.. /types.tgz", "nested/types.tgz:stream"])(
+    "rejects non-portable artifact paths %j before reading",
     async (ref) => {
       const root = await fixture();
       const { ports, calls } = harness(root, {

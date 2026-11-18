@@ -105,17 +105,12 @@ async function stageArtifacts(
         relative === "bicepconfig.json"
       )
         fail(`Unsafe graph extension reference for ${alias}.`);
-      const destination =
-        process.platform === "win32" ?
-          relative
-            .split("/")
-            .map((part) => part.replace(/[ .]+$/, "").toLowerCase())
-            .join("/")
-        : relative;
-      if (
-        process.platform === "win32" &&
-        (destination.includes(":") || destination.split("/").includes(""))
-      )
+      // Staged repository inputs must be portable to case-insensitive hosts.
+      const components = relative
+        .split("/")
+        .map((part) => part.replace(/[ .]+$/, "").toLowerCase());
+      const destination = components.join("/");
+      if (destination.includes(":") || components.includes(""))
         fail(`Unsafe graph extension reference for ${alias}.`);
       const previous = destinations.get(destination);
       if (previous !== undefined && previous !== relative)
