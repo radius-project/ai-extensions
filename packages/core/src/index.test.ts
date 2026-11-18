@@ -13,6 +13,11 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "GraphSourceError",
+  "createGraphOrchestrator",
+  "prepareGraph",
+  "compilePreparedGraph",
+  "enrichPlannedGraph",
   "appParams",
   "applyDeployMessages",
   "applyDeployStatusToResources",

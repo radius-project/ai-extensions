@@ -50,6 +50,8 @@ export default defineConfig({
       "src/gh*.test.ts",
       "src/server.test.ts",
       "src/workspace.test.ts",
+      "../core/src/graph-orchestration.test.ts",
+      "../adapter-shared/src/graph-{source-bindings,artifacts}.test.ts",
       "src/server/create-canvas-server.test.ts",
       "src/runtime/environment-execution-owner.test.ts",
       "src/runtime/create-radius-extension.test.ts",

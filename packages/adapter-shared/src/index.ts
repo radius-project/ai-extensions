@@ -112,3 +112,5 @@ export {
 } from "./runtime-deployment.js";
 export * from "./deployment-repair.js";
 export * from "./production-deployment.js";
+export * from "./graph-source-bindings.js";
+export * from "./graph-artifacts.js";
