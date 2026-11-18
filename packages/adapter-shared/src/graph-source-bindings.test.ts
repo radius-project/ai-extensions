@@ -31,7 +31,7 @@ afterEach(async () => {
 function harness(
   root: string,
   responses: Record<string, unknown> = {},
-  errors: Record<string, string> = {}
+  errors: Record<string, string | { stderr: string; stdout: string }> = {}
 ) {
   const calls: string[] = [];
   const checkout: { branch: string; error?: string; beforeRead(): void } = {
@@ -65,7 +65,13 @@ function harness(
     const apiPath = args[1];
     calls.push(apiPath);
     if (apiPath in errors) {
-      callback(new Error(errors[apiPath]), "", errors[apiPath]);
+      const error = errors[apiPath];
+      const stderr = typeof error === "string" ? error : error.stderr;
+      callback(
+        new Error(stderr),
+        typeof error === "string" ? "" : error.stdout,
+        stderr
+      );
     } else {
       if (!(apiPath in responses))
         throw new Error(`Unexpected request: ${apiPath}`);
@@ -83,6 +89,7 @@ function harness(
 }
 
 const commitPath = `/repos/${repo}/commits/feature%2Fbranch`;
+const pinnedCommitPath = `/repos/${repo}/commits/${revision}`;
 const filePath = (file: string) =>
   `/repos/${repo}/contents/${file}?ref=${revision}`;
 const encoded = (content: string | Buffer) => {
@@ -425,7 +432,30 @@ describe("graph source bindings", () => {
       status: "unavailable",
       diagnostic: "[redacted] (HTTP 404)"
     });
-    expect(calls).toEqual([commitPath, model, model, proof]);
+    expect(calls).toEqual([commitPath, model, proof]);
+  });
+
+  it("reports unavailable when commit access disappears after a fresh proof and a file 404", async () => {
+    const root = await fixture();
+    const model = filePath(".radius/app.bicep");
+    const errors: Record<string, string> = {
+      get [model]() {
+        errors[pinnedCommitPath] = "private-detail (HTTP 404)";
+        return "Not Found (HTTP 404)";
+      }
+    };
+    const { sources, calls } = harness(
+      root,
+      { [pinnedCommitPath]: { sha: revision } },
+      errors
+    );
+    expect(
+      await sources.readFile(remoteSource, ".radius/app.bicep")
+    ).toMatchObject({
+      status: "unavailable",
+      diagnostic: "[redacted] (HTTP 404)"
+    });
+    expect(calls).toEqual([pinnedCommitPath, model, pinnedCommitPath]);
   });
 
   it.each([null, { sha: "not-a-revision" }, [], { sha: 42 }])(
@@ -441,9 +471,39 @@ describe("graph source bindings", () => {
   );
 
   it.each([
+    { stdout: '{"errors":[{"code":"too_large"}]}', oversized: true },
+    { stdout: '{"message":"Forbidden"}', oversized: false },
+    { stdout: "not JSON", oversized: false }
+  ])(
+    "recognizes only an explicit size error from a failed Contents command ($stdout)",
+    async ({ stdout, oversized }) => {
+      const root = await fixture();
+      const model = filePath(".radius/app.bicep");
+      const { sources, calls } = harness(
+        root,
+        { [commitPath]: { sha: revision } },
+        { [model]: { stderr: "private-detail (HTTP 403)", stdout } }
+      );
+      expect(await sources.read({ repo, ref: "feature/branch" })).toMatchObject(
+        {
+          status: "unavailable",
+          diagnostic:
+            oversized ?
+              "Graph file .radius/app.bicep exceeds the GitHub Contents API inline limit (1 MiB)."
+            : "[redacted] (HTTP 403)"
+        }
+      );
+      expect(calls).toEqual([commitPath, model]);
+    }
+  );
+
+  it.each([
     null,
     [],
     { encoding: "none", content: "", size: 0 },
+    { encoding: "none", content: "", size: 1024 * 1024 },
+    { encoding: "none", content: "AA==", size: 1024 * 1024 + 1 },
+    { encoding: "none", content: "", size: 1024 * 1024 + 0.5 },
     { encoding: "base64", content: 3, size: 0 },
     { encoding: "base64", content: "", size: -1 },
     { encoding: "base64", content: "!!!!", size: 0 },
@@ -458,7 +518,10 @@ describe("graph source bindings", () => {
         [filePath(".radius/app.bicep")]: content
       });
       expect(await sources.read({ repo, ref: "feature/branch" })).toMatchObject(
-        { status: "unavailable" }
+        {
+          status: "unavailable",
+          diagnostic: expect.not.stringContaining("inline limit")
+        }
       );
       expect(calls).toHaveLength(2);
     }
@@ -488,6 +551,7 @@ describe("graph source bindings", () => {
     const root = await fixture();
     const { sources, calls } = harness(root, {
       [commitPath]: { sha: revision },
+      [pinnedCommitPath]: { sha: revision },
       [filePath(".radius/app.bicep")]: encoded("model"),
       [filePath(".radius/origin.json")]: encoded("{}")
     });
@@ -502,6 +566,7 @@ describe("graph source bindings", () => {
     expect(calls).toEqual([
       commitPath,
       filePath(".radius/app.bicep"),
+      pinnedCommitPath,
       filePath(".radius/origin.json")
     ]);
   });
@@ -695,11 +760,13 @@ describe("graph source bindings", () => {
     const binary = Buffer.from([255, 0, 128, 31, 139]);
     const { sources, calls } = harness(root, {
       [commitPath]: { sha: revision },
+      [pinnedCommitPath]: { sha: revision },
       [filePath(".radius/app.bicep")]: encoded("model"),
       [filePath(".radius/bicepconfig.json")]: encoded(
-        '{"extensions":{"custom":"types.tgz"}}'
+        '{"extensions":{"custom":"types.tgz","other":"other.tgz"}}'
       ),
-      [filePath(".radius/types.tgz")]: encoded(binary)
+      [filePath(".radius/types.tgz")]: encoded(binary),
+      [filePath(".radius/other.tgz")]: encoded(binary)
     });
     let stagedDir = "";
     const graph = createGraphOrchestrator({
@@ -712,6 +779,9 @@ describe("graph source bindings", () => {
         expect(options.cleanupRadArtifactsDir).toBe(false);
         stagedDir = options.radArtifactsDir;
         expect(await fs.readFile(path.join(stagedDir, "types.tgz"))).toEqual(
+          binary
+        );
+        expect(await fs.readFile(path.join(stagedDir, "other.tgz"))).toEqual(
           binary
         );
         return [{ name: "application" }];
@@ -730,10 +800,63 @@ describe("graph source bindings", () => {
     expect(calls).toEqual([
       commitPath,
       filePath(".radius/app.bicep"),
+      pinnedCommitPath,
+      filePath(".radius/bicepconfig.json"),
+      filePath(".radius/types.tgz"),
+      filePath(".radius/other.tgz")
+    ]);
+    await expect(fs.stat(stagedDir)).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+  });
+
+  it("propagates oversized committed artifacts before acquiring a staging directory or compiling", async () => {
+    const root = await fixture();
+    const { sources, calls } = harness(root, {
+      [commitPath]: { sha: revision },
+      [pinnedCommitPath]: { sha: revision },
+      [filePath(".radius/app.bicep")]: encoded("model"),
+      [filePath(".radius/bicepconfig.json")]: encoded(
+        '{"extensions":{"custom":"types.tgz"}}'
+      ),
+      [filePath(".radius/types.tgz")]: {
+        encoding: "none",
+        content: "",
+        size: 1024 * 1024 + 1
+      }
+    });
+    const selected = await sources.read({ repo, ref: "feature/branch" });
+    if (selected.status !== "present") throw new Error("Expected model");
+    const diagnostic =
+      "Graph file .radius/types.tgz exceeds the GitHub Contents API inline limit (1 MiB).";
+    await expect(sources.stage(selected)).rejects.toMatchObject({
+      code: "invalid-artifact",
+      message: expect.stringContaining(diagnostic)
+    });
+    const graph = createGraphOrchestrator({
+      stage: sources.stage,
+      compile: () => {
+        throw new Error("unexpected compile");
+      },
+      diff: () => {
+        throw new Error("unexpected diff");
+      }
+    });
+    await expect(graph.authored(selected)).rejects.toMatchObject({
+      code: "invalid-artifact",
+      message: expect.stringContaining(diagnostic)
+    });
+    expect(calls).toEqual([
+      commitPath,
+      filePath(".radius/app.bicep"),
+      pinnedCommitPath,
+      filePath(".radius/bicepconfig.json"),
+      filePath(".radius/types.tgz"),
+      pinnedCommitPath,
       filePath(".radius/bicepconfig.json"),
       filePath(".radius/types.tgz")
     ]);
-    await expect(fs.stat(stagedDir)).rejects.toMatchObject({
+    await expect(fs.stat(path.join(root, "staging"))).rejects.toMatchObject({
       code: "ENOENT"
     });
   });
@@ -767,6 +890,7 @@ describe("graph source bindings", () => {
       );
       const { sources, calls } = harness(root, {
         [commitPath]: { sha: revision },
+        [pinnedCommitPath]: { sha: revision },
         [filePath(".radius/app.bicep")]: encoded("model"),
         [filePath(".radius/bicepconfig.json")]: encoded(config),
         [filePath(".radius/nested/types.tgz")]: encoded(binary)
@@ -785,7 +909,7 @@ describe("graph source bindings", () => {
         expect(
           await fs.readFile(path.join(staged.dir, "nested", "types.tgz"))
         ).toEqual(binary);
-        expect(calls).toHaveLength(kind === "github" ? 4 : 0);
+        expect(calls).toHaveLength(kind === "github" ? 5 : 0);
       } finally {
         await staged.dispose();
       }
@@ -809,6 +933,7 @@ describe("graph source bindings", () => {
       );
       const { sources, calls } = harness(root, {
         [commitPath]: { sha: revision },
+        [pinnedCommitPath]: { sha: revision },
         [filePath(".radius/app.bicep")]: encoded("model"),
         [filePath(".radius/bicepconfig.json")]: encoded(malformed)
       });
@@ -821,7 +946,7 @@ describe("graph source bindings", () => {
         code: "invalid-artifact",
         message: "Graph bicepconfig.json is not valid JSON."
       });
-      expect(calls).toHaveLength(kind === "github" ? 3 : 0);
+      expect(calls).toHaveLength(kind === "github" ? 4 : 0);
       expect(
         await fs.readFile(
           path.join(root, ".radius", "bicepconfig.json"),

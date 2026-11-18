@@ -44,6 +44,24 @@ export interface GraphSourceBindings {
 
 export class WorkspaceGraphBranchChanged extends Error {}
 
+const CONTENTS_INLINE_LIMIT = 1024 * 1024;
+
+function isTooLargeError(value: unknown): boolean {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    "errors" in value &&
+    Array.isArray(value.errors) &&
+    value.errors.some(
+      (error: unknown) =>
+        !!error &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "too_large"
+    )
+  );
+}
+
 export interface GraphSourceBindingOptions {
   execute: DeploymentCommandExecutor;
   redactDiagnostic(message: string): string;
@@ -106,7 +124,6 @@ export function createGraphSourceBindings(
   options: GraphSourceBindingOptions
 ): GraphSourceBindings {
   const repository = createDeploymentRepository(options);
-  const readableRevisions = new Set<string>();
   const diagnostic = (error: unknown): string =>
     options.redactDiagnostic(
       error instanceof Error ? error.message : String(error)
@@ -159,7 +176,8 @@ export function createGraphSourceBindings(
 
   async function readBytes(
     source: GraphSourceIdentity,
-    repoPath: string
+    repoPath: string,
+    revisionProved: boolean
   ): Promise<GraphBytesRead> {
     try {
       const normalized = safePath(repoPath);
@@ -187,22 +205,23 @@ export function createGraphSourceBindings(
       }
       if (!source.revision || !/^[a-f0-9]{40}$/i.test(source.revision))
         throw new Error("GitHub graph source has no resolved revision.");
-      const revisionKey = `${source.repo.toLowerCase()}@${source.revision}`;
-      if (!readableRevisions.has(revisionKey)) {
+      if (!revisionProved)
         await requireReadableRevision(source.repo, source.revision);
-        readableRevisions.add(revisionKey);
-      }
+      const tooLarge = () =>
+        new Error(
+          `Graph file ${normalized} exceeds the GitHub Contents API inline limit (1 MiB).`
+        );
       const response = await repository.readJson(
-        `/repos/${source.repo}/contents/${normalized.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(source.revision)}`
+        `/repos/${source.repo}/contents/${normalized.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(source.revision)}`,
+        { readErrorJson: true }
       );
       if (!response.ok) {
         if (response.status === 404) {
           // GitHub also returns 404 when access has been lost.
-          readableRevisions.delete(revisionKey);
           await requireReadableRevision(source.repo, source.revision);
-          readableRevisions.add(revisionKey);
           return { status: "absent" };
         }
+        if (isTooLargeError(response.json)) throw tooLarge();
         throw new Error(response.stderr || "GitHub graph file unavailable.");
       }
       const value = response.json;
@@ -210,7 +229,6 @@ export function createGraphSourceBindings(
         !value ||
         typeof value !== "object" ||
         !("encoding" in value) ||
-        value.encoding !== "base64" ||
         !("content" in value) ||
         typeof value.content !== "string" ||
         !("size" in value) ||
@@ -218,6 +236,16 @@ export function createGraphSourceBindings(
         typeof value.size !== "number" ||
         value.size < 0
       )
+        throw new Error(
+          "GitHub graph file metadata is invalid or unsupported."
+        );
+      if (
+        value.encoding === "none" &&
+        value.content === "" &&
+        value.size > CONTENTS_INLINE_LIMIT
+      )
+        throw tooLarge();
+      if (value.encoding !== "base64")
         throw new Error(
           "GitHub graph file metadata is invalid or unsupported."
         );
@@ -231,12 +259,13 @@ export function createGraphSourceBindings(
     }
   }
 
-  async function readFile(
+  async function readText(
     source: GraphSourceIdentity,
-    repoPath: string
+    repoPath: string,
+    revisionProved: boolean
   ): Promise<GraphSourceRead> {
     const identity = { ...source, definitionPath: repoPath };
-    const result = await readBytes(source, repoPath);
+    const result = await readBytes(source, repoPath, revisionProved);
     if (result.status === "present")
       return {
         status: "present",
@@ -281,16 +310,13 @@ export function createGraphSourceBindings(
             response.stderr || "GitHub graph ref is unavailable or malformed."
           );
         source.revision = commit.sha;
-        readableRevisions.add(
-          `${source.repo.toLowerCase()}@${source.revision}`
-        );
       }
       const paths =
         request.definitionPath ?
           [request.definitionPath]
         : [".radius/app.bicep", "app.bicep"];
       for (const candidate of paths) {
-        const result = await readFile(source, candidate);
+        const result = await readText(source, candidate, true);
         if (result.status !== "absent") return result;
       }
       return { status: "absent", source };
@@ -306,13 +332,19 @@ export function createGraphSourceBindings(
   return {
     assertWorkspaceSource,
     read,
-    readFile,
-    stage: (selection) =>
-      stageGraphArtifacts(selection, {
-        readBytes,
+    readFile: (source, repoPath) => readText(source, repoPath, false),
+    stage: (selection) => {
+      let revisionProved = false;
+      return stageGraphArtifacts(selection, {
+        async readBytes(source, repoPath) {
+          const result = await readBytes(source, repoPath, revisionProved);
+          if (result.status !== "unavailable") revisionProved = true;
+          return result;
+        },
         stagingRoot: options.stagingRoot,
         diagnostic: options.diagnostic,
         redactDiagnostic: options.redactDiagnostic
-      })
+      });
+    }
   };
 }
