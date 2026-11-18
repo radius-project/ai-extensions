@@ -1039,6 +1039,14 @@ describe("cloud-e2e-cleanup.yml", () => {
       environments: ["production"],
       packages: ["radius-project-canvas"],
       status: 0
+    },
+    // Every environment the suite creates starts with `radtest-`, so the gate
+    // checks only the clouds' prefixes, not the bare state prefix.
+    {
+      case: "state for an environment the suite did not create",
+      environments: ["production"],
+      packages: ["fixture-repo-radius-state-production-0123456789ab"],
+      status: 0
     }
   ])(
     "runs the final reset gate: $case",
@@ -1319,6 +1327,71 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain(
       "orphaned GHCR package $package_name is still readable after deletion"
     );
+  });
+
+  // Every environment the suite creates starts with `radtest-`, so a state
+  // package for any other environment name is not the suite's to delete.
+  it("runs the orphaned state sweep on Azure packages only", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const sweep = steps(workflow.jobs?.["purge-azure"]).find(
+      (step) => step.id === "ghcr-state-cleanup"
+    );
+    expect(sweep?.run).toBeDefined();
+    const directory = await mkdtemp(path.join(tmpdir(), "orphan-sweep-"));
+    const deletes = path.join(directory, "deletes.txt");
+    const summary = path.join(directory, "summary.md");
+    const statePrefix = "fixture-repo-radius-state-";
+    const azure = `${statePrefix}radtest-abc-0123456789ab`;
+    const page = JSON.stringify([
+      [
+        azure,
+        `${statePrefix}radtest-aws-abc-0123456789ab`,
+        `${statePrefix}production-0123456789ab`
+      ].map((name) => ({ name, updated_at: "2026-09-01T00:00:00Z" }))
+    ]);
+    const stubs = `
+      ${process.platform === "win32" ? 'jq() { command jq --binary "$@"; }' : ""}
+      date() { echo 2026-09-17T12:00:00Z; }
+      sleep() { :; }
+      gh() {
+        case "$*" in
+          *packages?package_type=container*) printf '%s\\n' '${page}' ;;
+          *"--method DELETE"*) printf '%s\\n' "\${@: -1}" >>'${deletes}' ;;
+          *)
+            if grep -qxF "\${@: -1}" '${deletes}' 2>/dev/null; then
+              echo "HTTP 404" >&2
+              return 1
+            fi
+            echo '{"visibility":"private","repository":{"full_name":"owner/fixture-repo"}}' ;;
+        esac
+      }`;
+    try {
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          RUNNER_TEMP: directory,
+          GITHUB_STEP_SUMMARY: summary,
+          GH_PACKAGES_TOKEN: "packages-token",
+          FIXTURE_OWNER: "owner",
+          FIXTURE_REPOSITORY: "owner/fixture-repo",
+          MAX_AGE_HOURS: "6",
+          ENVIRONMENT_PREFIX: ENVIRONMENT_NAME_PREFIX
+        },
+        input: `${stubs}\n${sweep?.run}`
+      });
+      expect(result.stderr).not.toMatch(/error|unbound/i);
+      expect(result.status).toBe(0);
+      expect(await readFile(deletes, "utf8")).toBe(
+        `orgs/owner/packages/container/${azure}\n`
+      );
+      expect(await readFile(summary, "utf8")).toContain(
+        "Orphaned GHCR state packages deleted: 1"
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("retries and verifies Entra application deletion through the exact Graph object", async () => {

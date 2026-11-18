@@ -519,7 +519,8 @@ export function selectExpiredFallbackBranches(
 }
 
 /**
- * Every GHCR state package the fixture has left behind.
+ * Every stale GHCR state package under `prefix` that the fixture has left
+ * behind.
  *
  * The other state sweep walks the fixture's GitHub Environments and derives the
  * package name from each one, so it can only ever see state whose environment
@@ -562,7 +563,8 @@ export function selectStaleStatePackages(
 }
 
 /**
- * Every GHCR state package the fixture has left behind, whatever its age.
+ * Every GHCR state package under `prefix` that the fixture has left behind,
+ * whatever its age.
  *
  * `selectStaleStatePackages` keeps a package whose `updated_at` cannot be
  * read, so a check that only asks it with a future cutoff can miss state that
