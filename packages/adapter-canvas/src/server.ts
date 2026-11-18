@@ -611,11 +611,7 @@ interface OpenSourceInput {
   state?: CanvasState;
 }
 
-type AppBicepHandoff = (
-  input: AppBicepHandoffInput & {
-    readSelectedModel?: import("./shared.js").ReadSelectedGraphModel;
-  }
-) => Promise<unknown>;
+type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
 type DeployFailureNotice = (input: DeployFailureNoticeInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
@@ -1361,8 +1357,7 @@ function triggerAppBicepHandoff(
   progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph",
   isCurrent?: () => boolean,
   environmentKey?: string,
-  onFailure?: (message: string) => void,
-  readSelectedModel?: import("./shared.js").ReadSelectedGraphModel
+  onFailure?: (message: string) => void
 ): void {
   const handoff = appBicepHandoff;
   if (!handoff || !repo) return;
@@ -1378,8 +1373,7 @@ function triggerAppBicepHandoff(
         progressView,
         state: entry?.state,
         isCurrent,
-        environmentKey,
-        ...(readSelectedModel ? { readSelectedModel } : {})
+        environmentKey
       })
     )
     .catch((error: unknown) => {
@@ -6018,40 +6012,6 @@ export function createProductionCanvasServerRuntime(
     currentWorkspaceBranch
   );
   const fetchBicepSelection = graphSources.select;
-  const handOffGraphModel: typeof triggerAppBicepHandoff = (
-    entry,
-    repo,
-    branches,
-    page,
-    view,
-    isCurrent,
-    environmentKey,
-    onFailure
-  ) =>
-    triggerAppBicepHandoff(
-      entry,
-      repo,
-      branches,
-      page,
-      view,
-      isCurrent,
-      environmentKey,
-      onFailure,
-      entry ?
-        async (selectedRepo, branch) => {
-          const selection = await fetchBicepSelection(
-            entry,
-            selectedRepo,
-            branch
-          );
-          if (selection.content !== null && !selection.content.trim())
-            throw new Error(
-              `${selectedRepo}@${branch}:${selection.bicepPath} is empty; the graph is unavailable.`
-            );
-          return selection;
-        }
-      : undefined
-    );
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     resolveBranchForRequest: (entry, repo, requestedBranch) =>
@@ -6071,7 +6031,7 @@ export function createProductionCanvasServerRuntime(
     isCurrentSourceRef: (entry, expectedToken) =>
       isCurrentSourceRefToken(entry.state, "graph", expectedToken),
     triggerAppBicepHandoff: (entry, repo, branch, isCurrent) =>
-      handOffGraphModel(entry, repo, branch, "graph", "graph", isCurrent),
+      triggerAppBicepHandoff(entry, repo, branch, "graph", "graph", isCurrent),
     triggerGraphRepairHandoff: (entry, request) =>
       triggerGraphRepairHandoff(entry, request),
     clearGraphRepairAttempt: (entry) =>
@@ -6121,7 +6081,7 @@ export function createProductionCanvasServerRuntime(
           rmSync(dir, { recursive: true, force: true });
         }
       }),
-      triggerAppBicepHandoff: handOffGraphModel,
+      triggerAppBicepHandoff,
       triggerGraphRepairHandoff: (entry, request) =>
         triggerGraphRepairHandoff(entry, request),
       clearGraphRepairAttempt: (entry, view) => {

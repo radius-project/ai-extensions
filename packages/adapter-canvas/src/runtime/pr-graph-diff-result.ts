@@ -1,4 +1,5 @@
 import { PR_GRAPH_DIFF_MARKDOWN_HEADING } from "../pr-diff-markdown.js";
+import type { GraphSourceIdentity } from "@radius-project/core";
 
 const TELEMETRY_KEY = "radiusGraphDiff";
 
@@ -8,6 +9,7 @@ export interface PullRequestGraphDiffToolResult {
   textResultForLlm: string;
   resultType: "success" | "failure";
   error?: string;
+  sources?: { base: GraphSourceIdentity; head: GraphSourceIdentity };
   toolTelemetry?: {
     radiusGraphDiff: {
       outcome: PullRequestGraphDiffOutcome;
@@ -15,12 +17,24 @@ export interface PullRequestGraphDiffToolResult {
   };
 }
 
+function withSourceIdentities(
+  text: string,
+  sources: PullRequestGraphDiffToolResult["sources"]
+): string {
+  if (!sources) return text;
+  const identity = (source: GraphSourceIdentity) =>
+    `${source.repo}@${source.revision ?? source.ref}`;
+  return `${text}\n\nBase source: \`${identity(sources.base)}\`\n\nHead source: \`${identity(sources.head)}\``;
+}
+
 export function successfulGraphDiffResult(
-  markdown: string
+  markdown: string,
+  sources?: PullRequestGraphDiffToolResult["sources"]
 ): PullRequestGraphDiffToolResult {
   return {
-    textResultForLlm: markdown,
+    textResultForLlm: withSourceIdentities(markdown, sources),
     resultType: "success",
+    ...(sources ? { sources } : {}),
     toolTelemetry: {
       [TELEMETRY_KEY]: {
         outcome: "diff"
@@ -30,11 +44,13 @@ export function successfulGraphDiffResult(
 }
 
 export function unavailableGraphDiffResult(
-  message: string
+  message: string,
+  sources?: PullRequestGraphDiffToolResult["sources"]
 ): PullRequestGraphDiffToolResult {
   return {
-    textResultForLlm: message,
+    textResultForLlm: withSourceIdentities(message, sources),
     resultType: "success",
+    ...(sources ? { sources } : {}),
     toolTelemetry: {
       [TELEMETRY_KEY]: {
         outcome: "unavailable"
@@ -44,11 +60,13 @@ export function unavailableGraphDiffResult(
 }
 
 export function failedGraphDiffResult(
-  message: string
+  message: string,
+  sources?: PullRequestGraphDiffToolResult["sources"]
 ): PullRequestGraphDiffToolResult {
   return {
-    textResultForLlm: message,
+    textResultForLlm: withSourceIdentities(message, sources),
     resultType: "failure",
+    ...(sources ? { sources } : {}),
     error: message
   };
 }

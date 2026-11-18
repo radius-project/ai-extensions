@@ -5,14 +5,19 @@
 import { RADIUS_TOOL_DECLARATIONS } from "./declarations.js";
 import {
   ambiguousAppSourceBrief,
+  GraphSourceError,
   unsupportedAppSourceReport
 } from "@radius-project/core";
 import { errorMessage, optionalString } from "./util.js";
-import { createGraphContextHelpers } from "./graph-context.js";
+import {
+  createGraphContextHelpers,
+  createRuntimeGraphOrchestrator
+} from "./graph-context.js";
 import {
   failedGraphDiffResult,
   successfulGraphDiffResult,
-  unavailableGraphDiffResult
+  unavailableGraphDiffResult,
+  type PullRequestGraphDiffToolResult
 } from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { ModelingActivity } from "./modeling-activity.js";
@@ -41,7 +46,7 @@ export function createRadiusTools(
 ) {
   const {
     workspaceState,
-    fetchBicepForBranch,
+    readBicepForBranch,
     evaluateAppSourceForBranch,
     listSourceTreeForBranch
   } = createGraphContextHelpers(deps);
@@ -186,8 +191,16 @@ export function createRadiusTools(
               "The Canvas modeling attempt is no longer current; the failure was not recorded."
           };
         }
-        const content = await fetchBicepForBranch(repo, branch, entry.state);
-        if (content) {
+        const model = await readBicepForBranch(repo, branch, entry.state);
+        if (model.status === "unavailable") throw new Error(model.diagnostic);
+        if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
+          return {
+            recorded: false,
+            error:
+              "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
+          };
+        }
+        if (model.status === "present" && model.content.trim()) {
           clearAppModelAuthoringFailure(entry.state, repo, branch);
           return {
             recorded: false,
@@ -249,76 +262,43 @@ export function createRadiusTools(
           baseBranch: string;
           headBranch: string;
         };
+        let sources: PullRequestGraphDiffToolResult["sources"];
         try {
-          const state = await workspaceState();
-          const [baseContent, headContent] = await Promise.all([
-            fetchBicepForBranch(repo, baseBranch, state),
-            fetchBicepForBranch(repo, headBranch, state)
+          const [baseRead, headRead] = await Promise.all([
+            deps.graphSources.read({
+              repo,
+              ref: baseBranch,
+              committedOnly: true
+            }),
+            deps.graphSources.read({
+              repo,
+              ref: headBranch,
+              committedOnly: true
+            })
           ]);
-
-          if (!baseContent && !headContent) {
+          sources = { base: baseRead.source, head: headRead.source };
+          const result = await createRuntimeGraphOrchestrator(
+            deps,
+            logToSession
+          ).compare(baseRead, headRead);
+          if (result.status === "definitions-absent") {
             return unavailableGraphDiffResult(
-              `No .radius/app.bicep or app.bicep could be read for ${baseBranch} or ${headBranch}. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
+              `No .radius/app.bicep or app.bicep could be read for ${baseBranch} or ${headBranch}. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`,
+              sources
             );
           }
-
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                baseBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                headBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const baseResources = await deps.rad.buildGraphViaRad(
-            baseContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: baseRadArtifactsDir,
-              cleanupRadArtifactsDir: baseRadArtifactsRemote
-            }
-          );
-          const headResources = await deps.rad.buildGraphViaRad(
-            headContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: headRadArtifactsDir,
-              cleanupRadArtifactsDir: headRadArtifactsRemote
-            }
-          );
-
-          const diffResources = deps.core.computeGraphDiff(
-            baseResources,
-            headResources
-          );
           return successfulGraphDiffResult(
-            deps.renderPrDiffMarkdown(diffResources, baseBranch, headBranch)
+            deps.renderPrDiffMarkdown(result.diff, baseBranch, headBranch),
+            sources
           );
         } catch (err) {
+          const source =
+            err instanceof GraphSourceError ?
+              `${err.source.repo}@${err.source.ref} (${err.source.definitionPath}): `
+            : "";
           return failedGraphDiffResult(
-            `Could not generate app graph diff: ${errorMessage(err)}`
+            `Could not generate app graph diff: ${source}${errorMessage(err)}`,
+            sources
           );
         }
       }

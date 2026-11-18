@@ -15,7 +15,10 @@ import {
 import { record, optionalString, errorMessage } from "./util.js";
 import { DEFAULT_CANVAS_PAGE } from "./hooks.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
-import { createGraphContextHelpers } from "./graph-context.js";
+import {
+  createGraphContextHelpers,
+  createRuntimeGraphOrchestrator
+} from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import {
   createRadiusCanvasInstanceRegistry,
@@ -67,7 +70,7 @@ export function createRadiusCanvas(
   canvasInstances: RadiusCanvasInstanceRegistry = createRadiusCanvasInstanceRegistry()
 ) {
   const closeGenerations = new Map<string, number>();
-  const { workspaceState, fetchBicepForBranch } =
+  const { workspaceState, readBicepForBranch } =
     createGraphContextHelpers(deps);
 
   const declarationByName = new Map(
@@ -185,10 +188,8 @@ export function createRadiusCanvas(
           `Radius canvas instance ${activeInstanceId} is already open; reuse it instead of opening ${ctx.instanceId}.`
         );
       }
-      closeGenerations.set(
-        ctx.instanceId,
-        (closeGenerations.get(ctx.instanceId) || 0) + 1
-      );
+      const openGeneration = (closeGenerations.get(ctx.instanceId) || 0) + 1;
+      closeGenerations.set(ctx.instanceId, openGeneration);
       const input = record(ctx.input);
       const page = optionalString(input.page) || DEFAULT_CANVAS_PAGE;
       let entry;
@@ -200,6 +201,10 @@ export function createRadiusCanvas(
         }
         throw error;
       }
+      const isCurrentOpen = () =>
+        deps.servers.get(ctx.instanceId) === entry &&
+        closeGenerations.get(ctx.instanceId) === openGeneration;
+      if (!isCurrentOpen()) return { title: "Radius", url: entry.url };
       entry.state.canvasInstanceId = ctx.instanceId;
       entry.state.activeGraphView =
         page === "graph-diff" ? "diff"
@@ -214,6 +219,7 @@ export function createRadiusCanvas(
           }
         : undefined;
       const workspace = await workspaceState();
+      if (!isCurrentOpen()) return { title: "Radius", url: entry.url };
       Object.assign(entry.state, workspace);
       const inputRepo = optionalString(input.repo);
       const inputBranch = optionalString(input.branch);
@@ -260,6 +266,7 @@ export function createRadiusCanvas(
             ],
             { timeout: 5000, encoding: "utf8" }
           );
+          if (!isCurrentOpen()) return { title: "Radius", url: entry.url };
           const remoteUrl = stdout.trim();
           const repo = deps.workspace.parseRepoFromRemote(remoteUrl);
           if (repo) {
@@ -268,6 +275,7 @@ export function createRadiusCanvas(
         } catch (e) {
           /* ignore */
         }
+        if (!isCurrentOpen()) return { title: "Radius", url: entry.url };
       }
 
       if (page === "graph" || page === "planned") {
@@ -295,12 +303,21 @@ export function createRadiusCanvas(
         entry.state.diffTargetRepo = repo;
         delete entry.state.diffError;
         delete entry.state.diffModelingFailed;
+        const isCurrent = () =>
+          isCurrentOpen() &&
+          entry.state.activeGraphView === "diff" &&
+          isCurrentSourceRefToken(entry.state, "diff", sourceRefContext.token);
+        const checkCancelled = () => {
+          if (!isCurrent())
+            throw new Error("Graph comparison is no longer current.");
+        };
         try {
-          const [baseContent, headContent] = await Promise.all([
-            fetchBicepForBranch(repo, baseBranch, entry.state),
-            fetchBicepForBranch(repo, headBranch, entry.state)
+          const selection = { ...entry.state };
+          const [baseRead, headRead] = await Promise.all([
+            readBicepForBranch(repo, baseBranch, selection),
+            readBicepForBranch(repo, headBranch, selection)
           ]);
-
+          checkCancelled();
           const session = deps.session.get();
           const log = (m: string) => {
             try {
@@ -308,55 +325,19 @@ export function createRadiusCanvas(
             } catch {}
           };
 
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                entry.state,
-                repo,
-                baseBranch
-              ),
-              state: entry.state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                entry.state,
-                repo,
-                headBranch
-              ),
-              state: entry.state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log
-            });
-          let baseResources: CanvasGraphResource[];
-          let headResources: CanvasGraphResource[];
+          let diffResources: CanvasGraphResource[];
           try {
-            baseResources = await deps.rad.buildGraphViaRad(
-              baseContent || "",
-              ".radius/app.bicep",
-              {
-                log,
-                radArtifactsDir: baseRadArtifactsDir,
-                cleanupRadArtifactsDir: baseRadArtifactsRemote
-              }
-            );
-            headResources = await deps.rad.buildGraphViaRad(
-              headContent || "",
-              ".radius/app.bicep",
-              {
-                log,
-                radArtifactsDir: headRadArtifactsDir,
-                cleanupRadArtifactsDir: headRadArtifactsRemote
-              }
-            );
+            const result = await createRuntimeGraphOrchestrator(
+              deps,
+              log
+            ).compare(baseRead, headRead, { checkCancelled });
+            checkCancelled();
+            if (result.status === "definitions-absent") {
+              throw new Error(
+                `No .radius/app.bicep or app.bicep could be read for ${baseBranch} or ${headBranch}.`
+              );
+            }
+            diffResources = result.diff;
           } catch (error) {
             const failure = asGraphModelingFailure(error);
             if (!(failure instanceof GraphModelingFailure)) throw error;
@@ -365,17 +346,11 @@ export function createRadiusCanvas(
             );
             const request = {
               view: "diff" as const,
-              repo: repo || "",
+              repo,
               branches: [baseBranch, headBranch],
               diagnostic: failure.diagnostic
             };
-            if (
-              !isCurrentSourceRefToken(
-                entry.state,
-                "diff",
-                sourceRefContext.token
-              )
-            ) {
+            if (!isCurrent()) {
               throw failure;
             }
             const attempt = beginGraphRepairAttempt(entry.state, request);
@@ -393,10 +368,7 @@ export function createRadiusCanvas(
             }
             throw failure;
           }
-          const diffResources = deps.core.computeGraphDiff(
-            baseResources,
-            headResources
-          );
+          checkCancelled();
           const committed = deps.sourceRefs.setSourceRefResources(
             entry,
             "diff",
@@ -413,9 +385,7 @@ export function createRadiusCanvas(
             entry.state.diffNoChanges = !hasChanges;
           }
         } catch (e) {
-          if (
-            isCurrentSourceRefToken(entry.state, "diff", sourceRefContext.token)
-          ) {
+          if (isCurrent()) {
             entry.state.diffError = errorMessage(e);
           }
         }
@@ -424,6 +394,10 @@ export function createRadiusCanvas(
       return { title: "Radius", url: entry.url };
     },
     onClose: async (ctx: CanvasContext) => {
+      const generation = closeGenerations.get(ctx.instanceId);
+      if (generation !== undefined) {
+        closeGenerations.set(ctx.instanceId, generation + 1);
+      }
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
         if (deps.executionOwner.hasActiveDeletionTasks(ctx.instanceId)) {

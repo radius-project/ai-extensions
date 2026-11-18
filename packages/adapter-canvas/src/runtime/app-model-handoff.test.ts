@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { WorkspaceGraphBranchChanged } from "@radius-project/adapter-shared";
 import {
   appModelHandoffKey,
   createAppModelHandoff,
@@ -41,6 +42,13 @@ function modelStatus(
   return {
     repo,
     branch,
+    source: {
+      kind: "workspace",
+      repo,
+      ref: branch,
+      definitionPath: ".radius/app.bicep",
+      workspacePath: "/workspace"
+    },
     refreshable: overrides.refreshable ?? true,
     freshness: {
       status,
@@ -120,6 +128,7 @@ function harness(
   const deps: AppModelHandoffDependencies = {
     resolveContext,
     resolveStatus,
+    assertWorkspaceSource: vi.fn(async () => {}),
     evaluateSource,
     modelingInFlight,
     // Resolves immediately: the grace window's duration is expressed in the
@@ -255,6 +264,34 @@ describe("appModelHandoffKey", () => {
 });
 
 describe("createAppModelHandoff", () => {
+  it.each(["outdated", "unrecorded", "missing"] as const)(
+    "does not act on a %s model after the final workspace assertion detects drift",
+    async (status) => {
+      const memo = vi.fn(() => true);
+      const assertWorkspaceSource = vi.fn(async () => {
+        throw new WorkspaceGraphBranchChanged("checkout moved");
+      });
+      const { handOff, sent } = harness({
+        statuses: {
+          feat: modelStatus("a/b", "feat", {
+            status: status === "outdated" ? "source-changed" : status
+          })
+        },
+        assertWorkspaceSource,
+        shouldRequestRefresh: memo
+      });
+      const state: CanvasState = { canvasInstanceId: "panel" };
+      await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
+      expect(assertWorkspaceSource).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "workspace", ref: "feat" })
+      );
+      expect(sent).toHaveLength(0);
+      expect(memo).not.toHaveBeenCalled();
+      expect(state.appBicepHandoffKeys).toEqual({});
+      expect(state.appModelAttemptTokens).toBeUndefined();
+    }
+  );
+
   it("reads against the live workspace context when no panel state is supplied", async () => {
     const { handOff, resolveContext, resolveStatus, sent } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
@@ -284,7 +321,10 @@ describe("createAppModelHandoff", () => {
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
     expect(resolveContext).not.toHaveBeenCalled();
-    expect(resolveStatus).toHaveBeenCalledWith("a/b", "feat", state);
+    expect(resolveStatus).toHaveBeenCalledWith("a/b", "feat", {
+      workspaceRepo: state.workspaceRepo,
+      workspaceBranch: state.workspaceBranch
+    });
   });
 
   it("asks the agent to author a model when no branch has one", async () => {
@@ -1576,7 +1616,8 @@ describe("createAppModelHandoff", () => {
 
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
-    expect(seen).toEqual([state]);
+    expect(seen).toEqual([{ workspaceRepo: "a/b", workspaceBranch: "feat" }]);
+    expect(seen[0]).not.toBe(state);
   });
 
   it("propagates a broken reader rather than acting on a half-resolved picture", async () => {

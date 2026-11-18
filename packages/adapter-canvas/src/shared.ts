@@ -491,7 +491,3 @@ export function deleteCredentialProfile(repo: string, name: unknown): boolean {
   saveCredentials();
   return deleted;
 }
-export type ReadSelectedGraphModel = (
-  repo: string,
-  branch: string
-) => Promise<{ content: string | null; fromWorkspace: boolean }>;
