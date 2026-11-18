@@ -292,6 +292,37 @@ describe("createAppModelHandoff", () => {
     }
   );
 
+  it("releases the missing-model claim and reservation when the final workspace assertion errors", async () => {
+    const failure = new Error("Unable to read the current Git branch");
+    const assertWorkspaceSource = vi
+      .fn(async () => {})
+      .mockRejectedValueOnce(failure);
+    const missingModelHandoffs = createMissingModelHandoffClaims(() => 0);
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      assertWorkspaceSource,
+      missingModelHandoffs
+    });
+    const state: CanvasState = { canvasInstanceId: "panel" };
+    const request = {
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph" as const,
+      state
+    };
+
+    await expect(handOff(request)).rejects.toBe(failure);
+    expect(missingModelHandoffs.current("a/b::feat")).toBeNull();
+    expect(state.appBicepHandoffKeys).toEqual({});
+    expect(state.appModelAttemptTokens).toBeUndefined();
+    expect(sent).toHaveLength(0);
+
+    await handOff(request);
+    await handOff(request);
+    expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeDefined();
+    expect(sent).toHaveLength(1);
+  });
+
   it("reads against the live workspace context when no panel state is supplied", async () => {
     const { handOff, resolveContext, resolveStatus, sent } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
