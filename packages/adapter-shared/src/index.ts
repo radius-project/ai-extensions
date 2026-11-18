@@ -114,3 +114,7 @@ export * from "./deployment-repair.js";
 export * from "./production-deployment.js";
 export * from "./graph-source-bindings.js";
 export * from "./graph-artifacts.js";
+export {
+  inspectEnvironments,
+  type EnvironmentInspectionRead
+} from "./environment-inspection.js";

@@ -1557,6 +1557,46 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
   });
 });
 
+it("routes registered publication tools without a Canvas panel", async () => {
+  const harness = await createRuntimeSdkHarness();
+  const tools = harness.extension.tools;
+  const compile = tools.find(
+    (tool) => tool.name === "radius_publish_custom_type_extension"
+  );
+  const publish = tools.find((tool) => tool.name === "radius_publish_recipe");
+  if (!compile || !publish) throw new Error("Publication tools not registered");
+  try {
+    await expect(
+      compile.handler({ stagingDir: ".radius/.staging-fixture" })
+    ).resolves.toContain("custom-types.tgz");
+    expect(harness.deps.rad.runRadBicepPublishExtension).toHaveBeenCalledOnce();
+    expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
+
+    await expect(
+      publish.handler({
+        file: ".radius/recipe.bicep",
+        target: "br:ghcr.io/other/repo/recipe:v1"
+      })
+    ).resolves.toContain("must publish under the repository being modeled");
+    expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
+
+    await expect(
+      publish.handler({
+        file: ".radius/recipe.bicep",
+        target: "br:ghcr.io/acme/widgets/recipe:v1"
+      })
+    ).resolves.toContain("br:ghcr.io/acme/widgets/recipe:v1");
+    expect(harness.deps.rad.runRadBicepPublish).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        env: { DOCKER_CONFIG: "/tmp/fake-docker-config" }
+      })
+    );
+    expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+  } finally {
+    await harness.extension.shutdown("test");
+  }
+});
+
 // Exception 2.1: a repository with no Dockerfile has no containerized workload
 // to model, so both routes into modeling — the tool the agent calls and the host
 // handoff the graph routes fire — have to refuse through the real composition,

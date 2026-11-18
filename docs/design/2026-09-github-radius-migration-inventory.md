@@ -49,6 +49,14 @@ Already-delegated layer-1 paths are limited to provider classification, AWS comp
 
 The sections below identify current tests and contracts for each row. HTTP parsing/serialization, SDK objects, browser interaction, panel subscriptions, and rendered graph state remain frontend responsibilities; they are not residual library work.
 
+## Stage 5 authoring and inspection
+
+Core's `modeling/app-authoring.ts` owns explicit authoring eligibility, refresh selection, model evidence and the read-side fence for permanent failure reports. `modeling/app-publication.ts` coordinates local custom-type compilation and GHCR recipe publication through existing confined adapter bindings. Canvas still owns agent prompts, handoff claims and tokens, progress, and the final state update. An enqueued prompt or an observed model is not evidence that the prompt's agent wrote the file. Refresh handoffs are tokenless; stale-response fencing applies to host observations, not agent shell or registry execution. The shipped scripts still gate staged validation and promotion, and host tool permission remains the publication approval boundary.
+
+Core inspection separates application definition identity, deployment history and exact-run resource evidence. Shared bindings read GitHub and `rad` data; Canvas retains route payloads, cache generations, degraded display fallbacks, progress and modeled-graph handoffs. Missing artifact evidence never establishes deletion. Existing cleanup consumers retain their identity and provenance contracts.
+
+The authoring and publication unit suites exercise the refactored core entry points without an SDK or panel. Runtime contracts exercise registered tools and authoring transitions; loopback contracts exercise inspection, including run-scoped evidence and stale inventory. The built-extension fixture checks skill bootstrap, packaged assets and publication refusal against registered tools.
+
 ## Current delivery and reuse limits
 
 **Observation and setup:** Stage 1 observation and its redaction closure are merged. Core/shared supply independent read-only callers. Setup/status/control tools use shared setup services without opening Canvas; all four internal setup/verification/rollback transports are replaced and obsolete setup endpoints are removed. Shared verification now requires host redaction and core credential rules before composing excerpts and saved evidence, closing the historical raw-verification gap. Only the HTTP adapter retains the legacy panel run-ID fallback.

@@ -4,8 +4,10 @@
 
 import { RADIUS_TOOL_DECLARATIONS } from "./declarations.js";
 import {
-  ambiguousAppSourceBrief,
+  createAppPublication,
   GraphSourceError,
+  inspectAppModelFailure,
+  prepareAppAuthoring,
   unsupportedAppSourceReport
 } from "@radius-project/core";
 import { errorMessage, optionalString } from "./util.js";
@@ -72,6 +74,24 @@ export function createRadiusTools(
     }
   }
 
+  const publication = createAppPublication({
+    resolveExisting: deps.publishTargets.resolveExistingRadiusArtifact,
+    resolveTarget: deps.publishTargets.resolveRadiusArtifactTarget,
+    stagingPrefix: deps.publishTargets.resolveStagingDirPrefix,
+    validateRegistryTarget: deps.publishTargets.validateGhcrTargetForRepo,
+    exists: deps.process.existsSync,
+    compileExtension: (fromFile, target) =>
+      deps.rad.runRadBicepPublishExtension({
+        fromFile,
+        target,
+        log: logToSession
+      }),
+    publishRecipe: (file, target) =>
+      deps.withGhcrDockerConfig((env) =>
+        deps.rad.runRadBicepPublish({ file, target, env, log: logToSession })
+      )
+  });
+
   // Records that a modeling run is about to start, so a graph render that finds
   // no model defers to it instead of asking for the same work again. Called
   // only on the paths that actually hand the skill over: a refused repository
@@ -113,12 +133,18 @@ export function createRadiusTools(
           !repoPath ||
           deps.workspace.isWorkspacePath(state?.workspacePath, repoPath);
         if (state && targetsWorkspace) {
-          const source = await evaluateAppSourceForBranch(
-            state.contextRepo || "",
-            state.contextBranch || "",
-            state
-          ).catch(() => null);
-          if (source?.status === "none") {
+          const repo = state.contextRepo || "";
+          const branch = state.contextBranch || "";
+          const authoring = await prepareAppAuthoring({
+            evaluate: () =>
+              evaluateAppSourceForBranch(repo, branch, state).catch(() => null),
+            listPaths: () => listSourceTreeForBranch(repo, branch, state),
+            explicitlySelectedDirectory: () =>
+              !!repoPath &&
+              deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
+              !deps.workspace.isWorkspacePath(repoPath, state.workspacePath)
+          });
+          if (authoring.kind === "unsupported") {
             return unsupportedAppSourceReport(state.contextRepo);
           }
           // The workspace-manifest signal needs the listing itself, which the
@@ -130,29 +156,7 @@ export function createRadiusTools(
           // A null listing means the re-read did not happen, so the brief
           // simply omits the signal; it must never be read as "no manifests
           // present".
-          const listing =
-            source?.status === "ambiguous" ?
-              await listSourceTreeForBranch(
-                state.contextRepo || "",
-                state.contextBranch || "",
-                state
-              )
-            : null;
-          // A repoPath naming somewhere INSIDE the worktree is the user's
-          // answer to the very question this brief asks. The gate above
-          // deliberately lets a subdirectory through, because a tree with no
-          // Dockerfile has none in any subdirectory either — but that evidence
-          // only justifies the refusal above. Asking again here, with
-          // candidates from outside the directory they just named, would undo
-          // their answer and loop. So the brief is for the worktree itself.
-          const answeredWithDirectory =
-            !!repoPath &&
-            deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
-            !deps.workspace.isWorkspacePath(repoPath, state.workspacePath);
-          brief =
-            answeredWithDirectory ? undefined : (
-              (ambiguousAppSourceBrief(source, listing) ?? undefined)
-            );
+          brief = authoring.brief;
         }
         if (targetsWorkspace) announceModelingRun(state);
         return deps.radiusAppBicepSkill(repoPath, brief);
@@ -194,16 +198,25 @@ export function createRadiusTools(
         const stillCurrent = () =>
           deps.servers.get(instanceId) === entry &&
           entry.state.appModelAttemptTokens?.[target] === attemptToken;
-        const model = await readBicepForBranch(repo, branch, entry.state);
-        if (!stillCurrent()) {
+        const inspection = await inspectAppModelFailure({
+          current: stillCurrent,
+          readModel: () => readBicepForBranch(repo, branch, entry.state),
+          baseline: entry.state.appModelAttemptSourceRevisions?.[target],
+          readSourceRevision: () =>
+            readSelectedSourceRevision(entry.state, repo, branch, {
+              isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
+              workspaceSourceRevision: deps.appModel.workspaceSourceRevision,
+              branchHeadCommit: deps.appModel.branchHeadCommit
+            }).catch(() => "")
+        });
+        if (inspection.kind === "stale" || !stillCurrent()) {
           return {
             recorded: false,
             error:
               "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
           };
         }
-        if (model.status === "unavailable") throw new Error(model.diagnostic);
-        if (model.status === "present" && model.content.trim()) {
+        if (inspection.kind === "model-present") {
           clearAppModelAuthoringFailure(entry.state, repo, branch);
           return {
             recorded: false,
@@ -211,20 +224,7 @@ export function createRadiusTools(
               "The application model now exists; the stale failure was not recorded."
           };
         }
-        const sourceRevision =
-          entry.state.appModelAttemptSourceRevisions?.[target] ||
-          (await readSelectedSourceRevision(entry.state, repo, branch, {
-            isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
-            workspaceSourceRevision: deps.appModel.workspaceSourceRevision,
-            branchHeadCommit: deps.appModel.branchHeadCommit
-          }).catch(() => ""));
-        if (!stillCurrent()) {
-          return {
-            recorded: false,
-            error:
-              "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
-          };
-        }
+        const { sourceRevision } = inspection;
         entry.state.appModelFailures ??= {};
         entry.state.appModelFailures[target] = {
           attemptToken,
@@ -309,29 +309,14 @@ export function createRadiusTools(
       handler: async (args: ToolArgs) => {
         try {
           const { workspacePath } = await workspaceState();
-          const stagingPrefix = deps.publishTargets.resolveStagingDirPrefix(
+          const result = await publication.compileExtension(
             workspacePath,
-            args.stagingDir
+            args
           );
-          const fromFile = deps.publishTargets.resolveExistingRadiusArtifact(
-            workspacePath,
-            args.manifestPath,
-            `.radius/${stagingPrefix}custom-types.yaml`
-          );
-          const target = deps.publishTargets.resolveRadiusArtifactTarget(
-            workspacePath,
-            args.targetPath,
-            `.radius/${stagingPrefix}custom-types.tgz`
-          );
-          if (!deps.process.existsSync(fromFile)) {
-            return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+          if (result.kind === "missing") {
+            return `Resource-type manifest not found at ${result.path}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
           }
-          await deps.rad.runRadBicepPublishExtension({
-            fromFile,
-            target,
-            log: logToSession
-          });
-          return `Published custom-type extension to ${target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
+          return `Published custom-type extension to ${result.target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
         } catch (err) {
           return `⚠️ Could not publish the custom-type extension: ${errorMessage(err)}`;
         }
@@ -342,29 +327,16 @@ export function createRadiusTools(
       handler: async (args: ToolArgs) => {
         try {
           const { workspacePath, workspaceRepo } = await workspaceState();
-          const targetError = deps.publishTargets.validateGhcrTargetForRepo(
-            args.target,
-            workspaceRepo
-          );
-          if (targetError) return targetError;
-          const file = deps.publishTargets.resolveExistingRadiusArtifact(
+          const result = await publication.publishRecipe(
             workspacePath,
-            args.file,
-            null
+            workspaceRepo,
+            args
           );
-          if (!deps.process.existsSync(file)) {
-            return `Recipe file not found at ${file}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+          if (result.kind === "refused") return result.error;
+          if (result.kind === "missing") {
+            return `Recipe file not found at ${result.path}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
           }
-          const target = String(args.target).trim();
-          const published = await deps.withGhcrDockerConfig((env) =>
-            deps.rad.runRadBicepPublish({
-              file,
-              target,
-              env,
-              log: logToSession
-            })
-          );
-          return `Published recipe to ${String(published)}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
+          return `Published recipe to ${result.reference}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
         } catch (err) {
           return `⚠️ Could not publish the recipe: ${errorMessage(err)}`;
         }

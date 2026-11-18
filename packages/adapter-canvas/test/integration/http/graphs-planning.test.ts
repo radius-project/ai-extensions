@@ -1293,6 +1293,8 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     Object.assign(harness.state, {
       contextRepo: "octo/app",
       contextBranch: "feature/current",
+      deployAppName: "Billing",
+      deployEnvName: "Prod",
       graphTargetRepo: "octo/app",
       graphBranch: "feature/current",
       graphResources: [
@@ -1353,6 +1355,15 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       }
     });
 
+    const implicitSelection = await fetch(
+      `${entry.baseUrl}/api/deployed-graph`
+    );
+    expect(await implicitSelection.json()).toMatchObject({
+      mode: "terminal",
+      application: "Billing",
+      deletionInventory: null
+    });
+
     // Retained progress may still paint a useful graph after authentication
     // fails, but cannot authorize the resource names shown before deletion.
     harness.reader.graph.status = "auth";
@@ -1364,6 +1375,63 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       mode: "terminal",
       deletionInventory: null,
       resources: [{ name: "never-created", deployStatus: "failed" }]
+    });
+  });
+
+  it("does not publish an inventory if a different attempt owns the session when the read completes", async () => {
+    let markReached = () => {};
+    const reached = new Promise<void>((resolve) => {
+      markReached = resolve;
+    });
+    let release = () => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const progress: DeployProgress = {
+      schemaVersion: 1,
+      application: "store",
+      environment: "prod",
+      runId: 42,
+      sequence: 1,
+      state: "succeeded",
+      resources: [{ name: "db", type: "example/db" }]
+    };
+    const harness = start({
+      graph: async () => ({ status: "ok", graph: null }),
+      progress: async () => progress,
+      read: async () => {
+        markReached();
+        await hold;
+        return { status: "ok", progress };
+      }
+    });
+    Object.assign(harness.state, {
+      deployStatus: "complete",
+      deployRunId: 42,
+      deployAppName: "store",
+      deployEnvName: "prod"
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const request = fetch(
+      `${entry.baseUrl}/api/deployed-graph?repo=octo/app&application=store&environment=prod`
+    );
+    try {
+      await Promise.race([
+        reached,
+        request.then(() => {
+          throw new Error("The graph returned without reading inventory");
+        })
+      ]);
+      harness.state.deployRunId = 43;
+    } finally {
+      release();
+    }
+
+    const response = await request;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      application: "store",
+      deletionInventory: null
     });
   });
 

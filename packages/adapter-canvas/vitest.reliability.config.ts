@@ -8,6 +8,7 @@ export default defineConfig({
       "src/promote-app-model.test.ts",
       "../core/src/modeling/app-staging.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
+      "../core/src/inspection/deployed-graph.test.ts",
       "../core/src/workflow-read-policy.test.ts",
       "../core/src/setup-{admission,boundary,provider-configuration}.test.ts",
       "../core/src/setup-{command-admission,input-resume}.test.ts",

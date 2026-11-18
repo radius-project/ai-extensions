@@ -1,6 +1,5 @@
 import {
   ABANDONED_DEPLOYMENT_DESCRIPTION,
-  extractAppName,
   classifyDeploymentWorkflow,
   selectDeploymentRecord,
   deploymentRunId,
@@ -8,6 +7,7 @@ import {
   type DeploymentRecord,
   type DeploymentRow
 } from "@radius-project/core";
+import { inspectApplicationDefinition } from "@radius-project/core/inspection";
 import {
   cleanupConfirmation,
   cleanupMarker,
@@ -465,41 +465,38 @@ export function createDeploymentLookup(
     maxParallelRecords: dependencies.maxParallelRecords ?? 10
   };
 
-  async function resolveRepoAppName(
-    repo: string,
-    branch: string
-  ): Promise<string> {
-    let appName = repo.split("/").pop() || repo;
-    const ref = branch || "main";
-    for (const path of [".radius/app.bicep", "app.bicep"]) {
-      let raw: string;
+  const inspectRepoApplication = (repo: string, branch: string) =>
+    inspectApplicationDefinition(repo, branch, async (path, ref) => {
       try {
-        raw = await dependencies.ghOrThrow([
+        const raw = await dependencies.ghOrThrow([
           "api",
           `/repos/${repo}/contents/${path}?ref=${ref}`,
           "--jq",
           ".content"
         ]);
+        return raw ?
+            {
+              kind: "read",
+              source: Buffer.from(raw, "base64").toString("utf8")
+            }
+          : { kind: "missing" };
       } catch {
-        raw = "";
+        return { kind: "unavailable" };
       }
-      if (!raw) continue;
-      let decoded: string;
-      try {
-        decoded = Buffer.from(raw, "base64").toString("utf8");
-      } catch {
-        decoded = "";
-      }
-      const name = extractAppName(decoded);
-      if (name) {
-        appName = name;
-        break;
-      }
-    }
-    return appName;
+    });
+
+  async function resolveRepoAppName(
+    repo: string,
+    branch: string
+  ): Promise<string> {
+    const inspected = await inspectRepoApplication(repo, branch);
+    return inspected.kind === "defined" ?
+        inspected.name
+      : inspected.fallbackName;
   }
 
   return {
+    inspectRepoApplication,
     resolveRepoAppName,
     listEnvDeployment: (repo: string, environment: string, appName: string) =>
       listEnvironmentDeployment(

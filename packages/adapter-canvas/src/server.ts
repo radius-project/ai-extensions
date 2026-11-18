@@ -3478,7 +3478,7 @@ export function explainMissingPackagesScope(
 // record is almost always in the newest handful.
 const DEPLOY_MAX_PARALLEL_RECORDS = 10;
 
-const resolveRepoAppName = createDeploymentLookup({
+const { resolveRepoAppName, inspectRepoApplication } = createDeploymentLookup({
   readApplicationIdentity: createDeploymentIdentityReader({
     listWorkflowArtifacts,
     downloadWorkflowArtifact,
@@ -3488,7 +3488,7 @@ const resolveRepoAppName = createDeploymentLookup({
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
   deleteWorkflowFile: DELETE_WORKFLOW_FILE,
   maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS
-}).resolveRepoAppName;
+});
 
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
@@ -5798,7 +5798,7 @@ export function createProductionCanvasServerRuntime(
     triggerDeployRepairHandoff: () => false,
     triggerDeployFailureNotice: () => false,
     deployHandoffStatus,
-    resolveRepoAppName,
+    inspectRepoApplication,
     resolveEnvDeployment: (repo, environment, application) =>
       resolveEnvDeployment(repo, environment, application, cliExecPort),
     listEnvDeployment: (repo, environment, application) =>

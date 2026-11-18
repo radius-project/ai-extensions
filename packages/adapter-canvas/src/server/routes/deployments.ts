@@ -6,6 +6,10 @@ import type { DeployRequestService } from "../services/deploy-request.js";
 import type { DeploymentRow } from "../services/deployment-resolver.js";
 import { prepareDeploymentCleanup } from "../services/deployment-cleanup-details.js";
 import type { EnvironmentDeploymentListing } from "@radius-project/adapter-shared";
+import {
+  inspectDeploymentListings,
+  type ApplicationDefinitionInspection
+} from "@radius-project/core/inspection";
 import type {
   DeleteConflictProbe,
   DeleteConflictRequest
@@ -112,7 +116,10 @@ export interface DeploymentsDependencies {
     instanceId: string
   ): boolean;
   deployHandoffStatus(state: CanvasState): DeployHandoffSummary;
-  resolveRepoAppName(repo: string, branch: string): Promise<string>;
+  inspectRepoApplication(
+    repo: string,
+    branch: string
+  ): Promise<ApplicationDefinitionInspection>;
   resolveEnvDeployment(
     repo: string,
     environment: string,
@@ -393,13 +400,14 @@ export async function handleListApplications(
     return;
   }
   try {
-    // The application name is defined in the repo's app.bicep (a repo hosts a
-    // single Radius application in this model). Shared with the
-    // deployments/env-deletion paths via resolveRepoAppName.
+    // The compatibility response displays a fallback name without asserting
+    // that the selected branch contained a usable definition.
     const entry = dependencies.readInstanceEntry(context.instanceId);
     const branch = deployContextBranch(entry);
-    const appName = await dependencies.resolveRepoAppName(repo, branch);
-    respond({ applications: [{ name: appName }] });
+    const definition = await dependencies.inspectRepoApplication(repo, branch);
+    const name =
+      definition.kind === "defined" ? definition.name : definition.fallbackName;
+    respond({ applications: [{ name }] });
   } catch (e) {
     respond({
       applications: [{ name: repo.split("/").pop() || repo }],
@@ -459,22 +467,22 @@ export async function handleListDeployments(
     // OWN history (see resolveEnvDeployment). Querying per environment — rather
     // than a single repo-wide, capped page — means a busy environment can never
     // crowd another's latest deploy/delete record out of the results.
-    const envNamesRaw = await dependencies.ghOrThrow([
-      "api",
-      "--paginate",
-      `/repos/${repo}/environments?per_page=100`,
-      "--jq",
-      ".environments[].name"
-    ]);
-    const envNames =
-      envNamesRaw ? [...new Set(envNamesRaw.split("\n").filter(Boolean))] : [];
-    const resolved = await Promise.allSettled(
-      envNames.map((name) => dependencies.listEnvDeployment(repo, name, ""))
+    const resolved = await inspectDeploymentListings(
+      async () => {
+        const names = await dependencies.ghOrThrow([
+          "api",
+          "--paginate",
+          `/repos/${repo}/environments?per_page=100`,
+          "--jq",
+          ".environments[].name"
+        ]);
+        return names.split("\n").filter(Boolean);
+      },
+      (name) => dependencies.listEnvDeployment(repo, name, "")
     );
     const deployments = [];
     const environmentDiagnostics = [];
-    for (const [index, result] of resolved.entries()) {
-      const environment = envNames[index];
+    for (const { environment, result } of resolved) {
       if (result.status === "rejected") {
         environmentDiagnostics.push({
           environment,
