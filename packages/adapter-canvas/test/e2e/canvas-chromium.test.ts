@@ -4164,13 +4164,17 @@ test.describe("Radius Canvas in Chromium", () => {
     try {
       await gotoCanvas(page, canvas, "graph");
       const warning = page.locator("#graph-save-warning");
+      const plan = page.getByRole("button", { name: "Plan Deployment" });
       await expect(warning).toHaveRole("status");
       await expect(warning).toContainText("saved app-graph.json may be stale");
-      await expect(
-        page.getByRole("button", { name: "Plan Deployment" })
-      ).toBeEnabled();
+      await expect(plan).toBeEnabled();
       await page.reload();
       await expect(warning).toContainText("saved app-graph.json may be stale");
+      // The persisted warning is visible before the browser refresh completes.
+      await expect(page.locator("#graph-refresh-status")).toHaveText(
+        "Application graph ready."
+      );
+      await expect(plan).toBeEnabled();
       await expectNoWcagViolations(page);
     } finally {
       await fs.rmdir(destination);
