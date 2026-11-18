@@ -525,11 +525,7 @@ describe("collectAwsPreflightFindings", () => {
     w.aws.refuseOnce("iam get-policy", "AccessDenied");
     w.aws.refuseOnce("rds describe-db-instances", "AccessDenied");
     expect(await findings(w)).toEqual([
-      expect.stringMatching(
-        new RegExp(
-          `^Could not check cluster ${MAIN_LABEL.replace(/[()]/g, "\\$&")}: aws eks describe-addon: .*AccessDeniedException`
-        )
-      ),
+      `Could not check cluster ${MAIN_LABEL}: aws eks describe-addon: An error occurred (AccessDeniedException) when calling the eks describe-addon operation: Refused by the test.`,
       expect.stringMatching(
         /^Could not check the node groups of cluster .*: aws eks list-nodegroups: .*AccessDeniedException/
       ),

@@ -291,10 +291,7 @@ describe("scaleAwsNodeGroupsToZero", () => {
     await expect(
       scaleAwsNodeGroupsToZero(nodePorts(world), MAIN)
     ).rejects.toThrow(
-      new RegExp(
-        `^Could not scale the node groups on cluster ${MAIN_LABEL.replace(/[()]/g, "\\$&")} to zero \\(default: Scaling node group default .* to 0 failed: .*AccessDeniedException.*\\)\\. They keep costing until they are\\.`,
-        "s"
-      )
+      `Could not scale the node groups on cluster ${MAIN_LABEL} to zero (default: Scaling node group default on cluster ${MAIN_LABEL} to 0 failed: An error occurred (AccessDeniedException) when calling the eks update-nodegroup-config operation: Refused by the test.). They keep costing until they are. Run the Cloud E2E cleanup workflow, which scales them down.`
     );
     expect(groups(world).isolated.desiredSize).toBe(0);
   });
