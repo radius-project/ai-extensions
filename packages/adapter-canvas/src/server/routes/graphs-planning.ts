@@ -311,7 +311,7 @@ export async function handleDeployedGraph(
     return;
   }
   const instanceState = entry?.state;
-  const state = instanceState || {};
+  let state = instanceState || {};
   if (entry?.state) entry.state.progressMessages = [];
   const branch =
     state.workspaceBranch && dependencies.repoMatchesWorkspace(state, repo) ?
@@ -366,32 +366,49 @@ export async function handleDeployedGraph(
     selected: string
   ): boolean =>
     !session || !selected || session.toLowerCase() === selected.toLowerCase();
-  const sessionRepo = state.deployingRepo || state.contextRepo || "";
-  const sessionBranch =
-    state.deployingBranch || state.contextBranch || state.graphBranch || "";
-  const sessionMatchesSelection =
-    exactSelectionPartMatches(sessionRepo, repo) &&
-    exactSelectionPartMatches(sessionBranch, branch) &&
-    namedSelectionPartMatches(sessionEnv, requestedEnv) &&
-    namedSelectionPartMatches(state.deployAppName || "", requestedApp);
-  const deploying =
+  const matchesSelection = (candidate: CanvasState) =>
+    exactSelectionPartMatches(
+      candidate.deployingRepo || candidate.contextRepo || "",
+      repo
+    ) &&
+    exactSelectionPartMatches(
+      candidate.deployingBranch ||
+        candidate.contextBranch ||
+        candidate.graphBranch ||
+        "",
+      branch
+    ) &&
+    namedSelectionPartMatches(
+      candidate.deployEnvName || candidate.envName || "",
+      requestedEnv
+    ) &&
+    namedSelectionPartMatches(candidate.deployAppName || "", requestedApp);
+  let sessionMatchesSelection = matchesSelection(state);
+  let deploying =
     state.deployStatus === "in_progress" && sessionMatchesSelection;
-  const monitorRunId = state.deployRunId;
+  let monitorRunId = state.deployRunId;
 
   const statusByKey = new Map<string, DeployStatus>();
+  const artifactStatuses = new Map<string, DeployStatus>();
   // Seed the resources the deploy monitor tracks so an empty artifact read keeps
   // their status. A valid artifact later overwrites only the keys it mentions.
-  if (sessionMatchesSelection && Array.isArray(state.deployingResources)) {
-    for (const resource of state.deployingResources) {
+  const seedMonitorStatuses = (
+    resources: CanvasState["deployingResources"]
+  ) => {
+    if (!Array.isArray(resources)) return;
+    for (const resource of resources) {
       const status = resource?.deployStatus as DeployStatus | undefined;
       if (!status || status === "pending") continue;
       for (const key of dependencies.deployStatusKeys(resource)) {
         if (!statusByKey.has(key)) statusByKey.set(key, status);
       }
     }
-  }
+  };
+  if (sessionMatchesSelection) seedMonitorStatuses(state.deployingResources);
 
   const inventoryDeployStatus = state.deployStatus;
+  const generation = state.deployGeneration;
+  const attemptId = state.deployAttempt?.id;
   const run = {
     matchesSelection: sessionMatchesSelection,
     active: deploying,
@@ -404,6 +421,8 @@ export async function handleDeployedGraph(
     dependencies.readInstanceEntry(context.instanceId)?.state ===
       instanceState &&
     state.deployStatus === inventoryDeployStatus &&
+    state.deployGeneration === generation &&
+    state.deployAttempt?.id === attemptId &&
     state.deployRunId === run.id &&
     state.deployStartedAt === run.startedAt &&
     state.deployFinishedAt === run.finishedAt;
@@ -431,10 +450,9 @@ export async function handleDeployedGraph(
       if (entry?.observation?.stopped)
         throw new WorkflowReadInterruptedError("cancelled");
     },
-    acceptProgress: (progress, newerRun) => {
-      if (newerRun) statusByKey.clear();
+    acceptProgress: (progress) => {
       for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
-        statusByKey.set(key, status);
+        artifactStatuses.set(key, status);
       }
       for (const [key, message] of dependencies.buildDeployMessageMap(
         progress
@@ -455,12 +473,60 @@ export async function handleDeployedGraph(
     response.end(JSON.stringify({ error: "Workflow observation stopped." }));
     return;
   }
-  if (inspected.kind === "read-failed") {
+  const currentInstanceState = dependencies.readInstanceEntry(
+    context.instanceId
+  )?.state;
+  const currentState = currentInstanceState || {};
+  const currentMatchesSelection = matchesSelection(currentState);
+  const currentRunId = currentState.deployRunId;
+  const observedRunId = inspected.observation.artifactRunId;
+  const sameRun =
+    run.id == null ?
+      currentRunId == null ||
+      (observedRunId != null && String(observedRunId) === String(currentRunId))
+    : currentRunId != null && String(run.id) === String(currentRunId);
+  const sameStatus =
+    currentState.deployStatus === inventoryDeployStatus ||
+    (run.active &&
+      (currentState.deployStatus === "complete" ||
+        currentState.deployStatus === "failed"));
+  const superseded =
+    currentInstanceState !== instanceState ||
+    ((sessionMatchesSelection || currentMatchesSelection) &&
+      (sessionMatchesSelection !== currentMatchesSelection ||
+        currentState.deployGeneration !== generation ||
+        currentState.deployAttempt?.id !== attemptId ||
+        !sameRun ||
+        !sameStatus));
+  // An unpinned repository read belongs to the URL selection even if the
+  // monitor moves elsewhere; its inventory still requires the stricter fence.
+  const keepRepositoryEvidence =
+    superseded &&
+    currentInstanceState === instanceState &&
+    !run.active &&
+    !currentMatchesSelection &&
+    inspected.kind === "observed";
+  const discardArtifact = superseded && !keepRepositoryEvidence;
+  if (superseded) {
+    // Keep polling a matching replacement without carrying over old statuses.
+    state = currentState;
+    sessionMatchesSelection = currentMatchesSelection;
+    deploying = sessionMatchesSelection && state.deployStatus === "in_progress";
+    monitorRunId = currentRunId;
+    statusByKey.clear();
+    if (sessionMatchesSelection) seedMonitorStatuses(state.deployingResources);
+  } else if (inspected.kind === "read-failed") {
     if (entry?.state) {
       entry.state.progressMessages = [
         `Deployed graph status read failed: ${dependencies.errorMessage(inspected.error)}`
       ];
     }
+  }
+  if (discardArtifact) {
+    messageByKey.clear();
+  } else {
+    if (inspected.observation.newerRun) statusByKey.clear();
+    for (const [key, status] of artifactStatuses) statusByKey.set(key, status);
   }
   const {
     graph: publishedGraph,
@@ -468,7 +534,16 @@ export async function handleDeployedGraph(
     artifactRunId,
     readOk,
     inventory
-  } = inspected.observation;
+  } =
+    discardArtifact ?
+      {
+        graph: null,
+        progress: null,
+        artifactRunId: null,
+        readOk: false,
+        inventory: null
+      }
+    : inspected.observation;
   const resolvedApp = progress?.application || requestedApp || null;
   const updatedAt = progress?.updatedAt || null;
   const hasPublishedGraph =
@@ -631,7 +706,8 @@ export async function handleDeployedGraph(
       mode,
       updatedAt,
       application: resolvedApp,
-      deletionInventory: inventory && inventoryIsCurrent() ? inventory : null
+      deletionInventory:
+        !superseded && inventory && inventoryIsCurrent() ? inventory : null
     })
   );
 }

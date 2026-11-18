@@ -55,6 +55,8 @@ Core's `modeling/app-authoring.ts` owns explicit authoring eligibility, refresh 
 
 Core inspection separates application definition identity, deployment history and exact-run resource evidence. Shared bindings read GitHub and `rad` data; Canvas retains route payloads, cache generations, degraded display fallbacks, progress and modeled-graph handoffs. Missing artifact evidence never establishes deletion. Existing cleanup consumers retain their identity and provenance contracts.
 
+Canvas rechecks deployment identity after artifact reads so a superseded run cannot supply display data or deletion inventory. A matching replacement run keeps the graph polling. If the monitor moves to a different selection, an unpinned repository read can still supply display data for the requested selection, but not deletion inventory.
+
 The authoring and publication unit suites exercise the refactored core entry points without an SDK or panel. Runtime contracts exercise registered tools and authoring transitions; loopback contracts exercise inspection, including run-scoped evidence and stale inventory. The built-extension fixture checks skill bootstrap, packaged assets and publication refusal against registered tools.
 
 ## Current delivery and reuse limits

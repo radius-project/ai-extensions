@@ -1378,7 +1378,145 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     });
   });
 
-  it("does not publish an inventory if a different attempt owns the session when the read completes", async () => {
+  it.each([
+    "superseded",
+    "repair",
+    "discarded",
+    "selection drift",
+    "other environment",
+    "switch away",
+    "late failure"
+  ] as const)(
+    "keeps deployed graph evidence scoped to its selection during a held progress read: %s",
+    async (scenario) => {
+      let markReached = () => {};
+      const reached = new Promise<void>((resolve) => {
+        markReached = resolve;
+      });
+      let release = () => {};
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const unrelated = scenario === "other environment";
+      const switchAway = scenario === "switch away";
+      const repair = scenario === "repair";
+      const progress: DeployProgress = {
+        schemaVersion: 1,
+        application: "artifact-app",
+        environment: "prod",
+        runId: 42,
+        sequence: 1,
+        updatedAt: "2026-08-13T00:00:00.000Z",
+        resources: [
+          {
+            id: "db",
+            name: "db",
+            type: "example/db",
+            status: "failed",
+            message: "old failure"
+          }
+        ]
+      };
+      const harness = start({
+        graph: async () => ({
+          status: "ok",
+          graph: {
+            resources: [
+              {
+                id: "db",
+                outputResources: [{ id: "old-db", type: "example/db" }]
+              }
+            ]
+          }
+        }),
+        progress: async () => {
+          markReached();
+          await hold;
+          if (scenario === "late failure") throw new Error("old read error");
+          return progress;
+        },
+        read: async () => ({ status: "ok", progress })
+      });
+      harness.modeledResources.push({
+        id: "db",
+        name: "db",
+        type: "example/db"
+      });
+      Object.assign(harness.state, {
+        deployStatus:
+          repair ? "failed"
+          : switchAway ? "complete"
+          : "in_progress",
+        deployRunId: repair ? null : 42,
+        deployGeneration: 1,
+        deployAppName: scenario === "selection drift" ? "" : "store",
+        deployEnvName: unrelated ? "dev" : "prod",
+        deployingResources: [{ id: "db", deployStatus: "failed" }]
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const request = fetch(
+        `${entry.baseUrl}/api/deployed-graph?repo=octo/app&application=store&environment=prod`
+      );
+      try {
+        await Promise.race([
+          reached,
+          request.then(() => {
+            throw new Error("The graph returned without reading progress");
+          })
+        ]);
+        if (scenario === "selection drift")
+          harness.state.deployAppName = "other";
+        else if (scenario === "discarded") {
+          harness.state.deployStatus = "";
+          harness.state.deployRunId = null;
+          harness.state.deployingResources = null;
+        } else {
+          harness.state.deployGeneration = 2;
+          harness.state.deployRunId = 43;
+          harness.state.deployStatus = "in_progress";
+          if (switchAway) harness.state.deployEnvName = "dev";
+          harness.state.deployingResources = [
+            { id: "db", name: "db", deployStatus: "in_progress" }
+          ];
+          harness.state.progressMessages = ["current progress"];
+        }
+      } finally {
+        release();
+      }
+      const response = await request;
+      const payload = await response.json();
+      expect(response.status).toBe(200);
+      if (unrelated || switchAway) {
+        expect(payload).toMatchObject({
+          application: "artifact-app",
+          updatedAt: progress.updatedAt,
+          resources: [{ deployStatus: "failed", deployMessage: "old failure" }]
+        });
+        if (switchAway)
+          expect(payload).toMatchObject({
+            mode: "terminal",
+            deletionInventory: null
+          });
+      } else {
+        const active =
+          scenario !== "discarded" && scenario !== "selection drift";
+        expect(payload).toMatchObject({
+          application: "store",
+          mode: active ? "live" : "greyed",
+          updatedAt: null,
+          deletionInventory: null,
+          resources: [
+            { name: "db", deployStatus: active ? "in_progress" : "pending" }
+          ]
+        });
+        expect(JSON.stringify(payload)).not.toMatch(/old-db|old failure/);
+      }
+      if (scenario === "late failure")
+        expect(harness.state.progressMessages).toEqual(["current progress"]);
+    }
+  );
+
+  it("does not publish display evidence or inventory if a different attempt owns the session when the inventory read completes", async () => {
     let markReached = () => {};
     const reached = new Promise<void>((resolve) => {
       markReached = resolve;
@@ -1431,6 +1569,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       application: "store",
+      updatedAt: null,
       deletionInventory: null
     });
   });

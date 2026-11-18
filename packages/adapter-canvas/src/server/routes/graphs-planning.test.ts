@@ -2046,9 +2046,9 @@ describe("graphs-planning read routes (SU-09)", () => {
 
   it.each([
     [7, "failed", "Deployment timed out"],
-    [8, "in_progress", undefined]
+    [8, "failed", "Deployment timed out"]
   ] as const)(
-    "uses only the original attempt when run %s settles during the artifact read",
+    "uses the settled monitor when run %s owns the response, not stale progress",
     async (runId, expectedStatus, expectedMessage) => {
       const calls: Calls = { log: [] };
       const { deps, state } = fakes(calls, {
