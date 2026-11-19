@@ -177,7 +177,10 @@ export function createRadiusExtension(
   // authoring, refreshing, confirming, or only a note.
   const handOffAppModel = createAppModelHandoff({
     resolveContext: () => workspaceState(),
-    resolveStatus: resolveAppModelStatus,
+    resolveStatus: (repo, branch, state) =>
+      resolveAppModelStatus(repo, branch, state),
+    assertWorkspaceSource: (source) =>
+      deps.graphSources.assertWorkspaceSource(source),
     evaluateSource: (repo, branch, state) =>
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>
@@ -217,8 +220,7 @@ export function createRadiusExtension(
       progressView,
       state,
       isCurrent,
-      environmentKey,
-      readSelectedModel
+      environmentKey
     }) =>
       handOffAppModel({
         repo,
@@ -227,8 +229,7 @@ export function createRadiusExtension(
         progressView,
         state,
         isCurrent,
-        environmentKey,
-        readSelectedModel
+        environmentKey
       })
   );
   deps.hostCallbacks.setDeployRepairHandoff(

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { WorkspaceGraphBranchChanged } from "@radius-project/adapter-shared";
 import {
   appModelHandoffKey,
   createAppModelHandoff,
@@ -41,6 +42,13 @@ function modelStatus(
   return {
     repo,
     branch,
+    source: {
+      kind: "workspace",
+      repo,
+      ref: branch,
+      definitionPath: ".radius/app.bicep",
+      workspacePath: "/workspace"
+    },
     refreshable: overrides.refreshable ?? true,
     freshness: {
       status,
@@ -120,6 +128,7 @@ function harness(
   const deps: AppModelHandoffDependencies = {
     resolveContext,
     resolveStatus,
+    assertWorkspaceSource: vi.fn(async () => {}),
     evaluateSource,
     modelingInFlight,
     // Resolves immediately: the grace window's duration is expressed in the
@@ -255,6 +264,65 @@ describe("appModelHandoffKey", () => {
 });
 
 describe("createAppModelHandoff", () => {
+  it.each(["outdated", "unrecorded", "missing"] as const)(
+    "does not act on a %s model after the final workspace assertion detects drift",
+    async (status) => {
+      const memo = vi.fn(() => true);
+      const assertWorkspaceSource = vi.fn(async () => {
+        throw new WorkspaceGraphBranchChanged("checkout moved");
+      });
+      const { handOff, sent } = harness({
+        statuses: {
+          feat: modelStatus("a/b", "feat", {
+            status: status === "outdated" ? "source-changed" : status
+          })
+        },
+        assertWorkspaceSource,
+        shouldRequestRefresh: memo
+      });
+      const state: CanvasState = { canvasInstanceId: "panel" };
+      await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
+      expect(assertWorkspaceSource).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "workspace", ref: "feat" })
+      );
+      expect(sent).toHaveLength(0);
+      expect(memo).not.toHaveBeenCalled();
+      expect(state.appBicepHandoffKeys).toEqual({});
+      expect(state.appModelAttemptTokens).toBeUndefined();
+    }
+  );
+
+  it("releases the missing-model claim and reservation when the final workspace assertion errors", async () => {
+    const failure = new Error("Unable to read the current Git branch");
+    const assertWorkspaceSource = vi
+      .fn(async () => {})
+      .mockRejectedValueOnce(failure);
+    const missingModelHandoffs = createMissingModelHandoffClaims(() => 0);
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      assertWorkspaceSource,
+      missingModelHandoffs
+    });
+    const state: CanvasState = { canvasInstanceId: "panel" };
+    const request = {
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph" as const,
+      state
+    };
+
+    await expect(handOff(request)).rejects.toBe(failure);
+    expect(missingModelHandoffs.current("a/b::feat")).toBeNull();
+    expect(state.appBicepHandoffKeys).toEqual({});
+    expect(state.appModelAttemptTokens).toBeUndefined();
+    expect(sent).toHaveLength(0);
+
+    await handOff(request);
+    await handOff(request);
+    expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeDefined();
+    expect(sent).toHaveLength(1);
+  });
+
   it("reads against the live workspace context when no panel state is supplied", async () => {
     const { handOff, resolveContext, resolveStatus, sent } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
@@ -284,7 +352,10 @@ describe("createAppModelHandoff", () => {
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
     expect(resolveContext).not.toHaveBeenCalled();
-    expect(resolveStatus).toHaveBeenCalledWith("a/b", "feat", state);
+    expect(resolveStatus).toHaveBeenCalledWith("a/b", "feat", {
+      workspaceRepo: state.workspaceRepo,
+      workspaceBranch: state.workspaceBranch
+    });
   });
 
   it("asks the agent to author a model when no branch has one", async () => {
@@ -386,7 +457,6 @@ describe("createAppModelHandoff", () => {
 
     const token = state.appModelAttemptTokens?.["a/b::feat"];
     expect(token).toBeTruthy();
-    expect(state.appModelAttemptGeneration).toBe(1);
     expect(state.appModelAttemptEnvironments?.["a/b::feat"]).toBe(
       '["azure","dev"]'
     );
@@ -418,7 +488,6 @@ describe("createAppModelHandoff", () => {
       "a/b::main": "",
       "a/b::feat": ""
     });
-    expect(state.appModelAttemptGeneration).toBe(1);
     expect(sent[0].prompt).toContain("radius_report_modeling_failure");
     expect(sent[0].prompt).toContain(`attemptToken \`${token}\``);
     expect(sent[0].prompt).toContain("(`main`, `feat`) — one call per branch");
@@ -1576,7 +1645,8 @@ describe("createAppModelHandoff", () => {
 
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
-    expect(seen).toEqual([state]);
+    expect(seen).toEqual([{ workspaceRepo: "a/b", workspaceBranch: "feat" }]);
+    expect(seen[0]).not.toBe(state);
   });
 
   it("propagates a broken reader rather than acting on a half-resolved picture", async () => {

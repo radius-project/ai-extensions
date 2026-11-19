@@ -306,7 +306,10 @@ export interface CanvasState {
   // deduplicate both targets.
   appBicepHandoffKeys?: Record<string, string>;
   appBicepHandoffKey?: string;
-  appModelAttemptGeneration?: number;
+  appModelAttemptClaims?: Record<
+    string,
+    import("./runtime/missing-model-handoff-claims.js").MissingModelHandoffClaim
+  >;
   appModelAttemptTokens?: Record<string, string>;
   appModelAttemptEnvironments?: Record<string, string>;
   // Source evidence read when each attempt started, keyed like the tokens.
@@ -491,7 +494,3 @@ export function deleteCredentialProfile(repo: string, name: unknown): boolean {
   saveCredentials();
   return deleted;
 }
-export type ReadSelectedGraphModel = (
-  repo: string,
-  branch: string
-) => Promise<{ content: string | null; fromWorkspace: boolean }>;

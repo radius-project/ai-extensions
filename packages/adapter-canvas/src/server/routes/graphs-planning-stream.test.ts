@@ -740,12 +740,57 @@ describe("graphs-planning load-graph-stream route", () => {
       expect(frames(recording.stream).at(-1)).toEqual({
         event: "done",
         data: {
-          error: `formatted:${BICEP_PATH} is empty; the graph is unavailable.`
+          error: `formatted:${REPO}@${DEFAULT_BRANCH}:${BICEP_PATH} is empty; the graph is unavailable.`
         }
       });
       expect(
         calls.some((call) => call.startsWith("radArtifactsDirForSelection"))
       ).toBe(false);
+      expect(
+        calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+      ).toBe(false);
+    }
+  );
+
+  it.each(["current", "checkout", "superseded"] as const)(
+    "publishes one terminal blank model outcome for the owning stream (%s)",
+    async (ownership) => {
+      let current = true;
+      const verify = vi.fn(async () => {
+        if (ownership === "superseded") current = false;
+        return ownership !== "checkout";
+      });
+      const { deps, calls } = fakes({
+        state: {
+          appModelAttemptTokens: { [`${REPO}::${DEFAULT_BRANCH}`]: "attempt" },
+          appModelFailures: {
+            [`${REPO}::${DEFAULT_BRANCH}`]: {
+              attemptToken: "attempt",
+              error: "Authoring failed."
+            }
+          }
+        },
+        selection: selection({ content: " ", verifyWorkspaceBranch: verify })
+      });
+      deps.isCurrentSourceRef = () => current;
+      const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+      expect(verify).toHaveBeenCalledOnce();
+      expect(
+        frames(recording.stream).filter(({ event }) => event === "done")
+      ).toEqual([
+        {
+          event: "done",
+          data:
+            ownership === "current" ?
+              {
+                error: `Model generation failed and left ${BICEP_PATH} empty. Fix or remove the file, then select Refresh. Diagnostic: Authoring failed.`,
+                modelingFailed: true,
+                appModelAuthoringFailed: true
+              }
+            : { stale: true }
+        }
+      ]);
+      expect(recording.steps.filter((step) => step === "end")).toHaveLength(1);
       expect(
         calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
       ).toBe(false);

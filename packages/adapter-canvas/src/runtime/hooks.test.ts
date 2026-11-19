@@ -342,6 +342,12 @@ function modelStatus(
     repo,
     branch,
     refreshable: overrides.refreshable ?? true,
+    source: {
+      kind: "github",
+      repo,
+      ref: branch,
+      definitionPath: ".radius/app.bicep"
+    },
     freshness: {
       status,
       stale: status !== "up-to-date" && status !== "missing",

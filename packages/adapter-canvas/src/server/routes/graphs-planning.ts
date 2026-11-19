@@ -18,6 +18,8 @@ import {
   graphArtifactHandle,
   graphSourceForSelection,
   GraphRequestSuperseded,
+  BlankModelAuthoringFailed,
+  requireNonblankGraphModel,
   type AppBicepSelection,
   type StagedRadArtifacts
 } from "./graph-pipeline.js";
@@ -937,6 +939,9 @@ export async function handleLoadGraphStream(
     dependencies.readInstanceEntry(instanceId) === entry &&
     entry.state.graphBuildGeneration === requestGeneration &&
     dependencies.isCurrentSourceRef(entry, sourceRefContext.token);
+  const workspacePath = entry.state.workspacePath;
+  const isCurrentOutput = () =>
+    isCurrent() && entry.state.workspacePath === workspacePath;
 
   let output: ReturnType<typeof stageWorkspaceGraphOutput>;
   try {
@@ -951,11 +956,7 @@ export async function handleLoadGraphStream(
       sendDone({ stale: true });
       return;
     }
-    if (content !== null && !content.trim()) {
-      throw new Error(
-        `${selection.bicepPath || ".radius/app.bicep"} is empty; the graph is unavailable.`
-      );
-    }
+    requireNonblankGraphModel(selection, entry.state, repo, branch);
 
     if (content) {
       sendProgress("Found existing app.bicep — parsing resources...");
@@ -1001,9 +1002,6 @@ export async function handleLoadGraphStream(
       selection.fromWorkspace ?
         dependencies.workspaceGraphJsonPath(entry.state, selection.bicepPath)
       : "";
-    const workspacePath = entry.state.workspacePath;
-    const isCurrentOutput = () =>
-      isCurrent() && entry.state.workspacePath === workspacePath;
     let artifactsFingerprint = "";
     const graph = createGraphOrchestrator<
       CanvasGraphResource,
@@ -1120,6 +1118,24 @@ export async function handleLoadGraphStream(
   } catch (e) {
     if (e instanceof GraphRequestSuperseded || !isCurrent()) {
       sendDone({ stale: true });
+      return;
+    }
+    if (e instanceof BlankModelAuthoringFailed) {
+      if (
+        !(await ownsWorkspaceGraphOutput(
+          isCurrentOutput,
+          e.verifyWorkspaceBranch
+        )) ||
+        !isCurrentOutput()
+      ) {
+        sendDone({ stale: true });
+        return;
+      }
+      sendDone({
+        error: e.message,
+        modelingFailed: true,
+        appModelAuthoringFailed: true
+      });
       return;
     }
     const failure = asGraphModelingFailure(e);

@@ -18,7 +18,10 @@ import type { SessionHolder } from "./session.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import type { EnvironmentTools } from "./environment-tools.js";
 import type { PluginUpdatePreferences } from "./plugin-update-preferences.js";
-import type { DeploymentRuntime } from "@radius-project/adapter-shared";
+import type {
+  DeploymentRuntime,
+  GraphSourceBindings
+} from "@radius-project/adapter-shared";
 import type { DeploymentToolsPorts } from "./deployment-tools.js";
 
 export interface WorkspaceContext {
@@ -41,11 +44,6 @@ export interface WorkspaceDependencies {
     repo: string | null | undefined,
     branch: string | null | undefined
   ): boolean;
-  fetchWorkspaceBicep(
-    state: CanvasState,
-    repo: string,
-    branch: string
-  ): Promise<string | null>;
   // Repo-relative paths in the local worktree, or null when the selection is not
   // the workspace or the tree could not be walked. Null is distinct from an
   // empty list on purpose: a listing that failed proves nothing about the
@@ -77,24 +75,9 @@ export interface CoreGraphDependencies {
     base: CanvasGraphResource[],
     head: CanvasGraphResource[]
   ): CanvasGraphResource[];
-  fetchBicepFromRepo(
-    github: GitHubContentReader,
-    repo: string,
-    branch: string
-  ): Promise<string | null>;
   filterGraphVisualizationResources(
     resources: CanvasGraphResource[]
   ): CanvasGraphResource[];
-}
-
-export interface RadArtifactsSelection {
-  isLocal: boolean;
-  state?: CanvasState;
-  github?: GitHubContentReader;
-  repo?: string;
-  branch?: string;
-  bicepRepoPath: string;
-  log?: (message: string) => void;
 }
 
 export interface RadDependencies {
@@ -121,9 +104,6 @@ export interface RadDependencies {
     env?: Record<string, string>;
     log?: (message: string) => void;
   }): Promise<unknown>;
-  radArtifactsDirForSelection(
-    selection: RadArtifactsSelection
-  ): Promise<{ dir: string; remote: boolean }>;
 }
 
 export interface SourceRefsDependencies {
@@ -197,7 +177,6 @@ export interface HostCallbackDependencies {
       progressView?: GraphProgressView;
       isCurrent?: () => boolean;
       environmentKey?: string;
-      readSelectedModel?: import("../shared.js").ReadSelectedGraphModel;
       // The canvas instance's state, so the runtime resolves each branch's model
       // against the same workspace context the route rendered from and can
       // deduplicate against this panel's last handoff.
@@ -336,6 +315,7 @@ export interface RadiusExtensionDependencies {
   getLastWebviewActivityAt(): number;
   workspace: WorkspaceDependencies;
   github: GitHubContentReader;
+  graphSources: GraphSourceBindings;
   core: CoreGraphDependencies;
   rad: RadDependencies;
   deployment: DeploymentRuntime;

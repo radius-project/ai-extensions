@@ -35,6 +35,7 @@ function harness(
   let trackedApplication = "another-app";
   let trackedRunId = 31;
   const finished = createDeferred<void>();
+  const graphRecovery = createDeferred<{ error?: unknown }>();
   const sendRepair = vi.fn(async () => {});
   let terminal: "success" | "failed" = "success";
   let request: DeployMonitorRequest | undefined;
@@ -55,9 +56,15 @@ function harness(
             if (graphBuild) {
               if (!plannedGraph)
                 throw new Error("Missing Canvas graph recovery");
-              const resources = await plannedGraph.recover(input);
-              if (resources) input.entry.state.deployingResources = resources;
-              input.log("Graph recovery finished");
+              try {
+                const resources = await plannedGraph.recover(input);
+                if (resources) input.entry.state.deployingResources = resources;
+                input.log("Graph recovery finished");
+                graphRecovery.resolve({});
+              } catch (error) {
+                graphRecovery.resolve({ error });
+                throw error;
+              }
             }
             await finished.promise;
             input.entry.state.deployStatus = terminal;
@@ -191,6 +198,7 @@ function harness(
     server,
     deployment,
     finished,
+    graphRecovery,
     sendRepair,
     cli,
     modelSources,
@@ -373,11 +381,8 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
           })
         ).status
       ).toBe(200);
-      await vi.waitFor(() =>
-        expect(entry.state.deployLogs?.join("\n")).toContain(
-          "Graph recovery finished"
-        )
-      );
+      const recovery = await h.graphRecovery.promise;
+      if ("error" in recovery) throw recovery.error;
       if (source === "missing workspace") {
         expect(entry.state.deployingResources).toEqual([]);
         expect(entry.state.deployLogs?.join("\n")).toContain(

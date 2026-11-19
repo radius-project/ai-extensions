@@ -46,12 +46,6 @@ export interface MissingModelHandoffClaims {
   owns(claim: MissingModelHandoffClaim): boolean;
   markDelivered(claim: MissingModelHandoffClaim): void;
   release(claim: MissingModelHandoffClaim): void;
-  // Releases every claim whose target covers this repo+branch, including the
-  // two-branch diff claim. A diff mints one attempt token per branch under the
-  // single-branch key, so a failure recorded against one side has to free the
-  // diff's claim as well — otherwise the refresh the failure message tells the
-  // user to make is dropped until the claim's TTL expires.
-  releaseForBranch(repo: string, branch: string): void;
 }
 
 const CLAIM_LIMIT = 100;
@@ -128,13 +122,6 @@ export function createMissingModelHandoffClaims(
     release(claim) {
       if (entries.get(claim.target)?.claim === claim) {
         entries.delete(claim.target);
-      }
-    },
-
-    releaseForBranch(repo, branch) {
-      for (const target of [...entries.keys()]) {
-        if (!missingModelHandoffIncludesBranch(target, repo, branch)) continue;
-        entries.delete(target);
       }
     }
   };

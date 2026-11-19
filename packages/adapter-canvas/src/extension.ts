@@ -22,7 +22,6 @@ import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
-  fetchBicepFromRepo,
   filterGraphVisualizationResources
 } from "@radius-project/core";
 import {
@@ -31,9 +30,11 @@ import {
   resolveInstalledRadiusVersion,
   runRadBicepPublishExtension,
   runRadBicepPublish,
-  createDeploymentRepository
+  createDeploymentRepository,
+  createGraphSourceBindings
 } from "@radius-project/adapter-shared";
 import { createRadiusCliVersionReader } from "./radius-cli-version.js";
+import { graphSourceOptions } from "./graph-source-options.js";
 import { readAwsSwitch } from "./aws-switch.js";
 import {
   github,
@@ -47,7 +48,6 @@ import {
 import {
   defaultBranchForState,
   detectWorkspaceContext,
-  fetchWorkspaceBicep,
   fetchWorkspaceFile,
   hasRadiusApplicationModel,
   fetchWorkspaceTree,
@@ -63,7 +63,6 @@ import {
   workspaceModelRecoverable,
   workspaceSourceChangedSince
 } from "./workspace.js";
-import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
 import {
   createProductionCanvasServerRuntime,
   invalidateDeployListCache,
@@ -134,6 +133,7 @@ const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
 const awsEnabled = readAwsSwitch(process.env);
 const deploymentRuntime = createProductionDeploymentRuntime({ awsEnabled });
+const graphSources = createGraphSourceBindings(graphSourceOptions(cliExec));
 const readDeploymentModel = createDeployModelSource({
   readWorkspace: fetchWorkspaceFile,
   readRepository: createDeploymentRepository({
@@ -224,7 +224,6 @@ const dependencies: RadiusExtensionDependencies = {
     detectWorkspaceContext,
     defaultBranchForState,
     isWorkspaceSelection,
-    fetchWorkspaceBicep,
     fetchWorkspaceTree,
     parseRepoFromRemote,
     toSafeRepoRelPath,
@@ -232,9 +231,9 @@ const dependencies: RadiusExtensionDependencies = {
     workspaceFileExists
   },
   github,
+  graphSources,
   core: {
     computeGraphDiff,
-    fetchBicepFromRepo,
     filterGraphVisualizationResources
   },
   rad: {
@@ -244,8 +243,7 @@ const dependencies: RadiusExtensionDependencies = {
       >,
     ensureRadBinary,
     runRadBicepPublishExtension,
-    runRadBicepPublish,
-    radArtifactsDirForSelection
+    runRadBicepPublish
   },
   sourceRefs: {
     getSourceRefResources,

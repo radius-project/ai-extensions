@@ -11,6 +11,7 @@ import {
   type GraphWorkflowOutcome
 } from "./graph-workflows.js";
 import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../graph-progress-contract.js";
+import { BlankModelAuthoringFailed } from "./graph-pipeline.js";
 import type {
   AppBicepSelection,
   CompileResourcesInput,
@@ -725,6 +726,49 @@ describe("graph planning workflows", () => {
       };
       return harness;
     }
+
+    it.each(["current", "checkout", "superseded"] as const)(
+      "settles blank model recovery only for the current load (%s)",
+      async (ownership) => {
+        const recovery = "Fix or remove the empty app.bicep, then Refresh.";
+        let progressBeforeVerification: boolean | undefined;
+        const verify = vi.fn(async () => {
+          progressBeforeVerification =
+            harness.state.graphProgressRecords?.graph?.graphProgressActive;
+          if (ownership === "superseded") {
+            prepareSourceRefResources(harness.entry, "graph", {
+              repo: "octo/app",
+              branch: "other"
+            });
+          }
+          return ownership !== "checkout";
+        });
+        const harness = start({
+          selectThrows: {
+            main: new BlankModelAuthoringFailed(recovery, verify)
+          }
+        });
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+        expect(verify).toHaveBeenCalledOnce();
+        if (ownership === "current") {
+          expect(outcome).toMatchObject({
+            status: 200,
+            payload: { error: recovery, appModelAuthoringFailed: true }
+          });
+        } else {
+          expect(outcome).toMatchObject({
+            status: 409,
+            payload: { stale: true }
+          });
+          expect(messages(harness.state)).not.toContain(recovery);
+          expect(progressBeforeVerification).toBe(true);
+          expect(
+            harness.state.graphProgressRecords?.graph?.graphProgressActive
+          ).toBe(progressBeforeVerification);
+        }
+        expect(harness.handoffs).toEqual([]);
+      }
+    );
 
     it("keeps reporting a permanent failure when the page is reloaded", async () => {
       const harness = failedAt("sha-1");

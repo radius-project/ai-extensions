@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BlankModelAuthoringFailed,
   createGraphPipeline,
   graphArtifactHandle,
   DEFAULT_APP_BICEP_PATH,
@@ -225,6 +226,58 @@ describe("graph pipeline", () => {
   });
 
   describe("selectAppBicep", () => {
+    it.each([
+      {
+        selection: "workspace",
+        fromWorkspace: true,
+        attempt: "current",
+        terminal: true
+      },
+      {
+        selection: "workspace",
+        fromWorkspace: true,
+        attempt: "stale",
+        terminal: false
+      },
+      {
+        selection: "GitHub",
+        fromWorkspace: false,
+        attempt: "current",
+        terminal: false
+      }
+    ])(
+      "classifies a blank $selection definition with a $attempt failure",
+      async ({ fromWorkspace, attempt, terminal }) => {
+        const target = "octo/app::main";
+        const state: CanvasState = {
+          appModelAttemptTokens: { [target]: "current" },
+          appModelFailures: {
+            [target]: { attemptToken: attempt, error: "No supported resource." }
+          }
+        };
+        const { pipeline } = build({
+          selection: selectionOf({ content: " \n", fromWorkspace })
+        });
+
+        const selected = pipeline.selectAppBicep({ state }, "octo/app", "main");
+        if (terminal) {
+          await expect(selected).rejects.toBeInstanceOf(
+            BlankModelAuthoringFailed
+          );
+          await expect(selected).rejects.toThrow(
+            "Model generation failed and left .radius/app.bicep empty. Fix or remove the file, then select Refresh. Diagnostic: No supported resource."
+          );
+        } else {
+          await expect(selected).rejects.not.toBeInstanceOf(
+            BlankModelAuthoringFailed
+          );
+          await expect(selected).rejects.toThrow(
+            "octo/app@main:.radius/app.bicep is empty; the graph is unavailable."
+          );
+        }
+      }
+    );
+
     it.each(["", " \n\t"])(
       "rejects a present empty definition without compiling",
       async (content) => {

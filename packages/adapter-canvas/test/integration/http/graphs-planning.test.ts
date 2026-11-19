@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { ChildProcess, execFileSync } from "node:child_process";
+import { ChildProcess, execFile, execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -10,7 +10,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
+import {
+  createGraphSourceBindings,
+  createWorkflowArtifactReader
+} from "@radius-project/adapter-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createWorkflowObservationScope,
@@ -78,13 +81,15 @@ function initCommittedGraphWorkspace(workspace: string) {
 
 async function concurrentGraphRuntime(
   workspace?: string,
-  invalidOutputBuilds: ReadonlySet<number> = new Set()
+  invalidOutputBuilds: ReadonlySet<number> = new Set(),
+  afterWorkspaceBranchRead?: () => void
 ) {
   const builds: Array<ReturnType<typeof createDeferred<void>>> = [];
   const runtime = createTestCanvasServerRuntime({
     executionOwner: createEnvironmentExecutionOwner(),
     cliExec: (command, args, _options, callback) => {
       if (workspace && command === "git" && args.includes("symbolic-ref")) {
+        afterWorkspaceBranchRead?.();
         callback(null, "main\n", "");
         return new ChildProcess();
       }
@@ -183,6 +188,47 @@ async function concurrentGraphRuntime(
 }
 
 describe("graph concurrency through production HTTP routes", () => {
+  it.each(["JSON", "SSE"] as const)(
+    "reports stale instead of blank-model recovery after another request takes ownership (%s)",
+    async (transport) => {
+      const workspace = mkdtempSync(path.join(tmpdir(), "radius-blank-race-"));
+      const supersede = vi.fn(() => {
+        h.entry.state.graphBuildGeneration =
+          (h.entry.state.graphBuildGeneration ?? 0) + 1;
+      });
+      const h = await concurrentGraphRuntime(workspace, new Set(), supersede);
+      try {
+        initCommittedGraphWorkspace(workspace);
+        mkdirSync(path.join(workspace, ".radius"));
+        writeFileSync(path.join(workspace, ".radius", "app.bicep"), "  \n");
+        h.entry.state.appModelAttemptTokens = { "octo/app::main": "attempt" };
+        h.entry.state.appModelFailures = {
+          "octo/app::main": {
+            attemptToken: "attempt",
+            error: "Authoring failed."
+          }
+        };
+        const response =
+          transport === "JSON" ? await h.load() : await h.stream();
+        if (transport === "JSON") {
+          expect(response.status).toBe(409);
+          expect(await response.json()).toEqual({ stale: true });
+        } else {
+          expect(response.status).toBe(200);
+          const text = await response.text();
+          expect(text.match(/event: done\ndata: .+/g)).toEqual([
+            'event: done\ndata: {"stale":true}'
+          ]);
+        }
+        expect(supersede).toHaveBeenCalled();
+        expect(h.builds).toEqual([]);
+      } finally {
+        await h.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
   it.each(["JSON", "stream"])(
     "keeps the previous file and retains the %s save warning on reload and cache hits",
     async (transport) => {
@@ -320,10 +366,24 @@ describe("graph concurrency through production HTTP routes", () => {
       const workspace = mkdtempSync(
         path.join(tmpdir(), "radius-handoff-http-")
       );
-      const sdk = await createRuntimeSdkHarness({
-        bicepByRepoBranch: { "remote:octo/app@main": "committed model" },
-        workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] }
+      const execute = vi.fn<
+        Parameters<typeof createGraphSourceBindings>[0]["execute"]
+      >((command, args, options, callback) => {
+        if (command !== "git")
+          throw new Error(`Unexpected remote handoff read: ${args.join(" ")}`);
+        return execFile(command, args, options, callback);
       });
+      const sources = createGraphSourceBindings({
+        execute,
+        redactDiagnostic: (message) => message,
+        stagingRoot: workspace
+      });
+      const sdk = await createRuntimeSdkHarness(
+        { workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] } },
+        (deps) => {
+          deps.graphSources = sources;
+        }
+      );
       let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
       try {
         initCommittedGraphWorkspace(workspace);
@@ -336,7 +396,7 @@ describe("graph concurrency through production HTTP routes", () => {
             writeFileSync(path.join(workspace, "app.bicep"), "  \n");
           };
         }
-        const completed = createDeferred<void>();
+        let completed = createDeferred<void>();
         setAppBicepHandoff(async (input) => {
           try {
             await handoff(input);
@@ -354,10 +414,57 @@ describe("graph concurrency through production HTTP routes", () => {
           expect(await (await h.load()).json()).toMatchObject({
             error: expect.stringContaining("app.bicep is empty")
           });
+          const tool = sdk.extension.tools.find(
+            ({ name }) => name === "radius_report_modeling_failure"
+          );
+          if (!tool) throw new Error("Missing registered failure tool");
+          const target = "octo/app::main";
+          // Simulate the admitted run whose blank output is still on disk.
+          h.entry.state.appModelAttemptTokens = { [target]: "blank-attempt" };
+          sdk.servers.set("graph-races", h.entry);
+          const failure = "The fixture model has no supported resource.";
+          expect(
+            await tool.handler({
+              instanceId: "graph-races",
+              repo: "octo/app",
+              branch: "main",
+              attemptToken: "blank-attempt",
+              error: failure
+            })
+          ).toEqual({ recorded: true });
+          expect(await (await h.load()).json()).toMatchObject({
+            error: `Model generation failed and left app.bicep empty. Fix or remove the file, then select Refresh. Diagnostic: ${failure}`,
+            appModelAuthoringFailed: true,
+            modelingFailed: true
+          });
+          expect(await (await h.stream()).text()).toContain(
+            '"appModelAuthoringFailed":true'
+          );
+          expect(
+            await (await h.load({ retryModeling: true })).json()
+          ).toMatchObject({ appModelAuthoringFailed: true });
+          expect(sdk.session.send).not.toHaveBeenCalled();
+
+          // A blank saved file is not absence: retry only once the user
+          // removes it, rather than silently authoring over it.
+          rmSync(path.join(workspace, "app.bicep"));
+          sdk.deps.clock.wait = async () => {};
+          completed = createDeferred<void>();
+          expect(
+            await (await h.load({ retryModeling: true })).json()
+          ).toMatchObject({ needsAppBicep: true });
+          await completed.promise;
+          expect(sdk.session.send).toHaveBeenCalledOnce();
+          sdk.servers.delete("graph-races");
         } else {
           expect(sdk.session.send).toHaveBeenCalledOnce();
         }
-        expect(sdk.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalledWith(
+          "gh",
+          expect.anything(),
+          expect.anything(),
+          expect.anything()
+        );
       } finally {
         setAppBicepHandoff(null);
         await h?.close();

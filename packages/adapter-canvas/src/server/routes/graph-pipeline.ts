@@ -1,4 +1,5 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import { appModelAuthoringFailure } from "../../app-model-authoring-failure.js";
 import {
   prepareGraph,
   compilePreparedGraph,
@@ -26,6 +27,34 @@ import {
 export const DEFAULT_APP_BICEP_PATH = ".radius/app.bicep";
 
 export class GraphRequestSuperseded extends Error {}
+
+export class BlankModelAuthoringFailed extends Error {
+  constructor(
+    message: string,
+    readonly verifyWorkspaceBranch?: AppBicepSelection["verifyWorkspaceBranch"]
+  ) {
+    super(message);
+  }
+}
+
+export function requireNonblankGraphModel(
+  selection: AppBicepSelection,
+  state: CanvasState,
+  repo: string,
+  branch: string
+): void {
+  if (selection.content === null || selection.content.trim()) return;
+  const failure =
+    selection.fromWorkspace && appModelAuthoringFailure(state, repo, branch);
+  if (failure)
+    throw new BlankModelAuthoringFailed(
+      `Model generation failed and left ${selection.bicepPath || DEFAULT_APP_BICEP_PATH} empty. Fix or remove the file, then select Refresh. Diagnostic: ${failure.error}`,
+      selection.verifyWorkspaceBranch
+    );
+  throw new Error(
+    `${repo}@${branch}:${selection.bicepPath || DEFAULT_APP_BICEP_PATH} is empty; the graph is unavailable.`
+  );
+}
 
 export function graphArtifactHandle(
   staged: StagedRadArtifacts,
@@ -200,11 +229,7 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
         repo,
         branch
       );
-      if (selection.content !== null && !selection.content.trim()) {
-        throw new Error(
-          `${repo}@${branch}:${bicepPathOf(selection)} is empty; the graph is unavailable.`
-        );
-      }
+      requireNonblankGraphModel(selection, entry.state, repo, branch);
       return selection;
     },
 
