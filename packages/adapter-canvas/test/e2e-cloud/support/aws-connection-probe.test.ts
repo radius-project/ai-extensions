@@ -1,9 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { MAIN } from "../../support/aws/cleanup-scenario.js";
 import {
   connectionProbeJob,
   describeService,
   parseProbeOutcome,
+  type ProbeOutcome,
   probeJobName,
   PROBE_SCRIPT,
   runConnectionCheck,
@@ -522,5 +527,98 @@ describe("runConnectionCheck", () => {
       "pinned by digest"
     );
     expect(cluster.jobs.size).toBe(0);
+  });
+});
+
+// The probe script itself, run by /bin/sh with fake `getent`, `nc`, and
+// `date` as the only commands on PATH. Each `date` call is `step` seconds
+// after the last, so a test chooses how long each command seems to take.
+describe.skipIf(process.platform === "win32")("PROBE_SCRIPT", () => {
+  const directories: string[] = [];
+  afterEach(() => {
+    for (const directory of directories.splice(0))
+      rmSync(directory, { recursive: true, force: true });
+  });
+
+  function runProbe(tools: { getent?: string; nc: string; step: number }): {
+    result: ProbeOutcome | null;
+    nc: string;
+  } {
+    const directory = mkdtempSync(path.join(tmpdir(), "radius-probe-"));
+    directories.push(directory);
+    const tool = (name: string, body: string) => {
+      const file = path.join(directory, name);
+      writeFileSync(file, `#!/bin/sh\n${body}\n`);
+      chmodSync(file, 0o755);
+    };
+    writeFileSync(path.join(directory, "clock"), "1000");
+    tool(
+      "date",
+      `read now < "${directory}/clock"; echo $((now + ${tools.step})) > "${directory}/clock"; echo "$now"`
+    );
+    tool("nc", `echo "$@" > "${directory}/nc-args"\n${tools.nc}`);
+    if (tools.getent !== undefined) tool("getent", tools.getent);
+    const run = spawnSync(
+      "/bin/sh",
+      ["-c", PROBE_SCRIPT, "probe", "db.example.internal", "3306", "10"],
+      { env: { PATH: directory }, encoding: "utf8" }
+    );
+    const nc = spawnSync("/bin/sh", ["-c", `cat "${directory}/nc-args"`], {
+      encoding: "utf8"
+    }).stdout.trim();
+    return { result: parseProbeOutcome(run.stdout), nc };
+  }
+
+  // Only an IPv4 lookup answers; `getent hosts` may give an IPv6 address
+  // first, which the IPv4 cluster can't reach.
+  const resolves =
+    '[ "$1" = ahostsv4 ] || exit 2; echo "10.0.1.5        STREAM db.example.internal"; echo "10.0.1.5        DGRAM"';
+
+  it("connects to the address the name resolves to", () => {
+    expect(runProbe({ getent: resolves, nc: "exit 0", step: 1 })).toEqual({
+      result: { kind: "connected" },
+      nc: "-z -w 10 10.0.1.5 3306"
+    });
+  });
+
+  it("reports a connect that runs out the wait as a timeout", () => {
+    expect(
+      runProbe({ getent: resolves, nc: "exit 1", step: 10 }).result
+    ).toEqual({ kind: "timeout", detail: "timeout after 10s" });
+  });
+
+  it("reports a refused connect as a failure, not a timeout", () => {
+    expect(
+      runProbe({
+        getent: resolves,
+        nc: 'echo "Connection refused" >&2; exit 1',
+        step: 1
+      }).result
+    ).toEqual({
+      kind: "failed",
+      detail: "exit 1 after 1s: Connection refused"
+    });
+  });
+
+  it("fails a name that doesn't resolve, however long the lookup takes, without connecting", () => {
+    // A slow lookup that fails must not read as a TCP timeout.
+    expect(runProbe({ getent: "exit 2", nc: "exit 1", step: 30 })).toEqual({
+      result: {
+        kind: "failed",
+        detail: "could not resolve db.example.internal"
+      },
+      nc: ""
+    });
+  });
+
+  it("fails when the image has no getent to resolve the name", () => {
+    expect(runProbe({ nc: "exit 1", step: 30 })).toEqual({
+      result: {
+        kind: "failed",
+        detail:
+          "the probe image has no getent, so it can't resolve db.example.internal"
+      },
+      nc: ""
+    });
   });
 });

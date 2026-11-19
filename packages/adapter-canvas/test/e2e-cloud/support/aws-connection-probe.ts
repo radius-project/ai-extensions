@@ -43,12 +43,25 @@ const IMAGE_DIGEST_PATTERN = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
 const PROBE_TTL_SECONDS = 600;
 
 // The probe's shell script. The host, port, and timeout arrive as positional
-// arguments, never in the script text. It tells a timeout from a refusal by
-// how long the connect took, so it works with any `nc` that has `-z` and `-w`.
+// arguments, never in the script text. It resolves the name to an IPv4
+// address first, as the IPv4 cluster reaches it (`getent hosts` may answer an
+// IPv6 one), and fails if it can't, so a slow lookup that fails never reads as
+// a TCP timeout. Then it
+// connects to the address and tells a timeout from a refusal by how long the
+// connect took, so it works with any `nc` that has `-z` and `-w`. The image
+// needs `getent`, `nc`, and `date`.
 export const PROBE_SCRIPT = [
   'host="$1"; port="$2"; wait="$3"',
+  "if ! command -v getent >/dev/null 2>&1; then",
+  `  echo "${PROBE_RESULT_MARKER} failed: the probe image has no getent, so it can't resolve $host"; exit 0`,
+  "fi",
+  'address=$(getent ahostsv4 "$host" </dev/null)',
+  'address="${address%%[[:space:]]*}"',
+  'if [ -z "$address" ]; then',
+  `  echo "${PROBE_RESULT_MARKER} failed: could not resolve $host"; exit 0`,
+  "fi",
   "start=$(date +%s)",
-  'error=$(nc -z -w "$wait" "$host" "$port" 2>&1 </dev/null)',
+  'error=$(nc -z -w "$wait" "$address" "$port" 2>&1 </dev/null)',
   "code=$?",
   "took=$(( $(date +%s) - start ))",
   `if [ "$code" -eq 0 ]; then echo "${PROBE_RESULT_MARKER} connected";`,
