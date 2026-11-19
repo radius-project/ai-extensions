@@ -1,7 +1,26 @@
 import {
+  ownsWorkspaceGraphOutput,
+  recordModeledGraphSave,
+  stageWorkspaceGraphOutput
+} from "./workspace-graph-output.js";
+import {
+  clearGraphSaveWarningForSelection,
+  modeledGraphSaveWarning
+} from "../../graph-save-warning.js";
+import {
+  createGraphOrchestrator,
+  computeGraphDiff,
+  type GraphSourceRead,
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
+import {
+  graphArtifactHandle,
+  graphSourceForSelection,
+  GraphRequestSuperseded,
+  type AppBicepSelection,
+  type StagedRadArtifacts
+} from "./graph-pipeline.js";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -720,19 +739,12 @@ export function createGraphsPlanningRoutes(
 // The app.bicep selection `fetchBicepSelection` returns, narrowed to the members
 // this route reads. A null `content` is the "no app.bicep on this branch" signal
 // that triggers the generation handoff.
-export interface LoadGraphStreamBicepSelection {
-  content: string | null;
-  fromWorkspace: boolean;
-  branch: string;
-  bicepPath: string;
-}
+export type LoadGraphStreamBicepSelection = AppBicepSelection;
 
-export interface LoadGraphStreamRadArtifacts {
-  dir: string;
-  remote: boolean;
-}
+export type LoadGraphStreamRadArtifacts = StagedRadArtifacts;
 
 export interface LoadGraphStreamRadArtifactsOptions {
+  selection: GraphSourceRead;
   isLocal: boolean;
   state: CanvasState | undefined;
   repo: string;
@@ -743,7 +755,7 @@ export interface LoadGraphStreamRadArtifactsOptions {
 
 export interface LoadGraphStreamBuildOptions {
   log: (message: string) => void;
-  saveGraphJsonTo: string;
+  saveGraphJsonTo?: string;
   radArtifactsDir: string;
   cleanupRadArtifactsDir: boolean;
 }
@@ -799,7 +811,8 @@ export interface GraphsPlanningStreamDependencies {
   triggerAppBicepHandoff(
     entry: CanvasServerEntry,
     repo: string,
-    branch: string
+    branch: string,
+    isCurrent: () => boolean
   ): void;
   triggerGraphRepairHandoff(
     entry: CanvasServerEntry,
@@ -817,6 +830,7 @@ export interface GraphsPlanningStreamDependencies {
     branch: string
   ): Promise<string[]>;
   workspaceGraphJsonPath(state: CanvasState, bicepRepoPath: string): string;
+  graphDefinitionHash(content: string, artifactsFingerprint: string): string;
   radArtifactsDirForSelection(
     options: LoadGraphStreamRadArtifactsOptions
   ): Promise<LoadGraphStreamRadArtifacts>;
@@ -826,6 +840,7 @@ export interface GraphsPlanningStreamDependencies {
     options: LoadGraphStreamBuildOptions
   ): Promise<unknown[]>;
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
+  removeDirectory(dir: string): void;
   errorMessage(error: unknown): string;
   logError(message: string): void;
 }
@@ -917,7 +932,13 @@ export async function handleLoadGraphStream(
     repo,
     branch
   });
+  clearGraphSaveWarningForSelection(entry.state, repo, branch);
+  const isCurrent = () =>
+    dependencies.readInstanceEntry(instanceId) === entry &&
+    entry.state.graphBuildGeneration === requestGeneration &&
+    dependencies.isCurrentSourceRef(entry, sourceRefContext.token);
 
+  let output: ReturnType<typeof stageWorkspaceGraphOutput>;
   try {
     sendProgress(`Checking ${repo} for existing app.bicep...`);
     const selection = await dependencies.fetchBicepSelection(
@@ -926,17 +947,30 @@ export async function handleLoadGraphStream(
       branch
     );
     const content = selection.content;
+    if (!isCurrent()) {
+      sendDone({ stale: true });
+      return;
+    }
+    if (content !== null && !content.trim()) {
+      throw new Error(
+        `${selection.bicepPath || ".radius/app.bicep"} is empty; the graph is unavailable.`
+      );
+    }
 
     if (content) {
       sendProgress("Found existing app.bicep — parsing resources...");
       // A model that exists can still no longer describe its source. The runtime
       // classifies it and decides what, if anything, to say; the graph still
       // streams either way.
-      dependencies.triggerAppBicepHandoff(entry, repo, branch);
+      dependencies.triggerAppBicepHandoff(entry, repo, branch, isCurrent);
     } else {
       const source = evaluateAppSource(
         await dependencies.listBranchPaths(entry, repo, branch)
       );
+      if (!isCurrent()) {
+        sendDone({ stale: true });
+        return;
+      }
       if (source.status === "none") {
         sendDone({
           error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
@@ -946,7 +980,7 @@ export async function handleLoadGraphStream(
         });
         return;
       }
-      dependencies.triggerAppBicepHandoff(entry, repo, branch);
+      dependencies.triggerAppBicepHandoff(entry, repo, branch, isCurrent);
       // Deliberately outside the terminal-failure contract that the JSON
       // load-graph/plan-graph routes implement: this stream has no restartWait,
       // so every connection is a fresh explicit open with no way to distinguish
@@ -967,29 +1001,88 @@ export async function handleLoadGraphStream(
       selection.fromWorkspace ?
         dependencies.workspaceGraphJsonPath(entry.state, selection.bicepPath)
       : "";
-    const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-      await dependencies.radArtifactsDirForSelection({
-        isLocal: selection.fromWorkspace,
-        state: entry.state,
-        repo,
-        branch,
-        bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-        log: sendProgress
-      });
-    const graphValues = await dependencies.buildGraphViaRad(
-      content,
-      selection.bicepPath || ".radius/app.bicep",
+    const workspacePath = entry.state.workspacePath;
+    const isCurrentOutput = () =>
+      isCurrent() && entry.state.workspacePath === workspacePath;
+    let artifactsFingerprint = "";
+    const graph = createGraphOrchestrator<
+      CanvasGraphResource,
+      CanvasGraphResource[]
+    >({
+      stage: async (selected) => {
+        const handle = graphArtifactHandle(
+          await dependencies.radArtifactsDirForSelection({
+            selection: selected,
+            isLocal: selection.fromWorkspace,
+            state: entry.state,
+            repo,
+            branch,
+            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
+            log: sendProgress
+          }),
+          dependencies.removeDirectory
+        );
+        artifactsFingerprint = handle.fingerprint;
+        return handle;
+      },
+      compile: async (definition, definitionPath, options) => {
+        output = stageWorkspaceGraphOutput(
+          graphJsonPath,
+          dependencies.logError
+        );
+        try {
+          return dependencies.canvasGraphResources(
+            await dependencies.buildGraphViaRad(definition, definitionPath, {
+              ...options,
+              log: sendProgress,
+              saveGraphJsonTo: output?.compilerPath
+            })
+          );
+        } catch (error) {
+          if (
+            !(await ownsWorkspaceGraphOutput(
+              isCurrentOutput,
+              selection.verifyWorkspaceBranch
+            ))
+          )
+            throw new GraphRequestSuperseded();
+          output?.invalidate();
+          throw error;
+        }
+      },
+      diff: computeGraphDiff,
+      diagnostic: (message) =>
+        dependencies.logError(
+          `[radius graph] could not remove staged artifacts: ${message}`
+        )
+    });
+    const authored = await graph.authored(
+      graphSourceForSelection(selection, repo, branch),
       {
-        log: sendProgress,
-        saveGraphJsonTo: graphJsonPath,
-        radArtifactsDir,
-        cleanupRadArtifactsDir: radArtifactsRemote
+        checkCancelled: () => {
+          if (!isCurrent()) {
+            throw new GraphRequestSuperseded();
+          }
+        }
       }
     );
-    const resources = dependencies.canvasGraphResources(graphValues);
+    const resources = authored.resources;
+    const definitionHash = dependencies.graphDefinitionHash(
+      selection.content || "",
+      artifactsFingerprint
+    );
+    const modelRevision = dependencies.graphDefinitionHash(
+      selection.content || "",
+      ""
+    );
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (
+      !(await ownsWorkspaceGraphOutput(
+        isCurrentOutput,
+        selection.verifyWorkspaceBranch
+      )) ||
+      !isCurrentOutput() ||
       !dependencies.commitSourceRef(
         entry,
         resources,
@@ -1000,6 +1093,13 @@ export async function handleLoadGraphStream(
       sendDone({ stale: true });
       return;
     }
+    recordModeledGraphSave(
+      entry.state,
+      repo,
+      branch,
+      definitionHash,
+      output?.publish()
+    );
     entry.state.graphTargetRepo = repo;
     entry.state.graphBranch = branch;
     entry.state.graphFollowsWorkspaceBranch =
@@ -1008,19 +1108,25 @@ export async function handleLoadGraphStream(
     // supplied the app.bicep content (file is on disk).
     entry.state.graphFromWorkspace = selection.fromWorkspace;
     entry.state.activeGraphView = "graph";
+    entry.state.graphLoaded = true;
+    entry.state.graphDefinitionHash = definitionHash;
+    entry.state.graphModelRevision = modelRevision;
     dependencies.clearGraphRepairAttempt(entry);
 
-    sendDone({ reload: true });
+    sendDone({
+      reload: true,
+      ...modeledGraphSaveWarning(entry.state, repo, branch)
+    });
   } catch (e) {
+    if (e instanceof GraphRequestSuperseded || !isCurrent()) {
+      sendDone({ stale: true });
+      return;
+    }
     const failure = asGraphModelingFailure(e);
     if (failure instanceof GraphModelingFailure) {
       dependencies.logError(
         `[radius graph] modeling failed for ${repo}@${branch}: ${failure.diagnostic}`
       );
-      if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
-        sendDone({ stale: true });
-        return;
-      }
       const attempt = dependencies.triggerGraphRepairHandoff(entry, {
         view: "graph",
         repo,
@@ -1035,6 +1141,8 @@ export async function handleLoadGraphStream(
       return;
     }
     sendDone({ error: dependencies.errorMessage(e) });
+  } finally {
+    output?.dispose();
   }
 }
 

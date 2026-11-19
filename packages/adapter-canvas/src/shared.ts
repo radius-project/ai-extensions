@@ -166,6 +166,7 @@ export interface GraphProgressRecord {
   // browser may already have one retry in flight when progress polling expires
   // the wait; retaining the verdict prevents that request from restarting it.
   graphProgressWaitExpiredMessage?: string;
+  graphProgressHandoffFailure?: string;
 }
 
 // Append one event to the instance's build record.
@@ -295,6 +296,7 @@ export interface CanvasState {
   pendingSourceRefs?: PendingSourceRef[];
   page?: string;
   graphDefinitionHash?: string;
+  graphSaveWarning?: import("./graph-save-warning.js").GraphSaveWarningIdentity;
   graphModelRevision?: string;
   graphBuildGeneration?: number;
   progressMessages?: string[];
@@ -489,3 +491,7 @@ export function deleteCredentialProfile(repo: string, name: unknown): boolean {
   saveCredentials();
   return deleted;
 }
+export type ReadSelectedGraphModel = (
+  repo: string,
+  branch: string
+) => Promise<{ content: string | null; fromWorkspace: boolean }>;

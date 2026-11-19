@@ -4150,6 +4150,60 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toContainText("Application graph ready");
   });
 
+  test("shows the usable graph and its save warning after reload @safety", async ({
+    page,
+    canvas
+  }) => {
+    const destination = path.join(
+      canvas.workspacePath,
+      ".radius",
+      "app-graph.json"
+    );
+    await fs.rm(destination, { force: true });
+    await fs.mkdir(destination);
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      const warning = page.locator("#graph-save-warning");
+      const plan = page.getByRole("button", { name: "Plan Deployment" });
+      await expect(warning).toHaveRole("status");
+      await expect(warning).toContainText("saved app-graph.json may be stale");
+      await expect(plan).toBeEnabled();
+      await page.reload();
+      await expect(warning).toContainText("saved app-graph.json may be stale");
+      // The persisted warning is visible before the browser refresh completes.
+      await expect(page.locator("#graph-refresh-status")).toHaveText(
+        "Application graph ready."
+      );
+      await expect(plan).toBeEnabled();
+      await expectNoWcagViolations(page);
+    } finally {
+      await fs.rmdir(destination);
+    }
+  });
+
+  test("announces a rejected modeling handoff without waiting for authoring timeout @safety", async ({
+    page,
+    canvas
+  }) => {
+    await fs.unlink(path.join(canvas.workspacePath, ".radius", "app.bicep"));
+    await fs.writeFile(
+      path.join(canvas.workspacePath, "Dockerfile"),
+      "FROM scratch\n"
+    );
+    canvas.setAppBicepHandoff(async () => {
+      throw new Error("The workspace application model origin is unreadable.");
+    });
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      await expect(page.getByRole("alert")).toContainText(
+        "The workspace application model origin is unreadable."
+      );
+      await expectNoWcagViolations(page);
+    } finally {
+      canvas.setAppBicepHandoff(null);
+    }
+  });
+
   test("keeps a modeling failure on reload and retries once after a saved source edit @safety", async ({
     page,
     canvas

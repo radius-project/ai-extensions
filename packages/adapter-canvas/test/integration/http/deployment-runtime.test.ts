@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, execFileSync, execFile } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,12 +75,29 @@ function harness(
   });
   const cli = vi.fn<
     NonNullable<Parameters<typeof createTestCanvasServerRuntime>[0]["cliExec"]>
-  >((_command, args, _options, callback) => {
+  >((command, args, _options, callback) => {
+    if (command === "git") {
+      return execFile(
+        command,
+        args,
+        { timeout: 5000 },
+        (error, stdout, stderr) => callback(error, stdout, stderr)
+      );
+    }
     const endpoint = args
       .find((arg) => /^\/?repos\//.test(arg))
       ?.replace(/^\/?/, "/");
+    const graphRevision = "a".repeat(40);
+    if (
+      endpoint?.match(
+        /^\/repos\/acme\/(?:widgets|other)\/commits\/(?:feature|a{40})$/
+      )
+    ) {
+      callback(null, JSON.stringify({ sha: graphRevision }), "");
+      return new ChildProcess();
+    }
     const model = endpoint?.match(
-      /^\/repos\/acme\/(?:widgets|other)\/contents\/(.+)\?ref=feature$/
+      /^\/repos\/acme\/(?:widgets|other)\/contents\/(.+)\?ref=(?:feature|a{40})$/
     )?.[1];
     if (model && modelSources.has(model)) {
       const source = modelSources.get(model);
@@ -278,7 +295,7 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
     expect(entry.state.deployAttempt?.environment).toBe("staging");
   });
 
-  it.each(["workspace", "remote", "workspace fallback"] as const)(
+  it.each(["workspace", "remote", "missing workspace"] as const)(
     "binds fresh-panel graph recovery to the admitted %s model",
     async (source) => {
       const workspace = mkdtempSync(join(tmpdir(), "radius-deploy-graph-"));
@@ -289,12 +306,34 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
         ]);
       const h = harness(false, build);
       h.modelSources.set("models/custom.bicep", "selected model");
+      h.modelSources.set("models/bicepconfig.json", null);
       cleanups.push(async () => {
         h.finished.resolve();
         await h.deployment.owner.shutdown(1000);
         rmSync(workspace, { recursive: true, force: true });
       });
       mkdirSync(join(workspace, "models"));
+      execFileSync("git", ["init", "--initial-branch=feature"], {
+        cwd: workspace,
+        stdio: "ignore"
+      });
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Radius Fixture",
+          "-c",
+          "user.email=radius-fixture@example.invalid",
+          "-c",
+          "commit.gpgSign=false",
+          "commit",
+          "--allow-empty",
+          "--no-verify",
+          "-m",
+          "fixture"
+        ],
+        { cwd: workspace, stdio: "ignore" }
+      );
       writeFileSync(join(workspace, "app.bicep"), "wrong default model");
       if (source === "workspace")
         writeFileSync(
@@ -339,6 +378,19 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
           "Graph recovery finished"
         )
       );
+      if (source === "missing workspace") {
+        expect(entry.state.deployingResources).toEqual([]);
+        expect(entry.state.deployLogs?.join("\n")).toContain(
+          "models/custom.bicep not present"
+        );
+        expect(build).not.toHaveBeenCalled();
+        expect(h.cli.mock.calls.map(([command]) => command)).toEqual([
+          "git",
+          "git"
+        ]);
+        expect(entry.state.plannedResources).toBeUndefined();
+        return;
+      }
       expect(
         entry.state.deployingResources,
         entry.state.deployLogs?.join("\n")
@@ -351,7 +403,7 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
       expect(
         h.cli.mock.calls.some(([, args]) =>
           args.includes(
-            "/repos/acme/widgets/contents/models/custom.bicep?ref=feature"
+            `/repos/acme/widgets/contents/models/custom.bicep?ref=${"a".repeat(40)}`
           )
         )
       ).toBe(source !== "workspace");

@@ -15,7 +15,7 @@ import type {
 } from "@radius-project/core";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
-import type { CanvasState } from "../shared.js";
+import type { CanvasState, ReadSelectedGraphModel } from "../shared.js";
 
 // A branch's application model, classified. `refreshable` is the branch-safety
 // half of the decision: the skill writes the working tree, so only a model that
@@ -53,7 +53,8 @@ export interface GraphContextHelpers {
   resolveAppModelStatus(
     repo: string,
     branch: string,
-    state: CanvasState
+    state: CanvasState,
+    readSelectedModel?: ReadSelectedGraphModel
   ): Promise<AppModelStatus>;
 }
 
@@ -168,17 +169,25 @@ export function createGraphContextHelpers(
   async function resolveAppModelStatus(
     repo: string,
     branch: string,
-    state: CanvasState
+    state: CanvasState,
+    readSelectedModel?: ReadSelectedGraphModel
   ): Promise<AppModelStatus> {
     let model: string | null = null;
     let fromWorkspace = false;
-    if (repo && deps.workspace.isWorkspaceSelection(state, repo, branch)) {
+    if (readSelectedModel) {
+      const selected = await readSelectedModel(repo, branch);
+      model = selected.content;
+      fromWorkspace = selected.fromWorkspace && model !== null;
+    } else if (
+      repo &&
+      deps.workspace.isWorkspaceSelection(state, repo, branch)
+    ) {
       model = await deps.workspace
         .fetchWorkspaceBicep(state, repo, branch)
         .catch(() => null);
       fromWorkspace = !!model;
     }
-    if (!model) {
+    if (!readSelectedModel && !model) {
       model = await deps.core
         .fetchBicepFromRepo(deps.github, repo, branch)
         .catch(() => null);

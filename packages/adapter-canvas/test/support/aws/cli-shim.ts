@@ -226,7 +226,13 @@ export async function installCliShim(
       // A held call ends now, so the process that sent it can wind down.
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await fs.rm(bin, { recursive: true, force: true });
+      // Windows can briefly retain a lock on gh.exe after the process exits.
+      await fs.rm(bin, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 100
+      });
     }
   };
 }
