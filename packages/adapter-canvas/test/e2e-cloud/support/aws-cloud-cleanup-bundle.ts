@@ -9,9 +9,16 @@
 import { build } from "esbuild";
 import path from "node:path";
 import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// jsonc-parser's `main` is a UMD file that requires its implementation at run
+// time, which a bundle can't resolve. Bundle its ESM entry instead, as the
+// product build does (packages/adapter-canvas/build.mjs).
+const jsoncParserEsmEntry = createRequire(
+  import.meta.resolve("@radius-project/adapter-shared")
+).resolve("jsonc-parser/lib/esm/main.js");
 
 export async function bundleAwsCleanup(outfile: string): Promise<void> {
   await build({
@@ -22,6 +29,7 @@ export async function bundleAwsCleanup(outfile: string): Promise<void> {
     platform: "node",
     target: "node24",
     logLevel: "warning",
+    alias: { "jsonc-parser": jsoncParserEsmEntry },
     // Some dependencies `require` Node built-ins, which an ES module bundle
     // has no `require` for.
     banner: {
