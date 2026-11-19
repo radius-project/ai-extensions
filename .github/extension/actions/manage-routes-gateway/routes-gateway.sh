@@ -250,31 +250,60 @@ environment_recipe_pack_ids_json() {
     jq -sc '
       if length == 0 then
         error("environment lookup returned no JSON")
-      elif (.[0].properties.recipePacks | type) != "array" then
+      elif (.[0] | type) != "object" then
+        error("environment lookup must return an object")
+      elif .[0].properties.recipePacks != null and
+           (.[0].properties.recipePacks | type) != "array" then
         error("environment recipePacks must be an array")
-      elif any(.[0].properties.recipePacks[];
+      elif any((.[0].properties.recipePacks // [])[];
                type != "string" or length == 0) then
         error("environment recipePacks contains an invalid resource ID")
       else
-        .[0].properties.recipePacks
+        .[0].properties.recipePacks // []
       end
     ' <<<"${environment_json}" ||
         fail "environment '${ENVIRONMENT_NAME}' returned invalid recipe-pack data"
 }
 
+radius_environment_state() {
+    local environments_json
+    environments_json="$(rad env list -o json)" ||
+        fail "failed to list Radius environments"
+    environments_json="$(
+        normalize_items_json \
+            "${environments_json}" "Radius environment discovery" true
+    )" || return 1
+    jq -r --arg name "${ENVIRONMENT_NAME}" '
+      if any(.[];
+             type != "object" or
+             (.name | type) != "string" or
+             (.name | length) == 0) then
+        error("environment entries require non-empty names")
+      elif any(.[]; (.name | ascii_downcase) == ($name | ascii_downcase)) then
+        "present"
+      else
+        "absent"
+      end
+    ' <<<"${environments_json}" ||
+        fail "Radius environment discovery returned invalid environment entries"
+}
+
+# Prints the first effective routes recipe source, or nothing when the
+# environment has no routes recipe. Callers run this in a command substitution,
+# where errexit is not inherited, so failures are propagated explicitly.
 effective_routes_source() {
     local pack_ids
     local pack_id
     local pack_json
     local route_source
 
-    pack_ids="$(environment_recipe_pack_ids_json)"
+    pack_ids="$(environment_recipe_pack_ids_json)" || return 1
     while IFS= read -r pack_id; do
         [[ -n "${pack_id}" ]] || continue
         pack_json="$(rad recipe-pack show "${pack_id}" -o json)" ||
             fail "failed to inspect recipe pack ${pack_id}"
         route_source="$(
-            jq -sce '
+            jq -sc '
               if length != 1 then
                 error("recipe pack lookup must return one JSON document")
               elif (.[0].properties.recipes | type) != "object" then
@@ -300,14 +329,21 @@ effective_routes_source() {
             return 0
         fi
     done < <(jq -r '.[]' <<<"${pack_ids}")
-
-    return 1
 }
 
 uses_default_routes_recipe() {
     local source
     source="$(effective_routes_source)" ||
+        fail "failed to determine the effective Radius.Compute/routes recipe for environment '${ENVIRONMENT_NAME}'"
+    if [[ -z "${source}" ]]; then
+        # Cleanup can't tell whether this environment's routes ever used the
+        # managed Gateway, so it keeps whatever infrastructure exists.
+        if [[ "${MODE}" == "cleanup" ]]; then
+            echo "Environment '${ENVIRONMENT_NAME}' has no effective Radius.Compute/routes recipe; Gateway cleanup is a no-op."
+            return 1
+        fi
         fail "environment '${ENVIRONMENT_NAME}' has no effective Radius.Compute/routes recipe"
+    fi
     if [[ "${source}" == "${DEFAULT_ROUTES_SOURCE_PREFIX}"* &&
         "${source#"${DEFAULT_ROUTES_SOURCE_PREFIX}"}" != "" ]]; then
         echo "Effective routes recipe is the Radius default: ${source}"
@@ -1168,11 +1204,20 @@ ensure_gateway() {
 cleanup_gateway() {
     local crd_state
     local crd_ownership_states
+    local environment_state
     local fresh_release_state
     local gateway_class_ownership_state
     local gateway_ownership_state
     local release_state
 
+    # The deploy workflow creates the Radius environment, so an environment
+    # that was never deployed has no applications or routes to clean up.
+    environment_state="$(radius_environment_state)" ||
+        fail "failed to determine whether Radius environment '${ENVIRONMENT_NAME}' exists; preserving Gateway infrastructure"
+    if [[ "${environment_state}" == "absent" ]]; then
+        echo "Radius environment '${ENVIRONMENT_NAME}' does not exist; Gateway cleanup is a no-op."
+        return 0
+    fi
     if ! uses_default_routes_recipe; then
         return 0
     fi
