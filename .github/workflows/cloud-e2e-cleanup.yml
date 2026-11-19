@@ -570,11 +570,15 @@ jobs:
       # hex characters the package name ends in are unrecoverable, so the
       # package becomes permanently invisible to every environment-driven sweep.
       #
-      # This lists the organisation's packages instead and reclaims every one
-      # the fixture wrote. Cleanup exists to return the fixture to a pristine
-      # baseline and no run shares it, so there is no live state to preserve;
-      # the age threshold is only here so a sweep cannot delete state out from
-      # under a run that is still going.
+      # This lists the organisation's packages instead and reclaims the state
+      # packages whose environment part starts with the Azure prefix. It skips
+      # `radtest-aws-` names, which belong to AWS. Every environment the suite
+      # creates starts with `radtest-`, so a package for any other environment
+      # name is not the suite's: neither this sweep nor the final gate in
+      # reset-fixture selects it. Cleanup exists to return the fixture to a
+      # pristine baseline and no run shares it, so there is no live state to
+      # preserve; the age threshold is only here so a sweep cannot delete state
+      # out from under a run that is still going.
       #
       # It is deliberately not gated on the Radius application delete
       # succeeding, because that delete failing is one of the ways state is
@@ -1668,13 +1672,18 @@ jobs:
 
       # The age threshold lets a recent leak survive a sweep. This checks,
       # whatever the age, that none of the AWS state the suite creates is left:
-      # RDS resources, workloads and the namespace on both clusters, nodes,
-      # the deploy role's lock, and its trust subjects, inline policies, and
-      # access entries. reset-fixture runs only when this job succeeds, and
-      # checks every cloud's GitHub state itself.
+      # RDS resources, workloads and the namespace on both clusters, the app
+      # roles, Pod Identity associations, and app boundaries under the fixture
+      # repository's app path, nodes, the deploy role's lock, and its trust
+      # subjects, inline policies, and access entries. reset-fixture runs only
+      # when this job succeeds, and checks every cloud's GitHub state itself.
       - name: Verify no leaked AWS state remains
         id: aws-verification
         if: always() && steps.aws-config.outputs.configured == 'true' && steps.bundle.outcome == 'success' && steps.aws-login.outcome == 'success'
+        env:
+          # Reads the fixture repository's ID, which names the IAM path of its
+          # app roles and boundaries. Without the token, the check fails.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         shell: bash
         run: node "$RUNNER_TEMP/aws-cloud-cleanup.mjs" verify
 

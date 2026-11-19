@@ -262,12 +262,10 @@ function savedRadiusVersion(radiusDir) {
 // managed CLI needs. Returns true when the pin may move to the CLI's, and throws
 // when it may not.
 //
-// A pin equal to the Radius version the last run saved is the one modeling
-// wrote, so moving it forward to the CLI's newer version replaces nothing a
-// person chose. Any other pin was set on purpose and is left for the user to
-// change. A pin NEWER than the CLI is never moved back: that is a plugin behind
-// the one that generated the model, and moving the pin would put the model on
-// older types for everyone else on the branch.
+// Modeling owns release pins from the Radius registry, including legacy pins
+// whose origin record has no saved version. A pin NEWER than the CLI is never
+// moved back: moving it would put the model on older types for everyone else
+// on the branch.
 function mayMoveRadiusPin(configured, extension, saved, source) {
   const pinVersion = radiusVersionFromExtensionRef(configured);
   const cliVersion = radiusVersionFromExtensionRef(extension);
@@ -277,17 +275,18 @@ function mayMoveRadiusPin(configured, extension, saved, source) {
       `The Radius extension pinned in "${source}" ("${configured}") is newer than the managed Radius CLI's ("${extension}"), so this application model was generated with a newer Radius version than this plugin provides. Update the Radius plugin and run modeling again. Do not change extensions.radius.`
     );
   }
-  // An edge pin left by an earlier run has no order, but any released version
-  // is a better pin than `latest`. Moving TO `latest` is never allowed, so an
-  // edge CLI cannot replace a released pin.
-  const movesForward =
-    order === null ?
-      pinVersion === "latest" &&
-      compareRadiusVersions(cliVersion, cliVersion) !== null
-    : order < 0;
-  if (saved !== "" && pinVersion === saved && movesForward) return true;
+  if (order !== null && order < 0) return true;
+  // An edge pin has no order and still needs the saved origin record before
+  // it can move to a release. An edge CLI never replaces a released pin.
+  if (
+    pinVersion === "latest" &&
+    saved === "latest" &&
+    compareRadiusVersions(cliVersion, cliVersion) !== null
+  ) {
+    return true;
+  }
   throw new Error(
-    `Configured Radius extension "${configured}" in "${source}" does not match managed Radius extension "${extension}", and it is not the pin an earlier modeling run wrote, so it was left unchanged. Ask the user to set extensions.radius to "${extension}" or remove it, then run modeling again.`
+    `Configured Radius extension "${configured}" in "${source}" cannot be updated automatically to managed Radius extension "${extension}", so it was left unchanged. Ask the user to set extensions.radius to "${extension}" or remove it, then run modeling again.`
   );
 }
 

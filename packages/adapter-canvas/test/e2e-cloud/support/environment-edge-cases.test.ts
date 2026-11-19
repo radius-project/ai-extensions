@@ -384,6 +384,24 @@ describe("findSeededAppPreconditionProblems", () => {
     ]);
   });
 
+  it("rejects an orphan seed tagged for an environment the suite would not create", () => {
+    expect(
+      findSeededAppPreconditionProblems({
+        kind: "orphan",
+        snapshot: snapshot({
+          tags: [
+            ...orphanTags.slice(0, 2),
+            "radius-environment:production-orphan"
+          ]
+        }),
+        callerObjectId: CALLER,
+        repository: REPOSITORY
+      })
+    ).toEqual([
+      'The seeded orphan application\'s "radius-environment:" tag names "production-orphan", which does not start with "radtest-". Cleanup reclaims only environments with that prefix.'
+    ]);
+  });
+
   it("rejects an orphan seed tagged for another repository", () => {
     expect(
       findSeededAppPreconditionProblems({
@@ -392,7 +410,7 @@ describe("findSeededAppPreconditionProblems", () => {
           tags: [
             "radius-managed",
             "radius-repo:other/repo",
-            "radius-environment:e"
+            "radius-environment:radtest-orphan"
           ]
         }),
         callerObjectId: CALLER,

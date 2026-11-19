@@ -239,6 +239,33 @@ describe("runAwsCleanup", () => {
     );
   });
 
+  it("fails verification on an app boundary, reading the repository's ID with the App token", async () => {
+    const { run, calls } = cli();
+    const boundary = `arn:aws:iam::${ACCOUNT}:policy/radius/apps/42/radtest-aws-1/b-1`;
+    const withBoundary: AwsCleanupMainDependencies["run"] = async (
+      command,
+      args,
+      options
+    ) =>
+      args[1] === "list-policies" ?
+        OK({
+          Policies: [
+            {
+              PolicyName: "b-1",
+              Path: "/radius/apps/42/radtest-aws-1/",
+              Arn: boundary
+            }
+          ]
+        })
+      : run(command, args, options);
+    const { deps, log } = dependencies(ENV, withBoundary);
+    expect(await runAwsCleanup("verify", deps)).toBe(1);
+    expect(log.join("\n")).toContain(`permissions boundary ${boundary}`);
+    expect(
+      calls.find((call) => call.args.includes("repos/octo/fixture"))?.env
+    ).toEqual({ GH_TOKEN: "app-token" });
+  });
+
   it("logs a warning in each mode", async () => {
     const { run } = cli();
     const withSnapshot: AwsCleanupMainDependencies["run"] = async (

@@ -230,6 +230,8 @@ function cliRequest(
       break;
     case "iam get-policy":
     case "iam get-policy-version":
+      resource = flag(args, "--policy-arn");
+      break;
     case "iam delete-policy":
       resource = flag(args, "--policy-arn");
       for (const tag of known.policyTags?.get(resource) ?? [])
@@ -742,18 +744,31 @@ describe("build/cloud-e2e/aws", () => {
         "eks:updatenodegroupconfig",
         "eks:deleteaccessentry",
         "iam:updateassumerolepolicy",
-        "iam:createpolicy"
-      ])
-    );
-    expect(requests.map((item) => item.action)).toEqual(
-      expect.arrayContaining([
+        "iam:createpolicy",
+        "iam:deletepolicy",
+        "iam:listpolicies",
         "iam:listroles",
         "iam:listroletags",
-        "iam:listpolicies",
         "eks:listpodidentityassociations",
         "eks:describepodidentityassociation"
       ])
     );
+    // The product's removal deletes each environment's app boundary, and the
+    // sweep deletes the orphaned one.
+    expect(
+      requests
+        .filter(
+          (item) =>
+            item.action === "iam:deletepolicy" &&
+            item.resource.includes(":policy/radius/apps/")
+        )
+        .map((item) => item.resource.split("/").at(-2))
+        .sort()
+    ).toEqual([
+      "radtest-aws-aaaa11112222",
+      "radtest-aws-bbbb33334444",
+      "radtest-aws-cccc55556666"
+    ]);
     // Each call against the resource it names, in its region.
     expect(
       requests.filter((item) => evaluateIam(item, [policy]) !== "allowed")

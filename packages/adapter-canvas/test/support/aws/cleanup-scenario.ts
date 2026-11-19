@@ -472,6 +472,10 @@ export interface AwsEnvironmentOptions {
   readonly ageHours?: number;
   // Deployed: a database, its workloads, a deployment record, and state.
   readonly deployed?: boolean;
+  // A role outside the app path that still uses the environment's app
+  // boundary. The sweep doesn't own it, so IAM keeps refusing to delete the
+  // boundary.
+  readonly appRoleKeepsBoundary?: boolean;
 }
 
 /**
@@ -513,6 +517,12 @@ export async function addAwsEnvironment(
     ?.inline.set(APP_ROLES_POLICY, buildAwsAppRolesPolicy(ACCOUNT, REPO_ID));
   if (!scenario.aws.policies.has(appBoundary(name).arn))
     addAppBoundary(scenario, name, cluster.region);
+  if (options.appRoleKeepsBoundary)
+    scenario.aws.addRole({
+      name: `radius-app-web-${name}`,
+      trust: { Version: "2012-10-17", Statement: [] },
+      boundary: appBoundary(name).arn
+    });
   const entries = scenario.aws.clusters.get(
     `${cluster.region}:${cluster.name}`
   )?.entries;

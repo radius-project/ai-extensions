@@ -165,7 +165,7 @@ For each AWS test environment, the AWS job follows the same order as the Azure j
 
 If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs. The AWS job also scales the node groups to zero if a run left them up.
 
-It deletes an AWS resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with a test environment, and in one of the clusters' VPCs. An environment's app boundary goes in step 4 with the product's removal. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the deploy role, the test role, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
+It deletes an AWS resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with a test environment, and in one of the clusters' VPCs. An environment's app boundary goes in step 4 with the product's removal. The removal keeps a boundary it can't read or that an app role still uses, yet deletes the GitHub environment, so the job's final check lists every managed policy under the fixture repository's app path, and the fixture isn't reset while one is left. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the deploy role, the test role, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
 
 Like the Azure sweep, which also deletes in a subscription shared with Radius, it has no dry run. Its rules are unit-tested against resources shaped like Radius's.
 

@@ -530,8 +530,13 @@ export function awsStatePackagePrefix(config: AwsCleanupConfig): string {
   return `${repository.toLowerCase()}-radius-state-${config.environmentPrefix}`;
 }
 
-// --- App roles and Pod Identity -------------------------------------------
+// --- App roles, boundaries, and Pod Identity -------------------------------
 
+// The product's setup writes each AWS environment a permissions boundary for
+// its app roles, under the fixture repository's app path. Step 4's removal
+// deletes it, but keeps one it can't read or that an app role still uses, and
+// the environment goes anyway. The leftover check finds what it kept.
+//
 // For each container, the containers Recipe creates through Cloud Control an
 // IAM role under the environment's folder of the repository's app path, with
 // the environment's app boundary, and a Pod Identity association on the

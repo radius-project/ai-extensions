@@ -40,6 +40,17 @@ interface RecordedGh {
   readonly env: NodeJS.ProcessEnv;
 }
 
+// What `gh api user --include` prints: the status line, the headers, a blank
+// line, and the body. gh ends the status line with \n and headers with \r\n.
+function userResponse(headers: Record<string, string> = {}, login = LOGIN) {
+  const lines = Object.entries({
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Oauth-Scopes": "repo, workflow",
+    ...headers
+  }).map(([name, value]) => `${name}: ${value}\r\n`);
+  return `HTTP/2.0 200 OK\n${lines.join("")}\r\n${JSON.stringify({ login, id: 1 })}`;
+}
+
 /** A `gh` that answers the two sign-in calls and records how it was run. */
 function fakeGh(
   responses: {
@@ -53,7 +64,7 @@ function fakeGh(
     const response =
       args[0] === "auth" ?
         { stdout: `${SESSION_TOKEN}\n`, ...responses.token }
-      : { stdout: `${LOGIN}\n`, ...responses.user };
+      : { stdout: userResponse(), ...responses.user };
     return { status: 0, stderr: "", ...response };
   };
   return { runGh, calls };
@@ -104,7 +115,7 @@ describe("readGhSessionCredentials", () => {
 
     expect(calls.map((call) => call.args)).toEqual([
       ["auth", "token", "--hostname", "github.com"],
-      ["api", "user", "--jq", ".login"]
+      ["api", "user", "--include"]
     ]);
     expect(calls[0].env).toEqual({ PATH: "/bin" });
     expect(calls[1].env).toEqual({ PATH: "/bin", GH_TOKEN: SESSION_TOKEN });
@@ -139,8 +150,24 @@ describe("readGhSessionCredentials", () => {
       "the user lookup fails",
       { status: 1, stderr: `HTTP 401: Bad credentials for ${SESSION_TOKEN}` }
     ],
-    ["the login is not a GitHub login", { stdout: "not a login" }],
-    ["the login is empty", { stdout: "" }]
+    [
+      "the login is not a GitHub login",
+      { stdout: userResponse({}, "not a login") }
+    ],
+    ["gh prints nothing", { stdout: "" }],
+    ["gh prints no headers", { stdout: JSON.stringify({ login: LOGIN }) }],
+    [
+      "GitHub answers another status",
+      { stdout: userResponse().replace("200 OK", "203 Non-Authoritative") }
+    ],
+    [
+      "the headers never end",
+      { stdout: userResponse().replace(/\r\n\{.*$/, "") }
+    ],
+    [
+      "the body is not JSON",
+      { stdout: userResponse().replace(/\{.*$/, `oops ${SESSION_TOKEN}`) }
+    ]
   ])("fails without echoing the token when %s", (_label, user) => {
     const { runGh } = fakeGh({ user });
 
@@ -153,6 +180,45 @@ describe("readGhSessionCredentials", () => {
 
     expect(message).toContain("Could not read the login of your gh session");
     expect(message).not.toContain(SESSION_TOKEN);
+  });
+
+  // A session that expires could stop working partway through the journey,
+  // which runs for hours with the token it read here.
+  it.each([
+    "Github-Authentication-Token-Expiration",
+    "github-authentication-token-expiration"
+  ])("refuses a session whose token expires (%s)", (header) => {
+    const { runGh } = fakeGh({
+      user: { stdout: userResponse({ [header]: "2026-12-01 00:00:00 UTC" }) }
+    });
+
+    let message = "";
+    try {
+      readGhSessionCredentials(runGh, {});
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toBe(
+      "Your gh session's token expires (2026-12-01 00:00:00 UTC), so it could stop working partway through the run. Sign in with a gh session that doesn't expire: run `gh auth login -h github.com` and choose to log in with a web browser, then `gh auth refresh -h github.com -s workflow,read:packages,write:packages,delete:packages`."
+    );
+  });
+
+  it("redacts the token if GitHub echoes it in the expiration", () => {
+    const { runGh } = fakeGh({
+      user: {
+        stdout: userResponse({
+          "Github-Authentication-Token-Expiration": SESSION_TOKEN
+        })
+      }
+    });
+
+    expect(() => readGhSessionCredentials(runGh, {})).toThrow(
+      "Your gh session's token expires"
+    );
+    expect(() => readGhSessionCredentials(runGh, {})).not.toThrow(
+      SESSION_TOKEN
+    );
   });
 
   it("never echoes stdout from a failed token read", () => {
@@ -265,6 +331,24 @@ describe("prepareCloudRun", () => {
       expect(env).not.toHaveProperty("GH_TOKEN");
     }
   );
+
+  it("refuses to start a gh session run whose token expires", () => {
+    const { runGh } = fakeGh({
+      user: {
+        stdout: userResponse({
+          "Github-Authentication-Token-Expiration": "2026-12-01 00:00:00 UTC"
+        })
+      }
+    });
+    const env: NodeJS.ProcessEnv = { ...OVERRIDE };
+
+    const prepared = prepareCloudRun(runGh, env);
+
+    expect(prepared.signIn).toBe("gh-session");
+    expect(prepared.failure).toContain("Your gh session's token expires");
+    expect(prepared.failure).not.toContain(SESSION_TOKEN);
+    expect(env).not.toHaveProperty("GH_TOKEN");
+  });
 
   it("fails a gh session sign-in without leaking the token or setting it", () => {
     const { runGh } = fakeGh({

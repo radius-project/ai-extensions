@@ -147,6 +147,43 @@ describe("FakeAws", () => {
     ).toEqual([{ PolicyName: "admin", PolicyArn: "arn:p/admin" }]);
   });
 
+  it("lists customer managed policies by path, without their tags", () => {
+    const fake = aws();
+    fake.addManagedPolicy({
+      path: "/radius/apps/7/env-a/",
+      name: "boundary-a",
+      document: TRUST,
+      tags: [{ Key: "radius-managed", Value: "true" }]
+    });
+    fake.addManagedPolicy({ path: "/other/", name: "other", document: TRUST });
+    const listed = json(
+      fake.run([
+        "iam",
+        "list-policies",
+        "--scope",
+        "Local",
+        "--path-prefix",
+        "/radius/apps/7/",
+        "--output",
+        "json"
+      ]).stdout
+    );
+    expect(listed.Policies).toEqual([
+      {
+        PolicyName: "boundary-a",
+        PolicyId: expect.stringMatching(/^ANPA/),
+        Arn: `arn:aws:iam::${ACCOUNT}:policy/radius/apps/7/env-a/boundary-a`,
+        Path: "/radius/apps/7/env-a/",
+        DefaultVersionId: "v1",
+        AttachmentCount: 0,
+        PermissionsBoundaryUsageCount: 0,
+        IsAttachable: true,
+        CreateDate: expect.any(String)
+      }
+    ]);
+    expect(listed.IsTruncated).toBe(false);
+  });
+
   it("lets one caller create a lock policy, whatever the name's case", () => {
     const fake = aws();
     const create = (name: string) =>
@@ -461,6 +498,10 @@ describe("FakeAws app roles and boundaries", () => {
     fake.run(createAppRole(boundaryArn));
     const deletePolicy = (arn: string) =>
       fake.run(["iam", "delete-policy", "--policy-arn", arn]);
+    expect(
+      json(fake.run(["iam", "get-policy", "--policy-arn", boundaryArn]).stdout)
+        .Policy
+    ).toMatchObject({ PermissionsBoundaryUsageCount: 1, AttachmentCount: 0 });
     expect(deletePolicy(boundaryArn).stderr).toContain("(DeleteConflict)");
     // A boundary doesn't stop the role's own delete.
     expect(

@@ -14,6 +14,7 @@ import {
   containerTags,
   createCleanupScenario,
   databaseName,
+  deployRoleTrust,
   environmentId,
   MAIN,
   MAIN_VPC,
@@ -35,6 +36,7 @@ import {
   appIdentityEnvironment,
   appPathEnvironment,
   AWS_MAIN_NODE_GROUPS,
+  appPathRoot,
   awsEnvironmentFromTag,
   awsStatePackagePrefix,
   describedAssociation,
@@ -154,6 +156,49 @@ describe("resolveAwsCleanupConfig", () => {
 });
 
 describe("AWS cleanup selectors", () => {
+  it("selects only managed policies under the fixture repository's app path", () => {
+    const scope = {
+      accountId: ACCOUNT,
+      repositoryId: 1361595003,
+      prefix: "radtest-aws-"
+    };
+    const policy = (path: string, name: string, account = ACCOUNT) => ({
+      PolicyName: name,
+      Path: path,
+      Arn: `arn:aws:iam::${account}:policy${path}${name}`,
+      CreateDate: "2026-11-01T00:00:00Z"
+    });
+    const root = appPathRoot(scope.repositoryId);
+    expect(root).toBe("/radius/apps/1361595003/");
+    const mine = policy(`${root}radtest-aws-1/`, "b-1");
+    expect(
+      selectAppBoundaries(
+        {
+          Policies: [
+            mine,
+            policy("/radius/apps/42/radtest-aws-1/", "b-42"),
+            policy("/radius/apps/13615950030/radtest-aws-1/", "b-prefix"),
+            policy("/", "radius-lock-deploy"),
+            policy(`${root}radtest-aws-1/`, "b-other", "999999999999"),
+            { ...mine, Arn: `${mine.Arn}-renamed` },
+            { Path: root, Arn: "" }
+          ]
+        },
+        scope
+      )
+    ).toEqual([
+      {
+        arn: mine.Arn,
+        name: "b-1",
+        path: `${root}radtest-aws-1/`,
+        createdAt: "2026-11-01T00:00:00Z"
+      }
+    ]);
+    expect(() => selectAppBoundaries({}, scope)).toThrow(
+      "aws iam list-policies did not include a Policies array."
+    );
+  });
+
   function instance(
     id: string,
     options: {
@@ -416,6 +461,7 @@ describe("sweepAwsCloudE2E", () => {
       "iam create-policy",
       "iam delete-role-policy",
       "iam update-assume-role-policy",
+      // The app boundary, then the access entry.
       "iam delete-policy",
       "eks delete-access-entry",
       `DELETE environment ${OLD}`,
@@ -1138,6 +1184,75 @@ describe("sweepAwsCloudE2E", () => {
     ]);
   });
 
+  // Whatever the removal keeps after its second attempt, the environment
+  // goes, so a fresh run's leftover check must still name it.
+  it.each([
+    {
+      kept: "a trust subject other environments may present",
+      setup: (s: CleanupScenario) => {
+        const shared = `repo:${REPO}:ref:refs/heads/main`;
+        s.subjects.get(OLD)!.push(shared);
+        s.github
+          .environment(OLD)!
+          .variables.set(
+            "AWS_TRUST_SUBJECTS",
+            JSON.stringify(s.subjects.get(OLD))
+          );
+        s.aws.role(ROLE)!.AssumeRolePolicyDocument = deployRoleTrust(
+          [...s.subjects.values()].flat()
+        );
+        // The role still lets the subject in, so its access entry stays too.
+        return {
+          findings: [
+            `trust subject ${shared} on ${ROLE}`,
+            `access entry for ${ROLE} on cluster ${MAIN.name}`
+          ],
+          restore() {}
+        };
+      }
+    },
+    {
+      kept: "the app-roles policy, when the role's policies can't be listed",
+      setup: (s: CleanupScenario) => {
+        const name = "radius-app-roles-1361595003";
+        s.aws.role(ROLE)!.inline.set(name, {
+          Version: "2012-10-17",
+          Statement: []
+        });
+        const run = s.aws.run.bind(s.aws);
+        s.aws.run = (args) =>
+          args[1] === "list-role-policies" ?
+            {
+              code: 254,
+              stdout: "",
+              stderr:
+                "An error occurred (ServiceFailure) when calling the ListRolePolicies operation"
+            }
+          : run(args);
+        return {
+          findings: [`inline policy ${name} on ${ROLE}`],
+          restore: () => {
+            s.aws.run = run;
+          }
+        };
+      }
+    }
+  ])(
+    "keeps the reset blocked while the removal keeps $kept",
+    async ({ setup }) => {
+      const s = createCleanupScenario();
+      await addAwsEnvironment(s, OLD, { deployed: true });
+      const { findings, restore } = setup(s);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([expect.stringMatching(`^${OLD}: Kept`)]);
+      expect(s.github.environment(OLD)).toBeUndefined();
+      restore();
+      nextDay(s);
+      expect((await runSweep(s)).failures).toEqual([]);
+      expect((await runVerify(s)).findings).toEqual(findings);
+    }
+  );
+
   it("keeps the GitHub environment when the removal fails, naming the runbook", async () => {
     const s = await twoEnvironments();
     s.aws.refuseOnce("iam update-assume-role-policy", "AccessDenied");
@@ -1397,7 +1512,8 @@ describe("findAwsLeftovers", () => {
     const denied = [
       "describe-db-instances",
       "describe-access-entry",
-      "list-role-policies"
+      "list-role-policies",
+      "list-policies"
     ];
     s.aws.run = (args) =>
       denied.includes(args[1] ?? "") && !args.includes(SECOND.name) ?
@@ -1418,6 +1534,9 @@ describe("findAwsLeftovers", () => {
       `Could not check cluster ${MAIN.name}: timeout`,
       `Could not check cluster ${SECOND.name}: timeout`,
       expect.stringMatching(
+        /^Could not check app permissions boundaries: aws iam list-policies: .*AccessDenied/
+      ),
+      expect.stringMatching(
         new RegExp(`^Could not check deploy role ${ROLE}: .*AccessDenied`)
       ),
       expect.stringMatching(
@@ -1426,6 +1545,44 @@ describe("findAwsLeftovers", () => {
         )
       )
     ]);
+  });
+
+  it("keeps the reset blocked while an app boundary outlives its environment", async () => {
+    const s = createCleanupScenario();
+    await addAwsEnvironment(s, OLD, {
+      deployed: true,
+      appRoleKeepsBoundary: true
+    });
+    const boundary = appBoundary(OLD).arn;
+    // IAM refuses the boundary while the app role uses it, so the product's
+    // removal warns on both attempts, and the environment goes anyway.
+    const first = await runSweep(s);
+    expect(first.failures).toEqual([
+      expect.stringContaining(
+        `${OLD}: Kept permissions boundary ${boundary}, because IAM reported it is still in use`
+      )
+    ]);
+    expect(s.github.environment(OLD)).toBeUndefined();
+    expect(s.aws.policies.has(boundary)).toBe(true);
+    // A fresh run no longer has the environment to retry. IAM still refuses
+    // the boundary as an orphan, and the leftover check finds it, so the
+    // fixture isn't reset.
+    nextDay(s);
+    expect((await runSweep(s)).failures).toEqual([
+      expect.stringContaining(
+        `Deleting orphaned permissions boundary ${boundary}: An error occurred (DeleteConflict)`
+      )
+    ]);
+    expect((await runVerify(s)).findings).toEqual([
+      `permissions boundary ${boundary}`
+    ]);
+    // Once the app role and the boundary are gone, the reset may run.
+    s.aws.roles.delete(`radius-app-web-${OLD}`.toLowerCase());
+    expect(
+      s.aws.run(["iam", "delete-policy", "--policy-arn", boundary]).code
+    ).toBe(0);
+    nextDay(s);
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
   });
 
   it("checks again after a read that fails once", async () => {
@@ -2352,6 +2509,27 @@ describe("findAwsLeftovers app roles and Pod Identity", () => {
       `app role ${role.Arn}`,
       `Pod Identity association ${association.associationId} (other/radius-app-web) on cluster ${SECOND.name}, for ${untagged.Arn}`,
       `permissions boundary ${appBoundary(ORPHAN_ENV).arn}`
+    ]);
+  });
+
+  it("names an association whose app role is already gone", async () => {
+    const s = createCleanupScenario();
+    // Only the association still names the role, so only the association
+    // check can see it.
+    const roleArn = roleArnAt(appFolder(ORPHAN_ENV));
+    const association = s.aws.addPodIdentityAssociation(
+      MAIN.region,
+      MAIN.name,
+      {
+        namespace: NAMESPACE,
+        serviceAccount: "radius-app-web",
+        roleArn,
+        tags: containerTags(ORPHAN_ENV)
+      }
+    );
+    expect(s.aws.role("radius-app-web-x")).toBeUndefined();
+    expect((await runVerify(s)).findings).toEqual([
+      `Pod Identity association ${association.associationId} (${NAMESPACE}/radius-app-web) on cluster ${MAIN.name}, for ${roleArn}`
     ]);
   });
 
