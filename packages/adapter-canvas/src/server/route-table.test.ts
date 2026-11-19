@@ -308,10 +308,12 @@ const productionHandlers = {
       }),
     listBranchPaths: () => Promise.resolve([]),
     workspaceGraphJsonPath: () => "",
+    graphDefinitionHash: () => "",
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "", remote: false }),
     buildGraphViaRad: () => Promise.resolve([]),
     canvasGraphResources: () => [],
+    removeDirectory: () => {},
     errorMessage: (error) => String(error),
     logError: () => {}
   }),
@@ -339,7 +341,6 @@ const productionHandlers = {
         canvasGraphResources: () => [],
         workspaceGraphJsonPath: () => "",
         graphDefinitionHash: () => "",
-        radArtifactsFingerprint: () => "",
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},

@@ -11,15 +11,15 @@ The Radius plugin installs its own Radius CLI, and upgrading the plugin can move
 
 ## Proposal
 
-The skill saves the Radius version in the origin record. When the installed Radius CLI uses a newer version, the canvas regenerates the app model. During that regeneration, the skill moves the pin to the new version if the pin is one the skill wrote.
+The skill saves the Radius version in the origin record. When the installed Radius CLI uses a newer version, the canvas regenerates the app model. During modeling, the skill moves an older Radius release pin to the managed release. Modeling owns that pin, so the move does not require origin version metadata.
 
 ## Objectives
 
 ### Goals
 
 1. Regenerate an app model when the installed Radius CLI uses a newer Radius version than the one the app model was generated with.
-2. Move the pin to the new version during that regeneration when the skill wrote the pin.
-3. Never move a pin that someone set by hand.
+2. Move an older Radius release pin to the managed release during modeling, including when a legacy origin record has no saved version.
+3. Preserve custom extension references and reject unrecognized versions.
 4. Never move an app model to an older Radius version, such as when a teammate's plugin is behind.
 
 ### Non-goals
@@ -27,7 +27,7 @@ The skill saves the Radius version in the origin record. When the installed Radi
 1. **Detecting patch releases, such as 0.60.1 to 0.60.2.** Radius publishes one set of types per minor version, so the version cannot tell patches apart, and patches are expected to be compatible.
 2. **Detecting changes on edge builds.** Edge always uses `latest`, which says nothing about what changed, and edge needs an explicit developer override to run at all.
 3. **Regenerating app models whose origin record was written before this change.** They have no saved version, and regenerating every existing app model at once would be expensive for no proven reason.
-4. **Keeping an older Radius version while running a newer CLI.** The skill cannot tell a pin the user chose to keep from one it wrote, so it moves both. This is an advanced setup that can be supported later.
+4. **Keeping an older Radius version while running a newer CLI.** Modeling owns the Radius release pin and moves it forward to match the managed CLI. This is an advanced setup that can be supported later.
 
 ## Design
 
@@ -45,8 +45,8 @@ sequenceDiagram
     Canvas->>Files: Read the origin record
     Canvas->>Canvas: Saved 0.60, CLI uses 0.61
     Canvas->>Skill: Regenerate the app model
-    Skill->>Files: Read the pin and the saved version
-    Note over Skill: The pin matches the saved version, so the skill wrote it
+    Skill->>Files: Read the Radius release pin
+    Note over Skill: Modeling owns the older release pin and can move it forward
     Skill->>Files: Write the app model, pin 0.61, radiusVersion 0.61
     User->>Canvas: Open the graph again
     Canvas->>Files: Read the origin record
@@ -133,15 +133,18 @@ The canvas asks for each refresh once. The saved version is part of the key it u
 
 ### Moving the pin during regeneration
 
-Today `show-radius-type.mjs` stops when the existing pin differs from the CLI. With this change it also reads `radiusVersion` from `.radius/app.origin.json`, the origin record beside the `.radius/bicepconfig.json` whose pin it may move. A pin that matches the saved version is the one the skill wrote last time, so it is safe to move. Any other pin was set on purpose, and the skill does not overwrite it.
+`show-radius-type.mjs` compares a recognized release pin from `br:biceptypes.azurecr.io/radius` with the managed CLI's version. Modeling owns that pin and moves it forward even when the origin record is missing, unreadable, or has no matching `radiusVersion`. This legacy migration policy replaces the original requirement that the pin match the saved version, which blocked refresh for older models ([#1256](https://github.com/radius-project/ai-extensions/issues/1256)). It does not change graph freshness checks: a missing saved version alone still does not trigger a refresh.
 
-| Existing pin                                                                  | What happens                                                                                            |
-|-------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| None                                                                          | Use the CLI version. Same as today.                                                                     |
-| Same as the CLI                                                               | Keep it. Same as today.                                                                                 |
-| Older than the CLI, matches the saved version                                 | Move it to the CLI version.                                                                             |
-| Newer than the CLI                                                            | Stop. The error says the app model uses a newer Radius version and the Radius plugin should be updated. |
-| Differs from the CLI and from the saved version, or there is no saved version | Stop. The error names the pin and the CLI version and tells the user to update or remove the pin.       |
+The resolver still reads `radiusVersion` from `.radius/app.origin.json` for an edge pin. Moving `latest` to a released version requires that the saved version also be `latest`. Custom references and unrecognized versions remain unchanged.
+
+| Existing pin                                                          | What happens                                                                                            |
+|-----------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| None                                                                  | Use the CLI version. Same as today.                                                                     |
+| Same as the CLI                                                       | Keep it. Same as today.                                                                                 |
+| Recognized Radius release older than the CLI                          | Move it to the CLI version, regardless of origin metadata.                                              |
+| Newer than the CLI                                                    | Stop. The error says the app model uses a newer Radius version and the Radius plugin should be updated. |
+| `latest`, with a saved version of `latest` and a released CLI         | Move it to the CLI version.                                                                             |
+| Custom reference, unrecognized version, or an unverified `latest` pin | Stop. The error names the pin and the CLI version and tells the user to update or remove the pin.       |
 
 The move changes only `extensions.radius`. Every other setting and alias in `bicepconfig.json`, such as `customTypes`, is kept as it is. The move is written to the staging folder like every other file in the run, so `.radius/` is not touched until the run publishes, and the existing check that nothing in `.radius/` changed during the run still applies.
 
@@ -153,8 +156,8 @@ This also unblocks a repository whose pin was left at `latest` by an edge run. T
 |--------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `write-app-origin.mjs` cannot read the pin                   | The record is still written with an empty `radiusVersion`, and a warning says the check is off for this app model.                                                                                                                                               |
 | The canvas cannot find the CLI or read its release           | The check is skipped. If the app model does not compile, the graph shows the compile error as it does today.                                                                                                                                                     |
-| `show-radius-type.mjs` cannot read the origin record         | It treats the pin as set by hand and stops with the same error. A pin it cannot prove it wrote is never moved.                                                                                                                                                   |
-| Regeneration stops because the pin was set by hand           | The agent reports the error. The canvas asks for the refresh once and does not ask again for the same versions, so there is no loop.                                                                                                                             |
+| `show-radius-type.mjs` cannot read the origin record         | An older recognized Radius release pin still moves forward. An edge pin cannot move without its saved `latest` version.                                                                                                                                          |
+| Regeneration stops because the pin is unsupported            | The agent reports the error. The canvas asks for the refresh once and does not ask again for the same versions, so there is no loop.                                                                                                                             |
 | Regeneration fails for any other reason                      | `.radius/` is left as it was, as it is for every failed modeling run today.                                                                                                                                                                                      |
 | The canvas cannot update the deploy workflow before a deploy | Deploy runs with the workflow already on the branch, as it does today, and the canvas tries the update again before the next deploy. If that workflow installs an older Radius CLI than the pin, the deploy can fail, and its error is shown on the deploy page. |
 
@@ -172,7 +175,7 @@ Each behavior is tested at the lowest level that can prove it.
 ### Script tests
 
 - **`write-app-origin.mjs`:** every row of the "Saving the version" table, plus a missing or unreadable `bicepconfig.json`, which writes an empty version and a warning. The existing test that the script and core write identical records covers the new field.
-- **`show-radius-type.mjs`:** every row of the "Moving the pin" table. A missing or unreadable origin record stops the run rather than moving the pin. A move keeps every other setting and alias, and leaves `.radius/bicepconfig.json` byte for byte unchanged until the run publishes. A `latest` pin left by an edge run moves to the released version, and an edge CLI never replaces a released pin.
+- **`show-radius-type.mjs`:** every row of the "Moving the pin" table. An older release pin moves forward with absent, legacy, malformed, empty, or differing origin version metadata. Numeric and prerelease ordering still apply. A move keeps every other setting and alias, and leaves `.radius/bicepconfig.json` byte for byte unchanged until the run publishes. A `latest` pin moves to the released version only when the saved version is `latest`, and an edge CLI never replaces a released pin. Command-level tests cover a legacy upgrade, a later staged-evidence failure, and abort without changing published files or the Git index.
 
 ### Canvas unit and runtime integration tests
 
@@ -186,7 +189,7 @@ Each behavior is tested at the lowest level that can prove it.
 
 ### Built-extension smoke
 
-- The packaged scripts still load and agree on the origin record format.
+- The packaged scripts still load and agree on the origin record format. The packaged resolver updates a legacy `0.61` pin to `0.62` without changing the published configuration or origin record.
 
 ### Not needed
 

@@ -5,6 +5,35 @@ import { readBrowserPageState } from "../../test/support/pages/browser-state.js"
 import { graphPage } from "./graph-page.js";
 
 describe("graphPage", () => {
+  it("renders a warning only for the published graph's exact identity", () => {
+    const state = {
+      graphLoaded: true,
+      workspacePath: "/workspace",
+      graphTargetRepo: "octo/app",
+      graphBranch: "topic",
+      graphDefinitionHash: "fingerprint",
+      graphSaveWarning: {
+        workspacePath: "/workspace",
+        repo: "octo/app",
+        branch: "topic",
+        definitionHash: "fingerprint"
+      }
+    };
+    expect(graphPage(state)).toContain(
+      'role="status">The application graph is available here'
+    );
+    for (const change of [
+      { workspacePath: "/other-workspace" },
+      { graphTargetRepo: "octo/other" },
+      { graphBranch: "other" },
+      { graphDefinitionHash: "other-fingerprint" }
+    ]) {
+      expect(graphPage({ ...state, ...change })).not.toContain(
+        "saved app-graph.json may be stale"
+      );
+    }
+  });
+
   it("renders the unloaded selector state and one generated entry", () => {
     const html = graphPage({
       graphTargetRepo: "octo/app",

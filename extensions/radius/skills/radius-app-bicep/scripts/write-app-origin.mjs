@@ -135,9 +135,9 @@ const PLACEHOLDER = "<loaded-skill-version>";
 // since this model was made?", which is only a meaningful question if the value
 // recorded here is the same value the canvas resolves for itself. The canvas
 // reads the package manifest sitting beside the bundle it loaded, and passes the
-// result to the agent through the radius_generate_app handoff, which is what
-// substitutes --skill-version. So the flag carries the one authoritative answer,
-// and this script's job is to write it down unchanged.
+// result to the agent through its modeling handoff or radius_generate_app,
+// which is what substitutes --skill-version. So the flag carries the one
+// authoritative answer, and this script's job is to write it down unchanged.
 //
 // This script used to fall back to the manifest three directories above itself
 // when the flag was absent. That reads a real version — just not necessarily the

@@ -360,7 +360,7 @@ describe("evaluateAppModelFreshness", () => {
     expect(result.status).toBe("manually-edited");
     expect(result.stale).toBe(true);
     expect(result.requiresConfirmation).toBe(true);
-    expect(result.reason).toContain("the source has changed");
+    expect(result.reason).toContain("uncommitted source changes");
     expect(result.reason).toContain("would discard those edits");
   });
 
@@ -385,7 +385,9 @@ describe("evaluateAppModelFreshness", () => {
     expect(result.status).toBe("source-changed");
     expect(result.stale).toBe(true);
     expect(result.requiresConfirmation).toBe(false);
-    expect(result.reason).toContain("b".repeat(40));
+    expect(result.reason).toContain(
+      `but the source has changed since (the branch is now at ${"b".repeat(40)})`
+    );
   });
 
   it("prefers an explicit source answer over head-commit equality", () => {
@@ -414,7 +416,9 @@ describe("evaluateAppModelFreshness", () => {
     });
 
     expect(result.status).toBe("source-changed");
-    expect(result.reason).toContain("a".repeat(40));
+    expect(result.reason).toBe(
+      `The model was generated from commit ${"a".repeat(40)}, but the working tree has uncommitted source changes, so it may no longer describe the current source.`
+    );
   });
 
   it("states the drift without naming a head commit it could not resolve", () => {

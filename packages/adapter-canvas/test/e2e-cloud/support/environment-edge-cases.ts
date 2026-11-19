@@ -10,6 +10,7 @@ import {
   isGitHubApiNotFound,
   type CloudCommandResult
 } from "./cloud-command-port.js";
+import { ENVIRONMENT_NAME_PREFIX } from "./fixture-repository.js";
 
 /** The CI variable that names the seeded application no Radius setup made. */
 export const FOREIGN_APP_NAME_VARIABLE = "AIEXT_CLOUD_E2E_FOREIGN_APP_NAME";
@@ -316,9 +317,14 @@ export function findSeededAppPreconditionProblems(input: {
     problems.push(
       `The seeded orphan application needs the tag "${RADIUS_REPO_TAG_PREFIX}${input.repository}", but it has "${repo || "<none>"}".`
     );
-  if (!tagValue(snapshot.tags, RADIUS_ENVIRONMENT_TAG_PREFIX))
+  const environment = tagValue(snapshot.tags, RADIUS_ENVIRONMENT_TAG_PREFIX);
+  if (!environment)
     problems.push(
       `The seeded orphan application needs a "${RADIUS_ENVIRONMENT_TAG_PREFIX}<environment>" tag.`
+    );
+  else if (!environment.startsWith(ENVIRONMENT_NAME_PREFIX))
+    problems.push(
+      `The seeded orphan application's "${RADIUS_ENVIRONMENT_TAG_PREFIX}" tag names "${environment}", which does not start with "${ENVIRONMENT_NAME_PREFIX}". Cleanup reclaims only environments with that prefix.`
     );
   return problems;
 }
