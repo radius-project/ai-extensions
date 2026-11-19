@@ -493,6 +493,43 @@ describe("FakeAws app roles and boundaries", () => {
     ).toContain("(NoSuchEntity)");
   });
 
+  it("still lists a deleted role and its tags for a while, though GetRole and writes see it gone", () => {
+    const fake = withBoundary();
+    fake.lingeringReads = 1;
+    fake.run(createAppRole(boundaryArn));
+    expect(
+      fake.run(["iam", "delete-role", "--role-name", "radius-app-web-1"]).code
+    ).toBe(0);
+    const listed = () =>
+      json(
+        fake.run(["iam", "list-roles", "--path-prefix", "/radius/apps/7/"])
+          .stdout
+      ).Roles.map((role: { RoleName: string }) => role.RoleName);
+    const tags = () =>
+      fake.run(["iam", "list-role-tags", "--role-name", "radius-app-web-1"]);
+    expect(listed()).toEqual(["radius-app-web-1"]);
+    expect(tags().code).toBe(0);
+    expect(
+      fake.run(["iam", "get-role", "--role-name", "radius-app-web-1"]).stderr
+    ).toContain("(NoSuchEntity)");
+    expect(
+      fake.run(["iam", "delete-role", "--role-name", "radius-app-web-1"]).stderr
+    ).toContain("(NoSuchEntity)");
+    expect(listed()).toEqual([]);
+    expect(tags().stderr).toContain("(NoSuchEntity)");
+
+    // A role made again with the name is listed once, and settle ends a
+    // delete at once.
+    fake.lingeringReads = 5;
+    fake.run(createAppRole(boundaryArn));
+    fake.run(["iam", "delete-role", "--role-name", "radius-app-web-1"]);
+    fake.run(createAppRole(boundaryArn));
+    expect(listed()).toEqual(["radius-app-web-1"]);
+    fake.run(["iam", "delete-role", "--role-name", "radius-app-web-1"]);
+    fake.settle();
+    expect(listed()).toEqual([]);
+  });
+
   it("deletes a boundary only once no role uses it, and a policy only without extra versions or attachments", () => {
     const fake = withBoundary();
     fake.run(createAppRole(boundaryArn));
@@ -647,6 +684,47 @@ describe("FakeAws Pod Identity associations", () => {
         "us-west-2"
       ]).stderr
     ).toContain("(ResourceNotFoundException)");
+  });
+
+  it("still lists and describes a deleted association for a while", () => {
+    const { fake, association } = withAssociation();
+    fake.lingeringReads = 1;
+    const id = association.associationId;
+    const list = () =>
+      json(
+        fake.run([
+          "eks",
+          "list-pod-identity-associations",
+          "--cluster-name",
+          "shop",
+          "--region",
+          "us-west-2"
+        ]).stdout
+      ).associations.map(
+        (item: { associationId: string }) => item.associationId
+      );
+    const describe = () =>
+      fake.run(["eks", "describe-pod-identity-association", ...target(id)]);
+    expect(
+      fake.run(["eks", "delete-pod-identity-association", ...target(id)]).code
+    ).toBe(0);
+    expect(json(describe().stdout).association.roleArn).toBe(ROLE_ARN);
+    expect(list()).toEqual([id]);
+    expect(list()).toEqual([]);
+    expect(describe().stderr).toContain("(ResourceNotFoundException)");
+
+    const again = fake.addPodIdentityAssociation("us-west-2", "shop", {
+      namespace: "default-app",
+      serviceAccount: "radius-app-web",
+      roleArn: ROLE_ARN
+    });
+    fake.run([
+      "eks",
+      "delete-pod-identity-association",
+      ...target(again.associationId)
+    ]);
+    fake.settle();
+    expect(list()).toEqual([]);
   });
 
   it("allows one association per service account in a namespace", () => {

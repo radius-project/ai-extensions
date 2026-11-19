@@ -38,9 +38,13 @@ import {
 //      access entry (with the product's own removal code) and its GitHub
 //      environment.
 //
-// If any of steps 1 to 3 fails, everything step 4 removes stays, so the next
-// run can retry, and the sweep fails. The GitHub environment goes last: it is
-// what makes a later sweep find the environment again.
+// If step 2 or 3 fails, everything step 4 removes stays, so the next run can
+// retry, and the sweep fails. A failed step 1 fails the sweep too, but, as in
+// the Azure sweep, the environment still goes on to step 4 when steps 2 and
+// 3 pass and fresh reads of AWS and the clusters list nothing of it. A delete
+// that fails the same way every day would otherwise keep the environment's
+// access forever. The GitHub environment goes last: it is what makes a later
+// sweep find the environment again.
 //
 // Every delete is limited to what the suite creates: in one of the two test
 // regions, named the way the MySQL recipe names it, tagged with an AWS test
@@ -796,6 +800,8 @@ interface Target {
   trustSubjects: string[];
   // Why steps 1 to 3 keep this environment, or "" while nothing has.
   blocked: string;
+  // Whether step 1's Radius application delete failed.
+  deleteFailed: boolean;
 }
 
 // Failures and warnings are logged as GitHub annotations, in the order they
@@ -1728,6 +1734,34 @@ async function readFootprintByEnvironment(
   return left;
 }
 
+/**
+ * What is left of each AWS test environment, read again until `names` have
+ * nothing, or for at most LEFTOVER_SETTLE_MS. For an environment whose app
+ * delete failed, only these reads decide: nothing the sweep deleted is taken
+ * on trust, so a role, association, or workload that IAM, EKS, or Kubernetes
+ * still lists while it goes keeps the environment.
+ */
+async function settledFootprint(
+  config: AwsCleanupConfig,
+  ports: AwsCleanupPorts,
+  scopes: readonly AwsRdsScope[],
+  app: AwsAppScope,
+  names: readonly string[]
+): Promise<Map<string, string[]>> {
+  let left = new Map<string, string[]>();
+  await waitFor(ports, LEFTOVER_SETTLE_MS, LEFTOVER_POLL_MS, async () => {
+    left = await readFootprintByEnvironment(
+      config,
+      ports,
+      scopes,
+      app,
+      new Set()
+    );
+    return names.every((name) => !left.has(name));
+  });
+  return left;
+}
+
 function readTarget(
   config: AwsCleanupConfig,
   name: string,
@@ -1739,7 +1773,8 @@ function readTarget(
     region: (variables.AWS_REGION ?? "").trim(),
     cluster: (variables.AWS_EKS_CLUSTER_NAME ?? "").trim(),
     trustSubjects: parseTrustSubjects(variables.AWS_TRUST_SUBJECTS),
-    blocked: ""
+    blocked: "",
+    deleteFailed: false
   };
   const role = parseAwsRoleArn(target.roleArn);
   if (!role) {
@@ -1821,7 +1856,8 @@ export async function sweepAwsCloudE2E(
           region: "",
           cluster: "",
           trustSubjects: [],
-          blocked: `Could not read the variables of GitHub environment ${name}: ${errorMessage(error)}`
+          blocked: `Could not read the variables of GitHub environment ${name}: ${errorMessage(error)}`,
+          deleteFailed: false
         });
       }
     }
@@ -1850,8 +1886,10 @@ export async function sweepAwsCloudE2E(
         await ports.github.deleteApplication(target.name, config.application);
         report.did(`Deleted the Radius application in ${target.name}`);
       } catch (error) {
-        target.blocked = `Deleting the Radius application in ${target.name} failed: ${errorMessage(error)}`;
-        report.fail(target.blocked);
+        target.deleteFailed = true;
+        report.fail(
+          `Deleting the Radius application in ${target.name} failed: ${errorMessage(error)}`
+        );
       }
     }
 
@@ -1926,17 +1964,39 @@ export async function sweepAwsCloudE2E(
           app.scope,
           appIdentities.deleted
         );
+        const unconfirmed = targets
+          .filter((item) => item.deleteFailed && !item.blocked)
+          .map((item) => item.name.toLowerCase())
+          .filter((name) => !left.has(name));
+        if (unconfirmed.length > 0) {
+          const settled = await settledFootprint(
+            config,
+            ports,
+            scopes,
+            app.scope,
+            unconfirmed
+          );
+          for (const name of unconfirmed) {
+            const items = settled.get(name);
+            if (items) left.set(name, items);
+          }
+        }
       } catch (error) {
         report.fail(`Could not check what is left: ${errorMessage(error)}`);
         swept = false;
       }
     }
     for (const target of targets.filter((item) => !item.blocked)) {
+      const items = left.get(target.name.toLowerCase());
       if (!swept) {
         target.blocked = `The RDS, app role, or workload sweep failed, so ${target.name} keeps its access and GitHub state for a retry.`;
-      } else if (left.has(target.name.toLowerCase())) {
-        target.blocked = `${target.name} still has ${left.get(target.name.toLowerCase())?.join(", ")}, so it keeps its access and GitHub state for a retry.`;
+      } else if (items) {
+        target.blocked = `${target.deleteFailed ? `The Radius application delete in ${target.name} failed, and it` : target.name} still has ${items.join(", ")}, so it keeps its access and GitHub state for a retry.`;
         report.fail(target.blocked);
+      } else if (target.deleteFailed) {
+        report.warn(
+          `The Radius application delete in ${target.name} failed, but AWS and the clusters list none of its RDS resources, app roles, Pod Identity associations, or workloads, so the sweep removes its access and GitHub environment.`
+        );
       }
     }
 

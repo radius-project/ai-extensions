@@ -643,6 +643,23 @@ export function addOrphanedAppRole(
   return addAppRole(scenario, environment);
 }
 
+/**
+ * An app role in the environment's folder without the Recipe's environment
+ * tag, as when Cloud Control made the role but its tags didn't apply. The
+ * sweep can't tie it to the environment, so it keeps it, and the environment
+ * keeps everything step 4 removes while it is there.
+ */
+export function addUntaggedAppRole(
+  scenario: CleanupScenario,
+  environment: string
+): FakeIamRole {
+  return scenario.aws.addRole({
+    name: `radius-app-untagged-${environment.slice(PREFIX.length)}`,
+    trust: POD_IDENTITY_TRUST,
+    path: appBoundary(environment).path
+  });
+}
+
 /** Run the sweep once, as one scheduled cleanup run does. */
 export function runSweep(
   scenario: CleanupScenario,
@@ -661,6 +678,8 @@ export function nextDay(scenario: CleanupScenario): void {
   scenario.outside.startProcess();
   scenario.ports = createPorts(scenario);
   scenario.clock.now += DAY;
+  scenario.aws.settle();
+  scenario.kube.settle();
 }
 
 /** What one environment still has that a retry of its cleanup needs. */

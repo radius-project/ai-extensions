@@ -93,6 +93,36 @@ describe("FakeRds", () => {
     expect(fake.rds.snapshot().snapshots).toEqual([]);
   });
 
+  it("finishes every delete and snapshot when it settles", () => {
+    const fake = aws();
+    fake.rds.deletingReads = 1000;
+    fake.rds.creatingReads = 1000;
+    rds(
+      fake,
+      "delete-db-instance",
+      "--db-instance-identifier",
+      "mysql-abc",
+      "--final-db-snapshot-identifier",
+      "final"
+    );
+    fake.rds.addSnapshot({
+      id: "old",
+      region: REGION,
+      vpcId: "vpc-1",
+      tags: TAGS
+    });
+    rds(fake, "delete-db-snapshot", "--db-snapshot-identifier", "old");
+    fake.settle();
+    const state = fake.rds.snapshot();
+    expect(state.instances).toEqual([]);
+    expect(
+      state.snapshots.map((item: { id: string; status: string }) => [
+        item.id,
+        item.status
+      ])
+    ).toEqual([["final", "available"]]);
+  });
+
   it("takes a tagged final snapshot that becomes available, and refuses a taken name", () => {
     const fake = aws();
     rds(

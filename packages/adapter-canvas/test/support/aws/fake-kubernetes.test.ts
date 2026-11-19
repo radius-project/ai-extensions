@@ -40,7 +40,7 @@ describe("FakeKubernetes", () => {
     });
   });
 
-  it("deletes one workload by kind in any case, and a namespace with its workloads", () => {
+  it("deletes one workload by kind in any case, and a namespace with its workloads, each after it terminates", () => {
     const kube = new FakeKubernetes();
     kube.addCluster("c");
     kube.addCluster("d");
@@ -53,13 +53,71 @@ describe("FakeKubernetes", () => {
         creationTimestamp: ""
       });
     kube.delete("c", "deployment", "a", "one");
+    // Still listed while it terminates, with a deletionTimestamp.
+    const listed = (key: string) =>
+      (
+        kube.list(key) as {
+          items: Array<{
+            metadata: { name: string; deletionTimestamp?: string };
+          }>;
+        }
+      ).items.map((item) => [
+        item.metadata.name,
+        item.metadata.deletionTimestamp !== undefined
+      ]);
+    expect(listed("c")).toEqual([
+      ["a", true],
+      ["b", false]
+    ]);
+    // A second delete of a terminating workload doesn't restart it.
+    kube.delete("c", "Deployment", "a", "one");
+    expect(listed("c")).toEqual([
+      ["a", true],
+      ["b", false]
+    ]);
+    expect(listed("c")).toEqual([["b", false]]);
     expect(kube.snapshot()).toEqual(["c Deployment two/b"]);
-    expect(kube.namespaceExists("c", "two")).toBe(true);
+
     kube.deleteNamespace("c", "two");
+    expect(kube.namespaceExists("c", "two")).toBe(true);
+    expect(() =>
+      kube.addWorkload("c", {
+        kind: "Job",
+        name: "late",
+        namespace: "two",
+        labels: LABELS,
+        creationTimestamp: ""
+      })
+    ).toThrow("namespace two is being terminated");
+    expect(kube.namespaceExists("c", "two")).toBe(true);
     expect(kube.namespaceExists("c", "two")).toBe(false);
     expect(kube.snapshot()).toEqual([]);
+    kube.deleteNamespace("c", "two");
+    expect(kube.namespaceExists("c", "two")).toBe(false);
     kube.addNamespace("d", "x");
     expect(kube.namespaceExists("d", "x")).toBe(true);
+  });
+
+  it("finishes every delete at once when it settles, and at once with no terminating reads", () => {
+    const kube = new FakeKubernetes();
+    kube.addCluster("c");
+    kube.addWorkload("c", {
+      kind: "Deployment",
+      name: "a",
+      namespace: "one",
+      labels: LABELS,
+      creationTimestamp: ""
+    });
+    kube.addNamespace("c", "two");
+    kube.delete("c", "Deployment", "a", "one");
+    kube.deleteNamespace("c", "two");
+    kube.settle();
+    expect(kube.snapshot()).toEqual([]);
+    expect(kube.namespaceExists("c", "two")).toBe(false);
+
+    kube.terminatingReads = 0;
+    kube.deleteNamespace("c", "one");
+    expect(kube.namespaceExists("c", "one")).toBe(false);
   });
 
   it("refuses a cluster it wasn't given, so a mistyped target can't pass", () => {
