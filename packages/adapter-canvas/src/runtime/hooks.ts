@@ -59,7 +59,7 @@ interface DeployRepairDetails {
 function skillHandoffInstruction(skillHandoff: string): string {
   return [
     "Author the application model with the radius-app-bicep skill, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.",
-    "Do not call or search for a tool to start the skill. Use this handoff from the Canvas:",
+    "Load the skill, or read SKILL.md from skillBase; no other tool is needed to start it. Use this handoff from the Canvas:",
     skillHandoff
   ].join("\n");
 }
@@ -359,6 +359,13 @@ export function appModelUnverifiedMessage(
 export function appModelStaleNotice(status: AppModelStatus): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return `Radius: the application model${where} on branch \`${status.branch}\` may be out of date. ${status.freshness.reason} Refreshing it would require regenerating and pushing to that branch.`;
+}
+
+// Log line for a modeling handoff the Canvas could not build, for example
+// because the radius-app-bicep skill files are missing. Nothing is sent to the
+// agent in that case, so this is the only place the user sees the reason.
+export function appModelSkillHandoffFailureNotice(detail: string): string {
+  return `Radius could not start application modeling. ${detail}`;
 }
 
 // Note shown when the installed Radius CLI is older than the one the model was

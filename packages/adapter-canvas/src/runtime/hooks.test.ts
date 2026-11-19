@@ -435,7 +435,7 @@ describe("modeling skill handoff", () => {
 
       expect(text).toContain(SKILL_HANDOFF);
       expect(text).toContain(
-        "Do not call or search for a tool to start the skill."
+        "Load the skill, or read SKILL.md from skillBase; no other tool is needed to start it."
       );
       expect(text).not.toContain("radius_generate_app");
     }

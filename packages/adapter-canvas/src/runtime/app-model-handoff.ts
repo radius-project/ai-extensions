@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import {
   appBicepHandoffMessage,
   appModelRadiusCliOutdatedNotice,
+  appModelSkillHandoffFailureNotice,
   appModelRefreshMessage,
   appModelStaleNotice,
   appModelUnverifiedMessage,
@@ -32,6 +33,7 @@ import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.j
 import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { appModelTargetKey } from "../app-model-authoring-failure.js";
+import { errorMessage } from "./util.js";
 
 export interface AppModelHandoffRequest {
   repo: string;
@@ -166,6 +168,25 @@ export function createAppModelHandoff(
   deps: AppModelHandoffDependencies
 ): AppModelHandoff {
   const targetKey = missingModelHandoffTarget;
+
+  // The skill handoff failure last shown to the user. Every graph poll retries
+  // a handoff that failed, so the same failure is shown once, and again only
+  // after a success or a different failure.
+  let reportedSkillHandoffFailure: string | undefined;
+  async function buildSkillHandoff(): Promise<string> {
+    try {
+      const skillHandoff = await deps.skillHandoff();
+      reportedSkillHandoffFailure = undefined;
+      return skillHandoff;
+    } catch (error) {
+      const detail = errorMessage(error);
+      if (detail !== reportedSkillHandoffFailure) {
+        reportedSkillHandoffFailure = detail;
+        deps.log(appModelSkillHandoffFailureNotice(detail));
+      }
+      throw error;
+    }
+  }
 
   // Polls for an in-flight modeling run across the grace window. Answers true
   // as soon as one is observed, so the common case where the agent starts
@@ -362,7 +383,7 @@ export function createAppModelHandoff(
       }
       let skillHandoff: string;
       try {
-        skillHandoff = await deps.skillHandoff();
+        skillHandoff = await buildSkillHandoff();
       } catch (error) {
         releaseReservation();
         throw error;
@@ -487,7 +508,7 @@ export function createAppModelHandoff(
           releaseStateReservation();
           return;
         }
-        const skillHandoff = await deps.skillHandoff();
+        const skillHandoff = await buildSkillHandoff();
         await deps.send(appModelUnverifiedMessage(unverified, skillHandoff));
       } catch (error) {
         releaseStateReservation();
@@ -513,7 +534,7 @@ export function createAppModelHandoff(
           releaseStateReservation();
           return;
         }
-        const skillHandoff = await deps.skillHandoff();
+        const skillHandoff = await buildSkillHandoff();
         await deps.send(appModelRefreshMessage(outdated, skillHandoff));
       } catch (error) {
         releaseStateReservation();

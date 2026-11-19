@@ -1925,7 +1925,7 @@ describe("createAppModelHandoff", () => {
       .fn<() => Promise<string>>()
       .mockRejectedValueOnce(new Error("no usable radius-app-bicep skill"))
       .mockResolvedValue(SKILL_HANDOFF);
-    const { handOff, sent } = harness({
+    const { handOff, sent, logged } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
       skillHandoff
     });
@@ -1940,6 +1940,9 @@ describe("createAppModelHandoff", () => {
       "no usable radius-app-bicep skill"
     );
     expect(sent).toEqual([]);
+    expect(logged).toEqual([
+      "Radius could not start application modeling. no usable radius-app-bicep skill"
+    ]);
     expect(state.appBicepHandoffKey).toBeUndefined();
     expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeUndefined();
 
@@ -1959,7 +1962,7 @@ describe("createAppModelHandoff", () => {
         .fn<() => Promise<string>>()
         .mockRejectedValueOnce(new Error("no usable radius-app-bicep skill"))
         .mockResolvedValue(SKILL_HANDOFF);
-      const { handOff, sent } = harness({
+      const { handOff, sent, logged } = harness({
         statuses: {
           feat: modelStatus("a/b", "feat", { status, sourceCommit: "aaa" })
         },
@@ -1976,6 +1979,9 @@ describe("createAppModelHandoff", () => {
         "no usable radius-app-bicep skill"
       );
       expect(sent).toEqual([]);
+      expect(logged).toEqual([
+        "Radius could not start application modeling. no usable radius-app-bicep skill"
+      ]);
       expect(state.appBicepHandoffKey).toBeUndefined();
 
       // The refresh memo was released too, or this retry would be suppressed.
@@ -1985,4 +1991,41 @@ describe("createAppModelHandoff", () => {
       expect(sent[0].prompt).toContain(SKILL_HANDOFF);
     }
   );
+
+  it("shows a repeated skill handoff failure once, and again after it recovers", async () => {
+    const skillHandoff = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error("skill files missing"))
+      .mockRejectedValueOnce(new Error("skill files missing"))
+      .mockRejectedValueOnce(new Error("no Node.js"))
+      .mockResolvedValueOnce(SKILL_HANDOFF)
+      .mockRejectedValueOnce(new Error("skill files missing"));
+    const { handOff, logged } = harness({
+      statuses: {
+        feat: modelStatus("a/b", "feat", { status: "missing" }),
+        main: modelStatus("a/b", "main", { status: "missing" })
+      },
+      skillHandoff
+    });
+    const poll = async () => {
+      await handOff({ repo: "a/b", branches: ["feat"], page: "graph" }).catch(
+        () => undefined
+      );
+    };
+
+    await poll();
+    await poll();
+    expect(logged).toHaveLength(1);
+
+    await poll();
+    expect(logged).toHaveLength(2);
+    expect(logged[1]).toContain("no Node.js");
+
+    await poll();
+    await handOff({ repo: "a/b", branches: ["main"], page: "graph" }).catch(
+      () => undefined
+    );
+    expect(logged).toHaveLength(3);
+    expect(logged[2]).toContain("skill files missing");
+  });
 });
