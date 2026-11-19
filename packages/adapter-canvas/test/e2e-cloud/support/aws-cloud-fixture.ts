@@ -13,6 +13,8 @@ import {
 } from "@radius-project/core";
 import { defaultAwsDeployRoleName } from "../../../src/aws-deploy-role-name.js";
 import {
+  appRoleLeftovers,
+  associationLeftovers,
   AWS_MAIN_NODE_GROUPS,
   awsDetail,
   awsError,
@@ -393,6 +395,20 @@ async function leftoverFindings(
         `Namespace ${config.namespace} ${where} is left from an earlier run. ${CLEANUP}`
       );
   }
+  // The cleanup's own readers, so preflight refuses what the leftover check
+  // would report. App boundaries are in the footprint check.
+  const scope = {
+    accountId: config.accountId,
+    repositoryId: config.repositoryId,
+    prefix: config.environmentPrefix
+  };
+  const left = await appRoleLeftovers(ports, scope);
+  for (const cluster of config.clusters)
+    left.push(...(await associationLeftovers(ports, scope, cluster)));
+  for (const item of left)
+    findings.push(
+      `${item[0]!.toUpperCase()}${item.slice(1)} is left from an earlier run. ${CLEANUP}`
+    );
   return findings;
 }
 

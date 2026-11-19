@@ -489,6 +489,49 @@ describe("collectAwsPreflightFindings", () => {
     expect(awsWrites(w)).toEqual([]);
   });
 
+  it("names an app role and a Pod Identity association an earlier run left, including one whose role is gone", async () => {
+    const w = world();
+    const folder = `/radius/apps/${REPO_ID}/radtest-aws-old/`;
+    const tags = recipeTags("radtest-aws-old");
+    const role = w.aws.addRole({
+      name: "radius-app-web-1",
+      trust: {},
+      path: folder,
+      boundary: awsAppBoundary(ACCOUNT, REPO_ID, "radtest-aws-old").arn,
+      tags
+    });
+    const gone = `arn:aws:iam::${ACCOUNT}:role${folder}radius-app-api-1`;
+    const kept = w.aws.addPodIdentityAssociation(MAIN.region, MAIN.name, {
+      namespace: NAMESPACE,
+      serviceAccount: "radius-app-web",
+      roleArn: role.Arn,
+      tags: Object.fromEntries(tags.map((tag) => [tag.Key, tag.Value]))
+    });
+    const orphan = w.aws.addPodIdentityAssociation(SECOND.region, SECOND.name, {
+      namespace: NAMESPACE,
+      serviceAccount: "radius-app-api",
+      roleArn: gone
+    });
+    // Neither is the fixture repository's: another repository's path, and a
+    // role outside the app path.
+    w.aws.addRole({
+      name: "radius-app-other",
+      trust: {},
+      path: "/radius/apps/42/radtest-aws-old/"
+    });
+    w.aws.addPodIdentityAssociation(MAIN.region, MAIN.name, {
+      namespace: NAMESPACE,
+      serviceAccount: "unrelated",
+      roleArn: `arn:aws:iam::${ACCOUNT}:role/unrelated`
+    });
+    expect(await findings(w)).toEqual([
+      `App role ${role.Arn} is left from an earlier run. ${CLEANUP}`,
+      `Pod Identity association ${kept.associationId} (${NAMESPACE}/radius-app-web) on cluster ${MAIN.name}, for ${role.Arn} is left from an earlier run. ${CLEANUP}`,
+      `Pod Identity association ${orphan.associationId} (${NAMESPACE}/radius-app-api) on cluster ${SECOND.name}, for ${gone} is left from an earlier run. ${CLEANUP}`
+    ]);
+    expect(awsWrites(w)).toEqual([]);
+  });
+
   it("names values AWS left out", async () => {
     const w = world();
     second(w).status = "";

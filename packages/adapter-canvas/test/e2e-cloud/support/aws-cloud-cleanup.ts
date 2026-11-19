@@ -1534,6 +1534,35 @@ export async function readRoleBoundary(
   return text(asRecord(role.PermissionsBoundary)?.PermissionsBoundaryArn);
 }
 
+/**
+ * The repository's app roles, whatever their tags say, except what Radius's
+ * own cleanup tag marks as Radius's. The leftover check and preflight both
+ * use it.
+ */
+export async function appRoleLeftovers(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  scope: AwsAppScope
+): Promise<string[]> {
+  return (await readAppRoles(ports, scope))
+    .filter((role) => !radiusTagged(role.tags))
+    .map((role) => `app role ${role.arn}`);
+}
+
+/**
+ * A cluster's associations whose role is under the repository's app path, by
+ * the same rule. An association outlives its role, so this is the only check
+ * that sees one whose role is gone.
+ */
+export async function associationLeftovers(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  scope: AwsAppScope,
+  cluster: AwsCleanupCluster
+): Promise<string[]> {
+  return (await readAppAssociations(ports, scope, cluster))
+    .filter((item) => !radiusTagged(item.tags))
+    .map((item) => `${appAssociationLabel(item)}, for ${item.roleArn}`);
+}
+
 function associationKey(item: AppAssociation): string {
   return `${item.cluster.region}/${item.cluster.name}/${item.id}`;
 }
@@ -2470,14 +2499,11 @@ async function readAwsLeftovers(
     );
   } else {
     await check("app roles", async () => {
-      for (const role of await readAppRoles(ports, scope))
-        if (!radiusTagged(role.tags)) findings.push(`app role ${role.arn}`);
+      findings.push(...(await appRoleLeftovers(ports, scope)));
     });
     for (const cluster of config.clusters) {
       await check(`Pod Identity associations on ${cluster.name}`, async () => {
-        for (const item of await readAppAssociations(ports, scope, cluster))
-          if (!radiusTagged(item.tags))
-            findings.push(`${appAssociationLabel(item)}, for ${item.roleArn}`);
+        findings.push(...(await associationLeftovers(ports, scope, cluster)));
       });
     }
     await check("app permissions boundaries", async () => {
