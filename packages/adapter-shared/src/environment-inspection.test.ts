@@ -3,6 +3,7 @@ import {
   inspectEnvironments,
   type EnvironmentInspectionRead
 } from "./environment-inspection.js";
+import { createDeploymentDeferred } from "../test/support/deployment.js";
 
 const repo = "octo/app";
 const runs = `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`;
@@ -79,6 +80,60 @@ it("does not mistake a failed repository listing for an empty one", async () => 
       })
     )
   ).resolves.toEqual({ kind: "listed", environments: [], hadRows: false });
+});
+
+it.each([
+  {
+    namesResult: { ok: true, stdout: "" } as const,
+    result: { kind: "listed", environments: [], hadRows: false }
+  },
+  {
+    namesResult: { ok: false, error: "access denied" } as const,
+    result: { kind: "unavailable", error: "access denied" }
+  }
+])(
+  "handles failed verification before list settlement: $result.kind",
+  async ({ namesResult, result }) => {
+    const listing = createDeploymentDeferred<EnvironmentInspectionRead>();
+    const inspection = inspectEnvironments(repo, (args) =>
+      args.includes(runs) ?
+        Promise.reject(new Error("reader failed"))
+      : listing.promise
+    );
+    // Give Node a turn to report an unobserved rejection while names are pending.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    listing.resolve(namesResult);
+    await expect(inspection).resolves.toEqual(result);
+  }
+);
+
+it("returns an empty list without waiting for verification and observes a later rejection", async () => {
+  const verification = createDeploymentDeferred<EnvironmentInspectionRead>();
+  const read = fakeRead({ [names]: "" });
+  await expect(
+    inspectEnvironments(repo, (args) =>
+      args.includes(runs) ? verification.promise : read(args)
+    )
+  ).resolves.toEqual({ kind: "listed", environments: [], hadRows: false });
+  verification.reject(new Error("late reader failure"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+it("treats a rejecting verification reader as unavailable evidence for populated lists", async () => {
+  const read = fakeRead({
+    [names]: "7\tprod",
+    [variables("prod")]: "RADIUS_MANAGED\ttrue",
+    [deployments("prod")]: "10"
+  });
+  const inspection = await inspectEnvironments(repo, (args) =>
+    args.includes(runs) ?
+      Promise.reject(new Error("reader failed"))
+    : read(args)
+  );
+  expect(inspection).toMatchObject({
+    kind: "listed",
+    environments: [{ name: "prod", status: "pending" }]
+  });
 });
 
 it.each([

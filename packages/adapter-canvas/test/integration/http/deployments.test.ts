@@ -4,6 +4,7 @@ import {
 } from "@radius-project/core";
 import { redactGhCredentials } from "../../../src/gh.js";
 import { createServer } from "node:http";
+import { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseDocument } from "yaml";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
@@ -17,6 +18,8 @@ import {
 } from "../../../src/server/services/deploy-request.js";
 import { createDeploymentViews } from "../../../src/server/services/deployment-views.js";
 import { createTestDeploymentRuntime } from "../../support/server/deployment-runtime.js";
+import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import type {
   DeploymentRuntime,
   DeploymentRuntimePorts
@@ -1667,6 +1670,63 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     const noRepo = await fetch(`${entry.baseUrl}/api/list-applications`);
     expect(noRepo.status).toBe(200);
     expect(await noRepo.text()).toBe('{"applications":[]}');
+  });
+
+  it("uses the runtime GitHub port for the selected branch and keeps a display fallback when the ref is unreadable", async () => {
+    const repo = "octo/todolist";
+    const branch = "feature/model";
+    const sha = "a".repeat(40);
+    const refPath = `/repos/${repo}/commits/feature%2Fmodel`;
+    const filePath = `/repos/${repo}/contents/.radius/app.bicep?ref=${sha}`;
+    const model = "name: 'from-selected-commit'";
+    const reads: string[][] = [];
+    let refReadable = true;
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: createEnvironmentExecutionOwner(),
+      cliExec: (command, args, _options, callback) => {
+        expect(command).toBe("gh");
+        reads.push(args);
+        if (args[1] === refPath && !refReadable) {
+          callback(new Error("not found"), "", "Not Found (HTTP 404)");
+        } else {
+          const value =
+            args[1] === refPath ?
+              { sha }
+            : {
+                encoding: "base64",
+                content: Buffer.from(model).toString("base64"),
+                size: Buffer.byteLength(model)
+              };
+          callback(null, JSON.stringify(value), "");
+        }
+        return new ChildProcess();
+      }
+    });
+    const instance = "inspection-listing";
+    try {
+      const entry = await runtime.getOrCreateServer(instance, "deployments");
+      entry.state.contextBranch = branch;
+      const url = `${entry.baseUrl}/api/list-applications?repo=${repo}`;
+      const defined = await fetch(url);
+      expect(defined.status).toBe(200);
+      expect(defined.headers.get("cache-control")).toBe("no-store");
+      expect(await defined.json()).toEqual({
+        applications: [{ name: "from-selected-commit" }]
+      });
+      refReadable = false;
+      const unconfirmed = await fetch(url);
+      expect(unconfirmed.status).toBe(200);
+      expect(await unconfirmed.json()).toEqual({
+        applications: [{ name: "todolist" }]
+      });
+      expect(reads).toEqual([
+        ["api", refPath],
+        ["api", filePath],
+        ["api", refPath]
+      ]);
+    } finally {
+      await runtime.stopServer(instance, true);
+    }
   });
 
   it("caches the deployments listing and lets ?fresh=1 bypass the cache", async () => {

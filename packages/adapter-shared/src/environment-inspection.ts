@@ -31,7 +31,7 @@ export async function inspectEnvironments(
     `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
     "--jq",
     '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
-  ]);
+  ]).catch(() => ({ ok: false, stdout: "" }));
   const names = await read([
     "api",
     "--paginate",

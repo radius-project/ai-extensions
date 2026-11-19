@@ -13,6 +13,7 @@ import {
   cleanupMarker,
   cleanupRevision
 } from "./deployment-cleanup-marker.js";
+import type { createDeploymentRepository } from "./deployment-repository.js";
 
 export interface DeploymentResolverDependencies {
   readApplicationIdentity(
@@ -458,6 +459,10 @@ async function readEnvironmentDeployment(
 export function createDeploymentLookup(
   dependencies: Omit<DeploymentResolverDependencies, "maxParallelRecords"> & {
     maxParallelRecords?: number;
+    repository: Pick<
+      ReturnType<typeof createDeploymentRepository>,
+      "readJson" | "readContentResult"
+    >;
   }
 ) {
   const resolverDependencies = {
@@ -465,25 +470,42 @@ export function createDeploymentLookup(
     maxParallelRecords: dependencies.maxParallelRecords ?? 10
   };
 
-  const inspectRepoApplication = (repo: string, branch: string) =>
-    inspectApplicationDefinition(repo, branch, async (path, ref) => {
+  function inspectRepoApplication(repo: string, branch: string) {
+    async function readRevision(ref: string): Promise<string | null> {
+      const { ok, json } = await dependencies.repository.readJson(
+        `/repos/${repo}/commits/${encodeURIComponent(ref)}`
+      );
+      return (
+          ok &&
+            json &&
+            typeof json === "object" &&
+            "sha" in json &&
+            typeof json.sha === "string" &&
+            /^[a-f0-9]{40}$/i.test(json.sha)
+        ) ?
+          json.sha
+        : null;
+    }
+
+    let revision: Promise<string | null> | undefined;
+    return inspectApplicationDefinition(repo, branch, async (path, ref) => {
       try {
-        const raw = await dependencies.ghOrThrow([
-          "api",
-          `/repos/${repo}/contents/${path}?ref=${ref}`,
-          "--jq",
-          ".content"
-        ]);
-        return raw ?
-            {
-              kind: "read",
-              source: Buffer.from(raw, "base64").toString("utf8")
-            }
-          : { kind: "missing" };
+        const sha = await (revision ??= readRevision(ref));
+        if (!sha) return { kind: "unavailable" };
+        const file = await dependencies.repository.readContentResult(
+          `/repos/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(sha)}`
+        );
+        if (file.content !== null)
+          return { kind: "read", source: file.content };
+        // GitHub also returns 404 if the revision is no longer accessible.
+        if (file.status === 404 && (await readRevision(sha)) === sha)
+          return { kind: "missing" };
+        return { kind: "unavailable" };
       } catch {
         return { kind: "unavailable" };
       }
     });
+  }
 
   async function resolveRepoAppName(
     repo: string,
