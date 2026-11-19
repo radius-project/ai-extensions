@@ -1,0 +1,5 @@
+[
+  { "Key": "radius-managed", "Value": "true" },
+  { "Key": "radius-repository", "Value": "${FIXTURE_REPO}" },
+  { "Key": "radius-repository-id", "Value": "${FIXTURE_REPO_ID}" }
+]

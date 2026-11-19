@@ -1,0 +1,190 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RecipeServicesInTestRegions",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateResource",
+        "cloudformation:GetResource",
+        "cloudformation:UpdateResource",
+        "cloudformation:DeleteResource",
+        "cloudformation:ListResources",
+        "cloudformation:GetResourceRequestStatus",
+        "cloudformation:ListResourceRequests",
+        "cloudformation:CancelResourceRequest",
+        "cloudformation:DescribeType",
+        "rds:*",
+        "eks:DescribeCluster",
+        "eks:ListClusters",
+        "ec2:Describe*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": ["${MAIN_REGION}", "${SECOND_REGION}"]
+        }
+      }
+    },
+    {
+      "Sid": "EncryptRdsStorage",
+      "Effect": "Allow",
+      "Action": ["kms:DescribeKey", "kms:CreateGrant"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": [
+            "rds.${MAIN_REGION}.amazonaws.com",
+            "rds.${SECOND_REGION}.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "WhoAmI",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreatePodIdentityAssociations",
+      "Effect": "Allow",
+      "Action": [
+        "eks:CreatePodIdentityAssociation",
+        "eks:ListPodIdentityAssociations"
+      ],
+      "Resource": [
+        "arn:aws:eks:${MAIN_REGION}:${ACCOUNT}:cluster/${MAIN_CLUSTER}",
+        "arn:aws:eks:${SECOND_REGION}:${ACCOUNT}:cluster/${SECOND_CLUSTER}"
+      ]
+    },
+    {
+      "Sid": "ChangePodIdentityAssociations",
+      "Effect": "Allow",
+      "Action": [
+        "eks:DescribePodIdentityAssociation",
+        "eks:UpdatePodIdentityAssociation",
+        "eks:DeletePodIdentityAssociation",
+        "eks:TagResource",
+        "eks:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:eks:${MAIN_REGION}:${ACCOUNT}:podidentityassociation/${MAIN_CLUSTER}/*",
+        "arn:aws:eks:${SECOND_REGION}:${ACCOUNT}:podidentityassociation/${SECOND_CLUSTER}/*"
+      ]
+    },
+    {
+      "Sid": "AppRolesWithTheirBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT}:role/radius/apps/${FIXTURE_REPO_ID}/*",
+      "Condition": {
+        "ArnLike": {
+          "iam:PermissionsBoundary": "arn:aws:iam::${ACCOUNT}:policy/radius/apps/${FIXTURE_REPO_ID}/*"
+        }
+      }
+    },
+    {
+      "Sid": "ReadAndTagAppRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRoleTags",
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT}:role/radius/apps/${FIXTURE_REPO_ID}/*"
+    },
+    {
+      "Sid": "ReadRecipeRoleNames",
+      "Effect": "Allow",
+      "Action": "iam:GetRole",
+      "Resource": "arn:aws:iam::${ACCOUNT}:role/radius-app-*"
+    },
+    {
+      "Sid": "PassAppRolesToPodIdentity",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${ACCOUNT}:role/radius/apps/${FIXTURE_REPO_ID}/*",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "pods.eks.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "NeverOtherIam",
+      "Effect": "Deny",
+      "Action": "iam:*",
+      "NotResource": [
+        "arn:aws:iam::${ACCOUNT}:role/radius/apps/${FIXTURE_REPO_ID}/*",
+        "arn:aws:iam::${ACCOUNT}:role/radius-app-*"
+      ]
+    },
+    {
+      "Sid": "OnlyReadRecipeRoleNames",
+      "Effect": "Deny",
+      "NotAction": "iam:GetRole",
+      "Resource": "arn:aws:iam::${ACCOUNT}:role/radius-app-*"
+    },
+    {
+      "Sid": "AppRolesOnlyWithTheirBoundary",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "iam:PermissionsBoundary": "arn:aws:iam::${ACCOUNT}:policy/radius/apps/${FIXTURE_REPO_ID}/*"
+        }
+      }
+    },
+    {
+      "Sid": "KeepAppRoleBoundaries",
+      "Effect": "Deny",
+      "Action": "iam:DeleteRolePermissionsBoundary",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassRolesOnlyToPodIdentity",
+      "Effect": "Deny",
+      "Action": "iam:PassRole",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": { "iam:PassedToService": "pods.eks.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "NeverAccountSettings",
+      "Effect": "Deny",
+      "Action": [
+        "organizations:*",
+        "account:*",
+        "s3:PutAccountPublicAccessBlock"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

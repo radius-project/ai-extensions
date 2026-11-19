@@ -12,12 +12,13 @@ import { awsCommand, FakeAws, isFakeAwsWrite } from "./fake-aws.js";
 import { FakeGitHub, type FakeGitHubCommandResult } from "./fake-github.js";
 
 // Drives a multi-step operation and stops it at one outside call: a Stop the
-// customer asks for while the call is in flight, or a crash just before the
-// call reaches AWS or GitHub, or just after it lands with its answer lost.
+// customer asks for while the call is in flight, a crash just before the call
+// reaches AWS or GitHub or just after it lands with its answer lost, or the
+// service refusing the call.
 // Every AWS and GitHub call goes through one recorder, so a test can name the
 // call by its place in the run, and check what was written after it.
 
-export type StopKind = "stop" | "crash-before" | "crash-after";
+export type StopKind = "stop" | "crash-before" | "crash-after" | "fail";
 
 export interface OutsideCall {
   readonly index: number;
@@ -167,6 +168,11 @@ export class OutsideWorld {
       (result) => ({
         succeeded: result.code === 0 || result.code === "0",
         stdout: result.stdout
+      }),
+      () => ({
+        code: 254,
+        stdout: "",
+        stderr: `\nAn error occurred (InternalFailure) when calling the ${awsCommand(args)} operation: Refused by the test.\n`
       })
     );
 
@@ -177,7 +183,13 @@ export class OutsideWorld {
       [apiPath],
       false,
       () => this.github.readJson(apiPath),
-      (result) => ({ succeeded: result.ok, stdout: "" })
+      (result) => ({ succeeded: result.ok, stdout: "" }),
+      () => ({
+        ok: false,
+        status: 500,
+        json: null,
+        stderr: "Refused by the test (HTTP 500)"
+      })
     );
 
   readonly gh = (args: string[]): Promise<FakeGitHubCommandResult> =>
@@ -187,10 +199,14 @@ export class OutsideWorld {
       args,
       FakeGitHub.isWrite(args),
       () => this.github.gh(args),
-      (result) => ({ succeeded: result.code === 0, stdout: result.stdout })
+      (result) => ({ succeeded: result.code === 0, stdout: result.stdout }),
+      () => ({ code: 1, stdout: "", stderr: "Refused by the test (HTTP 500)" })
     );
 
-  /** An outside call that is not an AWS or `gh` command, such as a port. */
+  /**
+   * An outside call that is not an AWS or `gh` command, such as a port. A
+   * planned failure rejects with an error, as a port reports one.
+   */
   outside<T>(
     command: string,
     write: boolean,
@@ -200,7 +216,9 @@ export class OutsideWorld {
       stdout: ""
     })
   ): Promise<T> {
-    return this.call("github", command, [command], write, apply, read);
+    return this.call("github", command, [command], write, apply, read, () => {
+      throw new Error(`${command} was refused by the test.`);
+    });
   }
 
   private async call<T>(
@@ -209,7 +227,8 @@ export class OutsideWorld {
     args: readonly string[],
     write: boolean,
     apply: () => T,
-    read: (result: T) => { succeeded: boolean; stdout: string }
+    read: (result: T) => { succeeded: boolean; stdout: string },
+    fail: () => T
   ): Promise<T> {
     const call: OutsideCall = {
       index: this.calls.length,
@@ -234,6 +253,10 @@ export class OutsideWorld {
     }
     const plan = this.plan?.at === call.index ? this.plan : null;
     if (plan?.kind === "crash-before") return this.die(call);
+    if (plan?.kind === "fail") {
+      call.answered = true;
+      return fail();
+    }
     const result = apply();
     call.applied = true;
     Object.assign(call, read(result));

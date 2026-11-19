@@ -31,6 +31,8 @@ import { redactCredentials } from "../../src/credential-redaction.js";
 import { CLOUD_CANVAS_HOSTS } from "../e2e-cloud/support/cloud-canvas-host.js";
 import { COPILOT_APP_SUITE_TIMEOUT_MS } from "../e2e-cloud/support/cloud-timeout-budget.js";
 import { COPILOT_APP_DEFAULT_CDP_PORT } from "../e2e-cloud/support/copilot-app-cdp.js";
+import { resolveAwsCleanupConfig } from "../e2e-cloud/support/aws-cloud-cleanup.js";
+import { AWS_CLEANUP_APP_TOKEN_PERMISSIONS } from "../e2e-cloud/support/aws-cloud-cleanup-ports.js";
 import {
   AWS_ENVIRONMENT_NAME_PREFIX,
   ENVIRONMENT_NAME_PREFIX,
@@ -72,6 +74,7 @@ interface WorkflowJob {
 interface Workflow {
   readonly on?: Record<string, unknown>;
   readonly permissions?: Record<string, string>;
+  readonly env?: Record<string, string>;
   readonly concurrency?: {
     group?: string;
     "cancel-in-progress"?: boolean;
@@ -154,19 +157,33 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     }
   });
 
-  it("requests an OIDC token only on the job that exchanges it", async () => {
+  it("requests an OIDC token only on the jobs that exchange it", async () => {
     // Kept off the top level so no future job inherits the ability to mint a
-    // token for the Azure identity.
+    // token for a cloud identity. Each job that asks for one signs in to
+    // exactly one cloud.
     const workflow = await parseWorkflow(file);
     expect(workflow.permissions?.["id-token"]).toBeUndefined();
 
-    const withOidc = Object.values(workflow.jobs ?? {}).filter(
-      (job) => job.permissions?.["id-token"] === "write"
+    const withOidc = Object.entries(workflow.jobs ?? {})
+      .filter(([, job]) => job.permissions?.["id-token"] === "write")
+      .map(([name, job]) => [
+        name,
+        steps(job)
+          .map((step) => step.uses?.split("@")[0])
+          .filter(
+            (uses) =>
+              uses === "azure/login" ||
+              uses === "aws-actions/configure-aws-credentials"
+          )
+      ]);
+    expect(withOidc).toEqual(
+      file === CLEANUP_WORKFLOW ?
+        [
+          ["purge-azure", ["azure/login"]],
+          ["purge-aws", ["aws-actions/configure-aws-credentials"]]
+        ]
+      : [[expect.any(String), ["azure/login"]]]
     );
-    expect(withOidc).toHaveLength(1);
-    expect(
-      steps(withOidc[0]).some((step) => step.uses?.startsWith("azure/login@"))
-    ).toBe(true);
   });
 
   it("points a reader at the runbook rather than at the YAML", async () => {
@@ -1204,7 +1221,7 @@ describe("cloud-e2e-cleanup.yml", () => {
         `steps.${prerequisite}.outcome == 'success'`
       );
     // The cloud jobs never write to branches or pull requests.
-    for (const job of ["scope", "purge-azure"])
+    for (const job of ["scope", ...cloudJobs])
       for (const step of steps(workflow.jobs?.[job]))
         expect(step.run ?? "").not.toMatch(/git\/refs|pulls\//);
   });
@@ -1815,10 +1832,12 @@ describe("cloud-e2e-cleanup.yml", () => {
               'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
             ) ||
             step.run?.includes("-X DELETE") ||
-            step.run?.includes("-X PATCH")
+            step.run?.includes("-X PATCH") ||
+            step.run?.includes('aws-cloud-cleanup.mjs" sweep')
         )
     );
     expect(destructiveJobs.map(([name]) => name).sort()).toEqual([
+      "purge-aws",
       "purge-azure",
       "reset-fixture"
     ]);
@@ -1958,5 +1977,200 @@ describe.each(WORKFLOWS)("%s - shell scripts parse", (file) => {
     }
 
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("cloud-e2e-cleanup.yml purge-aws", () => {
+  const awsSteps = async () =>
+    steps((await parseWorkflow(CLEANUP_WORKFLOW)).jobs?.["purge-aws"]);
+  const CONFIGURED = "steps.aws-config.outputs.configured == 'true'";
+
+  // reset-fixture has no status function, so a skipped purge-aws would hold
+  // back the Azure reset too. The job always runs; its steps skip instead.
+  it("runs whatever the AWS variables say, and skips its steps until they are set", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const job = workflow.jobs?.["purge-aws"];
+    expect(job?.if).toBe(
+      "github.repository == 'radius-project/ai-extensions' && needs.scope.outputs.configured == 'true'"
+    );
+    expect(job?.needs).toBe("scope");
+    const [check, ...rest] = steps(job);
+    expect(check?.id).toBe("aws-config");
+    expect(check?.if).toBeUndefined();
+    for (const step of rest) expect(step.if).toContain(CONFIGURED);
+
+    const directory = await mkdtemp(path.join(tmpdir(), "aws-config-"));
+    try {
+      for (const [role, configured] of [
+        ["", "false"],
+        ["arn:aws:iam::123456789012:role/ai-extensions-cloud-e2e", "true"]
+      ]) {
+        const output = path.join(directory, `output-${configured}`);
+        const summary = path.join(directory, `summary-${configured}`);
+        const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+          input: check?.run,
+          encoding: "utf8",
+          env: {
+            PATH: process.env.PATH ?? "",
+            AWS_TEST_ROLE_ARN: role,
+            GITHUB_OUTPUT: output,
+            GITHUB_STEP_SUMMARY: summary
+          }
+        });
+        expect(result.status).toBe(0);
+        expect(await readFile(output, "utf8")).toBe(
+          `configured=${configured}\n`
+        );
+        if (configured === "false") {
+          expect(result.stdout).toContain(
+            "::notice::AIEXT_CLOUD_E2E_AWS_ROLE_ARN is not set"
+          );
+          expect(await readFile(summary, "utf8")).toContain(
+            "docs/eng/CLOUD_E2E_RUNBOOK.md"
+          );
+        }
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("signs in to the test role from repository variables, with no GitHub environment", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const job = workflow.jobs?.["purge-aws"] as WorkflowJob & {
+      environment?: unknown;
+    };
+    // A GitHub environment would change the OIDC subject, which the test
+    // role's trust policy pins to this repository's main branch.
+    expect(job.environment).toBeUndefined();
+    expect(job.permissions).toEqual({
+      contents: "read",
+      "id-token": "write"
+    });
+    const login = steps(job).find((step) => step.id === "aws-login");
+    expect(login?.uses).toMatch(
+      /^aws-actions\/configure-aws-credentials@[0-9a-f]{40}$/
+    );
+    expect(login?.with).toMatchObject({
+      "role-to-assume": "${{ vars.AIEXT_CLOUD_E2E_AWS_ROLE_ARN }}",
+      "aws-region": "${{ vars.AIEXT_CLOUD_E2E_AWS_REGION }}"
+    });
+    expect(job.env).toMatchObject({
+      AWS_TEST_ROLE_ARN: "${{ vars.AIEXT_CLOUD_E2E_AWS_ROLE_ARN }}",
+      AWS_MAIN_REGION: "${{ vars.AIEXT_CLOUD_E2E_AWS_REGION }}",
+      AWS_MAIN_CLUSTER: "${{ vars.AIEXT_CLOUD_E2E_AWS_EKS_CLUSTER_NAME }}",
+      AWS_SECOND_REGION: "${{ vars.AIEXT_CLOUD_E2E_AWS_SECOND_REGION }}",
+      AWS_SECOND_CLUSTER:
+        "${{ vars.AIEXT_CLOUD_E2E_AWS_SECOND_EKS_CLUSTER_NAME }}",
+      AWS_ENVIRONMENT_PREFIX:
+        "${{ needs.scope.outputs.aws-environment-prefix }}"
+    });
+  });
+
+  it("gives the sweep every value its configuration reads", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const job = workflow.jobs?.["purge-aws"];
+    const sample: Record<string, string> = {
+      AWS_TEST_ROLE_ARN: "arn:aws:iam::123456789012:role/test",
+      AWS_MAIN_REGION: "us-east-2",
+      AWS_MAIN_CLUSTER: "main",
+      AWS_SECOND_REGION: "us-west-1",
+      AWS_SECOND_CLUSTER: "second",
+      AWS_ENVIRONMENT_PREFIX: AWS_ENVIRONMENT_NAME_PREFIX,
+      FIXTURE_REPOSITORY: "octo/fixture",
+      FIXTURE_APPLICATION: "cloud-e2e",
+      RADIUS_ENVIRONMENT_NAMESPACE: "default-cloud-e2e",
+      DEFAULT_BRANCH: "main",
+      MAX_AGE_HOURS: "6"
+    };
+    const provided = [
+      ...Object.keys(workflow.env ?? {}),
+      ...Object.keys(job?.env ?? {})
+    ];
+    expect(provided.sort()).toEqual(Object.keys(sample).sort());
+    expect(
+      resolveAwsCleanupConfig(
+        Object.fromEntries(provided.map((name) => [name, sample[name]])),
+        0
+      )
+    ).not.toBeNull();
+  });
+
+  it("sweeps with the bundled entry point and checks for leftovers last", async () => {
+    const list = await awsSteps();
+    const bundle = list.find((step) => step.id === "bundle");
+    const sweep = list.find((step) => step.id === "aws-sweep");
+    const verify = list.at(-1);
+    expect(bundle?.run).toContain(
+      "node packages/adapter-canvas/test/e2e-cloud/support/aws-cloud-cleanup-bundle.ts"
+    );
+    await readFile(
+      path.join(
+        REPOSITORY_ROOT,
+        "packages/adapter-canvas/test/e2e-cloud/support/aws-cloud-cleanup-bundle.ts"
+      )
+    );
+    expect(
+      list.findIndex((step) => step.name === "Install dependencies")
+    ).toBeLessThan(list.indexOf(bundle!));
+    expect(sweep?.run).toBe('node "$RUNNER_TEMP/aws-cloud-cleanup.mjs" sweep');
+    for (const prerequisite of ["bundle", "aws-login", "app-token"])
+      expect(sweep?.if).toContain(`steps.${prerequisite}.outcome == 'success'`);
+    // The sweep can outlast the hour an installation token lives, so it
+    // renews the token with the App's own credentials.
+    expect(sweep?.env).toEqual({
+      GH_TOKEN: "${{ steps.app-token.outputs.token }}",
+      GH_PACKAGES_TOKEN: "${{ secrets.GH_RAD_CI_BOT_PAT }}",
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
+      CLOUD_E2E_BOT_INSTALLATION_ID:
+        "${{ steps.app-token.outputs.installation-id }}"
+    });
+    expect(verify?.id).toBe("aws-verification");
+    expect(verify?.run).toBe(
+      'node "$RUNNER_TEMP/aws-cloud-cleanup.mjs" verify'
+    );
+    expect(verify?.if).toContain("always()");
+    expect(verify?.if).toContain("steps.aws-login.outcome == 'success'");
+    // The check reads the fixture repository's ID to find its app
+    // boundaries. Without a token that read fails, and so does the check.
+    expect(verify?.env).toEqual({
+      GH_TOKEN: "${{ steps.app-token.outputs.token }}"
+    });
+  });
+
+  it("mints a fixture token that can dispatch, delete environments and records, and read variables", async () => {
+    const token = (await awsSteps()).find((step) => step.id === "app-token");
+    expect(token?.with).toMatchObject({
+      owner: "${{ needs.scope.outputs.owner }}",
+      repositories: "${{ needs.scope.outputs.name }}",
+      "permission-actions": "write",
+      "permission-administration": "write",
+      "permission-contents": "read",
+      "permission-deployments": "write",
+      "permission-environments": "read"
+    });
+    expect(Object.keys(token?.with ?? {})).not.toContain("permission-packages");
+    // The sweep renews this token with the same permissions.
+    expect(
+      Object.fromEntries(
+        Object.entries(token?.with ?? {})
+          .filter(([name]) => name.startsWith("permission-"))
+          .map(([name, value]) => [
+            name.slice("permission-".length).replace(/-/g, "_"),
+            value
+          ])
+      )
+    ).toEqual(AWS_CLEANUP_APP_TOKEN_PERMISSIONS);
+  });
+
+  it("names every cleanup job in the scheduled failure issue", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const result = steps(workflow.jobs?.["notify-scheduled-result"])[0]?.env
+      ?.RESULT;
+    for (const job of Object.keys(workflow.jobs ?? {}).filter(
+      (name) => name !== "notify-scheduled-result"
+    ))
+      expect(result).toContain(`${job}=\${{ needs.${job}.result }}`);
   });
 });

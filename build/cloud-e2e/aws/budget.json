@@ -1,0 +1,7 @@
+{
+  "BudgetName": "ai-extensions-cloud-e2e",
+  "BudgetType": "COST",
+  "TimeUnit": "MONTHLY",
+  "BudgetLimit": { "Amount": "200", "Unit": "USD" },
+  "CostFilters": { "Region": ["${MAIN_REGION}", "${SECOND_REGION}"] }
+}

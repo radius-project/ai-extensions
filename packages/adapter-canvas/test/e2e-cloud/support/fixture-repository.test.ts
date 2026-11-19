@@ -10,15 +10,22 @@ import {
   environmentName,
   findUnprovisionedFixtureFields,
   FIXTURE_APPLICATION_NAME,
+  FIXTURE_AWS_BASELINE_SHA,
+  FIXTURE_AWS_FAILED_DEPLOY_SHA,
   FIXTURE_BASELINE_SHA,
   FIXTURE_KUBERNETES_NAMESPACE,
   FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
   FIXTURE_REPO_DEFAULT_BRANCH,
   FIXTURE_REPOSITORY,
   FIXTURE_REPOSITORY_PIN,
+  FIXTURE_OVERRIDE_VARIABLES,
+  fixtureProjectName,
+  isContinuousIntegration,
   isFixtureRepositoryProvisioned,
   parseCloudE2ELeaseOwnerRunId,
+  PINNED_FIXTURE,
   RESOURCE_GROUP_PREFIX,
+  resolveFixtureSelection,
   resolveFixtureClusterTarget,
   resolveFixtureLocation,
   resourceGroupName,
@@ -28,8 +35,24 @@ import {
 } from "./fixture-repository.js";
 
 describe("pinned baseline constants", () => {
-  it("pins the baseline commit as a single 40-character SHA", () => {
-    expect(FIXTURE_BASELINE_SHA).toMatch(/^[0-9a-f]{40}$/);
+  it("pins three different 40-character commits", () => {
+    const pins = [
+      FIXTURE_BASELINE_SHA,
+      FIXTURE_AWS_BASELINE_SHA,
+      FIXTURE_AWS_FAILED_DEPLOY_SHA
+    ];
+    for (const sha of pins) expect(sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(new Set(pins).size).toBe(3);
+  });
+
+  it("selects the pinned commits in the shared repository by default", () => {
+    expect(PINNED_FIXTURE).toEqual({
+      repository: FIXTURE_REPOSITORY,
+      baselineSha: FIXTURE_BASELINE_SHA,
+      awsBaselineSha: FIXTURE_AWS_BASELINE_SHA,
+      awsFailedDeploySha: FIXTURE_AWS_FAILED_DEPLOY_SHA,
+      overridden: false
+    });
   });
 
   it("names a default branch and a composed owner/name repository", () => {
@@ -353,6 +376,158 @@ describe("resolveFixtureClusterTarget", () => {
     (_label, group, cluster, variable) => {
       expect(() => resolveFixtureClusterTarget(group, cluster, true)).toThrow(
         variable
+      );
+    }
+  );
+});
+
+describe("resolveFixtureSelection", () => {
+  const OVERRIDE = {
+    RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY: "octo-cat/my.fixture_copy",
+    RADIUS_CLOUD_E2E_FIXTURE_BASELINE_SHA: "A".repeat(40),
+    RADIUS_CLOUD_E2E_FIXTURE_AWS_BASELINE_SHA: "b".repeat(40),
+    RADIUS_CLOUD_E2E_FIXTURE_AWS_FAILED_DEPLOY_SHA: "c".repeat(40)
+  };
+
+  it("uses the pinned fixture when no override is set", () => {
+    expect(resolveFixtureSelection({})).toBe(PINNED_FIXTURE);
+  });
+
+  it("uses the pinned fixture in CI when no override is set", () => {
+    expect(resolveFixtureSelection({ CI: "true" })).toBe(PINNED_FIXTURE);
+  });
+
+  it("treats whitespace-only values as unset", () => {
+    expect(
+      resolveFixtureSelection(
+        Object.fromEntries(
+          FIXTURE_OVERRIDE_VARIABLES.map((name) => [name, " "])
+        )
+      )
+    ).toBe(PINNED_FIXTURE);
+  });
+
+  it("selects a developer's copy when all four are set", () => {
+    expect(
+      resolveFixtureSelection({
+        ...OVERRIDE,
+        RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY: " octo-cat/my.fixture_copy "
+      })
+    ).toEqual({
+      repository: "octo-cat/my.fixture_copy",
+      baselineSha: "a".repeat(40),
+      awsBaselineSha: "b".repeat(40),
+      awsFailedDeploySha: "c".repeat(40),
+      overridden: true
+    });
+  });
+
+  // A half-set override is a hard failure, never a partial override: a copy's
+  // commits are not the pinned ones.
+  it.each(
+    FIXTURE_OVERRIDE_VARIABLES.flatMap((name) => [
+      [`only ${name}`, { [name]: OVERRIDE[name] }],
+      [
+        `all but ${name}`,
+        Object.fromEntries(
+          Object.entries(OVERRIDE).filter(([key]) => key !== name)
+        )
+      ]
+    ])
+  )("refuses %s", (_label, env) => {
+    const missing = FIXTURE_OVERRIDE_VARIABLES.filter((name) => !(name in env));
+    expect(() => resolveFixtureSelection(env)).toThrow(
+      `Set ${FIXTURE_OVERRIDE_VARIABLES.join(", ")} together. Missing: ${missing.join(", ")}.`
+    );
+  });
+
+  // Refused rather than ignored: ignoring would let a developer believe they
+  // were testing their copy while they used the shared repository.
+  it.each(["true", "1", "false"])(
+    "refuses any override when CI is %j",
+    (ci) => {
+      expect(() => resolveFixtureSelection({ ...OVERRIDE, CI: ci })).toThrow(
+        `${FIXTURE_OVERRIDE_VARIABLES.join(", ")} must not be set when CI is set.`
+      );
+      expect(() =>
+        resolveFixtureSelection({
+          RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY:
+            OVERRIDE.RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY,
+          CI: ci
+        })
+      ).toThrow(
+        "RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY must not be set when CI is set."
+      );
+    }
+  );
+
+  it.each(["owner", "owner/", "/name", "owner/name/extra", "own er/name"])(
+    "refuses repository %j",
+    (repository) => {
+      expect(() =>
+        resolveFixtureSelection({
+          ...OVERRIDE,
+          RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY: repository
+        })
+      ).toThrow("RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY must be owner/name");
+    }
+  );
+
+  it.each(
+    FIXTURE_OVERRIDE_VARIABLES.slice(1).flatMap((name) => [
+      [name, "a".repeat(39)],
+      [name, "a".repeat(41)],
+      [name, "g".repeat(40)],
+      [name, "main"]
+    ])
+  )("refuses %s %j", (name, sha) => {
+    expect(() => resolveFixtureSelection({ ...OVERRIDE, [name]: sha })).toThrow(
+      `${name} must be a full 40-character commit SHA`
+    );
+  });
+
+  it.each([
+    [
+      "the two baselines",
+      { RADIUS_CLOUD_E2E_FIXTURE_AWS_BASELINE_SHA: "A".repeat(40) }
+    ],
+    [
+      "the AWS baseline and failed deploy",
+      { RADIUS_CLOUD_E2E_FIXTURE_AWS_FAILED_DEPLOY_SHA: "b".repeat(40) }
+    ]
+  ])("refuses the same commit for %s", (_label, patch) => {
+    expect(() => resolveFixtureSelection({ ...OVERRIDE, ...patch })).toThrow(
+      "must name three different commits"
+    );
+  });
+});
+
+describe("isContinuousIntegration", () => {
+  it.each([
+    [undefined, false],
+    ["", false],
+    ["  ", false],
+    ["true", true],
+    ["false", true]
+  ])("treats CI=%j as %s", (ci, expected) => {
+    expect(isContinuousIntegration({ CI: ci })).toBe(expected);
+  });
+});
+
+describe("fixtureProjectName", () => {
+  // A local run uses the developer's copy, whose name can differ from the pin.
+  it.each([
+    [FIXTURE_REPOSITORY, "ai-extensions-fixture"],
+    ["kachawla/my-fixture-copy", "my-fixture-copy"]
+  ])("names the Copilot app project for %s", (repository, expected) => {
+    expect(fixtureProjectName(repository)).toBe(expected);
+  });
+
+  it.each(["", "owner", "owner/", "/name", "owner/name/extra"])(
+    "refuses %j",
+    (repository) => {
+      expect(() => fixtureProjectName(repository)).toThrow(
+        "A fixture repository must be owner/name"
       );
     }
   );

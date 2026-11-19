@@ -1,4 +1,5 @@
 import type { AwsCommandResult } from "../../../src/server/services/aws-cli-session.js";
+import { FakeRds, RDS_WRITES } from "./fake-rds.js";
 
 // A stateful stand-in for the AWS CLI. It keeps the IAM, STS, and EKS state
 // Radius reads and writes, and answers each `aws <args>` the way the CLI v2
@@ -6,6 +7,17 @@ import type { AwsCommandResult } from "../../../src/server/services/aws-cli-sess
 // Unlike scripted answers, a write changes what later reads see, so a test can
 // stop a run anywhere and compare what AWS holds with what Radius saved.
 
+// Managed policies follow the IAM API reference:
+// - DeletePolicy refuses a policy that is attached to a role (DeleteConflict).
+//   It also refuses one a role uses as its permissions boundary: GetPolicy
+//   counts those uses in PermissionsBoundaryUsageCount, and the product's
+//   environment removal relies on the refusal to keep a boundary an app role
+//   still uses.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_DeletePolicy.html
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_Policy.html
+// - ListPolicies filters by scope and path prefix and leaves out Description
+//   and Tags.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_ListPolicies.html
 export interface FakeIamRole {
   RoleName: string;
   RoleId: string;
@@ -14,6 +26,8 @@ export interface FakeIamRole {
   Description: string;
   Tags: Array<{ Key: string; Value: string }>;
   AssumeRolePolicyDocument: unknown;
+  // The ARN of the role's permissions boundary, or "" for none.
+  boundary: string;
   inline: Map<string, unknown>;
   attached: string[];
 }
@@ -42,7 +56,24 @@ export interface FakeEksCluster {
   region: string;
   status: string;
   authenticationMode: string;
+  vpcId: string;
   entries: Map<string, FakeAccessEntry>;
+  nodegroups: Map<string, FakeNodegroup>;
+}
+
+// A managed node group. UpdateNodegroupConfig refuses a group that is not
+// ACTIVE (ResourceInUseException) and a scaling config outside
+// 0 <= min <= desired <= max with max >= 1 (InvalidParameterException).
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupConfig.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_NodegroupScalingConfig.html
+export interface FakeNodegroup {
+  name: string;
+  status: string;
+  minSize: number;
+  maxSize: number;
+  desiredSize: number;
+  // Describe reads left before an UPDATING group is ACTIVE again.
+  updatingReads: number;
 }
 
 // What a test compares: everything that exists, in a stable order.
@@ -120,7 +151,9 @@ const WRITES: ReadonlySet<string> = new Set([
   "iam create-open-id-connect-provider",
   "eks create-access-entry",
   "eks delete-access-entry",
-  "eks associate-access-policy"
+  "eks associate-access-policy",
+  "eks update-nodegroup-config",
+  ...RDS_WRITES
 ]);
 
 // `--tags Key=k,Value=v ...`, as create-role and create-policy take them.
@@ -154,6 +187,7 @@ export class FakeAws {
   readonly policies = new Map<string, FakeManagedPolicy>();
   readonly oidcProviders = new Map<string, { clientIds: string[] }>();
   readonly clusters = new Map<string, FakeEksCluster>();
+  readonly rds: FakeRds;
   // Set to make every call fail the way an expired sign-in does.
   sessionExpired = false;
   // Commands refused once each, as AWS refuses a call it throttles.
@@ -166,20 +200,38 @@ export class FakeAws {
     let tick = Date.parse("2026-11-01T00:00:00Z");
     // Each creation is a second after the last, so ages always order.
     this.now = options.now ?? (() => (tick += 1000));
+    this.rds = new FakeRds(this.accountId, () => this.time());
   }
 
   addCluster(
     name: string,
     region: string,
-    authenticationMode = "API_AND_CONFIG_MAP"
+    authenticationMode = "API_AND_CONFIG_MAP",
+    vpcId = `vpc-${name}`
   ): void {
     this.clusters.set(`${region}:${name}`, {
       name,
       region,
       status: "ACTIVE",
       authenticationMode,
-      entries: new Map()
+      vpcId,
+      entries: new Map(),
+      nodegroups: new Map()
     });
+  }
+
+  addNodegroup(
+    region: string,
+    cluster: string,
+    name: string,
+    scaling: { minSize: number; maxSize: number; desiredSize: number },
+    status = "ACTIVE"
+  ): FakeNodegroup {
+    const target = this.clusters.get(`${region}:${cluster}`);
+    if (!target) throw new Error(`fake aws: no cluster ${region}:${cluster}`);
+    const group = { name, status, ...scaling, updatingReads: 1 };
+    target.nodegroups.set(name, group);
+    return group;
   }
 
   addGitHubProvider(): void {
@@ -195,6 +247,7 @@ export class FakeAws {
     tags?: Array<{ Key: string; Value: string }>;
     inline?: Record<string, unknown>;
     attached?: string[];
+    boundary?: string;
   }): FakeIamRole {
     const role: FakeIamRole = {
       RoleName: input.name,
@@ -204,6 +257,7 @@ export class FakeAws {
       Description: "",
       Tags: [...(input.tags ?? [])],
       AssumeRolePolicyDocument: input.trust,
+      boundary: input.boundary ?? "",
       inline: new Map(Object.entries(input.inline ?? {})),
       attached: [...(input.attached ?? [])]
     };
@@ -334,6 +388,8 @@ export class FakeAws {
         "The security token included in the request is expired"
       );
     }
+    const rds = this.rds.run(command, args);
+    if (rds) return rds;
     switch (command) {
       case "sts get-caller-identity":
         return ok({
@@ -353,6 +409,8 @@ export class FakeAws {
         );
       case "iam delete-policy":
         return this.deletePolicy(args);
+      case "iam list-policies":
+        return this.listPolicies(args);
       case "iam get-policy-version":
         return this.withPolicy(args, "GetPolicyVersion", (policy) => {
           if (flag(args, "--version-id") !== "v1") {
@@ -506,6 +564,33 @@ export class FakeAws {
           if (!entry.policies.includes(policy)) entry.policies.push(policy);
           return ok({ associatedAccessPolicy: { policyArn: policy } });
         });
+      case "eks describe-nodegroup":
+        return this.withNodegroup(
+          args,
+          "DescribeNodegroup",
+          (cluster, group) => {
+            if (group.status === "UPDATING") {
+              if (group.updatingReads <= 0) group.status = "ACTIVE";
+              else group.updatingReads -= 1;
+            }
+            return ok({
+              nodegroup: {
+                nodegroupName: group.name,
+                clusterName: cluster.name,
+                status: group.status,
+                scalingConfig: {
+                  minSize: group.minSize,
+                  maxSize: group.maxSize,
+                  desiredSize: group.desiredSize
+                }
+              }
+            });
+          }
+        );
+      case "eks update-nodegroup-config":
+        return this.withNodegroup(args, "UpdateNodegroupConfig", (_c, group) =>
+          this.updateNodegroup(args, group)
+        );
     }
     throw new Error(`fake aws: no answer for aws ${args.join(" ")}`);
   }
@@ -534,7 +619,8 @@ export class FakeAws {
       cluster: {
         name: cluster.name,
         status: cluster.status,
-        accessConfig: { authenticationMode: cluster.authenticationMode }
+        accessConfig: { authenticationMode: cluster.authenticationMode },
+        resourcesVpcConfig: { vpcId: cluster.vpcId }
       }
     });
   }
@@ -555,6 +641,19 @@ export class FakeAws {
     });
   }
 
+  // How many roles use the policy: attached, or as their boundary.
+  private policyUse(policy: FakeManagedPolicy) {
+    const roles = [...this.roles.values()];
+    return {
+      AttachmentCount: roles.filter((role) =>
+        role.attached.includes(policy.Arn)
+      ).length,
+      PermissionsBoundaryUsageCount: roles.filter(
+        (role) => role.boundary === policy.Arn
+      ).length
+    };
+  }
+
   private policyView(policy: FakeManagedPolicy) {
     return {
       PolicyName: policy.PolicyName,
@@ -562,6 +661,8 @@ export class FakeAws {
       Arn: policy.Arn,
       Path: policy.Path,
       DefaultVersionId: "v1",
+      ...this.policyUse(policy),
+      IsAttachable: true,
       CreateDate: policy.CreateDate,
       Description: policy.Description,
       Tags: policy.Tags.map((tag) => ({ ...tag }))
@@ -616,8 +717,39 @@ export class FakeAws {
 
   private deletePolicy(args: readonly string[]): AwsCommandResult {
     return this.withPolicy(args, "DeletePolicy", (policy) => {
+      const use = this.policyUse(policy);
+      if (use.AttachmentCount > 0 || use.PermissionsBoundaryUsageCount > 0) {
+        return serviceError(
+          "DeleteConflict",
+          "DeletePolicy",
+          "Cannot delete a policy attached to entities."
+        );
+      }
       this.policies.delete(policy.Arn);
       return ok();
+    });
+  }
+
+  // Customer managed policies under `--path-prefix`, without Description
+  // and Tags. Only `--scope Local` is modeled.
+  private listPolicies(args: readonly string[]): AwsCommandResult {
+    if (flag(args, "--scope") !== "Local")
+      throw new Error("fake aws: list-policies needs --scope Local");
+    const prefix = flag(args, "--path-prefix") || "/";
+    return ok({
+      Policies: [...this.policies.values()]
+        .filter((policy) => policy.Path.startsWith(prefix))
+        .map((policy) => ({
+          PolicyName: policy.PolicyName,
+          PolicyId: policy.PolicyId,
+          Arn: policy.Arn,
+          Path: policy.Path,
+          DefaultVersionId: "v1",
+          ...this.policyUse(policy),
+          IsAttachable: true,
+          CreateDate: policy.CreateDate
+        })),
+      IsTruncated: false
     });
   }
 
@@ -658,6 +790,7 @@ export class FakeAws {
       AssumeRolePolicyDocument: JSON.parse(
         flag(args, "--assume-role-policy-document")
       ),
+      boundary: "",
       inline: new Map(),
       attached: []
     };
@@ -742,6 +875,77 @@ export class FakeAws {
         createdAt: entry.createdAt,
         type: entry.type,
         tags: { ...tags }
+      }
+    });
+  }
+
+  private withNodegroup(
+    args: readonly string[],
+    operation: string,
+    work: (cluster: FakeEksCluster, group: FakeNodegroup) => AwsCommandResult
+  ): AwsCommandResult {
+    const cluster = this.cluster(args);
+    const group = cluster?.nodegroups.get(flag(args, "--nodegroup-name"));
+    if (!cluster || !group) {
+      return serviceError(
+        "ResourceNotFoundException",
+        operation,
+        `No node group found for name: ${flag(args, "--nodegroup-name")}.`
+      );
+    }
+    return work(cluster, group);
+  }
+
+  private updateNodegroup(
+    args: readonly string[],
+    group: FakeNodegroup
+  ): AwsCommandResult {
+    if (group.status !== "ACTIVE") {
+      return serviceError(
+        "ResourceInUseException",
+        "UpdateNodegroupConfig",
+        `Nodegroup ${group.name} is in ${group.status} state and cannot be updated.`
+      );
+    }
+    const requested: Record<string, number> = {};
+    for (const pair of flag(args, "--scaling-config")
+      .split(",")
+      .filter(Boolean)) {
+      const [name = "", value = ""] = pair.split("=");
+      if (
+        !["minSize", "maxSize", "desiredSize"].includes(name) ||
+        !/^\d+$/.test(value)
+      ) {
+        return serviceError(
+          "InvalidParameterException",
+          "UpdateNodegroupConfig",
+          `Unreadable scaling config ${pair}.`
+        );
+      }
+      requested[name] = Number(value);
+    }
+    const next = {
+      minSize: requested.minSize ?? group.minSize,
+      maxSize: requested.maxSize ?? group.maxSize,
+      desiredSize: requested.desiredSize ?? group.desiredSize
+    };
+    if (
+      next.maxSize < 1 ||
+      next.minSize > next.desiredSize ||
+      next.desiredSize > next.maxSize
+    ) {
+      return serviceError(
+        "InvalidParameterException",
+        "UpdateNodegroupConfig",
+        "Minimum capacity must be less than or equal to desired capacity, which must be less than or equal to maximum capacity, and maximum capacity must be at least 1."
+      );
+    }
+    Object.assign(group, next, { status: "UPDATING", updatingReads: 1 });
+    return ok({
+      update: {
+        id: this.nextId("UPD"),
+        status: "InProgress",
+        type: "ConfigUpdate"
       }
     });
   }

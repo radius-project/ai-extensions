@@ -8,6 +8,7 @@ import type { GitHubJsonResponse } from "../../../src/azure-oidc.js";
 export interface FakeGitHubEnvironment {
   name: string;
   id: number;
+  createdAt: string;
   variables: Map<string, string>;
 }
 
@@ -88,6 +89,7 @@ export class FakeGitHub {
     const environment = {
       name,
       id: this.nextEnvironmentId++,
+      createdAt: "2026-11-01T00:00:00Z",
       variables: new Map(Object.entries(variables))
     };
     this.environments.set(name.toLowerCase(), environment);
@@ -203,10 +205,9 @@ export class FakeGitHub {
     if (encodedName === undefined) {
       return json({
         total_count: this.environments.size,
-        environments: [...this.environments.values()].map(({ name, id }) => ({
-          name,
-          id
-        }))
+        environments: [...this.environments.values()].map(
+          ({ name, id, createdAt }) => ({ name, id, created_at: createdAt })
+        )
       });
     }
     const environment = this.environment(decodeURIComponent(encodedName));
