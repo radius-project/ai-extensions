@@ -19,7 +19,7 @@ import {
 } from "./aws-connection-probe.js";
 import { selectLeakedClusterWorkloads } from "./cloud-cleanup.js";
 
-const IMAGE = `ghcr.io/radius-project/mirror/busybox@sha256:${"a".repeat(64)}`;
+const IMAGE = `ghcr.io/radius-project/mirror/alpine@sha256:${"a".repeat(64)}`;
 const NAMESPACE = "default";
 const APPLICATION = "cloud-e2e";
 const ENVIRONMENT = "radtest-aws-run1-main";
@@ -347,6 +347,10 @@ describe("parseProbeOutcome", () => {
       { kind: "failed", detail: "exit 1 after 0s: Connection refused" }
     ],
     [
+      "RADIUS_PROBE untested: could not resolve db.example.internal",
+      { kind: "untested", detail: "could not resolve db.example.internal" }
+    ],
+    [
       "RADIUS_PROBE timeout after 10s\nRADIUS_PROBE connected",
       { kind: "connected" }
     ],
@@ -478,11 +482,27 @@ describe("runConnectionCheck", () => {
     expect(refused.deleted).toHaveLength(2);
   });
 
+  it.each(["default", "isolated"] as const)(
+    "fails a %s probe that couldn't test the connection without blaming the network",
+    async (from) => {
+      const cluster = probeCluster();
+      cluster.log = (pool) =>
+        pool === from ? `RADIUS_PROBE untested: could not resolve ${DB.host}\n`
+        : pool === "default" ? "RADIUS_PROBE connected\n"
+        : "RADIUS_PROBE timeout after 10s\n";
+      const { rows, failures } = await check(cluster);
+      expect(rows.find((row) => row.pool === from)?.outcome).toBe("untested");
+      expect(failures).toEqual([
+        `The ${from} probe for ${DB_TEXT} didn't test the connection: could not resolve ${DB.host}. A probe that never tried to connect proves nothing about the network.`
+      ]);
+    }
+  );
+
   it("fails a probe that finishes without a result, or never finishes", async () => {
     const silent = probeCluster();
     silent.log = () => "sh: nc: not found\n";
     expect((await check(silent)).failures[0]).toBe(
-      `The default nodes couldn't connect to ${DB_TEXT}: the probe succeeded without a result: sh: nc: not found. The app's pods can't reach the service either.`
+      `The default probe for ${DB_TEXT} didn't test the connection: the probe succeeded without a result: sh: nc: not found. A probe that never tried to connect proves nothing about the network.`
     );
     const empty = probeCluster();
     empty.log = () => "";
@@ -491,7 +511,9 @@ describe("runConnectionCheck", () => {
     );
     const stuck = probeCluster();
     stuck.runningReads = Infinity;
-    expect((await check(stuck)).failures[0]).toContain(
+    const result = await check(stuck);
+    expect(result.rows[0]?.outcome).toBe("untested");
+    expect(result.failures[0]).toContain(
       "pod radius-probe-default-0-run1-pod was still Running after 5 minutes"
     );
   });
@@ -532,7 +554,8 @@ describe("runConnectionCheck", () => {
 
 // The probe script itself, run by /bin/sh with fake `getent`, `nc`, and
 // `date` as the only commands on PATH. Each `date` call is `step` seconds
-// after the last, so a test chooses how long each command seems to take.
+// after the last, so a test chooses how long each command seems to take. A
+// fake can move the clock itself through the file named by $CLOCK.
 describe.skipIf(process.platform === "win32")("PROBE_SCRIPT", () => {
   const directories: string[] = [];
   afterEach(() => {
@@ -540,28 +563,38 @@ describe.skipIf(process.platform === "win32")("PROBE_SCRIPT", () => {
       rmSync(directory, { recursive: true, force: true });
   });
 
-  function runProbe(tools: { getent?: string; nc: string; step: number }): {
+  interface Tools {
+    readonly getent?: string;
+    readonly nc?: string;
+    readonly date?: false;
+    readonly step: number;
+  }
+
+  function runProbe(tools: Tools): {
     result: ProbeOutcome | null;
     nc: string;
   } {
     const directory = mkdtempSync(path.join(tmpdir(), "radius-probe-"));
     directories.push(directory);
+    const clock = path.join(directory, "clock");
     const tool = (name: string, body: string) => {
       const file = path.join(directory, name);
       writeFileSync(file, `#!/bin/sh\n${body}\n`);
       chmodSync(file, 0o755);
     };
-    writeFileSync(path.join(directory, "clock"), "1000");
-    tool(
-      "date",
-      `read now < "${directory}/clock"; echo $((now + ${tools.step})) > "${directory}/clock"; echo "$now"`
-    );
-    tool("nc", `echo "$@" > "${directory}/nc-args"\n${tools.nc}`);
+    writeFileSync(clock, "1000");
+    if (tools.date !== false)
+      tool(
+        "date",
+        `read now < "$CLOCK"; echo $((now + ${tools.step})) > "$CLOCK"; echo "$now"`
+      );
+    if (tools.nc !== undefined)
+      tool("nc", `echo "$@" > "${directory}/nc-args"\n${tools.nc}`);
     if (tools.getent !== undefined) tool("getent", tools.getent);
     const run = spawnSync(
       "/bin/sh",
       ["-c", PROBE_SCRIPT, "probe", "db.example.internal", "3306", "10"],
-      { env: { PATH: directory }, encoding: "utf8" }
+      { env: { PATH: directory, CLOCK: clock }, encoding: "utf8" }
     );
     const nc = spawnSync("/bin/sh", ["-c", `cat "${directory}/nc-args"`], {
       encoding: "utf8"
@@ -570,11 +603,17 @@ describe.skipIf(process.platform === "win32")("PROBE_SCRIPT", () => {
   }
 
   // Only an IPv4 lookup answers; `getent hosts` may give an IPv6 address
-  // first, which the IPv4 cluster can't reach.
-  const resolves =
-    '[ "$1" = ahostsv4 ] || exit 2; echo "10.0.1.5        STREAM db.example.internal"; echo "10.0.1.5        DGRAM"';
+  // first, which the IPv4 cluster can't reach. `getent ahostsv4` prints each
+  // address once per socket type, and a name may have several addresses.
+  const resolves = [
+    '[ "$1" = ahostsv4 ] || exit 2',
+    'echo "10.0.1.5        STREAM db.example.internal"',
+    'echo "10.0.1.5        DGRAM"',
+    'echo "10.0.2.9        STREAM"',
+    'echo "10.0.2.9        DGRAM"'
+  ].join("\n");
 
-  it("connects to the address the name resolves to", () => {
+  it("connects to the first address the name resolves to", () => {
     expect(runProbe({ getent: resolves, nc: "exit 0", step: 1 })).toEqual({
       result: { kind: "connected" },
       nc: "-z -w 10 10.0.1.5 3306"
@@ -600,25 +639,45 @@ describe.skipIf(process.platform === "win32")("PROBE_SCRIPT", () => {
     });
   });
 
-  it("fails a name that doesn't resolve, however long the lookup takes, without connecting", () => {
+  it("leaves a slow lookup out of the connect's time", () => {
+    // The lookup takes 30s, more than the 10s wait; only the connect counts.
+    expect(
+      runProbe({
+        getent: `read now < "$CLOCK"; echo $((now + 30)) > "$CLOCK"\n${resolves}`,
+        nc: 'echo "Connection refused" >&2; exit 1',
+        step: 1
+      }).result
+    ).toEqual({
+      kind: "failed",
+      detail: "exit 1 after 1s: Connection refused"
+    });
+  });
+
+  it("reports a name that doesn't resolve as untested, however long the lookup takes, without connecting", () => {
     // A slow lookup that fails must not read as a TCP timeout.
     expect(runProbe({ getent: "exit 2", nc: "exit 1", step: 30 })).toEqual({
       result: {
-        kind: "failed",
+        kind: "untested",
         detail: "could not resolve db.example.internal"
       },
       nc: ""
     });
   });
 
-  it("fails when the image has no getent to resolve the name", () => {
-    expect(runProbe({ nc: "exit 1", step: 30 })).toEqual({
-      result: {
-        kind: "failed",
-        detail:
-          "the probe image has no getent, so it can't resolve db.example.internal"
-      },
-      nc: ""
-    });
-  });
+  it.each([
+    ["getent", { nc: "exit 0", step: 1 }],
+    ["nc", { getent: resolves, step: 1 }],
+    ["date", { getent: resolves, nc: "exit 0", date: false, step: 1 }]
+  ] as const)(
+    "reports an image without %s as untested, without connecting",
+    (missing, tools: Tools) => {
+      expect(runProbe(tools)).toEqual({
+        result: {
+          kind: "untested",
+          detail: `the probe image has no ${missing}`
+        },
+        nc: ""
+      });
+    }
+  );
 });

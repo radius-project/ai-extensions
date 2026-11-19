@@ -144,7 +144,7 @@ Why some steps work the way they do:
 - **Failed deploy on the second environment:** the failing app fails in Kubernetes before any AWS call. It runs on the second environment because after a failed redeploy, Radius loses track of what it created, a known Radius issue, so the failure runs where there's no database to lose. The exact resource is picked during the local run.
 - **Final snapshot:** AWS Cloud Control always takes one when it deletes an RDS instance, also a known Radius issue. The pinned MySQL recipe copies the app's tags to it, so the test finds it by its source instance and checks its tags.
 - **Radius build:** the AWS workflows use Radius `edge` on purpose, because no Radius release has the fixes AWS needs yet. A planned change moves AWS to that release before AWS ships. Each run records the Radius versions it used.
-- **Probe pods:** Kubernetes Jobs in the app's namespace with the app's Radius labels, so the lifecycle design's cleanup rule covers them. A probe that can't start fails the test instead of passing as a timeout.
+- **Probe pods:** Kubernetes Jobs in the app's namespace with the app's Radius labels, so the lifecycle design's cleanup rule covers them. A probe that can't start, or can't try the connect because its image lacks a tool or the node can't resolve the name, fails the test instead of passing as a timeout. The probe image needs `getent`, `nc`, and `date`, so BusyBox doesn't work and Alpine does.
 
 Each managed service in the pack gets a row in the connection check and a resource in the fixture app, added by the recipe that adds the service.
 

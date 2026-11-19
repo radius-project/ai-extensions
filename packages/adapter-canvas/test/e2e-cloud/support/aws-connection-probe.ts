@@ -43,22 +43,23 @@ const IMAGE_DIGEST_PATTERN = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
 const PROBE_TTL_SECONDS = 600;
 
 // The probe's shell script. The host, port, and timeout arrive as positional
-// arguments, never in the script text. It resolves the name to an IPv4
-// address first, as the IPv4 cluster reaches it (`getent hosts` may answer an
-// IPv6 one), and fails if it can't, so a slow lookup that fails never reads as
-// a TCP timeout. Then it
-// connects to the address and tells a timeout from a refusal by how long the
-// connect took, so it works with any `nc` that has `-z` and `-w`. The image
-// needs `getent`, `nc`, and `date`.
+// arguments, never in the script text. It reports "untested" when it can't try
+// the connect: the image lacks a tool, or the node's resolver can't resolve the
+// name (a slow lookup that fails must never read as a TCP timeout). It
+// resolves to an IPv4 address, as the IPv4 cluster reaches it (`getent hosts`
+// may answer an IPv6 one), then connects to the address and tells a timeout
+// from a refusal by how long the connect took, so it works with any `nc` that
+// has `-z` and `-w`.
 export const PROBE_SCRIPT = [
   'host="$1"; port="$2"; wait="$3"',
-  "if ! command -v getent >/dev/null 2>&1; then",
-  `  echo "${PROBE_RESULT_MARKER} failed: the probe image has no getent, so it can't resolve $host"; exit 0`,
-  "fi",
+  "for tool in getent nc date; do",
+  '  command -v "$tool" >/dev/null 2>&1 ||',
+  `    { echo "${PROBE_RESULT_MARKER} untested: the probe image has no $tool"; exit 0; }`,
+  "done",
   'address=$(getent ahostsv4 "$host" </dev/null)',
   'address="${address%%[[:space:]]*}"',
   'if [ -z "$address" ]; then',
-  `  echo "${PROBE_RESULT_MARKER} failed: could not resolve $host"; exit 0`,
+  `  echo "${PROBE_RESULT_MARKER} untested: could not resolve $host"; exit 0`,
   "fi",
   "start=$(date +%s)",
   'error=$(nc -z -w "$wait" "$address" "$port" 2>&1 </dev/null)',
@@ -116,7 +117,8 @@ export interface ConnectionProbeInput {
   readonly namespace: string;
   readonly application: string;
   readonly environment: string;
-  // Pinned by digest.
+  // Pinned by digest. It needs `getent` with `ahostsv4` (glibc or musl, as in
+  // Alpine; BusyBox has none), `nc` with `-z` and `-w`, and `date`.
   readonly image: string;
   // Makes the Job names unique to the run.
   readonly runId: string;
@@ -127,6 +129,8 @@ export type ProbeOutcome =
   | { readonly kind: "connected" }
   | { readonly kind: "timeout"; readonly detail: string }
   | { readonly kind: "failed"; readonly detail: string }
+  // The probe ran but never tried the connect.
+  | { readonly kind: "untested"; readonly detail: string }
   | { readonly kind: "cannot-start"; readonly detail: string };
 
 export interface ConnectionRow {
@@ -252,6 +256,8 @@ export function parseProbeOutcome(log: string): ProbeOutcome | null {
   const result = line.slice(PROBE_RESULT_MARKER.length + 1).trim();
   if (result === "connected") return { kind: "connected" };
   if (result.startsWith("timeout")) return { kind: "timeout", detail: result };
+  if (result.startsWith("untested:"))
+    return { kind: "untested", detail: result.replace(/^untested:\s*/, "") };
   return { kind: "failed", detail: result.replace(/^failed:\s*/, "") };
 }
 
@@ -326,7 +332,7 @@ async function waitForProbe(
       );
       return (
         parseProbeOutcome(log) ?? {
-          kind: "failed",
+          kind: "untested",
           detail: `the probe ${pod.phase.toLowerCase()} without a result: ${log.trim().slice(-300) || "(no output)"}`
         }
       );
@@ -340,7 +346,7 @@ async function waitForProbe(
         };
     } else if (ports.now() >= finishBy) {
       return {
-        kind: "failed",
+        kind: "untested",
         detail: `pod ${pod.name} was still ${pod.phase} after ${(AWS_PROBE_START_TIMEOUT_MS + AWS_PROBE_RUN_TIMEOUT_MS) / 60_000} minutes`
       };
     }
@@ -365,6 +371,11 @@ function judge(
     return row(
       false,
       `The ${pool} probe for ${target} couldn't start: ${outcome.detail}. A probe that never ran proves nothing about the network.`
+    );
+  if (outcome.kind === "untested")
+    return row(
+      false,
+      `The ${pool} probe for ${target} didn't test the connection: ${outcome.detail}. A probe that never tried to connect proves nothing about the network.`
     );
   if (pool === "default")
     return outcome.kind === "connected" ?
