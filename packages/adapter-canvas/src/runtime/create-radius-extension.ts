@@ -185,6 +185,7 @@ export function createRadiusExtension(
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>
       Promise.resolve(deps.session.get().send(message)).then(() => undefined),
+    skillHandoff: async () => deps.radiusAppBicepSkill(),
     readSourceRevision: (repo, branch, context) =>
       readSelectedSourceRevision(context, repo, branch, {
         isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
@@ -198,6 +199,10 @@ export function createRadiusExtension(
         path: context.workspacePath,
         waitStartedAtMs
       }),
+    announceModelingRun: (repo, branches) => {
+      for (const branch of branches)
+        modelingActivity.announce({ repo, branch });
+    },
     wait: (ms) => deps.clock.wait(ms),
     log: (message) => {
       try {

@@ -110,7 +110,7 @@ The canvas will:
 
 ## Rendering a branch that has no model yet
 
-For graph and planned views, when no `.radius/app.bicep` or `app.bicep` can be read for the selection, the canvas returns `needsAppBicep` and hands off to Copilot to author one with the `radius-app-bicep` skill (via the `radius_generate_app` tool). That skill models the working tree. Where the canvas reads the model depends on both the selected repository and branch:
+For graph and planned views, when no `.radius/app.bicep` or `app.bicep` can be read for the selection, the canvas returns `needsAppBicep` and hands off to Copilot to author one with the `radius-app-bicep` skill. That skill models the working tree. Where the canvas reads the model depends on both the selected repository and branch:
 
 - **Repository and branch match the current workspace:** saving `.radius/app.bicep` or `app.bicep` to disk is enough to preview the graph. Graph and planned views, and the matching side of a graph diff, prefer this saved model. No commit or push is required. Unsaved editor-buffer changes are not read by the model loader.
 - **Repository or branch differs from the current workspace:** the canvas reads the selected branch on GitHub. Its model must describe that branch's code and already be committed and pushed there; a local-only commit is not enough. Publishing is a separate step, not a requirement for a current-workspace preview. Prefer opening a pull request into the target branch rather than committing directly to it, and never push a generated model straight to a protected branch such as `main` without the user's explicit confirmation.
