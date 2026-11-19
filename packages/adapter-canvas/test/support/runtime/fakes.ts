@@ -10,6 +10,11 @@
 
 import { vi } from "vitest";
 import type { Mock } from "vitest";
+import { computeGraphDiff } from "@radius-project/core";
+import type {
+  GraphSourceIdentity,
+  GraphSourceRead
+} from "@radius-project/core";
 import {
   getSourceRefResources,
   prepareSourceRefResources,
@@ -177,6 +182,41 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     ) => Promise<unknown>;
   } = {};
 
+  const graphReadFile = vi.fn(
+    async (
+      source: GraphSourceIdentity,
+      repoPath: string
+    ): Promise<GraphSourceRead> => {
+      try {
+        const local = source.kind === "workspace";
+        const content = await (local ?
+          deps.appModel.fetchWorkspaceFile(
+            {
+              workspacePath: source.workspacePath,
+              workspaceRepo: source.repo,
+              workspaceBranch: source.ref
+            },
+            source.repo,
+            source.ref,
+            repoPath
+          )
+        : deps.appModel.fetchRepoFile(source.repo, source.ref, repoPath));
+        return content === null ?
+            {
+              status: "absent",
+              source: { ...source, definitionPath: repoPath }
+            }
+          : {
+              status: "present",
+              source: { ...source, definitionPath: repoPath },
+              content
+            };
+      } catch (error) {
+        return { status: "unavailable", source, diagnostic: String(error) };
+      }
+    }
+  );
+
   const deps: RadiusExtensionDependencies = {
     logError: vi.fn(),
     automaticPluginUpdates: false,
@@ -227,10 +267,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       // rests on it, so a hand-synced copy that drifted looser would let tests
       // assert behavior production cannot produce.
       isWorkspaceSelection: vi.fn(isWorkspaceSelection),
-      fetchWorkspaceBicep: vi.fn(
-        async (_state, repo: string, branch: string) =>
-          bicepByRepoBranch[`workspace:${repo}@${branch}`] ?? null
-      ),
       fetchWorkspaceTree: vi.fn(
         async (
           _state,
@@ -264,26 +300,53 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       ),
       getDefaultBranch: vi.fn(async () => options.defaultBranch ?? "main")
     },
+    graphSources: {
+      assertWorkspaceSource: vi.fn(async () => {}),
+      read: vi.fn(async (request): Promise<GraphSourceRead> => {
+        const workspace = request.workspace;
+        const local =
+          !request.committedOnly &&
+          !!workspace?.authorized &&
+          workspace.repo === request.repo &&
+          workspace.ref === request.ref;
+        const source: GraphSourceIdentity = {
+          kind: local ? "workspace" : "github",
+          repo: request.repo,
+          ref: request.ref,
+          definitionPath: request.definitionPath || ".radius/app.bicep",
+          ...(local ?
+            { workspacePath: workspace?.path }
+          : {
+              revision:
+                headCommits[`${request.repo}@${request.ref}`] || "a".repeat(40)
+            })
+        };
+        try {
+          if (request.definitionPath)
+            return graphReadFile(source, request.definitionPath);
+          const content =
+            bicepByRepoBranch[
+              `${local ? "workspace" : "remote"}:${request.repo}@${request.ref}`
+            ] ?? null;
+          return content === null ?
+              { status: "absent", source }
+            : { status: "present", source, content };
+        } catch (error) {
+          return { status: "unavailable", source, diagnostic: String(error) };
+        }
+      }),
+      readFile: graphReadFile,
+      stage: vi.fn(async () => ({
+        dir: "/workspace/.radius",
+        owned: false,
+        fingerprint: "fixture-artifacts",
+        dispose: vi.fn(async () => {})
+      }))
+    },
     core: {
       computeGraphDiff: vi.fn(
-        (base: CanvasGraphResource[], head: CanvasGraphResource[]) => {
-          const baseIds = new Set(base.map((r) => r.id));
-          const headIds = new Set(head.map((r) => r.id));
-          const added = head
-            .filter((r) => !baseIds.has(r.id))
-            .map((r) => ({ ...r, diffStatus: "added" as const }));
-          const removed = base
-            .filter((r) => !headIds.has(r.id))
-            .map((r) => ({ ...r, diffStatus: "removed" as const }));
-          const unchanged = head
-            .filter((r) => baseIds.has(r.id))
-            .map((r) => ({ ...r, diffStatus: "unchanged" as const }));
-          return [...unchanged, ...added, ...removed];
-        }
-      ),
-      fetchBicepFromRepo: vi.fn(
-        async (_github, repo: string, branch: string) =>
-          bicepByRepoBranch[`remote:${repo}@${branch}`] ?? null
+        (base: CanvasGraphResource[], head: CanvasGraphResource[]) =>
+          computeGraphDiff(base, head)
       ),
       filterGraphVisualizationResources: vi.fn(
         (resources: CanvasGraphResource[]) =>
@@ -294,13 +357,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       buildGraphViaRad: vi.fn(async () => []),
       ensureRadBinary: vi.fn(async () => undefined),
       runRadBicepPublishExtension: vi.fn(async () => undefined),
-      runRadBicepPublish: vi.fn(
-        async () => "br:ghcr.io/acme/widgets/recipe:v1"
-      ),
-      radArtifactsDirForSelection: vi.fn(async () => ({
-        dir: "/workspace/.radius",
-        remote: false
-      }))
+      runRadBicepPublish: vi.fn(async () => "br:ghcr.io/acme/widgets/recipe:v1")
     },
     deployment: createFakeDeploymentRuntime(),
     readDeploymentModel: vi.fn(async () => ({

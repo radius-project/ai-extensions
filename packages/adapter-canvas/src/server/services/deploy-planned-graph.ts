@@ -1,6 +1,15 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
-import type { DeployModelSource } from "./deploy-model-source.js";
+import {
+  createGraphOrchestrator,
+  computeGraphDiff,
+  type GraphSourceRead
+} from "@radius-project/core";
+import {
+  graphArtifactHandle,
+  type RadArtifactsRequest,
+  type StagedRadArtifacts
+} from "../routes/graph-pipeline.js";
 
 // First runtime stage of a background deploy: rebuild the planned application
 // graph when the deploy started before one was resolved, so the deploying page
@@ -15,11 +24,6 @@ import type { DeployModelSource } from "./deploy-model-source.js";
 
 export interface PlannedGraphInstanceEntry {
   state: CanvasState;
-}
-
-export interface RadArtifactsDir {
-  dir: string;
-  remote: boolean;
 }
 
 export interface PlannedGraphRecoveryDependencies {
@@ -44,18 +48,13 @@ export interface PlannedGraphRecoveryDependencies {
     repo: string,
     branch: string,
     appFile: string
-  ): Promise<DeployModelSource>;
+  ): Promise<GraphSourceRead>;
   // `github` is bound at the composition root rather than threaded through
   // here, so this port stays a narrow typed description of what the stage
   // needs instead of carrying a client object.
-  radArtifactsDirForSelection(input: {
-    isLocal: boolean;
-    state: CanvasState | undefined;
-    repo: string;
-    branch: string;
-    bicepRepoPath: string;
-    log(message: string): void;
-  }): Promise<RadArtifactsDir>;
+  radArtifactsDirForSelection(
+    input: RadArtifactsRequest
+  ): Promise<StagedRadArtifacts>;
   buildGraphViaRad(
     content: string,
     bicepPath: string,
@@ -65,13 +64,14 @@ export interface PlannedGraphRecoveryDependencies {
       cleanupRadArtifactsDir: boolean;
     }
   ): Promise<unknown[]>;
-  fetchRecipePack(provider: string): Promise<unknown>;
+  fetchRecipePack(provider: string): Promise<unknown[]>;
   resolveRecipeOutputs(
     parsed: CanvasGraphResource[],
     recipes: unknown,
     provider: string
   ): Promise<unknown[]>;
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
+  removeDirectory(dir: string): void;
   errorMessage(error: unknown): string;
 }
 
@@ -103,6 +103,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof PlannedGraphRecoveryDependencies)[]
     "fetchRecipePack",
     "resolveRecipeOutputs",
     "canvasGraphResources",
+    "removeDirectory",
     "errorMessage"
   ];
 
@@ -138,31 +139,57 @@ export function createPlannedGraphRecoveryService(
           appFile
         );
         if (selection.status === "unavailable")
-          throw new Error(selection.error);
-        if (selection.status === "missing" || !selection.content) {
+          throw new Error(selection.diagnostic);
+        if (selection.status === "absent") {
           log(`⚠ ${appFile} not present — the planned graph is unavailable.`);
           return null;
         }
-        const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await dependencies.radArtifactsDirForSelection({
-            isLocal: !!(entry && selection.fromWorkspace),
-            state: entry?.state,
-            repo,
-            branch,
-            bicepRepoPath: appFile,
-            log
-          });
-        const parsed = dependencies.canvasGraphResources(
-          await dependencies.buildGraphViaRad(selection.content, appFile, {
-            log,
-            radArtifactsDir,
-            cleanupRadArtifactsDir: radArtifactsRemote
-          })
-        );
-        const recipes = await dependencies.fetchRecipePack(provider);
-        const planned = dependencies.canvasGraphResources(
-          await dependencies.resolveRecipeOutputs(parsed, recipes, provider)
-        );
+        if (!selection.content.trim()) {
+          throw new Error(
+            `${appFile} is empty; the planned graph is unavailable.`
+          );
+        }
+        const graph = createGraphOrchestrator<
+          CanvasGraphResource,
+          CanvasGraphResource[]
+        >({
+          stage: async (selected) =>
+            graphArtifactHandle(
+              await dependencies.radArtifactsDirForSelection({
+                selection: selected,
+                isLocal: selected.source.kind === "workspace",
+                state: entry.state,
+                repo,
+                branch,
+                bicepRepoPath: selected.source.definitionPath,
+                log
+              }),
+              dependencies.removeDirectory
+            ),
+          compile: async (content, definitionPath, options) =>
+            dependencies.canvasGraphResources(
+              await dependencies.buildGraphViaRad(content, definitionPath, {
+                ...options,
+                log
+              })
+            ),
+          diff: computeGraphDiff,
+          diagnostic: (message) =>
+            log(`Could not remove staged graph artifacts: ${message}`)
+        });
+        const authored = await graph.authored(selection);
+        const enriched = await graph.enrich(authored.resources, provider, {
+          fetchRecipePack: dependencies.fetchRecipePack,
+          resolveRecipeOutputs: async (resources, recipes, selectedProvider) =>
+            dependencies.canvasGraphResources(
+              await dependencies.resolveRecipeOutputs(
+                resources,
+                recipes,
+                selectedProvider
+              )
+            )
+        });
+        const planned = enriched.resources;
         planned.forEach((r) => {
           r.deployStatus = "pending";
           if (r.outputResources)

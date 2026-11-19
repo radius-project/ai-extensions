@@ -4150,6 +4150,102 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toContainText("Application graph ready");
   });
 
+  test("shows the usable graph and its save warning after reload @safety", async ({
+    page,
+    canvas
+  }) => {
+    const destination = path.join(
+      canvas.workspacePath,
+      ".radius",
+      "app-graph.json"
+    );
+    await fs.rm(destination, { force: true });
+    await fs.mkdir(destination);
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      const warning = page.locator("#graph-save-warning");
+      const plan = page.getByRole("button", { name: "Plan Deployment" });
+      await expect(warning).toHaveRole("status");
+      await expect(warning).toContainText("saved app-graph.json may be stale");
+      await expect(plan).toBeEnabled();
+      await page.reload();
+      await expect(warning).toContainText("saved app-graph.json may be stale");
+      // The persisted warning is visible before the browser refresh completes.
+      await expect(page.locator("#graph-refresh-status")).toHaveText(
+        "Application graph ready."
+      );
+      await expect(plan).toBeEnabled();
+      await expectNoWcagViolations(page);
+    } finally {
+      await fs.rmdir(destination);
+    }
+  });
+
+  test("announces a rejected modeling handoff without waiting for authoring timeout @safety", async ({
+    page,
+    canvas
+  }) => {
+    await fs.unlink(path.join(canvas.workspacePath, ".radius", "app.bicep"));
+    await fs.writeFile(
+      path.join(canvas.workspacePath, "Dockerfile"),
+      "FROM scratch\n"
+    );
+    canvas.setAppBicepHandoff(async () => {
+      throw new Error("The workspace application model origin is unreadable.");
+    });
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      await expect(page.getByRole("alert")).toContainText(
+        "The workspace application model origin is unreadable."
+      );
+      await expectNoWcagViolations(page);
+    } finally {
+      canvas.setAppBicepHandoff(null);
+    }
+  });
+
+  test("names the empty model and only retries after the file is removed @safety", async ({
+    page,
+    canvas
+  }) => {
+    const model = path.join(canvas.workspacePath, ".radius", "app.bicep");
+    const target = `${REPOSITORY}::${WORKTREE_BRANCH}`;
+    await fs.writeFile(model, " \n");
+    await fs.writeFile(
+      path.join(canvas.workspacePath, "Dockerfile"),
+      "FROM scratch\n"
+    );
+    Object.assign(canvas.entry.state, {
+      appModelAttemptTokens: { [target]: "blank-attempt" },
+      appModelFailures: {
+        [target]: {
+          attemptToken: "blank-attempt",
+          error: "The service configuration did not specify a listening port."
+        }
+      }
+    });
+    const refresh = page.getByRole("button", { name: "Refresh", exact: true });
+    const status = page.getByRole("alert");
+    const message =
+      "Model generation failed and left .radius/app.bicep empty. Fix or remove the file, then select Refresh. Diagnostic: The service configuration did not specify a listening port.";
+    let handoffs = 0;
+    canvas.setAppBicepHandoff(async () => {
+      handoffs++;
+    });
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      await expect(status).toHaveText(message);
+      await refresh.click();
+      await expect(status).toHaveText(message);
+      expect(handoffs).toBe(0);
+      await fs.unlink(model);
+      await refresh.click();
+      await expect.poll(() => handoffs).toBe(1);
+    } finally {
+      canvas.setAppBicepHandoff(null);
+    }
+  });
+
   test("keeps a modeling failure on reload and retries once after a saved source edit @safety", async ({
     page,
     canvas

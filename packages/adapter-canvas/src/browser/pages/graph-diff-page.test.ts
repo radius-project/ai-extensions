@@ -394,6 +394,7 @@ describe("initializeGraphDiffPage", () => {
       calls++;
       return calls === 1 ? first.promise : jsonResponse({ message: "latest" });
     });
+
     const teardown = initializeGraphDiffPage(browser.context, {
       radiusRenderGraph: vi.fn()
     });
@@ -842,6 +843,27 @@ describe("initializeGraphDiffPage", () => {
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(1);
+  });
+
+  it("ignores diagnostics and navigation on a superseded comparison", async () => {
+    const { browser, head, status } = fixture();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({
+        stale: true,
+        reload: true,
+        error: "Discarded comparison"
+      })
+    );
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
+    await flushPromises();
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(status.textContent).not.toContain("Discarded comparison");
+    expect(browser.nav.reloads).toBe(0);
+    teardown();
   });
 
   it("stays silent when the response has no message, error or reload flag", async () => {

@@ -35,6 +35,7 @@ import {
   unsupportedGraphModelMessage
 } from "./graph-modeling-failure.js";
 import { WORKSPACE_MODEL_CHANGED_EVENT } from "../heartbeat.js";
+import { GRAPH_SAVE_WARNING_ID } from "../../graph-save-warning.js";
 import { GRAPH_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 
 const ENTRY_KEY = "graph-page";
@@ -51,7 +52,6 @@ export const GRAPH_RETRY_SCHEDULE_MS: readonly number[] = Object.freeze([
 // The last entry of the schedule, which every attempt past its end reuses.
 export const GRAPH_RETRY_MAX_MS =
   GRAPH_RETRY_SCHEDULE_MS[GRAPH_RETRY_SCHEDULE_MS.length - 1];
-export const GRAPH_STALE_RETRY_MS = 1_000;
 export const GRAPH_PROGRESS_MS = 800;
 
 // The delay before the `attempt`-th (0-based) `needsAppBicep` retry. Attempts
@@ -303,6 +303,11 @@ export function initializeGraphPage(
     }
     return graphFromWorkspace;
   };
+  const showSaveWarning = (message: string): void => {
+    const warning = context.dom.byId(GRAPH_SAVE_WARNING_ID);
+    if (warning && warning.textContent !== message)
+      warning.textContent = message;
+  };
 
   const showGuidance = (): void => {
     const guidance = context.dom.byId("graph-guidance");
@@ -425,12 +430,19 @@ export function initializeGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
+        if (readBoolean(payload, "stale")) {
+          stopProgress();
+          if (wrapper) wrapper.innerHTML = "";
+          showStatus(context, "The graph request was superseded.", "info");
+          return;
+        }
         const resolvedBranch = readString(payload, "resolvedBranch");
         if (resolvedBranch && resolvedBranch !== branch) {
           context.nav.reload();
           return;
         }
         if (isRecord(payload) && Array.isArray(payload.resources)) {
+          showSaveWarning(readString(payload, "saveWarning"));
           modelState = "ready";
           retryRecommended = false;
           syncPrimaryButton();
@@ -456,18 +468,6 @@ export function initializeGraphPage(
             "info"
           );
           retry = entry.after(graphRetryDelayMs(loadRetryAttempt++), () => {
-            retry = null;
-            load({ continuing: true });
-          });
-          return;
-        }
-        if (readBoolean(payload, "stale")) {
-          showStatus(
-            context,
-            "A newer graph request replaced this one. Retrying…",
-            "info"
-          );
-          retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
             retry = null;
             load({ continuing: true });
           });
@@ -515,6 +515,7 @@ export function initializeGraphPage(
     entry.on(branchSelect, "change", () => {
       branchSelectionGeneration++;
       followWorkspaceBranch = false;
+      showSaveWarning("");
       stopRequest();
       modelState = "pending";
       retryRecommended = false;
@@ -578,12 +579,17 @@ export function initializeGraphPage(
         .then((response) => response.json())
         .then((payload) => {
           if (refreshGeneration !== generation) return;
+          if (readBoolean(payload, "stale")) {
+            stopProgress();
+            return;
+          }
           const resolvedBranch = readString(payload, "resolvedBranch");
           if (resolvedBranch && resolvedBranch !== page.branch) {
             context.nav.reload();
             return;
           }
           if (isRecord(payload) && Array.isArray(payload.resources)) {
+            showSaveWarning(readString(payload, "saveWarning"));
             modelState = "ready";
             retryRecommended = false;
             syncPrimaryButton();
@@ -621,16 +627,6 @@ export function initializeGraphPage(
                 refresh({ continuing: true });
               }
             );
-          } else if (readBoolean(payload, "stale")) {
-            showStatus(
-              context,
-              "A newer graph request replaced this one. Retrying…",
-              "info"
-            );
-            retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
-              retry = null;
-              refresh({ continuing: true });
-            });
           } else {
             const error = readString(payload, "error");
             if (error) {

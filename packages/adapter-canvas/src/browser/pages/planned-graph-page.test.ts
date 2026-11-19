@@ -346,6 +346,18 @@ describe("initializePlannedGraphPage", () => {
     teardown();
   });
 
+  it("does not turn a superseded plan into a retry or reload", async () => {
+    const { browser, button } = fixture();
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ stale: true, reload: true, error: "Discarded plan" })
+    );
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    expect(button.textContent).not.toBe(PLAN_RETRY_LABEL);
+    expect(browser.nav.reloads).toBe(0);
+    teardown();
+  });
+
   it("keeps Create Environment when a plan fails without an environment", async () => {
     const { browser, button } = fixture({
       envListing: "empty",

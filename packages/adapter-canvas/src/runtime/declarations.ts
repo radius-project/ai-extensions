@@ -226,7 +226,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_report_modeling_failure",
     description:
-      "Reports a permanent radius-app-bicep authoring failure to the Radius Canvas attempt that requested it. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures, cancellations, or a run that wrote app.bicep.",
+      "Reports a permanent radius-app-bicep authoring failure that left the application definition missing or blank. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures or cancellations.",
     parameters: {
       type: "object",
       properties: {
@@ -259,7 +259,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_generate_pr_diff_markdown",
     description:
-      "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description. Call this only when the user explicitly asks for an application graph diff; do not call it automatically before creating a pull request. Include the exact returned markdown at the top of the PR body only when the result contains a diff. If the result says the diff is unavailable or the tool fails, create the PR without a graph diff section, report the reason in chat, and do not open the graph-diff Canvas.",
+      "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description from explicitly requested GitHub base/head branches resolved to committed SHAs. Includes both resolved repo@SHA source identities in the returned text; never reads local workspace edits. Call this only when the user explicitly asks for an application graph diff; do not call it automatically before creating a pull request. Include the exact returned markdown at the top of the PR body only when the result contains a diff. If the result says the diff is unavailable or the tool fails, create the PR without a graph diff section, report the reason in chat, and do not open the graph-diff Canvas.",
     parameters: {
       type: "object",
       properties: {

@@ -1944,6 +1944,68 @@ describe("writeBicepCompileConfig", () => {
     );
   });
 
+  it("compiles JSONC custom extensions without substituting the base configuration", () => {
+    const config = [
+      "{",
+      '  // "extensions": { "radius": "ignored" },',
+      '  "extensions": {',
+      '    "radius": "br:biceptypes.azurecr.io/radius:0.48",',
+      '    "customTypes": "./nested/custom-types.tgz",',
+      "  },",
+      '  "url": "https://example.test/a//b",',
+      '  "commentLike": "/* literal */ // retained",',
+      "  /* block comment */",
+      "}"
+    ].join("\r\n");
+    const binary = Buffer.from([255, 0, 128, 31, 139]);
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), config);
+    fs.mkdirSync(path.join(ws, "nested"));
+    fs.writeFileSync(path.join(ws, "nested", "custom-types.tgz"), binary);
+    const log = vi.fn();
+
+    writeBicepCompileConfig(dir, ws, log, DERIVED);
+
+    const compiled = readConfig();
+    expect(compiled.extensions).toEqual({
+      radius: "br:biceptypes.azurecr.io/radius:0.48",
+      customTypes: "./nested/custom-types.tgz"
+    });
+    expect(compiled.url).toBe("https://example.test/a//b");
+    expect(compiled.commentLike).toBe("/* literal */ // retained");
+    expect(
+      fs.readFileSync(path.join(dir, "nested", "custom-types.tgz"))
+    ).toEqual(binary);
+    expect(log).not.toHaveBeenCalledWith(
+      expect.stringContaining("could not read repository bicepconfig.json")
+    );
+  });
+
+  it.each([
+    '{ /* malformed */ "extensions": {"radius": "br:registry/radius:pinned", "custom":,}}',
+    '{ "extensions": {} /* unterminated'
+  ])("retains warning and fallback for malformed JSONC %j", (config) => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), config);
+    const log = vi.fn();
+
+    writeBicepCompileConfig(dir, ws, log, DERIVED);
+
+    expect(readConfig().extensions).toEqual({ radius: DERIVED });
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("could not read repository bicepconfig.json")
+    );
+  });
+
+  it.each([
+    '{"__proto__":{"extensions":{"radius":"br:registry/unexpected:v1"}}}',
+    '{"extensions":{"__proto__":{"radius":"br:registry/unexpected:v1"}}}'
+  ])("only accepts explicit Radius pins in JSONC %j", (config) => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), `// config\n${config}`);
+
+    writeBicepCompileConfig(dir, ws, undefined, DERIVED);
+
+    expect(readConfig().extensions.radius).toBe(DERIVED);
+  });
+
   it("keeps a missing local extension alias while reporting that no artifact was copied", () => {
     fs.writeFileSync(
       path.join(ws, "bicepconfig.json"),
