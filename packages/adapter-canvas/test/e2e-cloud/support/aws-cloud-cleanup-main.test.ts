@@ -392,6 +392,36 @@ describe("runAwsCleanup", () => {
     }
   );
 
+  it("verifies with a token it mints itself when it has only the App's credentials", async () => {
+    const tokens: string[] = [];
+    const mints: string[] = [];
+    const { run } = cli();
+    const verify = dependencies(
+      {
+        ...ENV,
+        GH_TOKEN: undefined,
+        CLOUD_E2E_BOT_CLIENT_ID: "Iv1.cleanup",
+        CLOUD_E2E_BOT_INSTALLATION_ID: "42",
+        CLOUD_E2E_BOT_PRIVATE_KEY: "key"
+      },
+      async (command, args, options) => {
+        if (command === "gh") tokens.push(options?.env?.GH_TOKEN ?? "");
+        return run(command, args, options);
+      }
+    );
+    const deps: AwsCleanupMainDependencies = {
+      ...verify.deps,
+      mintAppToken: async (config) => {
+        mints.push(config.repository);
+        return "ghs_verify";
+      }
+    };
+    expect(await runAwsCleanup("verify", deps)).toBe(0);
+    expect(mints).toEqual(["octo/fixture"]);
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(new Set(tokens)).toEqual(new Set(["ghs_verify"]));
+  });
+
   it("sends an empty token when a local run has none", async () => {
     const { run, calls } = cli();
     const { deps } = dependencies(

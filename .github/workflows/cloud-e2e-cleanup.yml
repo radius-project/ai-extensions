@@ -1682,8 +1682,12 @@ jobs:
         if: always() && steps.aws-config.outputs.configured == 'true' && steps.bundle.outcome == 'success' && steps.aws-login.outcome == 'success'
         env:
           # Reads the fixture repository's ID, which names the IAM path of its
-          # app roles and boundaries. Without the token, the check fails.
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # app roles and boundaries. The sweep before it can outlast the hour
+          # the job's token lives, so the check mints its own token with the
+          # App's credentials. Child processes never see the private key.
+          CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
         shell: bash
         run: node "$RUNNER_TEMP/aws-cloud-cleanup.mjs" verify
 

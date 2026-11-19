@@ -2132,10 +2132,15 @@ describe("cloud-e2e-cleanup.yml purge-aws", () => {
     );
     expect(verify?.if).toContain("always()");
     expect(verify?.if).toContain("steps.aws-login.outcome == 'success'");
-    // The check reads the fixture repository's ID to find its app
-    // boundaries. Without a token that read fails, and so does the check.
+    // The check reads the fixture repository's ID to find its app roles and
+    // boundaries. It runs after a sweep that can outlast the hour the job's
+    // token lives, so it mints its own token with the App's credentials
+    // rather than take one that may have expired.
     expect(verify?.env).toEqual({
-      GH_TOKEN: "${{ steps.app-token.outputs.token }}"
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
+      CLOUD_E2E_BOT_INSTALLATION_ID:
+        "${{ steps.app-token.outputs.installation-id }}"
     });
   });
 
