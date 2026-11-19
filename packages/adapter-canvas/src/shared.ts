@@ -166,6 +166,7 @@ export interface GraphProgressRecord {
   // browser may already have one retry in flight when progress polling expires
   // the wait; retaining the verdict prevents that request from restarting it.
   graphProgressWaitExpiredMessage?: string;
+  graphProgressHandoffFailure?: string;
 }
 
 // Append one event to the instance's build record.
@@ -295,6 +296,7 @@ export interface CanvasState {
   pendingSourceRefs?: PendingSourceRef[];
   page?: string;
   graphDefinitionHash?: string;
+  graphSaveWarning?: import("./graph-save-warning.js").GraphSaveWarningIdentity;
   graphModelRevision?: string;
   graphBuildGeneration?: number;
   progressMessages?: string[];
@@ -304,7 +306,10 @@ export interface CanvasState {
   // deduplicate both targets.
   appBicepHandoffKeys?: Record<string, string>;
   appBicepHandoffKey?: string;
-  appModelAttemptGeneration?: number;
+  appModelAttemptClaims?: Record<
+    string,
+    import("./runtime/missing-model-handoff-claims.js").MissingModelHandoffClaim
+  >;
   appModelAttemptTokens?: Record<string, string>;
   appModelAttemptEnvironments?: Record<string, string>;
   // Source evidence read when each attempt started, keyed like the tokens.

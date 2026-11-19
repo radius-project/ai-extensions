@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  BlankModelAuthoringFailed,
   createGraphPipeline,
+  graphArtifactHandle,
   DEFAULT_APP_BICEP_PATH,
   type AppBicepSelection,
   type GraphCompileOptions,
@@ -98,10 +100,6 @@ function build(script: Script = {}): {
       calls.hashes.push({ content, fingerprint });
       return `hash(${content}|${fingerprint})`;
     },
-    radArtifactsFingerprint: (dir) => {
-      calls.fingerprinted.push(dir);
-      return script.fingerprint ?? "fp";
-    },
     removeDirectory: (dir) => {
       calls.removed.push(dir);
       if (script.removeThrows) throw script.removeThrows;
@@ -111,6 +109,105 @@ function build(script: Script = {}): {
 }
 
 describe("graph pipeline", () => {
+  it("disposes an owned temporary artifact directory through its owning handle", async () => {
+    const removed: string[] = [];
+    await graphArtifactHandle({ dir: "/temporary", remote: true }, (dir) => {
+      removed.push(dir);
+    }).dispose();
+    expect(removed).toEqual(["/temporary"]);
+  });
+
+  it("preserves the typed revision, root path, and shared ownership handle through compilation", async () => {
+    let disposed = 0;
+    const sourceRead = {
+      status: "present" as const,
+      source: {
+        kind: "github" as const,
+        repo: "octo/app",
+        ref: "topic",
+        revision: "a".repeat(40),
+        definitionPath: "app.bicep"
+      },
+      content: "root model"
+    };
+    const handle = {
+      dir: "/staging",
+      owned: true,
+      fingerprint: "captured-config",
+      dispose: async () => {
+        disposed += 1;
+      }
+    };
+    const selection = selectionOf({
+      content: sourceRead.content,
+      bicepPath: "app.bicep",
+      sourceRead
+    });
+    const { pipeline, calls } = build({
+      staged: { dir: handle.dir, remote: true, handle },
+      built: []
+    });
+    const staged = await pipeline.stageArtifacts({
+      entry: { state: {} },
+      selection,
+      repo: "octo/app",
+      branch: "topic"
+    });
+    await pipeline.compileResources({ selection, staged });
+    await pipeline.discardStagedArtifacts(staged);
+    expect(calls.artifactRequests[0]?.selection).toBe(sourceRead);
+    expect(calls.compiles[0]).toMatchObject({
+      content: "root model",
+      definitionFile: "app.bicep",
+      options: { radArtifactsDir: "/staging", cleanupRadArtifactsDir: false }
+    });
+    expect(disposed).toBe(1);
+  });
+
+  it.each([
+    { dir: "/workspace", remote: false },
+    { dir: "", remote: true }
+  ])(
+    "never deletes borrowed or empty artifact directories ($dir)",
+    async (staged) => {
+      const removed: string[] = [];
+      await graphArtifactHandle(staged, (dir) => {
+        removed.push(dir);
+      }).dispose();
+      expect(removed).toEqual([]);
+    }
+  );
+
+  it.each([true, false])(
+    "retains a single cleanup owner for prepared artifacts (remote=%s)",
+    async (remote) => {
+      const { pipeline, calls } = build({
+        staged: { dir: "/artifacts", remote }
+      });
+      const staged = await pipeline.stageArtifacts({
+        entry: { state: {} },
+        selection: selectionOf(),
+        repo: "octo/app",
+        branch: "main"
+      });
+      await pipeline.discardStagedArtifacts(staged);
+      expect(calls.removed).toEqual(remote ? ["/artifacts"] : []);
+    }
+  );
+
+  it("does not stage a confirmed absent source", async () => {
+    const { pipeline, calls } = build();
+    expect(
+      await pipeline.stageArtifacts({
+        entry: { state: {} },
+        selection: selectionOf({ content: null }),
+        repo: "octo/app",
+        branch: "main"
+      })
+    ).toMatchObject({ dir: "", remote: false });
+    expect(calls.artifactRequests).toEqual([]);
+  });
+
   describe("bicepPathOf", () => {
     it("falls back to the default path for an empty bicepPath", () => {
       const { pipeline } = build();
@@ -129,6 +226,72 @@ describe("graph pipeline", () => {
   });
 
   describe("selectAppBicep", () => {
+    it.each([
+      {
+        selection: "workspace",
+        fromWorkspace: true,
+        attempt: "current",
+        terminal: true
+      },
+      {
+        selection: "workspace",
+        fromWorkspace: true,
+        attempt: "stale",
+        terminal: false
+      },
+      {
+        selection: "GitHub",
+        fromWorkspace: false,
+        attempt: "current",
+        terminal: false
+      }
+    ])(
+      "classifies a blank $selection definition with a $attempt failure",
+      async ({ fromWorkspace, attempt, terminal }) => {
+        const target = "octo/app::main";
+        const state: CanvasState = {
+          appModelAttemptTokens: { [target]: "current" },
+          appModelFailures: {
+            [target]: { attemptToken: attempt, error: "No supported resource." }
+          }
+        };
+        const { pipeline } = build({
+          selection: selectionOf({ content: " \n", fromWorkspace })
+        });
+
+        const selected = pipeline.selectAppBicep({ state }, "octo/app", "main");
+        if (terminal) {
+          await expect(selected).rejects.toBeInstanceOf(
+            BlankModelAuthoringFailed
+          );
+          await expect(selected).rejects.toThrow(
+            "Model generation failed and left .radius/app.bicep empty. Fix or remove the file, then select Refresh. Diagnostic: No supported resource."
+          );
+        } else {
+          await expect(selected).rejects.not.toBeInstanceOf(
+            BlankModelAuthoringFailed
+          );
+          await expect(selected).rejects.toThrow(
+            "octo/app@main:.radius/app.bicep is empty; the graph is unavailable."
+          );
+        }
+      }
+    );
+
+    it.each(["", " \n\t"])(
+      "rejects a present empty definition without compiling",
+      async (content) => {
+        const { pipeline, calls } = build({
+          selection: selectionOf({ content, bicepPath: "app.bicep" })
+        });
+        await expect(
+          pipeline.selectAppBicep({ state: {} }, "octo/app", "feature/x")
+        ).rejects.toThrow("app.bicep is empty");
+        expect(calls.compiles).toEqual([]);
+        expect(calls.artifactRequests).toEqual([]);
+      }
+    );
+
     it("passes the entry state and selection through to the reader", async () => {
       const selection = selectionOf({ branch: "feature/x" });
       const { pipeline, calls } = build({ selection });
@@ -158,9 +321,10 @@ describe("graph pipeline", () => {
           branch: "main",
           log
         })
-      ).resolves.toBe(staged);
+      ).resolves.toMatchObject(staged);
       expect(calls.artifactRequests).toEqual([
         {
+          selection: expect.objectContaining({ status: "present" }),
           isLocal: false,
           state,
           repo: "octo/app",
@@ -216,28 +380,34 @@ describe("graph pipeline", () => {
             log,
             saveGraphJsonTo: "/ws/.radius/app-graph.json",
             radArtifactsDir: "/tmp/staged",
-            cleanupRadArtifactsDir: true
+            cleanupRadArtifactsDir: false
           }
         }
       ]);
       expect(resources).toEqual([{ id: "res-a", normalized: true }]);
     });
 
-    it("compiles a branch with no app.bicep as empty content rather than null", async () => {
+    it("contributes no resources for confirmed absence without invoking rad", async () => {
       const { pipeline, calls } = build({ built: [] });
 
-      await pipeline.compileResources({
+      const resources = await pipeline.compileResources({
         selection: selectionOf({ content: null }),
         staged: { dir: "", remote: false }
       });
 
-      expect(calls.compiles[0]?.content).toBe("");
-      expect(calls.compiles[0]?.options).toEqual({
-        log: undefined,
-        saveGraphJsonTo: undefined,
-        radArtifactsDir: "",
-        cleanupRadArtifactsDir: false
-      });
+      expect(resources).toEqual([]);
+      expect(calls.compiles).toEqual([]);
+    });
+
+    it("refuses present-empty content even when a caller bypasses selection", async () => {
+      const { pipeline, calls } = build();
+      await expect(
+        pipeline.compileResources({
+          selection: selectionOf({ content: "" }),
+          staged: { dir: "", remote: false }
+        })
+      ).rejects.toThrow("is empty");
+      expect(calls.compiles).toEqual([]);
     });
   });
 
@@ -282,15 +452,20 @@ describe("graph pipeline", () => {
 
   describe("definitionHashFor", () => {
     it("hashes the bicep together with the staged artifacts fingerprint", () => {
-      const { pipeline, calls } = build({ fingerprint: "artifacts-v2" });
+      const { pipeline, calls } = build();
 
       expect(
         pipeline.definitionHashFor(selectionOf({ content: "app bicep" }), {
           dir: "/tmp/staged",
-          remote: true
+          remote: true,
+          handle: {
+            dir: "/tmp/staged",
+            owned: true,
+            fingerprint: "artifacts-v2",
+            dispose: async () => {}
+          }
         })
       ).toBe("hash(app bicep|artifacts-v2)");
-      expect(calls.fingerprinted).toEqual(["/tmp/staged"]);
       expect(calls.hashes).toEqual([
         { content: "app bicep", fingerprint: "artifacts-v2" }
       ]);

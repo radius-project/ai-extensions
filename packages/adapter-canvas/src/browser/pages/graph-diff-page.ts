@@ -210,6 +210,7 @@ export function initializeGraphDiffPage(
       .then((payload) => {
         if (requestGeneration !== generation) return;
         stopProgress();
+        if (readBoolean(payload, "stale")) return;
         const unsupported = unsupportedGraphModelMessage(payload);
         if (unsupported) {
           showModelingFailure(unsupported);

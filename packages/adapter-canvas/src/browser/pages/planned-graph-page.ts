@@ -261,6 +261,7 @@ export function initializePlannedGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (!current()) return;
+        if (readBoolean(payload, "stale")) return;
         const resolvedBranch = readString(payload, "resolvedBranch");
         if (resolvedBranch && resolvedBranch !== selectedBranch) {
           context.nav.reload();
