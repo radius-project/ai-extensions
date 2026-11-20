@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { MAIN, SECOND } from "../../support/aws/cleanup-scenario.js";
+import {
+  KUBECTL_FORBIDDEN,
+  KUBECTL_NOT_FOUND
+} from "../../support/aws/recorded-errors.js";
 import type { CommandResult } from "./aws-cloud-cleanup-ports.js";
 import { connectionProbeJob } from "./aws-connection-probe.js";
 import { createKubectlJourneyKubernetes } from "./aws-journey-ports.js";
@@ -102,10 +106,10 @@ describe("createKubectlJourneyKubernetes", () => {
 
   it("throws what kubectl said, or that it didn't answer JSON", async () => {
     const failing = harness((command) =>
-      command === "kubectl" ? { code: 1, stderr: "forbidden" } : {}
+      command === "kubectl" ? KUBECTL_NOT_FOUND : {}
     ).port;
-    await expect(failing.deleteJob(MAIN, "default", "job-1")).rejects.toThrow(
-      `Deleting Job job-1 on ${MAIN.name}: forbidden`
+    await expect(failing.readPodLog(MAIN, "default", "pod-1")).rejects.toThrow(
+      `Reading the log of pod pod-1 on ${MAIN.name}: Error from server (NotFound): jobs.batch "radius-probe-missing" not found`
     );
     const silent = harness((command) =>
       command === "kubectl" ? { code: 1 } : {}
@@ -118,6 +122,20 @@ describe("createKubectlJourneyKubernetes", () => {
     ).port;
     await expect(garbled.listJobPods(MAIN, "default", "job-1")).rejects.toThrow(
       "kubectl get pods did not return JSON."
+    );
+  });
+
+  it("fails a Forbidden list rather than reading the empty List kubectl prints as no items", async () => {
+    const { port } = harness((command) =>
+      command === "kubectl" ? KUBECTL_FORBIDDEN : {}
+    );
+    const forbidden =
+      'Error from server (Forbidden): jobs.batch is forbidden: User "system:serviceaccount:probe-ns:nobody" cannot list resource "jobs"';
+    await expect(port.listJobPods(MAIN, "probe-ns", "job-1")).rejects.toThrow(
+      `Listing the pods of Job job-1 on ${MAIN.name}: ${forbidden}`
+    );
+    await expect(port.listNodes(MAIN, "a=b")).rejects.toThrow(
+      `Listing nodes on ${MAIN.name}: ${forbidden}`
     );
   });
 });

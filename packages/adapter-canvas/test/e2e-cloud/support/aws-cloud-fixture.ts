@@ -106,7 +106,10 @@ export interface AwsPreflightConfig {
   readonly environmentPrefix: string;
 }
 
-export interface AwsPreflightPorts extends Pick<AwsJourneyPorts, "runAws"> {
+export interface AwsPreflightPorts extends Pick<
+  AwsJourneyPorts,
+  "runAws" | "sleep" | "now"
+> {
   readonly kubernetes: Pick<
     AwsCleanupKubernetes,
     "listWorkloads" | "namespaceExists"

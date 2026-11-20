@@ -20,12 +20,14 @@ import {
   removeLiveEnvironment,
   type JourneyWorld
 } from "../../support/aws/journey-scenario.js";
+import { lagging } from "../../support/aws/lagging.js";
 import {
   appBoundaryPathPrefix,
   checkAwsFootprint,
   expectedAwsFootprint,
   type AwsFootprintScope
 } from "./aws-footprint.js";
+import { AWS_SETTLE_MS, AWS_SETTLE_POLL_MS } from "./aws-timeout-budget.js";
 
 const SCOPE: AwsFootprintScope = {
   accountId: ACCOUNT,
@@ -114,8 +116,11 @@ describe("expectedAwsFootprint", () => {
 });
 
 describe("checkAwsFootprint", () => {
-  it("matches the deploy role setup leaves before any environment", async () => {
-    expect(await check(createJourneyWorld())).toEqual([]);
+  it("matches the deploy role setup leaves before any environment, without waiting", async () => {
+    const world = createJourneyWorld();
+    const start = world.clock.now;
+    expect(await check(world)).toEqual([]);
+    expect(world.clock.now).toBe(start);
   });
 
   it("matches after each create and delete, and names what the other count leaves", async () => {
@@ -187,9 +192,12 @@ describe("checkAwsFootprint", () => {
   it("fails when a read fails, rather than reporting a match", async () => {
     const world = createJourneyWorld();
     world.aws.refuseOnce("eks describe-access-entry", "AccessDeniedException");
-    await expect(check(world)).rejects.toThrow(
+    // A failed read isn't retried, even with a difference to wait on.
+    const start = world.clock.now;
+    await expect(check(world, [FIRST])).rejects.toThrow(
       `Could not read the access entry for ${ROLE} on cluster ${MAIN_LABEL}`
     );
+    expect(world.clock.now).toBe(start);
     world.aws.roles.clear();
     await expect(check(world)).rejects.toThrow("aws iam get-role");
   });
@@ -200,11 +208,55 @@ describe("checkAwsFootprint", () => {
   ])("fails when %s returns no list", async (command, message) => {
     const world = createJourneyWorld();
     const ports = {
+      ...world.ports,
       runAws: async (args: string[]) =>
         args[1] === command ?
           { code: 0, stdout: "{}", stderr: "" }
         : world.ports.runAws(args)
     };
     await expect(checkAwsFootprint(SCOPE, [], ports)).rejects.toThrow(message);
+  });
+
+  describe("after a delete that takes a while to show", () => {
+    // Two live environments, then the second's inline policy deleted through
+    // IAM, whose list answers as before it for `stale` reads.
+    async function deleteSlowly(stale: number) {
+      const world = createJourneyWorld();
+      addLiveEnvironment(world, FIRST);
+      addLiveEnvironment(world, SECOND_ENV);
+      const lag = lagging(
+        world,
+        "delete-role-policy",
+        "list-role-policies",
+        stale
+      );
+      expect(await check(world)).toEqual([]);
+      world.aws.run([
+        "iam",
+        "delete-role-policy",
+        "--role-name",
+        ROLE,
+        "--policy-name",
+        policyOf(SECOND_ENV.name)
+      ]);
+      removeLiveEnvironment(world, SECOND_ENV.name);
+      return { world, lag, start: world.clock.now };
+    }
+
+    it("passes once the deleted policy stops showing", async () => {
+      const { world, lag, start } = await deleteSlowly(3);
+      expect(await check(world)).toEqual([]);
+      expect(lag.left()).toBe(0);
+      expect(world.clock.now - start).toBe(3 * AWS_SETTLE_POLL_MS);
+    });
+
+    it("reports the policy still there when it outlasts the window", async () => {
+      const { world, lag, start } = await deleteSlowly(1000);
+      expect(await check(world)).toEqual([
+        `Deploy role ${ROLE} has inline policy ${policyOf(SECOND_ENV.name)}, which no live environment uses.`
+      ]);
+      expect(lag.left()).toBeGreaterThan(0);
+      expect(world.clock.now - start).toBeGreaterThanOrEqual(AWS_SETTLE_MS);
+    });
   });
 });

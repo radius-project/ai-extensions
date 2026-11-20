@@ -4,7 +4,8 @@ import {
   text,
   type AwsJourneyPorts
 } from "./aws-journey-support.js";
-import { readAws } from "./aws-cloud-cleanup.js";
+import { readAws, waitFor } from "./aws-cloud-cleanup.js";
+import { AWS_SETTLE_MS, AWS_SETTLE_POLL_MS } from "./aws-timeout-budget.js";
 
 // Proves the region scope setup writes on the deploy role, with IAM's own
 // policy simulator. `aws iam simulate-principal-policy` evaluates the role's
@@ -30,6 +31,14 @@ export interface SimulatedDecision {
   readonly decision: string;
 }
 
+export interface RegionScopeInput {
+  readonly roleArn: string;
+  // Every region the suite uses, in order.
+  readonly testRegions: readonly string[];
+  // The regions of the environments that exist now.
+  readonly liveRegions: readonly string[];
+}
+
 export interface RegionScopeCheck {
   readonly decisions: SimulatedDecision[];
   // Empty when every decision is the expected one.
@@ -47,15 +56,14 @@ export function requestedRegionContext(region: string): string {
   ]);
 }
 
+/**
+ * Each region's decisions, and the ones that aren't as expected. IAM is
+ * eventually consistent, so failures get the settle window to clear, and the
+ * last read's are returned. Throws when the simulator can't be called.
+ */
 export async function checkDeployRoleRegionScope(
-  ports: Pick<AwsJourneyPorts, "runAws">,
-  input: {
-    readonly roleArn: string;
-    // Every region the suite uses, in order.
-    readonly testRegions: readonly string[];
-    // The regions of the environments that exist now.
-    readonly liveRegions: readonly string[];
-  }
+  ports: Pick<AwsJourneyPorts, "runAws" | "sleep" | "now">,
+  input: RegionScopeInput
 ): Promise<RegionScopeCheck> {
   const outside = input.liveRegions.filter(
     (region) => !input.testRegions.includes(region)
@@ -64,6 +72,18 @@ export async function checkDeployRoleRegionScope(
     throw new Error(
       `Live environments are in ${outside.join(", ")}, which the check doesn't test. Test regions: ${input.testRegions.join(", ")}.`
     );
+  let check: RegionScopeCheck = { decisions: [], failures: [] };
+  await waitFor(ports, AWS_SETTLE_MS, AWS_SETTLE_POLL_MS, async () => {
+    check = await simulateRegionScope(ports, input);
+    return check.failures.length === 0;
+  });
+  return check;
+}
+
+async function simulateRegionScope(
+  ports: Pick<AwsJourneyPorts, "runAws">,
+  input: RegionScopeInput
+): Promise<RegionScopeCheck> {
   const decisions: SimulatedDecision[] = [];
   const failures: string[] = [];
   for (const region of input.testRegions) {
