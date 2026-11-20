@@ -58,7 +58,7 @@ function harness(
   return { input, reader, graph };
 }
 
-it("keeps a confirmed definition separate from an attempt whose artifacts are missing", async () => {
+it("reports no deployment evidence for an active run without a graph artifact or progress", async () => {
   const definition = await inspectApplicationDefinition(
     "octo/store",
     "feature/store",
@@ -81,14 +81,34 @@ it("keeps a confirmed definition separate from an attempt whose artifacts are mi
     graph: null
   });
   const result = await inspectDeploymentGraph(input);
-  expect(result.observation).toMatchObject({
-    graph: null,
-    progress: null,
-    artifactRunId: null,
-    inventory: null
+  expect(result).toMatchObject({
+    kind: "observed",
+    observation: {
+      graph: null,
+      progress: null,
+      artifactRunId: null,
+      inventory: null
+    }
   });
   expect(input.openReader).toHaveBeenCalledWith(run.id);
+  expect(input.acceptProgress).not.toHaveBeenCalled();
   expect(reader.read).not.toHaveBeenCalled();
+});
+
+it("accepts progress for the exact active run even without a graph artifact", async () => {
+  const { input, reader } = harness({ ...run, active: true }, progress);
+  reader.graph.mockResolvedValueOnce({ status: "missing", graph: null });
+
+  expect(await inspectDeploymentGraph(input)).toMatchObject({
+    kind: "observed",
+    observation: {
+      graph: null,
+      progress,
+      artifactRunId: run.id,
+      inventory: null
+    }
+  });
+  expect(input.acceptProgress).toHaveBeenCalledExactlyOnceWith(progress, false);
 });
 
 it("uses zero as an exact active run id and does not consult inventory currency", async () => {
