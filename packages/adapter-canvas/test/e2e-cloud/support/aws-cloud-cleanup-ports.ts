@@ -489,6 +489,11 @@ export function createKubectlCleanupKubernetes(
         "--namespace",
         workload.namespace,
         "--ignore-not-found",
+        // The workload stays listed until its Pods are gone, so the sweep's
+        // wait and check cover them. Kubernetes's default, background,
+        // removes it at once and its Pods later.
+        "--cascade=foreground",
+        "--wait=false",
         "--request-timeout=60s"
       ]);
       if (result.code !== 0) throw new Error(detail(result));

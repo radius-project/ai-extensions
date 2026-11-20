@@ -434,7 +434,7 @@ function deleteFailed(environment: string): string {
 }
 
 function wentOn(environment: string): string {
-  return `The Radius application delete in ${environment} failed, but AWS and the clusters list none of its RDS resources, app roles, Pod Identity associations, or workloads, so the sweep removes its access and GitHub environment.`;
+  return `The Radius application delete in ${environment} failed, but AWS and the clusters list none of its RDS resources, app roles, Pod Identity associations, or workloads, so the sweep goes on to remove its access and GitHub environment.`;
 }
 
 describe("sweepAwsCloudE2E", () => {
@@ -2432,6 +2432,44 @@ describe("sweepAwsCloudE2E app roles and Pod Identity", () => {
     expect(verify.findings).toContain(
       `inline policy ${APP_ROLES_POLICY} on ${ROLE}`
     );
+  });
+
+  it("doesn't go on after a failed app delete while AWS lists an app role or association it no longer describes", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, "fail");
+    s.aws.lingeringReads = 1000;
+    const role = appRoleName(OLD);
+    // The lists still show both, but their describes already say not found.
+    answer(s, "list-role-tags", (args) =>
+      args.includes(role) && !s.aws.role(role) ?
+        failed("NoSuchEntity", "ListRoleTags")
+      : null
+    );
+    answer(s, "describe-pod-identity-association", (args) =>
+      (
+        ![...s.aws.clusters.values()].some((cluster) =>
+          cluster.podIdentity.has(args[args.indexOf("--association-id") + 1]!)
+        )
+      ) ?
+        failed("ResourceNotFoundException", "DescribePodIdentityAssociation")
+      : null
+    );
+    const before = retryInputs(s, OLD);
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([
+      deleteFailed(OLD),
+      expect.stringMatching(
+        new RegExp(
+          `^The Radius application delete in ${OLD} failed, and it still has app role ${role} \\(still listed\\), Pod Identity association \\S+ \\(${NAMESPACE}/radius-app-web\\) on cluster ${MAIN.name} \\(still listed\\), so it keeps`
+        )
+      )
+    ]);
+    expect(retryInputs(s, OLD)).toEqual(before);
+    expect(retryInputs(s, SECOND_ENV)).toEqual([]);
+
+    nextDay(s);
+    expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+    expect(retryInputs(s, OLD)).toEqual([]);
   });
 
   it("keeps the app-roles policy while another environment still uses the deploy role", async () => {

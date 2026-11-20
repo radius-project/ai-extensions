@@ -437,7 +437,7 @@ describe("createKubectlCleanupKubernetes", () => {
     expect(await port.listWorkloads(CLUSTER)).toEqual({ items: [] });
   });
 
-  it("deletes a workload by kind and namespace, and a namespace without waiting", async () => {
+  it("deletes a workload in the foreground, and a namespace, without waiting for either", async () => {
     const { port, calls } = kubectl({});
     await port.deleteWorkload(CLUSTER, {
       kind: "Deployment",
@@ -453,6 +453,8 @@ describe("createKubectlCleanupKubernetes", () => {
         "--namespace",
         "ns",
         "--ignore-not-found",
+        "--cascade=foreground",
+        "--wait=false",
         "--request-timeout=60s"
       ],
       [

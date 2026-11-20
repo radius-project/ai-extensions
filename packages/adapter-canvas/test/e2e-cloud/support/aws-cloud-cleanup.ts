@@ -1445,10 +1445,24 @@ export interface AppRole extends AppRoleCandidate {
   readonly tags: unknown[];
 }
 
-/** The repository's app roles, each with its tags. */
+/**
+ * Something a list still shows but its describe no longer finds, as an
+ * eventually consistent read can answer while a delete settles. Its
+ * environment is null when the list doesn't say which it is.
+ */
+export interface ListedButGone {
+  readonly environment: string | null;
+  readonly label: string;
+}
+
+/**
+ * The repository's app roles, each with its tags. A role whose tags are
+ * already gone is left out, and added to `gone` when it is given.
+ */
 export async function readAppRoles(
   ports: Pick<AwsCleanupPorts, "runAws">,
-  scope: AwsAppScope
+  scope: AwsAppScope,
+  gone?: ListedButGone[]
 ): Promise<AppRole[]> {
   const roles: AppRole[] = [];
   for (const role of selectAppRoleCandidates(
@@ -1471,6 +1485,11 @@ export async function readAppRoles(
         ...role,
         tags: requireList(tags, "Tags", "aws iam list-role-tags")
       });
+    else
+      gone?.push({
+        environment: appPathEnvironment(role.path, scope),
+        label: `app role ${role.name}`
+      });
   }
   return roles;
 }
@@ -1482,11 +1501,14 @@ export interface AppAssociation extends AppAssociationCandidate {
 }
 
 /**
- * A cluster's Pod Identity associations, each with its role and tags.
+ * A cluster's Pod Identity associations, each with its role and tags. One
+ * whose describe is already gone is left out, and added to `gone` when it is
+ * given.
  */
 export async function readAssociations(
   ports: Pick<AwsCleanupPorts, "runAws">,
-  cluster: AwsCleanupCluster
+  cluster: AwsCleanupCluster,
+  gone?: ListedButGone[]
 ): Promise<AppAssociation[]> {
   const where = ["--region", cluster.region, "--cluster-name", cluster.name];
   const associations: AppAssociation[] = [];
@@ -1511,6 +1533,11 @@ export async function readAssociations(
         cluster,
         ...describedAssociation(described, candidate.id)
       });
+    else
+      gone?.push({
+        environment: null,
+        label: `Pod Identity association ${candidate.id} (${candidate.namespace}/${candidate.serviceAccount}) on cluster ${cluster.name}`
+      });
   }
   return associations;
 }
@@ -1519,9 +1546,10 @@ export async function readAssociations(
 export async function readAppAssociations(
   ports: Pick<AwsCleanupPorts, "runAws">,
   scope: AwsAppScope,
-  cluster: AwsCleanupCluster
+  cluster: AwsCleanupCluster,
+  gone?: ListedButGone[]
 ): Promise<AppAssociation[]> {
-  return (await readAssociations(ports, cluster)).filter((item) =>
+  return (await readAssociations(ports, cluster, gone)).filter((item) =>
     underAppPath(item.roleArn, scope)
   );
 }
@@ -1702,7 +1730,8 @@ async function readFootprintByEnvironment(
   scopes: readonly AwsRdsScope[],
   app: AwsAppScope,
   // What the sweep just deleted, which IAM may still list.
-  deleted: ReadonlySet<string>
+  deleted: ReadonlySet<string>,
+  gone?: ListedButGone[]
 ): Promise<Map<string, string[]>> {
   const left = new Map<string, string[]>();
   const add = (environment: string, label: string) =>
@@ -1714,13 +1743,13 @@ async function readFootprintByEnvironment(
     ))
       add(item.environment, item.label);
   }
-  for (const role of await readAppRoles(ports, app)) {
+  for (const role of await readAppRoles(ports, app, gone)) {
     const environment = appFolderEnvironment(role.arn, role.tags, app);
     if (environment && !deleted.has(role.arn))
       add(environment, `app role ${role.name}`);
   }
   for (const cluster of config.clusters) {
-    for (const item of await readAppAssociations(ports, app, cluster)) {
+    for (const item of await readAppAssociations(ports, app, cluster, gone)) {
       const environment = appFolderEnvironment(item.roleArn, item.tags, app);
       if (environment && !deleted.has(associationKey(item)))
         add(environment, appAssociationLabel(item));
@@ -1739,7 +1768,9 @@ async function readFootprintByEnvironment(
  * nothing, or for at most LEFTOVER_SETTLE_MS. For an environment whose app
  * delete failed, only these reads decide: nothing the sweep deleted is taken
  * on trust, so a role, association, or workload that IAM, EKS, or Kubernetes
- * still lists while it goes keeps the environment.
+ * still lists while it goes keeps the environment. That includes one a list
+ * shows but its describe no longer finds. An association's list doesn't say
+ * whose it is, so it keeps every one of `names`.
  */
 async function settledFootprint(
   config: AwsCleanupConfig,
@@ -1750,13 +1781,21 @@ async function settledFootprint(
 ): Promise<Map<string, string[]>> {
   let left = new Map<string, string[]>();
   await waitFor(ports, LEFTOVER_SETTLE_MS, LEFTOVER_POLL_MS, async () => {
+    const gone: ListedButGone[] = [];
     left = await readFootprintByEnvironment(
       config,
       ports,
       scopes,
       app,
-      new Set()
+      new Set(),
+      gone
     );
+    for (const item of gone)
+      for (const name of item.environment === null ? names : [item.environment])
+        left.set(name, [
+          ...(left.get(name) ?? []),
+          `${item.label} (still listed)`
+        ]);
     return names.every((name) => !left.has(name));
   });
   return left;
@@ -1995,7 +2034,7 @@ export async function sweepAwsCloudE2E(
         report.fail(target.blocked);
       } else if (target.deleteFailed) {
         report.warn(
-          `The Radius application delete in ${target.name} failed, but AWS and the clusters list none of its RDS resources, app roles, Pod Identity associations, or workloads, so the sweep removes its access and GitHub environment.`
+          `The Radius application delete in ${target.name} failed, but AWS and the clusters list none of its RDS resources, app roles, Pod Identity associations, or workloads, so the sweep goes on to remove its access and GitHub environment.`
         );
       }
     }
