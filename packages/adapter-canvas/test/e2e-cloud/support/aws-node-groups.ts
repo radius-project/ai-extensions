@@ -646,7 +646,7 @@ export interface AwsNodeGroupRun {
   /**
    * Stop a start still running, wait for it to end, then scale to zero every
    * group it may have changed. When this returns, the run writes nothing
-   * more to AWS.
+   * more to AWS. Every call shares one stop, so the scale-down runs once.
    */
   stop(): Promise<void>;
 }
@@ -658,6 +658,19 @@ export function createAwsNodeGroupRun(
   const stopping = new AbortController();
   const updates: AwsNodeGroupUpdates = new Map();
   let starting: Promise<void> | null = null;
+  let stopped: Promise<void> | null = null;
+  const stopOnce = async () => {
+    stopping.abort(
+      new Error(
+        `Starting the node groups on cluster ${clusterLabel(cluster)} stopped, because the teardown began.`
+      )
+    );
+    if (!starting) return;
+    // Its failure is the start's to report. What matters here is that it
+    // sends nothing after the scale-down.
+    await starting.catch(() => undefined);
+    await scaleAwsNodeGroupsToZero(ports, cluster, updates);
+  };
   return {
     start(sizes = {}) {
       if (stopping.signal.aborted)
@@ -672,24 +685,20 @@ export function createAwsNodeGroupRun(
             `The node groups on cluster ${clusterLabel(cluster)} were already started.`
           )
         );
-      starting = startAwsNodeGroups(ports, cluster, {
-        sizes,
-        updates,
-        signal: stopping.signal
-      });
+      // Set before any of the start runs, so a stop that begins during its
+      // first AWS call still waits for it.
+      starting = Promise.resolve().then(() =>
+        startAwsNodeGroups(ports, cluster, {
+          sizes,
+          updates,
+          signal: stopping.signal
+        })
+      );
       return starting;
     },
-    async stop() {
-      stopping.abort(
-        new Error(
-          `Starting the node groups on cluster ${clusterLabel(cluster)} stopped, because the teardown began.`
-        )
-      );
-      if (!starting) return;
-      // Its failure is the start's to report. What matters here is that it
-      // sends nothing after the scale-down.
-      await starting.catch(() => undefined);
-      await scaleAwsNodeGroupsToZero(ports, cluster, updates);
+    stop() {
+      stopped ??= stopOnce();
+      return stopped;
     }
   };
 }

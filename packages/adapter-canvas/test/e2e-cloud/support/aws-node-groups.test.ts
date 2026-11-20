@@ -528,6 +528,48 @@ describe("scaleAwsNodeGroupsToZero", () => {
   });
 });
 
+// Every point the start awaits: each AWS call, sent but not answered, and
+// each wait. The teardown begins at each in turn.
+function stopPointWorld(stopAt: number | null) {
+  const world = createJourneyWorld();
+  world.aws.clusters.get(`${MAIN.region}:${MAIN.name}`)!.version = "1.34";
+  const points: string[] = [];
+  const order: string[] = [];
+  let teardown: Promise<void> | null = null;
+  let run: AwsNodeGroupRun | null = null;
+  const reach = (point: string) => {
+    points.push(point);
+    if (run && points.length - 1 === stopAt && !teardown)
+      teardown = run.stop().finally(() => order.push("stop"));
+  };
+  const base = nodePorts(world);
+  run = createAwsNodeGroupRun(
+    {
+      ...base,
+      runAws: (args) => {
+        reach(`aws ${args[1]}`);
+        return world.ports.runAws(args);
+      },
+      sleep: (milliseconds) => {
+        reach("sleep");
+        return world.ports.sleep(milliseconds);
+      },
+      kubernetes: {
+        listNodes: (cluster, selector) => {
+          reach("list nodes");
+          return base.kubernetes.listNodes(cluster, selector);
+        }
+      }
+    },
+    MAIN
+  );
+  return { world, run, points, order, teardown: () => teardown };
+}
+
+const baseline = stopPointWorld(null);
+await baseline.run.start();
+const startPoints = [...baseline.points];
+
 describe("createAwsNodeGroupRun", () => {
   // A run whose start calls `hook` before each AWS call, so a test can begin
   // the teardown at any point. The hook may answer the call itself.
@@ -809,6 +851,49 @@ describe("createAwsNodeGroupRun", () => {
       default: { version: "1.33", desiredSize: 0 },
       isolated: { version: "1.33", desiredSize: 0 }
     });
+  });
+
+  it("has stop points to test", () => {
+    expect(startPoints.length).toBeGreaterThan(10);
+    expect(startPoints).toContain("aws update-nodegroup-version");
+    expect(startPoints).toContain("aws update-nodegroup-config");
+    expect(startPoints).toContain("sleep");
+    expect(startPoints).toContain("list nodes");
+  });
+
+  it.each(startPoints.map((point, index) => [index, point] as const))(
+    "ends at zero, after the start, when the teardown begins at point %i (%s)",
+    async (index) => {
+      const at = stopPointWorld(index);
+      await at.run.start().then(
+        () => at.order.push("start"),
+        () => at.order.push("start")
+      );
+      const teardown = at.teardown();
+      expect(teardown).not.toBeNull();
+      await teardown;
+      expect(at.order).toEqual(["start", "stop"]);
+      expect(groups(at.world)).toMatchObject({
+        default: { desiredSize: 0 },
+        isolated: { desiredSize: 0 }
+      });
+    }
+  );
+
+  it("shares one stop between every caller, and scales down once", async () => {
+    const world = createJourneyWorld();
+    const run = hooked(world, () => null);
+    await run.start();
+    const first = run.stop();
+    const second = run.stop();
+    expect(second).toBe(first);
+    await Promise.all([first, second, run.stop()]);
+    expect(
+      configWrites(world).filter((write) => write.endsWith("desiredSize=0"))
+    ).toEqual([
+      "default minSize=0,maxSize=2,desiredSize=0",
+      "isolated minSize=0,maxSize=1,desiredSize=0"
+    ]);
   });
 
   it("refuses a start after the teardown began, or a second start", async () => {
