@@ -7,8 +7,11 @@ import {
   createJourneyWorld,
   type JourneyWorld
 } from "../../support/aws/journey-scenario.js";
+import { AWS_NODE_GROUP_START_TIMEOUT_MS } from "./aws-timeout-budget.js";
 import {
   countReadyNodes,
+  createAwsNodeGroupRun,
+  type AwsNodeGroupRun,
   describeRadiusRelease,
   readAwsRunVersions,
   scaleAwsNodeGroupsToZero,
@@ -127,7 +130,9 @@ describe("startAwsNodeGroups", () => {
 
   it("takes other sizes", async () => {
     const world = createJourneyWorld();
-    await startAwsNodeGroups(nodePorts(world), MAIN, { default: 1 });
+    await startAwsNodeGroups(nodePorts(world), MAIN, {
+      sizes: { default: 1 }
+    });
     expect(groups(world).default).toEqual({ version: "1.33", desiredSize: 1 });
   });
 
@@ -483,40 +488,13 @@ describe("scaleAwsNodeGroupsToZero", () => {
     world.aws.nodegroupUpdateMs = Infinity;
     const updates: AwsNodeGroupUpdates = new Map();
     const start = world.clock.now;
-    const error = startAwsNodeGroups(nodePorts(world), MAIN, {}, updates);
+    const error = startAwsNodeGroups(nodePorts(world), MAIN, { updates });
     await expect(error).rejects.toThrow(
       /^Scaling node group default .* is still in progress after 15 minutes .* Scaling the node groups back to zero also failed: Could not scale the node groups on cluster .* to zero \(default: update UPDFAKE\d+ is still in progress after 15 minutes, so the group could not be scaled to zero; isolated: update UPDFAKE\d+ is still in progress after 15 minutes, so the group could not be scaled to zero\)/
     );
     // The scale-up's own wait, then one shared wait, not one per group.
     expect(world.clock.now - start).toBeLessThan(31 * 60_000);
     expect([...updates.keys()]).toEqual(["default", "isolated"]);
-  });
-
-  it("ends at zero when the teardown runs while the start is still scaling up", async () => {
-    const world = createJourneyWorld();
-    const updates: AwsNodeGroupUpdates = new Map();
-    let teardown: Promise<void> | null = null;
-    let scaleUps = 0;
-    // A stage timeout: the teardown starts once both scale-ups are sent, and
-    // the start keeps going.
-    const timeout = (args: string[]) => {
-      if (args[1] === "update-nodegroup-config" && ++scaleUps === 2)
-        teardown = scaleAwsNodeGroupsToZero(nodePorts(world), MAIN, updates);
-      return null;
-    };
-    const start = startAwsNodeGroups(
-      nodePorts(world, { runAws: timeout }),
-      MAIN,
-      {},
-      updates
-    ).catch(() => undefined);
-    await start;
-    expect(teardown).not.toBeNull();
-    await teardown;
-    expect(groups(world)).toEqual({
-      default: { version: "1.33", desiredSize: 0 },
-      isolated: { version: "1.33", desiredSize: 0 }
-    });
   });
 
   it("names a scale-down EKS started but couldn't finish", async () => {
@@ -547,6 +525,391 @@ describe("scaleAwsNodeGroupsToZero", () => {
       `Could not scale the node groups on cluster ${MAIN_LABEL} to zero (default: Scaling node group default on cluster ${MAIN_LABEL} to 0 failed: An error occurred (AccessDeniedException) when calling the UpdateNodegroupConfig operation: Refused by the test.). They keep costing until they are. Run the Cloud E2E cleanup workflow, which scales them down.`
     );
     expect(groups(world).isolated.desiredSize).toBe(0);
+  });
+});
+
+// Every point the start awaits: each AWS call, sent but not answered, and
+// each wait. The teardown begins at each in turn.
+function stopPointWorld(stopAt: number | null) {
+  const world = createJourneyWorld();
+  world.aws.clusters.get(`${MAIN.region}:${MAIN.name}`)!.version = "1.34";
+  const points: string[] = [];
+  const order: string[] = [];
+  let teardown: Promise<void> | null = null;
+  let run: AwsNodeGroupRun | null = null;
+  const reach = (point: string) => {
+    points.push(point);
+    if (run && points.length - 1 === stopAt && !teardown)
+      teardown = run.stop().finally(() => order.push("stop"));
+  };
+  const base = nodePorts(world);
+  run = createAwsNodeGroupRun(
+    {
+      ...base,
+      runAws: (args) => {
+        reach(`aws ${args[1]}`);
+        return world.ports.runAws(args);
+      },
+      sleep: (milliseconds) => {
+        reach("sleep");
+        return world.ports.sleep(milliseconds);
+      },
+      kubernetes: {
+        listNodes: (cluster, selector) => {
+          reach("list nodes");
+          return base.kubernetes.listNodes(cluster, selector);
+        }
+      }
+    },
+    MAIN
+  );
+  return { world, run, points, order, teardown: () => teardown };
+}
+
+const baseline = stopPointWorld(null);
+await baseline.run.start();
+const startPoints = [...baseline.points];
+
+describe("createAwsNodeGroupRun", () => {
+  // A run whose start calls `hook` before each AWS call, so a test can begin
+  // the teardown at any point. The hook may answer the call itself.
+  function hooked(
+    world: JourneyWorld,
+    hook: (
+      args: string[],
+      run: AwsNodeGroupRun
+    ) => Promise<AwsCommandResult> | null,
+    held?: ReadonlySet<string>
+  ) {
+    let run: AwsNodeGroupRun | null = null;
+    const created = createAwsNodeGroupRun(
+      nodePorts(world, {
+        held,
+        runAws: (args) => (run ? hook(args, run) : null)
+      }),
+      MAIN
+    );
+    run = created;
+    return created;
+  }
+
+  const configWrites = (world: JourneyWorld) =>
+    world.calls
+      .filter((args) => args[1] === "update-nodegroup-config")
+      .map(
+        (args) => `${args[args.indexOf("--nodegroup-name") + 1]} ${args.at(-1)}`
+      );
+
+  // Starts the run and returns its outcome once both it and the teardown
+  // ended. A hook began the teardown, or it begins after the start ends.
+  async function startThenStop(
+    run: AwsNodeGroupRun,
+    teardown: () => Promise<void> | null
+  ) {
+    const started = await run.start().then(
+      () => null,
+      (error: unknown) => error
+    );
+    await (teardown() ?? run.stop());
+    return { started };
+  }
+
+  // An AWS call held open until `release()`, as a slow answer is.
+  function held() {
+    let release = () => {};
+    const open = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { open, release };
+  }
+
+  // Whether `promise` has settled, after letting every pending step run.
+  async function settled(promise: Promise<unknown>): Promise<boolean> {
+    let done = false;
+    void promise.then(
+      () => (done = true),
+      () => (done = true)
+    );
+    for (let step = 0; step < 20; step += 1)
+      await new Promise((resolve) => setImmediate(resolve));
+    return done;
+  }
+
+  it("doesn't finish the teardown until the start's call in flight answers", async () => {
+    const world = createJourneyWorld();
+    world.aws.clusters.get(`${MAIN.region}:${MAIN.name}`)!.version = "1.34";
+    const call = held();
+    let teardown: Promise<void> | null = null;
+    const run = hooked(world, (args, self) => {
+      if (teardown || args[1] !== "update-nodegroup-version") return null;
+      teardown = self.stop();
+      return call.open.then(() => world.ports.runAws(args));
+    });
+    const start = run.start();
+    expect(await settled(start)).toBe(false);
+    expect(teardown).not.toBeNull();
+    expect(await settled(teardown!)).toBe(false);
+    call.release();
+    await expect(start).rejects.toThrow("stopped, because the teardown began");
+    await teardown;
+    expect(groups(world).default.desiredSize).toBe(0);
+  });
+
+  it("ends at zero when the teardown starts during the version update", async () => {
+    const world = createJourneyWorld();
+    world.aws.clusters.get(`${MAIN.region}:${MAIN.name}`)!.version = "1.34";
+    let teardown: Promise<void> | null = null;
+    const run = hooked(world, (args, self) => {
+      if (!teardown && args[1] === "update-nodegroup-version")
+        teardown = self.stop();
+      return null;
+    });
+    const { started } = await startThenStop(run, () => teardown);
+    // The start leaves the scale-down to the teardown rather than racing it.
+    expect((started as Error).message).toBe(
+      `Starting the node groups on cluster ${MAIN_LABEL} stopped, because the teardown began.`
+    );
+    expect(
+      world.calls.filter((args) => args[1] === "update-nodegroup-version")
+    ).toHaveLength(1);
+    expect(configWrites(world)).toEqual([]);
+    expect(groups(world)).toEqual({
+      default: { version: "1.34", desiredSize: 0 },
+      isolated: { version: "1.33", desiredSize: 0 }
+    });
+  });
+
+  it("scales down a scale-up AWS accepted while the teardown began", async () => {
+    const world = createJourneyWorld();
+    let teardown: Promise<void> | null = null;
+    // The teardown begins while the request is on its way; AWS accepts it
+    // and its answer arrives after.
+    const run = hooked(world, (args, self) => {
+      if (!teardown && args[1] === "update-nodegroup-config")
+        teardown = self.stop();
+      return null;
+    });
+    const { started } = await startThenStop(run, () => teardown);
+    // A stopped start doesn't run its own rollback alongside the teardown's.
+    expect((started as Error).message).toBe(
+      `Starting the node groups on cluster ${MAIN_LABEL} stopped, because the teardown began.`
+    );
+    expect(configWrites(world)).toEqual([
+      "default minSize=0,maxSize=2,desiredSize=2",
+      ...Array(configWrites(world).length - 1).fill(
+        "default minSize=0,maxSize=2,desiredSize=0"
+      )
+    ]);
+    expect(groups(world)).toEqual({
+      default: { version: "1.33", desiredSize: 0 },
+      isolated: { version: "1.33", desiredSize: 0 }
+    });
+  });
+
+  it("sends nothing more when the teardown begins between the two groups' scale-ups", async () => {
+    const world = createJourneyWorld();
+    let teardown: Promise<void> | null = null;
+    const run = hooked(world, (args, self) => {
+      if (
+        !teardown &&
+        args[1] === "describe-nodegroup" &&
+        args.includes("isolated") &&
+        configWrites(world).length === 1
+      )
+        teardown = self.stop();
+      return null;
+    });
+    await startThenStop(run, () => teardown);
+    expect(
+      configWrites(world).filter((write) => write.startsWith("isolated"))
+    ).toEqual([]);
+    expect(groups(world).default.desiredSize).toBe(0);
+  });
+
+  it("stops waiting for a group to be ACTIVE, and writes nothing, when the teardown begins", async () => {
+    const world = createJourneyWorld();
+    const group = world.aws.clusters
+      .get(`${MAIN.region}:${MAIN.name}`)!
+      .nodegroups.get("default")!;
+    group.status = "UPDATING";
+    group.updatingReads = 1000;
+    let teardown: Promise<void> | null = null;
+    let reads = 0;
+    const run = hooked(world, (args, self) => {
+      if (!teardown && args[1] === "describe-nodegroup" && ++reads === 3)
+        teardown = self.stop();
+      return null;
+    });
+    const start = world.clock.now;
+    const { started } = await startThenStop(run, () => teardown);
+    // The start leaves the scale-down to the teardown rather than racing it.
+    expect((started as Error).message).toBe(
+      `Starting the node groups on cluster ${MAIN_LABEL} stopped, because the teardown began.`
+    );
+    expect(awsWrites(world)).toEqual([]);
+    expect(world.clock.now - start).toBeLessThan(5 * 60_000);
+  });
+
+  it("lets a start that failed on its own scale back, then ends at zero", async () => {
+    const world = createJourneyWorld();
+    const run = hooked(world, () => null);
+    // The isolated group's scale-up is refused.
+    let refused = false;
+    const runAws = world.aws.run.bind(world.aws);
+    world.aws.run = (args) => {
+      if (
+        !refused &&
+        args[1] === "update-nodegroup-config" &&
+        args.includes("isolated")
+      ) {
+        refused = true;
+        return {
+          code: 254,
+          stdout: "",
+          stderr:
+            "\nAn error occurred (AccessDeniedException) when calling the UpdateNodegroupConfig operation: denied\n"
+        };
+      }
+      return runAws(args);
+    };
+    const { started } = await startThenStop(run, () => null);
+    expect(String(started)).toContain(
+      "The node groups were scaled back to zero."
+    );
+    expect(groups(world)).toEqual({
+      default: { version: "1.33", desiredSize: 0 },
+      isolated: { version: "1.33", desiredSize: 0 }
+    });
+  });
+
+  it("scales down a group whose scale-up AWS accepted but never answered", async () => {
+    const world = createJourneyWorld();
+    let lost = false;
+    const run = hooked(world, (args) => {
+      if (lost || args[1] !== "update-nodegroup-config") return null;
+      lost = true;
+      world.aws.run(args);
+      // The start's own scale-back is refused too, so the teardown must
+      // still not trust the group's read at zero.
+      world.aws.refuseOnce(
+        "eks update-nodegroup-config",
+        "ThrottlingException"
+      );
+      return Promise.resolve({
+        code: 255,
+        stdout: "",
+        stderr: "Read timeout on endpoint URL",
+        timedOut: true
+      });
+    });
+    const { started } = await startThenStop(run, () => null);
+    expect(String(started)).toMatch(
+      /Read timeout on endpoint URL\. This is an infrastructure failure, not a product one\. Scaling the node groups back to zero also failed: .*ThrottlingException/
+    );
+    expect(groups(world)).toEqual({
+      default: { version: "1.33", desiredSize: 0 },
+      isolated: { version: "1.33", desiredSize: 0 }
+    });
+  });
+
+  it("scales down a group whose accepted scale-up was answered as in use, when the teardown begins during the retry", async () => {
+    const world = createJourneyWorld();
+    let teardown: Promise<void> | null = null;
+    // The CLI's first try reached AWS but its answer was lost; its retry was
+    // refused, because that first try now holds the group.
+    const run = hooked(world, (args, self) => {
+      if (teardown || args[1] !== "update-nodegroup-config") return null;
+      world.aws.run(args);
+      teardown = self.stop();
+      return Promise.resolve({
+        code: 254,
+        stdout: "",
+        stderr:
+          "\nAn error occurred (ResourceInUseException) when calling the UpdateNodegroupConfig operation: Nodegroup default is in UPDATING state and cannot be updated.\n"
+      });
+    });
+    await startThenStop(run, () => teardown);
+    expect(groups(world)).toEqual({
+      default: { version: "1.33", desiredSize: 0 },
+      isolated: { version: "1.33", desiredSize: 0 }
+    });
+  });
+
+  it("stops a start that runs past its limit, and scales back to zero", async () => {
+    const world = createJourneyWorld();
+    world.aws.nodegroupUpdateMs = 11 * 60_000;
+    const run = hooked(world, () => null, new Set(["isolated"]));
+    const start = world.clock.now;
+    const { started } = await startThenStop(run, () => null);
+    expect(String(started)).toMatch(
+      /took longer than 20 minutes, the limit that keeps it inside the preflight stage\. This is an infrastructure failure, not a product one\. The node groups were scaled back to zero\.$/
+    );
+    expect(world.clock.now - start).toBeLessThan(
+      AWS_NODE_GROUP_START_TIMEOUT_MS + 20 * 60_000
+    );
+    expect(groups(world)).toEqual({
+      default: { version: "1.33", desiredSize: 0 },
+      isolated: { version: "1.33", desiredSize: 0 }
+    });
+  });
+
+  it("has stop points to test", () => {
+    expect(startPoints.length).toBeGreaterThan(10);
+    expect(startPoints).toContain("aws update-nodegroup-version");
+    expect(startPoints).toContain("aws update-nodegroup-config");
+    expect(startPoints).toContain("sleep");
+    expect(startPoints).toContain("list nodes");
+  });
+
+  it.each(startPoints.map((point, index) => [index, point] as const))(
+    "ends at zero, after the start, when the teardown begins at point %i (%s)",
+    async (index) => {
+      const at = stopPointWorld(index);
+      await at.run.start().then(
+        () => at.order.push("start"),
+        () => at.order.push("start")
+      );
+      const teardown = at.teardown();
+      expect(teardown).not.toBeNull();
+      await teardown;
+      expect(at.order).toEqual(["start", "stop"]);
+      expect(groups(at.world)).toMatchObject({
+        default: { desiredSize: 0 },
+        isolated: { desiredSize: 0 }
+      });
+    }
+  );
+
+  it("shares one stop between every caller, and scales down once", async () => {
+    const world = createJourneyWorld();
+    const run = hooked(world, () => null);
+    await run.start();
+    const first = run.stop();
+    const second = run.stop();
+    expect(second).toBe(first);
+    await Promise.all([first, second, run.stop()]);
+    expect(
+      configWrites(world).filter((write) => write.endsWith("desiredSize=0"))
+    ).toEqual([
+      "default minSize=0,maxSize=2,desiredSize=0",
+      "isolated minSize=0,maxSize=1,desiredSize=0"
+    ]);
+  });
+
+  it("refuses a start after the teardown began, or a second start", async () => {
+    const world = createJourneyWorld();
+    const stopped = hooked(world, () => null);
+    await stopped.stop();
+    await expect(stopped.start()).rejects.toThrow(
+      "don't start, because the teardown already began"
+    );
+    expect(world.calls).toEqual([]);
+    const twice = hooked(world, () => null);
+    const first = twice.start();
+    await expect(twice.start()).rejects.toThrow("were already started");
+    await first;
+    await twice.stop();
+    expect(groups(world).default.desiredSize).toBe(0);
   });
 });
 

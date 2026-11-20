@@ -34,6 +34,9 @@ export const AWS_SUITE_TIMEOUT_MS = 180 * MINUTE_MS;
 // Node groups: an update at zero nodes, then the scale-up until the pool's
 // nodes are Ready.
 export const AWS_NODE_GROUP_ACTIVE_TIMEOUT_MS = 15 * MINUTE_MS;
+// The whole start, every update and wait included, so it ends inside the
+// preflight stage with time left for the checks before it.
+export const AWS_NODE_GROUP_START_TIMEOUT_MS = 20 * MINUTE_MS;
 export const AWS_NODE_READY_TIMEOUT_MS = 10 * MINUTE_MS;
 export const AWS_NODE_POLL_MS = 15_000;
 

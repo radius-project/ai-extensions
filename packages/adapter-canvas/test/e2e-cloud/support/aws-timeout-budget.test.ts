@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  AWS_NODE_GROUP_START_TIMEOUT_MS,
   AWS_PROBE_CONNECT_TIMEOUT_SECONDS,
   AWS_PROBE_RUN_TIMEOUT_MS,
   AWS_PROBE_START_TIMEOUT_MS,
   AWS_SERIAL_TEST_TIMEOUT_BUDGET_MS,
+  AWS_SETTLE_MS,
   AWS_STAGE_TIMEOUTS_MS,
   AWS_SUITE_TIMEOUT_MS
 } from "./aws-timeout-budget.js";
@@ -23,6 +25,12 @@ describe("AWS Cloud E2E time budget", () => {
   it("keeps each stage inside one GitHub App token's lifetime", () => {
     for (const limit of Object.values(AWS_STAGE_TIMEOUTS_MS))
       expect(limit).toBeLessThanOrEqual(CLOUD_INSTALLATION_TOKEN_LIFETIME_MS);
+  });
+
+  it("fits the node group start and the preflight's settle wait in the preflight stage", () => {
+    expect(AWS_NODE_GROUP_START_TIMEOUT_MS + AWS_SETTLE_MS).toBeLessThan(
+      AWS_STAGE_TIMEOUTS_MS.preflight
+    );
   });
 
   it("fits a default and an isolated probe in the connection check", () => {

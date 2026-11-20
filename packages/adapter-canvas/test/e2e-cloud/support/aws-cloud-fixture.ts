@@ -39,9 +39,7 @@ import {
   NODE_POOL_LABEL,
   readAwsCluster,
   readAwsNodeGroup,
-  scaleAwsNodeGroupsToZero,
-  startAwsNodeGroups,
-  type AwsNodeGroupUpdates,
+  createAwsNodeGroupRun,
   type AwsNodeGroupPorts
 } from "./aws-node-groups.js";
 import { selectLeakedClusterWorkloads } from "./cloud-cleanup.js";
@@ -512,7 +510,17 @@ export interface AwsCloudFixture {
   prepareCleanSlate(): Promise<void>;
   /** Updates and scales up the node groups. Only after prepareCleanSlate(). */
   startNodeGroups(): Promise<void>;
-  /** Scales the node groups to zero if this run started them, then unwinds. */
+  /**
+   * Stops a node group start still running, waits for it, and scales the
+   * node groups to zero if this run started them. Keeps the lease and the
+   * clone. Safe to call at any time, also while dispose() runs: every call
+   * shares one stop.
+   */
+  stopNodeGroups(): Promise<void>;
+  /**
+   * Runs stopNodeGroups(), then unwinds: releases the lease and removes the
+   * clone, also when the stop failed. Every call shares one teardown.
+   */
   dispose(): Promise<void>;
 }
 
@@ -602,10 +610,10 @@ export async function createAwsCloudFixture(
     environmentPrefix: AWS_ENVIRONMENT_NAME_PREFIX
   };
   let clean = false;
-  let nodesStarted = false;
-  // Shared by the start and the teardown, which may run while it does.
-  const nodeUpdates: AwsNodeGroupUpdates = new Map();
-  let disposed = false;
+  // The teardown can run while the start does, as after a stage timeout, so
+  // it stops the start and waits for it before it scales down.
+  const nodeGroups = createAwsNodeGroupRun(options.aws, clusters[0]);
+  let disposed: Promise<void> | null = null;
 
   return {
     uniqueId,
@@ -646,27 +654,30 @@ export async function createAwsCloudFixture(
         throw new Error(
           "The node groups start only after prepareCleanSlate() passes."
         );
-      nodesStarted = true;
-      await startAwsNodeGroups(options.aws, clusters[0], {}, nodeUpdates);
+      await nodeGroups.start();
     },
 
-    async dispose() {
-      if (disposed) return;
-      disposed = true;
-      const failures: string[] = [];
-      if (nodesStarted) {
+    stopNodeGroups() {
+      return nodeGroups.stop();
+    },
+
+    dispose() {
+      disposed ??= (async () => {
+        const failures: string[] = [];
         try {
-          await scaleAwsNodeGroupsToZero(options.aws, clusters[0], nodeUpdates);
+          await nodeGroups.stop();
         } catch (error) {
           failures.push(describeError(error));
         }
-      }
-      failures.push(...(await unwindAll(unwind)));
-      if (failures.length > 0)
-        throw new Error(
-          "AWS cloud fixture teardown failed:\n" +
-            failures.map((failure) => `  - ${failure}`).join("\n")
-        );
+        // Only now, with nothing more going to AWS, is the lease released.
+        failures.push(...(await unwindAll(unwind)));
+        if (failures.length > 0)
+          throw new Error(
+            "AWS cloud fixture teardown failed:\n" +
+              failures.map((failure) => `  - ${failure}`).join("\n")
+          );
+      })();
+      return disposed;
     }
   };
 }
