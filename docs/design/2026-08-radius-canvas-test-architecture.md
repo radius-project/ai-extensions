@@ -163,6 +163,8 @@ Higher-level tests complement unit tests; they do not replace them. A policy bel
 
 Every layer above except Cloud E2E is offline: it contacts no network, credential, or mutable external resource. Cloud E2E is the deliberate exception, because the extension's most consequential behavior is the external side effects it performs — creating an Azure identity, federating it to GitHub, and later removing both. A fake cloud can prove the right commands were sent but never that they were accepted, so that one class of failure is invisible to every other layer. It is therefore kept off the pull request path and run on a schedule; see the [Cloud E2E design](./2026-08-cloud-e2e-environment-lifecycle.md).
 
+The separate [GitHub API contract suite](../eng/GITHUB_API_CONTRACT_RUNBOOK.md) checks a small set of real GitHub permission responses through production adapters. It is not another journey layer. It uses its own allowlisted sandbox and narrowed App tokens, runs only by manual dispatch or an explicitly enabled schedule, and never replaces the hermetic pull-request gate. GHCR is not covered without approved package credentials.
+
 ### Regression classes and prevention
 
 | Gate class                | Regressions stopped                                                                                                                   | Prevention layers                                                                      |
