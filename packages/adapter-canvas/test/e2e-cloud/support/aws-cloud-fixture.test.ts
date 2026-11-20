@@ -1,3 +1,4 @@
+import { STS_INVALID_TOKEN } from "../../support/aws/recorded-errors.js";
 import { describe, expect, it } from "vitest";
 import {
   buildAwsLockPolicyDocument,
@@ -568,7 +569,7 @@ describe("collectAwsPreflightFindings", () => {
     w.aws.refuseOnce("iam get-policy", "AccessDenied");
     w.aws.refuseOnce("rds describe-db-instances", "AccessDenied");
     expect(await findings(w)).toEqual([
-      `Could not check cluster ${MAIN_LABEL}: aws eks describe-addon: An error occurred (AccessDeniedException) when calling the eks describe-addon operation: Refused by the test.`,
+      `Could not check cluster ${MAIN_LABEL}: aws eks describe-addon: An error occurred (AccessDeniedException) when calling the DescribeAddon operation: Refused by the test.`,
       expect.stringMatching(
         /^Could not check the node groups of cluster .*: aws eks list-nodegroups: .*AccessDeniedException/
       ),
@@ -592,6 +593,14 @@ describe("collectAwsPreflightFindings", () => {
         /^Could not check the AWS account: aws sts get-caller-identity: .*ExpiredToken/
       )
     ]);
+    // As the real CLI answers keys STS doesn't know.
+    const run = w.aws.run.bind(w.aws);
+    w.aws.run = (args) =>
+      args[1] === "get-caller-identity" ? STS_INVALID_TOKEN : run(args);
+    expect(await findings(w)).toEqual([
+      "Could not check the AWS account: aws sts get-caller-identity: aws: [ERROR]: An error occurred (InvalidClientTokenId) when calling the GetCallerIdentity operation: The security token included in the request is invalid."
+    ]);
+    w.aws.run = run;
     w.aws.refuseOnce("iam get-role", "AccessDenied");
     main(w).clusterSecurityGroupId = "";
     const result = await findings(w);

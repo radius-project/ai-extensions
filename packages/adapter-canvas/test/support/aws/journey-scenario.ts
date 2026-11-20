@@ -81,6 +81,7 @@ export interface JourneyWorld {
 export function createJourneyWorld(): JourneyWorld {
   const clock = { now: Date.parse("2026-11-17T04:23:00Z") };
   const aws = new FakeAws({ accountId: ACCOUNT, now: () => clock.now });
+  aws.iamSettleMs = 10_000;
   aws.addCluster(MAIN.name, MAIN.region, "API", MAIN_VPC);
   aws.addCluster(SECOND.name, SECOND.region, "API", SECOND_VPC);
   aws.addNodegroup(MAIN.region, MAIN.name, "default", {

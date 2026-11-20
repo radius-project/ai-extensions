@@ -424,17 +424,32 @@ describe("FakeAws node groups", () => {
     });
   });
 
-  it("scales to zero, merging unset sizes, and refuses another update until ACTIVE", () => {
-    const fake = cluster();
+  it("scales to zero, merging unset sizes, and refuses another update until it ends", () => {
+    let now = Date.parse("2026-11-01T00:00:00Z");
+    const fake = new FakeAws({ now: () => now });
+    fake.addCluster("main", REGION, "API", "vpc-main");
+    fake.addNodegroup(REGION, "main", "default", {
+      minSize: 1,
+      maxSize: 2,
+      desiredSize: 2
+    });
     expect(update(fake, "minSize=0,desiredSize=0").code).toBe(0);
+    expect(describe(fake)).toMatchObject({
+      status: "ACTIVE",
+      scalingConfig: { minSize: 1, maxSize: 2, desiredSize: 2 }
+    });
     expect(update(fake, "minSize=0,desiredSize=0").stderr).toContain(
       "(ResourceInUseException)"
     );
     expect(describe(fake)).toMatchObject({
       status: "UPDATING",
+      scalingConfig: { minSize: 1, maxSize: 2, desiredSize: 2 }
+    });
+    now += fake.nodegroupUpdateMs;
+    expect(describe(fake)).toMatchObject({
+      status: "ACTIVE",
       scalingConfig: { minSize: 0, maxSize: 2, desiredSize: 0 }
     });
-    expect(describe(fake).status).toBe("ACTIVE");
   });
 
   it("answers ResourceNotFoundException for a group that does not exist", () => {

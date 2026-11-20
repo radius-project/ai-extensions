@@ -421,6 +421,7 @@ export function createCleanupScenario(): CleanupScenario {
     accountId: ACCOUNT,
     now: () => (clock.now += 1000)
   });
+  aws.iamSettleMs = 10_000;
   aws.addCluster(MAIN.name, MAIN.region, "API", MAIN_VPC);
   aws.addCluster(SECOND.name, SECOND.region, "API", SECOND_VPC);
   aws.addNodegroup(MAIN.region, MAIN.name, "default", {

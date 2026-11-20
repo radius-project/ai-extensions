@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AwsCommandResult } from "../../../src/server/services/aws-cli-session.js";
 import { MAIN, SECOND } from "../../support/aws/cleanup-scenario.js";
+import { EKS_UPDATE_NOT_FOUND } from "../../support/aws/recorded-errors.js";
 import {
   awsWrites,
   createJourneyWorld,
@@ -56,14 +57,41 @@ function nodePorts(
   };
 }
 
+// Each group as EKS shows it once every update has ended, so an update the
+// code left running counts.
 function groups(world: JourneyWorld) {
-  const cluster = world.aws.clusters.get(`${MAIN.region}:${MAIN.name}`);
+  world.clock.now += world.aws.nodegroupUpdateMs;
   return Object.fromEntries(
-    [...(cluster?.nodegroups.values() ?? [])].map((group) => [
-      group.name,
-      { version: group.version, desiredSize: group.desiredSize }
-    ])
+    ["default", "isolated"].map((name) => {
+      const { nodegroup } = JSON.parse(
+        world.aws.run([
+          "eks",
+          "describe-nodegroup",
+          "--region",
+          MAIN.region,
+          "--cluster-name",
+          MAIN.name,
+          "--nodegroup-name",
+          name
+        ]).stdout
+      );
+      return [
+        name,
+        {
+          version: nodegroup.version,
+          desiredSize: nodegroup.scalingConfig.desiredSize
+        }
+      ];
+    })
   );
+}
+
+function mainGroup(world: JourneyWorld, name: string) {
+  const group = world.aws.clusters
+    .get(`${MAIN.region}:${MAIN.name}`)
+    ?.nodegroups.get(name);
+  if (!group) throw new Error(`No node group ${name}`);
+  return group;
 }
 
 // Refuses `command` after its first `after` calls, `times` times.
@@ -76,7 +104,7 @@ function refusing(command: string, after: number, times = Infinity) {
         Promise.resolve({
           code: 254,
           stdout: "",
-          stderr: `An error occurred (AccessDeniedException) when calling ${command}`
+          stderr: `\nAn error occurred (AccessDeniedException) when calling the UpdateNodegroupConfig operation: User is not authorized to perform eks:UpdateNodegroupConfig\n`
         })
       : null;
   };
@@ -194,9 +222,45 @@ describe("startAwsNodeGroups", () => {
     await expect(startAwsNodeGroups(nodePorts(world), MAIN)).rejects.toThrow(
       `Updating node group default on cluster ${MAIN_LABEL} to Kubernetes 1.34 failed: `
     );
-    const ignored = (args: string[]) =>
+    const noId = (args: string[]) =>
       args[1] === "update-nodegroup-version" ?
         Promise.resolve({ code: 0, stdout: "{}", stderr: "" })
+      : null;
+    await expect(
+      startAwsNodeGroups(nodePorts(world, { runAws: noId }), MAIN)
+    ).rejects.toThrow(
+      `Updating node group default on cluster ${MAIN_LABEL} to Kubernetes 1.34 returned no update ID, so the run can't tell when it ends: {}`
+    );
+    const silent = (args: string[]) =>
+      args[1] === "update-nodegroup-version" ?
+        Promise.resolve({ code: 0, stdout: "not json", stderr: "" })
+      : null;
+    await expect(
+      startAwsNodeGroups(nodePorts(world, { runAws: silent }), MAIN)
+    ).rejects.toThrow(
+      "returned no update ID, so the run can't tell when it ends: not json"
+    );
+    const empty = (args: string[]) =>
+      args[1] === "update-nodegroup-version" ?
+        Promise.resolve({ code: 0, stdout: "", stderr: "" })
+      : null;
+    await expect(
+      startAwsNodeGroups(nodePorts(world, { runAws: empty }), MAIN)
+    ).rejects.toThrow("can't tell when it ends: (no output)");
+    // EKS says the update succeeded, but the group kept its version.
+    const ignored = (args: string[]) =>
+      args[1] === "update-nodegroup-version" ?
+        Promise.resolve({
+          code: 0,
+          stdout: '{"update":{"id":"u-1","status":"InProgress"}}',
+          stderr: ""
+        })
+      : args[1] === "describe-update" ?
+        Promise.resolve({
+          code: 0,
+          stdout: '{"update":{"id":"u-1","status":"Successful"}}',
+          stderr: ""
+        })
       : null;
     await expect(
       startAwsNodeGroups(nodePorts(world, { runAws: ignored }), MAIN)
@@ -207,6 +271,116 @@ describe("startAwsNodeGroups", () => {
       default: { version: "1.33", desiredSize: 0 },
       isolated: { version: "1.33", desiredSize: 0 }
     });
+  });
+
+  it("waits for each update by its ID, not by a describe that still shows the group as it was", async () => {
+    const world = createJourneyWorld();
+    const cluster = world.aws.clusters.get(`${MAIN.region}:${MAIN.name}`);
+    if (cluster) cluster.version = "1.34";
+    const start = world.clock.now;
+    await startAwsNodeGroups(nodePorts(world), MAIN);
+    expect(mainGroup(world, "default")).toMatchObject({
+      version: "1.34",
+      desiredSize: 2
+    });
+    expect(
+      world.calls.filter((args) => args[1] === "describe-update")
+    ).not.toHaveLength(0);
+    // Two version updates, then the two scale-ups together.
+    expect(world.clock.now - start).toBeGreaterThanOrEqual(
+      3 * world.aws.nodegroupUpdateMs
+    );
+  });
+
+  it("waits out an update it didn't start, even when a describe still shows the group ACTIVE", async () => {
+    const world = createJourneyWorld();
+    // Something else scales isolated just as this run scales default, so the
+    // run's next describe of isolated still shows it ACTIVE.
+    let raced = false;
+    const race = (args: string[]) => {
+      if (!raced && args[1] === "update-nodegroup-config") {
+        raced = true;
+        world.aws.run([
+          "eks",
+          "update-nodegroup-config",
+          "--region",
+          MAIN.region,
+          "--cluster-name",
+          MAIN.name,
+          "--nodegroup-name",
+          "isolated",
+          "--scaling-config",
+          "minSize=0,maxSize=1,desiredSize=0"
+        ]);
+      }
+      return null;
+    };
+    await startAwsNodeGroups(nodePorts(world, { runAws: race }), MAIN);
+    expect(
+      world.calls.filter((args) => args[1] === "update-nodegroup-config").length
+    ).toBeGreaterThan(2);
+    expect(groups(world).isolated.desiredSize).toBe(1);
+  });
+
+  it("waits for an update EKS doesn't list yet", async () => {
+    const world = createJourneyWorld();
+    let unlisted = 2;
+    const lagging = (args: string[]) =>
+      args[1] === "describe-update" && unlisted-- > 0 ?
+        Promise.resolve(EKS_UPDATE_NOT_FOUND)
+      : null;
+    await startAwsNodeGroups(nodePorts(world, { runAws: lagging }), MAIN);
+    expect(groups(world).default.desiredSize).toBe(2);
+  });
+
+  it("stops, naming EKS's reason, when an update fails, and scales back to zero", async () => {
+    const world = createJourneyWorld();
+    world.aws.nodegroupUpdateFailure = {
+      errorCode: "AsgInstanceLaunchFailures",
+      errorMessage: "Could not launch On-Demand Instances."
+    };
+    await expect(startAwsNodeGroups(nodePorts(world), MAIN)).rejects.toThrow(
+      /^Scaling node group default on cluster .* to 2 ended Failed \(update UPDFAKE\d+\): AsgInstanceLaunchFailures: Could not launch On-Demand Instances\. This is an infrastructure failure, not a product one\. The node groups were scaled back to zero\.$/
+    );
+    expect(groups(world)).toEqual({
+      default: { version: "1.33", desiredSize: 0 },
+      isolated: { version: "1.33", desiredSize: 0 }
+    });
+  });
+
+  it("says when EKS gives no reason for a failed update", async () => {
+    const world = createJourneyWorld();
+    const failed = (args: string[]) =>
+      args[1] === "describe-update" ?
+        Promise.resolve({
+          code: 0,
+          stdout: '{"update":{"status":"Cancelled"}}',
+          stderr: ""
+        })
+      : null;
+    await expect(
+      startAwsNodeGroups(nodePorts(world, { runAws: failed }), MAIN)
+    ).rejects.toThrow(
+      /to 2 ended Cancelled \(update UPDFAKE\d+\): EKS gave no reason\. This is an infrastructure failure/
+    );
+  });
+
+  it("stops when an update never ends, or EKS never lists it", async () => {
+    const world = createJourneyWorld();
+    world.aws.nodegroupUpdateMs = Infinity;
+    await expect(startAwsNodeGroups(nodePorts(world), MAIN)).rejects.toThrow(
+      /^Scaling node group default on cluster .* to 2 is still in progress after 15 minutes \(update UPDFAKE\d+\)\./
+    );
+    const unlisted = createJourneyWorld();
+    const never = (args: string[]) =>
+      args[1] === "describe-update" ?
+        Promise.resolve(EKS_UPDATE_NOT_FOUND)
+      : null;
+    await expect(
+      startAwsNodeGroups(nodePorts(unlisted, { runAws: never }), MAIN)
+    ).rejects.toThrow(
+      /^Scaling node group default on cluster .* to 2 is still not listed by EKS after 15 minutes/
+    );
   });
 
   it("stops when a group never becomes ACTIVE", async () => {
@@ -276,8 +450,8 @@ describe("scaleAwsNodeGroupsToZero", () => {
       isolated: { version: "1.33", desiredSize: 0 }
     });
     expect(ports.lines.slice(-2)).toEqual([
-      `Scaled node group default on cluster ${MAIN_LABEL} to zero from 2.`,
-      `Scaled node group isolated on cluster ${MAIN_LABEL} to zero from 1.`
+      `Scaling node group default on cluster ${MAIN_LABEL} to zero from 2.`,
+      `Scaling node group isolated on cluster ${MAIN_LABEL} to zero from 1.`
     ]);
   });
 
@@ -291,7 +465,7 @@ describe("scaleAwsNodeGroupsToZero", () => {
     await expect(
       scaleAwsNodeGroupsToZero(nodePorts(world), MAIN)
     ).rejects.toThrow(
-      `Could not scale the node groups on cluster ${MAIN_LABEL} to zero (default: Scaling node group default on cluster ${MAIN_LABEL} to 0 failed: An error occurred (AccessDeniedException) when calling the eks update-nodegroup-config operation: Refused by the test.). They keep costing until they are. Run the Cloud E2E cleanup workflow, which scales them down.`
+      `Could not scale the node groups on cluster ${MAIN_LABEL} to zero (default: Scaling node group default on cluster ${MAIN_LABEL} to 0 failed: An error occurred (AccessDeniedException) when calling the UpdateNodegroupConfig operation: Refused by the test.). They keep costing until they are. Run the Cloud E2E cleanup workflow, which scales them down.`
     );
     expect(groups(world).isolated.desiredSize).toBe(0);
   });

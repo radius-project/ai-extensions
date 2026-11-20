@@ -856,8 +856,15 @@ describe("FakeAws EKS clusters and node groups", () => {
     });
   });
 
-  it("updates a node group to the control plane's version, then is ACTIVE again", () => {
-    const { fake, main, group } = cluster();
+  it("updates a node group to the control plane's version late: a stale read, then UPDATING, then done", () => {
+    let now = Date.parse("2026-11-01T00:00:00Z");
+    const fake = new FakeAws({ accountId: ACCOUNT, now: () => now });
+    const main = fake.addCluster("main", "us-east-2", "API", "vpc-main");
+    fake.addNodegroup("us-east-2", "main", "isolated", {
+      minSize: 0,
+      maxSize: 1,
+      desiredSize: 0
+    });
     main.version = "1.34";
     const update = [
       "eks",
@@ -866,10 +873,6 @@ describe("FakeAws EKS clusters and node groups", () => {
       "--nodegroup-name",
       "isolated"
     ];
-    expect(isFakeAwsWrite(update)).toBe(true);
-    expect(json(fake.run(update).stdout).update.type).toBe("VersionUpdate");
-    expect(group).toMatchObject({ version: "1.34", status: "UPDATING" });
-    expect(fake.run(update).stderr).toContain("(ResourceInUseException)");
     const describe = [
       "eks",
       "describe-nodegroup",
@@ -877,8 +880,102 @@ describe("FakeAws EKS clusters and node groups", () => {
       "--nodegroup-name",
       "isolated"
     ];
-    fake.run(describe);
-    expect(json(fake.run(describe).stdout).nodegroup.status).toBe("ACTIVE");
+    expect(isFakeAwsWrite(update)).toBe(true);
+    const started = json(fake.run(update).stdout).update;
+    expect(started).toMatchObject({
+      type: "VersionUpdate",
+      status: "InProgress"
+    });
+    const progress = [
+      "eks",
+      "describe-update",
+      "--region",
+      "us-east-2",
+      "--name",
+      "main",
+      "--nodegroup-name",
+      "isolated",
+      "--update-id",
+      started.id
+    ];
+    expect(json(fake.run(describe).stdout).nodegroup).toMatchObject({
+      status: "ACTIVE",
+      version: "1.33"
+    });
+    expect(json(fake.run(describe).stdout).nodegroup).toMatchObject({
+      status: "UPDATING",
+      version: "1.33"
+    });
+    expect(fake.run(update).stderr).toContain(
+      "(ResourceInUseException) when calling the UpdateNodegroupVersion operation: Nodegroup isolated is in UPDATING state"
+    );
+    expect(json(fake.run(progress).stdout).update.status).toBe("InProgress");
+    now += fake.nodegroupUpdateMs;
+    expect(json(fake.run(progress).stdout).update.status).toBe("Successful");
+    expect(json(fake.run(describe).stdout).nodegroup).toMatchObject({
+      status: "ACTIVE",
+      version: "1.34"
+    });
+    expect(fake.run([...progress.slice(0, -1), "UPD-other"]).stderr).toContain(
+      "(ResourceNotFoundException) when calling the DescribeUpdate operation: No update found for ID: UPD-other"
+    );
+  });
+
+  it("ends a node group update Failed, keeping the group as it was", () => {
+    let now = Date.parse("2026-11-01T00:00:00Z");
+    const fake = new FakeAws({ accountId: ACCOUNT, now: () => now });
+    fake.addCluster("main", "us-east-2", "API", "vpc-main");
+    const group = fake.addNodegroup("us-east-2", "main", "isolated", {
+      minSize: 0,
+      maxSize: 1,
+      desiredSize: 0
+    });
+    fake.nodegroupUpdateFailure = { errorCode: "Code", errorMessage: "No." };
+    const { id } = json(
+      fake.run([
+        "eks",
+        "update-nodegroup-config",
+        ...MAIN,
+        "--nodegroup-name",
+        "isolated",
+        "--scaling-config",
+        "desiredSize=1"
+      ]).stdout
+    ).update;
+    now += fake.nodegroupUpdateMs;
+    expect(
+      json(
+        fake.run([
+          "eks",
+          "describe-update",
+          "--region",
+          "us-east-2",
+          "--name",
+          "main",
+          "--nodegroup-name",
+          "isolated",
+          "--update-id",
+          id
+        ]).stdout
+      ).update
+    ).toMatchObject({
+      status: "Failed",
+      errors: [{ errorCode: "Code", errorMessage: "No.", resourceIds: [] }]
+    });
+    expect(group.desiredSize).toBe(0);
+    expect(fake.nodegroupUpdateFailure).toBeNull();
+  });
+
+  it("names the API operation a refused or expired call was for", () => {
+    const { fake } = cluster();
+    fake.refuseOnce("rds describe-db-snapshots", "AccessDenied");
+    expect(fake.run(["rds", "describe-db-snapshots"]).stderr).toContain(
+      "when calling the DescribeDBSnapshots operation: Refused by the test."
+    );
+    fake.sessionExpired = true;
+    expect(fake.run(["iam", "get-role", "--role-name", "x"]).stderr).toBe(
+      "\nAn error occurred (ExpiredToken) when calling the GetRole operation: The security token included in the request is expired\n"
+    );
   });
 
   it("refuses to roll a node group back to an earlier version", () => {
