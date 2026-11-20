@@ -1001,13 +1001,21 @@ describe("createAwsCloudFixture", () => {
       return runGh(args);
     };
     const writes = w.events.length;
+    const stopping = fixture.stopNodeGroups();
     await fixture.dispose();
-    expect(during).not.toBeNull();
+    expect(during).toBe(stopping);
     await during;
     const after = w.events.slice(writes);
     expect(
       after.filter((line) => line === "aws eks update-nodegroup-config")
     ).toHaveLength(2);
+    // The late call ran no second stop: nothing reaches AWS after the lease.
+    const lease = w.events.findIndex(
+      (line) => line.includes("DELETE") && line.includes("cloud-e2e-lease")
+    );
+    expect(
+      w.events.slice(lease).filter((line) => line.startsWith("aws "))
+    ).toEqual([]);
     expect(fake.removed).toEqual(["/tmp/radtest-workspace"]);
   });
 
