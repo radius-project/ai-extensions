@@ -44,11 +44,25 @@ EOF
 set -euo pipefail
 printf 'rad %s\n' "$*" >>"${CALLS}"
 case "${1:-} ${2:-}" in
+    "env list")
+        if [[ "${RAD_DISCOVERY_FAIL}" == "env-list" ]]; then
+            echo 'synthetic environment list failure' >&2
+            exit 1
+        fi
+        printf '%s\n' "${ENV_LIST_JSON}"
+        ;;
     "env show")
+        if [[ "${RAD_DISCOVERY_FAIL}" == "env-show" ]]; then
+            # Recorded from rad v0.62.0 for a missing environment.
+            printf 'The environment "%s" does not exist. Please select a new environment and try again.\n\n' "${3:-}"
+            exit 1
+        fi
         printf '%s\n' "${ENV_JSON}"
         ;;
     "recipe-pack show")
-        if [[ -n "${PACK_JSON_OVERRIDE}" ]]; then
+        if [[ "${3:-}" == */recipePacks/without-routes ]]; then
+            printf '%s\n' '{"properties":{"recipes":{}}}'
+        elif [[ -n "${PACK_JSON_OVERRIDE}" ]]; then
             printf '%s\n' "${PACK_JSON_OVERRIDE}"
         else
             jq -nc --arg source "${PACK_SOURCE}" \
@@ -469,6 +483,7 @@ reset_case() {
         jq -nc \
             '{properties:{recipePacks:["/scope/providers/Radius.Core/recipePacks/default"]}}'
     )"
+    ENV_LIST_JSON="$(jq -nc '[{name:"test"}]')"
     PACK_SOURCE='ghcr.io/radius-project/kube-recipes/routes:test'
     PACK_JSON_OVERRIDE=''
     APP_LIST_JSON='[]'
@@ -529,7 +544,8 @@ reset_case() {
           })
         }'
     )"
-    export ENV_JSON PACK_SOURCE PACK_JSON_OVERRIDE APP_LIST_JSON ROUTES_APPS
+    export ENV_JSON ENV_LIST_JSON PACK_SOURCE PACK_JSON_OVERRIDE
+    export APP_LIST_JSON ROUTES_APPS
     export RESOURCE_JSON_OVERRIDE
     export RAD_DISCOVERY_FAIL CRDS_STATE CRDS_OWNED NAMESPACE_STATE
     export COMPONENTS_STATE HELM_STATE HELM_OWNED HELM_VALUES_STATE
@@ -722,6 +738,44 @@ run_action ensure
 assert_failure "malformed recipe discovery"
 assert_output "returned invalid recipe data"
 assert_no_call "kubectl"
+
+# Ensure needs the routes recipe the app's routes will deploy with.
+reset_case
+PACK_JSON_OVERRIDE="$(jq -nc '{properties:{recipes:{}}}')"
+export PACK_JSON_OVERRIDE
+run_action ensure
+assert_failure "ensure without a routes recipe"
+assert_output "has no effective Radius.Compute/routes recipe"
+assert_no_call "kubectl"
+
+# A pack without a routes recipe is skipped, not treated as invalid.
+reset_case
+ENV_JSON="$(
+    jq -nc '{properties:{recipePacks:[
+      "/scope/providers/Radius.Core/recipePacks/without-routes",
+      "/scope/providers/Radius.Core/recipePacks/default"
+    ]}}'
+)"
+export ENV_JSON
+run_action ensure
+assert_success "routes recipe in a later pack"
+assert_output "Effective routes recipe is the Radius default"
+assert_call "rad recipe-pack show /scope/providers/Radius.Core/recipePacks/default"
+
+# An environment read failure is reported as itself, not as a missing recipe.
+for mode in ensure cleanup; do
+    reset_case
+    RAD_DISCOVERY_FAIL='env-show'
+    export RAD_DISCOVERY_FAIL
+    run_action "${mode}"
+    assert_failure "${mode} environment read failure"
+    assert_output "failed to inspect Radius environment test"
+    if grep -qF "has no effective Radius.Compute/routes recipe" "${OUTPUT}"; then
+        fail "${mode}: environment read failure reported as a missing recipe
+$(cat "${OUTPUT}")"
+    fi
+    assert_no_call "kubectl"
+done
 
 # Invalid and conflicting inputs fail before any cluster mutation.
 reset_case
@@ -983,6 +1037,111 @@ run_action cleanup
 assert_success "custom recipe cleanup"
 assert_output "Custom routes recipe detected"
 assert_no_call "kubectl"
+
+# An environment that was never deployed has nothing to clean up. rad v0.62.0
+# prints null when no environments exist. The fake Gateway infrastructure is
+# Radius-owned so a wrong cleanup would delete it.
+missing_environment_lists=('null' '[]' '[{"name":"other"}]')
+for env_list in "${missing_environment_lists[@]}"; do
+    reset_case
+    ENV_LIST_JSON="${env_list}"
+    RAD_DISCOVERY_FAIL='env-show'
+    HELM_STATE='present'
+    HELM_OWNED='true'
+    GATEWAY_RESOURCES_OWNED='true'
+    export ENV_LIST_JSON RAD_DISCOVERY_FAIL HELM_STATE HELM_OWNED
+    export GATEWAY_RESOURCES_OWNED
+    run_action cleanup
+    assert_success "cleanup without the environment: ${env_list}"
+    assert_output "Radius environment 'test' does not exist"
+    assert_no_call "rad env show"
+    assert_no_call "kubectl"
+    assert_no_call "helm"
+done
+
+reset_case
+ENV_LIST_JSON="$(jq -nc '[{name:"other"},{name:"TEST"}]')"
+export ENV_LIST_JSON
+run_action cleanup
+assert_success "environment lookup ignores case"
+assert_call "rad env show test -o json"
+
+reset_case
+RAD_DISCOVERY_FAIL='env-list'
+export RAD_DISCOVERY_FAIL
+run_action cleanup
+assert_failure "environment list failure"
+assert_output "failed to list Radius environments"
+assert_no_call "rad env show"
+assert_no_call "kubectl"
+
+malformed_environment_lists=('{}' '[{"id":"no-name"}]' 'not-json')
+for env_list in "${malformed_environment_lists[@]}"; do
+    reset_case
+    ENV_LIST_JSON="${env_list}"
+    export ENV_LIST_JSON
+    run_action cleanup
+    assert_failure "malformed environment list: ${env_list}"
+    assert_output "Radius environment discovery returned invalid"
+    assert_no_call "rad env show"
+    assert_no_call "kubectl"
+done
+
+# A routes recipe may have been removed after a deploy, so cleanup without one
+# keeps whatever is there.
+reset_case
+PACK_JSON_OVERRIDE="$(jq -nc '{properties:{recipes:{}}}')"
+HELM_STATE='present'
+HELM_OWNED='true'
+GATEWAY_RESOURCES_OWNED='true'
+export PACK_JSON_OVERRIDE HELM_STATE HELM_OWNED GATEWAY_RESOURCES_OWNED
+run_action cleanup
+assert_success "cleanup without a routes recipe"
+assert_output "has no effective Radius.Compute/routes recipe; Gateway cleanup is a no-op"
+assert_no_call "kubectl"
+assert_no_call "helm"
+
+# A deploy that stopped after creating the environment, before attaching
+# recipe packs, leaves recipePacks unset or null.
+unattached_environments=('{"properties":{}}' '{"properties":{"recipePacks":null}}')
+for env_json in "${unattached_environments[@]}"; do
+    reset_case
+    ENV_JSON="${env_json}"
+    HELM_STATE='present'
+    HELM_OWNED='true'
+    GATEWAY_RESOURCES_OWNED='true'
+    export ENV_JSON HELM_STATE HELM_OWNED GATEWAY_RESOURCES_OWNED
+    run_action cleanup
+    assert_success "cleanup before recipe packs were attached: ${env_json}"
+    assert_output "Gateway cleanup is a no-op"
+    assert_no_call "rad recipe-pack show"
+    assert_no_call "kubectl"
+    assert_no_call "helm"
+
+    run_action ensure
+    assert_failure "ensure before recipe packs were attached: ${env_json}"
+    assert_output "has no effective Radius.Compute/routes recipe"
+done
+
+malformed_environments=(
+    '{"properties":{"recipePacks":"pack"}}'
+    '"not-an-object"'
+    '{}'
+    '{"properties":null}'
+    '{"properties":[]}'
+)
+for env_json in "${malformed_environments[@]}"; do
+    for mode in cleanup ensure; do
+        reset_case
+        ENV_JSON="${env_json}"
+        export ENV_JSON
+        run_action "${mode}"
+        assert_failure "${mode} malformed environment: ${env_json}"
+        assert_output "returned invalid recipe-pack data"
+        assert_no_call "rad recipe-pack show"
+        assert_no_call "kubectl"
+    done
+done
 
 reset_case
 APP_LIST_JSON="$(jq -nc '[{name:"remaining"}]')"
