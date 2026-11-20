@@ -17,6 +17,7 @@ import {
 } from "../../../src/aws-deploy-role-name.js";
 import { resolveOidcSubject } from "../../../src/azure-oidc.js";
 import {
+  ApplicationDeleteFailed,
   sweepAwsCloudE2E,
   findAwsLeftovers,
   statePackageName,
@@ -87,15 +88,22 @@ export interface CleanupScenario {
   readonly packages: Map<string, FakePackage>;
   readonly clock: { now: number };
   ports: AwsCleanupPorts;
-  // How delete-application.yml behaves for each environment: "fail" throws,
-  // "leave" succeeds but leaves the database, the app role, and its Pod
-  // Identity association, as when Radius loses track.
-  readonly appDelete: Map<string, "fail" | "leave">;
+  // How delete-application.yml behaves for each environment: "fail" ends
+  // failed, "leave" succeeds but leaves the database, the app role, and its
+  // Pod Identity association, as when Radius loses track, and `unfinished`
+  // throws that error while its run keeps going until the next day.
+  readonly appDelete: Map<string, AppDeleteBehavior>;
+  // Runs still going, by environment, and the ones that then couldn't sign
+  // in because the sweep had removed the access they needed.
+  readonly runningDeletes: string[];
+  readonly strandedDeletes: string[];
   readonly log: string[];
   // Each environment's trust subjects and cluster, as setup added them.
   readonly subjects: Map<string, string[]>;
   readonly clusters: Map<string, { region: string; name: string }>;
 }
+
+export type AppDeleteBehavior = "fail" | "leave" | { unfinished: string };
 
 export function cleanupConfig(
   scenario: Pick<CleanupScenario, "clock">,
@@ -230,16 +238,27 @@ function githubPort(scenario: CleanupScenario): AwsCleanupGitHub {
           if (application !== APPLICATION)
             throw new Error(`Unexpected application ${application}`);
           const behavior = scenario.appDelete.get(environment);
-          if (behavior === "fail")
-            throw new Error("delete-application.yml run 9 ended failure.");
-          // The delete workflow signs in as the deploy role through the
-          // environment's trust subject and acts with its inline policy.
-          const access = retryInputs(scenario, environment);
+          // As the port does, a run that ended while an earlier one for the
+          // environment is still going doesn't count as finished.
           if (
-            !access.includes("policy") ||
-            !access.some((item) => item.startsWith("trust "))
+            behavior === "fail" &&
+            scenario.runningDeletes.includes(environment)
           )
             throw new Error(
+              `delete-application.yml run 9 ended failure. Run 8 for ${environment} is still going.`
+            );
+          if (behavior === "fail")
+            throw new ApplicationDeleteFailed(
+              "delete-application.yml run 9 ended failure."
+            );
+          if (typeof behavior === "object") {
+            scenario.runningDeletes.push(environment);
+            throw new Error(behavior.unfinished);
+          }
+          // The delete workflow signs in as the deploy role through the
+          // environment's trust subject and acts with its inline policy.
+          if (!canSignIn(scenario, environment))
+            throw new ApplicationDeleteFailed(
               "delete-application.yml run 9 ended failure: Could not assume the deploy role."
             );
           // Cloud Control deletes the app role with the deploy role's
@@ -248,7 +267,7 @@ function githubPort(scenario: CleanupScenario): AwsCleanupGitHub {
             scenario.aws.role(appRoleName(environment)) &&
             !scenario.aws.role(ROLE)?.inline.has(APP_ROLES_POLICY)
           )
-            throw new Error(
+            throw new ApplicationDeleteFailed(
               "delete-application.yml run 9 ended failure: AccessDenied for iam:DeleteRole."
             );
           deleteApplication(scenario, environment, behavior === "leave");
@@ -458,6 +477,8 @@ export function createCleanupScenario(): CleanupScenario {
     packages: new Map(),
     clock,
     appDelete: new Map(),
+    runningDeletes: [],
+    strandedDeletes: [],
     log,
     subjects: new Map(),
     clusters: new Map(),
@@ -644,6 +665,23 @@ export function addOrphanedAppRole(
   return addAppRole(scenario, environment);
 }
 
+/**
+ * An app role in the environment's folder without the Recipe's environment
+ * tag, as when Cloud Control made the role but its tags didn't apply. The
+ * sweep can't tie it to the environment, so it keeps it, and the environment
+ * keeps everything step 4 removes while it is there.
+ */
+export function addUntaggedAppRole(
+  scenario: CleanupScenario,
+  environment: string
+): FakeIamRole {
+  return scenario.aws.addRole({
+    name: `radius-app-untagged-${environment.slice(PREFIX.length)}`,
+    trust: POD_IDENTITY_TRUST,
+    path: appBoundary(environment).path
+  });
+}
+
 /** Run the sweep once, as one scheduled cleanup run does. */
 export function runSweep(
   scenario: CleanupScenario,
@@ -657,11 +695,29 @@ export function runVerify(scenario: CleanupScenario) {
   return findAwsLeftovers(cleanupConfig(scenario), scenario.ports);
 }
 
-/** The next day's run: a new process, a day later. */
+// The delete workflow signs in as the deploy role through the environment's
+// trust subject and acts with its inline policy.
+function canSignIn(scenario: CleanupScenario, environment: string): boolean {
+  const access = retryInputs(scenario, environment);
+  return (
+    access.includes("policy") &&
+    access.some((item) => item.startsWith("trust "))
+  );
+}
+
+/**
+ * The next day's run: a new process, a day later. Each delete run still going
+ * has ended by then, and records whether it could still sign in.
+ */
 export function nextDay(scenario: CleanupScenario): void {
+  for (const environment of scenario.runningDeletes.splice(0))
+    if (!canSignIn(scenario, environment))
+      scenario.strandedDeletes.push(environment);
   scenario.outside.startProcess();
   scenario.ports = createPorts(scenario);
   scenario.clock.now += DAY;
+  scenario.aws.settle();
+  scenario.kube.settle();
 }
 
 /** What one environment still has that a retry of its cleanup needs. */

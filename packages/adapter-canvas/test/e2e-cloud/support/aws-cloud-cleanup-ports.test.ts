@@ -21,6 +21,7 @@ import {
   temporaryDirectory,
   type CommandResult
 } from "./aws-cloud-cleanup-ports.js";
+import { ApplicationDeleteFailed } from "./aws-cloud-cleanup.js";
 
 const REPO = "octo/fixture";
 const OK = (value: unknown): CommandResult => ({
@@ -63,10 +64,14 @@ function github(rules: Array<[string, Answer]>, clock = { now: 0 }) {
       sleep: async (milliseconds) => {
         clock.now += milliseconds;
       },
-      now: () => clock.now
+      now: () => clock.now,
+      correlationId: () => "cleanup-1"
     })
   };
 }
+
+// The run title delete-application.yml gives the port's dispatch.
+const TITLE = "Radius - Delete e [radius:v1 app=a] cleanup-1";
 
 // Answers in turn, repeating the last one.
 function sequence(...answers: CommandResult[]): () => CommandResult {
@@ -154,10 +159,14 @@ describe("createGhCleanupGitHub", () => {
   });
 
   it("dispatches delete-application.yml, finds its run, and waits for success", async () => {
+    const mine =
+      "Radius - Delete radtest-aws-x [radius:v1 app=cloud-e2e] cleanup-1";
     const runs = sequence(
-      OK([{ databaseId: 1 }]),
-      OK([{ databaseId: 1 }]),
-      OK([{ databaseId: 1 }, { databaseId: 2 }])
+      OK([{ databaseId: 1, displayTitle: "other" }]),
+      OK([
+        { databaseId: 1, displayTitle: "other" },
+        { databaseId: 2, displayTitle: mine }
+      ])
     );
     const view = sequence(
       OK({ status: "in_progress", conclusion: "" }),
@@ -180,7 +189,9 @@ describe("createGhCleanupGitHub", () => {
       "-f",
       "environment=radtest-aws-x",
       "-f",
-      "application=cloud-e2e"
+      "application=cloud-e2e",
+      "-f",
+      "correlation_id=cleanup-1"
     ]);
     expect(clock.now).toBeGreaterThan(0);
   });
@@ -205,7 +216,10 @@ describe("createGhCleanupGitHub", () => {
     [
       "the run fails",
       [
-        ["run list", sequence(OK([]), OK([{ databaseId: 5 }]))],
+        [
+          "run list",
+          sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
+        ],
         ["workflow run", OK("")],
         ["run view 5", OK({ status: "completed", conclusion: "failure" })]
       ],
@@ -214,7 +228,10 @@ describe("createGhCleanupGitHub", () => {
     [
       "the run can't be read",
       [
-        ["run list", sequence(OK([]), OK([{ databaseId: 5 }]))],
+        [
+          "run list",
+          sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
+        ],
         ["workflow run", OK("")],
         ["run view 5", HTTP(500)]
       ],
@@ -222,26 +239,217 @@ describe("createGhCleanupGitHub", () => {
     ],
     [
       "the runs can't be listed",
-      [["run list", HTTP(403)]],
+      [
+        ["run list", HTTP(403)],
+        ["workflow run", OK("")]
+      ],
       "Listing delete-application.yml runs: gh: Something (HTTP 403)"
     ]
   ] as Array<[string, Array<[string, Answer]>, string]>)(
     "fails the app delete when %s",
     async (_case, rules, message) => {
       const { port } = github(rules);
-      await expect(port.deleteApplication("e", "a")).rejects.toThrow(message);
+      const error: unknown = await port
+        .deleteApplication("e", "a")
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(message);
+      // Only a run that finished says nothing is still deleting.
+      expect(error instanceof ApplicationDeleteFailed).toBe(
+        _case === "the run fails"
+      );
+    }
+  );
+
+  it("doesn't take another dispatch's run for its own, even one that failed first", async () => {
+    const { port, calls } = github([
+      [
+        "run list",
+        sequence(
+          OK([]),
+          // Another delete, such as the Azure job's, shows up first.
+          OK([
+            {
+              databaseId: 4,
+              displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0"
+            }
+          ]),
+          OK([
+            {
+              databaseId: 4,
+              displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0"
+            },
+            { databaseId: 5, displayTitle: TITLE }
+          ])
+        )
+      ],
+      ["workflow run", OK("")],
+      ["run view 4", OK({ status: "completed", conclusion: "failure" })],
+      ["run view 5", OK({ status: "completed", conclusion: "success" })]
+    ]);
+    await port.deleteApplication("e", "a");
+    expect(
+      calls
+        .filter((call) => call.args[0] === "run" && call.args[1] === "view")
+        .map((call) => call.args[2])
+    ).toEqual(["5"]);
+  });
+
+  it.each([
+    [
+      "two runs carry its title",
+      [
+        { databaseId: 5, displayTitle: TITLE },
+        { databaseId: 6, displayTitle: TITLE }
+      ],
+      `2 delete-application.yml runs are titled "${TITLE}".`
+    ],
+    [
+      "its run has no ID",
+      [{ databaseId: "5", displayTitle: TITLE }],
+      `The run titled "${TITLE}" has no valid database id.`
+    ],
+    [
+      "the listing isn't a list",
+      {},
+      "The workflow run listing was not a JSON array."
+    ]
+  ])("can't tell its run when %s", async (_case, listed, message) => {
+    const { port } = github([
+      ["run list", OK(listed)],
+      ["workflow run", OK("")]
+    ]);
+    const error: unknown = await port
+      .deleteApplication("e", "a")
+      .catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe(message);
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+  });
+
+  it.each([
+    [
+      "an earlier run for it is still going",
+      OK([
+        {
+          databaseId: 3,
+          displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0"
+        }
+      ]),
+      "delete-application.yml run 5 ended cancelled. Run 3 for e is still going."
+    ],
+    [
+      "an earlier run for it has no ID",
+      OK([{ displayTitle: "Radius - Delete e [radius:v1 app=a]" }]),
+      "delete-application.yml run 5 ended cancelled. Run with no ID for e is still going."
+    ],
+    [
+      "the unfinished runs can't be listed",
+      HTTP(502),
+      "Listing requested delete-application.yml runs: gh: Something (HTTP 502)"
+    ],
+    [
+      "too many runs are unfinished to see them all",
+      OK(
+        Array.from({ length: 100 }, (_, index) => ({
+          databaseId: index + 10,
+          displayTitle: "Radius - Delete other [radius:v1 app=a]"
+        }))
+      ),
+      "100 delete-application.yml runs are requested, so the sweep can't tell whether one is for e."
+    ],
+    [
+      "the listing isn't a list",
+      OK({}),
+      "The workflow run listing was not a JSON array."
+    ]
+  ] as Array<[string, Answer, string]>)(
+    "doesn't report its run as finished when %s",
+    async (_case, unfinished, message) => {
+      const { port } = github([
+        [
+          "run list --repo octo/fixture --workflow delete-application.yml --status",
+          unfinished
+        ],
+        [
+          "run list",
+          sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
+        ],
+        ["workflow run", OK("")],
+        ["run view 5", OK({ status: "completed", conclusion: "cancelled" })]
+      ]);
+      const error: unknown = await port
+        .deleteApplication("e", "a")
+        .catch((caught: unknown) => caught);
+      expect((error as Error).message).toBe(message);
+      expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+    }
+  );
+
+  it("reads every unfinished status, and ignores other environments' runs", async () => {
+    const { port, calls } = github([
+      [
+        "run list --repo octo/fixture --workflow delete-application.yml --status",
+        OK([
+          {
+            databaseId: 3,
+            displayTitle: "Radius - Delete e2 [radius:v1 app=a] x"
+          },
+          {
+            databaseId: 4,
+            displayTitle: "Radius - Delete other e [radius:v1 app=a]"
+          }
+        ])
+      ],
+      [
+        "run list",
+        sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
+      ],
+      ["workflow run", OK("")],
+      ["run view 5", OK({ status: "completed", conclusion: "failure" })]
+    ]);
+    await expect(port.deleteApplication("e", "a")).rejects.toBeInstanceOf(
+      ApplicationDeleteFailed
+    );
+    expect(
+      calls
+        .filter((call) => call.args.includes("--status"))
+        .map((call) => call.args[call.args.indexOf("--status") + 1])
+    ).toEqual(["requested", "queued", "pending", "waiting", "in_progress"]);
+  });
+
+  it.each(["cancelled", "timed_out", "startup_failure"])(
+    "reports a run that ended %s as finished",
+    async (conclusion) => {
+      const { port } = github([
+        [
+          "run list",
+          sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
+        ],
+        ["workflow run", OK("")],
+        ["run view 5", OK({ status: "completed", conclusion })]
+      ]);
+      await expect(port.deleteApplication("e", "a")).rejects.toBeInstanceOf(
+        ApplicationDeleteFailed
+      );
     }
   );
 
   it("gives up on a run that outlives the app delete timeout", async () => {
     const { port, clock } = github([
-      ["run list", sequence(OK([]), OK([{ databaseId: 5 }]))],
+      [
+        "run list",
+        sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
+      ],
       ["workflow run", OK("")],
       ["run view 5", OK({ status: "queued" })]
     ]);
-    await expect(port.deleteApplication("e", "a")).rejects.toThrow(
+    const error: unknown = await port
+      .deleteApplication("e", "a")
+      .catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe(
       "delete-application.yml run 5 did not finish in time."
     );
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
     expect(clock.now).toBeGreaterThanOrEqual(APPLICATION_DELETE_TIMEOUT_MS);
   });
 
@@ -441,7 +649,7 @@ describe("createKubectlCleanupKubernetes", () => {
     expect(await port.listWorkloads(CLUSTER)).toEqual({ items: [] });
   });
 
-  it("deletes a workload by kind and namespace, and a namespace without waiting", async () => {
+  it("deletes a workload in the foreground, and a namespace, without waiting for either", async () => {
     const { port, calls } = kubectl({});
     await port.deleteWorkload(CLUSTER, {
       kind: "Deployment",
@@ -457,6 +665,8 @@ describe("createKubectlCleanupKubernetes", () => {
         "--namespace",
         "ns",
         "--ignore-not-found",
+        "--cascade=foreground",
+        "--wait=false",
         "--request-timeout=60s"
       ],
       [

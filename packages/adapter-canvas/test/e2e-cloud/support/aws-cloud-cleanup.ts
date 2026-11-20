@@ -38,9 +38,15 @@ import {
 //      access entry (with the product's own removal code) and its GitHub
 //      environment.
 //
-// If any of steps 1 to 3 fails, everything step 4 removes stays, so the next
-// run can retry, and the sweep fails. The GitHub environment goes last: it is
-// what makes a later sweep find the environment again.
+// If step 2 or 3 fails, everything step 4 removes stays, so the next run can
+// retry, and the sweep fails. A failed step 1 fails the sweep too, but, as in
+// the Azure sweep, when the delete's run finished without succeeding the
+// environment still goes on to step 4 if steps 2 and 3 pass and fresh reads
+// of AWS and the clusters list nothing of it. A run that may still be going
+// keeps everything. A delete
+// that fails the same way every day would otherwise keep the environment's
+// access forever. The GitHub environment goes last: it is what makes a later
+// sweep find the environment again.
 //
 // Every delete is limited to what the suite creates: in one of the two test
 // regions, named the way the MySQL recipe names it, tagged with an AWS test
@@ -113,8 +119,10 @@ export interface AwsCleanupGitHub {
   readEnvironmentVariables(
     environment: string
   ): Promise<Record<string, string>>;
-  // Dispatch delete-application.yml and wait for it to succeed. Throws when
-  // it can't be dispatched, found, or does not succeed.
+  // Dispatch delete-application.yml and wait for it to succeed. Throws
+  // ApplicationDeleteFailed when its run finished without succeeding, and
+  // any other error when it can't be dispatched, found, read, or doesn't
+  // finish in time, so the run may still be going.
   deleteApplication(environment: string, application: string): Promise<void>;
   listDeployments(): Promise<unknown>;
   // Deactivate, delete, and confirm the record is gone.
@@ -201,6 +209,13 @@ export function awsError(result: AwsCommandResult, code: string): boolean {
 }
 
 class ReadFailure extends Error {}
+
+/**
+ * The delete-application.yml run finished without succeeding. Only then is
+ * nothing still deleting the app, so only then can the sweep go on to step 4
+ * without a successful delete.
+ */
+export class ApplicationDeleteFailed extends Error {}
 
 // --- Configuration --------------------------------------------------------
 
@@ -796,6 +811,8 @@ interface Target {
   trustSubjects: string[];
   // Why steps 1 to 3 keep this environment, or "" while nothing has.
   blocked: string;
+  // Whether step 1's Radius application delete failed.
+  deleteFailed: boolean;
 }
 
 // Failures and warnings are logged as GitHub annotations, in the order they
@@ -1439,10 +1456,24 @@ export interface AppRole extends AppRoleCandidate {
   readonly tags: unknown[];
 }
 
-/** The repository's app roles, each with its tags. */
+/**
+ * Something a list still shows but its describe no longer finds, as an
+ * eventually consistent read can answer while a delete settles. Its
+ * environment is null when the list doesn't say which it is.
+ */
+export interface ListedButGone {
+  readonly environment: string | null;
+  readonly label: string;
+}
+
+/**
+ * The repository's app roles, each with its tags. A role whose tags are
+ * already gone is left out, and added to `gone` when it is given.
+ */
 export async function readAppRoles(
   ports: Pick<AwsCleanupPorts, "runAws">,
-  scope: AwsAppScope
+  scope: AwsAppScope,
+  gone?: ListedButGone[]
 ): Promise<AppRole[]> {
   const roles: AppRole[] = [];
   for (const role of selectAppRoleCandidates(
@@ -1465,6 +1496,11 @@ export async function readAppRoles(
         ...role,
         tags: requireList(tags, "Tags", "aws iam list-role-tags")
       });
+    else
+      gone?.push({
+        environment: appPathEnvironment(role.path, scope),
+        label: `app role ${role.name}`
+      });
   }
   return roles;
 }
@@ -1476,11 +1512,14 @@ export interface AppAssociation extends AppAssociationCandidate {
 }
 
 /**
- * A cluster's Pod Identity associations, each with its role and tags.
+ * A cluster's Pod Identity associations, each with its role and tags. One
+ * whose describe is already gone is left out, and added to `gone` when it is
+ * given.
  */
 export async function readAssociations(
   ports: Pick<AwsCleanupPorts, "runAws">,
-  cluster: AwsCleanupCluster
+  cluster: AwsCleanupCluster,
+  gone?: ListedButGone[]
 ): Promise<AppAssociation[]> {
   const where = ["--region", cluster.region, "--cluster-name", cluster.name];
   const associations: AppAssociation[] = [];
@@ -1505,6 +1544,11 @@ export async function readAssociations(
         cluster,
         ...describedAssociation(described, candidate.id)
       });
+    else
+      gone?.push({
+        environment: null,
+        label: `Pod Identity association ${candidate.id} (${candidate.namespace}/${candidate.serviceAccount}) on cluster ${cluster.name}`
+      });
   }
   return associations;
 }
@@ -1513,9 +1557,10 @@ export async function readAssociations(
 export async function readAppAssociations(
   ports: Pick<AwsCleanupPorts, "runAws">,
   scope: AwsAppScope,
-  cluster: AwsCleanupCluster
+  cluster: AwsCleanupCluster,
+  gone?: ListedButGone[]
 ): Promise<AppAssociation[]> {
-  return (await readAssociations(ports, cluster)).filter((item) =>
+  return (await readAssociations(ports, cluster, gone)).filter((item) =>
     underAppPath(item.roleArn, scope)
   );
 }
@@ -1717,7 +1762,8 @@ async function readFootprintByEnvironment(
   scopes: readonly AwsRdsScope[],
   app: AwsAppScope,
   // What the sweep just deleted, which IAM may still list.
-  deleted: ReadonlySet<string>
+  deleted: ReadonlySet<string>,
+  gone?: ListedButGone[]
 ): Promise<Map<string, string[]>> {
   const left = new Map<string, string[]>();
   const add = (environment: string, label: string) =>
@@ -1729,13 +1775,13 @@ async function readFootprintByEnvironment(
     ))
       add(item.environment, item.label);
   }
-  for (const role of await readAppRoles(ports, app)) {
+  for (const role of await readAppRoles(ports, app, gone)) {
     const environment = appFolderEnvironment(role.arn, role.tags, app);
     if (environment && !deleted.has(role.arn))
       add(environment, `app role ${role.name}`);
   }
   for (const cluster of config.clusters) {
-    for (const item of await readAppAssociations(ports, app, cluster)) {
+    for (const item of await readAppAssociations(ports, app, cluster, gone)) {
       const environment = appFolderEnvironment(item.roleArn, item.tags, app);
       if (environment && !deleted.has(associationKey(item)))
         add(environment, appAssociationLabel(item));
@@ -1746,6 +1792,44 @@ async function readFootprintByEnvironment(
         `${item.kind} ${item.namespace}/${item.name} on cluster ${cluster.name}`
       );
   }
+  return left;
+}
+
+/**
+ * What is left of each AWS test environment, read again until `names` have
+ * nothing, or for at most LEFTOVER_SETTLE_MS. For an environment whose app
+ * delete failed, only these reads decide: nothing the sweep deleted is taken
+ * on trust, so a role, association, or workload that IAM, EKS, or Kubernetes
+ * still lists while it goes keeps the environment. That includes one a list
+ * shows but its describe no longer finds. An association's list doesn't say
+ * whose it is, so it keeps every one of `names`.
+ */
+async function settledFootprint(
+  config: AwsCleanupConfig,
+  ports: AwsCleanupPorts,
+  scopes: readonly AwsRdsScope[],
+  app: AwsAppScope,
+  names: readonly string[]
+): Promise<Map<string, string[]>> {
+  let left = new Map<string, string[]>();
+  await waitFor(ports, LEFTOVER_SETTLE_MS, LEFTOVER_POLL_MS, async () => {
+    const gone: ListedButGone[] = [];
+    left = await readFootprintByEnvironment(
+      config,
+      ports,
+      scopes,
+      app,
+      new Set(),
+      gone
+    );
+    for (const item of gone)
+      for (const name of item.environment === null ? names : [item.environment])
+        left.set(name, [
+          ...(left.get(name) ?? []),
+          `${item.label} (still listed)`
+        ]);
+    return names.every((name) => !left.has(name));
+  });
   return left;
 }
 
@@ -1760,7 +1844,8 @@ function readTarget(
     region: (variables.AWS_REGION ?? "").trim(),
     cluster: (variables.AWS_EKS_CLUSTER_NAME ?? "").trim(),
     trustSubjects: parseTrustSubjects(variables.AWS_TRUST_SUBJECTS),
-    blocked: ""
+    blocked: "",
+    deleteFailed: false
   };
   const role = parseAwsRoleArn(target.roleArn);
   if (!role) {
@@ -1842,7 +1927,8 @@ export async function sweepAwsCloudE2E(
           region: "",
           cluster: "",
           trustSubjects: [],
-          blocked: `Could not read the variables of GitHub environment ${name}: ${errorMessage(error)}`
+          blocked: `Could not read the variables of GitHub environment ${name}: ${errorMessage(error)}`,
+          deleteFailed: false
         });
       }
     }
@@ -1871,8 +1957,16 @@ export async function sweepAwsCloudE2E(
         await ports.github.deleteApplication(target.name, config.application);
         report.did(`Deleted the Radius application in ${target.name}`);
       } catch (error) {
-        target.blocked = `Deleting the Radius application in ${target.name} failed: ${errorMessage(error)}`;
-        report.fail(target.blocked);
+        const line = `Deleting the Radius application in ${target.name} failed: ${errorMessage(error)}`;
+        if (error instanceof ApplicationDeleteFailed) {
+          target.deleteFailed = true;
+          report.fail(line);
+        } else {
+          // The run may still be deleting, and needs the access step 4
+          // removes until it ends.
+          target.blocked = `${line} Its run may still be going, so ${target.name} keeps its access and GitHub state for a retry.`;
+          report.fail(target.blocked);
+        }
       }
     }
 
@@ -1947,17 +2041,39 @@ export async function sweepAwsCloudE2E(
           app.scope,
           appIdentities.deleted
         );
+        const unconfirmed = targets
+          .filter((item) => item.deleteFailed && !item.blocked)
+          .map((item) => item.name.toLowerCase())
+          .filter((name) => !left.has(name));
+        if (unconfirmed.length > 0) {
+          const settled = await settledFootprint(
+            config,
+            ports,
+            scopes,
+            app.scope,
+            unconfirmed
+          );
+          for (const name of unconfirmed) {
+            const items = settled.get(name);
+            if (items) left.set(name, items);
+          }
+        }
       } catch (error) {
         report.fail(`Could not check what is left: ${errorMessage(error)}`);
         swept = false;
       }
     }
     for (const target of targets.filter((item) => !item.blocked)) {
+      const items = left.get(target.name.toLowerCase());
       if (!swept) {
         target.blocked = `The RDS, app role, or workload sweep failed, so ${target.name} keeps its access and GitHub state for a retry.`;
-      } else if (left.has(target.name.toLowerCase())) {
-        target.blocked = `${target.name} still has ${left.get(target.name.toLowerCase())?.join(", ")}, so it keeps its access and GitHub state for a retry.`;
+      } else if (items) {
+        target.blocked = `${target.deleteFailed ? `The Radius application delete in ${target.name} failed, and it` : target.name} still has ${items.join(", ")}, so it keeps its access and GitHub state for a retry.`;
         report.fail(target.blocked);
+      } else if (target.deleteFailed) {
+        report.warn(
+          `The Radius application delete in ${target.name} failed, but AWS and the clusters list none of its RDS resources, app roles, Pod Identity associations, or workloads, so the sweep goes on to remove its access and GitHub environment.`
+        );
       }
     }
 

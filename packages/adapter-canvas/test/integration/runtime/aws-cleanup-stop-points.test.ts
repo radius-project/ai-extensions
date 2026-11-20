@@ -218,8 +218,9 @@ const LOOK_ALIKES = [
 ];
 
 // A sweep that removed some of an environment's deploy-role access but kept
-// its GitHub environment leaves an app delete that can't sign in. By the
-// approved design that run fails and a person finishes it by hand.
+// its GitHub environment leaves an app delete that can't sign in. The next
+// run's delete fails, but the sweep finds nothing of the environment left and
+// finishes step 4.
 function accessPartlyRemoved(s: CleanupScenario, name: string): boolean {
   const inputs = retryInputs(s, name);
   return (
@@ -229,8 +230,40 @@ function accessPartlyRemoved(s: CleanupScenario, name: string): boolean {
   );
 }
 
+// The same world, where the Radius application delete always fails, as it
+// does with RecipeDeletionFailed after a failed first deploy. Nothing the
+// delete would remove is gone, so the sweep deletes all of it.
+async function failingDeleteWorld(): Promise<CleanupScenario> {
+  const s = await world();
+  for (const name of ENVIRONMENTS) s.appDelete.set(name, "fail");
+  return s;
+}
+
+function deleteFailed(name: string): string {
+  return `Deleting the Radius application in ${name} failed: delete-application.yml run 9 ended failure.`;
+}
+
 const points = await discover();
 const keptBoundaryPoints = await discover(keptBoundaryWorld, 1);
+const failingDeletePoints = await discover(
+  failingDeleteWorld,
+  ENVIRONMENTS.length
+);
+
+// The same world, where each delete run is still going when the sweep stops
+// waiting for it.
+async function runningDeleteWorld(): Promise<CleanupScenario> {
+  const s = await world();
+  for (const name of ENVIRONMENTS)
+    s.appDelete.set(name, {
+      unfinished: "delete-application.yml run 9 did not finish in time."
+    });
+  return s;
+}
+const runningDeletePoints = await discover(
+  runningDeleteWorld,
+  ENVIRONMENTS.length
+);
 
 describe("AWS cleanup sweep, stopped at each outside call", () => {
   it("has a write of every kind the sweep makes", () => {
@@ -258,6 +291,7 @@ describe("AWS cleanup sweep, stopped at each outside call", () => {
         "iam delete-role",
         "iam delete-role-policy",
         "iam update-assume-role-policy",
+        `kubectl delete Deployment web ${MAIN.name}`,
         `kubectl delete Job probe ${SECOND.name}`,
         `kubectl delete namespace ${MAIN.name}`,
         `kubectl delete namespace ${SECOND.name}`,
@@ -333,18 +367,12 @@ describe("AWS cleanup sweep, stopped at each outside call", () => {
     const stuck = ENVIRONMENTS.filter((name) => accessPartlyRemoved(s, name));
     const rerun = await runSweep(s);
     expect(lookAlikes(s)).toEqual(LOOK_ALIKES);
-    if (stuck.length > 0) {
-      expect(rerun.failures).toEqual(
-        stuck.map(
-          (name) =>
-            `Deleting the Radius application in ${name} failed: delete-application.yml run 9 ended failure: Could not assume the deploy role.`
-        )
-      );
-      for (const name of stuck)
-        expect(s.github.environment(name)).toBeDefined();
-      return;
-    }
-    expect(rerun.failures).toEqual([]);
+    expect(rerun.failures).toEqual(
+      stuck.map(
+        (name) =>
+          `Deleting the Radius application in ${name} failed: delete-application.yml run 9 ended failure: Could not assume the deploy role.`
+      )
+    );
     expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
     // A clean check means the outside world holds nothing of the suite.
     expect(s.deployments).toEqual([]);
@@ -389,5 +417,81 @@ describe("AWS cleanup sweep with an app boundary step 4 must keep, stopped at ea
     expect((await runVerify(s)).findings).not.toContain(
       `permissions boundary ${KEPT_BOUNDARY}`
     );
+  });
+});
+
+describe("AWS cleanup sweep whose app deletes always fail, stopped at each outside call", () => {
+  it("goes on to step 4 for each environment when nothing stops it", async () => {
+    const s = await failingDeleteWorld();
+    expect((await runSweep(s)).failures).toEqual(
+      ENVIRONMENTS.map(deleteFailed)
+    );
+    for (const name of ENVIRONMENTS) {
+      expect(retryInputs(s, name)).toEqual([]);
+      expect(appResources(s, name)).toEqual([]);
+    }
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+  });
+
+  it.each(failingDeletePoints)("$at $command ($kind)", async ({ at, kind }) => {
+    const s = await failingDeleteWorld();
+    const before = new Map(
+      ENVIRONMENTS.map((name) => [name, retryInputs(s, name)])
+    );
+    s.outside.arm(at, kind);
+    await s.outside.until(async () => {
+      await runSweep(s);
+    });
+    expect(s.outside.calls.filter((call) => call.afterCrash)).toEqual([]);
+    for (const name of ENVIRONMENTS) {
+      // While anything of the environment is left, it keeps everything a
+      // retry needs, and it loses its GitHub environment only once nothing is.
+      if (appResources(s, name).length > 0)
+        expect(retryInputs(s, name)).toEqual(before.get(name));
+      if (!s.github.environment(name)) {
+        expect(retryInputs(s, name)).toEqual([]);
+        expect(appResources(s, name)).toEqual([]);
+      }
+    }
+    expect(lookAlikes(s)).toEqual(LOOK_ALIKES);
+
+    // The next day's delete fails again for each environment still there,
+    // and the sweep still finishes the job.
+    nextDay(s);
+    const left = ENVIRONMENTS.filter((name) => s.github.environment(name));
+    expect((await runSweep(s)).failures).toEqual(left.map(deleteFailed));
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+    expect(lookAlikes(s)).toEqual(LOOK_ALIKES);
+    for (const name of ENVIRONMENTS) {
+      expect(retryInputs(s, name)).toEqual([]);
+      expect(appResources(s, name)).toEqual([]);
+    }
+  });
+});
+
+describe("AWS cleanup sweep whose app deletes are still going, stopped at each outside call", () => {
+  it.each(runningDeletePoints)("$at $command ($kind)", async ({ at, kind }) => {
+    const s = await runningDeleteWorld();
+    const before = new Map(
+      ENVIRONMENTS.map((name) => [name, retryInputs(s, name)])
+    );
+    s.outside.arm(at, kind);
+    await s.outside.until(async () => {
+      await runSweep(s);
+    });
+    expect(s.outside.calls.filter((call) => call.afterCrash)).toEqual([]);
+    // A run that may still be deleting keeps the access it signs in with.
+    for (const name of ENVIRONMENTS)
+      expect(retryInputs(s, name)).toEqual(before.get(name));
+    expect(lookAlikes(s)).toEqual(LOOK_ALIKES);
+
+    nextDay(s);
+    expect(s.strandedDeletes).toEqual([]);
+    for (const name of ENVIRONMENTS) s.appDelete.set(name, "fail");
+    expect((await runSweep(s)).failures).toEqual(
+      ENVIRONMENTS.map(deleteFailed)
+    );
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+    for (const name of ENVIRONMENTS) expect(retryInputs(s, name)).toEqual([]);
   });
 });
