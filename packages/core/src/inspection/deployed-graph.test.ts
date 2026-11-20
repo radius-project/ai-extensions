@@ -1,8 +1,10 @@
 import { expect, it, vi } from "vitest";
 import {
   inspectDeploymentGraph,
+  type DeploymentInspectionReader,
   type DeploymentRunSnapshot
 } from "./deployed-graph.js";
+import { inspectApplicationDefinition } from "./deployments.js";
 import type {
   DeployProgress,
   WorkflowArtifact
@@ -37,7 +39,11 @@ function harness(
 ) {
   const graph = [{ name: "model" }];
   const reader = {
-    graph: vi.fn(async () => ({ status: "ok", graph, artifact: metadata })),
+    graph: vi.fn<DeploymentInspectionReader["graph"]>(async () => ({
+      status: "ok",
+      graph,
+      artifact: metadata
+    })),
     progress: vi.fn(async () => observed),
     read: vi.fn(async () => ({ status: "ok", progress: observed }))
   };
@@ -51,6 +57,59 @@ function harness(
   };
   return { input, reader, graph };
 }
+
+it("reports no deployment evidence for an active run without a graph artifact or progress", async () => {
+  const definition = await inspectApplicationDefinition(
+    "octo/store",
+    "feature/store",
+    async () => ({
+      kind: "read",
+      source:
+        "resource app 'Applications.Core/applications@2023' = { name: 'store' }"
+    })
+  );
+  expect(definition).toEqual({
+    kind: "defined",
+    name: "store",
+    path: ".radius/app.bicep",
+    branch: "feature/store"
+  });
+
+  const { input, reader } = harness({ ...run, active: true }, null);
+  reader.graph.mockResolvedValueOnce({
+    status: "missing",
+    graph: null
+  });
+  const result = await inspectDeploymentGraph(input);
+  expect(result).toMatchObject({
+    kind: "observed",
+    observation: {
+      graph: null,
+      progress: null,
+      artifactRunId: null,
+      inventory: null
+    }
+  });
+  expect(input.openReader).toHaveBeenCalledWith(run.id);
+  expect(input.acceptProgress).not.toHaveBeenCalled();
+  expect(reader.read).not.toHaveBeenCalled();
+});
+
+it("accepts progress for the exact active run even without a graph artifact", async () => {
+  const { input, reader } = harness({ ...run, active: true }, progress);
+  reader.graph.mockResolvedValueOnce({ status: "missing", graph: null });
+
+  expect(await inspectDeploymentGraph(input)).toMatchObject({
+    kind: "observed",
+    observation: {
+      graph: null,
+      progress,
+      artifactRunId: run.id,
+      inventory: null
+    }
+  });
+  expect(input.acceptProgress).toHaveBeenCalledExactlyOnceWith(progress, false);
+});
 
 it("uses zero as an exact active run id and does not consult inventory currency", async () => {
   const { input, reader, graph } = harness(
