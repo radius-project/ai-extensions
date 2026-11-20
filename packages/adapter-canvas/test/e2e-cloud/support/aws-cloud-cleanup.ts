@@ -40,8 +40,10 @@ import {
 //
 // If step 2 or 3 fails, everything step 4 removes stays, so the next run can
 // retry, and the sweep fails. A failed step 1 fails the sweep too, but, as in
-// the Azure sweep, the environment still goes on to step 4 when steps 2 and
-// 3 pass and fresh reads of AWS and the clusters list nothing of it. A delete
+// the Azure sweep, when the delete's run finished without succeeding the
+// environment still goes on to step 4 if steps 2 and 3 pass and fresh reads
+// of AWS and the clusters list nothing of it. A run that may still be going
+// keeps everything. A delete
 // that fails the same way every day would otherwise keep the environment's
 // access forever. The GitHub environment goes last: it is what makes a later
 // sweep find the environment again.
@@ -117,8 +119,10 @@ export interface AwsCleanupGitHub {
   readEnvironmentVariables(
     environment: string
   ): Promise<Record<string, string>>;
-  // Dispatch delete-application.yml and wait for it to succeed. Throws when
-  // it can't be dispatched, found, or does not succeed.
+  // Dispatch delete-application.yml and wait for it to succeed. Throws
+  // ApplicationDeleteFailed when its run finished without succeeding, and
+  // any other error when it can't be dispatched, found, read, or doesn't
+  // finish in time, so the run may still be going.
   deleteApplication(environment: string, application: string): Promise<void>;
   listDeployments(): Promise<unknown>;
   // Deactivate, delete, and confirm the record is gone.
@@ -205,6 +209,13 @@ export function awsError(result: AwsCommandResult, code: string): boolean {
 }
 
 class ReadFailure extends Error {}
+
+/**
+ * The delete-application.yml run finished without succeeding. Only then is
+ * nothing still deleting the app, so only then can the sweep go on to step 4
+ * without a successful delete.
+ */
+export class ApplicationDeleteFailed extends Error {}
 
 // --- Configuration --------------------------------------------------------
 
@@ -1946,10 +1957,16 @@ export async function sweepAwsCloudE2E(
         await ports.github.deleteApplication(target.name, config.application);
         report.did(`Deleted the Radius application in ${target.name}`);
       } catch (error) {
-        target.deleteFailed = true;
-        report.fail(
-          `Deleting the Radius application in ${target.name} failed: ${errorMessage(error)}`
-        );
+        const line = `Deleting the Radius application in ${target.name} failed: ${errorMessage(error)}`;
+        if (error instanceof ApplicationDeleteFailed) {
+          target.deleteFailed = true;
+          report.fail(line);
+        } else {
+          // The run may still be deleting, and needs the access step 4
+          // removes until it ends.
+          target.blocked = `${line} Its run may still be going, so ${target.name} keeps its access and GitHub state for a retry.`;
+          report.fail(target.blocked);
+        }
       }
     }
 

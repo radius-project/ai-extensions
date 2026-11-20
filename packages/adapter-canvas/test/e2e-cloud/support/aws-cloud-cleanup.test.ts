@@ -581,6 +581,85 @@ describe("sweepAwsCloudE2E", () => {
     ).toHaveLength(1);
   });
 
+  it.each([
+    [
+      "its dispatch's answer was lost",
+      "Could not dispatch delete-application.yml (gh: connection reset). Check that it exists on main."
+    ],
+    [
+      "its run never appeared",
+      "The delete-application.yml run never appeared."
+    ],
+    ["its run couldn't be read", "Reading run 9: gh: Something (HTTP 502)"],
+    [
+      "its run didn't finish in time",
+      "delete-application.yml run 9 did not finish in time."
+    ]
+  ])(
+    "keeps everything while the app delete may still be going, when %s",
+    async (_, message) => {
+      const s = await twoEnvironments();
+      s.appDelete.set(OLD, { unfinished: message });
+      const before = retryInputs(s, OLD);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([
+        `Deleting the Radius application in ${OLD} failed: ${message} Its run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
+      ]);
+      expect(report.warnings).not.toContain(wentOn(OLD));
+      expect(retryInputs(s, OLD)).toEqual(before);
+      expect(retryInputs(s, SECOND_ENV)).toEqual([]);
+
+      // The run could sign in until it ended. The next day's delete ends
+      // failed, and nothing is left, so the sweep finishes.
+      nextDay(s);
+      expect(s.strandedDeletes).toEqual([]);
+      s.appDelete.set(OLD, "fail");
+      expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+      expect(retryInputs(s, OLD)).toEqual([]);
+      expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+    }
+  );
+
+  it("keeps everything when a retry's run ends failed while an earlier run for the environment is still going", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, {
+      unfinished: "delete-application.yml run 8 did not finish in time."
+    });
+    const before = retryInputs(s, OLD);
+    await runSweep(s);
+    // A second sweep the same day, before the first run has ended.
+    s.appDelete.set(OLD, "fail");
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([
+      `Deleting the Radius application in ${OLD} failed: delete-application.yml run 9 ended failure. Run 8 for ${OLD} is still going. Its run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
+    ]);
+    expect(retryInputs(s, OLD)).toEqual(before);
+
+    nextDay(s);
+    expect(s.strandedDeletes).toEqual([]);
+    expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+  });
+
+  it("has a scenario whose delete runs fail without the access they need", async () => {
+    const s = await twoEnvironments();
+    // A run still going when its environment's policy goes is stranded.
+    s.appDelete.set(OLD, { unfinished: "late" });
+    await expect(
+      s.ports.github.deleteApplication(OLD, APPLICATION)
+    ).rejects.toThrow("late");
+    s.aws.role(ROLE)!.inline.delete(awsEnvironmentPolicyName(REPO_ID, OLD));
+    nextDay(s);
+    expect(s.strandedDeletes).toEqual([OLD]);
+
+    // Cloud Control can't delete the app role without the app-roles policy.
+    const t = await twoEnvironments();
+    t.aws.role(ROLE)!.inline.delete(APP_ROLES_POLICY);
+    await expect(
+      t.ports.github.deleteApplication(OLD, APPLICATION)
+    ).rejects.toThrow("AccessDenied for iam:DeleteRole");
+  });
+
   it("keeps an environment whose app delete fails while anything of it is left, and says what on every run", async () => {
     const s = await twoEnvironments();
     s.appDelete.set(OLD, "fail");

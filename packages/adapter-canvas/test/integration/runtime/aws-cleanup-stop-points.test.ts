@@ -250,6 +250,21 @@ const failingDeletePoints = await discover(
   ENVIRONMENTS.length
 );
 
+// The same world, where each delete run is still going when the sweep stops
+// waiting for it.
+async function runningDeleteWorld(): Promise<CleanupScenario> {
+  const s = await world();
+  for (const name of ENVIRONMENTS)
+    s.appDelete.set(name, {
+      unfinished: "delete-application.yml run 9 did not finish in time."
+    });
+  return s;
+}
+const runningDeletePoints = await discover(
+  runningDeleteWorld,
+  ENVIRONMENTS.length
+);
+
 describe("AWS cleanup sweep, stopped at each outside call", () => {
   it("has a write of every kind the sweep makes", () => {
     const writes = new Set(
@@ -451,5 +466,32 @@ describe("AWS cleanup sweep whose app deletes always fail, stopped at each outsi
       expect(retryInputs(s, name)).toEqual([]);
       expect(appResources(s, name)).toEqual([]);
     }
+  });
+});
+
+describe("AWS cleanup sweep whose app deletes are still going, stopped at each outside call", () => {
+  it.each(runningDeletePoints)("$at $command ($kind)", async ({ at, kind }) => {
+    const s = await runningDeleteWorld();
+    const before = new Map(
+      ENVIRONMENTS.map((name) => [name, retryInputs(s, name)])
+    );
+    s.outside.arm(at, kind);
+    await s.outside.until(async () => {
+      await runSweep(s);
+    });
+    expect(s.outside.calls.filter((call) => call.afterCrash)).toEqual([]);
+    // A run that may still be deleting keeps the access it signs in with.
+    for (const name of ENVIRONMENTS)
+      expect(retryInputs(s, name)).toEqual(before.get(name));
+    expect(lookAlikes(s)).toEqual(LOOK_ALIKES);
+
+    nextDay(s);
+    expect(s.strandedDeletes).toEqual([]);
+    for (const name of ENVIRONMENTS) s.appDelete.set(name, "fail");
+    expect((await runSweep(s)).failures).toEqual(
+      ENVIRONMENTS.map(deleteFailed)
+    );
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+    for (const name of ENVIRONMENTS) expect(retryInputs(s, name)).toEqual([]);
   });
 });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -89,7 +90,8 @@ export function createAwsCleanupPorts(
       defaultBranch: (env.DEFAULT_BRANCH ?? "").trim() || "main",
       gh,
       sleep,
-      now
+      now,
+      correlationId: () => `cleanup-${randomUUID()}`
     }),
     kubernetes: createKubectlCleanupKubernetes({
       run,

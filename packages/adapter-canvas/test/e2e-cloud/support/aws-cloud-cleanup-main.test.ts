@@ -472,6 +472,38 @@ describe("runAwsCleanup", () => {
     expect(ports.github).toBeDefined();
     expect(calls).toEqual([]);
   });
+
+  it("gives each app delete dispatch its own correlation ID, and finds the run by it", async () => {
+    const dispatched: string[] = [];
+    const run: AwsCleanupMainDependencies["run"] = async (command, args) => {
+      const line = `${command} ${args.join(" ")}`;
+      if (line.startsWith("gh workflow run delete-application.yml")) {
+        dispatched.push(
+          args.find((arg) => arg.startsWith("correlation_id="))!.slice(15)
+        );
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (line.startsWith("gh run list"))
+        return OK(
+          dispatched.map((id, index) => ({
+            databaseId: index + 1,
+            displayTitle: `Radius - Delete e [radius:v1 app=a] ${id}`
+          }))
+        );
+      if (line.startsWith(`gh run view ${dispatched.length} `))
+        return OK({ status: "completed", conclusion: "success" });
+      throw new Error(`unexpected ${line}`);
+    };
+    const ports = createAwsCleanupPorts(
+      resolveAwsCleanupConfig(ENV, 0)!,
+      dependencies(ENV, run).deps
+    );
+    await ports.github.deleteApplication("e", "a");
+    await ports.github.deleteApplication("e", "a");
+    expect(dispatched).toHaveLength(2);
+    for (const id of dispatched) expect(id).toMatch(/^cleanup-[0-9a-f-]{36}$/);
+    expect(dispatched[0]).not.toBe(dispatched[1]);
+  });
 });
 
 describe("the bundled AWS cleanup entry point", () => {
