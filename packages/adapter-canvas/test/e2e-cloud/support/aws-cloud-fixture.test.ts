@@ -878,6 +878,52 @@ describe("createAwsCloudFixture", () => {
     );
   });
 
+  it("waits for a start the teardown interrupted, ends at zero, and releases the lease last", async () => {
+    const w = world();
+    const { fake, options } = fixtureOptions(w);
+    const fixture = await createAwsCloudFixture(options);
+    await fixture.prepareCleanSlate();
+    // A stage timeout: the teardown begins while the first scale-up is on
+    // its way, and the start goes on.
+    let teardown: Promise<void> | null = null;
+    const run = w.aws.run.bind(w.aws);
+    w.aws.run = (args) => {
+      if (!teardown && args[1] === "update-nodegroup-config")
+        teardown = fixture.dispose();
+      return run(args);
+    };
+    await expect(fixture.startNodeGroups()).rejects.toThrow(
+      "stopped, because the teardown began"
+    );
+    await teardown;
+    w.clock.now += w.aws.nodegroupUpdateMs;
+    for (const name of ["default", "isolated"])
+      expect(
+        JSON.parse(
+          w.aws.run([
+            "eks",
+            "describe-nodegroup",
+            "--region",
+            MAIN.region,
+            "--cluster-name",
+            MAIN.name,
+            "--nodegroup-name",
+            name
+          ]).stdout
+        ).nodegroup.scalingConfig.desiredSize
+      ).toBe(0);
+    const lease = w.events.findIndex(
+      (line) => line.includes("DELETE") && line.includes("cloud-e2e-lease")
+    );
+    expect(lease).toBeGreaterThan(
+      w.events.lastIndexOf("aws eks update-nodegroup-config")
+    );
+    expect(lease).toBeGreaterThan(
+      w.events.lastIndexOf("aws eks describe-update")
+    );
+    expect(fake.removed).toEqual(["/tmp/radtest-workspace"]);
+  });
+
   it("reports a scale-down that fails at teardown and still releases the lease", async () => {
     const w = world();
     const { fake, options } = fixtureOptions(w);
