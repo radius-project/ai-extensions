@@ -9,6 +9,7 @@ export default defineConfig({
       "../core/src/modeling/app-staging.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
       "../core/src/inspection/deployed-graph.test.ts",
+      "../adapter-shared/src/environment-inspection.test.ts",
       "../core/src/workflow-read-policy.test.ts",
       "../core/src/setup-{admission,boundary,provider-configuration}.test.ts",
       "../core/src/setup-{command-admission,input-resume}.test.ts",
