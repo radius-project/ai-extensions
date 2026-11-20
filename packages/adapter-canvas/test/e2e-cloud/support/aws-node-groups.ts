@@ -227,51 +227,73 @@ async function startUpdate(
 }
 
 /**
- * Wait for a node group update to end, by its ID. A describe of the group
- * right after an update may still show it ACTIVE at its old values, so only
- * DescribeUpdate says when it is done. An update EKS doesn't list yet is
- * waited for too.
+ * The update each node group last started in a run, until it ends. A describe
+ * of a group during an update may still show it as it was, so a scale-down
+ * waits for these before it takes a group at zero at its word.
  */
-async function waitForUpdate(
+export type AwsNodeGroupUpdates = Map<AwsMainNodeGroup, string>;
+
+// Poll a node group update by its ID until it ends or `timeoutMs` passes. An
+// update EKS doesn't list yet counts as not ended.
+async function pollUpdate(
   ports: AwsJourneyPorts,
   cluster: AwsCleanupCluster,
   name: string,
   id: string,
-  what: string
-): Promise<void> {
+  timeoutMs: number
+): Promise<{ ended: boolean; update: Record<string, unknown> | null }> {
   // Set inside the poll, so TypeScript can't narrow it from here.
   let update = null as Record<string, unknown> | null;
-  const ended = await waitFor(
+  const ended = await waitFor(ports, timeoutMs, AWS_NODE_POLL_MS, async () => {
+    const read = await readAwsIfFound(
+      ports,
+      [
+        "eks",
+        "describe-update",
+        "--region",
+        cluster.region,
+        "--name",
+        cluster.name,
+        "--nodegroup-name",
+        name,
+        "--update-id",
+        id
+      ],
+      "ResourceNotFoundException"
+    );
+    update = asRecord(asRecord(read)?.update);
+    const status = text(update?.status);
+    return status !== "" && status !== "InProgress";
+  });
+  return { ended, update };
+}
+
+/**
+ * Wait for a node group update to end, by its ID: only DescribeUpdate says
+ * when it is done. Once it ends it leaves `updates`. Throws unless it ended
+ * Successful.
+ */
+async function waitForUpdate(
+  ports: AwsJourneyPorts,
+  cluster: AwsCleanupCluster,
+  name: AwsMainNodeGroup,
+  id: string,
+  what: string,
+  updates: AwsNodeGroupUpdates
+): Promise<void> {
+  const { ended, update } = await pollUpdate(
     ports,
-    AWS_NODE_GROUP_ACTIVE_TIMEOUT_MS,
-    AWS_NODE_POLL_MS,
-    async () => {
-      const read = await readAwsIfFound(
-        ports,
-        [
-          "eks",
-          "describe-update",
-          "--region",
-          cluster.region,
-          "--name",
-          cluster.name,
-          "--nodegroup-name",
-          name,
-          "--update-id",
-          id
-        ],
-        "ResourceNotFoundException"
-      );
-      update = asRecord(asRecord(read)?.update);
-      const status = text(update?.status);
-      return status !== "" && status !== "InProgress";
-    }
+    cluster,
+    name,
+    id,
+    AWS_NODE_GROUP_ACTIVE_TIMEOUT_MS
   );
   const status = text(update?.status) || "not listed";
   if (!ended)
     throw new Error(
       `${what} is ${status === "InProgress" ? "still in progress" : "still not listed by EKS"} after ${AWS_NODE_GROUP_ACTIVE_TIMEOUT_MS / 60_000} minutes (update ${id}).`
     );
+  if (updates.get(name) === id) updates.delete(name);
   if (status !== "Successful") {
     const reasons = list(update?.errors)
       .map((entry) => {
@@ -289,7 +311,8 @@ async function updateToControlPlane(
   ports: AwsNodeGroupPorts,
   cluster: AwsCleanupCluster,
   name: AwsMainNodeGroup,
-  version: string
+  version: string,
+  updates: AwsNodeGroupUpdates
 ): Promise<void> {
   const where = `on cluster ${clusterLabel(cluster)}`;
   const group = await waitForActive(ports, cluster, name);
@@ -318,7 +341,8 @@ async function updateToControlPlane(
     ],
     what
   );
-  await waitForUpdate(ports, cluster, name, id, what);
+  updates.set(name, id);
+  await waitForUpdate(ports, cluster, name, id, what, updates);
   const updated = await readAwsNodeGroup(ports, cluster, name);
   if (updated.version !== version)
     throw new Error(
@@ -389,23 +413,43 @@ async function waitForReadyNodes(
  */
 export async function scaleAwsNodeGroupsToZero(
   ports: AwsNodeGroupPorts,
-  cluster: AwsCleanupCluster
+  cluster: AwsCleanupCluster,
+  // Updates this run started, which may still be in progress.
+  updates: AwsNodeGroupUpdates = new Map()
 ): Promise<void> {
   const failures: string[] = [];
   const started: Array<{ name: AwsMainNodeGroup; id: string }> = [];
+  // One wait for every update still in progress, not one per group.
+  const deadline = ports.now() + AWS_NODE_GROUP_ACTIVE_TIMEOUT_MS;
   for (const name of AWS_MAIN_NODE_GROUPS) {
     try {
-      const group = await readAwsNodeGroup(ports, cluster, name);
-      if (group.desiredSize === 0 && group.minSize === 0) continue;
-      started.push({
-        name,
-        id: await scaleTo(
+      const pending = updates.get(name);
+      if (pending !== undefined) {
+        const { ended } = await pollUpdate(
           ports,
           cluster,
-          await waitForActive(ports, cluster, name),
-          0
-        )
-      });
+          name,
+          pending,
+          Math.max(0, deadline - ports.now())
+        );
+        if (!ended) {
+          failures.push(
+            `${name}: update ${pending} is still in progress after ${AWS_NODE_GROUP_ACTIVE_TIMEOUT_MS / 60_000} minutes, so the group could not be scaled to zero`
+          );
+          continue;
+        }
+        updates.delete(name);
+      }
+      const group = await readAwsNodeGroup(ports, cluster, name);
+      if (group.desiredSize === 0 && group.minSize === 0) continue;
+      const id = await scaleTo(
+        ports,
+        cluster,
+        await waitForActive(ports, cluster, name),
+        0
+      );
+      updates.set(name, id);
+      started.push({ name, id });
       ports.log(
         `Scaling node group ${name} on cluster ${clusterLabel(cluster)} to zero from ${group.desiredSize}.`
       );
@@ -420,7 +464,8 @@ export async function scaleAwsNodeGroupsToZero(
         cluster,
         name,
         id,
-        scalingWhat(cluster, name, 0)
+        scalingWhat(cluster, name, 0),
+        updates
       );
     } catch (error) {
       failures.push(`${name}: ${describeError(error)}`);
@@ -440,7 +485,9 @@ export async function scaleAwsNodeGroupsToZero(
 export async function startAwsNodeGroups(
   ports: AwsNodeGroupPorts,
   cluster: AwsCleanupCluster,
-  sizes: Partial<Record<AwsMainNodeGroup, number>> = {}
+  sizes: Partial<Record<AwsMainNodeGroup, number>> = {},
+  // Filled with each update it starts, for the teardown's scale-down.
+  updates: AwsNodeGroupUpdates = new Map()
 ): Promise<void> {
   const { version } = await readAwsCluster(ports, cluster);
   if (!version)
@@ -448,17 +495,16 @@ export async function startAwsNodeGroups(
       `EKS reported no Kubernetes version for cluster ${clusterLabel(cluster)}.`
     );
   for (const name of AWS_MAIN_NODE_GROUPS)
-    await updateToControlPlane(ports, cluster, name, version);
+    await updateToControlPlane(ports, cluster, name, version, updates);
 
   const scaling = new Map<AwsMainNodeGroup, { size: number; id: string }>();
   try {
     for (const name of AWS_MAIN_NODE_GROUPS) {
       const group = await waitForActive(ports, cluster, name);
       const size = sizes[name] ?? (name === "isolated" ? 1 : group.maxSize);
-      scaling.set(name, {
-        size,
-        id: await scaleTo(ports, cluster, group, size)
-      });
+      const id = await scaleTo(ports, cluster, group, size);
+      updates.set(name, id);
+      scaling.set(name, { size, id });
     }
     for (const [name, { size, id }] of scaling)
       await waitForUpdate(
@@ -466,25 +512,15 @@ export async function startAwsNodeGroups(
         cluster,
         name,
         id,
-        scalingWhat(cluster, name, size)
+        scalingWhat(cluster, name, size),
+        updates
       );
     for (const [name, { size }] of scaling)
       await waitForReadyNodes(ports, cluster, name, size);
   } catch (error) {
     const failure = `${describeError(error)} This is an infrastructure failure, not a product one.`;
-    // A scale-up still in progress would land after the scale-down, and a
-    // read during it may still show the group at zero. Wait for each to end
-    // first, whatever the outcome.
-    for (const [name, { size, id }] of scaling)
-      await waitForUpdate(
-        ports,
-        cluster,
-        name,
-        id,
-        scalingWhat(cluster, name, size)
-      ).catch(() => undefined);
     try {
-      await scaleAwsNodeGroupsToZero(ports, cluster);
+      await scaleAwsNodeGroupsToZero(ports, cluster, updates);
     } catch (scaleDown) {
       throw new Error(
         `${failure} Scaling the node groups back to zero also failed: ${describeError(scaleDown)}`,

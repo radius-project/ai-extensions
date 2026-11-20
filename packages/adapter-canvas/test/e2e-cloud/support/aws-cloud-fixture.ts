@@ -41,6 +41,7 @@ import {
   readAwsNodeGroup,
   scaleAwsNodeGroupsToZero,
   startAwsNodeGroups,
+  type AwsNodeGroupUpdates,
   type AwsNodeGroupPorts
 } from "./aws-node-groups.js";
 import { selectLeakedClusterWorkloads } from "./cloud-cleanup.js";
@@ -602,6 +603,8 @@ export async function createAwsCloudFixture(
   };
   let clean = false;
   let nodesStarted = false;
+  // Shared by the start and the teardown, which may run while it does.
+  const nodeUpdates: AwsNodeGroupUpdates = new Map();
   let disposed = false;
 
   return {
@@ -644,7 +647,7 @@ export async function createAwsCloudFixture(
           "The node groups start only after prepareCleanSlate() passes."
         );
       nodesStarted = true;
-      await startAwsNodeGroups(options.aws, clusters[0]);
+      await startAwsNodeGroups(options.aws, clusters[0], {}, nodeUpdates);
     },
 
     async dispose() {
@@ -653,7 +656,7 @@ export async function createAwsCloudFixture(
       const failures: string[] = [];
       if (nodesStarted) {
         try {
-          await scaleAwsNodeGroupsToZero(options.aws, clusters[0]);
+          await scaleAwsNodeGroupsToZero(options.aws, clusters[0], nodeUpdates);
         } catch (error) {
           failures.push(describeError(error));
         }

@@ -13,7 +13,8 @@ import {
   readAwsRunVersions,
   scaleAwsNodeGroupsToZero,
   startAwsNodeGroups,
-  type AwsNodeGroupPorts
+  type AwsNodeGroupPorts,
+  type AwsNodeGroupUpdates
 } from "./aws-node-groups.js";
 
 const MAIN_LABEL = `${MAIN.name} (${MAIN.region})`;
@@ -453,6 +454,84 @@ describe("scaleAwsNodeGroupsToZero", () => {
       `Scaling node group default on cluster ${MAIN_LABEL} to zero from 2.`,
       `Scaling node group isolated on cluster ${MAIN_LABEL} to zero from 1.`
     ]);
+  });
+
+  it("scales down a group whose scale-up is still running, though a read shows it at zero", async () => {
+    const world = createJourneyWorld();
+    const { update } = JSON.parse(
+      world.aws.run([
+        "eks",
+        "update-nodegroup-config",
+        "--region",
+        MAIN.region,
+        "--cluster-name",
+        MAIN.name,
+        "--nodegroup-name",
+        "default",
+        "--scaling-config",
+        "minSize=0,maxSize=2,desiredSize=2"
+      ]).stdout
+    );
+    const updates: AwsNodeGroupUpdates = new Map([["default", update.id]]);
+    await scaleAwsNodeGroupsToZero(nodePorts(world), MAIN, updates);
+    expect(groups(world).default.desiredSize).toBe(0);
+    expect(updates.size).toBe(0);
+  });
+
+  it("names a group whose update is still running when the wait ends, without waiting per group", async () => {
+    const world = createJourneyWorld();
+    world.aws.nodegroupUpdateMs = Infinity;
+    const updates: AwsNodeGroupUpdates = new Map();
+    const start = world.clock.now;
+    const error = startAwsNodeGroups(nodePorts(world), MAIN, {}, updates);
+    await expect(error).rejects.toThrow(
+      /^Scaling node group default .* is still in progress after 15 minutes .* Scaling the node groups back to zero also failed: Could not scale the node groups on cluster .* to zero \(default: update UPDFAKE\d+ is still in progress after 15 minutes, so the group could not be scaled to zero; isolated: update UPDFAKE\d+ is still in progress after 15 minutes, so the group could not be scaled to zero\)/
+    );
+    // The scale-up's own wait, then one shared wait, not one per group.
+    expect(world.clock.now - start).toBeLessThan(31 * 60_000);
+    expect([...updates.keys()]).toEqual(["default", "isolated"]);
+  });
+
+  it("ends at zero when the teardown runs while the start is still scaling up", async () => {
+    const world = createJourneyWorld();
+    const updates: AwsNodeGroupUpdates = new Map();
+    let teardown: Promise<void> | null = null;
+    let scaleUps = 0;
+    // A stage timeout: the teardown starts once both scale-ups are sent, and
+    // the start keeps going.
+    const timeout = (args: string[]) => {
+      if (args[1] === "update-nodegroup-config" && ++scaleUps === 2)
+        teardown = scaleAwsNodeGroupsToZero(nodePorts(world), MAIN, updates);
+      return null;
+    };
+    const start = startAwsNodeGroups(
+      nodePorts(world, { runAws: timeout }),
+      MAIN,
+      {},
+      updates
+    ).catch(() => undefined);
+    await start;
+    expect(teardown).not.toBeNull();
+    await teardown;
+    expect(groups(world)).toEqual({
+      default: { version: "1.33", desiredSize: 0 },
+      isolated: { version: "1.33", desiredSize: 0 }
+    });
+  });
+
+  it("names a scale-down EKS started but couldn't finish", async () => {
+    const world = createJourneyWorld();
+    await startAwsNodeGroups(nodePorts(world), MAIN);
+    world.aws.nodegroupUpdateFailure = {
+      errorCode: "InternalFailure",
+      errorMessage: "Try again."
+    };
+    await expect(
+      scaleAwsNodeGroupsToZero(nodePorts(world), MAIN)
+    ).rejects.toThrow(
+      /\(default: Scaling node group default on cluster .* to 0 ended Failed \(update UPDFAKE\d+\): InternalFailure: Try again\.\)/
+    );
+    expect(groups(world).isolated.desiredSize).toBe(0);
   });
 
   it("tries every group and names each one it couldn't scale down", async () => {

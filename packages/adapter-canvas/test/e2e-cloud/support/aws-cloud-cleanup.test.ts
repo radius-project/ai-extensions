@@ -438,6 +438,13 @@ describe("sweepAwsCloudE2E", () => {
     const report = await runSweep(s);
 
     expect(report.failures).toEqual([]);
+    // The removal ran twice for the first environment; the report names what
+    // both attempts removed.
+    const removal = report.done.find((line) =>
+      line.includes(appBoundary(OLD).arn)
+    );
+    expect(removal).toContain(`Removed from ${ROLE}: `);
+    expect(removal).toContain("trust subject");
     expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
     expect(retryInputs(s, OLD)).toEqual([]);
     expect(retryInputs(s, SECOND_ENV)).toEqual([]);
@@ -1439,6 +1446,40 @@ describe("sweepAwsCloudE2E", () => {
     ]);
     expect(AWS_MAIN_NODE_GROUPS).toEqual(["default", "isolated"]);
     expect((await runSweep(s)).failures).toEqual([]);
+  });
+
+  it("doesn't take a node group still updating at zero as scaled down", async () => {
+    const s = createCleanupScenario();
+    // A cancelled run left default on its way up from zero.
+    s.aws.run([
+      "eks",
+      "update-nodegroup-config",
+      "--region",
+      MAIN.region,
+      "--cluster-name",
+      MAIN.name,
+      "--nodegroup-name",
+      "default",
+      "--scaling-config",
+      "desiredSize=2"
+    ]);
+    s.aws.run([
+      "eks",
+      "describe-nodegroup",
+      "--region",
+      MAIN.region,
+      "--cluster-name",
+      MAIN.name,
+      "--nodegroup-name",
+      "default"
+    ]);
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([]);
+    expect(
+      s.outside.calls
+        .filter((call) => call.command === "eks update-nodegroup-config")
+        .map((call) => call.args.at(-1))
+    ).toEqual(["minSize=0,maxSize=2,desiredSize=0"]);
   });
 
   it("reports a node group it can't scale", async () => {

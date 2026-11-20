@@ -2037,6 +2037,9 @@ async function removeEnvironment(
   let environmentDeleted = false;
   let lockedFailure = "";
   let result: AwsEnvironmentRemovalResult = { ok: false, message: "" };
+  // What every attempt removed, not only the last one.
+  const removed: string[] = [];
+  const lockWarnings: string[] = [];
   // A removal that kept something it couldn't check or delete, such as an
   // access entry it couldn't read or a boundary IAM still counts an app role
   // just deleted against, is tried again after each IAM retry wait. After
@@ -2092,6 +2095,10 @@ async function removeEnvironment(
     } catch (error) {
       result = { ok: false, message: errorMessage(error) };
     }
+    if (result.ok) {
+      removed.push(...result.removed);
+      if (result.lockWarning) lockWarnings.push(result.lockWarning);
+    }
     if (!result.ok || !again) break;
   }
   if (!result.ok) {
@@ -2100,13 +2107,11 @@ async function removeEnvironment(
     );
     return;
   }
-  if (result.lockWarning) report.warn(`${target.name}: ${result.lockWarning}`);
+  for (const line of lockWarnings) report.warn(`${target.name}: ${line}`);
   for (const line of result.warnings) report.fail(`${target.name}: ${line}`);
   for (const line of result.kept) ports.log(`${target.name} kept ${line}`);
-  if (result.removed.length > 0)
-    report.did(
-      `Removed from ${config.deployRoleName}: ${result.removed.join(", ")}`
-    );
+  if (removed.length > 0)
+    report.did(`Removed from ${config.deployRoleName}: ${removed.join(", ")}`);
   if (!environmentDeleted) {
     report.fail(
       `Removed ${target.name}'s access, but kept its GitHub environment${lockedFailure ? `: ${lockedFailure}` : ", because the deploy role's lock was lost"}. The next run tries again. See the AWS section of docs/eng/CLOUD_E2E_RUNBOOK.md.`
@@ -2302,7 +2307,13 @@ async function scaleDownNodeGroups(
   for (const name of AWS_MAIN_NODE_GROUPS) {
     try {
       let group = await readNodeGroup(ports, cluster, name);
-      if (group.desiredSize === 0 && group.minSize === 0) continue;
+      // A group still updating may be on its way up from zero.
+      if (
+        group.status === "ACTIVE" &&
+        group.desiredSize === 0 &&
+        group.minSize === 0
+      )
+        continue;
       if (group.status !== "ACTIVE") {
         const ready = await waitFor(
           ports,
