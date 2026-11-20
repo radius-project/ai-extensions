@@ -1,13 +1,15 @@
 import { awsAppBoundary } from "../../../src/aws-deploy-role-name.js";
-import type { AwsCommandResult } from "../../../src/server/services/aws-cli-session.js";
 import {
   appAssociationLabel,
   readAppRoles,
   readAssociations,
   readRoleBoundary,
   recipeEnvironment,
+  waitFor,
   type AwsCleanupCluster
 } from "./aws-cloud-cleanup.js";
+import type { AwsJourneyPorts } from "./aws-journey-support.js";
+import { AWS_SETTLE_MS, AWS_SETTLE_POLL_MS } from "./aws-timeout-budget.js";
 
 // The journey's check of what the containers Recipe made for an environment
 // through Cloud Control. While the app is deployed, each container has an app
@@ -38,47 +40,75 @@ function serviceAccount(container: string): string {
   return `radius-app-${container}`;
 }
 
+async function readAppIdentity(
+  ports: Pick<AwsJourneyPorts, "runAws">,
+  expected: AwsPodIdentityExpectation
+) {
+  const boundary = awsAppBoundary(
+    expected.accountId,
+    expected.repositoryId,
+    expected.environment
+  );
+  const roles = (
+    await readAppRoles(ports, {
+      accountId: expected.accountId,
+      repositoryId: expected.repositoryId,
+      prefix: expected.environment
+    })
+  ).filter((role) => role.path === boundary.path);
+  const associations = await readAssociations(ports, expected.cluster);
+  return { boundary, roles, associations };
+}
+
+async function readLeftovers(
+  ports: Pick<AwsJourneyPorts, "runAws">,
+  expected: AwsPodIdentityExpectation
+): Promise<string[]> {
+  const { boundary, roles, associations } = await readAppIdentity(
+    ports,
+    expected
+  );
+  const folder = `arn:aws:iam::${expected.accountId}:role${boundary.path}`;
+  const accounts = new Set(expected.containers.map(serviceAccount));
+  return [
+    ...roles.map((role) => `App role ${role.arn} is still there.`),
+    ...associations
+      .filter(
+        (item) =>
+          item.roleArn.startsWith(folder) ||
+          (item.namespace === expected.namespace &&
+            accounts.has(item.serviceAccount))
+      )
+      .map((item) => `${appAssociationLabel(item)} is still there.`)
+  ];
+}
+
 /**
  * How the environment's app roles and Pod Identity associations differ from
  * what `state` expects, in words. Empty when they match. A read that fails
  * throws.
  */
 export async function checkAwsPodIdentity(
-  runAws: (args: string[]) => Promise<AwsCommandResult>,
+  ports: Pick<AwsJourneyPorts, "runAws" | "sleep" | "now">,
   expected: AwsPodIdentityExpectation,
   state: "deployed" | "deleted"
 ): Promise<string[]> {
-  const ports = { runAws };
-  const { cluster, environment, namespace } = expected;
-  const boundary = awsAppBoundary(
-    expected.accountId,
-    expected.repositoryId,
-    environment
-  );
-  const roles = (
-    await readAppRoles(ports, {
-      accountId: expected.accountId,
-      repositoryId: expected.repositoryId,
-      prefix: environment
-    })
-  ).filter((role) => role.path === boundary.path);
-  const associations = await readAssociations(ports, cluster);
-  const folder = `arn:aws:iam::${expected.accountId}:role${boundary.path}`;
-
   if (state === "deleted") {
-    const accounts = new Set(expected.containers.map(serviceAccount));
-    return [
-      ...roles.map((role) => `App role ${role.arn} is still there.`),
-      ...associations
-        .filter(
-          (item) =>
-            item.roleArn.startsWith(folder) ||
-            (item.namespace === namespace && accounts.has(item.serviceAccount))
-        )
-        .map((item) => `${appAssociationLabel(item)} is still there.`)
-    ];
+    // IAM and Pod Identity deletes can take a while to show, so what is left
+    // gets the settle window to go.
+    let left: string[] = [];
+    await waitFor(ports, AWS_SETTLE_MS, AWS_SETTLE_POLL_MS, async () => {
+      left = await readLeftovers(ports, expected);
+      return left.length === 0;
+    });
+    return left;
   }
 
+  const { cluster, environment, namespace } = expected;
+  const { boundary, roles, associations } = await readAppIdentity(
+    ports,
+    expected
+  );
   const differences: string[] = [];
   for (const container of expected.containers) {
     const prefix = `${serviceAccount(container).slice(0, ROLE_NAME_MAX)}-`;

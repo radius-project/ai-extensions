@@ -186,6 +186,7 @@ function cliRequest(
       resource = `${eks}podidentityassociation/${cluster}/${flag(args, "--association-id")}`;
       break;
     case "eks describe-nodegroup":
+    case "eks describe-update":
     case "eks update-nodegroup-config":
     case "eks update-nodegroup-version":
       resource = `${eks}nodegroup/${cluster}/${flag(args, "--nodegroup-name")}/${NODEGROUP_ID}`;

@@ -848,7 +848,7 @@ export async function readAws(
 
 // As readAws, but undefined when AWS answers `notFound`: the resource is
 // already gone. JSON never parses to undefined.
-async function readAwsIfFound(
+export async function readAwsIfFound(
   ports: Pick<AwsCleanupPorts, "runAws">,
   args: string[],
   notFound: string
@@ -1680,11 +1680,32 @@ async function sweepAppIdentities(
   return { clean, deleted };
 }
 
+// IAM is eventually consistent: for a while after the sweep deletes a role's
+// inline policies, or a role that used a boundary, IAM may still count them
+// and refuse the next delete (DeleteConflict). That is retried with a
+// growing wait before it is reported.
+export const IAM_CONFLICT_RETRY_MS = [5_000, 10_000, 20_000, 40_000] as const;
+const IAM_CONFLICT_RETRY_SECONDS =
+  IAM_CONFLICT_RETRY_MS.reduce((total, wait) => total + wait, 0) / 1000;
+
+async function runIamDelete(
+  ports: Pick<AwsCleanupPorts, "runAws" | "sleep">,
+  args: string[]
+): Promise<AwsCommandResult> {
+  let result = await ports.runAws(args);
+  for (const wait of IAM_CONFLICT_RETRY_MS) {
+    if (!awsError(result, "DeleteConflict")) break;
+    await ports.sleep(wait);
+    result = await ports.runAws(args);
+  }
+  return result;
+}
+
 // Delete a role's inline policies, then the role. The Recipe attaches no
 // managed policy, and the test role can't detach one, so IAM's refusal of a
 // role that has one is reported, not worked around.
 async function deleteAppRole(
-  ports: Pick<AwsCleanupPorts, "runAws">,
+  ports: Pick<AwsCleanupPorts, "runAws" | "sleep">,
   role: AppRole & { policies: readonly string[] },
   report: Report
 ): Promise<boolean> {
@@ -1703,7 +1724,7 @@ async function deleteAppRole(
     );
     return false;
   }
-  const result = await ports.runAws([
+  const result = await runIamDelete(ports, [
     "iam",
     "delete-role",
     "--role-name",
@@ -1716,7 +1737,7 @@ async function deleteAppRole(
   report.fail(
     `Deleting app role ${role.arn}: ${awsDetail(result)}${
       awsError(result, "DeleteConflict") ?
-        " IAM keeps a role that has a managed policy or an instance profile, which the test role can't remove."
+        ` IAM still refused after ${IAM_CONFLICT_RETRY_SECONDS} seconds of retries, so the role has a managed policy or an instance profile, which the test role can't remove.`
       : ""
     }`
   );
@@ -2115,11 +2136,18 @@ async function removeEnvironment(
   let environmentDeleted = false;
   let lockedFailure = "";
   let result: AwsEnvironmentRemovalResult = { ok: false, message: "" };
-  // A removal that kept something it couldn't check, such as an access entry
-  // it couldn't read, is tried once more before the environment goes. After
+  // What every attempt removed, not only the last one.
+  const removed: string[] = [];
+  const lockWarnings: string[] = [];
+  // A removal that kept something it couldn't check or delete, such as an
+  // access entry it couldn't read or a boundary IAM still counts an app role
+  // just deleted against, is tried again after each IAM retry wait. After
   // that the environment goes anyway, as the product's delete does: a later
   // run could not sign in to delete the app again.
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  const waits = [0, ...IAM_CONFLICT_RETRY_MS];
+  for (const [attempt, wait] of waits.entries()) {
+    const last = attempt === waits.length - 1;
+    if (wait > 0) await ports.sleep(wait);
     let again = false;
     try {
       result = await ports.removeAccess({
@@ -2151,7 +2179,7 @@ async function removeEnvironment(
           );
         },
         whileLocked: async (removal) => {
-          if (removal.warnings.length > 0 && attempt === 1) {
+          if (removal.warnings.length > 0 && !last) {
             again = true;
             return;
           }
@@ -2166,6 +2194,10 @@ async function removeEnvironment(
     } catch (error) {
       result = { ok: false, message: errorMessage(error) };
     }
+    if (result.ok) {
+      removed.push(...result.removed);
+      if (result.lockWarning) lockWarnings.push(result.lockWarning);
+    }
     if (!result.ok || !again) break;
   }
   if (!result.ok) {
@@ -2174,13 +2206,11 @@ async function removeEnvironment(
     );
     return;
   }
-  if (result.lockWarning) report.warn(`${target.name}: ${result.lockWarning}`);
+  for (const line of lockWarnings) report.warn(`${target.name}: ${line}`);
   for (const line of result.warnings) report.fail(`${target.name}: ${line}`);
   for (const line of result.kept) ports.log(`${target.name} kept ${line}`);
-  if (result.removed.length > 0)
-    report.did(
-      `Removed from ${config.deployRoleName}: ${result.removed.join(", ")}`
-    );
+  if (removed.length > 0)
+    report.did(`Removed from ${config.deployRoleName}: ${removed.join(", ")}`);
   if (!environmentDeleted) {
     report.fail(
       `Removed ${target.name}'s access, but kept its GitHub environment${lockedFailure ? `: ${lockedFailure}` : ", because the deploy role's lock was lost"}. The next run tries again. See the AWS section of docs/eng/CLOUD_E2E_RUNBOOK.md.`
@@ -2305,7 +2335,7 @@ async function sweepOrphanedBoundaries(
       );
       continue;
     }
-    const result = await ports.runAws([
+    const result = await runIamDelete(ports, [
       "iam",
       "delete-policy",
       "--policy-arn",
@@ -2317,7 +2347,7 @@ async function sweepOrphanedBoundaries(
       report.fail(
         `Deleting orphaned ${label}: ${awsDetail(result)}${
           awsError(result, "DeleteConflict") ?
-            " IAM keeps a policy an app role still uses, or one with more than one version, which the test role can't delete."
+            ` IAM still refused after ${IAM_CONFLICT_RETRY_SECONDS} seconds of retries, so an app role still uses the policy, or it has more than one version, which the test role can't delete.`
           : ""
         }`
       );
@@ -2376,7 +2406,13 @@ async function scaleDownNodeGroups(
   for (const name of AWS_MAIN_NODE_GROUPS) {
     try {
       let group = await readNodeGroup(ports, cluster, name);
-      if (group.desiredSize === 0 && group.minSize === 0) continue;
+      // A group still updating may be on its way up from zero.
+      if (
+        group.status === "ACTIVE" &&
+        group.desiredSize === 0 &&
+        group.minSize === 0
+      )
+        continue;
       if (group.status !== "ACTIVE") {
         const ready = await waitFor(
           ports,
@@ -2395,7 +2431,7 @@ async function scaleDownNodeGroups(
         }
         if (group.desiredSize === 0 && group.minSize === 0) continue;
       }
-      const result = await ports.runAws([
+      const result = await runNodeGroupUpdate(ports, [
         "eks",
         "update-nodegroup-config",
         "--region",
@@ -2421,6 +2457,25 @@ async function scaleDownNodeGroups(
       );
     }
   }
+}
+
+/**
+ * Run a node group update, waiting out another update that still holds the
+ * group. EKS refuses an update while one is in progress
+ * (ResourceInUseException), and a describe right after an update may still
+ * show the group ACTIVE.
+ */
+export async function runNodeGroupUpdate(
+  ports: Pick<AwsCleanupPorts, "runAws" | "sleep" | "now">,
+  args: string[]
+): Promise<AwsCommandResult> {
+  const deadline = ports.now() + NODE_GROUP_READY_TIMEOUT_MS;
+  let result = await ports.runAws(args);
+  while (awsError(result, "ResourceInUseException") && ports.now() < deadline) {
+    await ports.sleep(NODE_GROUP_POLL_MS);
+    result = await ports.runAws(args);
+  }
+  return result;
 }
 
 interface LockState {

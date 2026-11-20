@@ -14,10 +14,12 @@ import {
   tagList,
   type CleanupScenario
 } from "../../support/aws/cleanup-scenario.js";
+import { lagging } from "../../support/aws/lagging.js";
 import {
   checkAwsPodIdentity,
   type AwsPodIdentityExpectation
 } from "./aws-pod-identity.js";
+import { AWS_SETTLE_MS, AWS_SETTLE_POLL_MS } from "./aws-timeout-budget.js";
 
 const ENVIRONMENT = "radtest-aws-aaaa11112222";
 const OTHER = "radtest-aws-bbbb33334444";
@@ -41,7 +43,7 @@ function check(
   state: "deployed" | "deleted",
   expected = EXPECTED
 ) {
-  return checkAwsPodIdentity(s.outside.runAws, expected, state);
+  return checkAwsPodIdentity(s.ports, expected, state);
 }
 
 function addRole(s: CleanupScenario, name: string, path: string) {
@@ -76,7 +78,9 @@ describe("checkAwsPodIdentity", () => {
     await s.ports.github.deleteApplication(ENVIRONMENT, APPLICATION);
     s.aws.roles.delete("radius-app-web-api-1234567890123");
     s.aws.roles.delete("radius-app-web-uppercase0000");
+    const start = s.clock.now;
     expect(await check(s, "deleted")).toEqual([]);
+    expect(s.clock.now - start).toBeLessThan(AWS_SETTLE_POLL_MS);
   });
 
   it("names the app role and association still there after the app is deleted", async () => {
@@ -214,9 +218,70 @@ describe("checkAwsPodIdentity", () => {
         { code: 0, stdout: "{}", stderr: "" }
       : s.outside.runAws(args);
     await expect(
-      checkAwsPodIdentity(noRole, EXPECTED, "deployed")
+      checkAwsPodIdentity({ ...s.ports, runAws: noRole }, EXPECTED, "deployed")
     ).rejects.toThrow(
       `IAM did not describe app role ${appRoleName(ENVIRONMENT)}.`
     );
+    // A failed read isn't retried in the settle window.
+    const start = s.clock.now;
+    s.aws.refuseOnce("eks list-pod-identity-associations", "AccessDenied");
+    await expect(check(s, "deleted")).rejects.toThrow(
+      /aws eks list-pod-identity-associations: .*AccessDenied/
+    );
+    expect(s.clock.now - start).toBeLessThan(AWS_SETTLE_POLL_MS);
+  });
+});
+
+describe("checkAwsPodIdentity after a delete that takes a while to show", () => {
+  // The app delete, with the association deleted through EKS so the lag
+  // applies, and the list and describe both answering as before it.
+  async function deleteSlowly(stale: number) {
+    const s = await deployed();
+    const lags = [
+      lagging(
+        s,
+        "delete-pod-identity-association",
+        "list-pod-identity-associations",
+        stale
+      ),
+      lagging(
+        s,
+        "delete-pod-identity-association",
+        "describe-pod-identity-association",
+        stale
+      )
+    ];
+    expect(await check(s, "deployed")).toEqual([]);
+    const id = association(s).associationId;
+    s.aws.roles.delete(appRoleName(ENVIRONMENT));
+    expect(
+      s.aws.run([
+        "eks",
+        "delete-pod-identity-association",
+        "--region",
+        MAIN.region,
+        "--cluster-name",
+        MAIN.name,
+        "--association-id",
+        id
+      ]).code
+    ).toBe(0);
+    return { s, id, lags, start: s.clock.now };
+  }
+
+  it("passes once the deleted association stops showing", async () => {
+    const { s, lags, start } = await deleteSlowly(3);
+    expect(await check(s, "deleted")).toEqual([]);
+    expect(lags.map((lag) => lag.left())).toEqual([0, 0]);
+    expect(s.clock.now - start).toBeGreaterThanOrEqual(3 * AWS_SETTLE_POLL_MS);
+  });
+
+  it("reports the association still there when it outlasts the window", async () => {
+    const { s, id, lags, start } = await deleteSlowly(1000);
+    expect(await check(s, "deleted")).toEqual([
+      `Pod Identity association ${id} (${NAMESPACE}/radius-app-web) on cluster ${MAIN.name} is still there.`
+    ]);
+    expect(lags[0]!.left()).toBeGreaterThan(0);
+    expect(s.clock.now - start).toBeGreaterThanOrEqual(AWS_SETTLE_MS);
   });
 });

@@ -5,6 +5,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAIN } from "../../support/aws/cleanup-scenario.js";
 import {
+  KUBECTL_FORBIDDEN,
+  KUBECTL_LOGS_WAITING,
+  type RecordedError
+} from "../../support/aws/recorded-errors.js";
+import {
   connectionProbeJob,
   describeService,
   parseProbeOutcome,
@@ -17,6 +22,8 @@ import {
   type ManagedServiceEndpoint,
   type ProbePool
 } from "./aws-connection-probe.js";
+import { AWS_PROBE_POLL_MS } from "./aws-timeout-budget.js";
+import { createKubectlJourneyKubernetes } from "./aws-journey-ports.js";
 import { selectLeakedClusterWorkloads } from "./cloud-cleanup.js";
 
 const IMAGE = `ghcr.io/radius-project/mirror/alpine@sha256:${"a".repeat(64)}`;
@@ -39,7 +46,8 @@ interface ProbeCluster {
   // What a connect from each pool does when it is not a timeout.
   connects: Partial<Record<ProbePool, "connected" | "refused">>;
   image: "pulls" | "fails";
-  podless: boolean;
+  // Reads of each Job that list no pod before its pod shows.
+  podless: number;
   // A pod that never leaves Pending, or a listing kubectl can't explain.
   stuck: "creating" | "bare" | "malformed" | null;
   // Reads before a started pod finishes; Infinity keeps it Running.
@@ -67,6 +75,7 @@ function pool(job: ConnectionProbeJob): ProbePool {
 // can't reach CoreDNS.
 function probeCluster(): ProbeCluster {
   const reads = new Map<string, number>();
+  const podlessReads = new Map<string, number>();
   const now = { value: Date.parse("2026-11-17T05:00:00Z") };
   const cluster: ProbeCluster = {
     jobs: new Map(),
@@ -74,7 +83,7 @@ function probeCluster(): ProbeCluster {
     pools: new Set(["default", "isolated"]),
     connects: { default: "connected" },
     image: "pulls",
-    podless: false,
+    podless: 0,
     stuck: null,
     runningReads: 1,
     log: null,
@@ -98,7 +107,11 @@ function probeCluster(): ProbeCluster {
           const job = cluster.jobs.get(name);
           if (!job || job.metadata.namespace !== namespace)
             throw new Error(`No Job ${namespace}/${name}`);
-          if (cluster.podless) return { items: [] };
+          const empty = podlessReads.get(name) ?? 0;
+          if (empty < cluster.podless) {
+            podlessReads.set(name, empty + 1);
+            return { items: [] };
+          }
           if (cluster.stuck === "malformed") return {};
           const spec = (job.spec.template as { spec: Record<string, any> })
             .spec;
@@ -469,7 +482,7 @@ describe("runConnectionCheck", () => {
 
   it("fails a Job that makes no pod, and one Kubernetes refuses", async () => {
     const podless = probeCluster();
-    podless.podless = true;
+    podless.podless = Infinity;
     expect((await check(podless)).failures[0]).toContain(
       "couldn't start: the Job made no pod in 3 minutes."
     );
@@ -480,6 +493,102 @@ describe("runConnectionCheck", () => {
       "couldn't start: creating Job radius-probe-default-0-run1 failed: admission webhook denied."
     );
     expect(refused.deleted).toHaveLength(2);
+  });
+
+  it("waits for a Job that makes its pod late", async () => {
+    const cluster = probeCluster();
+    cluster.podless = 2;
+    const start = cluster.now.value;
+    const { rows, failures } = await check(cluster);
+    expect(failures).toEqual([]);
+    expect(rows.map((row) => row.outcome)).toEqual(["connected", "timeout"]);
+    // Each probe: two reads with no pod, Pending, Running, then Succeeded.
+    expect(cluster.now.value - start).toBe(2 * 4 * AWS_PROBE_POLL_MS);
+  });
+
+  describe("reading a finished pod's log through kubectl", () => {
+    // The journey's kubectl port, over a cluster whose probe pods have all
+    // failed, and whose `kubectl logs` answers `logs`.
+    function failedPods(logs: RecordedError) {
+      const now = { value: 0 };
+      const calls: string[] = [];
+      const kubernetes = createKubectlJourneyKubernetes({
+        run: async (command, args) => {
+          calls.push(`${command} ${args[2] ?? ""}`);
+          if (command === "kubectl" && args.includes("logs")) return logs;
+          if (command === "kubectl" && args.includes("pods")) {
+            const job = (args[args.indexOf("--selector") + 1] ?? "").replace(
+              "batch.kubernetes.io/job-name=",
+              ""
+            );
+            return {
+              code: 0,
+              stderr: "",
+              stdout: JSON.stringify({
+                items: [
+                  {
+                    metadata: { name: `${job}-tptv8` },
+                    status: {
+                      phase: "Failed",
+                      reason: "DeadlineExceeded",
+                      containerStatuses: [
+                        {
+                          state: { waiting: { reason: "ContainerCreating" } }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              })
+            };
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        directory: async () => "/work/kube",
+        writeFile: async () => {}
+      });
+      const ports = {
+        kubernetes,
+        sleep: async (milliseconds: number) => {
+          now.value += milliseconds;
+        },
+        now: () => now.value
+      };
+      return {
+        calls,
+        run: () =>
+          runConnectionCheck(ports, {
+            cluster: MAIN,
+            namespace: NAMESPACE,
+            application: APPLICATION,
+            environment: ENVIRONMENT,
+            image: IMAGE,
+            runId: "Run-1",
+            services: [DB]
+          })
+      };
+    }
+
+    it("fails a probe whose container never started as one that couldn't start", async () => {
+      const { calls, run } = failedPods(KUBECTL_LOGS_WAITING);
+      const { rows, failures } = await run();
+      expect(rows.map((row) => row.outcome)).toEqual([
+        "cannot-start",
+        "cannot-start"
+      ]);
+      expect(failures[0]).toBe(
+        `The default probe for ${DB_TEXT} couldn't start: pod radius-probe-default-0-run1-tptv8 failed before its container started (container "radius-probe-default-0-run1" in pod "radius-probe-default-0-run1-tptv8" is waiting to start: trying and failing to pull image). A probe that never ran proves nothing about the network.`
+      );
+      expect(calls.filter((call) => call === "kubectl delete")).toHaveLength(2);
+    });
+
+    it("stops on any other log error, still deleting the Job", async () => {
+      const { calls, run } = failedPods(KUBECTL_FORBIDDEN);
+      await expect(run()).rejects.toThrow(
+        `The connection check stopped: Reading the log of pod radius-probe-default-0-run1-tptv8 on ${MAIN.name}: Error from server (Forbidden)`
+      );
+      expect(calls.filter((call) => call === "kubectl delete")).toHaveLength(1);
+    });
   });
 
   it.each(["default", "isolated"] as const)(

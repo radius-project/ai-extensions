@@ -33,10 +33,13 @@ import {
   tagList,
   type CleanupScenario
 } from "../../support/aws/cleanup-scenario.js";
+import { lagging } from "../../support/aws/lagging.js";
+import { IAM_NO_SUCH_ENTITY } from "../../support/aws/recorded-errors.js";
 import {
   appIdentityEnvironment,
   appPathEnvironment,
   AWS_MAIN_NODE_GROUPS,
+  IAM_CONFLICT_RETRY_MS,
   appPathRoot,
   awsEnvironmentFromTag,
   awsStatePackagePrefix,
@@ -440,10 +443,21 @@ function wentOn(environment: string): string {
 describe("sweepAwsCloudE2E", () => {
   it("deletes each stale environment's app, then its leftovers, then its access and GitHub state", async () => {
     const s = await twoEnvironments();
+    // Kubernetes deletes at once here, so step 4 starts while IAM still
+    // counts the app role step 2 deleted. Slow Kubernetes deletes are
+    // covered below.
+    s.kube.terminatingReads = 0;
     s.appDelete.set(OLD, "leave");
     const report = await runSweep(s);
 
     expect(report.failures).toEqual([]);
+    // The removal ran twice for the first environment; the report names what
+    // both attempts removed.
+    const removal = report.done.find((line) =>
+      line.includes(appBoundary(OLD).arn)
+    );
+    expect(removal).toContain(`Removed from ${ROLE}: `);
+    expect(removal).toContain("trust subject");
     expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
     expect(retryInputs(s, OLD)).toEqual([]);
     expect(retryInputs(s, SECOND_ENV)).toEqual([]);
@@ -470,9 +484,15 @@ describe("sweepAwsCloudE2E", () => {
       "iam create-policy",
       "iam delete-role-policy",
       "iam update-assume-role-policy",
-      // The app boundary, then the access entry.
+      // The app boundary, then the access entry. IAM still counts the app
+      // role step 2 just deleted against the boundary, so the removal keeps
+      // it, and its retry deletes it.
       "iam delete-policy",
       "eks delete-access-entry",
+      "iam delete-policy",
+      "iam create-policy",
+      "iam delete-role-policy",
+      "iam delete-policy",
       `DELETE environment ${OLD}`,
       "iam delete-policy",
       `DELETE package ${statePackageName(REPO, SECOND_ENV)}`,
@@ -495,6 +515,10 @@ describe("sweepAwsCloudE2E", () => {
         .map((call) => call.args.at(-1))
     ).toEqual([
       "connections",
+      awsEnvironmentPolicyName(REPO_ID, OLD),
+      appBoundary(OLD).arn,
+      expect.stringContaining("radius-lock-"),
+      // The retry while IAM still counts the deleted app role.
       awsEnvironmentPolicyName(REPO_ID, OLD),
       appBoundary(OLD).arn,
       expect.stringContaining("radius-lock-"),
@@ -968,7 +992,7 @@ describe("sweepAwsCloudE2E", () => {
     const start = s.clock.now;
     const report = await runSweep(s);
     expect(report.failures).toHaveLength(1);
-    expect(s.clock.now - start).toBeLessThan(60 * 1000);
+    expect(s.clock.now - start).toBeLessThan(RDS_DELETE_TIMEOUT_MS);
     expect(
       s.outside.calls.filter(
         (call) =>
@@ -998,7 +1022,7 @@ describe("sweepAwsCloudE2E", () => {
     expect(report.failures[0]).toContain(
       `Deleting RDS DB instance ${databaseName(OLD)} in ${REGION}: An error occurred (InvalidDBInstanceState)`
     );
-    expect(s.clock.now - start).toBeLessThan(60 * 1000);
+    expect(s.clock.now - start).toBeLessThan(RDS_DELETE_TIMEOUT_MS);
     expect(retryInputs(s, OLD)).toHaveLength(7);
 
     // The app delete started deleting it after the sweep read the list.
@@ -1256,7 +1280,7 @@ describe("sweepAwsCloudE2E", () => {
     expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
   });
 
-  it("fails, naming what is left, when the removal keeps something it couldn't check twice", async () => {
+  it("fails, naming what is left, when the removal keeps something it couldn't check every time", async () => {
     const s = await twoEnvironments();
     let refusals = 0;
     const run = s.aws.run.bind(s.aws);
@@ -1273,7 +1297,7 @@ describe("sweepAwsCloudE2E", () => {
       return run(args);
     };
     const report = await runSweep(s);
-    expect(refusals).toBe(2);
+    expect(refusals).toBe(IAM_CONFLICT_RETRY_MS.length + 1);
     expect(report.failures).toHaveLength(1);
     expect(report.failures[0]).toMatch(
       new RegExp(
@@ -1534,6 +1558,40 @@ describe("sweepAwsCloudE2E", () => {
     expect((await runSweep(s)).failures).toEqual([]);
   });
 
+  it("doesn't take a node group still updating at zero as scaled down", async () => {
+    const s = createCleanupScenario();
+    // A cancelled run left default on its way up from zero.
+    s.aws.run([
+      "eks",
+      "update-nodegroup-config",
+      "--region",
+      MAIN.region,
+      "--cluster-name",
+      MAIN.name,
+      "--nodegroup-name",
+      "default",
+      "--scaling-config",
+      "desiredSize=2"
+    ]);
+    s.aws.run([
+      "eks",
+      "describe-nodegroup",
+      "--region",
+      MAIN.region,
+      "--cluster-name",
+      MAIN.name,
+      "--nodegroup-name",
+      "default"
+    ]);
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([]);
+    expect(
+      s.outside.calls
+        .filter((call) => call.command === "eks update-nodegroup-config")
+        .map((call) => call.args.at(-1))
+    ).toEqual(["minSize=0,maxSize=2,desiredSize=0"]);
+  });
+
   it("reports a node group it can't scale", async () => {
     const s = createCleanupScenario();
     s.aws.addNodegroup(
@@ -1546,7 +1604,7 @@ describe("sweepAwsCloudE2E", () => {
     s.aws.refuseOnce("eks describe-nodegroup", "ServerException");
     const report = await runSweep(s);
     expect(report.failures).toEqual([
-      `Could not read node group default on ${MAIN.name}: aws eks describe-nodegroup: \nAn error occurred (ServerException) when calling the eks describe-nodegroup operation: Refused by the test.`.replace(
+      `Could not read node group default on ${MAIN.name}: aws eks describe-nodegroup: \nAn error occurred (ServerException) when calling the DescribeNodegroup operation: Refused by the test.`.replace(
         "aws eks describe-nodegroup: \n",
         "aws eks describe-nodegroup: "
       )
@@ -1840,27 +1898,6 @@ describe("AWS answers the sweep can't use", () => {
 describe("reads that lag a delete", () => {
   // After `deleteVerb`, the next `stale` reads by `readVerb` still answer as
   // they did before it, as an eventually consistent service does.
-  function lagging(
-    s: CleanupScenario,
-    deleteVerb: string,
-    readVerb: string,
-    stale: number
-  ): { left: () => number } {
-    const run = s.aws.run.bind(s.aws);
-    let before: ReturnType<typeof run> | null = null;
-    let remaining = 0;
-    s.aws.run = (args) => {
-      if (args[1] === readVerb && remaining > 0 && before) {
-        remaining -= 1;
-        return before;
-      }
-      const result = run(args);
-      if (args[1] === readVerb) before = result;
-      if (args[1] === deleteVerb && result.code === 0) remaining = stale;
-      return result;
-    };
-    return { left: () => remaining };
-  }
 
   it("waits for a removed lock to show as gone", async () => {
     const s = createCleanupScenario();
@@ -2122,6 +2159,10 @@ describe("sweepAwsCloudE2E app roles and Pod Identity", () => {
     expect(appIdentityWrites(s)).toEqual([
       expect.stringMatching(/^eks delete-pod-identity-association a-\d+$/),
       "iam delete-role-policy connections",
+      // IAM still counts the inline policy just deleted, so the role's
+      // delete is refused until it catches up.
+      `iam delete-role ${appRoleName(OLD)}`,
+      `iam delete-role ${appRoleName(OLD)}`,
       `iam delete-role ${appRoleName(OLD)}`
     ]);
     expect(report.done).toEqual(
@@ -2182,6 +2223,10 @@ describe("sweepAwsCloudE2E app roles and Pod Identity", () => {
     expect(appIdentityWrites(s)).toEqual([
       expect.stringMatching(/^eks delete-pod-identity-association /),
       "iam delete-role-policy connections",
+      // IAM still counts the inline policy just deleted, so the role's
+      // delete is refused until it catches up.
+      `iam delete-role ${appRoleName(OLD)}`,
+      `iam delete-role ${appRoleName(OLD)}`,
       `iam delete-role ${appRoleName(OLD)}`
     ]);
     expect([...s.aws.roles.keys()].sort()).toEqual(
@@ -2237,7 +2282,7 @@ describe("sweepAwsCloudE2E app roles and Pod Identity", () => {
     role.attached.push("arn:aws:iam::aws:policy/ReadOnlyAccess");
     const report = await runSweep(s);
     expect(report.failures).toEqual([
-      `Deleting app role ${role.Arn}: An error occurred (DeleteConflict) when calling the DeleteRole operation: Cannot delete entity, must delete policies first. IAM keeps a role that has a managed policy or an instance profile, which the test role can't remove.`
+      `Deleting app role ${role.Arn}: An error occurred (DeleteConflict) when calling the DeleteRole operation: Cannot delete entity, must delete policies first. IAM still refused after 75 seconds of retries, so the role has a managed policy or an instance profile, which the test role can't remove.`
     ]);
     expect(s.outside.calls.map((call) => call.command)).not.toContain(
       "iam detach-role-policy"
@@ -2370,20 +2415,40 @@ describe("sweepAwsCloudE2E app roles and Pod Identity", () => {
     expect(retryInputs(s, SECOND_ENV)).toEqual([]);
   });
 
+  it("takes an app role IAM answers NoSuchEntity for as already deleted", async () => {
+    const s = await leftByAppDelete();
+    // Something else deleted it first, as the real CLI reports that.
+    const run = s.aws.run.bind(s.aws);
+    s.aws.run = (args) => {
+      const result = run(args);
+      return args[1] === "delete-role" && result.code === 0 ?
+          IAM_NO_SUCH_ENTITY
+        : result;
+    };
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([]);
+    expect(report.done).toContain(
+      `Deleted app role ${s.aws.roleArn(appRoleName(OLD), appFolder(OLD))}`
+    );
+    expect(s.aws.role(appRoleName(OLD))).toBeUndefined();
+  });
+
   it("doesn't let an app role or association IAM and EKS still list after its delete keep the environment", async () => {
     const s = await leftByAppDelete();
-    // Without its boundary, the role doesn't hold up the boundary's delete.
-    s.aws.role(appRoleName(OLD))!.boundary = "";
-    // Each delete is answered, but the list still shows what it deleted.
+    // Each delete is answered, but the list still shows what it deleted, and
+    // IAM still counts the deleted role against its boundary for a while.
     answer(s, "delete-pod-identity-association", () => ({
       code: 0,
       stdout: "{}",
       stderr: ""
     }));
-    answer(s, "delete-role", () => ({ code: 0, stdout: "", stderr: "" }));
+    const lag = lagging(s, "delete-role", "list-roles", 3);
     const report = await runSweep(s);
     expect(report.failures).toEqual([]);
+    // The sweep's own check read the role while IAM still listed it.
+    expect(lag.left()).toBeLessThan(3);
     expect(retryInputs(s, OLD)).toEqual([]);
+    expect(s.aws.policies.has(appBoundary(OLD).arn)).toBe(false);
   });
 
   it("still scales down, sweeps RDS, and clears a stale lock when the repository's ID can't be read", async () => {
@@ -2432,6 +2497,33 @@ describe("sweepAwsCloudE2E app roles and Pod Identity", () => {
     expect(verify.findings).toContain(
       `inline policy ${APP_ROLES_POLICY} on ${ROLE}`
     );
+  });
+
+  it("doesn't go on after a failed app delete while IAM still refuses the app role's delete", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, "fail");
+    // IAM still counts the role's deleted inline policy past the retries.
+    s.aws.iamSettleMs = 10 * 60 * 1000;
+    const role = appRoleName(OLD);
+    const before = retryInputs(s, OLD);
+    const report = await runSweep(s);
+    expect(report.failures).toEqual(
+      expect.arrayContaining([
+        deleteFailed(OLD),
+        expect.stringContaining(
+          `Deleting app role arn:aws:iam::${ACCOUNT}:role${appBoundary(OLD).path}${role}: An error occurred (DeleteConflict)`
+        )
+      ])
+    );
+    expect(report.warnings).not.toContain(wentOn(OLD));
+    expect(retryInputs(s, OLD)).toEqual(before);
+    expect(s.aws.role(role)).toBeDefined();
+
+    s.aws.iamSettleMs = 10_000;
+    nextDay(s);
+    expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
   });
 
   it("doesn't go on after a failed app delete while AWS lists an app role or association it no longer describes", async () => {
@@ -2543,7 +2635,7 @@ describe("sweepAwsCloudE2E orphaned app boundaries", () => {
     role.Tags.push(RADIUS_TAG);
     const report = await runSweep(s);
     expect(report.failures).toEqual([
-      `Deleting orphaned permissions boundary ${appBoundary(ORPHAN).arn}: An error occurred (DeleteConflict) when calling the DeletePolicy operation: Cannot delete a policy attached to entities. IAM keeps a policy an app role still uses, or one with more than one version, which the test role can't delete.`
+      `Deleting orphaned permissions boundary ${appBoundary(ORPHAN).arn}: An error occurred (DeleteConflict) when calling the DeletePolicy operation: Cannot delete a policy attached to entities. IAM still refused after 75 seconds of retries, so an app role still uses the policy, or it has more than one version, which the test role can't delete.`
     ]);
     expect(s.aws.role(appRoleName(ORPHAN))).toBeDefined();
   });

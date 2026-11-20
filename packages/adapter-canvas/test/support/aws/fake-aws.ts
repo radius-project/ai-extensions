@@ -137,14 +137,42 @@ export interface FakeEksCluster {
 // UpdateNodegroupConfig, refuses a group that is not ACTIVE
 // (ResourceInUseException).
 // https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupVersion.html
+// Both return an update to follow with DescribeUpdate, whose status is
+// InProgress, Failed, Cancelled, or Successful.
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_DescribeUpdate.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_Update.html
+// How DescribeNodegroup looks during an update isn't documented, so the
+// fake takes the slow side: the first read after an update still shows the
+// group ACTIVE at its old values, later reads show UPDATING, and the new
+// version and sizes appear only when the update ends `nodegroupUpdateMs`
+// later. Until then the group refuses another update.
+export interface FakeNodegroupUpdate {
+  readonly id: string;
+  readonly type: string;
+  status: string;
+  readonly doneAt: number;
+  // Whether the next DescribeNodegroup still shows the group as it was.
+  staleRead: boolean;
+  readonly next: Partial<
+    Pick<
+      FakeNodegroup,
+      "version" | "releaseVersion" | "minSize" | "maxSize" | "desiredSize"
+    >
+  >;
+  readonly errors: Array<{ errorCode: string; errorMessage: string }>;
+}
+
 export interface FakeNodegroup {
   name: string;
   status: string;
   minSize: number;
   maxSize: number;
   desiredSize: number;
-  // Describe reads left before an UPDATING group is ACTIVE again.
+  // Describe reads left before a group set UPDATING by a test is ACTIVE
+  // again. An update through the CLI uses `update` instead.
   updatingReads: number;
+  // The update in progress, if any.
+  update: FakeNodegroupUpdate | null;
   version: string;
   releaseVersion: string;
   labels: Record<string, string>;
@@ -196,6 +224,17 @@ function serviceError(
     stdout: "",
     stderr: `\nAn error occurred (${code}) when calling the ${operation} operation: ${message}\n`
   };
+}
+
+// The API operation a CLI command calls: `eks update-nodegroup-config` is
+// UpdateNodegroupConfig, as the CLI names it in an error.
+export function awsOperation(command: string): string {
+  return (command.split(" ")[1] ?? "")
+    .split("-")
+    .map((word) =>
+      word === "db" ? "DB" : word.charAt(0).toUpperCase() + word.slice(1)
+    )
+    .join("");
 }
 
 function ok(value?: unknown): AwsCommandResult {
@@ -302,6 +341,31 @@ export class FakeAws {
     string,
     { role: FakeIamRole; reads: number }
   >();
+  // IAM is eventually consistent, and how long a delete takes to reach
+  // other calls isn't documented. Set this to model the slow side: for that
+  // long after a delete, a role still counts an inline policy just deleted
+  // (DeleteRole is refused), and a policy still counts a role just deleted
+  // that used it as its boundary (DeletePolicy is refused, and GetPolicy
+  // counts it). The cleanup and journey scenarios set it; the product's
+  // setup tests don't yet.
+  // https://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_general.html#troubleshoot_general_eventual-consistency
+  iamSettleMs = 0;
+  private readonly settlingInline = new Map<string, number>();
+  private readonly settlingBoundaryUse: Array<{ arn: string; until: number }> =
+    [];
+  // How long a node group update takes.
+  nodegroupUpdateMs = 90_000;
+  // Set to make the next node group update end Failed with this error.
+  nodegroupUpdateFailure: { errorCode: string; errorMessage: string } | null =
+    null;
+  private readonly nodegroupUpdates = new Map<
+    string,
+    {
+      cluster: FakeEksCluster;
+      group: FakeNodegroup;
+      update: FakeNodegroupUpdate;
+    }
+  >();
   // Commands refused once each, as AWS refuses a call it throttles.
   private readonly refusals = new Map<string, string>();
   private readonly now: () => number;
@@ -355,6 +419,7 @@ export class FakeAws {
       status,
       ...scaling,
       updatingReads: 1,
+      update: null,
       version: target.version,
       releaseVersion: `${target.version}.0-20261101`,
       labels: {},
@@ -574,12 +639,16 @@ export class FakeAws {
     const refusal = this.refusals.get(command);
     if (refusal !== undefined) {
       this.refusals.delete(command);
-      return serviceError(refusal, command, "Refused by the test.");
+      return serviceError(
+        refusal,
+        awsOperation(command),
+        "Refused by the test."
+      );
     }
     if (this.sessionExpired) {
       return serviceError(
         "ExpiredToken",
-        "GetCallerIdentity",
+        awsOperation(command),
         "The security token included in the request is expired"
       );
     }
@@ -655,7 +724,11 @@ export class FakeAws {
         });
       case "iam delete-role":
         return this.withRole(args, "DeleteRole", (role) => {
-          if (role.inline.size > 0 || role.attached.length > 0) {
+          if (
+            role.inline.size > 0 ||
+            role.attached.length > 0 ||
+            this.settling(this.settlingInline.get(role.RoleName.toLowerCase()))
+          ) {
             return serviceError(
               "DeleteConflict",
               "DeleteRole",
@@ -667,6 +740,11 @@ export class FakeAws {
             this.lingeringRoles.set(role.RoleName.toLowerCase(), {
               role,
               reads: this.lingeringReads
+            });
+          if (role.boundary)
+            this.settlingBoundaryUse.push({
+              arn: role.boundary,
+              until: this.now() + this.iamSettleMs
             });
           return ok();
         });
@@ -718,6 +796,10 @@ export class FakeAws {
               `The role policy with name ${name} cannot be found.`
             );
           }
+          this.settlingInline.set(
+            role.RoleName.toLowerCase(),
+            this.now() + this.iamSettleMs
+          );
           return ok();
         });
       case "iam list-open-id-connect-providers":
@@ -821,15 +903,21 @@ export class FakeAws {
           args,
           "DescribeNodegroup",
           (cluster, group) => {
-            if (group.status === "UPDATING") {
+            const update = this.settleNodegroup(group);
+            let status = group.status;
+            if (update) {
+              status = update.staleRead ? group.status : "UPDATING";
+              update.staleRead = false;
+            } else if (group.status === "UPDATING") {
               if (group.updatingReads <= 0) group.status = "ACTIVE";
               else group.updatingReads -= 1;
+              status = group.status;
             }
             return ok({
               nodegroup: {
                 nodegroupName: group.name,
                 clusterName: cluster.name,
-                status: group.status,
+                status,
                 version: group.version,
                 releaseVersion: group.releaseVersion,
                 scalingConfig: {
@@ -847,8 +935,10 @@ export class FakeAws {
           }
         );
       case "eks update-nodegroup-config":
-        return this.withNodegroup(args, "UpdateNodegroupConfig", (_c, group) =>
-          this.updateNodegroup(args, group)
+        return this.withNodegroup(
+          args,
+          "UpdateNodegroupConfig",
+          (cluster, group) => this.updateNodegroup(args, cluster, group)
         );
       case "eks list-nodegroups":
         return this.listNodegroups(args);
@@ -858,6 +948,8 @@ export class FakeAws {
           "UpdateNodegroupVersion",
           (cluster, group) => this.updateNodegroupVersion(args, cluster, group)
         );
+      case "eks describe-update":
+        return this.describeUpdate(args);
       case "ec2 describe-launch-template-versions":
         return this.describeLaunchTemplateVersions(args);
     }
@@ -940,11 +1032,12 @@ export class FakeAws {
     cluster: FakeEksCluster,
     group: FakeNodegroup
   ): AwsCommandResult {
-    if (group.status !== "ACTIVE") {
+    const busy = this.settleNodegroup(group) !== null;
+    if (busy || group.status !== "ACTIVE") {
       return serviceError(
         "ResourceInUseException",
         "UpdateNodegroupVersion",
-        `Nodegroup ${group.name} is in ${group.status} state and cannot be updated.`
+        `Nodegroup ${group.name} is in ${busy ? "UPDATING" : group.status} state and cannot be updated.`
       );
     }
     const version = flag(args, "--kubernetes-version") || cluster.version;
@@ -969,19 +1062,78 @@ export class FakeAws {
         `Requested Nodegroup version ${version} is newer than the cluster version ${cluster.version}.`
       );
     }
-    Object.assign(group, {
+    return this.startNodegroupUpdate(cluster, group, "VersionUpdate", {
       version,
-      releaseVersion: `${version}.0-20261101`,
-      status: "UPDATING",
-      updatingReads: 1
+      releaseVersion: `${version}.0-20261101`
     });
-    return ok({
-      update: {
-        id: this.nextId("UPD"),
-        status: "InProgress",
-        type: "VersionUpdate"
-      }
-    });
+  }
+
+  private startNodegroupUpdate(
+    cluster: FakeEksCluster,
+    group: FakeNodegroup,
+    type: string,
+    next: FakeNodegroupUpdate["next"]
+  ): AwsCommandResult {
+    const failure = this.nodegroupUpdateFailure;
+    this.nodegroupUpdateFailure = null;
+    const update: FakeNodegroupUpdate = {
+      id: this.nextId("UPD"),
+      type,
+      status: "InProgress",
+      doneAt: this.now() + this.nodegroupUpdateMs,
+      staleRead: true,
+      next,
+      errors: failure ? [failure] : []
+    };
+    group.update = update;
+    this.nodegroupUpdates.set(update.id, { cluster, group, update });
+    return ok({ update: this.updateView(update) });
+  }
+
+  // Ends the group's update if its time has come, and returns the update
+  // still in progress, if any.
+  private settleNodegroup(group: FakeNodegroup): FakeNodegroupUpdate | null {
+    const update = group.update;
+    if (!update) return null;
+    if (this.now() < update.doneAt) return update;
+    if (update.errors.length > 0) update.status = "Failed";
+    else {
+      update.status = "Successful";
+      Object.assign(group, update.next);
+    }
+    group.update = null;
+    return null;
+  }
+
+  private updateView(update: FakeNodegroupUpdate) {
+    return {
+      id: update.id,
+      status: update.status,
+      type: update.type,
+      params: [],
+      errors: update.errors.map((error) => ({ ...error, resourceIds: [] }))
+    };
+  }
+
+  private describeUpdate(args: readonly string[]): AwsCommandResult {
+    const id = flag(args, "--update-id");
+    const found = this.nodegroupUpdates.get(id);
+    if (
+      !found ||
+      found.cluster !==
+        this.clusters.get(
+          `${flag(args, "--region")}:${flag(args, "--name")}`
+        ) ||
+      found.group.name !== flag(args, "--nodegroup-name")
+    ) {
+      return serviceError(
+        "ResourceNotFoundException",
+        "DescribeUpdate",
+        `No update found for ID: ${id}`
+      );
+    }
+    this.settleNodegroup(found.group);
+    return ok({ update: this.updateView(found.update) });
   }
 
   private describeLaunchTemplateVersions(
@@ -1031,10 +1183,17 @@ export class FakeAws {
       AttachmentCount: roles.filter((role) =>
         role.attached.includes(policy.Arn)
       ).length,
-      PermissionsBoundaryUsageCount: roles.filter(
-        (role) => role.boundary === policy.Arn
-      ).length
+      PermissionsBoundaryUsageCount:
+        roles.filter((role) => role.boundary === policy.Arn).length +
+        this.settlingBoundaryUse.filter(
+          (use) => use.arn === policy.Arn && this.settling(use.until)
+        ).length
     };
+  }
+
+  // Whether a delete that ends at `until` is still settling.
+  private settling(until: number | undefined): boolean {
+    return until !== undefined && this.now() < until;
   }
 
   private policyView(policy: FakeManagedPolicy) {
@@ -1374,13 +1533,15 @@ export class FakeAws {
 
   private updateNodegroup(
     args: readonly string[],
+    cluster: FakeEksCluster,
     group: FakeNodegroup
   ): AwsCommandResult {
-    if (group.status !== "ACTIVE") {
+    const busy = this.settleNodegroup(group) !== null;
+    if (busy || group.status !== "ACTIVE") {
       return serviceError(
         "ResourceInUseException",
         "UpdateNodegroupConfig",
-        `Nodegroup ${group.name} is in ${group.status} state and cannot be updated.`
+        `Nodegroup ${group.name} is in ${busy ? "UPDATING" : group.status} state and cannot be updated.`
       );
     }
     const requested: Record<string, number> = {};
@@ -1416,14 +1577,7 @@ export class FakeAws {
         "Minimum capacity must be less than or equal to desired capacity, which must be less than or equal to maximum capacity, and maximum capacity must be at least 1."
       );
     }
-    Object.assign(group, next, { status: "UPDATING", updatingReads: 1 });
-    return ok({
-      update: {
-        id: this.nextId("UPD"),
-        status: "InProgress",
-        type: "ConfigUpdate"
-      }
-    });
+    return this.startNodegroupUpdate(cluster, group, "ConfigUpdate", next);
   }
 
   private listPodIdentityAssociations(

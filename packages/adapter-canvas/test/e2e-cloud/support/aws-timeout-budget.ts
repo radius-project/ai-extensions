@@ -37,6 +37,13 @@ export const AWS_NODE_GROUP_ACTIVE_TIMEOUT_MS = 15 * MINUTE_MS;
 export const AWS_NODE_READY_TIMEOUT_MS = 10 * MINUTE_MS;
 export const AWS_NODE_POLL_MS = 15_000;
 
+// IAM and EKS are eventually consistent, so a check that reads just after a
+// write gets this long to see it, as the cleanup's leftover check does.
+// https://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_general.html#troubleshoot_general_eventual-consistency
+// https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html
+export const AWS_SETTLE_MS = 2 * MINUTE_MS;
+export const AWS_SETTLE_POLL_MS = 15_000;
+
 // RDS: the final snapshot Cloud Control takes is ready in a few minutes.
 export const AWS_SNAPSHOT_READY_TIMEOUT_MS = 20 * MINUTE_MS;
 export const AWS_SNAPSHOT_GONE_TIMEOUT_MS = 10 * MINUTE_MS;

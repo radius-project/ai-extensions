@@ -39,6 +39,8 @@ const CANNOT_START = new Set([
   "CreateContainerConfigError",
   "CreateContainerError"
 ]);
+// What the API server answers `kubectl logs` for a container that never ran.
+const NEVER_STARTED = /container "[^"]*" in pod "[^"]*" is waiting to start.*/;
 const IMAGE_DIGEST_PATTERN = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
 const PROBE_TTL_SECONDS = 600;
 
@@ -325,11 +327,19 @@ async function waitForProbe(
           detail: `the Job made no pod in ${startMinutes} minutes`
         };
     } else if (pod.phase === "Succeeded" || pod.phase === "Failed") {
-      const log = await ports.kubernetes.readPodLog(
-        cluster,
-        namespace,
-        pod.name
-      );
+      let log: string;
+      try {
+        log = await ports.kubernetes.readPodLog(cluster, namespace, pod.name);
+      } catch (error) {
+        // A pod that ended before its container started, such as one the
+        // Job's deadline stopped while it pulled the image, has no log.
+        const waiting = NEVER_STARTED.exec(describeError(error));
+        if (!waiting) throw error;
+        return {
+          kind: "cannot-start",
+          detail: `pod ${pod.name} ${pod.phase.toLowerCase()} before its container started (${waiting[0]})`
+        };
+      }
       return (
         parseProbeOutcome(log) ?? {
           kind: "untested",

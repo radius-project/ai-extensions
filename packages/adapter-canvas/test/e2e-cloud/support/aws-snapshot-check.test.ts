@@ -9,6 +9,7 @@ import {
   createJourneyWorld,
   type JourneyWorld
 } from "../../support/aws/journey-scenario.js";
+import { RDS_SNAPSHOT_NOT_FOUND } from "../../support/aws/recorded-errors.js";
 import { AWS_ENVIRONMENT_NAME_PREFIX } from "./fixture-repository.js";
 import { checkAndDeleteFinalSnapshot } from "./aws-snapshot-check.js";
 
@@ -188,12 +189,7 @@ describe("checkAndDeleteFinalSnapshot", () => {
         if (args[1] !== "delete-db-snapshot") return runAws(args);
         world.aws.rds.snapshots.clear();
         deleted = true;
-        return {
-          code: 254,
-          stdout: "",
-          stderr:
-            "An error occurred (DBSnapshotNotFound) when calling DeleteDBSnapshot"
-        };
+        return RDS_SNAPSHOT_NOT_FOUND;
       }
     };
     expect(

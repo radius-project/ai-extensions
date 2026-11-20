@@ -13,6 +13,7 @@ import {
   awsError,
   readAws,
   succeeded,
+  waitFor,
   type AwsCleanupCluster
 } from "./aws-cloud-cleanup.js";
 import {
@@ -21,6 +22,7 @@ import {
   text,
   type AwsJourneyPorts
 } from "./aws-journey-support.js";
+import { AWS_SETTLE_MS, AWS_SETTLE_POLL_MS } from "./aws-timeout-budget.js";
 
 // What the AWS environments of a run leave on the deploy role and the
 // clusters, read from IAM and EKS. Preflight, each create and delete stage,
@@ -242,17 +244,24 @@ export async function readAwsFootprint(
 
 /**
  * How the deploy role and clusters differ from what these live environments
- * need, as sentences. Empty when they match. Throws when a read fails.
+ * need, as sentences. Empty when they match. IAM and EKS are eventually
+ * consistent, so differences get the settle window to clear, and the last
+ * read's are returned. Throws when a read fails.
  */
 export async function checkAwsFootprint(
   scope: AwsFootprintScope,
   environments: readonly AwsLiveEnvironment[],
-  ports: Pick<AwsJourneyPorts, "runAws">
+  ports: Pick<AwsJourneyPorts, "runAws" | "sleep" | "now">
 ): Promise<string[]> {
   const expected = expectedAwsFootprint(scope, environments);
-  return compareAwsFootprint(
-    scope,
-    expected,
-    await readAwsFootprint(scope, ports)
-  );
+  let differences: string[] = [];
+  await waitFor(ports, AWS_SETTLE_MS, AWS_SETTLE_POLL_MS, async () => {
+    differences = compareAwsFootprint(
+      scope,
+      expected,
+      await readAwsFootprint(scope, ports)
+    );
+    return differences.length === 0;
+  });
+  return differences;
 }
