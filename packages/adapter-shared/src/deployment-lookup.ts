@@ -1,6 +1,5 @@
 import {
   ABANDONED_DEPLOYMENT_DESCRIPTION,
-  extractAppName,
   classifyDeploymentWorkflow,
   selectDeploymentRecord,
   deploymentRunId,
@@ -8,11 +7,13 @@ import {
   type DeploymentRecord,
   type DeploymentRow
 } from "@radius-project/core";
+import { inspectApplicationDefinition } from "@radius-project/core/inspection";
 import {
   cleanupConfirmation,
   cleanupMarker,
   cleanupRevision
 } from "./deployment-cleanup-marker.js";
+import type { createDeploymentRepository } from "./deployment-repository.js";
 
 export interface DeploymentResolverDependencies {
   readApplicationIdentity(
@@ -458,6 +459,10 @@ async function readEnvironmentDeployment(
 export function createDeploymentLookup(
   dependencies: Omit<DeploymentResolverDependencies, "maxParallelRecords"> & {
     maxParallelRecords?: number;
+    repository: Pick<
+      ReturnType<typeof createDeploymentRepository>,
+      "readJson" | "readContentResult"
+    >;
   }
 ) {
   const resolverDependencies = {
@@ -465,41 +470,55 @@ export function createDeploymentLookup(
     maxParallelRecords: dependencies.maxParallelRecords ?? 10
   };
 
+  function inspectRepoApplication(repo: string, branch: string) {
+    async function readRevision(ref: string): Promise<string | null> {
+      const { ok, json } = await dependencies.repository.readJson(
+        `/repos/${repo}/commits/${encodeURIComponent(ref)}`
+      );
+      return (
+          ok &&
+            json &&
+            typeof json === "object" &&
+            "sha" in json &&
+            typeof json.sha === "string" &&
+            /^[a-f0-9]{40}$/i.test(json.sha)
+        ) ?
+          json.sha
+        : null;
+    }
+
+    let revision: Promise<string | null> | undefined;
+    return inspectApplicationDefinition(repo, branch, async (path, ref) => {
+      try {
+        const sha = await (revision ??= readRevision(ref));
+        if (!sha) return { kind: "unavailable" };
+        const file = await dependencies.repository.readContentResult(
+          `/repos/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(sha)}`
+        );
+        if (file.content !== null)
+          return { kind: "read", source: file.content };
+        // GitHub also returns 404 if the revision is no longer accessible.
+        if (file.status === 404 && (await readRevision(sha)) === sha)
+          return { kind: "missing" };
+        return { kind: "unavailable" };
+      } catch {
+        return { kind: "unavailable" };
+      }
+    });
+  }
+
   async function resolveRepoAppName(
     repo: string,
     branch: string
   ): Promise<string> {
-    let appName = repo.split("/").pop() || repo;
-    const ref = branch || "main";
-    for (const path of [".radius/app.bicep", "app.bicep"]) {
-      let raw: string;
-      try {
-        raw = await dependencies.ghOrThrow([
-          "api",
-          `/repos/${repo}/contents/${path}?ref=${ref}`,
-          "--jq",
-          ".content"
-        ]);
-      } catch {
-        raw = "";
-      }
-      if (!raw) continue;
-      let decoded: string;
-      try {
-        decoded = Buffer.from(raw, "base64").toString("utf8");
-      } catch {
-        decoded = "";
-      }
-      const name = extractAppName(decoded);
-      if (name) {
-        appName = name;
-        break;
-      }
-    }
-    return appName;
+    const inspected = await inspectRepoApplication(repo, branch);
+    return inspected.kind === "defined" ?
+        inspected.name
+      : inspected.fallbackName;
   }
 
   return {
+    inspectRepoApplication,
     resolveRepoAppName,
     listEnvDeployment: (repo: string, environment: string, appName: string) =>
       listEnvironmentDeployment(

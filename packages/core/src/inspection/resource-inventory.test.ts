@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { DeployProgress } from "../../deploy-artifacts.js";
-import { deletionInventoryFromSnapshot } from "./deletion-inventory.js";
+import type { DeployProgress } from "../deploy-artifact-evidence.js";
+import { deletionInventoryFromSnapshot } from "./resource-inventory.js";
 
 function progress(overrides: Partial<DeployProgress> = {}): DeployProgress {
   return {

@@ -4,6 +4,7 @@ import {
 } from "@radius-project/core";
 import { redactGhCredentials } from "../../../src/gh.js";
 import { createServer } from "node:http";
+import { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseDocument } from "yaml";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
@@ -17,6 +18,8 @@ import {
 } from "../../../src/server/services/deploy-request.js";
 import { createDeploymentViews } from "../../../src/server/services/deployment-views.js";
 import { createTestDeploymentRuntime } from "../../support/server/deployment-runtime.js";
+import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import type {
   DeploymentRuntime,
   DeploymentRuntimePorts
@@ -269,8 +272,13 @@ function start(
         maxAttempts: 3,
         pending: false
       }),
-      resolveRepoAppName: (_repo, branch) =>
-        Promise.resolve(`todo-app@${branch}`),
+      inspectRepoApplication: (_repo, branch) =>
+        Promise.resolve({
+          kind: "defined",
+          name: `todo-app@${branch}`,
+          path: ".radius/app.bicep",
+          branch
+        }),
       resolveEnvDeployment,
       listEnvDeployment:
         callbacks.listEnvDeployment ??
@@ -411,13 +419,23 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
   it("keeps healthy environments visible over HTTP when peers are incomplete or unreadable", async () => {
+    const cleanupSelection = {
+      deploymentId: "7",
+      runId: 42,
+      runAttempt: 2,
+      runUrl: "https://github.com/octo/todo/actions/runs/42"
+    };
     const h = start({
       listEnvDeployment: async (_repo, environment) => {
         if (environment === "failed")
           throw new Error("GitHub rate limit. Retry later.");
         if (environment === "incomplete")
           return { deployment: null, incomplete: true };
-        return { deployment: row(environment, "success"), incomplete: false };
+        return {
+          deployment: row(environment, "success"),
+          selection: cleanupSelection,
+          incomplete: false
+        };
       }
     });
     h.environments.push("healthy", "incomplete", "failed");
@@ -429,9 +447,16 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       `${entry.baseUrl}/api/list-deployments?repo=octo/todo`
     );
     expect(await response.json()).toMatchObject({
-      deployments: [{ environment: "healthy", status: "success" }],
+      deployments: [
+        { environment: "healthy", status: "success", cleanupSelection }
+      ],
       environmentDiagnostics: [
-        { environment: "incomplete", kind: "incomplete" },
+        {
+          environment: "incomplete",
+          kind: "incomplete",
+          message:
+            "Only the first 100 deployment records were checked. Load cleanup details to verify older history."
+        },
         {
           environment: "failed",
           kind: "error",
@@ -1647,6 +1672,63 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(await noRepo.text()).toBe('{"applications":[]}');
   });
 
+  it("uses the runtime GitHub port for the selected branch and keeps a display fallback when the ref is unreadable", async () => {
+    const repo = "octo/todolist";
+    const branch = "feature/model";
+    const sha = "a".repeat(40);
+    const refPath = `/repos/${repo}/commits/feature%2Fmodel`;
+    const filePath = `/repos/${repo}/contents/.radius/app.bicep?ref=${sha}`;
+    const model = "name: 'from-selected-commit'";
+    const reads: string[][] = [];
+    let refReadable = true;
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: createEnvironmentExecutionOwner(),
+      cliExec: (command, args, _options, callback) => {
+        expect(command).toBe("gh");
+        reads.push(args);
+        if (args[1] === refPath && !refReadable) {
+          callback(new Error("not found"), "", "Not Found (HTTP 404)");
+        } else {
+          const value =
+            args[1] === refPath ?
+              { sha }
+            : {
+                encoding: "base64",
+                content: Buffer.from(model).toString("base64"),
+                size: Buffer.byteLength(model)
+              };
+          callback(null, JSON.stringify(value), "");
+        }
+        return new ChildProcess();
+      }
+    });
+    const instance = "inspection-listing";
+    try {
+      const entry = await runtime.getOrCreateServer(instance, "deployments");
+      entry.state.contextBranch = branch;
+      const url = `${entry.baseUrl}/api/list-applications?repo=${repo}`;
+      const defined = await fetch(url);
+      expect(defined.status).toBe(200);
+      expect(defined.headers.get("cache-control")).toBe("no-store");
+      expect(await defined.json()).toEqual({
+        applications: [{ name: "from-selected-commit" }]
+      });
+      refReadable = false;
+      const unconfirmed = await fetch(url);
+      expect(unconfirmed.status).toBe(200);
+      expect(await unconfirmed.json()).toEqual({
+        applications: [{ name: "todolist" }]
+      });
+      expect(reads).toEqual([
+        ["api", refPath],
+        ["api", filePath],
+        ["api", refPath]
+      ]);
+    } finally {
+      await runtime.stopServer(instance, true);
+    }
+  });
+
   it("caches the deployments listing and lets ?fresh=1 bypass the cache", async () => {
     const harness = start();
     harness.environments.push("dev");
@@ -1675,6 +1757,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       `${entry.baseUrl}/api/list-deployments?repo=octo/todolist&fresh=1`
     );
     expect(await fresh.json()).toEqual({ deployments: [row("dev")] });
+    expect(harness.cache.get("octo/todolist")?.payload).toEqual({
+      deployments: [row("dev")]
+    });
   });
 
   it("resets the deploy view for the requested attempt and rejects a malformed body", async () => {
@@ -2453,7 +2538,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       expect(response.status).toBe(partial ? 502 : 200);
       expect(await response.json()).toMatchObject(
         partial ?
-          { error: expect.stringContaining("Cloud resources were not changed") }
+          {
+            error: expect.stringContaining("Cloud resources were not changed")
+          }
         : { outcome: "abandoned" }
       );
       expect(harness.cache.has("octo/todo")).toBe(false);
@@ -2815,7 +2902,13 @@ function startDeploy(
         maxAttempts: 3,
         pending: false
       }),
-      resolveRepoAppName: () => Promise.resolve("todo-app"),
+      inspectRepoApplication: () =>
+        Promise.resolve({
+          kind: "defined",
+          name: "todo-app",
+          path: ".radius/app.bicep",
+          branch: "main"
+        }),
       resolveEnvDeployment: () => Promise.resolve(null),
       listEnvDeployment: () =>
         Promise.resolve({ deployment: null, incomplete: false }),
