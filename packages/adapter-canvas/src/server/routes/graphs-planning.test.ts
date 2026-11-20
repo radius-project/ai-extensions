@@ -31,7 +31,7 @@ import type {
   GraphProgressView
 } from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
-import type { DeletionInventory } from "../services/deletion-inventory.js";
+import type { DeletionInventory } from "@radius-project/core/inspection";
 
 interface Recording {
   headers: Record<string, string>;

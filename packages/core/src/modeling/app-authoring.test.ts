@@ -125,6 +125,29 @@ describe("authoring eligibility", () => {
 });
 
 describe("model evidence", () => {
+  const recordedOrigin = {
+    ...freshness.origin,
+    sourceCommit: "a".repeat(40),
+    appBicepHash: `sha256:${"b".repeat(64)}`,
+    generatedAt: "2026-01-01T00:00:00.000Z",
+    radiusVersion: "0.61"
+  };
+
+  function evidencePorts() {
+    return {
+      assertSource: vi.fn(async () => {}),
+      origin: vi.fn(async (): Promise<string | null> =>
+        JSON.stringify(recordedOrigin)
+      ),
+      headCommit: vi.fn(async () => "c".repeat(40)),
+      sourceChangedSince: vi.fn(async (_commit: string) => false),
+      modelRecoverable: vi.fn(async (): Promise<boolean | undefined> => false),
+      generatorVersion: () => "",
+      radiusVersion: vi.fn(async () => "0.61"),
+      hashAppBicep: () => recordedOrigin.appBicepHash
+    };
+  }
+
   it("keeps unavailable, absent and blank definitions distinct", () => {
     expect(observeAppModel(unavailable)).toEqual({
       kind: "unreadable",
@@ -135,29 +158,14 @@ describe("model evidence", () => {
   });
 
   it("checks source drift against the recorded commit, not the current workspace head", async () => {
-    const sourceChangedSince = vi.fn(async () => false);
-    const modelRecoverable = vi.fn(async () => false);
-    const ports = {
-      assertSource: vi.fn(async () => {}),
-      origin: async () =>
-        JSON.stringify({
-          ...freshness.origin,
-          sourceCommit: "a".repeat(40),
-          appBicepHash: `sha256:${"b".repeat(64)}`,
-          generatedAt: "2026-01-01T00:00:00.000Z",
-          radiusVersion: "0.61"
-        }),
-      headCommit: async () => "c".repeat(40),
-      sourceChangedSince,
-      modelRecoverable,
-      generatorVersion: () => "",
-      radiusVersion: async () => "0.61",
-      hashAppBicep: () => `sha256:${"b".repeat(64)}`
-    };
+    const ports = evidencePorts();
+    const { sourceChangedSince, modelRecoverable } = ports;
     await expect(readAppModelEvidence(present, ports)).resolves.toMatchObject({
       observation: { kind: "present", verification: "verified" }
     });
-    expect(sourceChangedSince).toHaveBeenCalledExactlyOnceWith("a".repeat(40));
+    expect(sourceChangedSince).toHaveBeenCalledExactlyOnceWith(
+      recordedOrigin.sourceCommit
+    );
     expect(modelRecoverable).not.toHaveBeenCalled();
     sourceChangedSince.mockResolvedValueOnce(true);
     await expect(readAppModelEvidence(present, ports)).resolves.toMatchObject({
@@ -172,6 +180,116 @@ describe("model evidence", () => {
     );
   });
 
+  it("reads recorded GitHub evidence without probing the workspace", async () => {
+    const ports = evidencePorts();
+    await expect(
+      readAppModelEvidence(
+        { ...present, source: { ...source, kind: "github" } },
+        ports
+      )
+    ).resolves.toMatchObject({
+      freshness: { origin: recordedOrigin },
+      observation: { verification: "verified" }
+    });
+    expect(ports.origin).toHaveBeenCalledOnce();
+    expect(ports.radiusVersion).toHaveBeenCalledOnce();
+    expect(ports.assertSource).toHaveBeenCalledTimes(2);
+    expect(ports.headCommit).not.toHaveBeenCalled();
+    expect(ports.sourceChangedSince).not.toHaveBeenCalled();
+    expect(ports.modelRecoverable).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { recoverable: true, requiresConfirmation: false, reason: "no usable" },
+    {
+      recoverable: false,
+      requiresConfirmation: true,
+      reason: "uncommitted changes or is untracked"
+    },
+    {
+      recoverable: undefined,
+      requiresConfirmation: true,
+      reason: "Git could not say"
+    }
+  ])(
+    "uses workspace recoverability ($recoverable) when origin is absent",
+    async ({ recoverable, requiresConfirmation, reason }) => {
+      const ports = evidencePorts();
+      ports.origin.mockResolvedValueOnce(null);
+      ports.modelRecoverable.mockResolvedValueOnce(recoverable);
+      await expect(readAppModelEvidence(present, ports)).resolves.toMatchObject(
+        {
+          freshness: {
+            status: "unrecorded",
+            requiresConfirmation,
+            reason: expect.stringContaining(reason)
+          }
+        }
+      );
+      expect(ports.modelRecoverable).toHaveBeenCalledOnce();
+      expect(ports.sourceChangedSince).not.toHaveBeenCalled();
+      expect(ports.radiusVersion).not.toHaveBeenCalled();
+    }
+  );
+
+  it("checks drift without looking up Radius when otherwise valid origin lacks a version", async () => {
+    const ports = evidencePorts();
+    const origin = { ...recordedOrigin, radiusVersion: "" };
+    ports.origin.mockResolvedValueOnce(JSON.stringify(origin));
+    await expect(readAppModelEvidence(present, ports)).resolves.toMatchObject({
+      freshness: { origin },
+      observation: { verification: "verified" }
+    });
+    expect(ports.sourceChangedSince).toHaveBeenCalledExactlyOnceWith(
+      origin.sourceCommit
+    );
+    expect(ports.radiusVersion).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "rechecks the checkout after an origin rejection (changed: %s)",
+    async (changed) => {
+      const ports = evidencePorts();
+      const originError = new Error("origin unavailable");
+      const checkoutError = new Error("checkout changed");
+      ports.origin.mockRejectedValueOnce(originError);
+      ports.assertSource.mockResolvedValueOnce(undefined);
+      if (changed) ports.assertSource.mockRejectedValueOnce(checkoutError);
+      await expect(readAppModelEvidence(present, ports)).rejects.toBe(
+        changed ? checkoutError : originError
+      );
+      expect(ports.origin).toHaveBeenCalledOnce();
+      expect(ports.assertSource).toHaveBeenCalledTimes(2);
+      expect(ports.headCommit).not.toHaveBeenCalled();
+    }
+  );
+
+  it("stops subsequent probes when the checkout changes during the head read", async () => {
+    const ports = evidencePorts();
+    let finishHead: (value: string) => void = () => {
+      throw new Error("Head read not initialized");
+    };
+    const head = new Promise<string>((resolve) => {
+      finishHead = resolve;
+    });
+    const checkoutError = new Error("checkout changed");
+    const started = new Promise<void>((resolve) => {
+      ports.headCommit.mockImplementationOnce(() => {
+        resolve();
+        return head;
+      });
+    });
+    const result = readAppModelEvidence(present, ports);
+    const rejected = expect(result).rejects.toBe(checkoutError);
+    await started;
+    ports.assertSource.mockRejectedValueOnce(checkoutError);
+    finishHead("c".repeat(40));
+    await rejected;
+    expect(ports.assertSource).toHaveBeenCalledTimes(3);
+    expect(ports.sourceChangedSince).not.toHaveBeenCalled();
+    expect(ports.modelRecoverable).not.toHaveBeenCalled();
+    expect(ports.radiusVersion).not.toHaveBeenCalled();
+  });
   it("requires a fresh model with matching origin evidence", () => {
     expect(observeAppModel(present)).toEqual({
       kind: "present",

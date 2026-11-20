@@ -1587,6 +1587,31 @@ describe("repository application-name compatibility", () => {
   );
 
   it.each([
+    {
+      failure: "permission denied",
+      preferred: [{ path: managed, status: 403 }]
+    },
+    {
+      failure: "unverifiable 404",
+      preferred: [
+        { path: managed, status: 404 },
+        { path: revision(sha), json: { sha: "b".repeat(40) } }
+      ]
+    }
+  ])("keeps a named root unconfirmed after $failure", async ({ preferred }) => {
+    const h = lookup({ path: revision(ref), json: tip }, ...preferred, {
+      path: root,
+      json: named("name: 'legacy-app'")
+    });
+    await expect(h.lookup.inspectRepoApplication(repo, ref)).resolves.toEqual({
+      kind: "unconfirmed",
+      fallbackName: "legacy-app",
+      unavailable: true
+    });
+    h.assertReads();
+  });
+
+  it.each([
     { status: 403 },
     { json: [{ name: "subfile" }] },
     { json: { encoding: "none", content: "", size: 2 } },

@@ -20,7 +20,11 @@ export async function inspectApplicationDefinition(
     const definition = await read(path, ref);
     if (definition.kind === "read") {
       const name = extractAppName(definition.source);
-      if (name) return { kind: "defined", name, path, branch: ref };
+      if (name) {
+        return unavailable ?
+            { kind: "unconfirmed", fallbackName: name, unavailable }
+          : { kind: "defined", name, path, branch: ref };
+      }
     } else if (definition.kind === "unavailable") {
       unavailable = true;
     }

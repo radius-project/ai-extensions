@@ -23,23 +23,35 @@ describe("application definition inspection", () => {
     expect(read.mock.calls).toEqual([[".radius/app.bicep", "feature/read"]]);
   });
 
-  it("probes root when the preferred definition has no application name", async () => {
-    const read = async (path: string): Promise<ApplicationDefinitionRead> => ({
-      kind: "read",
-      source:
+  it.each([
+    { kind: "missing" },
+    { kind: "read", source: "param location string" },
+    { kind: "unavailable" }
+  ] satisfies ApplicationDefinitionRead[])(
+    "uses the root name without confirming it if the preferred read is unavailable ($kind)",
+    async (preferred) => {
+      const read = async (path: string): Promise<ApplicationDefinitionRead> =>
         path === "app.bicep" ?
-          "resource app 'Applications.Core/applications@2023' = { name: 'root-app' }"
-        : ""
-    });
-    await expect(
-      inspectApplicationDefinition("octo/repo", "", read)
-    ).resolves.toEqual({
-      kind: "defined",
-      name: "root-app",
-      path: "app.bicep",
-      branch: "main"
-    });
-  });
+          {
+            kind: "read",
+            source:
+              "resource app 'Applications.Core/applications@2023' = { name: 'root-app' }"
+          }
+        : preferred;
+      await expect(
+        inspectApplicationDefinition("octo/repo", "", read)
+      ).resolves.toEqual(
+        preferred.kind === "unavailable" ?
+          { kind: "unconfirmed", fallbackName: "root-app", unavailable: true }
+        : {
+            kind: "defined",
+            name: "root-app",
+            path: "app.bicep",
+            branch: "main"
+          }
+      );
+    }
+  );
 
   it.each([
     ["missing", "octo/repo", "repo", false],

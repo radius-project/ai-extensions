@@ -6,6 +6,8 @@ export default defineConfig({
       "src/deploy-artifacts.test.ts",
       "../core/src/deployment-resource-status.test.ts",
       "src/promote-app-model.test.ts",
+      "../core/src/modeling/app-authoring.test.ts",
+      "../adapter-shared/src/environment-inspection.test.ts",
       "../core/src/modeling/app-staging.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
       "../core/src/inspection/deployed-graph.test.ts",

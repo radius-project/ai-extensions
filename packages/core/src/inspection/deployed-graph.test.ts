@@ -1,12 +1,18 @@
 import { expect, it, vi } from "vitest";
 import {
   inspectDeploymentGraph,
+  projectInspectedTopology,
   type DeploymentRunSnapshot
 } from "./deployed-graph.js";
 import type {
   DeployProgress,
   WorkflowArtifact
 } from "../deploy-artifact-evidence.js";
+import {
+  mergeDeployedGraphMetadata,
+  mergeDeployedGraphDisplayMetadata,
+  projectDeployedGraph
+} from "../graph/deployed.js";
 
 const run: DeploymentRunSnapshot = {
   matchesSelection: true,
@@ -138,4 +144,82 @@ it("preserves accepted display evidence if the revalidated resource read fails",
     error,
     observation: { graph, progress, inventory: null }
   });
+});
+
+it("keeps topology, enriches outputs in evidence order, and projects output status to its parent", () => {
+  const parent = {
+    id: "store",
+    name: "store",
+    type: "Radius.Data/mySqlDatabases",
+    connections: [{ id: "api", direction: "Inbound" }]
+  };
+  const api = { id: "api", name: "api", type: "Radius.Compute/containers" };
+  const deployedServer = {
+    id: "deployed-server",
+    type: "Microsoft.DBforMySQL/flexibleServers"
+  };
+  const deployedService = { id: "deployed-service", type: "core/Service" };
+  const monitorOutput = { type: "apps/Deployment", displayType: "Worker" };
+
+  expect(
+    projectInspectedTopology(
+      [parent, api],
+      {
+        planned: [
+          {
+            id: parent.id,
+            name: "planned",
+            outputResources: [
+              {
+                ...deployedServer,
+                id: "planned-server",
+                displayType: "MySQL"
+              },
+              { id: "planned-only", type: "core/ConfigMap" }
+            ]
+          }
+        ],
+        deployment: [
+          {
+            id: parent.id,
+            name: "deployed",
+            connections: [{ id: "wrong", direction: "Outbound" }],
+            outputResources: [deployedServer, deployedService]
+          }
+        ],
+        monitor: [
+          {
+            id: parent.id,
+            name: "monitored",
+            outputResources: [
+              { ...deployedServer, displayType: "Do not overwrite" },
+              {
+                ...deployedService,
+                id: "monitor-service",
+                displayType: "Service"
+              },
+              { ...monitorOutput, id: "monitor-worker" }
+            ]
+          }
+        ]
+      },
+      new Map([[deployedServer.id, "failed"]]),
+      {
+        mergeDeployedGraphMetadata,
+        mergeDeployedGraphDisplayMetadata,
+        projectDeployedGraph
+      }
+    )
+  ).toMatchObject([
+    {
+      ...parent,
+      outputResources: [
+        { ...deployedServer, displayType: "MySQL" },
+        { ...deployedService, displayType: "Service" },
+        monitorOutput
+      ],
+      deployStatus: "failed"
+    },
+    { ...api, outputResources: [], deployStatus: "pending" }
+  ]);
 });
