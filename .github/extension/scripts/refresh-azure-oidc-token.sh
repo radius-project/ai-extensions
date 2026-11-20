@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# Refreshes the GitHub OIDC assertion mounted into Radius Azure consumers.
+# Refreshes the GitHub OIDC assertion mounted into Radius Azure consumers. When
+# the AKS kubeconfig uses a Microsoft Entra token (RADIUS_AKS_SERVER_ID is set by
+# the aks-token-kubeconfig action), each refresh also renews that token.
 
 set -euo pipefail
 
@@ -19,6 +21,8 @@ readonly CONSUMERS=(applications-rp dynamic-rp bicep-de)
 readonly REFRESH_INTERVAL_SECONDS="${AZURE_OIDC_REFRESH_INTERVAL_SECONDS:-120}"
 readonly CONNECT_TIMEOUT_SECONDS=5
 readonly REQUEST_TIMEOUT_SECONDS=20
+AKS_TOKEN_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/azure-aks-token.sh"
+readonly AKS_TOKEN_SCRIPT
 
 for variable in ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL; do
     if [[ -z "${!variable:-}" ]]; then
@@ -54,6 +58,16 @@ refresh_token() {
         kubectl apply --request-timeout="${REQUEST_TIMEOUT_SECONDS}s" -f - >/dev/null
 }
 
+# A failed renewal while watching is retried, so the token script reports it as
+# a warning there.
+refresh_tokens() {
+    refresh_token || return 1
+    if [[ -n "${RADIUS_AKS_SERVER_ID:-}" ]]; then
+        RADIUS_AKS_ANNOTATION="${AKS_ANNOTATION}" \
+            bash "${AKS_TOKEN_SCRIPT}" --renew || return 1
+    fi
+}
+
 restart_consumers() {
     local deployment
 
@@ -69,12 +83,14 @@ restart_consumers() {
 
 case "${MODE}" in
     --prepare)
-        refresh_token
+        AKS_ANNOTATION=error
+        refresh_tokens
         restart_consumers
         echo "Azure OIDC token refreshed and consumers restarted."
         ;;
     --watch)
-        watch_token_refresh refresh_token \
+        AKS_ANNOTATION=warning
+        watch_token_refresh refresh_tokens \
             "Azure OIDC token refreshed." \
             "Azure OIDC token refresh failed; retrying." \
             "${REFRESH_INTERVAL_SECONDS}" "${MAX_REFRESHES}"
