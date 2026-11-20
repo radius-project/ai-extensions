@@ -884,18 +884,34 @@ describe("createAwsCloudFixture", () => {
     const fixture = await createAwsCloudFixture(options);
     await fixture.prepareCleanSlate();
     // A stage timeout: the teardown begins while the first scale-up is on
-    // its way, and the start goes on.
+    // its way, and its answer is slow.
     let teardown: Promise<void> | null = null;
-    const run = w.aws.run.bind(w.aws);
-    w.aws.run = (args) => {
-      if (!teardown && args[1] === "update-nodegroup-config")
-        teardown = fixture.dispose();
-      return run(args);
+    let release = () => {};
+    const answered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runAws = w.preflightPorts.runAws;
+    w.preflightPorts.runAws = async (args) => {
+      if (teardown || args[1] !== "update-nodegroup-config")
+        return runAws(args);
+      teardown = fixture.dispose();
+      await answered;
+      return runAws(args);
     };
-    await expect(fixture.startNodeGroups()).rejects.toThrow(
-      "stopped, because the teardown began"
-    );
+    const start = fixture.startNodeGroups();
+    // Long enough for a teardown that didn't wait to finish.
+    for (let step = 0; step < 20; step += 1)
+      await new Promise((resolve) => setImmediate(resolve));
+    expect(teardown).not.toBeNull();
+    const leaseReleased = () =>
+      w.events.some(
+        (line) => line.includes("DELETE") && line.includes("cloud-e2e-lease")
+      );
+    expect(leaseReleased()).toBe(false);
+    release();
+    await expect(start).rejects.toThrow("stopped, because the teardown began");
     await teardown;
+    expect(leaseReleased()).toBe(true);
     w.clock.now += w.aws.nodegroupUpdateMs;
     for (const name of ["default", "isolated"])
       expect(

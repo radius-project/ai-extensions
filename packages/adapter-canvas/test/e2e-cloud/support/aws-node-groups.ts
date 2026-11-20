@@ -3,6 +3,7 @@ import type { AwsCommandResult } from "../../../src/server/services/aws-cli-sess
 import {
   AWS_MAIN_NODE_GROUPS,
   awsDetail,
+  awsError,
   readAws,
   readAwsIfFound,
   runNodeGroupUpdate,
@@ -216,22 +217,43 @@ async function startUpdate(
   // Recorded before it is sent: AWS may accept an update whose answer never
   // arrives, and a scale-down must not take that group at zero at its word.
   const before = updates.get(name);
+  updates.set(name, UNKNOWN_UPDATE);
+  const answers: AwsCommandResult[] = [];
+  const counted: AwsJourneyPorts = {
+    ...ports,
+    runAws: async (call) => {
+      const answer = await ports.runAws(call);
+      answers.push(answer);
+      return answer;
+    }
+  };
+  // The record goes only when nothing can have started: no attempt was
+  // sent, or AWS refused each one. A ResourceInUseException doesn't count,
+  // since the update holding the group may be one whose answer was lost.
+  // Keeping the record by mistake costs one scale to zero; dropping it by
+  // mistake leaves nodes running.
   const unsent = () => {
+    if (
+      !answers.every(
+        (answer) =>
+          /An error occurred \(/.test(answer.stderr) &&
+          !awsError(answer, "ResourceInUseException")
+      )
+    )
+      return;
     if (before === undefined) updates.delete(name);
     else updates.set(name, before);
   };
-  updates.set(name, UNKNOWN_UPDATE);
   let result: AwsCommandResult;
   try {
-    result = await runNodeGroupUpdate(ports, args);
+    result = await runNodeGroupUpdate(counted, args);
   } catch (error) {
-    // Refused before it was sent, as once the run stops.
+    // Stopped before the next attempt, as once the run stops.
     unsent();
     throw error;
   }
   if (!succeeded(result)) {
-    // AWS answered with a refusal, so it started nothing.
-    if (/An error occurred \(/.test(result.stderr)) unsent();
+    unsent();
     throw new Error(`${what} failed: ${awsDetail(result)}`);
   }
   let parsed: unknown = null;
