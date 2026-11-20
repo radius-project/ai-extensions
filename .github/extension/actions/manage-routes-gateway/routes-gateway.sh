@@ -252,6 +252,8 @@ environment_recipe_pack_ids_json() {
         error("environment lookup returned no JSON")
       elif (.[0] | type) != "object" then
         error("environment lookup must return an object")
+      elif (.[0].properties | type) != "object" then
+        error("environment properties must be an object")
       elif .[0].properties.recipePacks != null and
            (.[0].properties.recipePacks | type) != "array" then
         error("environment recipePacks must be an array")

@@ -1123,15 +1123,24 @@ for env_json in "${unattached_environments[@]}"; do
     assert_output "has no effective Radius.Compute/routes recipe"
 done
 
-malformed_environments=('{"properties":{"recipePacks":"pack"}}' '"not-an-object"')
+malformed_environments=(
+    '{"properties":{"recipePacks":"pack"}}'
+    '"not-an-object"'
+    '{}'
+    '{"properties":null}'
+    '{"properties":[]}'
+)
 for env_json in "${malformed_environments[@]}"; do
-    reset_case
-    ENV_JSON="${env_json}"
-    export ENV_JSON
-    run_action cleanup
-    assert_failure "malformed environment: ${env_json}"
-    assert_output "returned invalid recipe-pack data"
-    assert_no_call "kubectl"
+    for mode in cleanup ensure; do
+        reset_case
+        ENV_JSON="${env_json}"
+        export ENV_JSON
+        run_action "${mode}"
+        assert_failure "${mode} malformed environment: ${env_json}"
+        assert_output "returned invalid recipe-pack data"
+        assert_no_call "rad recipe-pack show"
+        assert_no_call "kubectl"
+    done
 done
 
 reset_case
