@@ -47,6 +47,7 @@ import {
   DEPLOY_WORKFLOW_POLL_LIMIT,
   DEPLOY_WORKFLOW_POLL_MS,
   IN_FLIGHT_LIST_REFRESH_MS,
+  IN_FLIGHT_LIST_SLOW_REFRESH_MS,
   LIST_DEPLOYMENTS_PATH,
   RESUME_POLL_LIMIT,
   RESUME_POLL_MS,
@@ -4364,6 +4365,69 @@ describe("in-flight listing refresh", () => {
       expect(startedAt.length).toBe(settled);
     }
   );
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "keeps refreshing %s every 60 seconds until a late record appears",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      let begin = 0;
+      const startedAt = slowListing(page, () =>
+        page.browser.clock.now() - begin > 3 * 60 * 1000 ?
+          [
+            {
+              ...knownDeployment("app", "dev", "in_progress"),
+              runUrl: "https://github.com/octo/app/actions/runs/7"
+            }
+          ]
+        : []
+      );
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      begin = page.browser.clock.now();
+      await flushPromises();
+      await advance(page, 4 * 60 * 1000, step);
+
+      expect(startedAt.map((at) => at - begin)).toEqual([
+        0, 15_000, 30_000, 45_000, 60_000, 75_000, 90_000, 105_000, 165_000,
+        225_000
+      ]);
+      expect(page.tableBody.innerHTML).toContain(
+        "https://github.com/octo/app/actions/runs/7"
+      );
+      await advance(page, 10 * 60 * 1000, step);
+      expect(startedAt).toHaveLength(10);
+    }
+  );
+
+  it("waits for a newer listing that replaced an aborted one before refreshing", async () => {
+    const page = await startDeploy();
+    const listings: ReturnType<typeof createDeferred<HttpResponse>>[] = [];
+    page.browser.net.handle(freshListing(page.repo), () => {
+      const listing = createDeferred<HttpResponse>();
+      listings.push(listing);
+      return listing.promise;
+    });
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.progressModal.dispatch("click", { target: page.progressModal });
+    await flushPromises();
+    expect(listings).toHaveLength(2);
+
+    await advance(page, 5 * 60 * 1000, DEPLOY_WORKFLOW_POLL_MS);
+    expect(listings).toHaveLength(2);
+
+    listings[1].resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+    await advance(
+      page,
+      IN_FLIGHT_LIST_SLOW_REFRESH_MS,
+      DEPLOY_WORKFLOW_POLL_MS
+    );
+    expect(listings).toHaveLength(3);
+  });
 
   it("does not start a refresh while another listing is still loading", async () => {
     const page = await startDeploy();
