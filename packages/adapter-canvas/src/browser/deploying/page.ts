@@ -68,15 +68,21 @@ export const AWS_REPAIR_BUTTON_ID = "deploy-repair-aws-trust";
 export const AWS_REPAIR_HELP_ID = "deploy-repair-aws-trust-help";
 export const AWS_REPAIR_STATUS_ID = "deploy-repair-aws-trust-status";
 
-// Safety caps mirror the legacy script exactly: a deploy-status poll that
-// never reaches a terminal state falls back to whatever the deployments
-// listing already shows, rather than polling forever.
+// Safety caps: a deploy-status poll that never reaches a terminal state falls
+// back to whatever the deployments listing already shows, rather than polling
+// forever. They outlast the server's 60-minute deploy watch window plus run
+// discovery, so the server reports the outcome first.
 export const DEPLOY_WORKFLOW_POLL_MS = 2500;
-export const DEPLOY_WORKFLOW_POLL_LIMIT = 720; // ~30 min at 2.5s/tick
+export const DEPLOY_WORKFLOW_POLL_LIMIT = 1680; // ~70 min at 2.5s/tick
 export const DEPLOY_FAILED_HANDOFF_POLL_LIMIT = 20;
 export const DEPLOY_AUTO_HIDE_MS = 2500;
 export const RESUME_POLL_MS = 2500;
-export const RESUME_POLL_LIMIT = 720; // ~30 min at 2.5s/tick
+export const RESUME_POLL_LIMIT = 1680; // ~70 min at 2.5s/tick
+// A fresh listing runs a full GitHub lookup per environment, so an in-flight
+// deploy refreshes it on a slower cadence than its status poll.
+export const IN_FLIGHT_LIST_REFRESH_MS = 15_000;
+export const IN_FLIGHT_LIST_SLOW_REFRESH_MS = 60_000;
+export const IN_FLIGHT_LIST_FAST_WINDOW_MS = 120_000;
 export const DELETE_POLL_MS = 4000;
 export const DELETE_POLL_LIMIT = 45; // ~3 min at 4s/tick
 
@@ -434,6 +440,7 @@ export function initializeDeployingPage(
 
   let deploymentsAbort: AbortHandle | null = null;
   let deploymentsRequest = 0;
+  let deploymentsLoading = false;
 
   // Renders the dismissible status banner.
   // The message uses textContent by default so server-provided strings can
@@ -808,6 +815,7 @@ export function initializeDeployingPage(
     deploymentsAbort?.abort();
     deploymentsAbort = context.net.createAbort();
     const request = ++deploymentsRequest;
+    deploymentsLoading = true;
     const url = `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(options.repo)}${fresh ? "&fresh=1" : ""}`;
     return context.net
       .fetch(
@@ -836,7 +844,28 @@ export function initializeDeployingPage(
         if (!quiet && !hasRenderableRows()) {
           tableBody.innerHTML = LOAD_FAILURE_ROW;
         }
+      })
+      .finally(() => {
+        if (request === deploymentsRequest) deploymentsLoading = false;
       });
+  };
+
+  // While a deploy is in flight, quietly refresh the listing until the real
+  // record replaces the optimistic row. Each fresh listing outlasts several
+  // status ticks, so a refresh never starts while another listing is loading:
+  // aborting it would discard its answer while the server keeps working. The
+  // caller's initial load counts as the first refresh.
+  const createInFlightListRefresh = (): ((elapsedMs: number) => void) => {
+    let lastRefreshAt = 0;
+    return (elapsedMs) => {
+      const interval =
+        elapsedMs < IN_FLIGHT_LIST_FAST_WINDOW_MS ?
+          IN_FLIGHT_LIST_REFRESH_MS
+        : IN_FLIGHT_LIST_SLOW_REFRESH_MS;
+      if (deploymentsLoading || elapsedMs - lastRefreshAt < interval) return;
+      lastRefreshAt = elapsedMs;
+      void loadDeployments(true, true);
+    };
   };
 
   // The status the table is showing for this row, including an optimistic
@@ -1480,6 +1509,7 @@ export function initializeDeployingPage(
 
     let ticks = 0;
     let recordSeen = false;
+    const refreshList = createInFlightListRefresh();
     const poll = entry.every(RESUME_POLL_MS, () => {
       ticks++;
       if (ticks > RESUME_POLL_LIMIT) {
@@ -1506,7 +1536,7 @@ export function initializeDeployingPage(
             if (!recordSeen && deployRecordsPresent.has(key)) {
               recordSeen = true;
             }
-            if (!recordSeen) void loadDeployments(true, true);
+            if (!recordSeen) refreshList(ticks * RESUME_POLL_MS);
             return;
           }
           entry.cancel(poll);
@@ -1602,6 +1632,7 @@ export function initializeDeployingPage(
     let failedPolls = 0;
     let wfTicks = 0;
     let recordSeen = false;
+    const refreshList = createInFlightListRefresh();
     // The deploy-status slot is per-canvas, not per-run: it keeps the previous
     // attempt's terminal result until `POST /api/deploy` reaches
     // `beginDeployAttempt`, which resets the status and mints a fresh attempt
@@ -1727,7 +1758,7 @@ export function initializeDeployingPage(
             recordSeen = true;
             return;
           }
-          void loadDeployments(true, true);
+          refreshList(wfTicks * DEPLOY_WORKFLOW_POLL_MS);
         })
         .catch(() => {});
     });

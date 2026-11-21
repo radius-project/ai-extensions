@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { DEPLOYMENT_MONITOR_LIMITS } from "@radius-project/core";
 import {
   DELETE_DIALOG_CONFIRM_BUTTON_ID,
   DELETE_DIALOG_CONFIRM_INPUT_ID,
@@ -45,6 +46,7 @@ import {
   DEPLOY_STATUS_PATH,
   DEPLOY_WORKFLOW_POLL_LIMIT,
   DEPLOY_WORKFLOW_POLL_MS,
+  IN_FLIGHT_LIST_REFRESH_MS,
   LIST_DEPLOYMENTS_PATH,
   RESUME_POLL_LIMIT,
   RESUME_POLL_MS,
@@ -2491,9 +2493,12 @@ describe("deploy flow", () => {
     page.deployBtn.dispatch("click");
     await flushPromises();
     const before = freshCalls;
-    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
-    await flushPromises();
-    expect(freshCalls).toBeGreaterThan(before);
+    for (let elapsed = 0; elapsed < IN_FLIGHT_LIST_REFRESH_MS;) {
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      elapsed += DEPLOY_WORKFLOW_POLL_MS;
+      await flushPromises();
+    }
+    expect(freshCalls).toBe(before + 1);
 
     page.browser.net.handle(
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
@@ -2502,7 +2507,7 @@ describe("deploy flow", () => {
           deployments: [{ app: "app", environment: "dev", status: "pending" }]
         })
     );
-    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     await flushPromises();
     const seen = freshCalls;
     page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
@@ -4229,6 +4234,166 @@ describe("resuming a redirected forced delete", () => {
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).not.toContain("Force deleting");
   });
+});
+
+// Measured against real GitHub: one fresh listing for a repository with two
+// environments makes 23 API requests.
+const LISTING_GITHUB_CALLS = 23;
+const LISTING_LATENCY_MS = 5000;
+
+describe("in-flight listing refresh", () => {
+  const freshListing = (repo: string) =>
+    `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`;
+
+  // Every request reaches the server, which runs the full lookup even when the
+  // page later aborts it, so each call is a lookup's worth of GitHub requests.
+  const slowListing = (
+    page: ReturnType<typeof fixture>,
+    deployments: () => unknown[]
+  ): number[] => {
+    const startedAt: number[] = [];
+    page.browser.net.handle(freshListing(page.repo), () => {
+      startedAt.push(page.browser.clock.now());
+      return new Promise<HttpResponse>((resolve) => {
+        page.browser.clock.setTimeout(
+          () => resolve(jsonResponse({ deployments: deployments() })),
+          LISTING_LATENCY_MS
+        );
+      });
+    });
+    return startedAt;
+  };
+
+  const advance = async (
+    page: ReturnType<typeof fixture>,
+    milliseconds: number,
+    step: number
+  ): Promise<void> => {
+    for (let elapsed = 0; elapsed < milliseconds; elapsed += step) {
+      page.browser.clock.tick(step);
+      await flushPromises();
+    }
+  };
+
+  const startDeploy = async (): Promise<ReturnType<typeof fixture>> => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "in_progress",
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      })
+    );
+    return page;
+  };
+
+  const resumeDeploy = (): ReturnType<typeof fixture> => {
+    const page = fixture({ search: "?application=app&environment=dev" });
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        active: true,
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      })
+    );
+    return page;
+  };
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "keeps GitHub calls for %s within budget for a 60-minute deploy",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      const startedAt = slowListing(page, () => []);
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      const begin = page.browser.clock.now();
+      await advance(page, 60 * 60 * 1000, step);
+
+      const perMinute = Array.from(
+        { length: 60 },
+        (_unused, minute) =>
+          startedAt.filter((at) => Math.floor((at - begin) / 60_000) === minute)
+            .length * LISTING_GITHUB_CALLS
+      );
+      expect(Math.max(...perMinute.slice(0, 2))).toBeLessThanOrEqual(
+        5 * LISTING_GITHUB_CALLS
+      );
+      expect(Math.max(...perMinute.slice(2))).toBeLessThanOrEqual(
+        LISTING_GITHUB_CALLS
+      );
+      // With the deploy monitor's own reads this stays well under GitHub's
+      // 5,000 requests an hour.
+      expect(startedAt.length * LISTING_GITHUB_CALLS).toBeLessThanOrEqual(1600);
+    }
+  );
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "shows the real record for %s when a listing outlasts several status ticks",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      let recorded = false;
+      const startedAt = slowListing(page, () =>
+        recorded ?
+          [
+            {
+              ...knownDeployment("app", "dev", "in_progress"),
+              runUrl: "https://github.com/octo/app/actions/runs/7"
+            }
+          ]
+        : []
+      );
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      recorded = true;
+      await advance(page, 2 * 60 * 1000, step);
+
+      expect(page.tableBody.innerHTML).toContain(
+        "https://github.com/octo/app/actions/runs/7"
+      );
+      const settled = startedAt.length;
+      await advance(page, 10 * 60 * 1000, step);
+      expect(startedAt.length).toBe(settled);
+    }
+  );
+
+  it("does not start a refresh while another listing is still loading", async () => {
+    const page = await startDeploy();
+    const pending = createDeferred<HttpResponse>();
+    let calls = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      calls++;
+      return pending.promise;
+    });
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    const aborted = page.browser.net.aborted;
+    await advance(page, 5 * 60 * 1000, DEPLOY_WORKFLOW_POLL_MS);
+    expect(calls).toBe(1);
+    expect(page.browser.net.aborted).toBe(aborted);
+  });
+
+  it.each([
+    ["deploy", DEPLOY_WORKFLOW_POLL_LIMIT * DEPLOY_WORKFLOW_POLL_MS],
+    ["resume", RESUME_POLL_LIMIT * RESUME_POLL_MS]
+  ])(
+    "keeps the %s status poll running past the server's watch window",
+    (_, pageWindowMs) => {
+      const { runWatchMs, discoveryAttempts, pollIntervalMs } =
+        DEPLOYMENT_MONITOR_LIMITS;
+      expect(pageWindowMs).toBeGreaterThan(
+        runWatchMs + discoveryAttempts * pollIntervalMs
+      );
+    }
+  );
 });
 
 describe("resuming a redirected deployment", () => {
