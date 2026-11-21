@@ -81,6 +81,7 @@ export {
   DEPLOY_HANDOFF_RETRY_DELAY_MS,
   DEPLOY_REPAIR_ATTEMPT_CAP,
   DEPLOYMENT_MONITOR_LIMITS,
+  nextDeployRunPollDelay,
   shouldRetryWithKeyringCredential,
   classifyDeployDispatchFailure,
   deploymentHandoffEligible,

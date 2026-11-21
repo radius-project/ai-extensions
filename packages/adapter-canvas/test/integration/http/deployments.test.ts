@@ -87,6 +87,13 @@ import {
   buildAppGraphRadCommand
 } from "../../../src/bicep.js";
 
+// The monitor polls every 5 seconds for 5 minutes, then every 15 seconds up to
+// its 60-minute watch window.
+const FULL_WATCH_DELAYS = [
+  ...Array<number>(60).fill(5000),
+  ...Array<number>(220).fill(15000)
+];
+
 let container: CanvasServerContainer | undefined;
 const fixtureRuntimes: DeploymentRuntime[] = [];
 let deploymentHarness:
@@ -1022,8 +1029,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
   );
 
   it.each([
-    { conclusion: "future_conclusion", reads: 1, sleeps: 0 },
-    { conclusion: null, reads: 240, sleeps: 240 }
+    { conclusion: "future_conclusion", reads: 1, sleeps: [] },
+    { conclusion: null, reads: 281, sleeps: FULL_WATCH_DELAYS }
   ])(
     "publishes completed+$conclusion as run-unconfirmed and refuses repair through the real guard",
     async ({ conclusion, reads, sleeps }) => {
@@ -1066,7 +1073,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           ]
         });
         expect(observed.reads).toHaveLength(reads);
-        expect(observed.sleeps).toEqual(Array<number>(sleeps).fill(5000));
+        expect(observed.sleeps).toEqual(sleeps);
         expect(observed.dispatches).toBe(1);
         expect(repairs).toBe(0);
         expect(harness.dispatches).toEqual([]);
@@ -3926,8 +3933,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   );
 
   it.each([
-    { conclusion: "future_conclusion", reads: 1, sleeps: 0 },
-    { conclusion: null, reads: 240, sleeps: 240 }
+    { conclusion: "future_conclusion", reads: 1, sleeps: [] },
+    { conclusion: null, reads: 281, sleeps: FULL_WATCH_DELAYS }
   ])(
     "cleans up completed+$conclusion once, only after dispatch, and never repairs it",
     async ({ conclusion, reads, sleeps }) => {
@@ -4020,9 +4027,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
               ])
           )
         ).toBe(true);
-        expect(harness.observationDelays).toEqual(
-          Array<number>(sleeps).fill(5000)
-        );
+        expect(harness.observationDelays).toEqual(sleeps);
         expect(observed.sleeps).toEqual([]);
         expect(notices).toEqual([state.deployError]);
         expect(state.deployNoticeState).toBe("pending");

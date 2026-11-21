@@ -134,7 +134,7 @@ A deploy started from the canvas Deploy button hands its failure to you automati
 - **Workflow runs but pod never reaches Ready**
   → Look at the `Install Radius on control plane` and `Refresh external deployment target credentials` steps in the run logs. Usually a target cluster kubeconfig issue (expired EKS token, AKS network restriction).
 
-- **"Deployment timed out"** in the canvas after ~5 minutes
+- **"Timed out waiting for the deploy workflow to complete"** in the canvas after about 60 minutes
   → The deploy is still running on GitHub; the canvas just stopped polling. Open the workflow run URL shown in the status to follow it live, and click **Back to overview** to return to the hub.
 
 - **`OCI archive repository is not configured` or GHCR authentication/visibility errors**
