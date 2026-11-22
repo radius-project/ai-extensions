@@ -603,7 +603,7 @@ describe("sweepAwsCloudE2E", () => {
       const before = retryInputs(s, OLD);
       const report = await runSweep(s);
       expect(report.failures).toEqual([
-        `Deleting the Radius application in ${OLD} failed: ${message} Its run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
+        `Deleting the Radius application in ${OLD} failed: ${message} A delete run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
       ]);
       expect(report.warnings).not.toContain(wentOn(OLD));
       expect(retryInputs(s, OLD)).toEqual(before);
@@ -620,6 +620,26 @@ describe("sweepAwsCloudE2E", () => {
     }
   );
 
+  it("keeps everything when a retry's run succeeds while an earlier run for the environment is still going", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, {
+      unfinished: "delete-application.yml run 8 did not finish in time."
+    });
+    const before = retryInputs(s, OLD);
+    await runSweep(s);
+    s.appDelete.delete(OLD);
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([
+      `Deleting the Radius application in ${OLD} failed: delete-application.yml run 9 succeeded. Run 8 for ${OLD} is still going. A delete run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
+    ]);
+    expect(retryInputs(s, OLD)).toEqual(before);
+
+    nextDay(s);
+    expect(s.strandedDeletes).toEqual([]);
+    expect((await runSweep(s)).failures).toEqual([]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+  });
+
   it("keeps everything when a retry's run ends failed while an earlier run for the environment is still going", async () => {
     const s = await twoEnvironments();
     s.appDelete.set(OLD, {
@@ -631,7 +651,7 @@ describe("sweepAwsCloudE2E", () => {
     s.appDelete.set(OLD, "fail");
     const report = await runSweep(s);
     expect(report.failures).toEqual([
-      `Deleting the Radius application in ${OLD} failed: delete-application.yml run 9 ended failure. Run 8 for ${OLD} is still going. Its run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
+      `Deleting the Radius application in ${OLD} failed: delete-application.yml run 9 ended failure. Run 8 for ${OLD} is still going. A delete run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
     ]);
     expect(retryInputs(s, OLD)).toEqual(before);
 

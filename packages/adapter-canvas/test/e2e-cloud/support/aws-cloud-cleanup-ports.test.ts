@@ -72,6 +72,10 @@ function github(rules: Array<[string, Answer]>, clock = { now: 0 }) {
 
 // The run title delete-application.yml gives the port's dispatch.
 const TITLE = "Radius - Delete e [radius:v1 app=a] cleanup-1";
+// Each read of one unfinished status, here finding nothing.
+const STATUS_LIST =
+  "run list --repo octo/fixture --workflow delete-application.yml --status";
+const NONE_UNFINISHED: [string, Answer] = [STATUS_LIST, OK([])];
 
 // Answers in turn, repeating the last one.
 function sequence(...answers: CommandResult[]): () => CommandResult {
@@ -263,23 +267,26 @@ describe("createGhCleanupGitHub", () => {
 
   it("doesn't take another dispatch's run for its own, even one that failed first", async () => {
     const { port, calls } = github([
+      NONE_UNFINISHED,
       [
         "run list",
         sequence(
           OK([]),
-          // Another delete, such as the Azure job's, shows up first.
+          // Another delete, such as an earlier sweep's, shows up first.
           OK([
             {
               databaseId: 4,
-              displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0"
+              displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0",
+              status: "completed"
             }
           ]),
           OK([
             {
               databaseId: 4,
-              displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0"
+              displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0",
+              status: "completed"
             },
-            { databaseId: 5, displayTitle: TITLE }
+            { databaseId: 5, displayTitle: TITLE, status: "completed" }
           ])
         )
       ],
@@ -384,6 +391,95 @@ describe("createGhCleanupGitHub", () => {
       expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
     }
   );
+
+  it("holds back a successful run while another run for the environment is still going", async () => {
+    const { port } = github([
+      [
+        STATUS_LIST,
+        OK([
+          {
+            databaseId: 3,
+            displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0"
+          }
+        ])
+      ],
+      [
+        "run list",
+        sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
+      ],
+      ["workflow run", OK("")],
+      ["run view 5", OK({ status: "completed", conclusion: "success" })]
+    ]);
+    const error: unknown = await port
+      .deleteApplication("e", "a")
+      .catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe(
+      "delete-application.yml run 5 succeeded. Run 3 for e is still going."
+    );
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+  });
+
+  it.each([
+    [
+      // Between two status reads, so no status read lists it.
+      "a run that moves between unfinished statuses",
+      { status: "queued" },
+      "delete-application.yml run 5 ended failure. Run 3 for e is still going."
+    ],
+    [
+      "a run without a status",
+      {},
+      "delete-application.yml run 5 ended failure. Run 3 for e is still going."
+    ]
+  ])(
+    "sees %s in its one listing of recent runs",
+    async (_case, fields, message) => {
+      const earlier = {
+        databaseId: 3,
+        displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0",
+        ...fields
+      };
+      const { port } = github([
+        NONE_UNFINISHED,
+        [
+          "run list",
+          sequence(
+            OK([earlier]),
+            OK([
+              earlier,
+              { databaseId: 5, displayTitle: TITLE, status: "completed" }
+            ])
+          )
+        ],
+        ["workflow run", OK("")],
+        ["run view 5", OK({ status: "completed", conclusion: "failure" })]
+      ]);
+      const error: unknown = await port
+        .deleteApplication("e", "a")
+        .catch((caught: unknown) => caught);
+      expect((error as Error).message).toBe(message);
+      expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+    }
+  );
+
+  it("doesn't report its run as finished when the recent runs can't be listed as a list", async () => {
+    const { port } = github([
+      NONE_UNFINISHED,
+      [
+        "run list",
+        sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]), OK({}))
+      ],
+      ["workflow run", OK("")],
+      ["run view 5", OK({ status: "completed", conclusion: "failure" })]
+    ]);
+    const error: unknown = await port
+      .deleteApplication("e", "a")
+      .catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe(
+      "The workflow run listing was not a JSON array."
+    );
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+  });
 
   it("reads every unfinished status, and ignores other environments' runs", async () => {
     const { port, calls } = github([

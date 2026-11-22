@@ -248,14 +248,32 @@ export function createGhCleanupGitHub(
   }
 
   // The delete-application.yml runs for `environment`, other than `own`, that
-  // haven't finished, read by each unfinished status GitHub reports.
+  // haven't finished. One listing of the newest runs with their statuses sees
+  // each recent run at a single moment, so a run that moves between unfinished
+  // statuses can't slip past. A read of each unfinished status then finds
+  // older ones.
   async function activeRuns(
     environment: string,
     own: string
   ): Promise<string[]> {
     const prefix = `Radius - Delete ${environment} [`;
-    // A run that moves on between reads is listed under two statuses.
+    // A run can be listed more than once.
     const active = new Set<string>();
+    const add = (item: Record<string, unknown> | null) => {
+      const id = String(item?.databaseId ?? "with no ID");
+      if (
+        id !== own &&
+        typeof item?.displayTitle === "string" &&
+        item.displayTitle.startsWith(prefix)
+      )
+        active.add(id);
+    };
+    const recent = await listRuns();
+    if (!Array.isArray(recent))
+      throw new Error("The workflow run listing was not a JSON array.");
+    // A run without a status can't be shown to be finished.
+    for (const item of recent.map(asRecord))
+      if (item?.status !== "completed") add(item);
     for (const status of ACTIVE_RUN_STATUSES) {
       const result = await gh([
         "run",
@@ -282,15 +300,7 @@ export function createGhCleanupGitHub(
         throw new Error(
           `${runs.length} delete-application.yml runs are ${status}, so the sweep can't tell whether one is for ${environment}.`
         );
-      for (const item of runs.map(asRecord)) {
-        const id = String(item?.databaseId ?? "with no ID");
-        if (
-          id !== own &&
-          typeof item?.displayTitle === "string" &&
-          item.displayTitle.startsWith(prefix)
-        )
-          active.add(id);
-      }
+      for (const item of runs.map(asRecord)) add(item);
     }
     return [...active];
   }
@@ -308,7 +318,7 @@ export function createGhCleanupGitHub(
       "--limit",
       "100",
       "--json",
-      "databaseId,displayTitle"
+      "databaseId,displayTitle,status"
     ]);
     if (result.code !== 0)
       throw new Error(`Listing delete-application.yml runs: ${detail(result)}`);
@@ -403,15 +413,17 @@ export function createGhCleanupGitHub(
           throw new Error(`Reading run ${runId}: ${detail(view)}`);
         const run = asRecord(parse(view, "gh run view"));
         if (run?.status === "completed") {
-          if (run.conclusion === "success") return;
-          const ended = `delete-application.yml run ${runId} ended ${String(run.conclusion)}.`;
-          // Another run for the environment, such as an earlier one this
-          // run queued behind, may still be deleting with its access.
+          const succeeded = run.conclusion === "success";
+          const ended = `delete-application.yml run ${runId} ${succeeded ? "succeeded" : `ended ${String(run.conclusion)}`}.`;
+          // Another run for the environment, such as an earlier one from a
+          // sweep that stopped waiting, may still be deleting with the access
+          // step 4 removes, whether this one succeeded or not.
           const others = await activeRuns(environment, runId);
           if (others.length > 0)
             throw new Error(
               `${ended} Run ${others.join(", ")} for ${environment} is still going.`
             );
+          if (succeeded) return;
           throw new ApplicationDeleteFailed(ended);
         }
         if (options.now() >= deadline)

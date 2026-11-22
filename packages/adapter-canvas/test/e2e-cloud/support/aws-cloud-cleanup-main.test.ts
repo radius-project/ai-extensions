@@ -483,11 +483,14 @@ describe("runAwsCleanup", () => {
         );
         return { code: 0, stdout: "", stderr: "" };
       }
+      if (line.startsWith("gh run list") && args.includes("--status"))
+        return OK([]);
       if (line.startsWith("gh run list"))
         return OK(
           dispatched.map((id, index) => ({
             databaseId: index + 1,
-            displayTitle: `Radius - Delete e [radius:v1 app=a] ${id}`
+            displayTitle: `Radius - Delete e [radius:v1 app=a] ${id}`,
+            status: "completed"
           }))
         );
       if (line.startsWith(`gh run view ${dispatched.length} `))

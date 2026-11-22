@@ -119,10 +119,11 @@ export interface AwsCleanupGitHub {
   readEnvironmentVariables(
     environment: string
   ): Promise<Record<string, string>>;
-  // Dispatch delete-application.yml and wait for it to succeed. Throws
-  // ApplicationDeleteFailed when its run finished without succeeding, and
-  // any other error when it can't be dispatched, found, read, or doesn't
-  // finish in time, so the run may still be going.
+  // Dispatch delete-application.yml and wait for it to succeed, with no
+  // other run for the environment unfinished. Throws ApplicationDeleteFailed
+  // when its run finished without succeeding and no other run is going, and
+  // any other error when a run may still be going: it can't be dispatched,
+  // found, or read, doesn't finish in time, or another run is unfinished.
   deleteApplication(environment: string, application: string): Promise<void>;
   listDeployments(): Promise<unknown>;
   // Deactivate, delete, and confirm the record is gone.
@@ -1964,7 +1965,7 @@ export async function sweepAwsCloudE2E(
         } else {
           // The run may still be deleting, and needs the access step 4
           // removes until it ends.
-          target.blocked = `${line} Its run may still be going, so ${target.name} keeps its access and GitHub state for a retry.`;
+          target.blocked = `${line} A delete run may still be going, so ${target.name} keeps its access and GitHub state for a retry.`;
           report.fail(target.blocked);
         }
       }

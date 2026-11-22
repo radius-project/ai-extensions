@@ -238,14 +238,14 @@ function githubPort(scenario: CleanupScenario): AwsCleanupGitHub {
           if (application !== APPLICATION)
             throw new Error(`Unexpected application ${application}`);
           const behavior = scenario.appDelete.get(environment);
-          // As the port does, a run that ended while an earlier one for the
-          // environment is still going doesn't count as finished.
+          // As the port does, a run that ended, failed or not, while an
+          // earlier one for the environment is still going doesn't count.
           if (
-            behavior === "fail" &&
+            typeof behavior !== "object" &&
             scenario.runningDeletes.includes(environment)
           )
             throw new Error(
-              `delete-application.yml run 9 ended failure. Run 8 for ${environment} is still going.`
+              `delete-application.yml run 9 ${behavior === "fail" ? "ended failure" : "succeeded"}. Run 8 for ${environment} is still going.`
             );
           if (behavior === "fail")
             throw new ApplicationDeleteFailed(
