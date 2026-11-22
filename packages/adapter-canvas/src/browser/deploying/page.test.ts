@@ -4667,6 +4667,32 @@ describe("delete completion poll", () => {
     );
   });
 
+  it("cancels the next check when the time limit passes between checks", async () => {
+    const { page, button } = await startDelete();
+    // Slow listings shift the checks so one is queued past the time limit.
+    const startedAt = slowListing(page, () => [
+      listed("app", "dev", "success")
+    ]);
+    const begin = await confirm(page, button);
+    await advance(page, DELETE_POLL_MAX_MS - 1000, 1000);
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+
+    // The reload at the time limit answers at once, so a check left queued
+    // would have to start a listing of its own.
+    let instant = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      instant++;
+      return jsonResponse({ deployments: [listed("app", "dev", "success")] });
+    });
+    await advance(page, 1000, 1000);
+    expect(page.browser.clock.now() - begin).toBe(DELETE_POLL_MAX_MS);
+    expect(page.tableBody.innerHTML).not.toContain("Deleting");
+    expect(page.browser.clock.pending).toBe(0);
+    await advance(page, 5 * 60 * 1000, 1000);
+    expect(instant).toBe(1);
+    expect(startedAt.length).toBeGreaterThan(0);
+  });
+
   it("does not read a failed listing response as a finished delete", async () => {
     const { page, button } = await startDelete();
     let failing = true;
