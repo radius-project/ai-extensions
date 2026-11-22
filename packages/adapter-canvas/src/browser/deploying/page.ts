@@ -83,8 +83,9 @@ export const RESUME_POLL_LIMIT = 1680; // ~70 min at 2.5s/tick
 export const IN_FLIGHT_LIST_REFRESH_MS = 15_000;
 export const IN_FLIGHT_LIST_SLOW_REFRESH_MS = 60_000;
 export const IN_FLIGHT_LIST_FAST_WINDOW_MS = 120_000;
-export const DELETE_POLL_MS = 4000;
-export const DELETE_POLL_LIMIT = 45; // ~3 min at 4s/tick
+// Matches the delete workflows' 30-minute job limit; an AWS app delete that
+// removes an RDS database can take well over the old 3 minutes.
+export const DELETE_POLL_MAX_MS = 30 * 60 * 1000;
 
 const ARROW_SVG =
   '<svg class="rad-applink-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -121,6 +122,34 @@ export type DeploymentRecord = DeploymentInfo;
 
 interface DeploymentRow extends DeploymentRecord {
   synthetic: boolean;
+}
+
+type DeploymentListingResult = { ok: boolean; payload: unknown } | null;
+
+interface DeleteTarget {
+  app: string;
+  environment: string;
+  forced: boolean;
+  runUrl: string;
+  previousDeploymentId?: string;
+}
+
+// A row can still show the previous delete's failure until GitHub records this
+// run, and a forced delete is only offered on such a row. Only a failure tied
+// to this delete stops the poll: its run, or failing that, a record newer than
+// the one the user deleted. Without either, keep polling.
+function isThisDeleteFailure(
+  row: DeploymentRecord,
+  target: DeleteTarget
+): boolean {
+  if (row.status !== DELETE_FAILED_STATUS) return false;
+  if (target.runUrl.startsWith("https://"))
+    return row.runUrl.toLowerCase() === target.runUrl.toLowerCase();
+  return (
+    !!target.previousDeploymentId &&
+    !!row.deploymentId &&
+    row.deploymentId !== target.previousDeploymentId
+  );
 }
 
 interface DeploymentOverride {
@@ -441,6 +470,9 @@ export function initializeDeployingPage(
   let deploymentsAbort: AbortHandle | null = null;
   let deploymentsRequest = 0;
   let deploymentsLoading = false;
+  // The fresh listing still loading, so the delete poll can wait for its
+  // answer instead of aborting it and starting another GitHub lookup.
+  let freshListing: Promise<DeploymentListingResult> | null = null;
 
   // Renders the dismissible status banner.
   // The message uses textContent by default so server-provided strings can
@@ -803,10 +835,13 @@ export function initializeDeployingPage(
   // back to a loading placeholder on every tick. Requests are aborted and
   // superseded by identity so a slow, out-of-order response can never
   // overwrite a table already repainted by a newer request.
-  const loadDeployments = (fresh = false, quiet = false): Promise<void> => {
+  const loadDeployments = (
+    fresh = false,
+    quiet = false
+  ): Promise<DeploymentListingResult> => {
     if (!options.repo) {
       tableBody.innerHTML = NO_DEPLOYMENTS_ROW;
-      return Promise.resolve();
+      return Promise.resolve(null);
     }
     if (!quiet) {
       if (hasRenderableRows()) renderDeployments();
@@ -817,37 +852,49 @@ export function initializeDeployingPage(
     const request = ++deploymentsRequest;
     deploymentsLoading = true;
     const url = `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(options.repo)}${fresh ? "&fresh=1" : ""}`;
-    return context.net
+    const loading: Promise<DeploymentListingResult> = context.net
       .fetch(
         url,
         deploymentsAbort ? { signal: deploymentsAbort.signal } : undefined
       )
-      .then((response) => response.json())
-      .then((payload) => {
-        if (!entry.active || request !== deploymentsRequest) return;
+      .then((response) =>
+        response.json().then((payload: unknown) => ({
+          ok: response.ok,
+          payload
+        }))
+      )
+      .then((result) => {
+        if (!entry.active || request !== deploymentsRequest) return null;
         // A transient failure returns { deployments: [], error }. Don't
         // render that as "no deployments" (which would hide real rows).
-        if (readString(payload, "error")) {
+        if (readString(result.payload, "error")) {
           if (!quiet && !hasRenderableRows()) tableBody.innerHTML = RETRY_ROW;
-          return;
+          return result;
         }
         lastRecords = parseDeploymentListingWithDiagnostics(
-          payload,
+          result.payload,
           lastRecords
         );
         renderDeployments();
+        return result;
       })
       .catch((error: unknown) => {
-        if (!entry.active || request !== deploymentsRequest) return;
-        if (error instanceof Error && error.name === "AbortError") return;
+        if (!entry.active || request !== deploymentsRequest) return null;
+        if (error instanceof Error && error.name === "AbortError") return null;
         context.logger.error("Radius deployments could not load.", error);
         if (!quiet && !hasRenderableRows()) {
           tableBody.innerHTML = LOAD_FAILURE_ROW;
         }
+        return null;
       })
       .finally(() => {
-        if (request === deploymentsRequest) deploymentsLoading = false;
+        if (request === deploymentsRequest) {
+          deploymentsLoading = false;
+          freshListing = null;
+        }
       });
+    freshListing = fresh ? loading : null;
+    return loading;
   };
 
   // While a deploy is in flight, quietly refresh the listing until the real
@@ -1055,9 +1102,16 @@ export function initializeDeployingPage(
         // The dispatched run is the only place the user can watch a delete,
         // and the deleting row carries no run URL of its own, so surface the
         // one the server just resolved.
-        const runUrl = workflowRunLink(readString(result.payload, "runUrl"));
-        if (runUrl) showInline("success", `${started}${runUrl}`, true);
-        pollDeleteCompletion(app, environment, 0, force, runUrl);
+        const runUrl = readString(result.payload, "runUrl");
+        const runLink = workflowRunLink(runUrl);
+        if (runLink) showInline("success", `${started}${runLink}`, true);
+        pollDeleteCompletion({
+          app,
+          environment,
+          forced: force,
+          runUrl,
+          previousDeploymentId: expected?.deploymentId
+        });
       })
       .catch(() => {
         if (!entry.active) return;
@@ -1071,62 +1125,68 @@ export function initializeDeployingPage(
   };
 
   // Poll the deployments listing until the target app/env is gone (a
-  // successful delete removes it). Bounded so a stuck or failed delete never
-  // polls forever; on timeout the override is cleared and the row reverts to
-  // its real status.
+  // successful delete removes it) or this delete's own run is recorded as
+  // failed. Each check uses one fresh listing, which also repaints the table,
+  // and waits for a listing already loading rather than starting another. A
+  // stuck delete stops polling after the workflows' time limit; the override is
+  // then cleared and the row reverts to its real status.
   const pollDeleteCompletion = (
-    app: string,
-    environment: string,
-    tries: number,
-    forced = false,
-    runLink = ""
+    target: DeleteTarget,
+    startedAt = context.clock.now()
   ): void => {
-    if (tries > DELETE_POLL_LIMIT) {
+    const { app, environment } = target;
+    const elapsed = context.clock.now() - startedAt;
+    if (elapsed >= DELETE_POLL_MAX_MS) {
       overrides.delete(opKey(app, environment));
       void loadDeployments(true, true);
       return;
     }
-    entry.after(DELETE_POLL_MS, () => {
-      void context.net
-        .fetch(
-          `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(options.repo)}&fresh=1`
-        )
-        .then((response) =>
-          response.json().then((payload) => ({ ok: response.ok, payload }))
-        )
-        .then((result) => {
-          if (!entry.active) return;
-          // Only trust a complete, successful listing. A transient failure
-          // or a malformed deployments field must not be read as "row gone".
-          const listing = parseRequiredDeploymentListing(result.payload);
-          if (!result.ok || listing.error !== "") {
-            pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
-            return;
-          }
-          const stillThere = listing.deployments.some(
-            (deployment) => deployment.environment === environment
+    const delay =
+      elapsed < IN_FLIGHT_LIST_FAST_WINDOW_MS ?
+        IN_FLIGHT_LIST_REFRESH_MS
+      : IN_FLIGHT_LIST_SLOW_REFRESH_MS;
+    entry.after(delay, () => {
+      void (freshListing ?? loadDeployments(true, true)).then((result) => {
+        if (!entry.active) return;
+        // Only trust a complete, successful listing. A transient failure
+        // or a malformed deployments field must not be read as "row gone".
+        const listing =
+          result ? parseRequiredDeploymentListing(result.payload) : null;
+        if (!result?.ok || !listing || listing.error !== "") {
+          pollDeleteCompletion(target, startedAt);
+          return;
+        }
+        const row = listing.deployments.find(
+          (deployment) => deployment.environment === environment
+        );
+        const runLink = workflowRunLink(target.runUrl);
+        const names = `application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong>`;
+        if (!row) {
+          overrides.delete(opKey(app, environment));
+          renderDeployments();
+          showInline(
+            "success",
+            `Deployment of ${names} has been successfully deleted.` +
+              (target.forced ?
+                ` ${escapeBrowserHtml(FORCE_DELETE_ORPHAN_NOTICE)}`
+              : "") +
+              runLink,
+            true
           );
-          if (!stillThere) {
-            overrides.delete(opKey(app, environment));
-            void loadDeployments(true, true);
-            showInline(
-              "success",
-              `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has been successfully deleted.` +
-                (forced ?
-                  ` ${escapeBrowserHtml(FORCE_DELETE_ORPHAN_NOTICE)}`
-                : "") +
-                runLink,
-              true
-            );
-            return;
-          }
-          void loadDeployments(true, true);
-          pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
-        })
-        .catch(() => {
-          if (!entry.active) return;
-          pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
-        });
+          return;
+        }
+        if (isThisDeleteFailure(row, target)) {
+          overrides.delete(opKey(app, environment));
+          renderDeployments();
+          showInline(
+            "error",
+            `${target.forced ? "Force deleting" : "Deleting"} deployment of ${names} failed. Check the delete workflow run for details.${runLink}`,
+            true
+          );
+          return;
+        }
+        pollDeleteCompletion(target, startedAt);
+      });
     });
   };
 
@@ -1482,14 +1542,15 @@ export function initializeDeployingPage(
       environment,
       status: "deleting"
     });
-    const runLink = workflowRunLink(queryValue(context.nav.search, "run"));
+    const runUrl = queryValue(context.nav.search, "run");
+    const runLink = workflowRunLink(runUrl);
     showInline(
       "success",
       `Force deleting deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.${runLink}`,
       true
     );
     void loadDeployments(true, true);
-    pollDeleteCompletion(app, environment, 0, true, runLink);
+    pollDeleteCompletion({ app, environment, forced: true, runUrl });
     return true;
   };
 
