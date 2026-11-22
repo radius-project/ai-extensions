@@ -1128,32 +1128,42 @@ export function initializeDeployingPage(
   // successful delete removes it) or this delete's own run is recorded as
   // failed. Each check uses one fresh listing, which also repaints the table,
   // and waits for a listing already loading rather than starting another. A
-  // stuck delete stops polling after the workflows' time limit; the override is
-  // then cleared and the row reverts to its real status.
-  const pollDeleteCompletion = (
-    target: DeleteTarget,
-    startedAt = context.clock.now()
-  ): void => {
+  // stuck delete stops polling after the workflows' time limit, even while a
+  // listing is still loading; the override is then cleared and the row reverts
+  // to its real status.
+  const pollDeleteCompletion = (target: DeleteTarget): void => {
     const { app, environment } = target;
-    const elapsed = context.clock.now() - startedAt;
-    if (elapsed >= DELETE_POLL_MAX_MS) {
+    const startedAt = context.clock.now();
+    let finished = false;
+    let nextCheck: ScopeTimer | null = null;
+    const finish = (): void => {
+      finished = true;
+      entry.cancel(deadline);
+      if (nextCheck) entry.cancel(nextCheck);
       overrides.delete(opKey(app, environment));
+    };
+    const deadline = entry.after(DELETE_POLL_MAX_MS, () => {
+      finish();
+      renderDeployments();
       void loadDeployments(true, true);
-      return;
-    }
-    const delay =
-      elapsed < IN_FLIGHT_LIST_FAST_WINDOW_MS ?
-        IN_FLIGHT_LIST_REFRESH_MS
-      : IN_FLIGHT_LIST_SLOW_REFRESH_MS;
-    entry.after(delay, () => {
+    });
+    const scheduleCheck = (): void => {
+      const delay =
+        context.clock.now() - startedAt < IN_FLIGHT_LIST_FAST_WINDOW_MS ?
+          IN_FLIGHT_LIST_REFRESH_MS
+        : IN_FLIGHT_LIST_SLOW_REFRESH_MS;
+      nextCheck = entry.after(delay, check);
+    };
+    const check = (): void => {
+      nextCheck = null;
       void (freshListing ?? loadDeployments(true, true)).then((result) => {
-        if (!entry.active) return;
+        if (!entry.active || finished) return;
         // Only trust a complete, successful listing. A transient failure
         // or a malformed deployments field must not be read as "row gone".
         const listing =
           result ? parseRequiredDeploymentListing(result.payload) : null;
         if (!result?.ok || !listing || listing.error !== "") {
-          pollDeleteCompletion(target, startedAt);
+          scheduleCheck();
           return;
         }
         const row = listing.deployments.find(
@@ -1162,7 +1172,7 @@ export function initializeDeployingPage(
         const runLink = workflowRunLink(target.runUrl);
         const names = `application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong>`;
         if (!row) {
-          overrides.delete(opKey(app, environment));
+          finish();
           renderDeployments();
           showInline(
             "success",
@@ -1176,7 +1186,7 @@ export function initializeDeployingPage(
           return;
         }
         if (isThisDeleteFailure(row, target)) {
-          overrides.delete(opKey(app, environment));
+          finish();
           renderDeployments();
           showInline(
             "error",
@@ -1185,9 +1195,10 @@ export function initializeDeployingPage(
           );
           return;
         }
-        pollDeleteCompletion(target, startedAt);
+        scheduleCheck();
       });
-    });
+    };
+    scheduleCheck();
   };
 
   const dialog = createDeleteDeploymentDialog(context, {

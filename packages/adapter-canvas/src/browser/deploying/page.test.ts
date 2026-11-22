@@ -4642,6 +4642,53 @@ describe("delete completion poll", () => {
     }
   );
 
+  it("ends a delete at the time limit while a listing never answers", async () => {
+    const { page, button } = await startDelete();
+    page.browser.net.handle(freshListing(page.repo), () =>
+      jsonResponse({ deployments: [listed("app", "dev", "success")] })
+    );
+    const begin = await confirm(page, button);
+    const stalled = createDeferred<HttpResponse>();
+    page.browser.net.handle(freshListing(page.repo), () => stalled.promise);
+    await advance(page, DELETE_POLL_MAX_MS - 60_000, 15_000);
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+
+    await advance(page, 75_000, 15_000);
+    expect(page.browser.clock.now() - begin).toBeGreaterThan(
+      DELETE_POLL_MAX_MS
+    );
+    expect(page.tableBody.innerHTML).not.toContain("Deleting");
+    expect(page.browser.clock.pending).toBe(0);
+
+    stalled.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+  });
+
+  it("does not read a failed listing response as a finished delete", async () => {
+    const { page, button } = await startDelete();
+    let failing = true;
+    page.browser.net.handle(freshListing(page.repo), () =>
+      failing ?
+        jsonResponse({ deployments: [] }, false, 503)
+      : jsonResponse({ deployments: [] })
+    );
+    await confirm(page, button);
+    await advance(page, 2 * IN_FLIGHT_LIST_REFRESH_MS);
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+    expect(page.browser.clock.pending).toBeGreaterThan(0);
+
+    failing = false;
+    await advance(page, IN_FLIGHT_LIST_REFRESH_MS);
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "has been successfully deleted"
+    );
+  });
+
   it("names a failed forced delete handed over from another page", async () => {
     const page = fixture({
       search:
