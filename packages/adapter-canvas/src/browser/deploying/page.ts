@@ -460,9 +460,10 @@ export function initializeDeployingPage(
   let hasApplications = false;
   let hasEnvironments = false;
   const overrides = new Map<string, DeploymentOverride>();
-  // Environments whose own deployment record the latest listing returned. A
-  // row added only for an environment's diagnostic is not that record: it
-  // carries no run link, so an in-flight deploy keeps refreshing past it.
+  // Environments whose own deployment record is in lastRecords, kept in step
+  // with every change to it. A row added only for an environment's diagnostic
+  // is not that record: it carries no run link, so an in-flight deploy keeps
+  // refreshing past it.
   let listedEnvironments = new Set<string>();
   let deployedEnvs = new Map<string, string>();
   let lastRecords: readonly DeploymentRecord[] = [];
@@ -743,6 +744,8 @@ export function initializeDeployingPage(
               ),
               ...(deployment ? [deployment] : [])
             ];
+            if (deployment) listedEnvironments.add(selected.environment);
+            else listedEnvironments.delete(selected.environment);
             if (!prepared || !deployment?.recovery) {
               renderDeployments();
               showInline(

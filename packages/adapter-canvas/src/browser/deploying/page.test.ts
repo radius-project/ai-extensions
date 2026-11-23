@@ -4493,6 +4493,60 @@ describe("in-flight listing refresh", () => {
     }
   );
 
+  it("keeps refreshing a deploy after cleanup details removed the environment's record", async () => {
+    const page = fixture({
+      deploymentsPayload: {
+        deployments: [
+          {
+            app: "",
+            environment: "dev",
+            status: "failed",
+            deploymentId: "4",
+            runUrl: "https://github.com/octo/app/actions/runs/4"
+          }
+        ],
+        environmentDiagnostics: [
+          {
+            environment: "dev",
+            message: "Only the first 100 records were checked."
+          }
+        ]
+      }
+    });
+    const cleanup = createFakeInput("cleanup-details");
+    cleanup.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-cleanup-dep", [cleanup]);
+    page.browser.net.handle("/api/deployment-cleanup-details", () =>
+      jsonResponse({ prepared: false, deployment: null })
+    );
+    init(page);
+    await flushPromises();
+    cleanup.dispatch("click");
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "No deployment remains tracked"
+    );
+
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "in_progress",
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      })
+    );
+    let recorded = false;
+    slowListing(page, () => (recorded ? recordedDeploy.deployments : []));
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    await advance(page, 6000, DEPLOY_WORKFLOW_POLL_MS);
+    recorded = true;
+    await advance(page, 60_000, DEPLOY_WORKFLOW_POLL_MS);
+
+    expect(page.tableBody.innerHTML).toContain(
+      "https://github.com/octo/app/actions/runs/7"
+    );
+  });
+
   it("keeps refreshing every 60 seconds while the diagnostic lasts", async () => {
     const page = await startDeploy();
     const startedAt: number[] = [];
@@ -4557,7 +4611,7 @@ describe("in-flight listing refresh", () => {
       ...knownDeployment("old", "prod", "success"),
       runUrl: ""
     };
-    let phase: "before" | "window" | "recorded" = "before";
+    let phase: "before" | "window" | "deleted" | "recorded" = "before";
     let calls = 0;
     page.browser.net.handle(freshListing(page.repo), () => {
       calls++;
@@ -4567,6 +4621,7 @@ describe("in-flight listing refresh", () => {
             deployments: [prodRow],
             environmentDiagnostics: diagnosticOnly("dev").environmentDiagnostics
           }
+        : phase === "deleted" ? diagnosticOnly("dev")
         : phase === "window" ?
           {
             deployments: [],
@@ -4593,13 +4648,19 @@ describe("in-flight listing refresh", () => {
     // Each keeps its own 15 second cadence, with no extra listing per tick.
     expect(calls - windowStart).toBeLessThanOrEqual(8);
 
-    phase = "recorded";
+    // The delete finishes while the deploy's record is still missing, so
+    // only the deploy refresh is left to find it.
+    phase = "deleted";
     await advance(page, 30_000, RESUME_POLL_MS);
-    expect(page.tableBody.innerHTML).toContain(
-      "https://github.com/octo/app/actions/runs/7"
-    );
     expect(inlineMessage(page.inlineStatus)).toContain(
       "has been successfully deleted"
+    );
+    expect(page.tableBody.innerHTML).not.toContain("runs/7");
+
+    phase = "recorded";
+    await advance(page, 60_000, RESUME_POLL_MS);
+    expect(page.tableBody.innerHTML).toContain(
+      "https://github.com/octo/app/actions/runs/7"
     );
     const settled = calls;
     await advance(page, 5 * 60 * 1000, RESUME_POLL_MS);
