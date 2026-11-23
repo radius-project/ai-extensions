@@ -108,6 +108,14 @@ function dependencies(
   };
 }
 
+// GitHub scopes a run read to one repository and run; answer only the run the
+// default fakes dispatched and found.
+function trackedRun(repo: string, runId: number | string): Promise<void> {
+  if (repo !== "acme/widgets" || String(runId) !== "77")
+    return Promise.reject(new Error(`Unexpected run read: ${repo} ${runId}`));
+  return Promise.resolve();
+}
+
 function reader(): DeployMonitorStatusReader {
   return {
     progress: () => Promise.resolve(null),
@@ -2057,8 +2065,8 @@ describe("deploy monitor settlement", () => {
     await createDeployMonitorService(
       dependencies({
         plannedGraph: { recover: () => Promise.resolve(null) },
-        getRunDetail: () =>
-          Promise.resolve(
+        getRunDetail: (repo, runId) =>
+          trackedRun(repo, runId).then(() =>
             waited < 45 * 60 * 1000 ?
               { status: "in_progress", conclusion: null, steps: [] }
             : completedRun()
@@ -2091,10 +2099,17 @@ describe("deploy monitor settlement", () => {
       await createDeployMonitorService(
         dependencies({
           plannedGraph: { recover: () => Promise.resolve(null) },
-          getRunDetail: () => {
+          getRunDetail: async (repo, runId) => {
+            await trackedRun(repo, runId);
             reads++;
-            return Promise.resolve(detail as DeployRunDetail | null);
+            return detail as DeployRunDetail | null;
           },
+          // Wall time jumps an hour on every read; the window counts only
+          // the waits between polls.
+          now: (() => {
+            let at = 1_700_000_000_000;
+            return () => (at += 60 * 60 * 1000);
+          })(),
           sleep: async (ms) => {
             sleeps.push(ms);
           }

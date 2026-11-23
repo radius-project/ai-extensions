@@ -109,3 +109,102 @@ it.each([
     ).toBe("none");
   }
 );
+
+// Response bodies are parsed by the real browser, outside the fake clock, so
+// each clock step yields real tasks before the next timer can fire.
+async function step(milliseconds: number, by = 250): Promise<void> {
+  for (let elapsed = 0; elapsed < milliseconds; elapsed += by) {
+    await vi.advanceTimersByTimeAsync(by);
+    for (let turn = 0; turn < 5; turn++)
+      await new Promise<void>((resolve) => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => resolve();
+        channel.port2.postMessage(null);
+      });
+  }
+}
+
+it("shows the real deployment row when a fresh listing outlasts several status ticks", async () => {
+  vi.useFakeTimers();
+  const runUrl = "https://github.com/org/app/actions/runs/7";
+  let freshListings = 0;
+  const scope = createRealScope({
+    route(request) {
+      const url = new URL(request.url, "http://canvas.test");
+      if (url.pathname === "/api/deploy" && request.method === "POST")
+        return jsonResponse(200, { ok: true });
+      if (url.pathname === "/api/deploy-status")
+        return jsonResponse(200, {
+          status: "in_progress",
+          active: true,
+          attempt: { targetRepo: "org/app", environment: "dev" }
+        });
+      if (url.pathname === APPLICATIONS_PATH)
+        return jsonResponse(200, { applications: [{ name: "app" }] });
+      if (url.pathname === ENVIRONMENTS_PATH)
+        return jsonResponse(200, {
+          environments: [{ name: "dev", provider: "azure", status: "success" }]
+        });
+      if (url.pathname === BRANCHES_PATH)
+        return jsonResponse(200, { branches: [] });
+      if (url.pathname === DEPLOYMENTS_PATH) {
+        // The listing is scoped to one repository, and only a fresh listing
+        // skips the server's cache and sees the new deployment record.
+        if (url.searchParams.get("repo") !== "org/app")
+          throw new Error("Unexpected repository: " + request.url);
+        if (url.searchParams.get("fresh") !== "1")
+          return jsonResponse(200, { deployments: [] });
+        freshListings++;
+        return new Promise<Response>((resolve) => {
+          setTimeout(
+            () =>
+              resolve(
+                jsonResponse(200, {
+                  deployments: [
+                    {
+                      app: "app",
+                      environment: "dev",
+                      status: "in_progress",
+                      runUrl,
+                      identity: { state: "known", application: "app" }
+                    }
+                  ]
+                })
+              ),
+            4000
+          );
+        });
+      }
+      throw new Error("Unexpected request: " + request.url);
+    }
+  });
+  disposals.push(scope.dispose);
+  scope.host.innerHTML = `
+    <button id="deploy-now-btn">Deploy</button>
+    <select id="deploy-app-select"></select><select id="deploy-env-select"></select>
+    <div id="deploy-inline-status"></div><table><tbody id="deploy-table-body"></tbody></table>
+    <div id="deploy-progress-modal"><div id="deploy-progress-title"></div><div id="deploy-progress-subtitle"></div></div>`;
+  disposals.push(
+    initializeDeployingPage(scope.context, {
+      repo: "org/app",
+      branch: "feature",
+      mutationNonce: "fixture-nonce"
+    })
+  );
+  const deploy = scope.host.querySelector<HTMLButtonElement>("#deploy-now-btn");
+  const envSelect =
+    scope.host.querySelector<HTMLSelectElement>("#deploy-env-select");
+  for (let wait = 0; wait < 20 && envSelect?.value !== "dev"; wait++)
+    await vi.advanceTimersByTimeAsync(10);
+  expect(envSelect?.value).toBe("dev");
+  expect(deploy?.textContent).toBe("Deploy");
+  deploy?.click();
+  await step(10_000);
+
+  expect(
+    scope.host.querySelector(`#deploy-table-body a[href="${runUrl}"]`)
+  ).not.toBeNull();
+  expect(freshListings).toBe(1);
+  await step(5 * 60 * 1000, 2500);
+  expect(freshListings).toBe(1);
+});

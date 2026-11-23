@@ -9453,8 +9453,18 @@ test.describe("Radius Canvas in Chromium", () => {
       });
     });
     await page.route("**/api/list-deployments**", async (route) => {
-      const fresh = new URL(route.request().url()).searchParams.get("fresh");
-      if (fresh !== "1") {
+      const query = new URL(route.request().url()).searchParams;
+      // The listing is scoped to one repository; only a fresh listing skips
+      // the server's cache and sees the new deployment record.
+      if (query.get("repo") !== REPOSITORY) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ deployments: [], error: "Wrong repository" })
+        });
+        return;
+      }
+      if (query.get("fresh") !== "1") {
         await route.fulfill({
           status: 200,
           contentType: "application/json",

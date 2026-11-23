@@ -44,7 +44,18 @@ export function createUnconfirmedMonitor(
               {
                 mode: "ambient",
                 run: async (args) => {
-                  const jobs = args[1].includes("/jobs");
+                  // Answer only the run the monitor found and its first jobs
+                  // page, as GitHub scopes these reads to one run.
+                  const run = `repos/${targetRepo}/actions/runs/42`;
+                  const jobs = args[1] === `${run}/jobs?per_page=100&page=1`;
+                  if (
+                    String(targetRun) !== "42" ||
+                    (args[1] !== run && !jobs) ||
+                    args.slice(2).join(" ") !== "--include --method GET"
+                  )
+                    throw new Error(
+                      `Unexpected workflow read: ${args.join(" ")}`
+                    );
                   if (!jobs) reads.push(args);
                   return {
                     code: 0,
