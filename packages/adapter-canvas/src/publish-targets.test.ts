@@ -18,6 +18,34 @@ const validationError = (
 const WS = path.join(os.tmpdir(), "ws");
 const RADIUS = path.join(WS, ".radius");
 
+test("standalone publication refuses managed staging paths, including aliases", () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "managed-publication-"));
+  try {
+    const managed = path.join(ws, ".radius", ".staging-managed-fixture");
+    fs.mkdirSync(managed, { recursive: true });
+    fs.symlinkSync(managed, path.join(ws, ".radius", "alias"), "junction");
+    assert.throws(
+      () => resolveStagingDirPrefix(ws, ".staging-managed-fixture"),
+      /request token/
+    );
+    assert.throws(
+      () =>
+        resolveExistingRadiusArtifact(
+          ws,
+          ".staging-managed-fixture/example-recipe.bicep",
+          null
+        ),
+      /request token/
+    );
+    assert.throws(
+      () => resolveRadiusArtifactTarget(ws, "alias/custom-types.tgz", null),
+      /request token/
+    );
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("resolveRadiusArtifactTarget confines relative paths under .radius/", () => {
   assert.equal(
     resolveRadiusArtifactTarget(WS, "custom-types.yaml", null),

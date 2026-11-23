@@ -83,7 +83,7 @@ Rules:
 
 ### 2. Publish the extension locally: call `radius_publish_custom_type_extension`
 
-Compile the manifest into a local Bicep extension co-located with `app.bicep` by calling the `radius_publish_custom_type_extension` tool (never invoke `rad` directly). Pass `stagingDir` with the run's staging directory so it reads `custom-types.yaml` from there and writes `custom-types.tgz` beside it; pass `manifestPath` / `targetPath` only if you used different names.
+Compile the manifest into a local Bicep extension co-located with `app.bicep` by calling the `radius_publish_custom_type_extension` tool (never invoke `rad` directly). For a managed Canvas handoff, pass `requestToken` only: the tool reads `custom-types.yaml` and writes `custom-types.tgz` in that request's staging directory. For a standalone run, pass `stagingDir`; pass `manifestPath` / `targetPath` only if you used different names.
 
 Re-run this tool after ANY edit to `custom-types.yaml` — the compiled `custom-types.tgz` is what `app.bicep` validates against, so a schema change (for example adding `codeReference` to a type that predates that rule) has no effect until the extension is republished.
 
@@ -172,7 +172,7 @@ output result object = {
 }
 ```
 
-Then publish it to the user's GitHub Container Registry for the repository being modeled by calling the `radius_publish_recipe` tool (never invoke `rad` directly), and use the resulting path as the recipe pack `source`. Pass `file` (the recipe path) and `target` (`br:ghcr.io/<owner>/<repo>/<recipe>:<tag>`):
+Then publish it to the user's GitHub Container Registry for the repository being modeled by calling the `radius_publish_recipe` tool (never invoke `rad` directly), and use the resulting path as the recipe pack `source`. For a managed Canvas handoff, include `requestToken` and pass only the filename for `file` (for example `emailCommunicationServices-recipe.bicep`). For a standalone run, pass the staging-relative path. Both use a `target` of the form `br:ghcr.io/<owner>/<repo>/<recipe>:<tag>`:
 
 ```text
 file: <staging-dir>/<type>-recipe.bicep

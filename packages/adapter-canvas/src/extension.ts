@@ -92,6 +92,7 @@ import {
 import { configureCredentialProvenanceStore } from "./credential-provenance.js";
 import { createFileCredentialProvenanceStore } from "./credential-provenance-store.js";
 import { radiusAppBicepSkill } from "./skill.js";
+import { beginManagedRun } from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import { createGeneratorVersionReader } from "./generator-version.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
@@ -285,6 +286,7 @@ const dependencies: RadiusExtensionDependencies = {
       fetchFileFromRepo(repo, repoPath, branch)
   },
   radiusAppBicepSkill,
+  beginManagedModel: beginManagedRun,
   renderPrDiffMarkdown,
   withGhcrDockerConfig: (fn) =>
     withGhcrDockerConfig(fn, { ghCommandPresentation })

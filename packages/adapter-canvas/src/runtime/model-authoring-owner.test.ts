@@ -11,20 +11,25 @@ function fixture() {
   };
   const staging = (stagingDir: string) => ({
     stagingDir,
+    artifact: vi.fn(() => {
+      throw new Error("No fixture artifact configured");
+    }),
     cancel: vi.fn(),
-    validate: vi.fn(),
+    validate: vi.fn((check: (file: string) => Promise<void>) =>
+      check(`${stagingDir}/app.bicep`)
+    ),
     promote: vi.fn(() => ({ published: ["app.bicep"], gitError: "" }))
   });
   const first = staging("/workspace/.radius/.staging-managed-one");
   const second = staging("/workspace/.radius/.staging-managed-two");
   const ports = {
     staging: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second),
-    resolveTarget: vi.fn(async () => target),
-    validate: vi.fn(async () => {})
+    resolveTarget: vi.fn(async () => target)
   };
+  const validate = vi.fn(async () => {});
   const owner = createModelAuthoringOwner(ports);
-  owner.begin("one", target, () => true);
-  return { owner, target, ports, first, second };
+  owner.begin("one", target, () => true, validate);
+  return { owner, target, ports, first, second, validate };
 }
 
 describe("model authoring owner", () => {
@@ -32,14 +37,19 @@ describe("model authoring owner", () => {
     const { owner, target, first, second } = fixture();
     const started = createDeferred<void>();
     const publisher = createDeferred<string>();
-    const publication = owner.publish("one", async (dir) => {
-      expect(dir).toBe(first.stagingDir);
+    const publication = owner.publish("one", async (staging) => {
+      expect(staging).toBe(first);
       started.resolve();
       return publisher.promise;
     });
     await started.promise;
     await expect(owner.finish("one")).rejects.toThrow("work running");
-    owner.begin("two", target, () => true);
+    owner.begin(
+      "two",
+      target,
+      () => true,
+      async () => {}
+    );
     publisher.resolve("published by one");
     await expect(publication).resolves.toBe("published by one");
     const late = vi.fn(async () => "not started");
@@ -55,11 +65,30 @@ describe("model authoring owner", () => {
     expect(second.promote).toHaveBeenCalledOnce();
   });
 
+  it("drains a started publication when closing without reviving its request", async () => {
+    const { owner } = fixture();
+    const started = createDeferred<void>();
+    const effect = createDeferred<string>();
+    const publication = owner.publish("one", () => {
+      started.resolve();
+      return effect.promise;
+    });
+    await started.promise;
+    const settled = vi.fn();
+    const closing = owner.close().then(settled);
+    await expect(owner.finish("one")).rejects.toThrow("expired");
+    expect(settled).not.toHaveBeenCalled();
+    effect.resolve("published");
+    await expect(publication).resolves.toBe("published");
+    await closing;
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
   it("does not promote if the source changes while validation is running", async () => {
-    const { owner, target, ports, first } = fixture();
+    const { owner, target, ports, first, validate } = fixture();
     const validating = createDeferred<void>();
     const checked = createDeferred<void>();
-    ports.validate.mockImplementationOnce(() => {
+    validate.mockImplementationOnce(() => {
       validating.resolve();
       return checked.promise;
     });
@@ -81,13 +110,19 @@ describe("model authoring owner", () => {
     const result = expect(owner.publish("one", start)).rejects.toThrow(
       "no longer current"
     );
-    owner.close();
+    const closing = owner.close();
     pending.resolve(target);
     await result;
+    await closing;
     expect(first.cancel).toHaveBeenCalledOnce();
     expect(start).not.toHaveBeenCalled();
-    expect(() => owner.begin("two", target, () => true)).toThrow(
-      "Cannot establish"
-    );
+    expect(() =>
+      owner.begin(
+        "two",
+        target,
+        () => true,
+        async () => {}
+      )
+    ).toThrow("Cannot establish");
   });
 });

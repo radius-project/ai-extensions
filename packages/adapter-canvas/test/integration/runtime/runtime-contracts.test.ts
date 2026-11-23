@@ -1,4 +1,5 @@
 import { redactCredentials, type DeploymentState } from "@radius-project/core";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APP_ORIGIN_REPO_PATH,
@@ -19,6 +20,7 @@ import {
   createFakeSession
 } from "../../support/runtime/fakes.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
+import { createDeferred } from "../../support/browser/fakes.js";
 import { createFakeDeploymentRuntime } from "../../support/runtime/deployment.js";
 import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monitor.js";
 import { deployFailureNoticePrompt } from "../../../src/runtime/hooks.js";
@@ -51,6 +53,7 @@ const TOOL_NAMES = [
   "radius_generate_app",
   "radius_report_modeling_failure",
   "radius_generate_pr_diff_markdown",
+  "radius_complete_app_authoring",
   "radius_publish_custom_type_extension",
   "radius_publish_recipe",
   "radius_deploy",
@@ -1433,29 +1436,33 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
 
   it("deduplicates missing-model delivery across canvas states without rediscovering the workspace on every poll", async () => {
     const harness = await createRuntimeSdkHarness({
+      headCommits: { "workspace:/workspace": "saved-source" },
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["Dockerfile", "src/index.ts"]
       }
     });
     const handoff = harness.capturedHostCallbacks.appBicepHandoff;
     if (!handoff) throw new Error("runtime registered no app-model handoff");
-    const state = (canvasInstanceId: string) => ({
-      canvasInstanceId,
-      workspacePath: "/workspace",
-      workspaceRepo: "acme/widgets",
-      workspaceBranch: "main",
-      contextRepo: "acme/widgets",
-      contextBranch: "main"
-    });
-    const request = (canvasInstanceId: string) => ({
-      repo: "acme/widgets",
-      branches: ["main"],
-      page: "graph",
-      state: state(canvasInstanceId)
-    });
-
-    await handoff(request("closed-panel"));
-    await handoff(request("reopened-panel"));
+    for (const canvasInstanceId of ["first-panel", "second-panel"]) {
+      const { state } = await harness.deps.getOrCreateServer(
+        canvasInstanceId,
+        "graph"
+      );
+      Object.assign(state, {
+        canvasInstanceId,
+        workspacePath: "/workspace",
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: "main",
+        contextRepo: "acme/widgets",
+        contextBranch: "main"
+      });
+      await handoff({
+        repo: "acme/widgets",
+        branches: ["main"],
+        page: "graph",
+        state
+      });
+    }
 
     expect(harness.session.send).toHaveBeenCalledTimes(1);
     expect(
@@ -1467,6 +1474,188 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
 
     await harness.extension.shutdown("test");
   });
+
+  it.each([
+    "complete",
+    "invalid",
+    "cancel",
+    "stale",
+    "stale during credentials",
+    "no node",
+    "send failed"
+  ] as const)(
+    "binds the managed Canvas graph handoff to registered tools: %s",
+    async (outcome) => {
+      const stage = resolve(".radius", ".staging-managed-test");
+      const node = resolve("test", "bin", "node");
+      const skillBase = resolve("test", "skills", "radius-app-bicep");
+      let revision = "saved-source-1";
+      const artifact = vi.fn((name: string) => join(stage, name));
+      const cancel = vi.fn();
+      const credentialsStarted = createDeferred<void>();
+      const credentialsReady = createDeferred<void>();
+      const promote = vi.fn(() => ({ published: ["app.bicep"], gitError: "" }));
+      const execFile = vi.fn(async () => {
+        if (outcome === "invalid") throw new Error("invalid test model");
+        return { stdout: "", stderr: "" };
+      });
+      const harness = await createRuntimeSdkHarness(
+        {
+          workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] }
+        },
+        (deps) => {
+          deps.appModel.workspaceSourceRevision = async () => revision;
+          deps.radiusAppBicepSkill = () =>
+            JSON.stringify({
+              skill: "radius-app-bicep",
+              skillBase,
+              nodeCommand: outcome === "no node" ? null : node
+            });
+          deps.beginManagedModel = () => ({
+            stagingDir: stage,
+            artifact,
+            cancel,
+            promote,
+            validate: (check) => check(join(stage, "app.bicep"))
+          });
+          deps.process.execFile = execFile;
+          if (outcome === "stale during credentials") {
+            deps.withGhcrDockerConfig = async (publish) => {
+              credentialsStarted.resolve();
+              await credentialsReady.promise;
+              return publish({ DOCKER_CONFIG: "fixture-config" });
+            };
+          }
+        }
+      );
+      try {
+        const { state } = await harness.deps.getOrCreateServer(
+          "model-panel",
+          "graph"
+        );
+        Object.assign(state, {
+          canvasInstanceId: "model-panel",
+          workspacePath: "/workspace",
+          workspaceRepo: "acme/widgets",
+          workspaceBranch: "main"
+        });
+        const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+        if (!handoff) throw new Error("No Canvas modeling handoff registered");
+        const request = {
+          repo: "acme/widgets",
+          branches: ["main"],
+          page: "graph",
+          state
+        };
+        if (outcome === "send failed") {
+          vi.mocked(harness.session.send).mockRejectedValueOnce(
+            new Error("SDK delivery failed")
+          );
+          await expect(handoff(request)).rejects.toThrow("SDK delivery failed");
+          expect(cancel).toHaveBeenCalledOnce();
+          return;
+        }
+        await handoff(request);
+        const requestToken =
+          state.appModelAttemptTokens?.["acme/widgets::main"];
+        expect(requestToken).toBeTruthy();
+        const tool = (name: string) => {
+          const result = harness.extension.tools.find(
+            (candidate) => candidate.name === name
+          );
+          if (!result) throw new Error(`Missing tool: ${name}`);
+          return result;
+        };
+        const complete = tool("radius_complete_app_authoring");
+        if (outcome === "no node") {
+          await expect(
+            complete.handler({ requestToken, outcome: "complete" })
+          ).resolves.toMatchObject({
+            kind: "refused",
+            error: expect.stringContaining("expired")
+          });
+          return;
+        }
+        expect(harness.session.send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            prompt: expect.stringContaining(
+              JSON.stringify({ requestToken, stagingDir: stage })
+            )
+          })
+        );
+
+        if (outcome === "stale during credentials") {
+          const publish = tool("radius_publish_recipe").handler({
+            requestToken,
+            file: "service-recipe.bicep",
+            target: "br:ghcr.io/acme/widgets/service:1"
+          });
+          await credentialsStarted.promise;
+          revision = "saved-source-2";
+          credentialsReady.resolve();
+          await expect(publish).resolves.toContain(
+            "source or worktree changed"
+          );
+          expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
+        } else if (outcome === "complete") {
+          await expect(
+            tool("radius_publish_custom_type_extension").handler({
+              requestToken
+            })
+          ).resolves.toContain("custom-types.tgz");
+          expect(artifact).toHaveBeenCalledWith("custom-types.yaml", true);
+          expect(artifact).toHaveBeenCalledWith("custom-types.tgz", false);
+          await expect(
+            tool("radius_publish_recipe").handler({
+              requestToken,
+              file: "service-recipe.bicep",
+              target: "br:ghcr.io/acme/widgets/service:1"
+            })
+          ).resolves.toContain("Published recipe");
+          expect(artifact).toHaveBeenCalledWith("service-recipe.bicep", true);
+          await expect(
+            complete.handler({ requestToken, outcome })
+          ).resolves.toMatchObject({
+            kind: "promoted",
+            published: ["app.bicep"]
+          });
+          expect(execFile).toHaveBeenCalledWith(
+            node,
+            [
+              join(skillBase, "scripts", "validate-bicep.mjs"),
+              join(stage, "app.bicep"),
+              "--managed-final"
+            ],
+            expect.objectContaining({ cwd: "/workspace" })
+          );
+          expect(promote).toHaveBeenCalledOnce();
+        } else if (outcome === "cancel") {
+          await expect(
+            complete.handler({ requestToken, outcome })
+          ).resolves.toEqual({ kind: "cancelled" });
+          await expect(
+            complete.handler({ requestToken, outcome: "complete" })
+          ).resolves.toMatchObject({ kind: "refused" });
+          expect(execFile).not.toHaveBeenCalled();
+        } else {
+          if (outcome === "stale") revision = "saved-source-2";
+          await expect(
+            complete.handler({ requestToken, outcome: "complete" })
+          ).resolves.toMatchObject({
+            kind: "refused",
+            error: expect.stringContaining(
+              outcome === "stale" ?
+                "source or worktree changed"
+              : "invalid test model"
+            )
+          });
+          expect(promote).not.toHaveBeenCalled();
+        }
+      } finally {
+        await harness.extension.shutdown("test");
+      }
+    }
+  );
 
   // The memo key includes the commit the record names, so a long session with
   // many regenerations would otherwise grow it without limit.

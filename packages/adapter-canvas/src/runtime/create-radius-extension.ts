@@ -17,6 +17,7 @@ import { redactCredentials } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
+import { createCanvasModelAuthoring } from "./canvas-model-authoring.js";
 import { readSelectedSourceRevision } from "../app-model-authoring-failure.js";
 import {
   createModelingActivity,
@@ -175,7 +176,10 @@ export function createRadiusExtension(
   // Every graph render reaches this callback through the HTTP routes, which is
   // why it, and no hook or canvas-open fallback, decides whether the model needs
   // authoring, refreshing, confirming, or only a note.
+  const authoring = createCanvasModelAuthoring(deps, workspaceState);
   const handOffAppModel = createAppModelHandoff({
+    beginManaged: authoring.begin,
+    cancelManaged: authoring.owner.cancel,
     resolveContext: () => workspaceState(),
     resolveStatus: (repo, branch, state) =>
       resolveAppModelStatus(repo, branch, state),
@@ -347,6 +351,7 @@ export function createRadiusExtension(
   function shutdown(signal = "shutdown"): Promise<RadiusShutdownOutcome> {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
+      const authoringDrain = authoring.owner.close();
       shuttingDown = true;
       const drain = deps.executionOwner.shutdown();
       const deploymentDrain =
@@ -396,7 +401,12 @@ export function createRadiusExtension(
         });
         if (
           !(await withTimeout(
-            Promise.all([...closes, drained, deploymentsDrained]),
+            Promise.all([
+              ...closes,
+              drained,
+              deploymentsDrained,
+              authoringDrain
+            ]),
             CLEANUP_TIMEOUT_MS
           ))
         ) {
@@ -553,7 +563,12 @@ export function createRadiusExtension(
 
   return {
     canvases: [createRadiusCanvas(deps, canvasInstances)],
-    tools: createRadiusTools(deps, modelingActivity, missingModelHandoffs),
+    tools: createRadiusTools(
+      deps,
+      modelingActivity,
+      missingModelHandoffs,
+      authoring.owner
+    ),
     hooks: {
       // Nothing here inspects the application model any more. Opening a graph
       // page used to be denied until .radius/app.bicep existed, but every graph

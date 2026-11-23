@@ -458,6 +458,19 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           filesByRepoBranch[`remote:${repo}@${branch}:${repoPath}`] ?? null
       )
     },
+    beginManagedModel: vi.fn((workspace: string) => ({
+      stagingDir: `${workspace}/.radius/.staging-managed-test`,
+      artifact: () => {
+        throw new Error("No test publication artifact configured");
+      },
+      cancel: vi.fn(),
+      validate: async () => {
+        throw new Error("No test model validation configured");
+      },
+      promote: () => {
+        throw new Error("No test promotion configured");
+      }
+    })),
     radiusAppBicepSkill: vi.fn((repoPath?: string, brief?: string) =>
       JSON.stringify({
         skill: "radius-app-bicep",

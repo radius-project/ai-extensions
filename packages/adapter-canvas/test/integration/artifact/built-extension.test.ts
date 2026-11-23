@@ -1946,7 +1946,7 @@ await resolver.writeStagedBicepConfig(
       asset: "radius-app-bicep skill",
       missingAsset: ["radius-app-bicep"],
       expectedError: "Could not resolve",
-      expectedPath: "show-radius-type.mjs"
+      expectedPath: "app-model-staging.mjs"
     },
     {
       asset: "source-reference guide",

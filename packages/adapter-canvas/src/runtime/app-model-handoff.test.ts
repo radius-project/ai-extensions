@@ -130,6 +130,10 @@ function harness(
   const modelingInFlight = vi.fn(async () => false);
   const announced: Array<{ repo: string; branches: string[] }> = [];
   const deps: AppModelHandoffDependencies = {
+    beginManaged: vi.fn(
+      (_state, _repo, _branch, _token, _revision, handoff) => handoff
+    ),
+    cancelManaged: vi.fn(),
     resolveContext,
     resolveStatus,
     assertWorkspaceSource: vi.fn(async () => {}),

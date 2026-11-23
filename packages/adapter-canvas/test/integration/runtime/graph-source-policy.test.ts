@@ -173,6 +173,8 @@ async function fixture(
     (deps) => {
       deps.graphSources = sources;
       deps.rad.buildGraphViaRad = compiler;
+      deps.appModel.workspaceSourceRevision = async () =>
+        "fixture-saved-source";
     }
   );
   const tool = harness.extension.tools.find(

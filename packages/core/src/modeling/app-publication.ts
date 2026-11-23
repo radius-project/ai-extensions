@@ -63,12 +63,17 @@ export function createAppPublication(ports: AppPublicationPorts) {
     async publishRecipe(
       workspace: WorkspacePath,
       repo: string | null | undefined,
-      input: { file?: unknown; target?: unknown }
+      input: { file?: unknown; target?: unknown },
+      managedPublish?: (target: string) => Promise<unknown>
     ) {
       const error = ports.validateRegistryTarget(input.target, repo);
       if (error) return { kind: "refused", error } as const;
       const target = String(input.target).trim();
       return publishRecipeInOrder(target, async () => {
+        if (managedPublish) {
+          const published = await managedPublish(target);
+          return { kind: "published", reference: String(published) } as const;
+        }
         const file = ports.resolveExisting(workspace, input.file, null);
         if (!ports.exists(file))
           return { kind: "missing", path: file } as const;

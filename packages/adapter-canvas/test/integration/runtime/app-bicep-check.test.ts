@@ -2978,6 +2978,43 @@ function stagedRun(directory: string, repair?: unknown): void {
 }
 
 describe("repair budget", () => {
+  it("runs a separate managed completion check without charging the repair budget", () => {
+    const directory = path.join(
+      temporaryDirectory(),
+      ".staging-managed-fixture"
+    );
+    fs.mkdirSync(directory);
+    const repair = { attempts: REPAIR_COMPILE_LIMIT, fingerprint: null };
+    stagedRun(directory, repair);
+    const app = path.join(directory, "app.bicep");
+    fs.writeFileSync(app, "");
+    const env = fakeBicep(directory, sarif([]), 0);
+    const complete = spawnSync(
+      process.execPath,
+      [checker, app, "--managed-final"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, ...env }
+      }
+    );
+    assert.equal(complete.status, 0, complete.stderr);
+    assert.deepEqual(readRepair(directory), repair);
+    const refused = spawnSync(
+      process.execPath,
+      [
+        checker,
+        path.join(path.dirname(directory), "app.bicep"),
+        "--managed-final"
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, ...env }
+      }
+    );
+    assert.equal(refused.status, 2);
+    assert.match(refused.stderr, /requires a managed Radius staging run/u);
+  });
+
   it("compiles and counts the first attempt of a staged run", () => {
     const directory = temporaryDirectory();
     stagedRun(directory);

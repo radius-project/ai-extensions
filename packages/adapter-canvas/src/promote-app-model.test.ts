@@ -157,6 +157,29 @@ function gitStatus(root: string): string[] {
 }
 
 describe("managed staging", () => {
+  it("allows only direct, single-link publication files within the current staging directory", () => {
+    const managed = beginManagedRun(repo().root);
+    const manifest = path.join(managed.stagingDir, "custom-types.yaml");
+    const output = path.join(managed.stagingDir, "custom-types.tgz");
+    expect(() => managed.artifact("custom-types.yaml", true)).toThrow(
+      "regular"
+    );
+    expect(() => managed.artifact("../custom-types.tgz", false)).toThrow(
+      "direct"
+    );
+    expect(managed.artifact("custom-types.tgz", false)).toBe(output);
+    fs.writeFileSync(manifest, "fixture manifest");
+    expect(managed.artifact("custom-types.yaml", true)).toBe(manifest);
+    fs.linkSync(manifest, output);
+    expect(() => managed.artifact("custom-types.tgz", false)).toThrow(
+      "regular"
+    );
+    managed.cancel();
+    expect(() => managed.artifact("custom-types.yaml", true)).toThrow(
+      "no longer active"
+    );
+  });
+
   it("reserves managed IDs and refuses standalone publication and abort", async () => {
     const target = repo();
     const reserved = run(target.root, ["--begin", "--run-id", "Managed-test"]);
