@@ -132,7 +132,12 @@ const productionHandlers = {
       maxAttempts: 3,
       pending: false
     }),
-    resolveRepoAppName: () => Promise.resolve(""),
+    inspectRepoApplication: () =>
+      Promise.resolve({
+        kind: "unconfirmed",
+        fallbackName: "",
+        unavailable: false
+      }),
     resolveEnvDeployment: () => Promise.resolve(null),
     listEnvDeployment: () =>
       Promise.resolve({ deployment: null, incomplete: false }),

@@ -63,6 +63,8 @@ describe("shared graph test discovery", () => {
             "node"
           ].map((name) => `packages/graph-react/src/${name}.test.ts`),
           "packages/graph-react/src/graph.browser.test.ts",
+          "packages/core/src/modeling/app-authoring.test.ts",
+          "packages/adapter-shared/src/environment-inspection.test.ts",
           "packages/adapter-canvas/src/browser/graph/surface.test.ts",
           "packages/adapter-canvas/src/browser/graph/navigation.test.ts",
           "packages/adapter-canvas/src/browser/graph/progress.test.ts",

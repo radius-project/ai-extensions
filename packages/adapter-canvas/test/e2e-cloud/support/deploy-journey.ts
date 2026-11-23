@@ -220,6 +220,14 @@ export interface DeploymentRow {
 export function readDeploymentRows(payload: unknown): DeploymentRow[] {
   const record = asRecord(payload);
   rejectEndpointError(record, "deployment listing");
+  const diagnostics = record?.environmentDiagnostics;
+  if (
+    diagnostics !== undefined &&
+    (!Array.isArray(diagnostics) || diagnostics.length > 0)
+  )
+    throw new Error(
+      `The deployment listing carried environment diagnostics: ${JSON.stringify(diagnostics)}`
+    );
   const list = record?.deployments;
   if (!Array.isArray(list))
     throw new Error(

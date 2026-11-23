@@ -91,8 +91,8 @@ function dependencies(
     deployHandoffStatus: () => {
       throw new Error("deployHandoffStatus not stubbed");
     },
-    resolveRepoAppName: () => {
-      throw new Error("resolveRepoAppName not stubbed");
+    inspectRepoApplication: () => {
+      throw new Error("inspectRepoApplication not stubbed");
     },
     resolveEnvDeployment: () => {
       throw new Error("resolveEnvDeployment not stubbed");
@@ -335,7 +335,13 @@ describe("deployments routes (SU-06)", () => {
         readInstanceEntry: () => ({ state }),
         triggerDeployRepairHandoff: () => false,
         deployHandoffStatus: () => IDLE_HANDOFF,
-        resolveRepoAppName: () => Promise.resolve("todolist"),
+        inspectRepoApplication: () =>
+          Promise.resolve({
+            kind: "defined",
+            name: "todolist",
+            path: ".radius/app.bicep",
+            branch: "main"
+          }),
         deployListCache: {
           get: () => undefined,
           set: () => undefined,
@@ -1044,9 +1050,14 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => ({ state: { contextBranch: "feature/x" } }),
-          resolveRepoAppName: (repo, branch) => {
+          inspectRepoApplication: (repo, branch) => {
             seen.push([repo, branch]);
-            return Promise.resolve("todo-app");
+            return Promise.resolve({
+              kind: "defined",
+              name: "todo-app",
+              path: ".radius/app.bicep",
+              branch
+            });
           }
         })
       );
@@ -1092,9 +1103,14 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => ({ state: state as CanvasState }),
-          resolveRepoAppName: (_repo, branch) => {
+          inspectRepoApplication: (_repo, branch) => {
             seen.push(branch);
-            return Promise.resolve("todo-app");
+            return Promise.resolve({
+              kind: "defined",
+              name: "todo-app",
+              path: ".radius/app.bicep",
+              branch
+            });
           }
         })
       );
@@ -1111,9 +1127,14 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => undefined,
-          resolveRepoAppName: (_repo, branch) => {
+          inspectRepoApplication: (_repo, branch) => {
             seen.push(branch);
-            return Promise.resolve("todo-app");
+            return Promise.resolve({
+              kind: "defined",
+              name: "todo-app",
+              path: ".radius/app.bicep",
+              branch
+            });
           }
         })
       );
@@ -1129,7 +1150,7 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => undefined,
-          resolveRepoAppName: () => Promise.reject(new Error("gh exploded"))
+          inspectRepoApplication: () => Promise.reject(new Error("gh exploded"))
         })
       );
 
@@ -1150,7 +1171,7 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => undefined,
-          resolveRepoAppName: () => Promise.reject("plain string")
+          inspectRepoApplication: () => Promise.reject("plain string")
         })
       );
       expect(JSON.parse(recording.body).error).toBe("plain string");
@@ -1165,7 +1186,7 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => undefined,
-          resolveRepoAppName: () => Promise.reject(new Error("nope"))
+          inspectRepoApplication: () => Promise.reject(new Error("nope"))
         })
       );
       expect(JSON.parse(recording.body).applications).toEqual([
@@ -1235,7 +1256,13 @@ describe("deployments routes (SU-06)", () => {
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve("dev"),
-          resolveRepoAppName: () => Promise.resolve("todolist"),
+          inspectRepoApplication: () =>
+            Promise.resolve({
+              kind: "defined",
+              name: "todolist",
+              path: ".radius/app.bicep",
+              branch: "main"
+            }),
           resolveEnvDeployment: (_repo, environment) =>
             Promise.resolve(row(environment))
         })
@@ -1265,7 +1292,13 @@ describe("deployments routes (SU-06)", () => {
           ghCalls += 1;
           return Promise.resolve("dev");
         },
-        resolveRepoAppName: () => Promise.resolve("todolist"),
+        inspectRepoApplication: () =>
+          Promise.resolve({
+            kind: "defined",
+            name: "todolist",
+            path: ".radius/app.bicep",
+            branch: "main"
+          }),
         resolveEnvDeployment: (_repo, environment) =>
           Promise.resolve(row(environment))
       };
@@ -1312,7 +1345,13 @@ describe("deployments routes (SU-06)", () => {
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve("dev"),
-          resolveRepoAppName: () => Promise.resolve("todolist"),
+          inspectRepoApplication: () =>
+            Promise.resolve({
+              kind: "defined",
+              name: "todolist",
+              path: ".radius/app.bicep",
+              branch: "main"
+            }),
           resolveEnvDeployment: (_repo, environment) =>
             Promise.resolve(row(environment))
         })
@@ -1363,7 +1402,13 @@ describe("deployments routes (SU-06)", () => {
             // produces across page boundaries.
             return Promise.resolve("dev\nprod\ndev\n\n");
           },
-          resolveRepoAppName: () => Promise.resolve("todo-app"),
+          inspectRepoApplication: () =>
+            Promise.resolve({
+              kind: "defined",
+              name: "todo-app",
+              path: ".radius/app.bicep",
+              branch: "main"
+            }),
           resolveEnvDeployment: (repo, environment, appName) => {
             resolveCalls.push([repo, environment, appName]);
             return Promise.resolve(
@@ -1406,7 +1451,13 @@ describe("deployments routes (SU-06)", () => {
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve(""),
-          resolveRepoAppName: () => Promise.resolve("todolist"),
+          inspectRepoApplication: () =>
+            Promise.resolve({
+              kind: "defined",
+              name: "todolist",
+              path: ".radius/app.bicep",
+              branch: "main"
+            }),
           resolveEnvDeployment: () => {
             throw new Error("no environment to resolve");
           }
