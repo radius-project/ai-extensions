@@ -1185,7 +1185,7 @@ async function ensureAppBoundary(
   return {
     ok: false,
     code: "aws-app-boundary-failed",
-    message: `Permissions boundary ${arn} differs from the one setup writes for region ${region}, so nothing was changed on it. To change the environment's region, delete the environment and create it again.`
+    message: `Permissions boundary ${arn} differs from the one setup writes for region ${region}, so nothing was changed on it. It was written for another region or by an earlier version of Radius. Delete the environment's apps and the environment, then create it again.`
   };
 }
 

@@ -60,6 +60,10 @@ const TOOL_NAMES = [
   "radius_environment_control"
 ];
 
+// The skillBase the fake radiusAppBicepSkill reports. A handoff that carries
+// it embeds the skill bootstrap instead of asking the agent to call a tool.
+const SKILL_BASE = "/test/skills/radius-app-bicep";
+
 function parseSkillHandoff(value: unknown): Record<string, unknown> {
   if (typeof value !== "string") {
     throw new Error("Expected the skill handoff to be JSON text.");
@@ -710,7 +714,7 @@ describe("P0-A Radius runtime registration contract", () => {
     expect(unrelatedResult).toBeUndefined();
     expect(unrelated.session.send).not.toHaveBeenCalled();
     expect(unrelated.session.rpc.canvas.open).not.toHaveBeenCalled();
-    expect(unrelated.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+    expect(unrelated.deps.graphSources.read).not.toHaveBeenCalled();
     expect(unrelated.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
     expect(enabledResult?.additionalContext).toContain("radius-panel");
     expect(enabledResult?.additionalContext).toContain(
@@ -1036,6 +1040,45 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
+  it("fences an old fallback Git lookup across registered close and reopen", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" }
+    });
+    let started = () => {};
+    let finish = () => {};
+    const lookupStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const lookup = new Promise<{ stdout: string; stderr: string }>(
+      (resolve) => {
+        finish = () =>
+          resolve({ stdout: "git@github.com:acme/old.git", stderr: "" });
+      }
+    );
+    vi.mocked(harness.deps.process.execFile).mockImplementationOnce(() => {
+      started();
+      return lookup;
+    });
+    const pending = harness.host.open("radius-panel", { page: "graph" });
+    try {
+      await lookupStarted;
+      await harness.host.close("radius-panel");
+      await harness.host.open("radius-panel", {
+        page: "planned",
+        repo: "acme/new",
+        branch: "topic"
+      });
+    } finally {
+      finish();
+      await pending;
+    }
+    expect(harness.servers.get("radius-panel")?.state).toMatchObject({
+      contextRepo: "acme/new",
+      contextBranch: "topic",
+      activeGraphView: "planned"
+    });
+  });
+
   it("uses the worktree branch when omitted and explicit base/head for graph diff", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
@@ -1060,15 +1103,19 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       headBranch: "feature/runtime-tests"
     });
 
-    expect(harness.deps.core.fetchBicepFromRepo).toHaveBeenCalledWith(
-      harness.deps.github,
-      "acme/widgets",
-      "main"
+    expect(harness.deps.graphSources.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: "acme/widgets",
+        ref: "main",
+        workspace: expect.objectContaining({ authorized: false })
+      })
     );
-    expect(harness.deps.workspace.fetchWorkspaceBicep).toHaveBeenCalledWith(
-      expect.any(Object),
-      "acme/widgets",
-      "feature/runtime-tests"
+    expect(harness.deps.graphSources.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: "acme/widgets",
+        ref: "feature/runtime-tests",
+        workspace: expect.objectContaining({ authorized: true })
+      })
     );
     expect(harness.servers.get("radius-panel")?.state).toMatchObject({
       diffTargetRepo: "acme/widgets",
@@ -1242,7 +1289,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       .map((call) => JSON.stringify(call[0]))
       .join("\n");
     expect(sent).toContain("source has changed since");
-    expect(sent).toContain("radius_generate_app");
+    expect(sent).toContain(SKILL_BASE);
+    expect(sent).not.toContain("radius_generate_app");
 
     // The skill regenerates and rewrites the origin record against the branch's
     // current commit, so the worktree now reports no source change beyond the
@@ -1509,6 +1557,46 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
   });
 });
 
+it("routes registered publication tools without a Canvas panel", async () => {
+  const harness = await createRuntimeSdkHarness();
+  const tools = harness.extension.tools;
+  const compile = tools.find(
+    (tool) => tool.name === "radius_publish_custom_type_extension"
+  );
+  const publish = tools.find((tool) => tool.name === "radius_publish_recipe");
+  if (!compile || !publish) throw new Error("Publication tools not registered");
+  try {
+    await expect(
+      compile.handler({ stagingDir: ".radius/.staging-fixture" })
+    ).resolves.toContain("custom-types.tgz");
+    expect(harness.deps.rad.runRadBicepPublishExtension).toHaveBeenCalledOnce();
+    expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
+
+    await expect(
+      publish.handler({
+        file: ".radius/recipe.bicep",
+        target: "br:ghcr.io/other/repo/recipe:v1"
+      })
+    ).resolves.toContain("must publish under the repository being modeled");
+    expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
+
+    await expect(
+      publish.handler({
+        file: ".radius/recipe.bicep",
+        target: "br:ghcr.io/acme/widgets/recipe:v1"
+      })
+    ).resolves.toContain("br:ghcr.io/acme/widgets/recipe:v1");
+    expect(harness.deps.rad.runRadBicepPublish).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        env: { DOCKER_CONFIG: "/tmp/fake-docker-config" }
+      })
+    );
+    expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+  } finally {
+    await harness.extension.shutdown("test");
+  }
+});
+
 // Exception 2.1: a repository with no Dockerfile has no containerized workload
 // to model, so both routes into modeling — the tool the agent calls and the host
 // handoff the graph routes fire — have to refuse through the real composition,
@@ -1580,7 +1668,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     // the tool runs, because handing the skill over starts a run the handoff is
     // then right to defer to.
     const handedOff = await handOff(harness);
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
+    expect(handedOff).not.toContain("radius_generate_app");
     expect(handedOff).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
 
     const generated = String(await generateApp(harness));
@@ -1631,7 +1720,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     });
 
     // The graph render that finds no model comes first and legitimately asks.
-    expect(await handOff(harness)).toContain("radius_generate_app");
+    expect(await handOff(harness)).toContain(SKILL_BASE);
 
     // Then the agent acts on it, which is the run the next render must defer to
     // rather than ask for a second time. Panel state carries no dedupe key
@@ -1662,10 +1751,51 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       page: "graph"
     });
 
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
 
     await harness.extension.shutdown("test");
   });
+
+  // The agent does not call radius_generate_app for a run the Canvas
+  // requests, so the assembled runtime must record that run when it delivers
+  // the handoff. Otherwise an overlapping view, such as a diff that includes
+  // the same branch, asks for the same model again before the run stages.
+  it.each([
+    {
+      name: "a diff that includes the requested branch waits for its run",
+      second: {
+        repo: "acme/widgets",
+        branches: ["main", "feat"],
+        page: "graph-diff"
+      },
+      asksAgain: false
+    },
+    {
+      name: "a view of an unrelated branch still asks",
+      second: { repo: "acme/widgets", branches: ["feat"], page: "graph" },
+      asksAgain: true
+    }
+  ])(
+    "after the Canvas requests a model, $name",
+    async ({ second, asksAgain }) => {
+      const harness = await createRuntimeSdkHarness({
+        workspaceTreeByRepoBranch: {
+          "acme/widgets@main": ["src/index.ts", "Dockerfile"]
+        },
+        remoteTreeByRepoBranch: {
+          "acme/widgets@feat": ["src/index.ts", "Dockerfile"]
+        }
+      });
+
+      expect(await handOff(harness)).toContain(SKILL_BASE);
+      const again = await handOff(harness, second);
+
+      if (asksAgain) expect(again).toContain(SKILL_BASE);
+      else expect(again).toBe("");
+
+      await harness.extension.shutdown("test");
+    }
+  );
 
   it("does not re-ask once the user answers with a directory inside the worktree", async () => {
     const harness = await createRuntimeSdkHarness({
@@ -1728,7 +1858,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 
     const handedOff = await handOff(harness);
 
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
     expect(harness.deps.github.treePaths).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
@@ -1742,7 +1872,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 
     // Asked before the tool runs: handing the skill over starts a run the
     // handoff is then right to defer to.
-    expect(await handOff(harness)).toContain("radius_generate_app");
+    expect(await handOff(harness)).toContain(SKILL_BASE);
 
     const generated = await generateApp(harness);
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
@@ -2002,6 +2132,39 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
         await handoffs[0];
 
         expect(polled).toBe(true);
+        expect(harness.session.send).toHaveBeenCalledTimes(1);
+        const report = harness.extension.tools.find(
+          (candidate) => candidate.name === "radius_report_modeling_failure"
+        );
+        if (!report) throw new Error("Missing failure reporting tool");
+        const typedRead = vi.mocked(harness.deps.graphSources.read);
+        const readModel = typedRead.getMockImplementation();
+        if (!readModel) throw new Error("Missing typed graph reader");
+        typedRead.mockImplementationOnce(async (request) => ({
+          status: "present",
+          content: " \n",
+          source: (await readModel(request)).source
+        }));
+        expect(
+          await report.handler({
+            instanceId: "radius-panel",
+            repo: "acme/widgets",
+            branch: "main",
+            attemptToken:
+              entry.state.appModelAttemptTokens?.["acme/widgets::main"],
+            error: "Permanent fixture authoring failure"
+          })
+        ).toEqual({ recorded: true });
+        expect(entry.state.appBicepHandoffKeys).toEqual({});
+        const failed = await workflows[workflow]({
+          instanceId: "radius-panel",
+          body
+        });
+        expect(failed.payload).toMatchObject({
+          appModelAuthoringFailed: true,
+          modelingFailed: true
+        });
+        expect(failed.payload.needsAppBicep).toBeUndefined();
         expect(harness.session.send).toHaveBeenCalledTimes(1);
       } finally {
         await harness.extension.shutdown("test");

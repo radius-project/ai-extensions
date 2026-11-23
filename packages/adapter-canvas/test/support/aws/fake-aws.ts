@@ -1,4 +1,6 @@
 import type { AwsCommandResult } from "../../../src/server/services/aws-cli-session.js";
+import { FakeRds, RDS_WRITES } from "./fake-rds.js";
+import { evaluateIam } from "./iam-policy-evaluator.js";
 
 // A stateful stand-in for the AWS CLI. It keeps the IAM, STS, and EKS state
 // Radius reads and writes, and answers each `aws <args>` the way the CLI v2
@@ -6,14 +8,38 @@ import type { AwsCommandResult } from "../../../src/server/services/aws-cli-sess
 // Unlike scripted answers, a write changes what later reads see, so a test can
 // stop a run anywhere and compare what AWS holds with what Radius saved.
 
+// IAM roles and managed policies follow the IAM API reference:
+// - A role's ARN carries its path, `role/<path><name>`, and role names are
+//   unique in the account, ignoring case, whatever the path. CreateRole's
+//   path defaults to `/`; a boundary that isn't a managed policy is refused.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_CreateRole.html
+// - DeleteRole refuses a role that still has inline or attached policies
+//   (DeleteConflict). Its permissions boundary doesn't block it.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_DeleteRole.html
+// - ListRoles filters by path prefix and leaves out PermissionsBoundary and
+//   Tags; ListRoleTags returns the tags.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_ListRoles.html
+// - DeletePolicy refuses a policy that is attached to a role, or has versions
+//   besides the default (DeleteConflict). It also refuses one a role uses as
+//   its permissions boundary: GetPolicy counts those uses in
+//   PermissionsBoundaryUsageCount, and the product's environment removal
+//   relies on the refusal to keep a boundary an app role still uses.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_DeletePolicy.html
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_Policy.html
+// - ListPolicies filters by scope and path prefix and leaves out Description
+//   and Tags.
+//   https://docs.aws.amazon.com/IAM/latest/APIReference/API_ListPolicies.html
 export interface FakeIamRole {
   RoleName: string;
   RoleId: string;
   Arn: string;
+  Path: string;
   CreateDate: string;
   Description: string;
   Tags: Array<{ Key: string; Value: string }>;
   AssumeRolePolicyDocument: unknown;
+  // The ARN of the role's permissions boundary, or "" for none.
+  boundary: string;
   inline: Map<string, unknown>;
   attached: string[];
 }
@@ -27,6 +53,25 @@ export interface FakeManagedPolicy {
   Description: string;
   Tags: Array<{ Key: string; Value: string }>;
   document: unknown;
+  // Versions besides the default, which DeletePolicy refuses to delete.
+  extraVersions: number;
+}
+
+// An EKS Pod Identity association, as the containers Recipe makes one
+// through Cloud Control. ListPodIdentityAssociations leaves out roleArn and
+// tags; DescribePodIdentityAssociation and DeletePodIdentityAssociation
+// return them, and both answer ResourceNotFoundException for an unknown ID.
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_ListPodIdentityAssociations.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_PodIdentityAssociationSummary.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_DeletePodIdentityAssociation.html
+export interface FakePodIdentityAssociation {
+  associationId: string;
+  associationArn: string;
+  namespace: string;
+  serviceAccount: string;
+  roleArn: string;
+  tags: Record<string, string>;
+  createdAt: string;
 }
 
 export interface FakeAccessEntry {
@@ -37,12 +82,100 @@ export interface FakeAccessEntry {
   policies: string[];
 }
 
+// DescribeCluster returns the control plane's Kubernetes `version`, the
+// cluster security group EKS creates (`resourcesVpcConfig.
+// clusterSecurityGroupId`), whether the API endpoint is public
+// (`endpointPublicAccess`), and `upgradePolicy.supportType`, STANDARD or
+// EXTENDED. ListNodegroups answers ResourceNotFoundException for an unknown
+// cluster. DescribeAddon answers ResourceNotFoundException for an add-on the
+// cluster doesn't have; `podIdentityAgent` null models that.
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_DescribeCluster.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_ListNodegroups.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_DescribeAddon.html
 export interface FakeEksCluster {
   name: string;
   region: string;
   status: string;
   authenticationMode: string;
+  vpcId: string;
+  version: string;
+  endpointPublicAccess: boolean;
+  clusterSecurityGroupId: string;
+  supportType: string;
+  // The eks-pod-identity-agent add-on's status, or null when it is missing.
+  podIdentityAgent: string | null;
   entries: Map<string, FakeAccessEntry>;
+  nodegroups: Map<string, FakeNodegroup>;
+  podIdentity: Map<string, FakePodIdentityAssociation>;
+}
+
+// A managed node group. UpdateNodegroupConfig refuses a group that is not
+// ACTIVE (ResourceInUseException) and a scaling config outside
+// 0 <= min <= desired <= max with max >= 1 (InvalidParameterException).
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupConfig.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_NodegroupScalingConfig.html
+// DescribeNodegroup also returns its Kubernetes `version`, AMI
+// `releaseVersion`, `labels`, `taints`, and `launchTemplate` (id and
+// version) when it was created with one.
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_Nodegroup.html
+// UpdateNodegroupVersion moves a group to the cluster's version when no
+// `version` is given, can't move a group back to an earlier version or past
+// the cluster's version (InvalidParameterException), and, like
+// UpdateNodegroupConfig, refuses a group that is not ACTIVE
+// (ResourceInUseException).
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupVersion.html
+// Both return an update to follow with DescribeUpdate, whose status is
+// InProgress, Failed, Cancelled, or Successful.
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_DescribeUpdate.html
+// https://docs.aws.amazon.com/eks/latest/APIReference/API_Update.html
+// How DescribeNodegroup looks during an update isn't documented, so the
+// fake takes the slow side: the first read after an update still shows the
+// group ACTIVE at its old values, later reads show UPDATING, and the new
+// version and sizes appear only when the update ends `nodegroupUpdateMs`
+// later. Until then the group refuses another update.
+export interface FakeNodegroupUpdate {
+  readonly id: string;
+  readonly type: string;
+  status: string;
+  readonly doneAt: number;
+  // Whether the next DescribeNodegroup still shows the group as it was.
+  staleRead: boolean;
+  readonly next: Partial<
+    Pick<
+      FakeNodegroup,
+      "version" | "releaseVersion" | "minSize" | "maxSize" | "desiredSize"
+    >
+  >;
+  readonly errors: Array<{ errorCode: string; errorMessage: string }>;
+}
+
+export interface FakeNodegroup {
+  name: string;
+  status: string;
+  minSize: number;
+  maxSize: number;
+  desiredSize: number;
+  // Describe reads left before a group set UPDATING by a test is ACTIVE
+  // again. An update through the CLI uses `update` instead.
+  updatingReads: number;
+  // The update in progress, if any.
+  update: FakeNodegroupUpdate | null;
+  version: string;
+  releaseVersion: string;
+  labels: Record<string, string>;
+  taints: Array<{ key: string; value: string; effect: string }>;
+  launchTemplate: { id: string; version: string } | null;
+}
+
+// An EC2 launch template version, as DescribeLaunchTemplateVersions returns
+// it for `--launch-template-id` and `--versions`. An unknown template is
+// InvalidLaunchTemplateId.NotFound and an unknown version
+// InvalidLaunchTemplateId.VersionNotFound.
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeLaunchTemplateVersions.html
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html
+export interface FakeLaunchTemplateVersion {
+  SecurityGroupIds?: string[];
+  NetworkInterfaces?: Array<{ Groups?: string[] }>;
 }
 
 // What a test compares: everything that exists, in a stable order.
@@ -78,6 +211,17 @@ function serviceError(
     stdout: "",
     stderr: `\nAn error occurred (${code}) when calling the ${operation} operation: ${message}\n`
   };
+}
+
+// The API operation a CLI command calls: `eks update-nodegroup-config` is
+// UpdateNodegroupConfig, as the CLI names it in an error.
+export function awsOperation(command: string): string {
+  return (command.split(" ")[1] ?? "")
+    .split("-")
+    .map((word) =>
+      word === "db" ? "DB" : word.charAt(0).toUpperCase() + word.slice(1)
+    )
+    .join("");
 }
 
 function ok(value?: unknown): AwsCommandResult {
@@ -120,7 +264,11 @@ const WRITES: ReadonlySet<string> = new Set([
   "iam create-open-id-connect-provider",
   "eks create-access-entry",
   "eks delete-access-entry",
-  "eks associate-access-policy"
+  "eks associate-access-policy",
+  "eks update-nodegroup-config",
+  "eks update-nodegroup-version",
+  "eks delete-pod-identity-association",
+  ...RDS_WRITES
 ]);
 
 // `--tags Key=k,Value=v ...`, as create-role and create-policy take them.
@@ -154,8 +302,38 @@ export class FakeAws {
   readonly policies = new Map<string, FakeManagedPolicy>();
   readonly oidcProviders = new Map<string, { clientIds: string[] }>();
   readonly clusters = new Map<string, FakeEksCluster>();
+  readonly launchTemplates = new Map<
+    string,
+    Map<string, FakeLaunchTemplateVersion>
+  >();
+  readonly rds: FakeRds;
   // Set to make every call fail the way an expired sign-in does.
   sessionExpired = false;
+  // IAM is eventually consistent, and how long a delete takes to reach
+  // other calls isn't documented. Set this to model the slow side: for that
+  // long after a delete, a role still counts an inline policy just deleted
+  // (DeleteRole is refused), and a policy still counts a role just deleted
+  // that used it as its boundary (DeletePolicy is refused, and GetPolicy
+  // counts it). The cleanup and journey scenarios set it; the product's
+  // setup tests don't yet.
+  // https://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_general.html#troubleshoot_general_eventual-consistency
+  iamSettleMs = 0;
+  private readonly settlingInline = new Map<string, number>();
+  private readonly settlingBoundaryUse: Array<{ arn: string; until: number }> =
+    [];
+  // How long a node group update takes.
+  nodegroupUpdateMs = 90_000;
+  // Set to make the next node group update end Failed with this error.
+  nodegroupUpdateFailure: { errorCode: string; errorMessage: string } | null =
+    null;
+  private readonly nodegroupUpdates = new Map<
+    string,
+    {
+      cluster: FakeEksCluster;
+      group: FakeNodegroup;
+      update: FakeNodegroupUpdate;
+    }
+  >();
   // Commands refused once each, as AWS refuses a call it throttles.
   private readonly refusals = new Map<string, string>();
   private readonly now: () => number;
@@ -166,20 +344,69 @@ export class FakeAws {
     let tick = Date.parse("2026-11-01T00:00:00Z");
     // Each creation is a second after the last, so ages always order.
     this.now = options.now ?? (() => (tick += 1000));
+    this.rds = new FakeRds(this.accountId, () => this.time());
   }
 
   addCluster(
     name: string,
     region: string,
-    authenticationMode = "API_AND_CONFIG_MAP"
-  ): void {
-    this.clusters.set(`${region}:${name}`, {
+    authenticationMode = "API_AND_CONFIG_MAP",
+    vpcId = `vpc-${name}`
+  ): FakeEksCluster {
+    const cluster: FakeEksCluster = {
       name,
       region,
       status: "ACTIVE",
       authenticationMode,
-      entries: new Map()
-    });
+      vpcId,
+      version: "1.33",
+      endpointPublicAccess: true,
+      clusterSecurityGroupId: `sg-cluster-${name}`,
+      supportType: "STANDARD",
+      podIdentityAgent: "ACTIVE",
+      entries: new Map(),
+      nodegroups: new Map(),
+      podIdentity: new Map()
+    };
+    this.clusters.set(`${region}:${name}`, cluster);
+    return cluster;
+  }
+
+  addNodegroup(
+    region: string,
+    cluster: string,
+    name: string,
+    scaling: { minSize: number; maxSize: number; desiredSize: number },
+    status = "ACTIVE"
+  ): FakeNodegroup {
+    const target = this.clusters.get(`${region}:${cluster}`);
+    if (!target) throw new Error(`fake aws: no cluster ${region}:${cluster}`);
+    const group: FakeNodegroup = {
+      name,
+      status,
+      ...scaling,
+      updatingReads: 1,
+      update: null,
+      version: target.version,
+      releaseVersion: `${target.version}.0-20261101`,
+      labels: {},
+      taints: [],
+      launchTemplate: null
+    };
+    target.nodegroups.set(name, group);
+    return group;
+  }
+
+  // Versions by number. `$Default` is version 1 and `$Latest` the highest.
+  addLaunchTemplate(
+    region: string,
+    id: string,
+    versions: Record<string, FakeLaunchTemplateVersion>
+  ): void {
+    this.launchTemplates.set(
+      `${region}:${id}`,
+      new Map(Object.entries(versions))
+    );
   }
 
   addGitHubProvider(): void {
@@ -188,22 +415,28 @@ export class FakeAws {
     });
   }
 
-  // A role that exists before the test starts, such as one another setup made.
+  // A role that exists before the test starts, such as one another setup made
+  // or an app role the containers Recipe made through Cloud Control.
   addRole(input: {
     name: string;
     trust: unknown;
+    path?: string;
+    boundary?: string;
     tags?: Array<{ Key: string; Value: string }>;
     inline?: Record<string, unknown>;
     attached?: string[];
   }): FakeIamRole {
+    const path = input.path ?? "/";
     const role: FakeIamRole = {
       RoleName: input.name,
       RoleId: this.nextId("AROA"),
-      Arn: this.roleArn(input.name),
+      Arn: this.roleArn(input.name, path),
+      Path: path,
       CreateDate: this.time(),
       Description: "",
       Tags: [...(input.tags ?? [])],
       AssumeRolePolicyDocument: input.trust,
+      boundary: input.boundary ?? "",
       inline: new Map(Object.entries(input.inline ?? {})),
       attached: [...(input.attached ?? [])]
     };
@@ -218,6 +451,7 @@ export class FakeAws {
     name: string;
     document: unknown;
     tags?: Array<{ Key: string; Value: string }>;
+    extraVersions?: number;
   }): FakeManagedPolicy {
     const policy: FakeManagedPolicy = {
       PolicyName: input.name,
@@ -227,10 +461,50 @@ export class FakeAws {
       CreateDate: this.time(),
       Description: "",
       Tags: [...(input.tags ?? [])],
-      document: input.document
+      document: input.document,
+      extraVersions: input.extraVersions ?? 0
     };
     this.policies.set(policy.Arn, policy);
     return policy;
+  }
+
+  // An association the containers Recipe made through Cloud Control. EKS
+  // allows one per service account in a namespace of a cluster.
+  // https://docs.aws.amazon.com/eks/latest/APIReference/API_CreatePodIdentityAssociation.html
+  addPodIdentityAssociation(
+    region: string,
+    cluster: string,
+    input: {
+      namespace: string;
+      serviceAccount: string;
+      roleArn: string;
+      tags?: Record<string, string>;
+    }
+  ): FakePodIdentityAssociation {
+    const target = this.clusters.get(`${region}:${cluster}`);
+    if (!target) throw new Error(`fake aws: no cluster ${region}:${cluster}`);
+    const taken = [...target.podIdentity.values()].some(
+      (item) =>
+        item.namespace === input.namespace &&
+        item.serviceAccount === input.serviceAccount
+    );
+    if (taken)
+      throw new Error(
+        `fake aws: ${input.namespace}/${input.serviceAccount} already has an association`
+      );
+    this.ids += 1;
+    const associationId = `a-${String(this.ids).padStart(17, "0")}`;
+    const association: FakePodIdentityAssociation = {
+      associationId,
+      associationArn: `arn:aws:eks:${region}:${this.accountId}:podidentityassociation/${cluster}/${associationId}`,
+      namespace: input.namespace,
+      serviceAccount: input.serviceAccount,
+      roleArn: input.roleArn,
+      tags: { ...(input.tags ?? {}) },
+      createdAt: this.time()
+    };
+    target.podIdentity.set(associationId, association);
+    return association;
   }
 
   addAccessEntry(
@@ -256,8 +530,8 @@ export class FakeAws {
     this.refusals.set(command, code);
   }
 
-  roleArn(name: string): string {
-    return `arn:aws:iam::${this.accountId}:role/${name}`;
+  roleArn(name: string, path = "/"): string {
+    return `arn:aws:iam::${this.accountId}:role${path}${name}`;
   }
 
   providerArn(): string {
@@ -325,15 +599,21 @@ export class FakeAws {
     const refusal = this.refusals.get(command);
     if (refusal !== undefined) {
       this.refusals.delete(command);
-      return serviceError(refusal, command, "Refused by the test.");
+      return serviceError(
+        refusal,
+        awsOperation(command),
+        "Refused by the test."
+      );
     }
     if (this.sessionExpired) {
       return serviceError(
         "ExpiredToken",
-        "GetCallerIdentity",
+        awsOperation(command),
         "The security token included in the request is expired"
       );
     }
+    const rds = this.rds.run(command, args);
+    if (rds) return rds;
     switch (command) {
       case "sts get-caller-identity":
         return ok({
@@ -353,9 +633,12 @@ export class FakeAws {
         );
       case "iam delete-policy":
         return this.deletePolicy(args);
+      case "iam list-policies":
+        return this.listPolicies(args);
       case "iam get-policy-version":
         return this.withPolicy(args, "GetPolicyVersion", (policy) => {
-          if (flag(args, "--version-id") !== "v1") {
+          const version = `v${policy.extraVersions + 1}`;
+          if (flag(args, "--version-id") !== version) {
             return serviceError(
               "NoSuchEntity",
               "GetPolicyVersion",
@@ -365,7 +648,7 @@ export class FakeAws {
           return ok({
             PolicyVersion: {
               Document: policy.document,
-              VersionId: "v1",
+              VersionId: version,
               IsDefaultVersion: true,
               CreateDate: policy.CreateDate
             }
@@ -373,6 +656,17 @@ export class FakeAws {
         });
       case "iam get-role":
         return this.getRole(args);
+      case "iam list-roles":
+        return this.listRoles(args);
+      case "iam simulate-principal-policy":
+        return this.simulatePrincipalPolicy(args);
+      case "iam list-role-tags":
+        return this.withRole(args, "ListRoleTags", (role) =>
+          ok({
+            Tags: role.Tags.map((tag) => ({ ...tag })),
+            IsTruncated: false
+          })
+        );
       case "iam create-role":
         return this.createRole(args);
       case "iam update-assume-role-policy":
@@ -384,7 +678,11 @@ export class FakeAws {
         });
       case "iam delete-role":
         return this.withRole(args, "DeleteRole", (role) => {
-          if (role.inline.size > 0 || role.attached.length > 0) {
+          if (
+            role.inline.size > 0 ||
+            role.attached.length > 0 ||
+            this.settling(this.settlingInline.get(role.RoleName.toLowerCase()))
+          ) {
             return serviceError(
               "DeleteConflict",
               "DeleteRole",
@@ -392,6 +690,11 @@ export class FakeAws {
             );
           }
           this.roles.delete(role.RoleName.toLowerCase());
+          if (role.boundary)
+            this.settlingBoundaryUse.push({
+              arn: role.boundary,
+              until: this.now() + this.iamSettleMs
+            });
           return ok();
         });
       case "iam list-role-policies":
@@ -442,6 +745,10 @@ export class FakeAws {
               `The role policy with name ${name} cannot be found.`
             );
           }
+          this.settlingInline.set(
+            role.RoleName.toLowerCase(),
+            this.now() + this.iamSettleMs
+          );
           return ok();
         });
       case "iam list-open-id-connect-providers":
@@ -506,6 +813,80 @@ export class FakeAws {
           if (!entry.policies.includes(policy)) entry.policies.push(policy);
           return ok({ associatedAccessPolicy: { policyArn: policy } });
         });
+      case "eks list-pod-identity-associations":
+        return this.listPodIdentityAssociations(args);
+      case "eks describe-pod-identity-association":
+        return this.withAssociation(
+          args,
+          "DescribePodIdentityAssociation",
+          (cluster, association) =>
+            ok({ association: this.associationView(cluster, association) })
+        );
+      case "eks delete-pod-identity-association":
+        return this.withAssociation(
+          args,
+          "DeletePodIdentityAssociation",
+          (cluster, association) => {
+            cluster.podIdentity.delete(association.associationId);
+            return ok({
+              association: this.associationView(cluster, association)
+            });
+          }
+        );
+      case "eks describe-nodegroup":
+        return this.withNodegroup(
+          args,
+          "DescribeNodegroup",
+          (cluster, group) => {
+            const update = this.settleNodegroup(group);
+            let status = group.status;
+            if (update) {
+              status = update.staleRead ? group.status : "UPDATING";
+              update.staleRead = false;
+            } else if (group.status === "UPDATING") {
+              if (group.updatingReads <= 0) group.status = "ACTIVE";
+              else group.updatingReads -= 1;
+              status = group.status;
+            }
+            return ok({
+              nodegroup: {
+                nodegroupName: group.name,
+                clusterName: cluster.name,
+                status,
+                version: group.version,
+                releaseVersion: group.releaseVersion,
+                scalingConfig: {
+                  minSize: group.minSize,
+                  maxSize: group.maxSize,
+                  desiredSize: group.desiredSize
+                },
+                labels: { ...group.labels },
+                taints: group.taints.map((taint) => ({ ...taint })),
+                ...(group.launchTemplate ?
+                  { launchTemplate: { ...group.launchTemplate } }
+                : {})
+              }
+            });
+          }
+        );
+      case "eks update-nodegroup-config":
+        return this.withNodegroup(
+          args,
+          "UpdateNodegroupConfig",
+          (cluster, group) => this.updateNodegroup(args, cluster, group)
+        );
+      case "eks list-nodegroups":
+        return this.listNodegroups(args);
+      case "eks update-nodegroup-version":
+        return this.withNodegroup(
+          args,
+          "UpdateNodegroupVersion",
+          (cluster, group) => this.updateNodegroupVersion(args, cluster, group)
+        );
+      case "eks describe-update":
+        return this.describeUpdate(args);
+      case "ec2 describe-launch-template-versions":
+        return this.describeLaunchTemplateVersions(args);
     }
     throw new Error(`fake aws: no answer for aws ${args.join(" ")}`);
   }
@@ -534,16 +915,26 @@ export class FakeAws {
       cluster: {
         name: cluster.name,
         status: cluster.status,
-        accessConfig: { authenticationMode: cluster.authenticationMode }
+        version: cluster.version,
+        accessConfig: { authenticationMode: cluster.authenticationMode },
+        resourcesVpcConfig: {
+          vpcId: cluster.vpcId,
+          clusterSecurityGroupId: cluster.clusterSecurityGroupId,
+          endpointPublicAccess: cluster.endpointPublicAccess
+        },
+        upgradePolicy: { supportType: cluster.supportType }
       }
     });
   }
 
-  // Every fake cluster runs the EKS Pod Identity Agent.
   private describeAddon(args: readonly string[]): AwsCommandResult {
     const cluster = this.cluster(args);
     const name = flag(args, "--addon-name");
-    if (!cluster || name !== "eks-pod-identity-agent") {
+    if (
+      !cluster ||
+      name !== "eks-pod-identity-agent" ||
+      cluster.podIdentityAgent === null
+    ) {
       return serviceError(
         "ResourceNotFoundException",
         "DescribeAddon",
@@ -551,8 +942,193 @@ export class FakeAws {
       );
     }
     return ok({
-      addon: { addonName: name, clusterName: cluster.name, status: "ACTIVE" }
+      addon: {
+        addonName: name,
+        clusterName: cluster.name,
+        status: cluster.podIdentityAgent
+      }
     });
+  }
+
+  private listNodegroups(args: readonly string[]): AwsCommandResult {
+    const cluster = this.cluster(args);
+    if (!cluster) {
+      return serviceError(
+        "ResourceNotFoundException",
+        "ListNodegroups",
+        `No cluster found for name: ${flag(args, "--cluster-name")}.`
+      );
+    }
+    return ok({ nodegroups: [...cluster.nodegroups.keys()] });
+  }
+
+  private updateNodegroupVersion(
+    args: readonly string[],
+    cluster: FakeEksCluster,
+    group: FakeNodegroup
+  ): AwsCommandResult {
+    const busy = this.settleNodegroup(group) !== null;
+    if (busy || group.status !== "ACTIVE") {
+      return serviceError(
+        "ResourceInUseException",
+        "UpdateNodegroupVersion",
+        `Nodegroup ${group.name} is in ${busy ? "UPDATING" : group.status} state and cannot be updated.`
+      );
+    }
+    const version = flag(args, "--kubernetes-version") || cluster.version;
+    const parts = (value: string) => value.split(".").map(Number);
+    const [toMajor = 0, toMinor = 0] = parts(version);
+    const [fromMajor = 0, fromMinor = 0] = parts(group.version);
+    if (toMajor < fromMajor || (toMajor === fromMajor && toMinor < fromMinor)) {
+      return serviceError(
+        "InvalidParameterException",
+        "UpdateNodegroupVersion",
+        `Requested Nodegroup version ${version} is older than the current version ${group.version}.`
+      );
+    }
+    const [planeMajor = 0, planeMinor = 0] = parts(cluster.version);
+    if (
+      toMajor > planeMajor ||
+      (toMajor === planeMajor && toMinor > planeMinor)
+    ) {
+      return serviceError(
+        "InvalidParameterException",
+        "UpdateNodegroupVersion",
+        `Requested Nodegroup version ${version} is newer than the cluster version ${cluster.version}.`
+      );
+    }
+    return this.startNodegroupUpdate(cluster, group, "VersionUpdate", {
+      version,
+      releaseVersion: `${version}.0-20261101`
+    });
+  }
+
+  private startNodegroupUpdate(
+    cluster: FakeEksCluster,
+    group: FakeNodegroup,
+    type: string,
+    next: FakeNodegroupUpdate["next"]
+  ): AwsCommandResult {
+    const failure = this.nodegroupUpdateFailure;
+    this.nodegroupUpdateFailure = null;
+    const update: FakeNodegroupUpdate = {
+      id: this.nextId("UPD"),
+      type,
+      status: "InProgress",
+      doneAt: this.now() + this.nodegroupUpdateMs,
+      staleRead: true,
+      next,
+      errors: failure ? [failure] : []
+    };
+    group.update = update;
+    this.nodegroupUpdates.set(update.id, { cluster, group, update });
+    return ok({ update: this.updateView(update) });
+  }
+
+  // Ends the group's update if its time has come, and returns the update
+  // still in progress, if any.
+  private settleNodegroup(group: FakeNodegroup): FakeNodegroupUpdate | null {
+    const update = group.update;
+    if (!update) return null;
+    if (this.now() < update.doneAt) return update;
+    if (update.errors.length > 0) update.status = "Failed";
+    else {
+      update.status = "Successful";
+      Object.assign(group, update.next);
+    }
+    group.update = null;
+    return null;
+  }
+
+  private updateView(update: FakeNodegroupUpdate) {
+    return {
+      id: update.id,
+      status: update.status,
+      type: update.type,
+      params: [],
+      errors: update.errors.map((error) => ({ ...error, resourceIds: [] }))
+    };
+  }
+
+  private describeUpdate(args: readonly string[]): AwsCommandResult {
+    const id = flag(args, "--update-id");
+    const found = this.nodegroupUpdates.get(id);
+    if (
+      !found ||
+      found.cluster !==
+        this.clusters.get(
+          `${flag(args, "--region")}:${flag(args, "--name")}`
+        ) ||
+      found.group.name !== flag(args, "--nodegroup-name")
+    ) {
+      return serviceError(
+        "ResourceNotFoundException",
+        "DescribeUpdate",
+        `No update found for ID: ${id}`
+      );
+    }
+    this.settleNodegroup(found.group);
+    return ok({ update: this.updateView(found.update) });
+  }
+
+  private describeLaunchTemplateVersions(
+    args: readonly string[]
+  ): AwsCommandResult {
+    const id = flag(args, "--launch-template-id");
+    const versions = this.launchTemplates.get(
+      `${flag(args, "--region")}:${id}`
+    );
+    if (!versions) {
+      return serviceError(
+        "InvalidLaunchTemplateId.NotFound",
+        "DescribeLaunchTemplateVersions",
+        `The specified launch template, with template ID ${id}, does not exist.`
+      );
+    }
+    const numbers = [...versions.keys()].sort((a, b) => Number(a) - Number(b));
+    const requested = flagValues(args, "--versions");
+    const resolved = (requested.length > 0 ? requested : numbers).map(
+      (value) =>
+        value === "$Latest" ? (numbers.at(-1) ?? "")
+        : value === "$Default" ? "1"
+        : value
+    );
+    const missing = resolved.find((value) => !versions.has(value));
+    if (missing !== undefined) {
+      return serviceError(
+        "InvalidLaunchTemplateId.VersionNotFound",
+        "DescribeLaunchTemplateVersions",
+        `Could not find launch template version ${missing} for template ${id}.`
+      );
+    }
+    return ok({
+      LaunchTemplateVersions: resolved.map((value) => ({
+        LaunchTemplateId: id,
+        VersionNumber: Number(value),
+        DefaultVersion: value === "1",
+        LaunchTemplateData: structuredClone(versions.get(value))
+      }))
+    });
+  }
+
+  // How many roles use the policy: attached, or as their boundary.
+  private policyUse(policy: FakeManagedPolicy) {
+    const roles = [...this.roles.values()];
+    return {
+      AttachmentCount: roles.filter((role) =>
+        role.attached.includes(policy.Arn)
+      ).length,
+      PermissionsBoundaryUsageCount:
+        roles.filter((role) => role.boundary === policy.Arn).length +
+        this.settlingBoundaryUse.filter(
+          (use) => use.arn === policy.Arn && this.settling(use.until)
+        ).length
+    };
+  }
+
+  // Whether a delete that ends at `until` is still settling.
+  private settling(until: number | undefined): boolean {
+    return until !== undefined && this.now() < until;
   }
 
   private policyView(policy: FakeManagedPolicy) {
@@ -561,7 +1137,9 @@ export class FakeAws {
       PolicyId: policy.PolicyId,
       Arn: policy.Arn,
       Path: policy.Path,
-      DefaultVersionId: "v1",
+      DefaultVersionId: `v${policy.extraVersions + 1}`,
+      ...this.policyUse(policy),
+      IsAttachable: true,
       CreateDate: policy.CreateDate,
       Description: policy.Description,
       Tags: policy.Tags.map((tag) => ({ ...tag }))
@@ -608,7 +1186,8 @@ export class FakeAws {
       CreateDate: this.time(),
       Description: flag(args, "--description"),
       Tags: parseTags(args),
-      document: JSON.parse(flag(args, "--policy-document"))
+      document: JSON.parse(flag(args, "--policy-document")),
+      extraVersions: 0
     };
     this.policies.set(policy.Arn, policy);
     return ok({ Policy: this.policyView(policy) });
@@ -616,26 +1195,139 @@ export class FakeAws {
 
   private deletePolicy(args: readonly string[]): AwsCommandResult {
     return this.withPolicy(args, "DeletePolicy", (policy) => {
+      const use = this.policyUse(policy);
+      if (use.AttachmentCount > 0 || use.PermissionsBoundaryUsageCount > 0) {
+        return serviceError(
+          "DeleteConflict",
+          "DeletePolicy",
+          "Cannot delete a policy attached to entities."
+        );
+      }
+      if (policy.extraVersions > 0) {
+        return serviceError(
+          "DeleteConflict",
+          "DeletePolicy",
+          "This policy has more than one version. Before you delete a policy, you must delete the policy's versions. The default version is deleted with the policy."
+        );
+      }
       this.policies.delete(policy.Arn);
       return ok();
     });
   }
 
+  // Customer managed policies under `--path-prefix`, without Description
+  // and Tags. Only `--scope Local` is modeled.
+  private listPolicies(args: readonly string[]): AwsCommandResult {
+    if (flag(args, "--scope") !== "Local")
+      throw new Error("fake aws: list-policies needs --scope Local");
+    const prefix = flag(args, "--path-prefix") || "/";
+    return ok({
+      Policies: [...this.policies.values()]
+        .filter((policy) => policy.Path.startsWith(prefix))
+        .map((policy) => ({
+          PolicyName: policy.PolicyName,
+          PolicyId: policy.PolicyId,
+          Arn: policy.Arn,
+          Path: policy.Path,
+          DefaultVersionId: `v${policy.extraVersions + 1}`,
+          ...this.policyUse(policy),
+          IsAttachable: true,
+          CreateDate: policy.CreateDate
+        })),
+      IsTruncated: false
+    });
+  }
+
+  private roleView(role: FakeIamRole) {
+    return {
+      Path: role.Path,
+      RoleName: role.RoleName,
+      RoleId: role.RoleId,
+      Arn: role.Arn,
+      CreateDate: role.CreateDate,
+      Description: role.Description,
+      AssumeRolePolicyDocument: role.AssumeRolePolicyDocument,
+      ...(role.boundary ?
+        {
+          PermissionsBoundary: {
+            PermissionsBoundaryType: "Policy",
+            PermissionsBoundaryArn: role.boundary
+          }
+        }
+      : {}),
+      Tags: role.Tags.map((tag) => ({ ...tag }))
+    };
+  }
+
   private getRole(args: readonly string[]): AwsCommandResult {
     return this.withRole(args, "GetRole", (role) =>
-      ok({
-        Role: {
-          Path: "/",
+      ok({ Role: this.roleView(role) })
+    );
+  }
+
+  // Roles under `--path-prefix`, without PermissionsBoundary and Tags.
+  private listRoles(args: readonly string[]): AwsCommandResult {
+    const prefix = flag(args, "--path-prefix") || "/";
+    return ok({
+      Roles: [...this.roles.values()]
+        .filter((role) => role.Path.startsWith(prefix))
+        .map((role) => ({
+          Path: role.Path,
           RoleName: role.RoleName,
           RoleId: role.RoleId,
           Arn: role.Arn,
           CreateDate: role.CreateDate,
           Description: role.Description,
-          AssumeRolePolicyDocument: role.AssumeRolePolicyDocument,
-          Tags: role.Tags.map((tag) => ({ ...tag }))
-        }
-      })
-    );
+          AssumeRolePolicyDocument: role.AssumeRolePolicyDocument
+        })),
+      IsTruncated: false
+    });
+  }
+
+  // Evaluates the role's inline and attached policies and its boundary, as
+  // the policy simulator does for a principal with no resource policy.
+  // Context entries use the CLI's JSON form.
+  // https://docs.aws.amazon.com/IAM/latest/APIReference/API_SimulatePrincipalPolicy.html
+  private simulatePrincipalPolicy(args: readonly string[]): AwsCommandResult {
+    const source = flag(args, "--policy-source-arn");
+    const role = [...this.roles.values()].find((item) => item.Arn === source);
+    if (!role) {
+      return serviceError(
+        "NoSuchEntity",
+        "SimulatePrincipalPolicy",
+        `Role ${source} not found.`
+      );
+    }
+    const context: Record<string, string> = {};
+    const entries = flag(args, "--context-entries");
+    for (const entry of entries ? (JSON.parse(entries) as unknown[]) : []) {
+      const item = entry as {
+        ContextKeyName: string;
+        ContextKeyValues: string[];
+      };
+      context[item.ContextKeyName] = item.ContextKeyValues[0] ?? "";
+    }
+    const identity = [
+      ...role.inline.values(),
+      ...role.attached.map((arn) => this.policies.get(arn)?.document)
+    ];
+    const boundary =
+      role.boundary ? this.policies.get(role.boundary)?.document : undefined;
+    const resources = flagValues(args, "--resource-arns");
+    return ok({
+      EvaluationResults: flagValues(args, "--action-names").flatMap((action) =>
+        (resources.length > 0 ? resources : ["*"]).map((resource) => ({
+          EvalActionName: action,
+          EvalResourceName: resource,
+          EvalDecision: evaluateIam(
+            { action, resource, context },
+            identity,
+            boundary
+          )
+        }))
+      ),
+      IsTruncated: false
+    });
   }
 
   private createRole(args: readonly string[]): AwsCommandResult {
@@ -647,32 +1339,39 @@ export class FakeAws {
         `Role with name ${name} already exists.`
       );
     }
-    const tags = parseTags(args);
+    const path = flag(args, "--path") || "/";
+    if (!/^(\/|\/[\u0021-\u007E]+\/)$/.test(path)) {
+      return serviceError(
+        "ValidationError",
+        "CreateRole",
+        `The specified value for path is invalid. It must begin and end with / and contain only alphanumeric characters and/or / characters.`
+      );
+    }
+    const boundary = flag(args, "--permissions-boundary");
+    if (boundary && !this.policies.has(boundary)) {
+      return serviceError(
+        "NoSuchEntity",
+        "CreateRole",
+        `Scope ARN: ${boundary} does not exist or is not attachable.`
+      );
+    }
     const role: FakeIamRole = {
       RoleName: name,
       RoleId: this.nextId("AROA"),
-      Arn: this.roleArn(name),
+      Arn: this.roleArn(name, path),
+      Path: path,
       CreateDate: this.time(),
       Description: flag(args, "--description"),
-      Tags: tags,
+      Tags: parseTags(args),
       AssumeRolePolicyDocument: JSON.parse(
         flag(args, "--assume-role-policy-document")
       ),
+      boundary,
       inline: new Map(),
       attached: []
     };
     this.roles.set(name.toLowerCase(), role);
-    return ok({
-      Role: {
-        Path: "/",
-        RoleName: role.RoleName,
-        RoleId: role.RoleId,
-        Arn: role.Arn,
-        CreateDate: role.CreateDate,
-        AssumeRolePolicyDocument: role.AssumeRolePolicyDocument,
-        Tags: role.Tags
-      }
-    });
+    return ok({ Role: this.roleView(role) });
   }
 
   private withRole(
@@ -744,6 +1443,136 @@ export class FakeAws {
         tags: { ...tags }
       }
     });
+  }
+
+  private withNodegroup(
+    args: readonly string[],
+    operation: string,
+    work: (cluster: FakeEksCluster, group: FakeNodegroup) => AwsCommandResult
+  ): AwsCommandResult {
+    const cluster = this.cluster(args);
+    const group = cluster?.nodegroups.get(flag(args, "--nodegroup-name"));
+    if (!cluster || !group) {
+      return serviceError(
+        "ResourceNotFoundException",
+        operation,
+        `No node group found for name: ${flag(args, "--nodegroup-name")}.`
+      );
+    }
+    return work(cluster, group);
+  }
+
+  private updateNodegroup(
+    args: readonly string[],
+    cluster: FakeEksCluster,
+    group: FakeNodegroup
+  ): AwsCommandResult {
+    const busy = this.settleNodegroup(group) !== null;
+    if (busy || group.status !== "ACTIVE") {
+      return serviceError(
+        "ResourceInUseException",
+        "UpdateNodegroupConfig",
+        `Nodegroup ${group.name} is in ${busy ? "UPDATING" : group.status} state and cannot be updated.`
+      );
+    }
+    const requested: Record<string, number> = {};
+    for (const pair of flag(args, "--scaling-config")
+      .split(",")
+      .filter(Boolean)) {
+      const [name = "", value = ""] = pair.split("=");
+      if (
+        !["minSize", "maxSize", "desiredSize"].includes(name) ||
+        !/^\d+$/.test(value)
+      ) {
+        return serviceError(
+          "InvalidParameterException",
+          "UpdateNodegroupConfig",
+          `Unreadable scaling config ${pair}.`
+        );
+      }
+      requested[name] = Number(value);
+    }
+    const next = {
+      minSize: requested.minSize ?? group.minSize,
+      maxSize: requested.maxSize ?? group.maxSize,
+      desiredSize: requested.desiredSize ?? group.desiredSize
+    };
+    if (
+      next.maxSize < 1 ||
+      next.minSize > next.desiredSize ||
+      next.desiredSize > next.maxSize
+    ) {
+      return serviceError(
+        "InvalidParameterException",
+        "UpdateNodegroupConfig",
+        "Minimum capacity must be less than or equal to desired capacity, which must be less than or equal to maximum capacity, and maximum capacity must be at least 1."
+      );
+    }
+    return this.startNodegroupUpdate(cluster, group, "ConfigUpdate", next);
+  }
+
+  private listPodIdentityAssociations(
+    args: readonly string[]
+  ): AwsCommandResult {
+    const cluster = this.cluster(args);
+    if (!cluster) {
+      return serviceError(
+        "ResourceNotFoundException",
+        "ListPodIdentityAssociations",
+        `No cluster found for name: ${flag(args, "--cluster-name")}.`
+      );
+    }
+    const namespace = flag(args, "--namespace");
+    return ok({
+      associations: [...cluster.podIdentity.values()]
+        .filter((item) => !namespace || item.namespace === namespace)
+        .map((item) => ({
+          clusterName: cluster.name,
+          namespace: item.namespace,
+          serviceAccount: item.serviceAccount,
+          associationArn: item.associationArn,
+          associationId: item.associationId
+        }))
+    });
+  }
+
+  private associationView(
+    cluster: FakeEksCluster,
+    association: FakePodIdentityAssociation
+  ) {
+    return {
+      clusterName: cluster.name,
+      namespace: association.namespace,
+      serviceAccount: association.serviceAccount,
+      roleArn: association.roleArn,
+      associationArn: association.associationArn,
+      associationId: association.associationId,
+      tags: { ...association.tags },
+      createdAt: association.createdAt,
+      modifiedAt: association.createdAt
+    };
+  }
+
+  private withAssociation(
+    args: readonly string[],
+    operation: string,
+    work: (
+      cluster: FakeEksCluster,
+      association: FakePodIdentityAssociation
+    ) => AwsCommandResult
+  ): AwsCommandResult {
+    const cluster = this.cluster(args);
+    const association = cluster?.podIdentity.get(
+      flag(args, "--association-id")
+    );
+    if (!cluster || !association) {
+      return serviceError(
+        "ResourceNotFoundException",
+        operation,
+        `The specified pod identity association ${flag(args, "--association-id")} could not be found.`
+      );
+    }
+    return work(cluster, association);
   }
 
   private withEntry(

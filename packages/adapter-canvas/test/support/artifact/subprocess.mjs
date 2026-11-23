@@ -4,6 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
   artifactCloseCount,
+  assertArtifactPublicationRefusals,
   renderArtifactPage,
   runArtifactReadiness
 } from "./sdk-stub.mjs";
@@ -24,6 +25,7 @@ const originalExecFile = childProcess.execFile;
 const originalSpawnSync = childProcess.spawnSync;
 let renderingPage = false;
 let checkingReadiness = false;
+let checkingPublication = false;
 const readinessCalls = [];
 const readinessMode =
   process.env.RADIUS_ARTIFACT_SHUTDOWN?.startsWith("readiness");
@@ -103,7 +105,7 @@ childProcess.execFile = (...args) => {
   const command = String(args[0] ?? "");
   const commandArgs = args[1];
   if (
-    (renderingPage || checkingReadiness) &&
+    (renderingPage || checkingReadiness || checkingPublication) &&
     command === "git" &&
     Array.isArray(commandArgs) &&
     commandArgs[0] === "-C" &&
@@ -200,6 +202,12 @@ const artifact = process.env.RADIUS_ARTIFACT_PATH;
 if (!artifact) throw new Error("RADIUS_ARTIFACT_PATH is required");
 
 await import(pathToFileURL(artifact).href);
+checkingPublication = true;
+try {
+  await assertArtifactPublicationRefusals();
+} finally {
+  checkingPublication = false;
+}
 process.on("message", async (message) => {
   if (message?.type === "shutdown") {
     if (readinessMode) {

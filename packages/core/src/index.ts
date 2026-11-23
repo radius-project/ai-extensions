@@ -277,6 +277,17 @@ export {
 } from "./modeling/index.js";
 export type { ConcreteResource, RecipePackEntry } from "./modeling/index.js";
 export type { AppSourceEvaluation, AppSourceStatus } from "./modeling/index.js";
+export {
+  appAuthoringRequired,
+  findAppModelRefresh,
+  hasModelableSource,
+  inspectAppModelFailure,
+  observeAppModel,
+  prepareAppAuthoring,
+  readAppModelEvidence
+} from "./modeling/app-authoring.js";
+export type { AppModelObservation } from "./modeling/app-authoring.js";
+export { createAppPublication } from "./modeling/app-publication.js";
 export type {
   AppModelFreshness,
   AppModelFreshnessInput,
@@ -449,3 +460,5 @@ export {
   projectDeploymentGraph
 } from "./deployment-graph.js";
 export { deploymentStatusBlocksMutation } from "./deploy-admission.js";
+export * from "./graph-source.js";
+export * from "./graph-orchestration.js";

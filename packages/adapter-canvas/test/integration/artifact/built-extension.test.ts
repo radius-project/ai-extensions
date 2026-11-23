@@ -16,7 +16,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   runArtifactSmoke,
@@ -308,6 +308,112 @@ describe("packaged Bicep literal credential detector", () => {
     expect(`${key}: { value: 'strict' }`).not.toMatch(
       LITERAL_CREDENTIAL_ASSIGNMENT
     );
+  });
+});
+
+describe("JSONC module compatibility", () => {
+  it.each(["playwright.config.ts", "playwright.visual.config.ts"])(
+    "loads production sources during native %s discovery",
+    (config) => {
+      const result = spawnSync(
+        process.execPath,
+        [
+          createRequire(import.meta.url).resolve("@playwright/test/cli"),
+          "test",
+          "--config",
+          join(REPO_ROOT, "packages", "adapter-canvas", config),
+          "--list",
+          "--reporter=line"
+        ],
+        { cwd: REPO_ROOT, encoding: "utf8", timeout: 15_000 }
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toMatch(/Total: [1-9]\d* tests in [1-9]\d* files?/);
+    }
+  );
+
+  it("stages and compiles JSONC configuration through the production Node bundle", () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-jsonc-bundle-")
+    );
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      writeFileSync(
+        join(buildDirectory, "src", "extension.ts"),
+        'export { stageGraphArtifacts } from "@radius-project/adapter-shared";\n' +
+          'export { writeBicepCompileConfig } from "../../adapter-shared/src/rad.js";\n'
+      );
+      const built = spawnSync(process.execPath, ["build.mjs"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        timeout: 20_000,
+        env: { ...process.env, RADIUS_SOURCE_REF: SOURCE_REF }
+      });
+      expect(built.error).toBeUndefined();
+      expect(built.status, built.stderr).toBe(0);
+
+      const artifact = pathToFileURL(
+        join(workspaceRoot, ".artifacts", "radius", ARTIFACT_RELATIVE_PATH)
+      ).href;
+      const config = `{
+        // Keep repository configuration and trailing commas.
+        "extensions": { "radius": "br:registry.example/radius:v1", },
+        "analyzers": { "core": { "enabled": false, }, },
+      }`;
+      const executed = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+            import assert from "node:assert/strict";
+            import fs from "node:fs";
+            import path from "node:path";
+            import { stageGraphArtifacts, writeBicepCompileConfig } from ${JSON.stringify(artifact)};
+            const config = ${JSON.stringify(config)};
+            const staged = await stageGraphArtifacts({
+              status: "present",
+              content: "model",
+              source: {
+                kind: "github",
+                repo: "owner/repository",
+                ref: "feature",
+                revision: "a".repeat(40),
+                definitionPath: ".radius/app.bicep"
+              }
+            }, {
+              readBytes: async () => ({ status: "present", bytes: Buffer.from(config) }),
+              stagingRoot: ".",
+              redactDiagnostic: (message) => message
+            });
+            try {
+              assert.equal(fs.readFileSync(path.join(staged.dir, "bicepconfig.json"), "utf8"), config);
+              const compiled = writeBicepCompileConfig(".", staged.dir);
+              assert.equal(compiled.extensions.radius, "br:registry.example/radius:v1");
+              assert.deepEqual(compiled.analyzers, { core: { enabled: false } });
+              assert.equal(compiled.experimentalFeaturesEnabled.extensibility, true);
+            } finally {
+              await staged.dispose();
+            }
+          `
+        ],
+        {
+          cwd: workspaceRoot,
+          encoding: "utf8",
+          timeout: 5_000,
+          env: {
+            ...process.env,
+            HOME: workspaceRoot,
+            USERPROFILE: workspaceRoot
+          }
+        }
+      );
+      expect(executed.error).toBeUndefined();
+      expect(executed.status, executed.stderr).toBe(0);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1438,6 +1544,63 @@ describe("P0-C built Radius extension artifact", () => {
     expect(secretsGuidance).toContain(
       "the data-key contract below is not verified anywhere"
     );
+  });
+
+  it("updates a legacy Radius pin with the packaged resolver without changing published files", () => {
+    assertCurrentArtifact();
+    const workspace = mkdtempSync(join(tmpdir(), "radius-legacy-pin-"));
+    try {
+      const radiusDir = join(workspace, ".radius");
+      const staging = join(radiusDir, ".staging-legacy");
+      mkdirSync(staging, { recursive: true });
+      writeFileSync(
+        join(staging, "run.json"),
+        JSON.stringify({ baseline: {} })
+      );
+      const current = join(radiusDir, "bicepconfig.json");
+      const origin = join(radiusDir, "app.origin.json");
+      const config = JSON.stringify({
+        extensions: {
+          radius: "br:biceptypes.azurecr.io/radius:0.61",
+          customTypes: "./custom-types.tgz"
+        }
+      });
+      const originText = JSON.stringify({ skillVersion: "0.1.1" });
+      writeFileSync(current, config);
+      writeFileSync(origin, originText);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `import { pathToFileURL } from "node:url";
+const resolver = await import(pathToFileURL(process.argv[2]).href);
+await resolver.writeStagedBicepConfig(
+  process.argv[3], "br:biceptypes.azurecr.io/radius:0.62"
+);`,
+          "packaged-resolver-test",
+          join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
+          staging
+        ],
+        { cwd: workspace, encoding: "utf8", timeout: 10_000 }
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        JSON.parse(readFileSync(join(staging, "bicepconfig.json"), "utf8"))
+      ).toEqual({
+        experimentalFeaturesEnabled: { extensibility: true },
+        extensions: {
+          radius: "br:biceptypes.azurecr.io/radius:0.62",
+          customTypes: "./custom-types.tgz"
+        }
+      });
+      expect(readFileSync(current, "utf8")).toBe(config);
+      expect(readFileSync(origin, "utf8")).toBe(originText);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   it("packages the checker's secure-value remedies", () => {

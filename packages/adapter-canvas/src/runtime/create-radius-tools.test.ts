@@ -13,6 +13,7 @@ import {
   createFakeDependencies,
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
+import { createDeferred } from "../../test/support/browser/fakes.js";
 
 function findTool(
   tools: ReturnType<typeof createRadiusTools>,
@@ -574,6 +575,81 @@ describe("TL-11: radius_report_modeling_failure", () => {
     error: "The configured Recipe rejects the required credential shape."
   };
 
+  it.each(["", " \n\t"])(
+    "records a current blank-model failure (%j) and releases its activity",
+    async (content) => {
+      const { tools, entry, modelingActivity, missingModelHandoffs } =
+        await currentAttempt({
+          bicepByRepoBranch: { "workspace:acme/widgets@main": content }
+        });
+      const claim = missingModelHandoffs.claim("acme/widgets::main", "blank");
+      if (!claim) throw new Error("Missing claim");
+      entry.state.appModelAttemptClaims = { "acme/widgets::main": claim };
+      expect(
+        await findTool(tools, "radius_report_modeling_failure").handler(report)
+      ).toEqual({ recorded: true });
+      expect(entry.state.appModelFailures?.["acme/widgets::main"]?.error).toBe(
+        report.error
+      );
+      expect(missingModelHandoffs.current("acme/widgets::main")).toBeNull();
+      expect(modelingActivity.release).toHaveBeenCalledWith({
+        repo: "acme/widgets",
+        branch: "main"
+      });
+    }
+  );
+
+  it("does not record or release claims when the workspace branch drifted", async () => {
+    const { tools, entry, deps, modelingActivity, missingModelHandoffs } =
+      await currentAttempt();
+    const claim = missingModelHandoffs.claim("acme/widgets::main", "current");
+    deps.graphSources.read = async () => ({
+      status: "unavailable",
+      source: {
+        kind: "workspace",
+        repo: report.repo,
+        ref: report.branch,
+        definitionPath: ".radius/app.bicep"
+      },
+      diagnostic: "Workspace branch changed"
+    });
+    await expect(
+      findTool(tools, "radius_report_modeling_failure").handler(report)
+    ).rejects.toThrow("Workspace branch changed");
+    expect(entry.state.appModelFailures).toBeUndefined();
+    expect(missingModelHandoffs.current("acme/widgets::main")).toBe(claim);
+    expect(modelingActivity.release).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a replacement attempt when an old read finds a nonblank model", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    deps.graphSources.read = async () => {
+      entry.state.appModelAttemptTokens = { "acme/widgets::main": "attempt-2" };
+      entry.state.appModelFailures = {
+        "acme/widgets::main": {
+          attemptToken: "attempt-2",
+          error: "new failure"
+        }
+      };
+      return {
+        status: "present",
+        content: "resource app = {}",
+        source: {
+          kind: "workspace",
+          repo: report.repo,
+          ref: report.branch,
+          definitionPath: ".radius/app.bicep"
+        }
+      };
+    };
+    expect(
+      await findTool(tools, "radius_report_modeling_failure").handler(report)
+    ).toMatchObject({ recorded: false });
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::main"]?.attemptToken
+    ).toBe("attempt-2");
+  });
+
   it("records a permanent failure for the current missing-model attempt", async () => {
     const { tools, entry } = await currentAttempt();
 
@@ -740,14 +816,15 @@ describe("TL-11: radius_report_modeling_failure", () => {
   });
 
   it("releases the dead run's handoff claim so the promised retry can be sent", async () => {
-    const { tools, missingModelHandoffs, modelingActivity } =
+    const { tools, entry, missingModelHandoffs, modelingActivity } =
       await currentAttempt();
     const delivered = missingModelHandoffs.claim(
       "acme/widgets::main",
       "missing-model-key"
     );
-    expect(delivered).not.toBeNull();
-    missingModelHandoffs.markDelivered(delivered!);
+    if (!delivered) throw new Error("Missing claim");
+    entry.state.appModelAttemptClaims = { "acme/widgets::main": delivered };
+    missingModelHandoffs.markDelivered(delivered);
     expect(missingModelHandoffs.current("acme/widgets::main")).toBe(delivered);
 
     await findTool(tools, "radius_report_modeling_failure").handler(report);
@@ -762,23 +839,47 @@ describe("TL-11: radius_report_modeling_failure", () => {
     });
   });
 
-  it("also releases the two-branch diff claim that covers the failed branch", async () => {
-    const { tools, missingModelHandoffs } = await currentAttempt();
-    const diffTarget = missingModelHandoffTarget("acme/widgets", [
-      "release",
-      "main"
-    ]);
-    const diffClaim = missingModelHandoffs.claim(
-      diffTarget,
-      "missing-model-key"
-    );
-    expect(diffClaim).not.toBeNull();
-    missingModelHandoffs.markDelivered(diffClaim!);
+  it.each(["main", "release"])(
+    "releases the shared diff claim on failure of %s without releasing another attempt on that branch",
+    async (branch) => {
+      const { tools, entry, missingModelHandoffs } = await currentAttempt();
+      const diffTarget = missingModelHandoffTarget("acme/widgets", [
+        "release",
+        "main"
+      ]);
+      const diffClaim = missingModelHandoffs.claim(
+        diffTarget,
+        "missing-model-key"
+      );
+      const separateTarget = missingModelHandoffTarget("acme/widgets", [
+        branch
+      ]);
+      const separateClaim = missingModelHandoffs.claim(
+        separateTarget,
+        "another"
+      );
+      if (!diffClaim || !separateClaim) throw new Error("Missing claim");
+      entry.state.appModelAttemptTokens = {
+        "acme/widgets::main": report.attemptToken,
+        "acme/widgets::release": report.attemptToken
+      };
+      entry.state.appModelAttemptClaims = {
+        "acme/widgets::main": diffClaim,
+        "acme/widgets::release": diffClaim
+      };
+      missingModelHandoffs.markDelivered(diffClaim);
 
-    await findTool(tools, "radius_report_modeling_failure").handler(report);
+      await expect(
+        findTool(tools, "radius_report_modeling_failure").handler({
+          ...report,
+          branch
+        })
+      ).resolves.toEqual({ recorded: true });
 
-    expect(missingModelHandoffs.current(diffTarget)).toBeNull();
-  });
+      expect(missingModelHandoffs.current(diffTarget)).toBeNull();
+      expect(missingModelHandoffs.current(separateTarget)).toBe(separateClaim);
+    }
+  );
 
   it("leaves an unrelated target's claim alone when a failure is recorded", async () => {
     const { tools, missingModelHandoffs } = await currentAttempt();
@@ -811,7 +912,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
 
   it("propagates a model read failure instead of recording an unverified failure", async () => {
     const { tools, deps, entry } = await currentAttempt();
-    vi.mocked(deps.workspace.fetchWorkspaceBicep).mockRejectedValue(
+    vi.mocked(deps.graphSources.read).mockRejectedValue(
       new Error("workspace unavailable")
     );
 
@@ -823,24 +924,24 @@ describe("TL-11: radius_report_modeling_failure", () => {
 
   it("rejects a report superseded while the model recheck is in flight", async () => {
     const { tools, deps, entry } = await currentAttempt();
-    let finishRead!: (content: string | null) => void;
-    vi.mocked(deps.workspace.fetchWorkspaceBicep).mockImplementation(
-      () =>
-        new Promise<string | null>((resolve) => {
-          finishRead = resolve;
-        })
-    );
+    const started = createDeferred<void>();
+    const finishRead = createDeferred<void>();
+    const read = vi.mocked(deps.graphSources.read).getMockImplementation();
+    if (!read) throw new Error("Missing typed graph reader");
+    vi.mocked(deps.graphSources.read).mockImplementation(async (request) => {
+      started.resolve();
+      await finishRead.promise;
+      return read(request);
+    });
 
     const pending = findTool(tools, "radius_report_modeling_failure").handler(
       report
     );
-    await vi.waitFor(() =>
-      expect(deps.workspace.fetchWorkspaceBicep).toHaveBeenCalledOnce()
-    );
+    await started.promise;
     const tokens = entry.state.appModelAttemptTokens;
     if (!tokens) throw new Error("expected current modeling attempt");
     tokens["acme/widgets::main"] = "attempt-2";
-    finishRead(null);
+    finishRead.resolve();
 
     await expect(pending).resolves.toMatchObject({ recorded: false });
     expect(entry.state.appModelFailures).toBeUndefined();
@@ -879,8 +980,9 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
     expect(result).toMatchObject({
       resultType: "success",
-      textResultForLlm:
-        "No .radius/app.bicep or app.bicep could be read for main or feat. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.",
+      textResultForLlm: expect.stringContaining(
+        "No .radius/app.bicep or app.bicep could be read for main or feat. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas."
+      ),
       toolTelemetry: { radiusGraphDiff: { outcome: "unavailable" } }
     });
     expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
@@ -946,12 +1048,12 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     session.log = vi.fn(() => {
       throw new Error("log unavailable");
     });
-    (
-      deps.rad.radArtifactsDirForSelection as ReturnType<typeof vi.fn>
-    ).mockImplementation(async ({ log }) => {
-      log("building graph");
-      return { dir: "/workspace/.radius", remote: false };
-    });
+    (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_content, _path, { log }) => {
+        log("building graph");
+        return [];
+      }
+    );
 
     const result = await findTool(
       tools,

@@ -89,17 +89,25 @@ An account administrator creates both once.
 - Read EKS, EC2, and RDS, and run `kubectl` on the two clusters.
 - Scale and update the two node groups on the main cluster.
 - Change only the deploy role's trust policy and inline policies, its lock policy, and access entries on the two clusters.
-- Delete only RDS instances, groups, and snapshots named `mysql-*` and `rds-snapshot-*`.
+- Create, read, and delete the app permissions boundaries setup writes for each environment, under `policy/radius/apps/<fixture repository ID>/`. It may create or delete one only when it carries the tags Radius uses to mark the fixture repository's policies.
+- Delete only RDS instances, groups, and snapshots named `mysql-*` and `rds-snapshot-*`, app roles under `role/radius/apps/<fixture repository ID>/`, and EKS Pod Identity associations on the two clusters.
 
-Everything except IAM is limited to the two regions. The test role can't create or delete roles, change a permissions boundary, or create an identity provider. Its session lasts 6 hours, as long as the job, because AWS's default is 1 hour and the job signs in only once.
+Everything except IAM is limited to the two regions. The test role can't create roles, delete any role outside the app role path, change a permissions boundary, or create an identity provider. Its session lasts 6 hours, as long as the job, because AWS's default is 1 hour and the job signs in only once.
 
 **The deploy role.** Setup gives it permissions by writing inline policies on it, so whoever runs setup controls what it can do. In an account shared with Radius's tests, that must be capped, so the administrator creates it ahead of time with:
 
 - The tags setup puts on a role it creates, including `radius-repository-id` with the fixture repository's GitHub ID, so setup reuses it instead of creating one.
 - The trust policy setup leaves when no environment uses the role: one deny statement, `RadiusNoTrustedEnvironments`.
-- A permissions boundary, which is the most a role can ever do, whatever its own policies say. It allows only the services the recipes use (Cloud Control, RDS, and a few EKS and EC2 reads), only in the two regions. It denies IAM, account settings, and `s3:PutAccountPublicAccessBlock`. Each new recipe adds its service.
+- A permissions boundary, which is the most the deploy role itself can ever do, whatever its own policies say. It allows only the services the recipes use (Cloud Control, RDS, EKS Pod Identity associations on the two clusters, and a few EKS and EC2 reads), only in the two regions. For the IAM role the containers recipe gives each app through EKS Pod Identity, it allows exactly what the product's app-roles policy grants: roles under `role/radius/apps/<fixture repository ID>/` that carry one of the repository's app boundaries, passed only to EKS Pod Identity. It denies all other IAM, account settings, and `s3:PutAccountPublicAccessBlock`. Each new recipe adds its service. A unit test checks that the boundary allows everything the product's app-roles policy grants, so a product change fails in a pull request instead of in the daily run.
 
 The boundary lists services instead of allowing everything in the two regions, because a region condition limits where a request is sent, not what it changes. For example, `s3:PutAccountPublicAccessBlock` sent to `us-east-2` turns off S3 Block Public Access for every bucket in the account, including Radius's.
+
+A boundary caps only the role it's on, not the roles that role creates. The app roles the deploy role creates are capped by the product's app boundary instead, which allows nearly everything in the environment's region except IAM and account-wide security settings ([#1278](https://github.com/radius-project/ai-extensions/pull/1278)), and the deploy role writes their trust policies. IAM has no condition on a new role's trust or on a new policy's content, so neither role's policies can close this:
+
+- The deploy role can create an app role that acts outside its own boundary in the two regions, or that trusts another account.
+- The test role must create the app boundaries setup writes, so it can write one that allows everything and have the deploy role create an app role under it. In effect, this repository's `main` CI can become an administrator of the account.
+
+This is an accepted risk for the shared test account, because the account already allows broader access to other CI. [#1276](https://github.com/radius-project/ai-extensions/issues/1276) is the fast follow that removes it: the deploy identity stops creating IAM roles. An organization-level guard on `role/radius/apps/*`, such as a service control policy that denies those roles IAM, `sts:AssumeRole`, organizations, account, and `s3:PutAccountPublicAccessBlock`, would harden it further, but isn't a prerequisite.
 
 The deploy role can't create service-linked roles. RDS's already exists; a new service's recipe may need an administrator to create one. If the deploy role is missing, setup stops and changes nothing, because the test role can't create roles.
 
@@ -128,15 +136,15 @@ Each step runs in the canvas, in order, with the AWS switch on.
 7. **Delete the apps.** The RDS instance and its groups are gone, and exactly one final RDS snapshot exists. The test deletes it.
 8. **Delete the second environment.** Its subject, policy, and access entry are removed, and the main environment still passes verify.
 9. **Delete the main environment** the same way.
-10. **Leftovers.** Only the deploy role, with no policies or trusted subjects, and the GitHub identity provider are left.
+10. **Leftovers.** Only the deploy role, with no policies or trusted subjects, and the GitHub identity provider are left. No app role, app boundary, or Pod Identity association is left.
 
 Why some steps work the way they do:
 
 - **15 minutes:** an EKS token lasts 15 minutes, so a later Kubernetes write proves token refresh works. The clock starts at the refresher's first log line. RDS create time varies, so the fixture app forces a Kubernetes write at least 16 minutes into the deploy, for example with a resource that waits on the container, whose readiness is held back. The exact resource is picked during the local run.
 - **Failed deploy on the second environment:** the failing app fails in Kubernetes before any AWS call. It runs on the second environment because after a failed redeploy, Radius loses track of what it created, a known Radius issue, so the failure runs where there's no database to lose. The exact resource is picked during the local run.
-- **Final snapshot:** AWS Cloud Control always takes one when it deletes an RDS instance, also a known Radius issue. The recipe commit the canvas pins doesn't copy the app's tags to it yet, so the test finds it by instance name, and checks the tags once the pin moves.
+- **Final snapshot:** AWS Cloud Control always takes one when it deletes an RDS instance, also a known Radius issue. The pinned MySQL recipe copies the app's tags to it, so the test finds it by its source instance and checks its tags.
 - **Radius build:** the AWS workflows use Radius `edge` on purpose, because no Radius release has the fixes AWS needs yet. A planned change moves AWS to that release before AWS ships. Each run records the Radius versions it used.
-- **Probe pods:** Kubernetes Jobs in the app's namespace with the app's Radius labels, so the lifecycle design's cleanup rule covers them. A probe that can't start fails the test instead of passing as a timeout.
+- **Probe pods:** Kubernetes Jobs in the app's namespace with the app's Radius labels, so the lifecycle design's cleanup rule covers them. A probe that can't start, or can't try the connect because its image lacks a tool or the node can't resolve the name, fails the test instead of passing as a timeout. The probe image needs `getent`, `nc`, and `date`, so BusyBox doesn't work and Alpine does.
 
 Each managed service in the pack gets a row in the connection check and a resource in the fixture app, added by the recipe that adds the service.
 
@@ -153,11 +161,11 @@ For each AWS test environment, the AWS job follows the same order as the Azure j
 1. Asks the product to delete the app, and waits.
 2. Sweeps the environment's leftover RDS and Kubernetes resources.
 3. Checks nothing is left.
-4. Only then removes the environment's trust subject, inline policy, access entry, GitHub environment, and state.
+4. Only then removes the environment's trust subject, inline policy, app boundary, access entry, GitHub environment, and state.
 
 If any of steps 1 to 3 fails, it keeps everything in step 4, so the next run can retry, and the job fails. This is the lifecycle design's rule that cleanup never removes what a retry needs. The AWS job also scales the node groups to zero if a run left them up.
 
-It deletes an AWS resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with a test environment, and in one of the clusters' VPCs. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the roles, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
+It deletes an AWS resource only if it's in one of the two regions, named the way the MySQL recipe names it, tagged with a test environment, and in one of the clusters' VPCs. An environment's app boundary goes in step 4 with the product's removal. The removal keeps a boundary it can't read or that an app role still uses, yet deletes the GitHub environment, so the job's final check lists every managed policy under the fixture repository's app path, and the fixture isn't reset while one is left. Kubernetes workloads follow the lifecycle design's label rule. It never deletes the deploy role, the test role, the identity provider, a cluster, or a VPC, and a failed read stops that sweep without deleting.
 
 Like the Azure sweep, which also deletes in a subscription shared with Radius, it has no dry run. Its rules are unit-tested against resources shaped like Radius's.
 

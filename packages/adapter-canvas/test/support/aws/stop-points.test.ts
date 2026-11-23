@@ -42,6 +42,46 @@ const LOCK = [
 const LOCK_ARN = "arn:aws:iam::123456789012:policy/radius-lock-deploy";
 
 describe("OutsideWorld", () => {
+  it("fails a planned call the way each service refuses one, applying nothing", async () => {
+    const w = world();
+    w.arm(0, "fail");
+    expect(await w.runAws(LOCK)).toMatchObject({
+      code: 254,
+      stderr: expect.stringContaining("(InternalFailure)")
+    });
+    expect(w.aws.locks()).toEqual([]);
+    w.arm(0, "fail");
+    expect(await w.readGitHubJson("/repos/octo/shop")).toMatchObject({
+      ok: false,
+      status: 500
+    });
+    w.arm(0, "fail");
+    expect(
+      await w.gh([
+        "api",
+        "--method",
+        "DELETE",
+        "repos/octo/shop/environments/dev"
+      ])
+    ).toMatchObject({ code: 1, stderr: expect.stringContaining("HTTP 500") });
+    expect(w.github.environment("dev")).toBeDefined();
+    let applied = false;
+    w.arm(0, "fail");
+    await expect(
+      w.outside("delete thing", true, () => {
+        applied = true;
+      })
+    ).rejects.toThrow("delete thing was refused by the test.");
+    expect(applied).toBe(false);
+    expect(w.calls.map((call) => [call.applied, call.answered])).toEqual([
+      [false, true],
+      [false, true],
+      [false, true],
+      [false, true]
+    ]);
+    expect(w.crashed).toBe(false);
+  });
+
   it("records every AWS and GitHub call in order, as read or write", async () => {
     const w = world();
     await w.runAws(["iam", "get-role", "--role-name", "x"]);

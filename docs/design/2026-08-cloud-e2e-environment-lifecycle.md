@@ -79,7 +79,7 @@ configuration: the product is written for a signed-in human, so a local run exer
 primary path, and CI is the one that needs the service-principal accommodation in step 4.
 The consequence to plan for is that a local run and CI are not identical environments, so
 an identity-sensitive failure can reproduce in one and not the other. The fork is selected
-through the two `RADIUS_CLOUD_E2E_FIXTURE_*` variables described under
+through the four `RADIUS_CLOUD_E2E_FIXTURE_*` variables described under
 [Two product behaviours the fixture must respect](#two-product-behaviours-the-fixture-must-respect);
 they are refused when `CI` is set, so they cannot affect the nightly run.
 
@@ -317,18 +317,20 @@ The dedicated App is installed on this repository alone. Its installation carrie
 
 A `concurrency` group only serializes runs _within the CI repository_, so it does nothing about a developer running `pnpm test:cloud` while the nightly is mid-flight. Two runs sharing a subscription and a fixture repository would contend for that one application name, and the likely symptom is not a clean failure — it is one run's cleanup deleting the application the other is still using, surfacing as an unrelated Entra error. This is the second reason a local run uses the developer's own subscription and their own fork of the fixture repository, alongside the credential reason above: **different repository, different derived application name, no shared state, no possible contention.**
 
-**How a developer selects their fork.** Two environment variables, which must be set together:
+**How a developer selects their fork.** Four environment variables, which must be set together. The two AWS commits were added with the [AWS Cloud E2E design](2026-11-aws-cloud-e2e.md); an Azure run needs the AWS baseline too, because the fixture branch is clean at either baseline.
 
-| Variable                                | Value                                |
-|-----------------------------------------|--------------------------------------|
-| `RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY`   | `owner/name` of the developer's fork |
-| `RADIUS_CLOUD_E2E_FIXTURE_BASELINE_SHA` | The baseline commit **in that fork** |
+| Variable                                         | Value                                     |
+|--------------------------------------------------|-------------------------------------------|
+| `RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY`            | `owner/name` of the developer's fork      |
+| `RADIUS_CLOUD_E2E_FIXTURE_BASELINE_SHA`          | The baseline commit **in that fork**      |
+| `RADIUS_CLOUD_E2E_FIXTURE_AWS_BASELINE_SHA`      | The AWS baseline commit in that fork      |
+| `RADIUS_CLOUD_E2E_FIXTURE_AWS_FAILED_DEPLOY_SHA` | The AWS failed-deploy commit in that fork |
 
-Setting one without the other is a hard failure rather than a partial override. A fork's commits are not the upstream commits, so a run pointed at a fork while still carrying the upstream pin would try to reset the fork to a SHA it does not contain — and because that pinned SHA is also the cleanup reset target, the failure would surface during cleanup, after the run had already created cloud resources. Failing at startup instead costs nothing and is unambiguous.
+Setting only some of them is a hard failure rather than a partial override. A fork's commits are not the upstream commits, so a run pointed at a fork while still carrying the upstream pin would try to reset the fork to a SHA it does not contain. Because that pinned SHA is also the cleanup reset target, the failure would surface during cleanup, after the run had already created cloud resources. Failing at startup instead costs nothing and is unambiguous.
 
 **The suite refuses these variables when `CI` is set**, and fails rather than ignoring them. Ignoring would be worse than either alternative: in CI a stray value could repoint the nightly run at somebody's fork, and locally a silently-ignored override would leave a developer believing they were testing their fork while actually operating on the shared repository — which is precisely the contention this paragraph exists to prevent.
 
-Pointing a local run at the _shared_ fixture repository is therefore unsupported. The runbook must state that and name these two variables; it lands with the CI layer rather than this note, so treat it as a requirement on that layer, not something already written down here.
+Pointing a local run at the _shared_ fixture repository is therefore unsupported. The runbook must state that and name these variables; it lands with the CI layer rather than this note, so treat it as a requirement on that layer, not something already written down here.
 
 **Workflow publication has two paths, and only one touches the default branch.** A GitHub App token missing `workflows: write` hard-fails workflow publication; it does not silently fall back. With that permission present, another protected-branch-style direct-commit failure can create a `radius/setup-<env>-workflows-<suffix>` branch and open a pull request ([`beginPrFallback()`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-committer.ts)). A clean-slate or leak check that compares only the default-branch head to the pinned baseline therefore reports clean while a branch and an open pull request leak, so those checks and cleanup cover both. The journey still requires the normal result to be workflows committed on `main`; a fallback is observable failure evidence rather than success.
 

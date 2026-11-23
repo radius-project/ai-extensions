@@ -1,0 +1,17 @@
+# eksctl config for the second Cloud E2E cluster, which has no nodes. Render
+# with envsubst, then:
+#   eksctl create cluster -f second-cluster.yaml --without-nodegroup --write-kubeconfig=false
+# See the AWS section of docs/eng/CLOUD_E2E_RUNBOOK.md.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${SECOND_CLUSTER}
+  region: ${SECOND_REGION}
+  tags: { ai-extensions-cloud-e2e: infrastructure }
+accessConfig:
+  authenticationMode: API
+  bootstrapClusterCreatorAdminPermissions: true
+vpc:
+  cidr: 10.61.0.0/16
+  nat: { gateway: Disable }
+  clusterEndpoints: { publicAccess: true, privateAccess: false }

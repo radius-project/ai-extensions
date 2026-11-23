@@ -132,7 +132,12 @@ const productionHandlers = {
       maxAttempts: 3,
       pending: false
     }),
-    resolveRepoAppName: () => Promise.resolve(""),
+    inspectRepoApplication: () =>
+      Promise.resolve({
+        kind: "unconfirmed",
+        fallbackName: "",
+        unavailable: false
+      }),
     resolveEnvDeployment: () => Promise.resolve(null),
     listEnvDeployment: () =>
       Promise.resolve({ deployment: null, incomplete: false }),
@@ -308,10 +313,12 @@ const productionHandlers = {
       }),
     listBranchPaths: () => Promise.resolve([]),
     workspaceGraphJsonPath: () => "",
+    graphDefinitionHash: () => "",
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "", remote: false }),
     buildGraphViaRad: () => Promise.resolve([]),
     canvasGraphResources: () => [],
+    removeDirectory: () => {},
     errorMessage: (error) => String(error),
     logError: () => {}
   }),
@@ -339,7 +346,6 @@ const productionHandlers = {
         canvasGraphResources: () => [],
         workspaceGraphJsonPath: () => "",
         graphDefinitionHash: () => "",
-        radArtifactsFingerprint: () => "",
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},

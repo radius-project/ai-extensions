@@ -106,7 +106,7 @@ A previous run did not clean up, so this one refused to start rather than assert
 
 The cleanup workflow runs automatically once daily, two hours before the scheduled Cloud E2E run. For each expired test environment, it first dispatches the fixture repository's `delete-application.yml` workflow and waits for Radius to delete the Kubernetes and Azure resources in the application, including the Azure-backed PostgreSQL resource. If the dispatcher is missing or fails, cleanup independently sweeps the fixture-labelled Kubernetes workloads and stale resources in the shared Azure resource group. It may continue with identity and GitHub recovery only after either the Radius delete workflow succeeds or both independent resource sweeps succeed. It deletes the run's Entra identity, Azure role assignments, GitHub deployment records, GitHub Environment, and GHCR state package. It also retains the legacy sweep for tagged per-run resource groups created by older workflow revisions. The sweep explicitly excludes `AIEXT_CLOUD_E2E_RESOURCE_GROUP`, even if that group later matches the legacy prefix and tags. It never deletes the configured shared resource group or AKS cluster.
 
-Cleanup runs as three jobs. `scope` reads the pinned fixture and checks the published variable. Each cloud's job then reclaims only its own environments: `purge-azure` selects `radtest-` names and skips `radtest-aws-` names, which belong to AWS. `reset-fixture` runs only when every cloud's job succeeded. It deletes the generated workflow branches and their pull requests, which can't be tied to one cloud, and then resets the fixture default branch. If a cloud's job fails, both stay in place so the next run can retry. **Run it by hand rather than deleting things yourself**:
+Cleanup runs as four jobs. `scope` reads the pinned fixture and checks the published variable. Each cloud's job then reclaims only its own environments: `purge-azure` selects `radtest-` names and skips `radtest-aws-` names, which belong to `purge-aws` (see [AWS leaked state](#aws-leaked-state)). `reset-fixture` runs only when every cloud's job succeeded. It deletes the generated workflow branches and their pull requests, which can't be tied to one cloud, and then resets the fixture default branch. If a cloud's job fails, both stay in place so the next run can retry. **Run it by hand rather than deleting things yourself**:
 
 ```bash
 gh workflow run cloud-e2e-cleanup.yml --repo radius-project/ai-extensions
@@ -136,7 +136,7 @@ Each check call gets only the time that remains before its timeout. If a call st
 
 A failure that a retry cannot fix stops the step at once. Examples are HTTP `400`, `401`, `403`, `405`, `409`, `410`, or `422` from GitHub (but not a rate limit), `Forbidden` from Kubernetes, `AuthorizationFailed` from Azure, and `Authorization_RequestDenied` from Microsoft Graph. A `422` from the `delete-application.yml` dispatch means that the workflow is not on the fixture default branch, for example after a reset. In that case, Radius cannot delete the application, so the independent Kubernetes and Azure sweeps must reclaim the resources. Recovery takes two cleanup runs. In the first run, the dispatch fails, so the GHCR state step does not run and the branch is not reset. If the Kubernetes and Azure sweeps pass, the later steps still delete the environment, its Entra identity, and its deployment records. The second run finds no environment to dispatch for, so it can delete the remaining state and reset the branch. Do not delete the environment by hand.
 
-Before cleanup resets the fixture default branch, it checks for leaked state of any age in two places. The last step of `purge-azure` checks the Entra application, labelled cluster workloads, and the `default-cloud-e2e` namespace. It finds the Entra application by name, also when it has no Radius tags. Then `reset-fixture` checks every cloud's GitHub Environments and GHCR state packages, and it finds a state package also when its update time cannot be read. If either check finds anything, cleanup does not reset the branch. A reset removes the generated `delete-application.yml`, so a reset while an environment remains makes that environment harder to delete. Run cleanup again with `max_age_hours=0` to clear recent state.
+Before cleanup resets the fixture default branch, it checks for leaked state of any age in two places. The last step of `purge-azure` checks the Entra application, labelled cluster workloads, and the `default-cloud-e2e` namespace, and the last step of `purge-aws` checks the AWS stage's state. It finds the Entra application by name, also when it has no Radius tags. Then `reset-fixture` checks the GitHub Environments and GHCR state packages for both clouds' prefixes, `radtest-` and `radtest-aws-`, and it finds a state package also when its update time cannot be read. Every environment the suite creates starts with `radtest-`, so no cleanup step deletes or reports an environment or state package with any other name. The orphan probe takes its environment name from its seed, so it checks that the seed's `radius-environment` tag starts with `radtest-` and stops before the probe if it does not (see [Seeded app registrations](#seeded-app-registrations)). If either check finds anything, cleanup does not reset the branch. A reset removes the generated `delete-application.yml`, so a reset while an environment remains makes that environment harder to delete. Run cleanup again with `max_age_hours=0` to clear recent state.
 
 The Cloud E2E run also stops at once on leaked state of any age. For example, if an earlier environment still owns the `default` namespace, the create wizard refuses the request, and the test fails at once instead of waiting for its timeout.
 
@@ -153,7 +153,7 @@ gh api "repos/<fixture>/environments" --jq '.environments[].name'
 # Legacy per-run resource groups created by older suite revisions
 az group list --query "[?starts_with(name, 'radtest-canvas')].{name:name,tags:tags}"
 
-# Whether the fixture branch is still at the pinned baseline
+# Whether the fixture branch is at a pinned baseline, Azure's or AWS's
 gh api "repos/<fixture>/git/ref/heads/<default-branch>" --jq .object.sha
 ```
 
@@ -164,6 +164,46 @@ Two boundaries worth knowing before you go looking for a gap:
 - **Product deletion and fixture reclamation own different artifacts.** Deployment deletion preserves the GitHub Environment, its variables, the repository-scoped Entra application, its federated credentials, and its role assignments so the environment can deploy again. Final environment deletion removes the GitHub Environment and its per-environment federated credentials, as implemented by `radius-project/ai-extensions#398`, while deliberately retaining the shared Entra application and role assignments. After assertions, `reclaimLeakedProductArtifacts()` runs Radius application deletion before removing identity or recovery state, then removes only the three expected assignments for the product-created service principal at the configured resource-group and AKS scopes.
 - **A deployment record outlives the environment that names it.** GitHub links a deployment to its environment by name rather than by id, so deleting the environment strands its records instead of removing them, and the product never deletes them — to it, a deployment record is history, not an owned resource. Only the suite that created them can, so both fixture teardown and scheduled cleanup delete them explicitly, before the environment. Each deletion is two calls: mark the record `inactive`, then `DELETE` it. GitHub rejects deleting an active record, and a record whose job never reported a status is active by default. If any record cannot be reclaimed, both paths hold the environment back rather than deleting it, so the next sweep can still find the records by name and retry.
 - **Cleanup fails closed.** If Radius application deletion fails and either independent Kubernetes or Azure recovery also fails, cleanup preserves the Entra identity, role assignments, GitHub Environment, GHCR state package, generated delete workflow, and repository state so a developer can retry or investigate. If the independent sweeps prove the workload and Azure resources are gone, cleanup can reclaim the remaining identity and GitHub artifacts even when a prior teardown removed the dispatcher. If a role assignment is unexpected or cannot be removed, cleanup preserves both the service principal and its parent application registration; deleting the application would cascade-delete the principal and leave an orphaned role assignment. A successful delete command is treated as a request rather than proof: teardown and scheduled recovery poll Entra until the application registration is absent, and retry by application/client ID when deletion by object ID reports resource-not-found. GHCR cleanup likewise verifies that a package is unreadable after deletion; a DELETE `404` while the same credential can still read the package is reported as insufficient effective `delete:packages` access. Exact-name, age-qualified orphan packages may have no repository association after their source environment or repository metadata disappears, but a non-empty association to another repository is always refused.
+
+### AWS leaked state
+
+`purge-aws` runs the sweep in [`aws-cloud-cleanup.ts`](../../packages/adapter-canvas/test/e2e-cloud/support/aws-cloud-cleanup.ts). Until `AIEXT_CLOUD_E2E_AWS_ROLE_ARN` is set, the job succeeds with a notice and does nothing. For each AWS environment older than the age threshold, in order, it:
+
+1. Dispatches `delete-application.yml` and waits for it to succeed.
+2. Deletes the MySQL recipe's leftovers: `mysql-*` DB instances (with `--skip-final-snapshot`), then their DB subnet and parameter groups, then the final `rds-snapshot-*` snapshots that carry an AWS test environment's tag. It also deletes the containers Recipe's Pod Identity associations and then its app roles, each only when its role is in the environment's folder under `/radius/apps/<fixture repository ID>/` and its `radapp.io/environment` tag names the same environment, and labelled workloads and the `default-cloud-e2e` namespace on both clusters.
+3. Checks that nothing of that environment is left.
+4. Deletes its deployment records and GHCR state package, then, under the deploy role's lock, removes its trust subjects, inline policy, app boundary, and access entry with the product's own removal code, and deletes its GitHub environment.
+
+If any of steps 1 to 3 fails, the environment keeps everything step 4 removes, so the next run can retry. The sweep also deletes deployment records, state packages, and app boundaries of AWS environments that no longer exist, scales the main cluster's `default` and `isolated` node groups to zero, and removes a lock on the deploy role once it is 10 or more minutes old, the same rule the product uses.
+
+It deletes an RDS resource only when it is in one of the two test regions, named the way the recipe names it, tagged with a `radtest-aws-` environment, not tagged `RadiusCreationTimestamp`, and, for instances, subnet groups, and snapshots, in one of the clusters' VPCs. It never deletes a group that another instance uses, the deploy or test role, the identity provider, a cluster, a node group, or a VPC. A read that fails stops that sweep before it deletes anything. RDS deletes finish in the background, so after each delete the sweep waits for the resource to be gone, and a run that finds a snapshot still `deleting` waits for it instead of deleting it again. The sweep can run longer than the hour its GitHub App token lives, so it mints a new token with the same permissions every 45 minutes.
+
+The job's last step checks, whatever their age, the recipe's RDS resources, the app roles and every managed policy under the fixture repository's app path (`/radius/apps/<fixture repository ID>/`) and the Pod Identity associations whose role is under it, workloads and the namespace on both clusters, the node groups' size, the deploy role's lock, and the deploy role's trust subjects, inline policies, and access entries. Step 4 keeps an app boundary it can't read or that an app role still uses, but deletes the GitHub environment anyway, so this check is what keeps the fixture from being reset while that boundary remains.
+
+| Error in the job log                                                                                                  | What to do                                                                                                                                                                                                                           |
+|-----------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Deleting the Radius application in <env> failed`                                                                     | Open the fixture's `delete-application.yml` run. If it failed with `Could not assume role` and the deploy role no longer trusts `<env>`, an earlier sweep stopped part way through step 4. Finish it by hand, below                  |
+| `Removing <env> from deploy role ... failed` or `Removed <env>'s access, but kept its GitHub environment`             | The role is partly cleaned up and the app delete can no longer sign in. Finish it by hand, below                                                                                                                                     |
+| `RDS DB snapshot <id> ... has no environment tag`                                                                     | A warning only. The sweep can't tie the snapshot to the suite. Check its source instance and creation time, and delete it by hand if it is the suite's: `aws rds delete-db-snapshot --region <region> --db-snapshot-identifier <id>` |
+| `RDS DB ... was still there after <n> minutes` or `RDS DB snapshot <id> ... was still being deleted after 20 minutes` | RDS hasn't finished the delete. The environment keeps its retry inputs, so the next sweep waits again. If it repeats, check the resource's status with the reads below                                                               |
+| `permissions boundary arn:aws:iam::<account>:policy/radius/apps/...` or `Kept permissions boundary ...`               | Step 4 kept an environment's app boundary. If IAM says it is in use, find the app roles that use it (`aws iam list-roles --path-prefix <the boundary's path>`), delete them, then run `aws iam delete-policy --policy-arn <arn>`     |
+| `The lock on <role> ... is less than 10 minutes old`                                                                  | A run stopped while it held the lock. The next sweep removes it                                                                                                                                                                      |
+| `<env>: Kept the access entry ...`                                                                                    | The removal couldn't read the entry twice. The message ends with the exact `aws eks delete-access-entry` command; run it once you have checked nothing else uses the entry                                                           |
+
+To finish a partial step 4 by hand, first confirm that the environment has no app resources left, with the RDS and `kubectl` reads below. Then delete its inline policy (`aws iam delete-role-policy --role-name <role> --policy-name <policy>`), remove its subjects from the role's trust policy (`aws iam update-assume-role-policy`), delete its access entry if no other environment uses that cluster, and delete the GitHub environment. The next sweep reclaims its records and state package.
+
+```bash
+# Recipe leftovers in a test region
+aws rds describe-db-instances --region <region> \
+  --query "DBInstances[?starts_with(DBInstanceIdentifier, 'mysql-')].[DBInstanceIdentifier,DBInstanceStatus,DBSubnetGroup.VpcId]"
+aws rds describe-db-snapshots --region <region> --snapshot-type manual \
+  --query "DBSnapshots[?starts_with(DBSnapshotIdentifier, 'rds-snapshot-')].[DBSnapshotIdentifier,Status,VpcId]"
+
+# What the deploy role still grants
+aws iam list-role-policies --role-name <role>
+aws iam get-role --role-name <role> --query Role.AssumeRolePolicyDocument
+aws iam get-policy --policy-arn arn:aws:iam::<account>:policy/radius-lock-<role>
+```
 
 ## When a run is cancelled
 
@@ -184,6 +224,52 @@ The workflow resolves the tag to its commit, downloads the installer from that c
 Selection changes only the runner checkout and the test environment. The local managed CLI uses the selected pin. After the product creates the GitHub Environment, the fixture adds `RADIUS_RELEASE_OVERRIDE` with the selected tag, commit, and checksum. The deploy and delete runners use that value to install the matching CLI and control plane, verify the installer checksum, and load the recipe catalog from the same commit. The fixture sets the value again after environment recreation. Environment deletion removes it. No repository-wide variable or source commit is changed.
 
 The cloud workflow pins remote templates and actions to its own source commit, so both hosts use the matching workflow support. Older Radius versions must still support the commands, chart options, recipes, and application model used by the journey. Version selection does not add compatibility for removed or missing Radius features.
+
+## Run the journey locally
+
+A local run uses your own Azure subscription and your own copy of the fixture repository. Never point it at `radius-project/ai-extensions-fixture`: a local run and a CI run on one repository would share the product's app registration and delete each other's state.
+
+1. Copy the fixture. Create a private repository, keep GitHub Actions enabled on it, and push the shared fixture's `main` and `baselines/aws` branches to it. The copy then has the pinned commits under the same SHAs:
+
+   ```bash
+   gh repo create <you>/ai-extensions-fixture --private
+   git clone https://github.com/radius-project/ai-extensions-fixture.git
+   cd ai-extensions-fixture
+   git fetch origin baselines/aws:baselines/aws
+   git push https://github.com/<you>/ai-extensions-fixture.git main baselines/aws
+   ```
+
+2. Sign in with your own GitHub CLI session. Then add the scopes a fresh login doesn't have: `workflow` to commit the generated workflows, and the package scopes to push, check, and remove the state package:
+
+   ```bash
+   gh auth login -h github.com
+   gh auth refresh -h github.com -s workflow,read:packages,write:packages,delete:packages
+   ```
+
+   The run reads this session itself with `gh auth token`, and ignores any `GH_TOKEN` or `GITHUB_TOKEN` you have set. It never writes the token to the log.
+
+   The session must not expire, because the run uses the token it read at the start for hours. Before it starts, the run calls `GET /user` once and refuses a token whose response has a `GitHub-Authentication-Token-Expiration` header, or a response it can't read. A web-browser `gh auth login` gives a session that doesn't expire; a fine-grained or expiring personal access token is refused.
+
+3. Sign in to Azure with `az login`, then run the suite from `packages/adapter-canvas`:
+
+   ```bash
+   export RADIUS_CLOUD_E2E=1
+   export AZURE_SUBSCRIPTION_ID=<your-subscription>
+   export RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY=<you>/ai-extensions-fixture
+   export RADIUS_CLOUD_E2E_FIXTURE_BASELINE_SHA=<FIXTURE_BASELINE_SHA>
+   export RADIUS_CLOUD_E2E_FIXTURE_AWS_BASELINE_SHA=<FIXTURE_AWS_BASELINE_SHA>
+   export RADIUS_CLOUD_E2E_FIXTURE_AWS_FAILED_DEPLOY_SHA=<FIXTURE_AWS_FAILED_DEPLOY_SHA>
+   pnpm test:cloud
+   ```
+
+   Copy the three SHAs from [`fixture-repository.ts`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts), or use your own commits if your copy has different ones.
+
+The run stops before it changes anything when:
+
+- Only some of the four `RADIUS_CLOUD_E2E_FIXTURE_*` variables are set. Set all four or none.
+- Any of them is set while `CI` is set. They are for local runs only.
+
+The run signs in with your `gh` session only when `CI` isn't set and your copy's owner isn't `radius-project`. Otherwise it needs the fixture's GitHub App, which only CI has. No personal access token is used anywhere.
 
 ## Run the journey in the GitHub Copilot app
 
@@ -227,7 +313,171 @@ The workflow reads these repository Actions variables:
 | `AIEXT_CLOUD_E2E_FOREIGN_APP_NAME`   | Not set                                | Optional. Names the seeded foreign app            |
 | `AIEXT_CLOUD_E2E_ORPHAN_APP_NAME`    | Not set                                | Optional. Names the seeded orphan app             |
 
-The fixture repository is pinned by [`FIXTURE_BASELINE_SHA`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts). CI requires both cluster variables, verifies the cluster through `az aks show`, and fails before the product journey if either value is absent, malformed, inaccessible, in a different location, not fully provisioned, or stopped. Local runs may omit both variables to provision disposable infrastructure in the developer's own subscription.
+The fixture repository is pinned by [`FIXTURE_BASELINE_SHA`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts). The AWS baseline and failed-deploy commits are pinned next to it, and the fixture's `baselines/aws` branch keeps them reachable. A run starts only when the fixture branch is at either baseline, and moves it to its own baseline after the rest of the clean-slate check passes. Cleanup resets the branch to the Azure baseline. CI requires both cluster variables, verifies the cluster through `az aks show`, and fails before the product journey if either value is absent, malformed, inaccessible, in a different location, not fully provisioned, or stopped. Local runs may omit both variables to provision disposable infrastructure in the developer's own subscription.
+
+### AWS configuration
+
+The AWS stage and its cleanup read these repository Actions variables. None of them is secret: the jobs sign in with OIDC. Setting `AIEXT_CLOUD_E2E_AWS_ROLE_ARN` turns the AWS steps on; until then they skip with a notice. Set all five together.
+
+| Variable                                      | Value in `radius-test`                                   | Purpose                                     |
+|-----------------------------------------------|----------------------------------------------------------|---------------------------------------------|
+| `AIEXT_CLOUD_E2E_AWS_ROLE_ARN`                | `arn:aws:iam::179022619019:role/ai-extensions-cloud-e2e` | The test role the job signs in to           |
+| `AIEXT_CLOUD_E2E_AWS_REGION`                  | `us-east-2`                                              | The main cluster's region                   |
+| `AIEXT_CLOUD_E2E_AWS_EKS_CLUSTER_NAME`        | `ai-extensions-e2e-use2`                                 | The main cluster, which has the node groups |
+| `AIEXT_CLOUD_E2E_AWS_SECOND_REGION`           | `us-west-1`                                              | The second cluster's region                 |
+| `AIEXT_CLOUD_E2E_AWS_SECOND_EKS_CLUSTER_NAME` | `ai-extensions-e2e-usw1`                                 | The second cluster, which has no nodes      |
+
+Neither region may be `us-west-2`, which Radius's own tests and their cleanup job use.
+
+### AWS one-time setup
+
+An account administrator creates the clusters, the two roles, the deploy role's boundary, and a spend alarm once, from the files in [`build/cloud-e2e/aws/`](../../build/cloud-e2e/aws/). The test role can't create or delete roles, so setup fails rather than creating a deploy role if this hasn't been done. Run each block from the repository root with `eksctl` 0.226 or later:
+
+```bash
+export ACCOUNT=179022619019 CI_REPO=radius-project/ai-extensions
+export FIXTURE_REPO=radius-project/ai-extensions-fixture FIXTURE_REPO_ID=1361595003
+export MAIN_REGION=us-east-2 MAIN_CLUSTER=ai-extensions-e2e-use2
+export SECOND_REGION=us-west-1 SECOND_CLUSTER=ai-extensions-e2e-usw1
+# The name the product's defaultAwsDeployRoleName gives the fixture repository.
+export DEPLOY_ROLE=radius-deploy-radius-project-ai-extensions-fixture
+export BUDGET_EMAIL=<alert address>
+WORK=$(mktemp -d)
+for file in build/cloud-e2e/aws/*; do envsubst <"$file" >"$WORK/${file##*/}"; done
+```
+
+1. Create the clusters. The main cluster starts with one node so eksctl's add-on wait doesn't depend on CoreDNS starting with no nodes. `--write-kubeconfig=false` leaves your kubeconfig alone.
+
+   ```bash
+   eksctl create cluster -f "$WORK/main-cluster.yaml" --write-kubeconfig=false
+   eksctl create cluster -f "$WORK/second-cluster.yaml" --without-nodegroup --write-kubeconfig=false
+   # eksctl installs vpc-cni, kube-proxy, coredns, and metrics-server itself.
+   aws eks create-addon --cluster-name "$SECOND_CLUSTER" --region "$SECOND_REGION" \
+     --addon-name eks-pod-identity-agent --tags ai-extensions-cloud-e2e=infrastructure
+   for c in "$MAIN_CLUSTER:$MAIN_REGION" "$SECOND_CLUSTER:$SECOND_REGION"; do
+     aws eks update-cluster-config --name "${c%%:*}" --region "${c##*:}" --upgrade-policy supportType=STANDARD
+   done
+   ```
+
+   With no nodes, CoreDNS on the second cluster reports `DEGRADED`, which is expected.
+
+2. Add the isolated node group. Its launch template sets its own security group, so EKS doesn't add the node to the cluster security group and nothing allows TCP 3306 from it. Then scale the default group to zero, where it stays between runs.
+
+   ```bash
+   VPC_ID=$(aws eks describe-cluster --name "$MAIN_CLUSTER" --region "$MAIN_REGION" --query cluster.resourcesVpcConfig.vpcId --output text)
+   CLUSTER_SG=$(aws eks describe-cluster --name "$MAIN_CLUSTER" --region "$MAIN_REGION" --query cluster.resourcesVpcConfig.clusterSecurityGroupId --output text)
+   ISOLATED_SG=$(aws ec2 create-security-group --region "$MAIN_REGION" --vpc-id "$VPC_ID" \
+     --group-name ai-extensions-e2e-isolated-nodes \
+     --description "Cloud E2E isolated nodes, outside the EKS cluster security group" \
+     --tag-specifications "ResourceType=security-group,Tags=[{Key=ai-extensions-cloud-e2e,Value=infrastructure}]" \
+     --query GroupId --output text)
+   aws ec2 authorize-security-group-ingress --region "$MAIN_REGION" --group-id "$ISOLATED_SG" \
+     --ip-permissions "IpProtocol=-1,UserIdGroupPairs=[{GroupId=$CLUSTER_SG}]"
+   LT_ID=$(aws ec2 create-launch-template --region "$MAIN_REGION" \
+     --launch-template-name ai-extensions-e2e-isolated \
+     --launch-template-data "{\"SecurityGroupIds\":[\"$ISOLATED_SG\"],\"MetadataOptions\":{\"HttpTokens\":\"required\",\"HttpPutResponseHopLimit\":2}}" \
+     --tag-specifications "ResourceType=launch-template,Tags=[{Key=ai-extensions-cloud-e2e,Value=infrastructure}]" \
+     --query LaunchTemplate.LaunchTemplateId --output text)
+   NODE_ROLE=$(aws eks describe-nodegroup --cluster-name "$MAIN_CLUSTER" --nodegroup-name default --region "$MAIN_REGION" --query nodegroup.nodeRole --output text)
+   PUBLIC_SUBNETS=$(aws ec2 describe-subnets --region "$MAIN_REGION" \
+     --filters "Name=vpc-id,Values=$VPC_ID" "Name=map-public-ip-on-launch,Values=true" \
+     --query 'Subnets[].SubnetId' --output text)
+   aws eks create-nodegroup --region "$MAIN_REGION" --cluster-name "$MAIN_CLUSTER" \
+     --nodegroup-name isolated --node-role "$NODE_ROLE" --subnets $PUBLIC_SUBNETS \
+     --launch-template "id=$LT_ID,version=1" --instance-types t3.small \
+     --scaling-config minSize=0,maxSize=1,desiredSize=0 \
+     --labels radius-e2e/pool=isolated \
+     --taints key=radius-e2e/isolated,value=true,effect=NO_SCHEDULE \
+     --tags ai-extensions-cloud-e2e=infrastructure
+   aws eks wait nodegroup-active --region "$MAIN_REGION" --cluster-name "$MAIN_CLUSTER" --nodegroup-name isolated
+   aws eks update-nodegroup-config --region "$MAIN_REGION" --cluster-name "$MAIN_CLUSTER" \
+     --nodegroup-name default --scaling-config minSize=0,maxSize=2,desiredSize=0
+   ```
+
+3. Create the test role. It trusts only this repository's `main` branch, and its sessions last six hours.
+
+   ```bash
+   aws iam create-role --role-name ai-extensions-cloud-e2e --max-session-duration 21600 \
+     --description "ai-extensions Cloud E2E: runs canvas setup, checks, and cleanup" \
+     --assume-role-policy-document "file://$WORK/test-role-trust.json" \
+     --tags Key=ai-extensions-cloud-e2e,Value=infrastructure
+   aws iam put-role-policy --role-name ai-extensions-cloud-e2e --policy-name cloud-e2e \
+     --policy-document "file://$WORK/test-role-policy.json"
+   for c in "$MAIN_CLUSTER:$MAIN_REGION" "$SECOND_CLUSTER:$SECOND_REGION"; do
+     aws eks create-access-entry --cluster-name "${c%%:*}" --region "${c##*:}" \
+       --principal-arn "arn:aws:iam::$ACCOUNT:role/ai-extensions-cloud-e2e" \
+       --tags ai-extensions-cloud-e2e=infrastructure
+     aws eks associate-access-policy --cluster-name "${c%%:*}" --region "${c##*:}" \
+       --principal-arn "arn:aws:iam::$ACCOUNT:role/ai-extensions-cloud-e2e" \
+       --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster
+   done
+   ```
+
+4. Create the deploy role, with the boundary, the trust policy the product leaves when no environment uses the role, and the three tags the product puts on a role it creates, so setup reuses it.
+
+   ```bash
+   aws iam create-policy --policy-name ai-extensions-cloud-e2e-deploy-boundary \
+     --policy-document "file://$WORK/deploy-role-boundary.json" \
+     --description "Most the ai-extensions Cloud E2E deploy role can ever do" \
+     --tags Key=ai-extensions-cloud-e2e,Value=infrastructure
+   aws iam create-role --role-name "$DEPLOY_ROLE" \
+     --description "Radius deploy identity for $FIXTURE_REPO" \
+     --assume-role-policy-document "file://$WORK/deploy-role-trust.json" \
+     --permissions-boundary "arn:aws:iam::$ACCOUNT:policy/ai-extensions-cloud-e2e-deploy-boundary" \
+     --tags "file://$WORK/deploy-role-tags.json"
+   ```
+
+5. Create the spend alarm. It counts only the two test regions.
+
+   ```bash
+   aws budgets create-budget --account-id "$ACCOUNT" --budget "file://$WORK/budget.json" \
+     --notifications-with-subscribers "file://$WORK/budget-notifications.json"
+   ```
+
+6. Set the [AWS variables](#aws-configuration).
+
+The deploy role's boundary caps only the deploy role. The app roles it creates through EKS Pod Identity are capped by the product's app boundary, and the test role can write that boundary, because IAM can't limit what a policy contains. This is an accepted risk for the shared test account, because the account already allows broader access to other CI. [#1276](https://github.com/radius-project/ai-extensions/issues/1276) is the fast follow that removes it: the deploy identity stops creating IAM roles. For further hardening, an organization administrator can add a service control policy that denies `iam:*`, `sts:AssumeRole`, `organizations:*`, `account:*`, and `s3:PutAccountPublicAccessBlock` to principals matching `arn:aws:iam::*:role/radius/apps/*` (an `ArnLike` condition on `aws:PrincipalArn`). See [How the test signs in to AWS](../design/2026-11-aws-cloud-e2e.md#how-the-test-signs-in-to-aws).
+
+Before applying a change to a policy file, validate it. These calls are read-only:
+
+```bash
+for file in test-role-policy deploy-role-boundary; do
+  aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY --policy-document "file://$WORK/$file.json"
+done
+for file in test-role-trust deploy-role-trust; do
+  aws accessanalyzer validate-policy --policy-type RESOURCE_POLICY \
+    --validate-policy-resource-type AWS::IAM::AssumeRolePolicyDocument --policy-document "file://$WORK/$file.json"
+done
+# For example, the test role can't delete a cluster. The policy must be
+# compact JSON here; a pretty-printed file is refused.
+aws iam simulate-custom-policy --policy-input-list "$(jq -c . "$WORK/test-role-policy.json")" \
+  --action-names eks:DeleteCluster \
+  --resource-arns "arn:aws:eks:$MAIN_REGION:$ACCOUNT:cluster/$MAIN_CLUSTER"
+# And the deploy role can't create an app role without its boundary, even
+# with an identity policy that allows everything.
+aws iam simulate-custom-policy \
+  --policy-input-list '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}' \
+  --permissions-boundary-policy-input-list "$(jq -c . "$WORK/deploy-role-boundary.json")" \
+  --action-names iam:CreateRole \
+  --resource-arns "arn:aws:iam::$ACCOUNT:role/radius/apps/$FIXTURE_REPO_ID/radtest-aws-1/radius-app-web"
+```
+
+`packages/adapter-canvas/test/ci/cloud-e2e-aws-setup.test.ts` checks the same allow and deny cases on every pull request, with the product's own policies as the deploy role's.
+
+For a local run in your own account, use your account, your copy of the fixture, and the deploy role name the product gives it. Also add a statement to the test role's trust policy that lets your own IAM user assume the role, and sign in through it, so the run proves the policy is enough. Don't set the variables there.
+
+To apply a changed policy file to an existing setup, render the files as above, then:
+
+```bash
+# A managed policy keeps at most five versions. Delete the oldest
+# non-default one first if it already has five.
+aws iam create-policy-version \
+  --policy-arn "arn:aws:iam::$ACCOUNT:policy/ai-extensions-cloud-e2e-deploy-boundary" \
+  --policy-document "file://$WORK/deploy-role-boundary.json" --set-as-default
+aws iam put-role-policy --role-name ai-extensions-cloud-e2e --policy-name cloud-e2e \
+  --policy-document "file://$WORK/test-role-policy.json"
+```
+
+If you can't create a policy version, recreate the deploy role and its boundary instead: delete the role, delete the boundary, then run step 4 again. Do this only while the deploy role is empty: no environment uses it, so it has the deny-only trust policy, no inline policies, no access entries, and no lock. Otherwise environments lose their access.
 
 ### Seeded app registrations
 

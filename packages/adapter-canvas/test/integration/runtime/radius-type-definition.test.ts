@@ -2434,6 +2434,105 @@ describe("command boundary", () => {
     );
   });
 
+  it.each([false, true])(
+    "resolves a legacy pin upgrade and can abort without publishing (staged evidence invalid: %s)",
+    async (invalidEvidence) => {
+      const workspace = fs.realpathSync(temporaryDirectory());
+      const staging = stagingDirectory(workspace);
+      const current = path.join(workspace, ".radius", "bicepconfig.json");
+      const originPath = path.join(workspace, ".radius", "app.origin.json");
+      const config = JSON.stringify({
+        extensions: {
+          radius: "br:biceptypes.azurecr.io/radius:0.61",
+          customTypes: "./custom-types.tgz"
+        }
+      });
+      const originText = JSON.stringify({ skillVersion: "0.1.1" });
+      fs.writeFileSync(current, config);
+      fs.writeFileSync(originPath, originText);
+      expect(
+        spawnSync("git", ["init", "--quiet"], { cwd: workspace }).status
+      ).toBe(0);
+      expect(
+        spawnSync(
+          "git",
+          ["add", ".radius/bicepconfig.json", ".radius/app.origin.json"],
+          {
+            cwd: workspace
+          }
+        ).status
+      ).toBe(0);
+      const indexPath = path.join(workspace, ".git", "index");
+      const indexBefore = fs.readFileSync(indexPath);
+      if (invalidEvidence) {
+        fs.writeFileSync(path.join(staging, "resolved-types.json"), "{");
+      }
+      const calls: string[] = [];
+      let stdout = "";
+      let stderr = "";
+
+      const status = await resolver.main(
+        ["--staging", staging, "Radius.Core/applications"],
+        {
+          stdout: { write: (value: string) => (stdout += value) },
+          stderr: { write: (value: string) => (stderr += value) },
+          resolve: (
+            selectors: unknown[],
+            options: { warn: (warning: string) => void }
+          ) =>
+            resolver.resolveRadiusTypes(selectors, {
+              ...options,
+              ...managedIdentityOptions({
+                radiusIdentity: {
+                  release: "v0.62.0",
+                  version: "v0.62.0",
+                  commit
+                }
+              }),
+              cacheRoot: temporaryDirectory(),
+              fetchImpl: fixtureFetch(calls)
+            })
+        }
+      );
+
+      expect(status).toBe(invalidEvidence ? 1 : 0);
+      if (invalidEvidence) {
+        expect(stdout).toBe("");
+        expect(stderr).toContain("Could not parse staged resolved types");
+      } else {
+        expect(JSON.parse(stdout).resources).toEqual([
+          expect.objectContaining({ type: "Radius.Core/applications" })
+        ]);
+        expect(stderr).toBe("");
+      }
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
+        ).extensions
+      ).toEqual({
+        radius: "br:biceptypes.azurecr.io/radius:0.62",
+        customTypes: "./custom-types.tgz"
+      });
+      expect(fs.readFileSync(current, "utf8")).toBe(config);
+      expect(fs.readFileSync(originPath, "utf8")).toBe(originText);
+      const aborted = spawnSync(
+        process.execPath,
+        [
+          path.join(path.dirname(script), "promote-app-model.mjs"),
+          "--abort",
+          "--staging",
+          staging
+        ],
+        { cwd: workspace, encoding: "utf8", timeout: 5_000 }
+      );
+      expect(aborted.status, aborted.stderr).toBe(0);
+      expect(fs.existsSync(staging)).toBe(false);
+      expect(fs.readFileSync(current, "utf8")).toBe(config);
+      expect(fs.readFileSync(originPath, "utf8")).toBe(originText);
+      expect(fs.readFileSync(indexPath)).toEqual(indexBefore);
+    }
+  );
+
   it("rejects an invalid staging directory before resolution", async () => {
     let stdout = "";
     let stderr = "";
@@ -2771,12 +2870,12 @@ describe("staged Bicep configuration", () => {
     fs.writeFileSync(
       config,
       JSON.stringify({
-        extensions: { radius: "br:biceptypes.azurecr.io/radius:0.59" }
+        extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
       })
     );
     await expect(
       resolver.writeStagedBicepConfig(staging, identity.extension)
-    ).rejects.toThrow(/does not match managed Radius extension/u);
+    ).rejects.toThrow(/cannot be updated automatically/u);
     expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(false);
 
     fs.writeFileSync(config, "{");
@@ -2865,11 +2964,7 @@ describe("staged Bicep configuration", () => {
   });
 });
 
-// A Radius upgrade moves the managed CLI to a newer extension, but the pin an
-// earlier run wrote still names the old one. The resolver moves that pin
-// forward only when the saved origin record shows modeling wrote it, and never
-// backwards, which would put a shared model on older types.
-describe("moving a Radius pin an earlier modeling run wrote", () => {
+describe("updating Radius-owned release pins", () => {
   const registry = "br:biceptypes.azurecr.io/radius";
 
   interface PinCase {
@@ -2947,13 +3042,83 @@ describe("moving a Radius pin an earlier modeling run wrote", () => {
   );
 
   it.each([
-    ["a different version was saved", `${registry}:0.59`, origin("0.58")],
-    ["there is no origin record", `${registry}:0.59`, null],
-    ["the origin record is not JSON", `${registry}:0.59`, "{"],
-    ["the origin record is not an object", `${registry}:0.59`, "[]"],
-    ["the saved version is not a string", `${registry}:0.59`, origin(59)],
-    ["no version was saved", `${registry}:0.59`, origin("")],
+    ["no origin record", null],
+    [
+      "a legacy origin record",
+      JSON.stringify({ skillVersion: "0.1.1", appBicepHash: "sha256:model" })
+    ],
+    ["an empty saved version", origin("")],
+    ["a different saved version", origin("0.60")],
+    ["a non-string saved version", origin(61)],
+    ["invalid origin JSON", "{"],
+    ["a non-object origin record", "[]"]
+  ])(
+    "updates a legacy 0.61 pin to 0.62 with %s and preserves published files",
+    async (_label, originText) => {
+      const { staging, current, currentText } = arrange({
+        pin: `${registry}:0.61`,
+        origin: originText
+      });
+      const cli = `${registry}:0.62`;
+
+      await resolver.writeStagedBicepConfig(staging, cli);
+      await resolver.writeStagedBicepConfig(staging, cli);
+
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
+        )
+      ).toEqual({
+        analyzers: { core: { enabled: true } },
+        experimentalFeaturesEnabled: { extensibility: true },
+        extensions: { radius: cli, customTypes: "./custom-types.tgz" }
+      });
+      expect(fs.readFileSync(current, "utf8")).toBe(currentText);
+      const originPath = path.join(path.dirname(current), "app.origin.json");
+      if (originText === null) {
+        expect(fs.existsSync(originPath)).toBe(false);
+      } else {
+        expect(fs.readFileSync(originPath, "utf8")).toBe(originText);
+      }
+    }
+  );
+
+  it.each([
+    ["numeric minor ordering", "0.9", "0.10"],
+    ["a prerelease becoming stable", "0.62.0-rc1", "0.62"],
+    ["numeric prerelease ordering", "0.62.0-rc.9", "0.62.0-rc.10"]
+  ])("updates without origin metadata using %s", async (_label, pin, cli) => {
+    const { staging } = arrange({
+      pin: `${registry}:${pin}`,
+      origin: null
+    });
+
+    await resolver.writeStagedBicepConfig(staging, `${registry}:${cli}`);
+
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
+      ).extensions.radius
+    ).toBe(`${registry}:${cli}`);
+  });
+
+  it.each([
+    [
+      "an edge pin has a different saved version",
+      `${registry}:latest`,
+      origin("0.58")
+    ],
+    ["an edge pin has no origin record", `${registry}:latest`, null],
+    ["an edge origin record is not JSON", `${registry}:latest`, "{"],
+    ["an edge origin record is not an object", `${registry}:latest`, "[]"],
+    ["an edge saved version is not a string", `${registry}:latest`, origin(59)],
+    ["an edge pin has no saved version", `${registry}:latest`, origin("")],
     ["the pin is a local package", "./radius.tgz", origin("")],
+    [
+      "the pin has an unrecognized version",
+      `${registry}:custom`,
+      origin("custom")
+    ],
     [
       "the pin names another registry",
       "br:example.invalid/radius:0.59",
@@ -2967,7 +3132,7 @@ describe("moving a Radius pin an earlier modeling run wrote", () => {
       await expect(
         resolver.writeStagedBicepConfig(staging, identity.extension)
       ).rejects.toThrow(
-        /does not match managed Radius extension "br:biceptypes\.azurecr\.io\/radius:0\.60", and it is not the pin an earlier modeling run wrote, so it was left unchanged\. Ask the user to set extensions\.radius/u
+        /cannot be updated automatically to managed Radius extension "br:biceptypes\.azurecr\.io\/radius:0\.60", so it was left unchanged\. Ask the user to set extensions\.radius/u
       );
       expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(false);
     }
@@ -2975,7 +3140,8 @@ describe("moving a Radius pin an earlier modeling run wrote", () => {
 
   it.each([
     ["the last run saved it", origin("0.61")],
-    ["no version was saved", origin("")]
+    ["no version was saved", origin("")],
+    ["there is no origin record", null]
   ])(
     "never moves a pin newer than the managed extension back, even when %s",
     async (_label, originText) => {
@@ -3003,7 +3169,7 @@ describe("moving a Radius pin an earlier modeling run wrote", () => {
 
     await expect(
       resolver.writeStagedBicepConfig(staging, `${registry}:latest`)
-    ).rejects.toThrow(/is not the pin an earlier modeling run wrote/u);
+    ).rejects.toThrow(/cannot be updated automatically/u);
     expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(false);
   });
 });

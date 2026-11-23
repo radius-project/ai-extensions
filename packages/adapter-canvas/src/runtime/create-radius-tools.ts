@@ -4,15 +4,22 @@
 
 import { RADIUS_TOOL_DECLARATIONS } from "./declarations.js";
 import {
-  ambiguousAppSourceBrief,
+  createAppPublication,
+  GraphSourceError,
+  inspectAppModelFailure,
+  prepareAppAuthoring,
   unsupportedAppSourceReport
 } from "@radius-project/core";
 import { errorMessage, optionalString } from "./util.js";
-import { createGraphContextHelpers } from "./graph-context.js";
+import {
+  createGraphContextHelpers,
+  createRuntimeGraphOrchestrator
+} from "./graph-context.js";
 import {
   failedGraphDiffResult,
   successfulGraphDiffResult,
-  unavailableGraphDiffResult
+  unavailableGraphDiffResult,
+  type PullRequestGraphDiffToolResult
 } from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { ModelingActivity } from "./modeling-activity.js";
@@ -41,7 +48,7 @@ export function createRadiusTools(
 ) {
   const {
     workspaceState,
-    fetchBicepForBranch,
+    readBicepForBranch,
     evaluateAppSourceForBranch,
     listSourceTreeForBranch
   } = createGraphContextHelpers(deps);
@@ -66,6 +73,24 @@ export function createRadiusTools(
       /* logging is best-effort */
     }
   }
+
+  const publication = createAppPublication({
+    resolveExisting: deps.publishTargets.resolveExistingRadiusArtifact,
+    resolveTarget: deps.publishTargets.resolveRadiusArtifactTarget,
+    stagingPrefix: deps.publishTargets.resolveStagingDirPrefix,
+    validateRegistryTarget: deps.publishTargets.validateGhcrTargetForRepo,
+    exists: deps.process.existsSync,
+    compileExtension: (fromFile, target) =>
+      deps.rad.runRadBicepPublishExtension({
+        fromFile,
+        target,
+        log: logToSession
+      }),
+    publishRecipe: (file, target) =>
+      deps.withGhcrDockerConfig((env) =>
+        deps.rad.runRadBicepPublish({ file, target, env, log: logToSession })
+      )
+  });
 
   // Records that a modeling run is about to start, so a graph render that finds
   // no model defers to it instead of asking for the same work again. Called
@@ -108,12 +133,18 @@ export function createRadiusTools(
           !repoPath ||
           deps.workspace.isWorkspacePath(state?.workspacePath, repoPath);
         if (state && targetsWorkspace) {
-          const source = await evaluateAppSourceForBranch(
-            state.contextRepo || "",
-            state.contextBranch || "",
-            state
-          ).catch(() => null);
-          if (source?.status === "none") {
+          const repo = state.contextRepo || "";
+          const branch = state.contextBranch || "";
+          const authoring = await prepareAppAuthoring({
+            evaluate: () =>
+              evaluateAppSourceForBranch(repo, branch, state).catch(() => null),
+            listPaths: () => listSourceTreeForBranch(repo, branch, state),
+            explicitlySelectedDirectory: () =>
+              !!repoPath &&
+              deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
+              !deps.workspace.isWorkspacePath(repoPath, state.workspacePath)
+          });
+          if (authoring.kind === "unsupported") {
             return unsupportedAppSourceReport(state.contextRepo);
           }
           // The workspace-manifest signal needs the listing itself, which the
@@ -125,29 +156,7 @@ export function createRadiusTools(
           // A null listing means the re-read did not happen, so the brief
           // simply omits the signal; it must never be read as "no manifests
           // present".
-          const listing =
-            source?.status === "ambiguous" ?
-              await listSourceTreeForBranch(
-                state.contextRepo || "",
-                state.contextBranch || "",
-                state
-              )
-            : null;
-          // A repoPath naming somewhere INSIDE the worktree is the user's
-          // answer to the very question this brief asks. The gate above
-          // deliberately lets a subdirectory through, because a tree with no
-          // Dockerfile has none in any subdirectory either — but that evidence
-          // only justifies the refusal above. Asking again here, with
-          // candidates from outside the directory they just named, would undo
-          // their answer and loop. So the brief is for the worktree itself.
-          const answeredWithDirectory =
-            !!repoPath &&
-            deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
-            !deps.workspace.isWorkspacePath(repoPath, state.workspacePath);
-          brief =
-            answeredWithDirectory ? undefined : (
-              (ambiguousAppSourceBrief(source, listing) ?? undefined)
-            );
+          brief = authoring.brief;
         }
         if (targetsWorkspace) announceModelingRun(state);
         return deps.radiusAppBicepSkill(repoPath, brief);
@@ -186,8 +195,28 @@ export function createRadiusTools(
               "The Canvas modeling attempt is no longer current; the failure was not recorded."
           };
         }
-        const content = await fetchBicepForBranch(repo, branch, entry.state);
-        if (content) {
+        const stillCurrent = () =>
+          deps.servers.get(instanceId) === entry &&
+          entry.state.appModelAttemptTokens?.[target] === attemptToken;
+        const inspection = await inspectAppModelFailure({
+          current: stillCurrent,
+          readModel: () => readBicepForBranch(repo, branch, entry.state),
+          baseline: entry.state.appModelAttemptSourceRevisions?.[target],
+          readSourceRevision: () =>
+            readSelectedSourceRevision(entry.state, repo, branch, {
+              isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
+              workspaceSourceRevision: deps.appModel.workspaceSourceRevision,
+              branchHeadCommit: deps.appModel.branchHeadCommit
+            }).catch(() => "")
+        });
+        if (inspection.kind === "stale" || !stillCurrent()) {
+          return {
+            recorded: false,
+            error:
+              "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
+          };
+        }
+        if (inspection.kind === "model-present") {
           clearAppModelAuthoringFailure(entry.state, repo, branch);
           return {
             recorded: false,
@@ -195,20 +224,7 @@ export function createRadiusTools(
               "The application model now exists; the stale failure was not recorded."
           };
         }
-        const sourceRevision =
-          entry.state.appModelAttemptSourceRevisions?.[target] ||
-          (await readSelectedSourceRevision(entry.state, repo, branch, {
-            isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
-            workspaceSourceRevision: deps.appModel.workspaceSourceRevision,
-            branchHeadCommit: deps.appModel.branchHeadCommit
-          }).catch(() => ""));
-        if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
-          return {
-            recorded: false,
-            error:
-              "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
-          };
-        }
+        const { sourceRevision } = inspection;
         entry.state.appModelFailures ??= {};
         entry.state.appModelFailures[target] = {
           attemptToken,
@@ -218,16 +234,8 @@ export function createRadiusTools(
             { environmentKey: entry.state.appModelAttemptEnvironments[target] }
           : {})
         };
-        // The run this claim belongs to just ended, so the claim can only
-        // suppress the retry the failure message tells the user to make. A diff
-        // claim covers both compared branches under one target, while this
-        // failure is keyed `repo::branch`, so releasing by branch — not by
-        // exact target — is what frees both the single-branch claim and the
-        // diff claim that covers it. Without this a source-change retry asks
-        // for a handoff and is dropped by the dead run's claim until it
-        // expires. `missingModelHandoffTarget` owns the target
-        // encoding; do not rebuild or parse it here.
-        missingModelHandoffs.releaseForBranch(repo, branch);
+        const claim = entry.state.appModelAttemptClaims?.[target];
+        if (claim) missingModelHandoffs.release(claim);
         for (const [handoffTarget, key] of Object.entries(
           entry.state.appBicepHandoffKeys ?? {}
         )) {
@@ -249,76 +257,43 @@ export function createRadiusTools(
           baseBranch: string;
           headBranch: string;
         };
+        let sources: PullRequestGraphDiffToolResult["sources"];
         try {
-          const state = await workspaceState();
-          const [baseContent, headContent] = await Promise.all([
-            fetchBicepForBranch(repo, baseBranch, state),
-            fetchBicepForBranch(repo, headBranch, state)
+          const [baseRead, headRead] = await Promise.all([
+            deps.graphSources.read({
+              repo,
+              ref: baseBranch,
+              committedOnly: true
+            }),
+            deps.graphSources.read({
+              repo,
+              ref: headBranch,
+              committedOnly: true
+            })
           ]);
-
-          if (!baseContent && !headContent) {
+          sources = { base: baseRead.source, head: headRead.source };
+          const result = await createRuntimeGraphOrchestrator(
+            deps,
+            logToSession
+          ).compare(baseRead, headRead);
+          if (result.status === "definitions-absent") {
             return unavailableGraphDiffResult(
-              `No .radius/app.bicep or app.bicep could be read for ${baseBranch} or ${headBranch}. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
+              `No .radius/app.bicep or app.bicep could be read for ${baseBranch} or ${headBranch}. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`,
+              sources
             );
           }
-
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                baseBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                headBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const baseResources = await deps.rad.buildGraphViaRad(
-            baseContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: baseRadArtifactsDir,
-              cleanupRadArtifactsDir: baseRadArtifactsRemote
-            }
-          );
-          const headResources = await deps.rad.buildGraphViaRad(
-            headContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: headRadArtifactsDir,
-              cleanupRadArtifactsDir: headRadArtifactsRemote
-            }
-          );
-
-          const diffResources = deps.core.computeGraphDiff(
-            baseResources,
-            headResources
-          );
           return successfulGraphDiffResult(
-            deps.renderPrDiffMarkdown(diffResources, baseBranch, headBranch)
+            deps.renderPrDiffMarkdown(result.diff, baseBranch, headBranch),
+            sources
           );
         } catch (err) {
+          const source =
+            err instanceof GraphSourceError ?
+              `${err.source.repo}@${err.source.ref} (${err.source.definitionPath}): `
+            : "";
           return failedGraphDiffResult(
-            `Could not generate app graph diff: ${errorMessage(err)}`
+            `Could not generate app graph diff: ${source}${errorMessage(err)}`,
+            sources
           );
         }
       }
@@ -334,29 +309,14 @@ export function createRadiusTools(
       handler: async (args: ToolArgs) => {
         try {
           const { workspacePath } = await workspaceState();
-          const stagingPrefix = deps.publishTargets.resolveStagingDirPrefix(
+          const result = await publication.compileExtension(
             workspacePath,
-            args.stagingDir
+            args
           );
-          const fromFile = deps.publishTargets.resolveExistingRadiusArtifact(
-            workspacePath,
-            args.manifestPath,
-            `.radius/${stagingPrefix}custom-types.yaml`
-          );
-          const target = deps.publishTargets.resolveRadiusArtifactTarget(
-            workspacePath,
-            args.targetPath,
-            `.radius/${stagingPrefix}custom-types.tgz`
-          );
-          if (!deps.process.existsSync(fromFile)) {
-            return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+          if (result.kind === "missing") {
+            return `Resource-type manifest not found at ${result.path}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
           }
-          await deps.rad.runRadBicepPublishExtension({
-            fromFile,
-            target,
-            log: logToSession
-          });
-          return `Published custom-type extension to ${target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
+          return `Published custom-type extension to ${result.target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
         } catch (err) {
           return `⚠️ Could not publish the custom-type extension: ${errorMessage(err)}`;
         }
@@ -367,29 +327,16 @@ export function createRadiusTools(
       handler: async (args: ToolArgs) => {
         try {
           const { workspacePath, workspaceRepo } = await workspaceState();
-          const targetError = deps.publishTargets.validateGhcrTargetForRepo(
-            args.target,
-            workspaceRepo
-          );
-          if (targetError) return targetError;
-          const file = deps.publishTargets.resolveExistingRadiusArtifact(
+          const result = await publication.publishRecipe(
             workspacePath,
-            args.file,
-            null
+            workspaceRepo,
+            args
           );
-          if (!deps.process.existsSync(file)) {
-            return `Recipe file not found at ${file}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+          if (result.kind === "refused") return result.error;
+          if (result.kind === "missing") {
+            return `Recipe file not found at ${result.path}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
           }
-          const target = String(args.target).trim();
-          const published = await deps.withGhcrDockerConfig((env) =>
-            deps.rad.runRadBicepPublish({
-              file,
-              target,
-              env,
-              log: logToSession
-            })
-          );
-          return `Published recipe to ${String(published)}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
+          return `Published recipe to ${result.reference}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
         } catch (err) {
           return `⚠️ Could not publish the recipe: ${errorMessage(err)}`;
         }

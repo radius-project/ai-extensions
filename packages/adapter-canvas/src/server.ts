@@ -1,13 +1,16 @@
 import { workflowTempFile } from "@radius-project/adapter-shared";
+import { graphSourceOptions } from "./graph-source-options.js";
 import {
   createDeploymentLookup,
   createDeploymentRepository,
   createDeploymentIdentityReader,
   createDeploymentObservationBindings,
+  createGraphSourceBindings,
   readWorkspaceFile,
   type DeploymentRuntime
 } from "@radius-project/adapter-shared";
 import { createDeploymentViews } from "./server/services/deployment-views.js";
+import { createCanvasGraphSources } from "./server/graph-sources.js";
 import { createDeploymentAbandonmentViewService } from "./server/services/deployment-abandonment-view.js";
 import {
   ensureAzureServicePrincipal,
@@ -46,7 +49,6 @@ import {
   buildRemediation,
   computeGraphDiff,
   deployStatusKeys,
-  fetchBicepSelectionFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
   mergeDeployedGraphDisplayMetadata,
@@ -244,10 +246,6 @@ import type {
   SetupCleanupOutcome,
   SetupCleanupResult
 } from "./operations.js";
-import {
-  radArtifactsDirForSelection,
-  radArtifactsFingerprint
-} from "./remote-rad-artifacts.js";
 import {
   prepareSourceRefResources,
   setSourceRefResources
@@ -1358,16 +1356,17 @@ function triggerAppBicepHandoff(
   page: string,
   progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph",
   isCurrent?: () => boolean,
-  environmentKey?: string
+  environmentKey?: string,
+  onFailure?: (message: string) => void
 ): void {
-  try {
-    if (typeof appBicepHandoff !== "function") return;
-    if (!repo) return;
-    const list = (Array.isArray(branches) ? branches : [branches]).filter(
-      (branch): branch is string => Boolean(branch)
-    );
-    Promise.resolve(
-      appBicepHandoff({
+  const handoff = appBicepHandoff;
+  if (!handoff || !repo) return;
+  const list = (Array.isArray(branches) ? branches : [branches]).filter(
+    (branch): branch is string => Boolean(branch)
+  );
+  void Promise.resolve()
+    .then(() =>
+      handoff({
         repo,
         branches: list,
         page,
@@ -1376,10 +1375,14 @@ function triggerAppBicepHandoff(
         isCurrent,
         environmentKey
       })
-    ).catch(() => {});
-  } catch {
-    /* never let a handoff failure break the response */
-  }
+    )
+    .catch((error: unknown) => {
+      const message = redactGhCredentials(errorMessage(error));
+      console.error(
+        `[radius graph] Application model handoff failed: ${message}`
+      );
+      if (isCurrent?.() !== false) onFailure?.(message);
+    });
 }
 
 // Hand a failed deploy to the agent to repair and redeploy. Fires at most once
@@ -3475,18 +3478,6 @@ export function explainMissingPackagesScope(
 // record is almost always in the newest handful.
 const DEPLOY_MAX_PARALLEL_RECORDS = 10;
 
-const resolveRepoAppName = createDeploymentLookup({
-  readApplicationIdentity: createDeploymentIdentityReader({
-    listWorkflowArtifacts,
-    downloadWorkflowArtifact,
-    redactDiagnostic: redactGhCredentials
-  }),
-  ghOrThrow,
-  deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
-  deleteWorkflowFile: DELETE_WORKFLOW_FILE,
-  maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS
-}).resolveRepoAppName;
-
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -3511,6 +3502,10 @@ async function resolveEnvDeployment(
 
 function deploymentLookupFor(execute: typeof cliExec) {
   return createDeploymentLookup({
+    repository: createDeploymentRepository({
+      execute,
+      redactDiagnostic: redactGhCredentials
+    }),
     readApplicationIdentity: createDeploymentIdentityReader({
       ...createDeploymentObservationBindings({
         execute,
@@ -3641,36 +3636,6 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 // Takes only the state-bearing shape of an instance entry, not the whole
 // `CanvasServerEntry`, so the migrated `graphs-planning` write routes can inject
 // it against their own narrow entry type without a cast.
-async function fetchBicepSelection(
-  entry: { state: CanvasState },
-  repo: string,
-  branch: string
-): Promise<{
-  content: string | null;
-  fromWorkspace: boolean;
-  branch: string;
-  bicepPath: string;
-}> {
-  const access = accessForSelection(entry, repo, branch);
-  if (access.useWorkspace) {
-    const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
-    if (local)
-      return {
-        content: local.content,
-        fromWorkspace: true,
-        branch: access.branch,
-        bicepPath: local.repoPath
-      };
-  }
-  const remote = await fetchBicepSelectionFromRepo(github, repo, access.branch);
-  return {
-    content: remote?.content ?? null,
-    fromWorkspace: false,
-    branch: access.branch,
-    bicepPath: remote?.bicepPath ?? ""
-  };
-}
-
 // Every path on a branch, resolved through the same workspace-or-remote access
 // rule as the Bicep selection so the answer describes the tree the graph would
 // actually be built from. Resolves empty when the tree cannot be read, which
@@ -5814,6 +5779,8 @@ export function createProductionCanvasServerRuntime(
   // The listing cache, its TTL and the deploy service are read through getters
   // because all three are declared later and would otherwise be in the
   // temporal dead zone when this runtime's route dependencies are built.
+  const { inspectRepoApplication, resolveRepoAppName } =
+    deploymentLookupFor(cliExecPort);
   const deploymentsRoutes = createDeploymentsRoutes({
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     isValidRepoSlug,
@@ -5825,7 +5792,7 @@ export function createProductionCanvasServerRuntime(
     triggerDeployRepairHandoff: () => false,
     triggerDeployFailureNotice: () => false,
     deployHandoffStatus,
-    resolveRepoAppName,
+    inspectRepoApplication,
     resolveEnvDeployment: (repo, environment, application) =>
       resolveEnvDeployment(repo, environment, application, cliExecPort),
     listEnvDeployment: (repo, environment, application) =>
@@ -6033,6 +6000,12 @@ export function createProductionCanvasServerRuntime(
   });
   const authorizeAzure = createAzureSetupService(azureSetupDependencies);
 
+  const graphSources = createCanvasGraphSources(
+    createGraphSourceBindings(graphSourceOptions(cliExecPort)),
+    isWorkspaceSelection,
+    currentWorkspaceBranch
+  );
+  const fetchBicepSelection = graphSources.select;
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     resolveBranchForRequest: (entry, repo, requestedBranch) =>
@@ -6051,8 +6024,8 @@ export function createProductionCanvasServerRuntime(
       setSourceRefResources(entry, "graph", resources, context, expectedToken),
     isCurrentSourceRef: (entry, expectedToken) =>
       isCurrentSourceRefToken(entry.state, "graph", expectedToken),
-    triggerAppBicepHandoff: (entry, repo, branch) =>
-      triggerAppBicepHandoff(entry, repo, branch, "graph"),
+    triggerAppBicepHandoff: (entry, repo, branch, isCurrent) =>
+      triggerAppBicepHandoff(entry, repo, branch, "graph", "graph", isCurrent),
     triggerGraphRepairHandoff: (entry, request) =>
       triggerGraphRepairHandoff(entry, request),
     clearGraphRepairAttempt: (entry) =>
@@ -6063,10 +6036,11 @@ export function createProductionCanvasServerRuntime(
       listBranchPaths(entry, repo, branch),
     workspaceGraphJsonPath: (state, bicepRepoPath) =>
       workspaceGraphJsonPath(state, bicepRepoPath),
-    radArtifactsDirForSelection: (options) =>
-      radArtifactsDirForSelection({ ...options, github }),
+    graphDefinitionHash,
+    radArtifactsDirForSelection: graphSources.stage,
     buildGraphViaRad: buildGraphPort,
     canvasGraphResources,
+    removeDirectory: (dir) => rmSync(dir, { recursive: true, force: true }),
     errorMessage,
     logError: (message) => console.error(message)
   });
@@ -6092,13 +6066,11 @@ export function createProductionCanvasServerRuntime(
       pipeline: createGraphPipeline<CanvasServerEntry>({
         fetchBicepSelection: (entry, repo, branch) =>
           fetchBicepSelection(entry, repo, branch),
-        resolveRadArtifactsDir: (request) =>
-          radArtifactsDirForSelection({ ...request, github }),
+        resolveRadArtifactsDir: graphSources.stage,
         buildGraphViaRad: buildGraphPort,
         canvasGraphResources,
         workspaceGraphJsonPath,
         graphDefinitionHash,
-        radArtifactsFingerprint,
         removeDirectory: (dir) => {
           rmSync(dir, { recursive: true, force: true });
         }
@@ -6605,14 +6577,14 @@ export function createProductionCanvasServerRuntime(
     plannedGraph: createPlannedGraphRecoveryService({
       prepareSourceRefResources,
       setSourceRefResources,
-      readModelForSelection: readDeployModelForSelection,
-      radArtifactsDirForSelection: (request) =>
-        radArtifactsDirForSelection({ ...request, github }),
+      readModelForSelection: graphSources.readForRecovery,
+      radArtifactsDirForSelection: graphSources.stage,
       buildGraphViaRad: buildGraphPort,
       fetchRecipePack: (provider) => fetchRecipePack(github, provider),
       resolveRecipeOutputs: (parsed, recipes, provider) =>
         resolveRecipeOutputs(github, parsed, recipes, provider),
       canvasGraphResources,
+      removeDirectory: (dir) => rmSync(dir, { recursive: true, force: true }),
       errorMessage
     }),
     readModelForSelection: readDeployModelForSelection,

@@ -1,0 +1,32 @@
+# eksctl config for the main Cloud E2E cluster. Render with envsubst, then:
+#   eksctl create cluster -f main-cluster.yaml --write-kubeconfig=false
+# See the AWS section of docs/eng/CLOUD_E2E_RUNBOOK.md.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${MAIN_CLUSTER}
+  region: ${MAIN_REGION}
+  tags: { ai-extensions-cloud-e2e: infrastructure }
+accessConfig:
+  authenticationMode: API
+  bootstrapClusterCreatorAdminPermissions: true
+vpc:
+  cidr: 10.60.0.0/16
+  nat: { gateway: Disable }
+  clusterEndpoints: { publicAccess: true, privateAccess: false }
+addons:
+  - name: vpc-cni
+  - name: kube-proxy
+  - name: coredns
+  - name: eks-pod-identity-agent
+managedNodeGroups:
+  # Starts with one node so eksctl's add-on wait never depends on CoreDNS
+  # coming up with no nodes. The runbook scales it to zero afterwards.
+  - name: default
+    instanceType: t3.medium
+    minSize: 0
+    maxSize: 2
+    desiredCapacity: 1
+    privateNetworking: false
+    labels: { radius-e2e/pool: default }
+    tags: { ai-extensions-cloud-e2e: infrastructure }

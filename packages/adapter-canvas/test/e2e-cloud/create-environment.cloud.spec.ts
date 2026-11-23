@@ -112,10 +112,12 @@ import {
   waitForIdleSession,
   type CanvasTarget
 } from "./support/copilot-app-ui.js";
+import { readPlaywrightGitHubAppTokenConfig } from "./support/github-app-token.js";
 import {
-  readPlaywrightGitHubAppTokenConfig,
-  refreshProcessGitHubToken
-} from "./support/github-app-token.js";
+  createGitHubTokenRefresh,
+  prepareCloudRun,
+  runGhSync
+} from "./support/github-sign-in.js";
 import {
   awaitRequestOrRefusal,
   classifyWorkflowPublication,
@@ -178,7 +180,7 @@ import {
   FIXTURE_APPLICATION_NAME,
   FIXTURE_KUBERNETES_NAMESPACE,
   FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
-  FIXTURE_REPO_NAME,
+  fixtureProjectName,
   isFixtureRepositoryProvisioned,
   resolveFixtureClusterTarget,
   resolveFixtureLocation
@@ -228,6 +230,9 @@ const orphanAppGate = evaluateSeededAppGate(
   process.env[ORPHAN_APP_NAME_VARIABLE]
 );
 const WORKFLOW_DIRECTORY = ".github/workflows";
+// Runs first: a local run against the developer's own fixture copy signs in
+// here, before the token variables below are read.
+const cloudRun = prepareCloudRun(runGhSync);
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
@@ -239,6 +244,8 @@ const WORKFLOW_QUIESCENCE_TIMEOUT_MS = 10 * 60 * 1000;
 const WORKFLOW_DISCOVERY_TIMEOUT_MS = 2 * 60 * 1000;
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
+  preparationFailure: cloudRun.failure,
+  githubSignIn: cloudRun.signIn,
   fixtureProvisioned: isFixtureRepositoryProvisioned(),
   unprovisionedReason: describeUnprovisionedFixtureRepository(),
   subscriptionId,
@@ -715,13 +722,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     });
   };
 
-  const refreshGitHubToken = async (): Promise<void> => {
-    if (!githubAppTokenConfig)
-      throw new Error(
-        "GitHub App refresh credentials are required for the cloud lifecycle journey."
-      );
-    await refreshProcessGitHubToken(githubAppTokenConfig);
-  };
+  const refreshGitHubToken = createGitHubTokenRefresh(
+    cloudRun.signIn,
+    githubAppTokenConfig
+  );
 
   test.beforeAll(async () => {
     if (cloudCanvasHost === "copilot-app")
@@ -751,6 +755,9 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       resourceGroup: clusterTarget?.resourceGroup,
       clusterName: clusterTarget?.clusterName,
       githubRunId: process.env.GITHUB_RUN_ID,
+      repository: cloudRun.fixture.repository,
+      baselineSha: cloudRun.fixture.baselineSha,
+      otherBaselineShas: [cloudRun.fixture.awsBaselineSha],
       ports
     });
     fixture.registerNamespaceCleanupTarget(
@@ -772,8 +779,9 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     );
     await refreshGitHubToken();
     // Turns every assertion below from an observation into a proof: none of the
-    // artifacts asserted on existed before the product ran.
-    await fixture.assertCleanSlate();
+    // artifacts asserted on existed before the product ran. Only a clean
+    // repository has its default branch moved to this run's baseline.
+    await fixture.prepareCleanSlate();
   });
 
   test.beforeEach(refreshGitHubToken);
@@ -847,9 +855,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       if (!cloud) throw new Error("The cloud fixture was not created.");
       const { appPage } = cloudCanvas.app;
 
-      await ensureFixtureProject(appPage, cloud.repository, FIXTURE_REPO_NAME);
+      const projectName = fixtureProjectName(cloud.repository);
+      await ensureFixtureProject(appPage, cloud.repository, projectName);
       const sessionId = await startSessionFromNewPage(appPage, {
-        projectName: FIXTURE_REPO_NAME,
+        projectName,
         prompt:
           "Reply Ready and stop. Do not read, change, commit, push, model, or deploy anything. The test will prepare this workspace first."
       });
