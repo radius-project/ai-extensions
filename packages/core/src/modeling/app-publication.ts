@@ -12,7 +12,11 @@ export interface AppPublicationPorts {
   validateRegistryTarget(target: unknown, repo: WorkspacePath): string | null;
   exists(path: string): boolean;
   compileExtension(fromFile: string, target: string): Promise<unknown>;
-  publishRecipe(file: string, target: string): Promise<unknown>;
+  publishRecipe(
+    file: string,
+    target: string,
+    workspace: WorkspacePath
+  ): Promise<unknown>;
 }
 
 export function createAppPublication(ports: AppPublicationPorts) {
@@ -77,7 +81,7 @@ export function createAppPublication(ports: AppPublicationPorts) {
         const file = ports.resolveExisting(workspace, input.file, null);
         if (!ports.exists(file))
           return { kind: "missing", path: file } as const;
-        const published = await ports.publishRecipe(file, target);
+        const published = await ports.publishRecipe(file, target, workspace);
         return { kind: "published", reference: String(published) } as const;
       });
     }

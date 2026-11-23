@@ -66,7 +66,8 @@ describe("application publication", () => {
     ).rejects.toThrow("unknown outcome");
     expect(ports.publishRecipe).toHaveBeenCalledExactlyOnceWith(
       "recipe",
-      "target"
+      "target",
+      "workspace"
     );
     await expect(
       publication.publishRecipe("workspace", "org/repo", input)
@@ -98,13 +99,21 @@ describe("application publication", () => {
     const successor = request("new.bicep", target);
     await request("cache.bicep", "br:ghcr.io/org/repo/cache:v1");
     expect(ports.publishRecipe).toHaveBeenCalledTimes(2);
-    expect(ports.publishRecipe).not.toHaveBeenCalledWith("new.bicep", target);
+    expect(ports.publishRecipe).not.toHaveBeenCalledWith(
+      "new.bicep",
+      target,
+      "workspace"
+    );
     finishFirst(new Error("unknown outcome"));
     await olderResult;
     await expect(successor).resolves.toEqual({
       kind: "published",
       reference: "registry reference"
     });
-    expect(ports.publishRecipe).toHaveBeenLastCalledWith("new.bicep", target);
+    expect(ports.publishRecipe).toHaveBeenLastCalledWith(
+      "new.bicep",
+      target,
+      "workspace"
+    );
   });
 });

@@ -108,6 +108,15 @@ export function createModelAuthoringOwner(ports: {
     assertCurrent(token: string) {
       assertCurrent(requestFor(token));
     },
+    assertStandalone(workspace: string | null | undefined) {
+      for (const request of requests.values()) {
+        if (request.target.workspace === workspace && request.current()) {
+          throw new Error(
+            "This worktree has an active managed Radius authoring request; use its request token."
+          );
+        }
+      }
+    },
     async publish<T>(
       token: string,
       start: (

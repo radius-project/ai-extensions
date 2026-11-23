@@ -1477,6 +1477,9 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
 
   it.each([
     "complete",
+    "refresh",
+    "refresh cancelled",
+    "refresh selection changed",
     "invalid",
     "cancel",
     "stale",
@@ -1486,6 +1489,9 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
   ] as const)(
     "binds the managed Canvas graph handoff to registered tools: %s",
     async (outcome) => {
+      const model =
+        "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+      let selectionIsCurrent = true;
       const stage = resolve(".radius", ".staging-managed-test");
       const node = resolve("test", "bin", "node");
       const skillBase = resolve("test", "skills", "radius-app-bicep");
@@ -1501,7 +1507,24 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       });
       const harness = await createRuntimeSdkHarness(
         {
-          workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] }
+          workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] },
+          ...(outcome.startsWith("refresh") ?
+            {
+              bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+              filesByRepoBranch: {
+                [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
+                  serializeAppOrigin({
+                    generatedAt: "2026-08-11T05:32:32.000Z",
+                    sourceCommit: "a".repeat(40),
+                    skillVersion: "0.1.0-test",
+                    radiusVersion: "0.60",
+                    appBicepHash: hashAppBicep(model)
+                  })
+              },
+              headCommits: { "workspace:/workspace": "b".repeat(40) },
+              sourceChangedSince: true
+            }
+          : {})
         },
         (deps) => {
           deps.appModel.workspaceSourceRevision = async () => revision;
@@ -1545,7 +1568,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           repo: "acme/widgets",
           branches: ["main"],
           page: "graph",
-          state
+          state,
+          isCurrent: () => selectionIsCurrent
         };
         if (outcome === "send failed") {
           vi.mocked(harness.session.send).mockRejectedValueOnce(
@@ -1597,7 +1621,20 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             "source or worktree changed"
           );
           expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
-        } else if (outcome === "complete") {
+        } else if (outcome === "complete" || outcome === "refresh") {
+          await expect(
+            tool("radius_publish_custom_type_extension").handler({})
+          ).resolves.toContain("active managed");
+          await expect(
+            tool("radius_publish_recipe").handler({
+              file: "service-recipe.bicep",
+              target: "br:ghcr.io/acme/widgets/service:1"
+            })
+          ).resolves.toContain("active managed");
+          expect(
+            harness.deps.rad.runRadBicepPublishExtension
+          ).not.toHaveBeenCalled();
+          expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
           await expect(
             tool("radius_publish_custom_type_extension").handler({
               requestToken
@@ -1614,7 +1651,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           ).resolves.toContain("Published recipe");
           expect(artifact).toHaveBeenCalledWith("service-recipe.bicep", true);
           await expect(
-            complete.handler({ requestToken, outcome })
+            complete.handler({ requestToken, outcome: "complete" })
           ).resolves.toMatchObject({
             kind: "promoted",
             published: ["app.bicep"]
@@ -1629,9 +1666,18 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             expect.objectContaining({ cwd: "/workspace" })
           );
           expect(promote).toHaveBeenCalledOnce();
-        } else if (outcome === "cancel") {
+        } else if (outcome === "refresh selection changed") {
+          selectionIsCurrent = false;
           await expect(
-            complete.handler({ requestToken, outcome })
+            complete.handler({ requestToken, outcome: "complete" })
+          ).resolves.toMatchObject({ kind: "refused" });
+          expect(execFile).not.toHaveBeenCalled();
+          expect(promote).not.toHaveBeenCalled();
+          await complete.handler({ requestToken, outcome: "cancel" });
+          expect(cancel).toHaveBeenCalledOnce();
+        } else if (outcome === "cancel" || outcome === "refresh cancelled") {
+          await expect(
+            complete.handler({ requestToken, outcome: "cancel" })
           ).resolves.toEqual({ kind: "cancelled" });
           await expect(
             complete.handler({ requestToken, outcome: "complete" })

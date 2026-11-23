@@ -451,7 +451,8 @@ export function createAppModelHandoff(
             branch,
             attemptToken,
             sourceRevisions[0],
-            skillHandoff
+            skillHandoff,
+            stillCurrent
           );
         }
         await deps.send(
@@ -515,11 +516,14 @@ export function createAppModelHandoff(
     // Checked before plain staleness: a model this extension cannot prove it
     // generated needs the user's agreement, because regenerating it destroys
     // whatever they wrote by hand.
-    const refresh = findAppModelRefresh(present);
+    const comparison = page === "graph-diff" || targets.length > 1;
+    const refresh = comparison ? undefined : findAppModelRefresh(present);
     if (refresh) {
       const { model } = refresh;
       const refreshKey = refreshRequestKey(model);
       let memoOwned = false;
+      let attemptToken: string | undefined;
+      const tokenKey = appModelTargetKey(repo, model.branch);
       try {
         if (
           !(await sourcesStillCurrent([model])) ||
@@ -530,13 +534,65 @@ export function createAppModelHandoff(
           releaseStateReservation();
           return;
         }
-        const skillHandoff = await buildSkillHandoff();
+        let skillHandoff = await buildSkillHandoff();
+        if (!stillCurrent() || !ownsStateReservation()) {
+          releaseStateReservation();
+          deps.releaseRefreshMemo(refreshKey);
+          return;
+        }
         if (refresh.kind === "confirmation") {
           await deps.send(appModelUnverifiedMessage(model, skillHandoff));
         } else {
+          if (state?.canvasInstanceId && model.source.kind === "workspace") {
+            const revision = await deps.readSourceRevision(
+              repo,
+              model.branch,
+              context
+            );
+            const latest = await deps.resolveStatus(
+              repo,
+              model.branch,
+              context
+            );
+            if (
+              !(await sourcesStillCurrent([latest])) ||
+              !stillCurrent() ||
+              !ownsStateReservation() ||
+              latest.source.kind !== "workspace" ||
+              state.workspacePath !== context.workspacePath ||
+              latest.freshness.appBicepHash !== model.freshness.appBicepHash ||
+              findAppModelRefresh([latest])?.kind !== "refresh" ||
+              refreshRequestKey(latest) !== refreshKey
+            ) {
+              releaseStateReservation();
+              deps.releaseRefreshMemo(refreshKey);
+              return;
+            }
+            attemptToken = randomUUID();
+            state.appModelAttemptTokens ??= {};
+            state.appModelAttemptTokens[tokenKey] = attemptToken;
+            delete state.appModelAttemptClaims?.[tokenKey];
+            delete state.appModelAttemptEnvironments?.[tokenKey];
+            delete state.appModelAttemptSourceRevisions?.[tokenKey];
+            skillHandoff = deps.beginManaged(
+              state,
+              repo,
+              model.branch,
+              attemptToken,
+              revision,
+              skillHandoff,
+              stillCurrent
+            );
+          }
           await deps.send(appModelRefreshMessage(model, skillHandoff));
         }
       } catch (error) {
+        if (attemptToken) {
+          deps.cancelManaged(attemptToken);
+          if (state?.appModelAttemptTokens?.[tokenKey] === attemptToken) {
+            delete state.appModelAttemptTokens[tokenKey];
+          }
+        }
         releaseStateReservation();
         if (memoOwned) deps.releaseRefreshMemo(refreshKey);
         throw error;
@@ -548,8 +604,8 @@ export function createAppModelHandoff(
     // need a commit and a push, so there is nothing to hand off — say it drifted
     // and stop.
     for (const status of present) {
-      if (!status.refreshable && status.freshness.stale) {
-        deps.log(appModelStaleNotice(status));
+      if (status.freshness.stale && (comparison || !status.refreshable)) {
+        deps.log(appModelStaleNotice(status, comparison));
       }
     }
   };
