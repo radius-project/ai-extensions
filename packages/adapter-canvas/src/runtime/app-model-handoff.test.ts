@@ -137,6 +137,7 @@ function harness(
     resolveContext,
     resolveStatus,
     assertWorkspaceSource: vi.fn(async () => {}),
+    authorizeMissingModel: vi.fn(),
     evaluateSource,
     modelingInFlight,
     announceModelingRun: (repo, branches) => {

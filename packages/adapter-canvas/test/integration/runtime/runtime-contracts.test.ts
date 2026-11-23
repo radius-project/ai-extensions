@@ -1858,7 +1858,22 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
   ): Promise<string> {
     const send = harness.session.send as ReturnType<typeof vi.fn>;
     send.mockClear();
-    await harness.capturedHostCallbacks.appBicepHandoff?.(request);
+    const { state } = await harness.deps.getOrCreateServer(
+      "model-panel",
+      "graph"
+    );
+    Object.assign(state, {
+      canvasInstanceId: "model-panel",
+      workspacePath: "/workspace",
+      workspaceRepo: GRAPH_HANDOFF.repo,
+      workspaceBranch: "main"
+    });
+    harness.deps.appModel.workspaceSourceRevision = async () =>
+      "fixture-source";
+    await harness.capturedHostCallbacks.appBicepHandoff?.({
+      ...request,
+      state
+    });
     return send.mock.calls.map((call) => JSON.stringify(call[0])).join("\n");
   }
 
@@ -1967,7 +1982,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     await harness.extension.shutdown("test");
   });
 
-  it("keeps asking for a model on a branch nothing is generating", async () => {
+  it("does not authorize remote authoring when a local model run exists", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
@@ -1980,13 +1995,14 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     await generateApp(harness);
 
     // A run against the worktree's `main` says nothing about `release`.
-    const handedOff = await handOff(harness, {
-      repo: "acme/widgets",
-      branches: ["release"],
-      page: "graph"
-    });
-
-    expect(handedOff).toContain(SKILL_BASE);
+    await expect(
+      handOff(harness, {
+        repo: "acme/widgets",
+        branches: ["release"],
+        page: "graph"
+      })
+    ).rejects.toThrow("This graph selection is read-only");
+    expect(harness.session.send).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
@@ -1997,40 +2013,35 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
   // the same branch, asks for the same model again before the run stages.
   it.each([
     {
-      name: "a diff that includes the requested branch waits for its run",
+      name: "a diff that includes the requested branch cannot start a run",
       second: {
         repo: "acme/widgets",
         branches: ["main", "feat"],
         page: "graph-diff"
-      },
-      asksAgain: false
+      }
     },
     {
-      name: "a view of an unrelated branch still asks",
-      second: { repo: "acme/widgets", branches: ["feat"], page: "graph" },
-      asksAgain: true
+      name: "a view of an unrelated branch cannot start a run",
+      second: { repo: "acme/widgets", branches: ["feat"], page: "graph" }
     }
-  ])(
-    "after the Canvas requests a model, $name",
-    async ({ second, asksAgain }) => {
-      const harness = await createRuntimeSdkHarness({
-        workspaceTreeByRepoBranch: {
-          "acme/widgets@main": ["src/index.ts", "Dockerfile"]
-        },
-        remoteTreeByRepoBranch: {
-          "acme/widgets@feat": ["src/index.ts", "Dockerfile"]
-        }
-      });
+  ])("after the Canvas requests a model, $name", async ({ second }) => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "Dockerfile"]
+      },
+      remoteTreeByRepoBranch: {
+        "acme/widgets@feat": ["src/index.ts", "Dockerfile"]
+      }
+    });
 
-      expect(await handOff(harness)).toContain(SKILL_BASE);
-      const again = await handOff(harness, second);
+    expect(await handOff(harness)).toContain(SKILL_BASE);
+    await expect(handOff(harness, second)).rejects.toThrow(
+      "This graph selection is read-only"
+    );
+    expect(harness.session.send).not.toHaveBeenCalled();
 
-      if (asksAgain) expect(again).toContain(SKILL_BASE);
-      else expect(again).toBe("");
-
-      await harness.extension.shutdown("test");
-    }
-  );
+    await harness.extension.shutdown("test");
+  });
 
   it("does not re-ask once the user answers with a directory inside the worktree", async () => {
     const harness = await createRuntimeSdkHarness({
@@ -2058,7 +2069,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     await harness.extension.shutdown("test");
   });
 
-  it("stays silent for a repository that is not the workspace's, skipping a vendored Dockerfile the tree listing does not prune", async () => {
+  it("refuses authoring for a repository outside the workspace", async () => {
     const harness = await createRuntimeSdkHarness({
       remoteTreeByRepoBranch: {
         "other/service@feat": [
@@ -2068,13 +2079,14 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       }
     });
 
-    const handedOff = await handOff(harness, {
-      repo: "other/service",
-      branches: ["feat"],
-      page: "graph"
-    });
-
-    expect(handedOff).toBe("");
+    await expect(
+      handOff(harness, {
+        repo: "other/service",
+        branches: ["feat"],
+        page: "graph"
+      })
+    ).rejects.toThrow("This graph selection is read-only");
+    expect(harness.session.send).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
@@ -2243,12 +2255,7 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
 
   it.each([
     ["loadGraph", "graph", { repo: "acme/widgets", branch: "main" }],
-    ["planGraph", "graph", { repo: "acme/widgets", branch: "main" }],
-    [
-      "diffBranches",
-      "graph-diff",
-      { repo: "acme/widgets", base: "main", head: "feature" }
-    ]
+    ["planGraph", "graph", { repo: "acme/widgets", branch: "main" }]
   ] as const)(
     "still asks the agent to model when %s polls the same selection during the grace window",
     async (workflow, page, request) => {

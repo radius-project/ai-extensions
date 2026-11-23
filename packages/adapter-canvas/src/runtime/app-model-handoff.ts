@@ -73,6 +73,11 @@ export interface AppModelHandoffDependencies {
     state: CanvasState
   ): Promise<AppModelStatus>;
   assertWorkspaceSource(source: AppModelStatus["source"]): Promise<void>;
+  authorizeMissingModel(
+    page: string,
+    state: CanvasState | undefined,
+    statuses: readonly AppModelStatus[]
+  ): void;
   // Consulted only when no branch has a model, because a model that already
   // exists answers "can this repository be modeled" by existing.
   evaluateSource(
@@ -300,6 +305,7 @@ export function createAppModelHandoff(
     };
 
     if (appAuthoringRequired(statuses)) {
+      deps.authorizeMissingModel(page, state, statuses);
       // Claim extension-wide before consuming the per-panel reservation. A
       // reopened panel that loses this claim must remain free to retry if the
       // owner later abandons delivery.
@@ -384,6 +390,7 @@ export function createAppModelHandoff(
       }
       let skillHandoff: string;
       try {
+        deps.authorizeMissingModel(page, state, settled);
         skillHandoff = await buildSkillHandoff();
       } catch (error) {
         releaseReservation();
