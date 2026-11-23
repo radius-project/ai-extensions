@@ -75,4 +75,36 @@ describe("application publication", () => {
       reference: "registry reference"
     });
   });
+
+  it("orders writes to one target after a failed predecessor without blocking other targets", async () => {
+    const { ports, publication } = fixture();
+    let finishFirst: (error: Error) => void = () => {
+      throw new Error("First publication did not start");
+    };
+    ports.publishRecipe.mockImplementationOnce(() => {
+      return new Promise<string>((_resolve, reject) => {
+        finishFirst = reject;
+      });
+    });
+    const target = "br:ghcr.io/org/repo/database:v1";
+    const request = (file: string, reference: string) =>
+      publication.publishRecipe("workspace", "org/repo", {
+        file,
+        target: reference
+      });
+    const older = request("old.bicep", target);
+    const olderResult = expect(older).rejects.toThrow("unknown outcome");
+    await vi.waitFor(() => expect(ports.publishRecipe).toHaveBeenCalledOnce());
+    const successor = request("new.bicep", target);
+    await request("cache.bicep", "br:ghcr.io/org/repo/cache:v1");
+    expect(ports.publishRecipe).toHaveBeenCalledTimes(2);
+    expect(ports.publishRecipe).not.toHaveBeenCalledWith("new.bicep", target);
+    finishFirst(new Error("unknown outcome"));
+    await olderResult;
+    await expect(successor).resolves.toEqual({
+      kind: "published",
+      reference: "registry reference"
+    });
+    expect(ports.publishRecipe).toHaveBeenLastCalledWith("new.bicep", target);
+  });
 });
