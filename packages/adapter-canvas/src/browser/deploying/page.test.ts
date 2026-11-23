@@ -4443,6 +4443,169 @@ describe("in-flight listing refresh", () => {
     expect(listings).toHaveLength(3);
   });
 
+  // While GitHub has created a deployment record but not yet its first status,
+  // the server reports the environment as a diagnostic instead of a row.
+  const diagnosticOnly = (environment: string) => ({
+    deployments: [],
+    environmentDiagnostics: [
+      {
+        environment,
+        kind: "error",
+        message: `Could not identify GitHub deployment 5 for environment ${environment}.`
+      }
+    ]
+  });
+  const recordedDeploy = {
+    deployments: [
+      {
+        ...knownDeployment("app", "dev", "in_progress"),
+        runUrl: "https://github.com/octo/app/actions/runs/7"
+      }
+    ]
+  };
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "shows View Run for %s when the first listing only has a diagnostic",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      let recorded = false;
+      let calls = 0;
+      page.browser.net.handle(freshListing(page.repo), () => {
+        calls++;
+        return jsonResponse(recorded ? recordedDeploy : diagnosticOnly("dev"));
+      });
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain("Could not identify");
+
+      recorded = true;
+      await advance(page, IN_FLIGHT_LIST_REFRESH_MS, step);
+      expect(page.tableBody.innerHTML).toContain(
+        "https://github.com/octo/app/actions/runs/7"
+      );
+      const settled = calls;
+      await advance(page, 5 * 60 * 1000, step);
+      expect(calls).toBe(settled);
+    }
+  );
+
+  it("keeps refreshing every 60 seconds while the diagnostic lasts", async () => {
+    const page = await startDeploy();
+    const startedAt: number[] = [];
+    page.browser.net.handle(freshListing(page.repo), () => {
+      startedAt.push(page.browser.clock.now());
+      return jsonResponse(diagnosticOnly("dev"));
+    });
+    page.deployBtn.dispatch("click");
+    const begin = page.browser.clock.now();
+    await flushPromises();
+    await advance(page, 6 * 60 * 1000, DEPLOY_WORKFLOW_POLL_MS);
+
+    expect(startedAt.map((at) => at - begin)).toEqual([
+      0, 15_000, 30_000, 45_000, 60_000, 75_000, 90_000, 105_000, 165_000,
+      225_000, 285_000, 345_000
+    ]);
+  });
+
+  it("stops refreshing once the record arrives even with a diagnostic attached", async () => {
+    const page = await startDeploy();
+    let calls = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      calls++;
+      return jsonResponse({
+        ...recordedDeploy,
+        environmentDiagnostics: [
+          {
+            environment: "dev",
+            kind: "incomplete",
+            message: "Only the first 100 deployment records were checked."
+          }
+        ]
+      });
+    });
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    await advance(page, 5 * 60 * 1000, DEPLOY_WORKFLOW_POLL_MS);
+    expect(calls).toBe(1);
+  });
+
+  it("keeps a deploy refresh and a delete poll going through a diagnostic window", async () => {
+    const page = fixture({
+      search: "?application=app&environment=dev",
+      deploymentsPayload: {
+        deployments: [
+          { ...knownDeployment("old", "prod", "success"), runUrl: "" }
+        ]
+      }
+    });
+    const button = deployRowButton("old", "prod");
+    page.browser.document.addSelectorAll(".js-del-dep", [button]);
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        active: true,
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      })
+    );
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse({ success: true })
+    );
+    const prodRow = {
+      ...knownDeployment("old", "prod", "success"),
+      runUrl: ""
+    };
+    let phase: "before" | "window" | "recorded" = "before";
+    let calls = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      calls++;
+      return jsonResponse(
+        phase === "before" ?
+          {
+            deployments: [prodRow],
+            environmentDiagnostics: diagnosticOnly("dev").environmentDiagnostics
+          }
+        : phase === "window" ?
+          {
+            deployments: [],
+            environmentDiagnostics: [
+              ...diagnosticOnly("dev").environmentDiagnostics,
+              ...diagnosticOnly("prod").environmentDiagnostics
+            ]
+          }
+        : recordedDeploy
+      );
+    });
+    init(page);
+    await flushPromises();
+    button.dispatch("click");
+    await confirmDeleteDialog(page.deleteBody, "old", "prod");
+    await flushPromises();
+    phase = "window";
+    const windowStart = calls;
+    await advance(page, 60_000, RESUME_POLL_MS);
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+    expect(page.tableBody.innerHTML).not.toContain("runs/7");
+    // Each keeps its own 15 second cadence, with no extra listing per tick.
+    expect(calls - windowStart).toBeLessThanOrEqual(8);
+
+    phase = "recorded";
+    await advance(page, 30_000, RESUME_POLL_MS);
+    expect(page.tableBody.innerHTML).toContain(
+      "https://github.com/octo/app/actions/runs/7"
+    );
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "has been successfully deleted"
+    );
+    const settled = calls;
+    await advance(page, 5 * 60 * 1000, RESUME_POLL_MS);
+    expect(calls).toBe(settled);
+  });
+
   it("does not start a refresh while another listing is still loading", async () => {
     const page = await startDeploy();
     const pending = createDeferred<HttpResponse>();

@@ -36,6 +36,7 @@ import {
   deploymentStatusBlocksMutation,
   parseApplicationListing,
   parseBranchListing,
+  parseDeploymentListing,
   parseDeploymentListingWithDiagnostics,
   parseRequiredDeploymentListing,
   parseEnvironmentListing
@@ -325,7 +326,7 @@ export function buildDeployBranchOptions(
 function buildDeploymentRows(
   deployments: readonly DeploymentRecord[],
   overrides: ReadonlyMap<string, DeploymentOverride>
-): { rows: DeploymentRow[]; present: Set<string> } {
+): DeploymentRow[] {
   const present = new Set<string>();
   for (const deployment of deployments) {
     present.add(opKey(deployment.app, deployment.environment));
@@ -352,7 +353,7 @@ function buildDeploymentRows(
     ...synthetic,
     ...deployments.map((deployment) => ({ ...deployment, synthetic: false }))
   ];
-  return { rows, present };
+  return rows;
 }
 
 function computeBlockedEnvironments(
@@ -459,7 +460,10 @@ export function initializeDeployingPage(
   let hasApplications = false;
   let hasEnvironments = false;
   const overrides = new Map<string, DeploymentOverride>();
-  let deployRecordsPresent = new Set<string>();
+  // Environments whose own deployment record the latest listing returned. A
+  // row added only for an environment's diagnostic is not that record: it
+  // carries no run link, so an in-flight deploy keeps refreshing past it.
+  let listedEnvironments = new Set<string>();
   let deployedEnvs = new Map<string, string>();
   let lastRecords: readonly DeploymentRecord[] = [];
 
@@ -798,8 +802,7 @@ export function initializeDeployingPage(
       ) ?
         focused.getAttribute("data-env")
       : null;
-    const { rows, present } = buildDeploymentRows(lastRecords, overrides);
-    deployRecordsPresent = present;
+    const rows = buildDeploymentRows(lastRecords, overrides);
     if (rows.length === 0) {
       deployedEnvs = new Map();
       refreshDeployBtn();
@@ -874,6 +877,11 @@ export function initializeDeployingPage(
         lastRecords = parseDeploymentListingWithDiagnostics(
           result.payload,
           lastRecords
+        );
+        listedEnvironments = new Set(
+          parseDeploymentListing(result.payload).map(
+            (record) => record.environment
+          )
         );
         renderDeployments();
         return result;
@@ -1605,7 +1613,7 @@ export function initializeDeployingPage(
             // Once the real record replaces the synthetic row, keep polling
             // for the terminal transition but stop fanning out fresh=1 list
             // fetches every tick.
-            if (!recordSeen && deployRecordsPresent.has(key)) {
+            if (!recordSeen && listedEnvironments.has(environment)) {
               recordSeen = true;
             }
             if (!recordSeen) refreshList(ticks * RESUME_POLL_MS);
@@ -1826,7 +1834,7 @@ export function initializeDeployingPage(
           // (with its "View Run" link) replaces the optimistic synthetic
           // row; after that, further fresh=1 fetches are wasted.
           if (recordSeen) return;
-          if (deployRecordsPresent.has(key)) {
+          if (listedEnvironments.has(environment)) {
             recordSeen = true;
             return;
           }
