@@ -1,0 +1,4 @@
+---
+# Standalone workspace root. Without this file pnpm walks up to the repository
+# workspace, so `pnpm update` run from this directory never touches this lockfile.
+packages: []

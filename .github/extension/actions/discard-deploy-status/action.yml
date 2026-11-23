@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+# Provider-agnostic cleanup shared by delete-azure.yml and delete-aws.yml. Runs
+# after an application delete succeeds and removes the deploy-status workflow
+# artifact that describes exactly that (environment, application) pair, so the
+# canvas "Deployed" graph stops showing a deployment that no longer exists
+# instead of waiting out the artifact's retention window.
+#
+# Scoped to one application: the artifact name is derived with the same shared
+# helper the producer and the canvas reader use, but the name is only a listing
+# filter. Distinct pairs can collide on one derived name, so each candidate is
+# downloaded and the application and environment recorded in its own
+# deploy-state.txt must denote this pair -- compared the way the canvas reader's
+# confirmArtifactIdentity compares them -- before it is removed. A candidate
+# whose identity cannot be read is left to expire.
+name: Radius - Discard deploy status
+description: Remove the deploy-status artifacts describing a deleted application's last deployment.
+
+inputs:
+  environment:
+    description: Radius environment the deleted application was deployed to.
+    required: true
+  application:
+    description: Name of the deleted application.
+    required: true
+  github-token:
+    description: Token used to list and delete workflow artifacts; needs the actions:write permission.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Discard deploy status artifacts
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        APPLICATION: ${{ inputs.application }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "$GITHUB_ACTION_PATH/discard-deploy-status.sh"
