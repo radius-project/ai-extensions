@@ -21,6 +21,7 @@ import {
   temporaryDirectory,
   type CommandResult
 } from "./aws-cloud-cleanup-ports.js";
+import { FakeGhRuns } from "../../support/aws/fake-gh-runs.js";
 import { ApplicationDeleteFailed } from "./aws-cloud-cleanup.js";
 
 const REPO = "octo/fixture";
@@ -76,6 +77,40 @@ const TITLE = "Radius - Delete e [radius:v1 app=a] cleanup-1";
 const STATUS_LIST =
   "run list --repo octo/fixture --workflow delete-application.yml --status";
 const NONE_UNFINISHED: [string, Answer] = [STATUS_LIST, OK([])];
+
+// Another run for environment e, from an earlier dispatch.
+const OTHER = "Radius - Delete e [radius:v1 app=a] cleanup-0";
+
+// The port over a FakeGhRuns, which keeps the runs and honors each read's
+// filters. `before` answers first, as a call gh refuses.
+function runs(before: Array<[string, Answer]> = []) {
+  const fake = new FakeGhRuns();
+  const answer: Answer = (args) => fake.run(args);
+  return {
+    ...github([
+      ...before,
+      ["workflow run delete-application.yml", answer],
+      ["run list", answer],
+      ["run view", answer]
+    ]),
+    fake
+  };
+}
+
+function views(calls: Array<{ args: string[] }>): string[] {
+  return calls
+    .filter((call) => call.args[0] === "run" && call.args[1] === "view")
+    .map((call) => call.args[2] ?? "");
+}
+
+async function failure(port: {
+  deleteApplication(environment: string, application: string): Promise<void>;
+}): Promise<unknown> {
+  return port
+    .deleteApplication("e", "a")
+    .then(() => null)
+    .catch((caught: unknown) => caught);
+}
 
 // Answers in turn, repeating the last one.
 function sequence(...answers: CommandResult[]): () => CommandResult {
@@ -162,25 +197,19 @@ describe("createGhCleanupGitHub", () => {
     );
   });
 
-  it("dispatches delete-application.yml, finds its run, and waits for success", async () => {
-    const mine =
-      "Radius - Delete radtest-aws-x [radius:v1 app=cloud-e2e] cleanup-1";
-    const runs = sequence(
-      OK([{ databaseId: 1, displayTitle: "other" }]),
-      OK([
-        { databaseId: 1, displayTitle: "other" },
-        { databaseId: 2, displayTitle: mine }
-      ])
-    );
-    const view = sequence(
-      OK({ status: "in_progress", conclusion: "" }),
-      OK({ status: "completed", conclusion: "success" })
-    );
-    const { port, calls, clock } = github([
-      ["run list", runs],
-      ["workflow run delete-application.yml", OK("")],
-      ["run view 2", view]
-    ]);
+  it("dispatches delete-application.yml, finds its run among others, and waits for success", async () => {
+    const { port, calls, clock, fake } = runs();
+    fake.add({
+      displayTitle: "other",
+      status: "completed",
+      conclusion: "success"
+    });
+    fake.onDispatch({
+      states: [
+        { status: "in_progress" },
+        { status: "completed", conclusion: "success" }
+      ]
+    });
     await port.deleteApplication("radtest-aws-x", "cloud-e2e");
     expect(calls.find((call) => call.args[0] === "workflow")?.args).toEqual([
       "workflow",
@@ -197,120 +226,92 @@ describe("createGhCleanupGitHub", () => {
       "-f",
       "correlation_id=cleanup-1"
     ]);
+    expect(views(calls)).toEqual(["2", "2"]);
     expect(clock.now).toBeGreaterThan(0);
   });
 
   it.each([
     [
       "the dispatch fails",
-      [
-        ["run list", OK([])],
-        ["workflow run", HTTP(422)]
-      ],
-      "Could not dispatch delete-application.yml (gh: Something (HTTP 422)). Check that it exists on main."
+      [["workflow run", HTTP(422)]],
+      () => {},
+      "Could not dispatch delete-application.yml (gh: Something (HTTP 422)). Check that it exists on main.",
+      false
     ],
     [
       "the run never appears",
-      [
-        ["run list", OK([])],
-        ["workflow run", OK("")]
-      ],
-      "The delete-application.yml run never appeared."
+      [],
+      (fake: FakeGhRuns) => fake.onDispatch({ appearAfterLists: Infinity }),
+      "The delete-application.yml run never appeared.",
+      false
     ],
     [
       "the run fails",
-      [
-        [
-          "run list",
-          sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
-        ],
-        ["workflow run", OK("")],
-        ["run view 5", OK({ status: "completed", conclusion: "failure" })]
-      ],
-      "delete-application.yml run 5 ended failure."
+      [],
+      (fake: FakeGhRuns) =>
+        fake.onDispatch({
+          states: [{ status: "completed", conclusion: "failure" }]
+        }),
+      "delete-application.yml run 1 ended failure.",
+      true
     ],
     [
       "the run can't be read",
-      [
-        [
-          "run list",
-          sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
-        ],
-        ["workflow run", OK("")],
-        ["run view 5", HTTP(500)]
-      ],
-      "Reading run 5: gh: Something (HTTP 500)"
+      [["run view", HTTP(500)]],
+      () => {},
+      "Reading run 1: gh: Something (HTTP 500)",
+      false
     ],
     [
       "the runs can't be listed",
-      [
-        ["run list", HTTP(403)],
-        ["workflow run", OK("")]
-      ],
-      "Listing delete-application.yml runs: gh: Something (HTTP 403)"
+      [["run list", HTTP(403)]],
+      () => {},
+      "Listing delete-application.yml runs: gh: Something (HTTP 403)",
+      false
     ]
-  ] as Array<[string, Array<[string, Answer]>, string]>)(
+  ] as Array<
+    [
+      string,
+      Array<[string, Answer]>,
+      (fake: FakeGhRuns) => void,
+      string,
+      boolean
+    ]
+  >)(
     "fails the app delete when %s",
-    async (_case, rules, message) => {
-      const { port } = github(rules);
-      const error: unknown = await port
-        .deleteApplication("e", "a")
-        .catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toContain(message);
+    async (_case, before, arrange, message, finished) => {
+      const { port, fake } = runs(before);
+      arrange(fake);
+      const error = await failure(port);
+      expect((error as Error).message).toBe(message);
       // Only a run that finished says nothing is still deleting.
-      expect(error instanceof ApplicationDeleteFailed).toBe(
-        _case === "the run fails"
-      );
+      expect(error instanceof ApplicationDeleteFailed).toBe(finished);
     }
   );
 
-  it("doesn't take another dispatch's run for its own, even one that failed first", async () => {
-    const { port, calls } = github([
-      NONE_UNFINISHED,
-      [
-        "run list",
-        sequence(
-          OK([]),
-          // Another delete, such as an earlier sweep's, shows up first.
-          OK([
-            {
-              databaseId: 4,
-              displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0",
-              status: "completed"
-            }
-          ]),
-          OK([
-            {
-              databaseId: 4,
-              displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0",
-              status: "completed"
-            },
-            { databaseId: 5, displayTitle: TITLE, status: "completed" }
-          ])
-        )
-      ],
-      ["workflow run", OK("")],
-      ["run view 4", OK({ status: "completed", conclusion: "failure" })],
-      ["run view 5", OK({ status: "completed", conclusion: "success" })]
-    ]);
+  it("doesn't take another dispatch's run for its own, even one that failed", async () => {
+    const { port, calls, fake } = runs();
+    fake.add({
+      displayTitle: OTHER,
+      status: "completed",
+      conclusion: "failure"
+    });
     await port.deleteApplication("e", "a");
-    expect(
-      calls
-        .filter((call) => call.args[0] === "run" && call.args[1] === "view")
-        .map((call) => call.args[2])
-    ).toEqual(["5"]);
+    expect(views(calls)).toEqual(["2", "2"]);
+  });
+
+  it("can't tell its run when two runs carry its title", async () => {
+    const { port, fake } = runs();
+    fake.add({ displayTitle: TITLE, status: "queued" });
+    fake.onDispatch({ appearAfterLists: 0 });
+    const error = await failure(port);
+    expect((error as Error).message).toBe(
+      `2 delete-application.yml runs are titled "${TITLE}".`
+    );
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
   });
 
   it.each([
-    [
-      "two runs carry its title",
-      [
-        { databaseId: 5, displayTitle: TITLE },
-        { databaseId: 6, displayTitle: TITLE }
-      ],
-      `2 delete-application.yml runs are titled "${TITLE}".`
-    ],
     [
       "its run has no ID",
       [{ databaseId: "5", displayTitle: TITLE }],
@@ -326,9 +327,7 @@ describe("createGhCleanupGitHub", () => {
       ["run list", OK(listed)],
       ["workflow run", OK("")]
     ]);
-    const error: unknown = await port
-      .deleteApplication("e", "a")
-      .catch((caught: unknown) => caught);
+    const error = await failure(port);
     expect((error as Error).message).toBe(message);
     expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
   });
@@ -336,131 +335,125 @@ describe("createGhCleanupGitHub", () => {
   it.each([
     [
       "an earlier run for it is still going",
-      OK([
-        {
-          databaseId: 3,
-          displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0"
-        }
-      ]),
-      "delete-application.yml run 5 ended cancelled. Run 3 for e is still going."
-    ],
-    [
-      "an earlier run for it has no ID",
-      OK([{ displayTitle: "Radius - Delete e [radius:v1 app=a]" }]),
-      "delete-application.yml run 5 ended cancelled. Run with no ID for e is still going."
+      [],
+      (fake: FakeGhRuns) =>
+        fake.add({ displayTitle: OTHER, status: "in_progress" }),
+      "delete-application.yml run 2 ended cancelled. Run 1 for e is still going."
     ],
     [
       "the unfinished runs can't be listed",
-      HTTP(502),
+      [[STATUS_LIST, HTTP(502)]],
+      () => {},
       "Listing requested delete-application.yml runs: gh: Something (HTTP 502)"
     ],
     [
       "too many runs are unfinished to see them all",
-      OK(
-        Array.from({ length: 100 }, (_, index) => ({
-          databaseId: index + 10,
-          displayTitle: "Radius - Delete other [radius:v1 app=a]"
-        }))
-      ),
+      [],
+      (fake: FakeGhRuns) => {
+        for (let index = 0; index < 100; index += 1)
+          fake.add({
+            displayTitle: "Radius - Delete other [radius:v1 app=a]",
+            status: "requested"
+          });
+      },
       "100 delete-application.yml runs are requested, so the sweep can't tell whether one is for e."
     ],
     [
       "the listing isn't a list",
-      OK({}),
+      [[STATUS_LIST, OK({})]],
+      () => {},
       "The workflow run listing was not a JSON array."
     ]
-  ] as Array<[string, Answer, string]>)(
+  ] as Array<
+    [string, Array<[string, Answer]>, (fake: FakeGhRuns) => void, string]
+  >)(
     "doesn't report its run as finished when %s",
-    async (_case, unfinished, message) => {
-      const { port } = github([
-        [
-          "run list --repo octo/fixture --workflow delete-application.yml --status",
-          unfinished
-        ],
-        [
-          "run list",
-          sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
-        ],
-        ["workflow run", OK("")],
-        ["run view 5", OK({ status: "completed", conclusion: "cancelled" })]
-      ]);
-      const error: unknown = await port
-        .deleteApplication("e", "a")
-        .catch((caught: unknown) => caught);
+    async (_case, before, arrange, message) => {
+      const { port, fake } = runs(before);
+      arrange(fake);
+      fake.onDispatch({
+        states: [{ status: "completed", conclusion: "cancelled" }]
+      });
+      const error = await failure(port);
       expect((error as Error).message).toBe(message);
       expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
     }
   );
 
-  it("holds back a successful run while another run for the environment is still going", async () => {
+  it("doesn't report its run as finished when an earlier run for it has no ID", async () => {
     const { port } = github([
       [
         STATUS_LIST,
-        OK([
-          {
-            databaseId: 3,
-            displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0"
-          }
-        ])
+        OK([{ displayTitle: "Radius - Delete e [radius:v1 app=a]" }])
       ],
       [
         "run list",
         sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
       ],
       ["workflow run", OK("")],
-      ["run view 5", OK({ status: "completed", conclusion: "success" })]
+      ["run view 5", OK({ status: "completed", conclusion: "cancelled" })]
     ]);
-    const error: unknown = await port
-      .deleteApplication("e", "a")
-      .catch((caught: unknown) => caught);
+    const error = await failure(port);
     expect((error as Error).message).toBe(
-      "delete-application.yml run 5 succeeded. Run 3 for e is still going."
+      "delete-application.yml run 5 ended cancelled. Run with no ID for e is still going."
     );
     expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
   });
 
-  it.each([
-    [
-      // Between two status reads, so no status read lists it.
-      "a run that moves between unfinished statuses",
-      { status: "queued" },
+  it("holds back a successful run while another run for the environment is still going", async () => {
+    const { port, fake } = runs();
+    fake.add({ displayTitle: OTHER, status: "in_progress" });
+    const error = await failure(port);
+    expect((error as Error).message).toBe(
+      "delete-application.yml run 2 succeeded. Run 1 for e is still going."
+    );
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+  });
+
+  it("sees, in its one listing of recent runs, a run that moves between unfinished statuses while the status reads run", async () => {
+    const { port, fake } = runs();
+    // Waiting on a concurrency group during the queued read, then queued
+    // before the pending read: no status read lists it.
+    const earlier = fake.add({ displayTitle: OTHER, status: "pending" });
+    fake.afterList = (status) => {
+      if (status === "queued") earlier.status = "queued";
+    };
+    fake.onDispatch({
+      states: [{ status: "completed", conclusion: "failure" }]
+    });
+    const error = await failure(port);
+    expect((error as Error).message).toBe(
+      "delete-application.yml run 2 ended failure. Run 1 for e is still going."
+    );
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+  });
+
+  it("counts a recent run listed without a status as unfinished", async () => {
+    const earlier = {
+      databaseId: 3,
+      displayTitle: OTHER
+    };
+    const { port } = github([
+      NONE_UNFINISHED,
+      [
+        "run list",
+        sequence(
+          OK([earlier]),
+          OK([
+            earlier,
+            { databaseId: 5, displayTitle: TITLE, status: "completed" }
+          ])
+        )
+      ],
+      ["workflow run", OK("")],
+      ["run view 5", OK({ status: "completed", conclusion: "failure" })]
+    ]);
+    const error = await failure(port);
+    expect((error as Error).message).toBe(
       "delete-application.yml run 5 ended failure. Run 3 for e is still going."
-    ],
-    [
-      "a run without a status",
-      {},
-      "delete-application.yml run 5 ended failure. Run 3 for e is still going."
-    ]
-  ])(
-    "sees %s in its one listing of recent runs",
-    async (_case, fields, message) => {
-      const earlier = {
-        databaseId: 3,
-        displayTitle: "Radius - Delete e [radius:v1 app=a] cleanup-0",
-        ...fields
-      };
-      const { port } = github([
-        NONE_UNFINISHED,
-        [
-          "run list",
-          sequence(
-            OK([earlier]),
-            OK([
-              earlier,
-              { databaseId: 5, displayTitle: TITLE, status: "completed" }
-            ])
-          )
-        ],
-        ["workflow run", OK("")],
-        ["run view 5", OK({ status: "completed", conclusion: "failure" })]
-      ]);
-      const error: unknown = await port
-        .deleteApplication("e", "a")
-        .catch((caught: unknown) => caught);
-      expect((error as Error).message).toBe(message);
-      expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
-    }
-  );
+    );
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+  });
 
   it("doesn't report its run as finished when the recent runs can't be listed as a list", async () => {
     const { port } = github([
@@ -472,37 +465,45 @@ describe("createGhCleanupGitHub", () => {
       ["workflow run", OK("")],
       ["run view 5", OK({ status: "completed", conclusion: "failure" })]
     ]);
-    const error: unknown = await port
-      .deleteApplication("e", "a")
-      .catch((caught: unknown) => caught);
+    const error = await failure(port);
     expect((error as Error).message).toBe(
       "The workflow run listing was not a JSON array."
     );
     expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
   });
 
+  it("finds an unfinished run for the environment older than the recent listing reaches", async () => {
+    const { port, fake } = runs();
+    fake.add({ displayTitle: OTHER, status: "waiting" });
+    for (let index = 0; index < 100; index += 1)
+      fake.add({
+        displayTitle: "Radius - Delete other [radius:v1 app=a]",
+        status: "completed",
+        conclusion: "success"
+      });
+    fake.onDispatch({
+      states: [{ status: "completed", conclusion: "failure" }]
+    });
+    const error = await failure(port);
+    expect((error as Error).message).toBe(
+      "delete-application.yml run 102 ended failure. Run 1 for e is still going."
+    );
+    expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
+  });
+
   it("reads every unfinished status, and ignores other environments' runs", async () => {
-    const { port, calls } = github([
-      [
-        "run list --repo octo/fixture --workflow delete-application.yml --status",
-        OK([
-          {
-            databaseId: 3,
-            displayTitle: "Radius - Delete e2 [radius:v1 app=a] x"
-          },
-          {
-            databaseId: 4,
-            displayTitle: "Radius - Delete other e [radius:v1 app=a]"
-          }
-        ])
-      ],
-      [
-        "run list",
-        sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
-      ],
-      ["workflow run", OK("")],
-      ["run view 5", OK({ status: "completed", conclusion: "failure" })]
-    ]);
+    const { port, calls, fake } = runs();
+    fake.add({
+      displayTitle: "Radius - Delete e2 [radius:v1 app=a] x",
+      status: "in_progress"
+    });
+    fake.add({
+      displayTitle: "Radius - Delete other e [radius:v1 app=a]",
+      status: "queued"
+    });
+    fake.onDispatch({
+      states: [{ status: "completed", conclusion: "failure" }]
+    });
     await expect(port.deleteApplication("e", "a")).rejects.toBeInstanceOf(
       ApplicationDeleteFailed
     );
@@ -516,14 +517,8 @@ describe("createGhCleanupGitHub", () => {
   it.each(["cancelled", "timed_out", "startup_failure"])(
     "reports a run that ended %s as finished",
     async (conclusion) => {
-      const { port } = github([
-        [
-          "run list",
-          sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
-        ],
-        ["workflow run", OK("")],
-        ["run view 5", OK({ status: "completed", conclusion })]
-      ]);
+      const { port, fake } = runs();
+      fake.onDispatch({ states: [{ status: "completed", conclusion }] });
       await expect(port.deleteApplication("e", "a")).rejects.toBeInstanceOf(
         ApplicationDeleteFailed
       );
@@ -531,19 +526,11 @@ describe("createGhCleanupGitHub", () => {
   );
 
   it("gives up on a run that outlives the app delete timeout", async () => {
-    const { port, clock } = github([
-      [
-        "run list",
-        sequence(OK([]), OK([{ databaseId: 5, displayTitle: TITLE }]))
-      ],
-      ["workflow run", OK("")],
-      ["run view 5", OK({ status: "queued" })]
-    ]);
-    const error: unknown = await port
-      .deleteApplication("e", "a")
-      .catch((caught: unknown) => caught);
+    const { port, clock, fake } = runs();
+    fake.onDispatch({ states: [{ status: "queued" }] });
+    const error = await failure(port);
     expect((error as Error).message).toBe(
-      "delete-application.yml run 5 did not finish in time."
+      "delete-application.yml run 1 did not finish in time."
     );
     expect(error).not.toBeInstanceOf(ApplicationDeleteFailed);
     expect(clock.now).toBeGreaterThanOrEqual(APPLICATION_DELETE_TIMEOUT_MS);
