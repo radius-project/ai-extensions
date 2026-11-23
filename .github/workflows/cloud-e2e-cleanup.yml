@@ -1672,18 +1672,22 @@ jobs:
 
       # The age threshold lets a recent leak survive a sweep. This checks,
       # whatever the age, that none of the AWS state the suite creates is left:
-      # RDS resources, workloads and the namespace on both clusters, the
-      # fixture repository's app boundaries, nodes, the deploy role's lock, and
-      # its trust subjects, inline policies, and access entries. reset-fixture
-      # runs only when this job succeeds, and checks every cloud's GitHub state
-      # itself.
+      # RDS resources, workloads and the namespace on both clusters, the app
+      # roles, Pod Identity associations, and app boundaries under the fixture
+      # repository's app path, nodes, the deploy role's lock, and its trust
+      # subjects, inline policies, and access entries. reset-fixture runs only
+      # when this job succeeds, and checks every cloud's GitHub state itself.
       - name: Verify no leaked AWS state remains
         id: aws-verification
         if: always() && steps.aws-config.outputs.configured == 'true' && steps.bundle.outcome == 'success' && steps.aws-login.outcome == 'success'
         env:
-          # Reads the fixture repository's ID, which names its app boundaries'
-          # IAM path. Without the token, the check fails.
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Reads the fixture repository's ID, which names the IAM path of its
+          # app roles and boundaries. The sweep before it can outlast the hour
+          # the job's token lives, so the check mints its own token with the
+          # App's credentials. Child processes never see the private key.
+          CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
         shell: bash
         run: node "$RUNNER_TEMP/aws-cloud-cleanup.mjs" verify
 

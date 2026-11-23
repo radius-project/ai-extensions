@@ -5,6 +5,7 @@ import {
   parseAwsLockHolder,
   parseAwsRoleArn,
   parsePolicyDocument,
+  radiusRoleRepositoryId,
   stateRegistryForEnvironment,
   trustedGitHubSubjects
 } from "@radius-project/core";
@@ -28,12 +29,14 @@ import {
 // environment it follows the order the AWS Cloud E2E design sets:
 //
 //   1. Ask the product to delete the application, and wait.
-//   2. Sweep the MySQL recipe's RDS resources and the Radius workloads that
+//   2. Sweep the MySQL recipe's RDS resources, the containers Recipe's app
+//      roles and Pod Identity associations, and the Radius workloads that
 //      are left.
 //   3. Check nothing of that environment is left.
 //   4. Only then remove its deployment records and GHCR state, and, under the
-//      deploy role's lock, its trust subject, inline policy, and access entry
-//      (with the product's own removal code) and its GitHub environment.
+//      deploy role's lock, its trust subject, inline policy, app boundary, and
+//      access entry (with the product's own removal code) and its GitHub
+//      environment.
 //
 // If any of steps 1 to 3 fails, everything step 4 removes stays, so the next
 // run can retry, and the sweep fails. The GitHub environment goes last: it is
@@ -41,7 +44,10 @@ import {
 //
 // Every delete is limited to what the suite creates: in one of the two test
 // regions, named the way the MySQL recipe names it, tagged with an AWS test
-// environment, and in one of the two clusters' VPCs. Roles, the identity
+// environment, and in one of the two clusters' VPCs. App roles and
+// associations are deleted only when their role's IAM path is a test
+// environment's folder under the fixture repository's app path and their tag
+// names the same environment. The deploy and test roles, the identity
 // provider, clusters, node groups, and VPCs are never deleted. A read that
 // fails stops that sweep without deleting.
 
@@ -182,17 +188,19 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function succeeded(result: AwsCommandResult): boolean {
+export function succeeded(result: AwsCommandResult): boolean {
   return result.code === 0 || result.code === "0";
 }
 
-function awsDetail(result: AwsCommandResult): string {
+export function awsDetail(result: AwsCommandResult): string {
   return (result.stderr || result.stdout).trim() || `exit ${result.code}`;
 }
 
-function awsError(result: AwsCommandResult, code: string): boolean {
+export function awsError(result: AwsCommandResult, code: string): boolean {
   return result.stderr.includes(`(${code})`);
 }
+
+class ReadFailure extends Error {}
 
 // --- Configuration --------------------------------------------------------
 
@@ -522,17 +530,28 @@ export function awsStatePackagePrefix(config: AwsCleanupConfig): string {
   return `${repository.toLowerCase()}-radius-state-${config.environmentPrefix}`;
 }
 
-// --- App boundaries -------------------------------------------------------
+// --- App roles, boundaries, and Pod Identity -------------------------------
 
 // The product's setup writes each AWS environment a permissions boundary for
 // its app roles, under the fixture repository's app path. Step 4's removal
 // deletes it, but keeps one it can't read or that an app role still uses, and
 // the environment goes anyway. The leftover check finds what it kept.
+//
+// For each container, the containers Recipe creates through Cloud Control an
+// IAM role under the environment's folder of the repository's app path, with
+// the environment's app boundary, and a Pod Identity association on the
+// environment's cluster that lets the container's service account use it.
+// Both carry the Recipe's `radapp.io/*` tags.
 
 export interface AwsAppScope {
   readonly accountId: string;
   readonly repositoryId: number;
   readonly prefix: string;
+}
+
+export interface AwsTag {
+  readonly Key: string;
+  readonly Value: string;
 }
 
 // The app scope of the fixture repository, or null with a message when its
@@ -557,6 +576,157 @@ async function readAppScope(
 /** The IAM path the repository's app roles and boundaries are under. */
 export function appPathRoot(repositoryId: number): string {
   return `/radius/apps/${repositoryId}/`;
+}
+
+/**
+ * The AWS test environment whose folder an IAM path is, the way the product
+ * names it: `/radius/apps/<repositoryId>/<environment>/`. Null for any other
+ * path.
+ */
+export function appPathEnvironment(
+  path: string,
+  scope: AwsAppScope
+): string | null {
+  const root = appPathRoot(scope.repositoryId);
+  if (!path.startsWith(root)) return null;
+  const folder = /^([^/]+)\/$/.exec(path.slice(root.length))?.[1] ?? "";
+  return folder.startsWith(scope.prefix.toLowerCase()) ? folder : null;
+}
+
+const ROLE_ARN_PATTERN = /^arn:aws:iam::\d{12}:role\/(?:[^/]+\/)*[^/]+$/;
+
+// The IAM path of a role in the scope's account, or "" for any other ARN.
+function rolePath(roleArn: string, scope: AwsAppScope): string {
+  const prefix = `arn:aws:iam::${scope.accountId}:role`;
+  return ROLE_ARN_PATTERN.test(roleArn) && roleArn.startsWith(`${prefix}/`) ?
+      roleArn.slice(prefix.length, roleArn.lastIndexOf("/") + 1)
+    : "";
+}
+
+/** Whether a role is under the repository's app path, in the scope's account. */
+export function underAppPath(roleArn: string, scope: AwsAppScope): boolean {
+  return rolePath(roleArn, scope).startsWith(appPathRoot(scope.repositoryId));
+}
+
+/** Whether tags carry Radius's own cleanup tag, which makes a resource Radius's. */
+export function radiusTagged(tagList: unknown): boolean {
+  return readTags(tagList).has(RADIUS_CREATION_TAG);
+}
+
+/**
+ * The AWS test environment an app role or association belongs to: its role's
+ * path is the environment's folder under the repository's app path, and its
+ * tag names the same environment. Null for anything else, or for anything
+ * with Radius's own cleanup tag.
+ */
+export function appIdentityEnvironment(
+  roleArn: string,
+  tagList: unknown,
+  scope: AwsAppScope
+): string | null {
+  const folder = appPathEnvironment(rolePath(roleArn, scope), scope);
+  return (
+      folder !== null && recipeEnvironment(tagList, scope.prefix) === folder
+    ) ?
+      folder
+    : null;
+}
+
+// The environment folder an app role or association is in, whatever its
+// tags say, unless it is Radius's own. What the step 3 check keys on, so an
+// environment keeps its access while anything is under its folder.
+function appFolderEnvironment(
+  roleArn: string,
+  tagList: unknown,
+  scope: AwsAppScope
+): string | null {
+  if (radiusTagged(tagList)) return null;
+  return appPathEnvironment(rolePath(roleArn, scope), scope);
+}
+
+export interface AppRoleCandidate {
+  readonly name: string;
+  readonly arn: string;
+  readonly path: string;
+}
+
+/**
+ * Roles under the repository's app path, from `aws iam list-roles
+ * --path-prefix`. ListRoles leaves out tags, so they are read separately.
+ */
+export function selectAppRoleCandidates(
+  payload: unknown,
+  scope: AwsAppScope
+): AppRoleCandidate[] {
+  const root = appPathRoot(scope.repositoryId);
+  return requireList(payload, "Roles", "aws iam list-roles")
+    .map(asRecord)
+    .flatMap((item) => {
+      const name = text(item?.RoleName);
+      const path = text(item?.Path);
+      const arn = text(item?.Arn);
+      return (
+          name &&
+            path.startsWith(root) &&
+            arn === `arn:aws:iam::${scope.accountId}:role${path}${name}`
+        ) ?
+          [{ name, arn, path }]
+        : [];
+    });
+}
+
+export interface AppAssociationCandidate {
+  readonly id: string;
+  readonly namespace: string;
+  readonly serviceAccount: string;
+}
+
+/**
+ * The associations `aws eks list-pod-identity-associations` lists. The list
+ * leaves out each one's role and tags, so they are described separately.
+ */
+export function selectAssociationCandidates(
+  payload: unknown
+): AppAssociationCandidate[] {
+  return requireList(
+    payload,
+    "associations",
+    "aws eks list-pod-identity-associations"
+  ).map((entry) => {
+    const item = asRecord(entry);
+    const id = text(item?.associationId);
+    if (!id)
+      throw new ReadFailure(
+        "aws eks list-pod-identity-associations listed an association without an ID."
+      );
+    return {
+      id,
+      namespace: text(item?.namespace),
+      serviceAccount: text(item?.serviceAccount)
+    };
+  });
+}
+
+/**
+ * The role and tags `aws eks describe-pod-identity-association` reports. EKS
+ * returns tags as a map; they are returned in IAM's list form.
+ */
+export function describedAssociation(
+  payload: unknown,
+  id: string
+): { roleArn: string; tags: AwsTag[] } {
+  const association = asRecord(asRecord(payload)?.association);
+  const roleArn = association?.roleArn;
+  if (typeof roleArn !== "string")
+    throw new ReadFailure(
+      `EKS did not describe the role of Pod Identity association ${id}.`
+    );
+  return {
+    roleArn,
+    tags: Object.entries(asRecord(association?.tags) ?? {}).map(
+      ([Key, Value]) => ({ Key, Value: text(Value) })
+    )
+  };
 }
 
 export interface AppBoundary {
@@ -589,6 +759,31 @@ export function selectAppBoundaries(
           [{ arn, name, path, createdAt: text(item?.CreateDate) }]
         : [];
     });
+}
+
+/**
+ * Boundaries of AWS test environments that no longer exist, created before
+ * the cutoff: in a test environment's folder, named the way the product
+ * names it. Their tags are read separately.
+ */
+export function selectOrphanBoundaryCandidates(
+  payload: unknown,
+  scope: AwsAppScope,
+  known: ReadonlySet<string>,
+  cutoff: string
+): Array<AppBoundary & { environment: string }> {
+  return selectAppBoundaries(payload, scope).flatMap((boundary) => {
+    const environment = appPathEnvironment(boundary.path, scope);
+    return (
+        environment !== null &&
+          !known.has(environment) &&
+          boundary.name ===
+            `radius-app-boundary-${scope.repositoryId}-${environment}` &&
+          Date.parse(boundary.createdAt) < Date.parse(cutoff)
+      ) ?
+        [{ ...boundary, environment }]
+      : [];
+  });
 }
 
 // --- The sweep ------------------------------------------------------------
@@ -624,13 +819,7 @@ class Report implements AwsCleanupReport {
   }
 }
 
-class ReadFailure extends Error {}
-
-async function readAws(
-  ports: Pick<AwsCleanupPorts, "runAws">,
-  args: string[]
-): Promise<unknown> {
-  const result = await ports.runAws([...args, "--output", "json"]);
+function parseAwsJson(result: AwsCommandResult, args: string[]): unknown {
   if (!succeeded(result))
     throw new ReadFailure(
       `aws ${args.slice(0, 2).join(" ")}: ${awsDetail(result)}`
@@ -644,7 +833,25 @@ async function readAws(
   }
 }
 
-async function waitFor(
+export async function readAws(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  args: string[]
+): Promise<unknown> {
+  return parseAwsJson(await ports.runAws([...args, "--output", "json"]), args);
+}
+
+// As readAws, but undefined when AWS answers `notFound`: the resource is
+// already gone. JSON never parses to undefined.
+export async function readAwsIfFound(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  args: string[],
+  notFound: string
+): Promise<unknown> {
+  const result = await ports.runAws([...args, "--output", "json"]);
+  return awsError(result, notFound) ? undefined : parseAwsJson(result, args);
+}
+
+export async function waitFor(
   ports: Pick<AwsCleanupPorts, "sleep" | "now">,
   timeoutMs: number,
   pollMs: number,
@@ -679,8 +886,8 @@ async function clusterVpc(
 }
 
 /** The regions the sweep reads, each with its clusters' VPCs. */
-async function rdsScopes(
-  config: AwsCleanupConfig,
+export async function rdsScopes(
+  config: Pick<AwsCleanupConfig, "clusters" | "environmentPrefix">,
   ports: Pick<AwsCleanupPorts, "runAws">
 ): Promise<AwsRdsScope[]> {
   const scopes = new Map<string, Set<string>>();
@@ -697,7 +904,7 @@ async function rdsScopes(
   }));
 }
 
-interface RdsFootprint {
+export interface RdsFootprint {
   readonly instances: RecipeDbInstance[];
   readonly subnetGroups: Array<RecipeGroupCandidate & { environment: string }>;
   readonly parameterGroups: Array<
@@ -759,7 +966,7 @@ export function groupsUsedElsewhere(
 }
 
 /** Every recipe resource of an AWS test environment in one region. */
-async function readRdsFootprint(
+export async function readRdsFootprint(
   ports: Pick<AwsCleanupPorts, "runAws">,
   scope: AwsRdsScope
 ): Promise<RdsFootprint> {
@@ -816,7 +1023,7 @@ async function readRdsFootprint(
   };
 }
 
-function rdsLabels(
+export function rdsLabels(
   region: string,
   footprint: RdsFootprint
 ): Array<{
@@ -1228,11 +1435,289 @@ async function sweepWorkloads(
   return clean;
 }
 
+export interface AppRole extends AppRoleCandidate {
+  readonly tags: unknown[];
+}
+
+/** The repository's app roles, each with its tags. */
+export async function readAppRoles(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  scope: AwsAppScope
+): Promise<AppRole[]> {
+  const roles: AppRole[] = [];
+  for (const role of selectAppRoleCandidates(
+    await readAws(ports, [
+      "iam",
+      "list-roles",
+      "--path-prefix",
+      appPathRoot(scope.repositoryId)
+    ]),
+    scope
+  )) {
+    // A role deleted since the list is skipped.
+    const tags = await readAwsIfFound(
+      ports,
+      ["iam", "list-role-tags", "--role-name", role.name],
+      "NoSuchEntity"
+    );
+    if (tags !== undefined)
+      roles.push({
+        ...role,
+        tags: requireList(tags, "Tags", "aws iam list-role-tags")
+      });
+  }
+  return roles;
+}
+
+export interface AppAssociation extends AppAssociationCandidate {
+  readonly cluster: AwsCleanupCluster;
+  readonly roleArn: string;
+  readonly tags: AwsTag[];
+}
+
+/**
+ * A cluster's Pod Identity associations, each with its role and tags.
+ */
+export async function readAssociations(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  cluster: AwsCleanupCluster
+): Promise<AppAssociation[]> {
+  const where = ["--region", cluster.region, "--cluster-name", cluster.name];
+  const associations: AppAssociation[] = [];
+  for (const candidate of selectAssociationCandidates(
+    await readAws(ports, ["eks", "list-pod-identity-associations", ...where])
+  )) {
+    // An association deleted since the list is skipped.
+    const described = await readAwsIfFound(
+      ports,
+      [
+        "eks",
+        "describe-pod-identity-association",
+        ...where,
+        "--association-id",
+        candidate.id
+      ],
+      "ResourceNotFoundException"
+    );
+    if (described !== undefined)
+      associations.push({
+        ...candidate,
+        cluster,
+        ...describedAssociation(described, candidate.id)
+      });
+  }
+  return associations;
+}
+
+/** A cluster's associations whose role is under the repository's app path. */
+export async function readAppAssociations(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  scope: AwsAppScope,
+  cluster: AwsCleanupCluster
+): Promise<AppAssociation[]> {
+  return (await readAssociations(ports, cluster)).filter((item) =>
+    underAppPath(item.roleArn, scope)
+  );
+}
+
+/** The permissions boundary of a role, or "" for none. ListRoles leaves it out. */
+export async function readRoleBoundary(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  roleName: string
+): Promise<string> {
+  const role = asRecord(
+    asRecord(await readAws(ports, ["iam", "get-role", "--role-name", roleName]))
+      ?.Role
+  );
+  if (!role)
+    throw new ReadFailure(`IAM did not describe app role ${roleName}.`);
+  return text(asRecord(role.PermissionsBoundary)?.PermissionsBoundaryArn);
+}
+
+/**
+ * The repository's app roles, whatever their tags say, except what Radius's
+ * own cleanup tag marks as Radius's. The leftover check and preflight both
+ * use it.
+ */
+export async function appRoleLeftovers(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  scope: AwsAppScope
+): Promise<string[]> {
+  return (await readAppRoles(ports, scope))
+    .filter((role) => !radiusTagged(role.tags))
+    .map((role) => `app role ${role.arn}`);
+}
+
+/**
+ * A cluster's associations whose role is under the repository's app path, by
+ * the same rule. An association outlives its role, so this is the only check
+ * that sees one whose role is gone.
+ */
+export async function associationLeftovers(
+  ports: Pick<AwsCleanupPorts, "runAws">,
+  scope: AwsAppScope,
+  cluster: AwsCleanupCluster
+): Promise<string[]> {
+  return (await readAppAssociations(ports, scope, cluster))
+    .filter((item) => !radiusTagged(item.tags))
+    .map((item) => `${appAssociationLabel(item)}, for ${item.roleArn}`);
+}
+
+function associationKey(item: AppAssociation): string {
+  return `${item.cluster.region}/${item.cluster.name}/${item.id}`;
+}
+
+export function appAssociationLabel(item: AppAssociation): string {
+  return `Pod Identity association ${item.id} (${item.namespace}/${item.serviceAccount}) on cluster ${item.cluster.name}`;
+}
+
+/**
+ * Delete the app roles and Pod Identity associations of the environments
+ * `sweepable` accepts. Each one, and each role's inline policies, is read
+ * before anything is deleted. Associations go first, and the roles only once
+ * every association is gone, so none is left naming a deleted role. Returns
+ * what it deleted, which IAM may still list for a moment.
+ */
+async function sweepAppIdentities(
+  config: AwsCleanupConfig,
+  ports: AwsCleanupPorts,
+  scope: AwsAppScope,
+  sweepable: (environment: string) => boolean,
+  report: Report
+): Promise<{ clean: boolean; deleted: Set<string> }> {
+  const selected = (roleArn: string, tags: unknown) => {
+    const environment = appIdentityEnvironment(roleArn, tags, scope);
+    return environment !== null && sweepable(environment);
+  };
+  const associations: AppAssociation[] = [];
+  for (const cluster of config.clusters)
+    associations.push(
+      ...(await readAppAssociations(ports, scope, cluster)).filter((item) =>
+        selected(item.roleArn, item.tags)
+      )
+    );
+  const roles: Array<AppRole & { policies: string[] }> = [];
+  for (const role of (await readAppRoles(ports, scope)).filter((item) =>
+    selected(item.arn, item.tags)
+  )) {
+    const listed = await readAwsIfFound(
+      ports,
+      ["iam", "list-role-policies", "--role-name", role.name],
+      "NoSuchEntity"
+    );
+    if (listed !== undefined)
+      roles.push({
+        ...role,
+        policies: requireList(
+          listed,
+          "PolicyNames",
+          "aws iam list-role-policies"
+        ).map(text)
+      });
+  }
+  const deleted = new Set<string>();
+  let clean = true;
+  for (const item of associations) {
+    const result = await ports.runAws([
+      "eks",
+      "delete-pod-identity-association",
+      "--region",
+      item.cluster.region,
+      "--cluster-name",
+      item.cluster.name,
+      "--association-id",
+      item.id
+    ]);
+    if (succeeded(result) || awsError(result, "ResourceNotFoundException")) {
+      deleted.add(associationKey(item));
+      report.did(`Deleted ${appAssociationLabel(item)}`);
+    } else {
+      report.fail(
+        `Deleting ${appAssociationLabel(item)}: ${awsDetail(result)}`
+      );
+      clean = false;
+    }
+  }
+  if (!clean) return { clean, deleted };
+  for (const role of roles) {
+    if (await deleteAppRole(ports, role, report)) deleted.add(role.arn);
+    else clean = false;
+  }
+  return { clean, deleted };
+}
+
+// IAM is eventually consistent: for a while after the sweep deletes a role's
+// inline policies, or a role that used a boundary, IAM may still count them
+// and refuse the next delete (DeleteConflict). That is retried with a
+// growing wait before it is reported.
+export const IAM_CONFLICT_RETRY_MS = [5_000, 10_000, 20_000, 40_000] as const;
+const IAM_CONFLICT_RETRY_SECONDS =
+  IAM_CONFLICT_RETRY_MS.reduce((total, wait) => total + wait, 0) / 1000;
+
+async function runIamDelete(
+  ports: Pick<AwsCleanupPorts, "runAws" | "sleep">,
+  args: string[]
+): Promise<AwsCommandResult> {
+  let result = await ports.runAws(args);
+  for (const wait of IAM_CONFLICT_RETRY_MS) {
+    if (!awsError(result, "DeleteConflict")) break;
+    await ports.sleep(wait);
+    result = await ports.runAws(args);
+  }
+  return result;
+}
+
+// Delete a role's inline policies, then the role. The Recipe attaches no
+// managed policy, and the test role can't detach one, so IAM's refusal of a
+// role that has one is reported, not worked around.
+async function deleteAppRole(
+  ports: Pick<AwsCleanupPorts, "runAws" | "sleep">,
+  role: AppRole & { policies: readonly string[] },
+  report: Report
+): Promise<boolean> {
+  for (const policy of role.policies) {
+    const result = await ports.runAws([
+      "iam",
+      "delete-role-policy",
+      "--role-name",
+      role.name,
+      "--policy-name",
+      policy
+    ]);
+    if (succeeded(result) || awsError(result, "NoSuchEntity")) continue;
+    report.fail(
+      `Deleting inline policy ${policy} of app role ${role.arn}: ${awsDetail(result)}`
+    );
+    return false;
+  }
+  const result = await runIamDelete(ports, [
+    "iam",
+    "delete-role",
+    "--role-name",
+    role.name
+  ]);
+  if (succeeded(result) || awsError(result, "NoSuchEntity")) {
+    report.did(`Deleted app role ${role.arn}`);
+    return true;
+  }
+  report.fail(
+    `Deleting app role ${role.arn}: ${awsDetail(result)}${
+      awsError(result, "DeleteConflict") ?
+        ` IAM still refused after ${IAM_CONFLICT_RETRY_SECONDS} seconds of retries, so the role has a managed policy or an instance profile, which the test role can't remove.`
+      : ""
+    }`
+  );
+  return false;
+}
+
 /** What is left of each AWS test environment, by environment name. */
 async function readFootprintByEnvironment(
   config: AwsCleanupConfig,
   ports: AwsCleanupPorts,
-  scopes: readonly AwsRdsScope[]
+  scopes: readonly AwsRdsScope[],
+  app: AwsAppScope,
+  // What the sweep just deleted, which IAM may still list.
+  deleted: ReadonlySet<string>
 ): Promise<Map<string, string[]>> {
   const left = new Map<string, string[]>();
   const add = (environment: string, label: string) =>
@@ -1244,7 +1729,17 @@ async function readFootprintByEnvironment(
     ))
       add(item.environment, item.label);
   }
+  for (const role of await readAppRoles(ports, app)) {
+    const environment = appFolderEnvironment(role.arn, role.tags, app);
+    if (environment && !deleted.has(role.arn))
+      add(environment, `app role ${role.name}`);
+  }
   for (const cluster of config.clusters) {
+    for (const item of await readAppAssociations(ports, app, cluster)) {
+      const environment = appFolderEnvironment(item.roleArn, item.tags, app);
+      if (environment && !deleted.has(associationKey(item)))
+        add(environment, appAssociationLabel(item));
+    }
     for (const item of await readWorkloads(config, ports, cluster, ANY_AGE))
       add(
         item.environment.toLowerCase(),
@@ -1353,7 +1848,7 @@ export async function sweepAwsCloudE2E(
     }
   } catch (error) {
     report.fail(
-      `Could not list the fixture's GitHub environments: ${errorMessage(error)}. No environment, RDS resource, or workload was deleted.`
+      `Could not list the fixture's GitHub environments: ${errorMessage(error)}. No environment, RDS resource, app role, or workload was deleted.`
     );
   }
   for (const target of targets) {
@@ -1395,6 +1890,33 @@ export async function sweepAwsCloudE2E(
       );
       swept = false;
     }
+    let appIdentities: Awaited<ReturnType<typeof sweepAppIdentities>> = {
+      clean: false,
+      deleted: new Set()
+    };
+    // App roles are under the repository's ID. Without it, the rest of the
+    // sweep still runs, and every environment keeps its access.
+    const app = await readAppScope(config, ports);
+    if (app.scope === null) {
+      report.fail(
+        `No app role, Pod Identity association, or app boundary was swept, because the fixture repository's ID could not be read: ${app.message}`
+      );
+    } else {
+      try {
+        appIdentities = await sweepAppIdentities(
+          config,
+          ports,
+          app.scope,
+          sweepable,
+          report
+        );
+      } catch (error) {
+        report.fail(
+          `App role and Pod Identity sweep stopped without deleting further: ${errorMessage(error)}`
+        );
+      }
+    }
+    if (!appIdentities.clean) swept = false;
     for (const cluster of config.clusters) {
       try {
         if (
@@ -1416,9 +1938,15 @@ export async function sweepAwsCloudE2E(
       }
     }
     let left = new Map<string, string[]>();
-    if (swept) {
+    if (swept && app.scope) {
       try {
-        left = await readFootprintByEnvironment(config, ports, scopes);
+        left = await readFootprintByEnvironment(
+          config,
+          ports,
+          scopes,
+          app.scope,
+          appIdentities.deleted
+        );
       } catch (error) {
         report.fail(`Could not check what is left: ${errorMessage(error)}`);
         swept = false;
@@ -1426,7 +1954,7 @@ export async function sweepAwsCloudE2E(
     }
     for (const target of targets.filter((item) => !item.blocked)) {
       if (!swept) {
-        target.blocked = `The RDS or workload sweep failed, so ${target.name} keeps its access and GitHub state for a retry.`;
+        target.blocked = `The RDS, app role, or workload sweep failed, so ${target.name} keeps its access and GitHub state for a retry.`;
       } else if (left.has(target.name.toLowerCase())) {
         target.blocked = `${target.name} still has ${left.get(target.name.toLowerCase())?.join(", ")}, so it keeps its access and GitHub state for a retry.`;
         report.fail(target.blocked);
@@ -1468,6 +1996,10 @@ export async function sweepAwsCloudE2E(
       deployments,
       report
     );
+    // A boundary IAM still sees an app role use can't be deleted, so this
+    // waits for the app role sweep.
+    if (appIdentities.clean && app.scope)
+      await sweepOrphanedBoundaries(config, ports, app.scope, existing, report);
   }
 
   await clearStaleLock(config, ports, report);
@@ -1505,11 +2037,18 @@ async function removeEnvironment(
   let environmentDeleted = false;
   let lockedFailure = "";
   let result: AwsEnvironmentRemovalResult = { ok: false, message: "" };
-  // A removal that kept something it couldn't check, such as an access entry
-  // it couldn't read, is tried once more before the environment goes. After
+  // What every attempt removed, not only the last one.
+  const removed: string[] = [];
+  const lockWarnings: string[] = [];
+  // A removal that kept something it couldn't check or delete, such as an
+  // access entry it couldn't read or a boundary IAM still counts an app role
+  // just deleted against, is tried again after each IAM retry wait. After
   // that the environment goes anyway, as the product's delete does: a later
   // run could not sign in to delete the app again.
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  const waits = [0, ...IAM_CONFLICT_RETRY_MS];
+  for (const [attempt, wait] of waits.entries()) {
+    const last = attempt === waits.length - 1;
+    if (wait > 0) await ports.sleep(wait);
     let again = false;
     try {
       result = await ports.removeAccess({
@@ -1541,7 +2080,7 @@ async function removeEnvironment(
           );
         },
         whileLocked: async (removal) => {
-          if (removal.warnings.length > 0 && attempt === 1) {
+          if (removal.warnings.length > 0 && !last) {
             again = true;
             return;
           }
@@ -1556,6 +2095,10 @@ async function removeEnvironment(
     } catch (error) {
       result = { ok: false, message: errorMessage(error) };
     }
+    if (result.ok) {
+      removed.push(...result.removed);
+      if (result.lockWarning) lockWarnings.push(result.lockWarning);
+    }
     if (!result.ok || !again) break;
   }
   if (!result.ok) {
@@ -1564,13 +2107,11 @@ async function removeEnvironment(
     );
     return;
   }
-  if (result.lockWarning) report.warn(`${target.name}: ${result.lockWarning}`);
+  for (const line of lockWarnings) report.warn(`${target.name}: ${line}`);
   for (const line of result.warnings) report.fail(`${target.name}: ${line}`);
   for (const line of result.kept) ports.log(`${target.name} kept ${line}`);
-  if (result.removed.length > 0)
-    report.did(
-      `Removed from ${config.deployRoleName}: ${result.removed.join(", ")}`
-    );
+  if (removed.length > 0)
+    report.did(`Removed from ${config.deployRoleName}: ${removed.join(", ")}`);
   if (!environmentDeleted) {
     report.fail(
       `Removed ${target.name}'s access, but kept its GitHub environment${lockedFailure ? `: ${lockedFailure}` : ", because the deploy role's lock was lost"}. The next run tries again. See the AWS section of docs/eng/CLOUD_E2E_RUNBOOK.md.`
@@ -1636,6 +2177,85 @@ async function sweepOrphanedGitHubState(
   }
 }
 
+/**
+ * App boundaries of AWS environments that no longer exist. The product's
+ * removal deletes an environment's boundary in step 4, but keeps one an app
+ * role still used. Each is deleted only when Radius tagged it for the fixture
+ * repository.
+ */
+async function sweepOrphanedBoundaries(
+  config: AwsCleanupConfig,
+  ports: AwsCleanupPorts,
+  scope: AwsAppScope,
+  // Every AWS environment the run started with. Step 4 removes their
+  // boundaries, or keeps them for a retry.
+  known: ReadonlySet<string>,
+  report: Report
+): Promise<void> {
+  let boundaries: AppBoundary[];
+  try {
+    boundaries = selectOrphanBoundaryCandidates(
+      await readAws(ports, [
+        "iam",
+        "list-policies",
+        "--scope",
+        "Local",
+        "--path-prefix",
+        appPathRoot(scope.repositoryId)
+      ]),
+      scope,
+      known,
+      config.cutoff
+    );
+  } catch (error) {
+    report.fail(
+      `Could not list app permissions boundaries: ${errorMessage(error)}`
+    );
+    return;
+  }
+  for (const boundary of boundaries) {
+    const label = `permissions boundary ${boundary.arn}`;
+    try {
+      const read = await readAwsIfFound(
+        ports,
+        ["iam", "get-policy", "--policy-arn", boundary.arn],
+        "NoSuchEntity"
+      );
+      if (read === undefined) continue;
+      if (
+        radiusRoleRepositoryId(asRecord(read)?.Policy) !== scope.repositoryId
+      ) {
+        report.warn(
+          `The orphaned ${label} is not tagged for ${config.repository}, so the sweep kept it.`
+        );
+        continue;
+      }
+    } catch (error) {
+      report.fail(
+        `Could not read the orphaned ${label}: ${errorMessage(error)}`
+      );
+      continue;
+    }
+    const result = await runIamDelete(ports, [
+      "iam",
+      "delete-policy",
+      "--policy-arn",
+      boundary.arn
+    ]);
+    if (succeeded(result) || awsError(result, "NoSuchEntity")) {
+      report.did(`Deleted orphaned ${label}`);
+    } else {
+      report.fail(
+        `Deleting orphaned ${label}: ${awsDetail(result)}${
+          awsError(result, "DeleteConflict") ?
+            ` IAM still refused after ${IAM_CONFLICT_RETRY_SECONDS} seconds of retries, so an app role still uses the policy, or it has more than one version, which the test role can't delete.`
+          : ""
+        }`
+      );
+    }
+  }
+}
+
 interface NodeGroupState {
   readonly status: string;
   readonly minSize: number;
@@ -1687,7 +2307,13 @@ async function scaleDownNodeGroups(
   for (const name of AWS_MAIN_NODE_GROUPS) {
     try {
       let group = await readNodeGroup(ports, cluster, name);
-      if (group.desiredSize === 0 && group.minSize === 0) continue;
+      // A group still updating may be on its way up from zero.
+      if (
+        group.status === "ACTIVE" &&
+        group.desiredSize === 0 &&
+        group.minSize === 0
+      )
+        continue;
       if (group.status !== "ACTIVE") {
         const ready = await waitFor(
           ports,
@@ -1706,7 +2332,7 @@ async function scaleDownNodeGroups(
         }
         if (group.desiredSize === 0 && group.minSize === 0) continue;
       }
-      const result = await ports.runAws([
+      const result = await runNodeGroupUpdate(ports, [
         "eks",
         "update-nodegroup-config",
         "--region",
@@ -1732,6 +2358,25 @@ async function scaleDownNodeGroups(
       );
     }
   }
+}
+
+/**
+ * Run a node group update, waiting out another update that still holds the
+ * group. EKS refuses an update while one is in progress
+ * (ResourceInUseException), and a describe right after an update may still
+ * show the group ACTIVE.
+ */
+export async function runNodeGroupUpdate(
+  ports: Pick<AwsCleanupPorts, "runAws" | "sleep" | "now">,
+  args: string[]
+): Promise<AwsCommandResult> {
+  const deadline = ports.now() + NODE_GROUP_READY_TIMEOUT_MS;
+  let result = await ports.runAws(args);
+  while (awsError(result, "ResourceInUseException") && ports.now() < deadline) {
+    await ports.sleep(NODE_GROUP_POLL_MS);
+    result = await ports.runAws(args);
+  }
+  return result;
 }
 
 interface LockState {
@@ -1899,12 +2544,23 @@ async function readAwsLeftovers(
         );
     });
   }
-  // Every app boundary under the repository's app path, whatever its age.
+  // Everything under the repository's app path, whatever its tags say,
+  // except what Radius's own cleanup tag marks as Radius's.
   const app = await readAppScope(config, ports);
   const scope = app.scope;
   if (scope === null) {
-    findings.push(`Could not check app permissions boundaries: ${app.message}`);
+    findings.push(
+      `Could not check app roles, Pod Identity associations, or app boundaries: ${app.message}`
+    );
   } else {
+    await check("app roles", async () => {
+      findings.push(...(await appRoleLeftovers(ports, scope)));
+    });
+    for (const cluster of config.clusters) {
+      await check(`Pod Identity associations on ${cluster.name}`, async () => {
+        findings.push(...(await associationLeftovers(ports, scope, cluster)));
+      });
+    }
     await check("app permissions boundaries", async () => {
       for (const boundary of selectAppBoundaries(
         await readAws(ports, [

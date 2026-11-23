@@ -30,14 +30,10 @@ import {
 import type { DeployStatus } from "@radius-project/core";
 import {
   WORKFLOW_READ_LIMITS,
-  WorkflowReadInterruptedError,
-  type WorkflowReadContext
+  WorkflowReadInterruptedError
 } from "@radius-project/core";
 import type { WorkflowObservationScope } from "../services/workflow-observation-scope.js";
-import type {
-  DeployProgress,
-  WorkflowArtifact
-} from "../../deploy-artifacts.js";
+import type { DeployProgress } from "../../deploy-artifacts.js";
 import { expireGraphProgressWait } from "../../shared.js";
 import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
 import type {
@@ -54,10 +50,10 @@ import type {
   WorkspaceBranchResolution
 } from "../../workspace.js";
 import {
-  deletionInventoryFromSnapshot,
-  type DeletionInventory,
-  type DeletionInventorySnapshot
-} from "../services/deletion-inventory.js";
+  inspectDeploymentGraph,
+  projectInspectedTopology,
+  type DeploymentInspectionReader
+} from "@radius-project/core/inspection";
 
 // The two read-only halves of the `graphs-planning` family: the progress log the
 // page polls, and the deployed-graph projection. They are migrated together
@@ -69,15 +65,7 @@ import {
 // Shaped exactly like the reader `createDeployStatusReader` returns, minus every
 // member these routes do not call. The inventory uses `read` so status and
 // progress come from one snapshot, without graph/progress's last-good fallback.
-export interface DeployedGraphStatusReader {
-  read(context?: WorkflowReadContext): Promise<DeletionInventorySnapshot>;
-  graph(context?: WorkflowReadContext): Promise<{
-    graph: unknown | null;
-    status: string;
-    artifact?: WorkflowArtifact | null;
-  }>;
-  progress(context?: WorkflowReadContext): Promise<DeployProgress | null>;
-}
+export type DeployedGraphStatusReader = DeploymentInspectionReader;
 
 export interface DeployedGraphReaderOptions {
   repo: string;
@@ -99,11 +87,8 @@ export interface DeployedGraphInstanceEntry {
   observation?: WorkflowObservationScope;
 }
 
-// Ten narrow function seams for two routes. Nothing is moved: the cached reader
-// factory, the status/message map builders and the workspace-repo predicate stay
-// in `server.ts`, and the projection helpers stay in `@radius-project/core` and
-// `deploy-artifacts.ts`. Every one of them is handed in, so this module owns no
-// cache, spawns no process and reads no module-level mutable state.
+// The cached reader, observation scope, and presentation helpers are supplied
+// by the server composition layer.
 export interface GraphsPlanningReadsDependencies {
   // Returns undefined when the instance has no entry, which is what the legacy
   // `servers.get(instanceId)` miss meant. The request context's `state` snapshot
@@ -325,7 +310,8 @@ export async function handleDeployedGraph(
     );
     return;
   }
-  const state = entry?.state || {};
+  const instanceState = entry?.state;
+  let state = instanceState || {};
   if (entry?.state) entry.state.progressMessages = [];
   const branch =
     state.workspaceBranch && dependencies.repoMatchesWorkspace(state, repo) ?
@@ -380,51 +366,66 @@ export async function handleDeployedGraph(
     selected: string
   ): boolean =>
     !session || !selected || session.toLowerCase() === selected.toLowerCase();
-  const sessionRepo = state.deployingRepo || state.contextRepo || "";
-  const sessionBranch =
-    state.deployingBranch || state.contextBranch || state.graphBranch || "";
-  const sessionMatchesSelection =
-    exactSelectionPartMatches(sessionRepo, repo) &&
-    exactSelectionPartMatches(sessionBranch, branch) &&
-    namedSelectionPartMatches(sessionEnv, requestedEnv) &&
-    namedSelectionPartMatches(state.deployAppName || "", requestedApp);
-  const deploying =
+  const matchesSelection = (candidate: CanvasState) =>
+    exactSelectionPartMatches(
+      candidate.deployingRepo || candidate.contextRepo || "",
+      repo
+    ) &&
+    exactSelectionPartMatches(
+      candidate.deployingBranch ||
+        candidate.contextBranch ||
+        candidate.graphBranch ||
+        "",
+      branch
+    ) &&
+    namedSelectionPartMatches(
+      candidate.deployEnvName || candidate.envName || "",
+      requestedEnv
+    ) &&
+    namedSelectionPartMatches(candidate.deployAppName || "", requestedApp);
+  let sessionMatchesSelection = matchesSelection(state);
+  let deploying =
     state.deployStatus === "in_progress" && sessionMatchesSelection;
-  const monitorRunId = state.deployRunId;
+  let monitorRunId = state.deployRunId;
 
   const statusByKey = new Map<string, DeployStatus>();
+  const artifactStatuses = new Map<string, DeployStatus>();
   // Seed the resources the deploy monitor tracks so an empty artifact read keeps
   // their status. A valid artifact later overwrites only the keys it mentions.
-  if (sessionMatchesSelection && Array.isArray(state.deployingResources)) {
-    for (const resource of state.deployingResources) {
+  const seedMonitorStatuses = (
+    resources: CanvasState["deployingResources"]
+  ) => {
+    if (!Array.isArray(resources)) return;
+    for (const resource of resources) {
       const status = resource?.deployStatus as DeployStatus | undefined;
       if (!status || status === "pending") continue;
       for (const key of dependencies.deployStatusKeys(resource)) {
         if (!statusByKey.has(key)) statusByKey.set(key, status);
       }
     }
-  }
+  };
+  if (sessionMatchesSelection) seedMonitorStatuses(state.deployingResources);
 
-  let publishedGraph: unknown = null;
-  let readOk = false;
-  let updatedAt: string | null = null;
-  let progress: DeployProgress | null = null;
-  let artifactRunId: string | number | null = null;
-  let deletionInventory: DeletionInventory | null = null;
-  const inventoryApplication = (
-    url.searchParams.get("application") || ""
-  ).trim();
-  const inventoryEnvironment = (
-    url.searchParams.get("environment") || ""
-  ).trim();
-  const inventorySessionRunId = state.deployRunId;
   const inventoryDeployStatus = state.deployStatus;
-  const inventoryStartedAt = state.deployStartedAt;
-  const inventoryFinishedAt = state.deployFinishedAt;
-  // Only repo-wide discovery permits a guessed app-name fallback. An active
-  // run requires matching application identity. Surface the actual resolved
-  // application for a repo-wide fallback rather than mislabeling its status.
-  let resolvedApp: string | null = requestedApp || null;
+  const generation = state.deployGeneration;
+  const attemptId = state.deployAttempt?.id;
+  const run = {
+    matchesSelection: sessionMatchesSelection,
+    active: deploying,
+    id: monitorRunId,
+    startedAt: state.deployStartedAt,
+    finishedAt: state.deployFinishedAt,
+    unconfirmed: state.deployErrorKind === "run-unconfirmed"
+  };
+  const inventoryIsCurrent = () =>
+    dependencies.readInstanceEntry(context.instanceId)?.state ===
+      instanceState &&
+    state.deployStatus === inventoryDeployStatus &&
+    state.deployGeneration === generation &&
+    state.deployAttempt?.id === attemptId &&
+    state.deployRunId === run.id &&
+    state.deployStartedAt === run.startedAt &&
+    state.deployFinishedAt === run.finishedAt;
   const messageByKey = new Map<string, string>();
   const observation = entry?.observation?.observe(
     undefined,
@@ -432,119 +433,119 @@ export async function handleDeployedGraph(
       WORKFLOW_READ_LIMITS.artifactRunMs
     : WORKFLOW_READ_LIMITS.artifactRepositoryMs
   );
-  const assertCurrent = () => {
-    if (entry?.observation?.stopped)
-      throw new WorkflowReadInterruptedError("cancelled");
-  };
-  try {
-    const reader = dependencies.createDeployStatusReader(
-      {
-        repo,
-        environment: requestedEnv,
-        application: requestedApp,
-        // While a deploy is in flight, scope to its run so a previous
-        // deployment's newest-repo-wide artifact can't overwrite the live
-        // topology/status. The in-flight run hasn't uploaded yet, so this read is
-        // empty and the seeded live statuses stand. `??` rather than `||`: a run
-        // id of 0 is a real id and must not fall through to null.
-        runId: deploying ? (state.deployRunId ?? null) : null
-      },
-      context.instanceId
-    );
-    const result = await reader.graph(observation?.context);
-    assertCurrent();
-    publishedGraph = result.graph;
-    readOk = result.status === "ok" || result.status === "stale";
-    progress = await reader.progress(observation?.context);
-    assertCurrent();
-    artifactRunId =
-      progress?.runId ?? result.artifact?.workflow_run?.id ?? null;
-    const artifactRunMismatchesSession =
-      sessionMatchesSelection &&
-      state.deployRunId != null &&
-      artifactRunId != null &&
-      String(artifactRunId) !== String(state.deployRunId);
-    const attemptBoundary = Math.max(
-      state.deployStartedAt ?? 0,
-      state.deployFinishedAt ?? 0
-    );
-    const artifactCreatedAt = Date.parse(result.artifact?.created_at ?? "");
-    const mismatchedArtifactIsNewer =
-      !artifactRunMismatchesSession ||
-      (!deploying &&
-        attemptBoundary > 0 &&
-        Number.isFinite(artifactCreatedAt) &&
-        artifactCreatedAt > attemptBoundary);
-    const terminalArtifactNeedsIdentity =
-      sessionMatchesSelection &&
-      state.deployRunId != null &&
-      state.deployErrorKind === "run-unconfirmed" &&
-      (progress?.state === "failed" || progress?.state === "succeeded");
-    const activeArtifactMatchesRun =
-      deploying ?
-        state.deployRunId != null &&
-        artifactRunId != null &&
-        String(artifactRunId) === String(state.deployRunId)
-      : mismatchedArtifactIsNewer &&
-        (!terminalArtifactNeedsIdentity || artifactRunId != null);
-    if (!activeArtifactMatchesRun) {
-      // Unknown or older artifact identity cannot establish the tracked run's
-      // outcome. Keep monitor state without exposing unrelated graph metadata.
-      publishedGraph = null;
-      readOk = false;
-      progress = null;
-      artifactRunId = null;
-    } else {
-      updatedAt = progress?.updatedAt || null;
-      if (progress?.application) resolvedApp = progress.application;
-      if (artifactRunMismatchesSession) {
-        statusByKey.clear();
-      }
+  const inspected = await inspectDeploymentGraph({
+    run,
+    context: observation?.context,
+    openReader: (runId) =>
+      dependencies.createDeployStatusReader(
+        {
+          repo,
+          environment: requestedEnv,
+          application: requestedApp,
+          runId
+        },
+        context.instanceId
+      ),
+    assertObserving: () => {
+      if (entry?.observation?.stopped)
+        throw new WorkflowReadInterruptedError("cancelled");
+    },
+    acceptProgress: (progress) => {
       for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
-        statusByKey.set(key, status);
+        artifactStatuses.set(key, status);
       }
-      // First-wins protects duplicate weaker identity keys in this snapshot.
       for (const [key, message] of dependencies.buildDeployMessageMap(
         progress
       )) {
         if (!messageByKey.has(key)) messageByKey.set(key, message);
       }
-      const snapshot = await reader.read(observation?.context);
-      assertCurrent();
-      // A concurrent deploy must not turn an earlier snapshot into a delete
-      // inventory. Unlike graph display, selectors cannot fall back to session
-      // identity, and unverified reads cannot reuse last-good resources.
-      if (
-        !deploying &&
-        state.deployStatus === inventoryDeployStatus &&
-        state.deployRunId === inventorySessionRunId &&
-        state.deployStartedAt === inventoryStartedAt &&
-        state.deployFinishedAt === inventoryFinishedAt
-      ) {
-        deletionInventory = deletionInventoryFromSnapshot(
-          snapshot,
-          inventoryApplication,
-          inventoryEnvironment,
-          sessionMatchesSelection ? (inventorySessionRunId ?? null) : null
-        );
-      }
-    }
-  } catch (e) {
-    if (entry?.observation?.stopped) {
-      response.writeHead(503);
-      response.end(JSON.stringify({ error: "Workflow observation stopped." }));
-      return;
-    }
-    // A status read failure must not blank the tab: fall through to the seeded
-    // statuses and the modeled topology. The message is appended to the same
-    // array `/api/progress` serves, which is the one piece of cross-route state
-    // this pair shares.
+    },
+    // Inventory must be requested explicitly rather than infer identity from
+    // session fallbacks, and an in-flight read must not outlive its attempt.
+    inventorySelection: {
+      application: (url.searchParams.get("application") || "").trim(),
+      environment: (url.searchParams.get("environment") || "").trim()
+    },
+    inventoryIsCurrent
+  });
+  if (entry?.observation?.stopped) {
+    response.writeHead(503);
+    response.end(JSON.stringify({ error: "Workflow observation stopped." }));
+    return;
+  }
+  const currentInstanceState = dependencies.readInstanceEntry(
+    context.instanceId
+  )?.state;
+  const currentState = currentInstanceState || {};
+  const currentMatchesSelection = matchesSelection(currentState);
+  const currentRunId = currentState.deployRunId;
+  const observedRunId = inspected.observation.artifactRunId;
+  const sameRun =
+    run.id == null ?
+      currentRunId == null ||
+      (observedRunId != null && String(observedRunId) === String(currentRunId))
+    : currentRunId != null && String(run.id) === String(currentRunId);
+  const sameStatus =
+    currentState.deployStatus === inventoryDeployStatus ||
+    (run.active &&
+      (currentState.deployStatus === "complete" ||
+        currentState.deployStatus === "failed"));
+  const superseded =
+    currentInstanceState !== instanceState ||
+    ((sessionMatchesSelection || currentMatchesSelection) &&
+      (sessionMatchesSelection !== currentMatchesSelection ||
+        currentState.deployGeneration !== generation ||
+        currentState.deployAttempt?.id !== attemptId ||
+        !sameRun ||
+        !sameStatus));
+  // An unpinned repository read belongs to the URL selection even if the
+  // monitor moves elsewhere; its inventory still requires the stricter fence.
+  const keepRepositoryEvidence =
+    superseded &&
+    currentInstanceState === instanceState &&
+    !run.active &&
+    !currentMatchesSelection &&
+    inspected.kind === "observed";
+  const discardArtifact = superseded && !keepRepositoryEvidence;
+  if (superseded) {
+    // Keep polling a matching replacement without carrying over old statuses.
+    state = currentState;
+    sessionMatchesSelection = currentMatchesSelection;
+    deploying = sessionMatchesSelection && state.deployStatus === "in_progress";
+    monitorRunId = currentRunId;
+    statusByKey.clear();
+    if (sessionMatchesSelection) seedMonitorStatuses(state.deployingResources);
+  } else if (inspected.kind === "read-failed") {
     if (entry?.state) {
       entry.state.progressMessages = [
-        `Deployed graph status read failed: ${dependencies.errorMessage(e)}`
+        `Deployed graph status read failed: ${dependencies.errorMessage(inspected.error)}`
       ];
     }
   }
+  if (discardArtifact) {
+    messageByKey.clear();
+  } else {
+    if (inspected.observation.newerRun) statusByKey.clear();
+    for (const [key, status] of artifactStatuses) statusByKey.set(key, status);
+  }
+  const {
+    graph: publishedGraph,
+    progress,
+    artifactRunId,
+    readOk,
+    inventory
+  } =
+    discardArtifact ?
+      {
+        graph: null,
+        progress: null,
+        artifactRunId: null,
+        readOk: false,
+        inventory: null
+      }
+    : inspected.observation;
+  const resolvedApp = progress?.application || requestedApp || null;
+  const updatedAt = progress?.updatedAt || null;
   const hasPublishedGraph =
     publishedGraph != null ||
     (sessionMatchesSelection && state.deployedGraph != null);
@@ -665,30 +666,30 @@ export async function handleDeployedGraph(
       (!!state.plannedEnvironment &&
         namedSelectionPartMatches(state.plannedEnvironment, requestedEnv))) &&
     Array.isArray(state.plannedResources);
-  const providerResolvedTopology = dependencies.mergeDeployedGraphMetadata(
-    topology,
-    plannedMetadataMatchesSelection ? state.plannedResources : null
-  );
-  const deploymentMetadata =
-    publishedGraph ??
-    (!deploying && sessionMatchesSelection ? state.deployedGraph : null) ??
-    null;
-  const enrichedTopology = dependencies.mergeDeployedGraphMetadata(
-    providerResolvedTopology,
-    deploymentMetadata
-  );
-  const displayedTopology = dependencies.mergeDeployedGraphDisplayMetadata(
-    enrichedTopology,
-    (
-      sessionMatchesSelection &&
-        artifactMatchesSessionRun &&
-        Array.isArray(state.deployingResources)
-    ) ?
-      state.deployingResources
-    : null
-  );
   const resources = dependencies.canvasGraphResources(
-    dependencies.projectDeployedGraph(displayedTopology, statusByKey)
+    projectInspectedTopology(
+      topology,
+      {
+        planned:
+          plannedMetadataMatchesSelection ? state.plannedResources : null,
+        deployment:
+          publishedGraph ??
+          (!deploying && sessionMatchesSelection ?
+            state.deployedGraph
+          : null) ??
+          null,
+        monitor:
+          (
+            sessionMatchesSelection &&
+            artifactMatchesSessionRun &&
+            Array.isArray(state.deployingResources)
+          ) ?
+            state.deployingResources
+          : null
+      },
+      statusByKey,
+      dependencies
+    )
   );
   // Attach the producer's per-resource message so a red node can explain itself
   // in the popup instead of just being red.
@@ -705,7 +706,8 @@ export async function handleDeployedGraph(
       mode,
       updatedAt,
       application: resolvedApp,
-      deletionInventory
+      deletionInventory:
+        !superseded && inventory && inventoryIsCurrent() ? inventory : null
     })
   );
 }

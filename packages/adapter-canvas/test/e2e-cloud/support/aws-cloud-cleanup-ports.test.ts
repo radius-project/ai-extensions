@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  GH_NOT_FOUND,
+  KUBECTL_FORBIDDEN
+} from "../../support/aws/recorded-errors.js";
+import {
   APP_TOKEN_RENEW_AFTER_MS,
   APPLICATION_DELETE_TIMEOUT_MS,
   createAppTokenSource,
@@ -12,6 +16,7 @@ import {
   ghJsonRunner,
   ghNamespaceClaims,
   httpStatus,
+  readRepositoryId,
   runCommand,
   temporaryDirectory,
   type CommandResult
@@ -359,9 +364,9 @@ describe("createGhCleanupGitHub", () => {
     const { port } = github([
       [
         "api --method DELETE repos/octo/fixture/environments/radtest-aws-x",
-        HTTP(404)
+        GH_NOT_FOUND
       ],
-      ["api repos/octo/fixture/environments/radtest-aws-x", HTTP(404)]
+      ["api repos/octo/fixture/environments/radtest-aws-x", GH_NOT_FOUND]
     ]);
     await port.deleteEnvironment("radtest-aws-x");
     const refused = github([["api --method DELETE", HTTP(403)]]);
@@ -483,7 +488,7 @@ describe("createKubectlCleanupKubernetes", () => {
     "deleteNamespace"
   ] as const)("reports a kubectl failure from %s", async (method) => {
     const port = createKubectlCleanupKubernetes({
-      run: async (command) => (command === "aws" ? OK({}) : HTTP(403)),
+      run: async (command) => (command === "aws" ? OK({}) : KUBECTL_FORBIDDEN),
       directory: async () => "/tmp/kube"
     });
     const call =
@@ -496,7 +501,9 @@ describe("createKubectlCleanupKubernetes", () => {
         })
       : method === "listWorkloads" ? port.listWorkloads(CLUSTER)
       : port[method](CLUSTER, "ns");
-    await expect(call).rejects.toThrow("HTTP 403");
+    await expect(call).rejects.toThrow(
+      "Error from server (Forbidden): jobs.batch is forbidden"
+    );
   });
 });
 
@@ -517,13 +524,13 @@ describe("ghJsonRunner", () => {
     ]);
   });
 
-  it("answers a failure with its status", async () => {
-    const { gh } = scriptedGh([["api", HTTP(404)]]);
+  it("answers a failure with its status, never reading the error body as the resource", async () => {
+    const { gh } = scriptedGh([["api", GH_NOT_FOUND]]);
     expect(await ghJsonRunner(gh)("/repos/octo/gone")).toEqual({
       ok: false,
       status: 404,
       json: null,
-      stderr: "gh: Something (HTTP 404)"
+      stderr: "gh: Not Found (HTTP 404)"
     });
   });
 });
@@ -533,6 +540,35 @@ describe("ghNamespaceClaims", () => {
     const { gh } = scriptedGh([["api", OK({ environments: [] })]]);
     const claims = ghNamespaceClaims(gh);
     expect(await claims.listEnvironmentNames(REPO)).toMatchObject({ ok: true });
+  });
+});
+
+describe("readRepositoryId", () => {
+  it("reads GitHub's ID for the repository, and refuses anything but a positive integer", async () => {
+    const answer =
+      (json: Record<string, unknown> | null, ok = true, status = 200) =>
+      async (apiPath: string) => {
+        expect(apiPath).toBe(`/repos/${REPO}`);
+        return { ok, status, json, stderr: "" };
+      };
+    expect(await readRepositoryId(answer({ id: 1361595003 }), REPO)).toBe(
+      1361595003
+    );
+    for (const json of [{ id: 0 }, { id: "x" }, { id: 1.5 }, {}, null])
+      await expect(readRepositoryId(answer(json), REPO)).rejects.toThrow(
+        `Could not read the ID of ${REPO} (HTTP 200).`
+      );
+    await expect(
+      readRepositoryId(
+        async () => ({
+          ok: false,
+          status: null,
+          json: null,
+          stderr: ""
+        }),
+        REPO
+      )
+    ).rejects.toThrow(`Could not read the ID of ${REPO} (HTTP unknown).`);
   });
 });
 

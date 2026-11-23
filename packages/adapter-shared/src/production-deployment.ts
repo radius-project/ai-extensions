@@ -99,6 +99,7 @@ export function createProductionDeploymentRuntime(
       redactDiagnostic: ports.redactDiagnostic
     }),
     ghOrThrow: repository.ghOrThrow,
+    repository,
     deployWorkflowFile: DEPLOY_DISPATCHER_FILE,
     deleteWorkflowFile: DELETE_APP_DISPATCHER_FILE
   });

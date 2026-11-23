@@ -15,14 +15,32 @@ import {
 } from "@radius-project/core";
 import { awsAppBoundary } from "../../src/aws-deploy-role-name.js";
 import { AWS_MAIN_NODE_GROUPS } from "../e2e-cloud/support/aws-cloud-cleanup.js";
+import { collectAwsPreflightFindings } from "../e2e-cloud/support/aws-cloud-fixture.js";
+import { checkAwsFootprint } from "../e2e-cloud/support/aws-footprint.js";
+import {
+  scaleAwsNodeGroupsToZero,
+  startAwsNodeGroups
+} from "../e2e-cloud/support/aws-node-groups.js";
+import { checkDeployRoleRegionScope } from "../e2e-cloud/support/aws-policy-simulator-check.js";
+import { checkAndDeleteFinalSnapshot } from "../e2e-cloud/support/aws-snapshot-check.js";
 import {
   addAwsEnvironment,
+  addOrphanedAppRole,
   createCleanupScenario,
+  MAIN,
   MAIN_VPC,
   recipeTags,
+  ROLE_ARN,
   runSweep,
-  runVerify
+  runVerify,
+  SECOND
 } from "../support/aws/cleanup-scenario.js";
+import { FakeKubernetes } from "../support/aws/fake-kubernetes.js";
+import {
+  addLiveEnvironment,
+  createJourneyWorld,
+  liveEnvironment
+} from "../support/aws/journey-scenario.js";
 import {
   evaluateIam,
   type IamDecision,
@@ -127,15 +145,15 @@ function requestTags(args: readonly string[]): Record<string, string> {
 
 // The request IAM authorizes for one AWS CLI call: its action, the resource
 // it names, and the context keys the committed policies' conditions read.
-// `policyTags` are the tags of each managed policy before the run, which IAM
-// reads as aws:ResourceTag. A command it doesn't know fails the test, so a
-// new sweep call gets mapped.
+// A command it doesn't know fails the test, so a new sweep call gets mapped.
+// `known` gives the ARN of a role by name, for a role with a path, and the
+// tags of a policy by ARN, which conditions on its deletion read.
 function cliRequest(
   args: readonly string[],
-  policyTags: ReadonlyMap<
-    string,
-    ReadonlyArray<{ Key: string; Value: string }>
-  > = new Map()
+  known: {
+    roles?: ReadonlyMap<string, string>;
+    policyTags?: ReadonlyMap<string, readonly { Key: string; Value: string }[]>;
+  } = {}
 ): IamRequest {
   const [service, operation] = args;
   const command = `${service} ${operation}`;
@@ -151,15 +169,26 @@ function cliRequest(
     case "sts get-caller-identity":
     case "iam list-roles":
     case "iam list-policies":
+    case "ec2 describe-launch-template-versions":
       resource = "*";
       break;
     case "eks describe-cluster":
     case "eks list-nodegroups":
     case "eks list-access-entries":
+    case "eks list-pod-identity-associations":
       resource = `${eks}cluster/${cluster}`;
       break;
+    case "eks describe-addon":
+      resource = `${eks}addon/${cluster}/${flag(args, "--addon-name")}/${NODEGROUP_ID}`;
+      break;
+    case "eks describe-pod-identity-association":
+    case "eks delete-pod-identity-association":
+      resource = `${eks}podidentityassociation/${cluster}/${flag(args, "--association-id")}`;
+      break;
     case "eks describe-nodegroup":
+    case "eks describe-update":
     case "eks update-nodegroup-config":
+    case "eks update-nodegroup-version":
       resource = `${eks}nodegroup/${cluster}/${flag(args, "--nodegroup-name")}/${NODEGROUP_ID}`;
       break;
     case "eks describe-access-entry":
@@ -191,7 +220,14 @@ function cliRequest(
     case "iam put-role-policy":
     case "iam delete-role-policy":
     case "iam update-assume-role-policy":
-      resource = `${IAM}role/${flag(args, "--role-name")}`;
+    case "iam list-role-tags":
+    case "iam delete-role":
+      resource =
+        known.roles?.get(flag(args, "--role-name")) ??
+        `${IAM}role/${flag(args, "--role-name")}`;
+      break;
+    case "iam simulate-principal-policy":
+      resource = flag(args, "--policy-source-arn");
       break;
     case "iam get-policy":
     case "iam get-policy-version":
@@ -199,7 +235,7 @@ function cliRequest(
       break;
     case "iam delete-policy":
       resource = flag(args, "--policy-arn");
-      for (const tag of policyTags.get(resource) ?? [])
+      for (const tag of known.policyTags?.get(resource) ?? [])
         context[`aws:ResourceTag/${tag.Key}`] = tag.Value;
       break;
     case "iam create-policy":
@@ -675,6 +711,8 @@ describe("build/cloud-e2e/aws", () => {
     await addAwsEnvironment(s, "radtest-aws-bbbb33334444", {
       cluster: "second"
     });
+    // The app delete leaves the app role and its Pod Identity association,
+    // and an environment that is gone left its app role and boundary.
     s.appDelete.set("radtest-aws-aaaa11112222", "leave");
     s.aws.rds.addSnapshot({
       id: "rds-snapshot-mysql-aaaa11112222",
@@ -682,20 +720,24 @@ describe("build/cloud-e2e/aws", () => {
       vpcId: MAIN_VPC,
       tags: recipeTags("radtest-aws-aaaa11112222")
     });
+    addOrphanedAppRole(s, "radtest-aws-cccc55556666");
+    const roleArns = new Map(
+      [...s.aws.roles.values()].map((role) => [role.RoleName, role.Arn])
+    );
+    const policyTags = new Map(
+      [...s.aws.policies.values()].map((item) => [item.Arn, item.Tags])
+    );
     s.aws.addNodegroup(VALUES.MAIN_REGION!, VALUES.MAIN_CLUSTER!, "default", {
       minSize: 0,
       maxSize: 2,
       desiredSize: 1
     });
-    const policyTags = new Map(
-      [...s.aws.policies.values()].map((item) => [item.Arn, item.Tags])
-    );
     expect((await runSweep(s)).failures).toEqual([]);
     expect((await runVerify(s)).findings).toEqual([]);
     const policy = await rendered("test-role-policy.json");
     const requests = s.outside.calls
       .filter((call) => call.service === "aws" && call.command !== "--version")
-      .map((call) => cliRequest(call.args, policyTags));
+      .map((call) => cliRequest(call.args, { roles: roleArns, policyTags }));
     expect(requests.map((item) => item.action)).toEqual(
       expect.arrayContaining([
         "rds:deletedbinstance",
@@ -705,18 +747,180 @@ describe("build/cloud-e2e/aws", () => {
         "iam:updateassumerolepolicy",
         "iam:createpolicy",
         "iam:deletepolicy",
-        "iam:listpolicies"
+        "iam:listpolicies",
+        "iam:listroles",
+        "iam:listroletags",
+        "eks:listpodidentityassociations",
+        "eks:describepodidentityassociation"
       ])
     );
-    // The product's removal deletes each environment's app boundary.
+    // The product's removal deletes each environment's app boundary, and the
+    // sweep deletes the orphaned one.
     expect(
-      requests.filter(
-        (item) =>
-          item.action === "iam:deletepolicy" &&
-          item.resource.includes(":policy/radius/apps/")
-      )
-    ).toHaveLength(2);
+      requests
+        .filter(
+          (item) =>
+            item.action === "iam:deletepolicy" &&
+            item.resource.includes(":policy/radius/apps/")
+        )
+        .map((item) => item.resource.split("/").at(-2))
+        .sort()
+    ).toEqual([
+      "radtest-aws-aaaa11112222",
+      "radtest-aws-bbbb33334444",
+      "radtest-aws-cccc55556666"
+    ]);
     // Each call against the resource it names, in its region.
+    expect(
+      requests.filter((item) => evaluateIam(item, [policy]) !== "allowed")
+    ).toEqual([]);
+    // The test role's deletes are limited by resource, so the app role,
+    // association, and boundary deletes must name the ones they delete.
+    expect(
+      requests
+        .filter((item) =>
+          [
+            "iam:deleterole",
+            "iam:deletepolicy",
+            "eks:deletepodidentityassociation"
+          ].includes(item.action)
+        )
+        .map((item) => item.resource)
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(":podidentityassociation/"),
+        expect.stringMatching(/:role\/radius\/apps\/.*radtest-aws-aaaa/),
+        expect.stringMatching(/:role\/radius\/apps\/.*radtest-aws-cccc/),
+        expect.stringMatching(/:policy\/radius\/apps\/.*radtest-aws-cccc/)
+      ])
+    );
+  });
+
+  it("lets the test role make every AWS call the journey's checks make", async () => {
+    const world = createJourneyWorld();
+    const kube = new FakeKubernetes();
+    for (const target of [MAIN, SECOND])
+      kube.addCluster(`${target.region}/${target.name}`);
+    const cluster = world.aws.clusters.get(`${MAIN.region}:${MAIN.name}`);
+    if (cluster) cluster.version = "1.34";
+    const ports = {
+      ...world.ports,
+      log: () => {},
+      kubernetes: {
+        listWorkloads: async (target: { region: string; name: string }) =>
+          kube.list(`${target.region}/${target.name}`),
+        namespaceExists: async (
+          target: { region: string; name: string },
+          namespace: string
+        ) => kube.namespaceExists(`${target.region}/${target.name}`, namespace),
+        // Every desired node is Ready.
+        listNodes: async (
+          target: { region: string; name: string },
+          selector: string
+        ) => ({
+          items: Array.from(
+            {
+              length:
+                world.aws.clusters
+                  .get(`${target.region}:${target.name}`)
+                  ?.nodegroups.get(selector.split("=")[1] ?? "")?.desiredSize ??
+                0
+            },
+            () => ({
+              status: { conditions: [{ type: "Ready", status: "True" }] }
+            })
+          )
+        })
+      }
+    };
+    const scope = {
+      accountId: VALUES.ACCOUNT!,
+      repositoryId: Number(VALUES.FIXTURE_REPO_ID),
+      deployRoleName: VALUES.DEPLOY_ROLE!,
+      clusters: [MAIN, SECOND] as const
+    };
+    expect(
+      await collectAwsPreflightFindings(
+        {
+          ...scope,
+          repository: VALUES.FIXTURE_REPO!,
+          application: "cloud-e2e",
+          namespace: "default-cloud-e2e",
+          environmentPrefix: "radtest-aws-"
+        },
+        ports
+      )
+    ).toEqual([]);
+    await startAwsNodeGroups(ports, MAIN);
+    const environments = [
+      liveEnvironment("radtest-aws-run1-main"),
+      liveEnvironment("radtest-aws-run1-second", SECOND)
+    ];
+    for (const count of [0, 1, 2]) {
+      const live = environments.slice(0, count);
+      if (count > 0) addLiveEnvironment(world, live[count - 1]!);
+      expect(await checkAwsFootprint(scope, live, ports)).toEqual([]);
+      const { failures } = await checkDeployRoleRegionScope(ports, {
+        roleArn: ROLE_ARN,
+        testRegions: [MAIN.region, SECOND.region],
+        liveRegions: live.map((item) => item.region)
+      });
+      expect(failures).toEqual([]);
+    }
+    world.aws.rds.addSnapshot({
+      id: "rds-snapshot-mysql-run1main",
+      region: MAIN.region,
+      instanceId: "mysql-run1main",
+      vpcId: MAIN_VPC,
+      tags: recipeTags("radtest-aws-run1-main")
+    });
+    expect(
+      (
+        await checkAndDeleteFinalSnapshot(ports, {
+          scope: {
+            region: MAIN.region,
+            vpcIds: new Set([MAIN_VPC]),
+            prefix: "radtest-aws-"
+          },
+          instanceId: "mysql-run1main",
+          tags: Object.fromEntries(
+            recipeTags("radtest-aws-run1-main").map((tag) => [
+              tag.Key,
+              tag.Value
+            ])
+          )
+        })
+      ).failures
+    ).toEqual([]);
+    await scaleAwsNodeGroupsToZero(ports, MAIN);
+
+    const policy = await rendered("test-role-policy.json");
+    const action = (args: readonly string[]) =>
+      `${args[0]}:${args[1]?.replace(/-/g, "")}`;
+    const actions = [...new Set(world.calls.map(action))].sort();
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        "sts:getcalleridentity",
+        "eks:describeaddon",
+        "eks:listnodegroups",
+        "eks:describeaccessentry",
+        "eks:updatenodegroupversion",
+        "eks:updatenodegroupconfig",
+        "ec2:describelaunchtemplateversions",
+        "iam:simulateprincipalpolicy",
+        "iam:listpolicies",
+        "iam:getpolicy",
+        "rds:describedbsnapshots",
+        "rds:deletedbsnapshot"
+      ])
+    );
+    const requests = world.calls.map((args) => cliRequest(args));
+    expect(
+      requests.find((item) => item.action === "iam:simulateprincipalpolicy")
+    ).toMatchObject({
+      resource: ROLE_ARN,
+      context: { "aws:RequestedRegion": GLOBAL }
+    });
     expect(
       requests.filter((item) => evaluateIam(item, [policy]) !== "allowed")
     ).toEqual([]);

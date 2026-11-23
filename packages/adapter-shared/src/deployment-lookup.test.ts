@@ -5,12 +5,20 @@ import {
 } from "@radius-project/core";
 import { createDeploymentLookup } from "./deployment-lookup.js";
 import { cleanupMarker } from "./deployment-cleanup-marker.js";
+import { createDeploymentRepository } from "./deployment-repository.js";
+import type { DeploymentCommandExecutor } from "./deployment-command-bindings.js";
 import { createDeploymentDeferred } from "../test/support/deployment.js";
 
 const REPO = "octo/app";
 const ENVIRONMENT = "dev";
 const DEPLOY_WORKFLOW = "run-rad-commands.yml";
 const DELETE_WORKFLOW = "delete-application.yml";
+const unexpectedRepository = createDeploymentRepository({
+  execute: () => {
+    throw new Error("Unexpected repository read");
+  },
+  redactDiagnostic: String
+});
 
 it("keeps a healthy latest deployment readable without resolving thousands of older runs", async () => {
   const h = resolver(
@@ -95,6 +103,7 @@ it("fails closed at the full history budget without an unbounded recovery scan",
   );
   let pages = 0;
   const lookup = createDeploymentLookup({
+    repository: unexpectedRepository,
     ghOrThrow: async (args) => {
       if (!args[1].includes("/deployments?")) return h.ghOrThrow(args);
       const page = Number(/&page=(\d+)/.exec(args[1])?.[1] ?? 1);
@@ -127,6 +136,7 @@ it("propagates an older grouped-record read failure instead of offering incomple
     }
   });
   const lookup = createDeploymentLookup({
+    repository: unexpectedRepository,
     ghOrThrow: (args) =>
       args[1].includes("/deployments/2/statuses") ?
         Promise.reject(new Error("Older record unavailable"))
@@ -238,6 +248,7 @@ function resolver(
     ghOrThrow,
     list: () =>
       createDeploymentLookup({
+        repository: unexpectedRepository,
         readApplicationIdentity: async () =>
           options.identity ?? {
             state: "known",
@@ -249,6 +260,7 @@ function resolver(
       }).listEnvDeployment(REPO, ENVIRONMENT, ""),
     resolve: (appName = "radius-app") =>
       createDeploymentLookup({
+        repository: unexpectedRepository,
         readApplicationIdentity: async (_repo, _environment, runId) =>
           options.identities?.[runId] ??
           options.identity ?? {
@@ -682,6 +694,7 @@ describe("resolveEnvironmentDeployment", () => {
   it("propagates the active run's application identity read error", async () => {
     const h = resolver(["2"], { "2": activeRecord });
     const lookup = createDeploymentLookup({
+      repository: unexpectedRepository,
       ghOrThrow: h.ghOrThrow,
       readApplicationIdentity: async () => {
         throw new Error("Application identity read failed");
@@ -888,6 +901,7 @@ describe("resolveEnvironmentDeployment", () => {
       : h.ghOrThrow(args)
     );
     const lookup = createDeploymentLookup({
+      repository: unexpectedRepository,
       ghOrThrow,
       deployWorkflowFile: DEPLOY_WORKFLOW,
       deleteWorkflowFile: DELETE_WORKFLOW,
@@ -948,6 +962,7 @@ describe("resolveEnvironmentDeployment", () => {
       throw new Error(`Unexpected request ${path}`);
     };
     const lookup = createDeploymentLookup({
+      repository: unexpectedRepository,
       readApplicationIdentity: async () => ({
         state: "known",
         application: "modeled-app"
@@ -1412,6 +1427,7 @@ describe("resolveEnvironmentDeployment", () => {
 
     await expect(
       createDeploymentLookup({
+        repository: unexpectedRepository,
         readApplicationIdentity: async () => {
           throw new Error("Unexpected identity read");
         },
@@ -1425,79 +1441,192 @@ describe("resolveEnvironmentDeployment", () => {
 });
 
 describe("repository application-name compatibility", () => {
-  function lookup(responses: readonly (string | Error)[]) {
-    let index = 0;
-    const ghOrThrow = vi.fn(async () => {
-      const response = responses[index++];
-      if (response === undefined) throw new Error("Unexpected GitHub request");
-      if (response instanceof Error) throw response;
-      return response;
-    });
+  const sha = "a".repeat(40);
+  const repo = "acme/repo";
+  const revision = (ref: string) =>
+    `/repos/${repo}/commits/${encodeURIComponent(ref)}`;
+  const file = (path: string) => `/repos/${repo}/contents/${path}?ref=${sha}`;
+  const managed = file(".radius/app.bicep");
+  const root = file("app.bicep");
+  const ref = "feature/model";
+  const tip = { sha };
+  const named = (source: string) => ({
+    encoding: "base64",
+    content: Buffer.from(source).toString("base64"),
+    size: Buffer.byteLength(source)
+  });
+  function lookup(
+    ...responses: {
+      path: string;
+      json?: unknown;
+      status?: number;
+      error?: Error;
+    }[]
+  ) {
+    const execute = vi.fn<DeploymentCommandExecutor>(
+      (command, _args, _options, callback) => {
+        expect(command).toBe("gh");
+        const reply = responses.shift();
+        if (!reply) throw new Error("Unexpected GitHub request");
+        if (reply.error) throw reply.error;
+        if (reply.status)
+          callback({ code: 1 }, "", `gh: lookup failed (HTTP ${reply.status})`);
+        else callback(null, JSON.stringify(reply.json), "");
+        return {};
+      }
+    );
+    const expected = responses.map(({ path }) => ["api", path]);
     return {
-      ghOrThrow,
+      assertReads: () =>
+        expect(execute.mock.calls.map((call) => call[1])).toEqual(expected),
       lookup: createDeploymentLookup({
+        repository: createDeploymentRepository({
+          execute,
+          redactDiagnostic: String
+        }),
         readApplicationIdentity: async () => {
           throw new Error("Unexpected identity read");
         },
-        ghOrThrow,
+        ghOrThrow: async () => {
+          throw new Error("Unexpected legacy GitHub read");
+        },
         deployWorkflowFile: DEPLOY_WORKFLOW,
         deleteWorkflowFile: DELETE_WORKFLOW
       })
     };
   }
-  const encode = (source: string) => Buffer.from(source).toString("base64");
 
-  it("reads the committed model on the exact requested branch and stops after its application name", async () => {
-    const h = lookup([
-      encode(
-        "resource app 'Radius.Core/applications@v1' = { name: 'modeled-app' }"
-      )
-    ]);
-    expect(await h.lookup.resolveRepoAppName("acme/repo", "feature")).toBe(
-      "modeled-app"
+  it("resolves the escaped branch and returns the preferred definition from its commit", async () => {
+    const h = lookup(
+      { path: revision(ref), json: tip },
+      { path: managed, json: named("name: 'modeled-app'") }
     );
-    expect(h.ghOrThrow).toHaveBeenCalledExactlyOnceWith([
-      "api",
-      "/repos/acme/repo/contents/.radius/app.bicep?ref=feature",
-      "--jq",
-      ".content"
-    ]);
+    await expect(h.lookup.inspectRepoApplication(repo, ref)).resolves.toEqual({
+      kind: "defined",
+      name: "modeled-app",
+      path: ".radius/app.bicep",
+      branch: ref
+    });
+    h.assertReads();
   });
 
-  it.each([
-    new Error("not available"),
-    "",
-    "malformed base64",
-    encode("param location string")
-  ])(
-    "falls back to root app.bicep after an unreadable or nameless preferred model: %s",
-    async (first) => {
-      const h = lookup([first, encode("name: 'legacy-app'")]);
-      expect(await h.lookup.resolveRepoAppName("acme/repo", "feature")).toBe(
+  it.each([named(""), named("param location string")])(
+    "falls back to root at the same commit when the preferred definition has no name",
+    async (json) => {
+      const h = lookup(
+        { path: revision(ref), json: tip },
+        { path: managed, json },
+        { path: root, json: named("name: 'legacy-app'") }
+      );
+      await expect(h.lookup.resolveRepoAppName(repo, ref)).resolves.toBe(
         "legacy-app"
       );
-      expect(h.ghOrThrow).toHaveBeenLastCalledWith([
-        "api",
-        "/repos/acme/repo/contents/app.bicep?ref=feature",
-        "--jq",
-        ".content"
-      ]);
+      h.assertReads();
     }
   );
 
-  it("retains the empty-branch main fallback and basename fallback when both reads fail", async () => {
-    const h = lookup([new Error("permission denied"), new Error("missing")]);
-    expect(await h.lookup.resolveRepoAppName("acme/repo", "")).toBe("repo");
-    expect(h.ghOrThrow).toHaveBeenNthCalledWith(1, [
-      "api",
-      "/repos/acme/repo/contents/.radius/app.bicep?ref=main",
-      "--jq",
-      ".content"
-    ]);
+  it("confirms both files are absent only after proving the exact commit after each 404", async () => {
+    const h = lookup(
+      { path: revision("main"), json: tip },
+      { path: managed, status: 404 },
+      { path: revision(sha), json: tip },
+      { path: root, status: 404 },
+      { path: revision(sha), json: tip }
+    );
+    await expect(h.lookup.inspectRepoApplication(repo, "")).resolves.toEqual({
+      kind: "unconfirmed",
+      fallbackName: "repo",
+      unavailable: false
+    });
+    h.assertReads();
   });
 
-  it("retains the complete repository label when it has no basename", async () => {
-    const h = lookup(["", ""]);
-    expect(await h.lookup.resolveRepoAppName("acme/", "feature")).toBe("acme/");
+  it("keeps the basename display fallback when the GitHub executor throws", async () => {
+    const h = lookup({
+      path: revision(ref),
+      error: new Error("GitHub executor failed")
+    });
+    await expect(h.lookup.resolveRepoAppName(repo, ref)).resolves.toBe("repo");
+    h.assertReads();
+  });
+
+  it.each([{ status: 404 }, { json: { sha: "short" } }])(
+    "does not read files or infer absence when the ref cannot be resolved: %j",
+    async (reply) => {
+      const h = lookup({ path: revision(ref), ...reply });
+      await expect(h.lookup.inspectRepoApplication(repo, ref)).resolves.toEqual(
+        {
+          kind: "unconfirmed",
+          fallbackName: "repo",
+          unavailable: true
+        }
+      );
+      h.assertReads();
+    }
+  );
+
+  it.each([{ status: 404 }, { json: { sha: "b".repeat(40) } }])(
+    "does not infer absence when a 404 cannot be backed by the pinned revision: %j",
+    async (reply) => {
+      const h = lookup(
+        { path: revision(ref), json: tip },
+        { path: managed, status: 404 },
+        { path: revision(sha), ...reply },
+        { path: root, status: 404 },
+        { path: revision(sha), json: tip }
+      );
+      await expect(h.lookup.inspectRepoApplication(repo, ref)).resolves.toEqual(
+        {
+          kind: "unconfirmed",
+          fallbackName: "repo",
+          unavailable: true
+        }
+      );
+      h.assertReads();
+    }
+  );
+
+  it.each([
+    {
+      failure: "permission denied",
+      preferred: [{ path: managed, status: 403 }]
+    },
+    {
+      failure: "unverifiable 404",
+      preferred: [
+        { path: managed, status: 404 },
+        { path: revision(sha), json: { sha: "b".repeat(40) } }
+      ]
+    }
+  ])("keeps a named root unconfirmed after $failure", async ({ preferred }) => {
+    const h = lookup({ path: revision(ref), json: tip }, ...preferred, {
+      path: root,
+      json: named("name: 'legacy-app'")
+    });
+    await expect(h.lookup.inspectRepoApplication(repo, ref)).resolves.toEqual({
+      kind: "unconfirmed",
+      fallbackName: "legacy-app",
+      unavailable: true
+    });
+    h.assertReads();
+  });
+
+  it.each([
+    { status: 403 },
+    { json: [{ name: "subfile" }] },
+    { json: { encoding: "none", content: "", size: 2 } },
+    { json: { ...named("name: 'invalid'"), size: 1 } }
+  ])("does not mistake an unreadable file for missing: %j", async (reply) => {
+    const h = lookup(
+      { path: revision(ref), json: tip },
+      { path: managed, ...reply },
+      { path: root, json: named("") }
+    );
+    await expect(h.lookup.inspectRepoApplication(repo, ref)).resolves.toEqual({
+      kind: "unconfirmed",
+      fallbackName: "repo",
+      unavailable: true
+    });
+    h.assertReads();
   });
 });
