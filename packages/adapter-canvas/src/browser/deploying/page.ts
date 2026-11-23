@@ -69,16 +69,17 @@ export const AWS_REPAIR_BUTTON_ID = "deploy-repair-aws-trust";
 export const AWS_REPAIR_HELP_ID = "deploy-repair-aws-trust-help";
 export const AWS_REPAIR_STATUS_ID = "deploy-repair-aws-trust-status";
 
-// Safety caps: a deploy-status poll that never reaches a terminal state falls
-// back to whatever the deployments listing already shows, rather than polling
-// forever. They outlast the server's 60-minute deploy watch window plus run
-// discovery, so the server reports the outcome first.
+// Safety caps: a deploy-status poll that goes this many ticks without the
+// server confirming the same deploy is still running falls back to whatever
+// the deployments listing already shows, rather than polling forever. While
+// the server confirms it, the page keeps polling: the server's own watch
+// window ends every deploy with an outcome.
 export const DEPLOY_WORKFLOW_POLL_MS = 2500;
-export const DEPLOY_WORKFLOW_POLL_LIMIT = 1680; // ~70 min at 2.5s/tick
+export const DEPLOY_WORKFLOW_POLL_LIMIT = 720; // ~30 min at 2.5s/tick
 export const DEPLOY_FAILED_HANDOFF_POLL_LIMIT = 20;
 export const DEPLOY_AUTO_HIDE_MS = 2500;
 export const RESUME_POLL_MS = 2500;
-export const RESUME_POLL_LIMIT = 1680; // ~70 min at 2.5s/tick
+export const RESUME_POLL_LIMIT = 720; // ~30 min at 2.5s/tick
 // A fresh listing runs a full GitHub lookup per environment, so an in-flight
 // deploy refreshes it on a slower cadence than its status poll.
 export const IN_FLIGHT_LIST_REFRESH_MS = 15_000;
@@ -1567,6 +1568,7 @@ export function initializeDeployingPage(
       status: "deleting"
     });
     const runUrl = queryValue(context.nav.search, "run");
+    const deployment = queryValue(context.nav.search, "deployment");
     const runLink = workflowRunLink(runUrl);
     showInline(
       "success",
@@ -1574,7 +1576,13 @@ export function initializeDeployingPage(
       true
     );
     void loadDeployments(true, true);
-    pollDeleteCompletion({ app, environment, forced: true, runUrl });
+    pollDeleteCompletion({
+      app,
+      environment,
+      forced: true,
+      runUrl,
+      previousDeploymentId: /^\d+$/.test(deployment) ? deployment : undefined
+    });
     return true;
   };
 
@@ -1593,11 +1601,13 @@ export function initializeDeployingPage(
     void loadDeployments(true);
 
     let ticks = 0;
+    let unconfirmedTicks = 0;
     let recordSeen = false;
     const refreshList = createInFlightListRefresh();
     const poll = entry.every(RESUME_POLL_MS, () => {
       ticks++;
-      if (ticks > RESUME_POLL_LIMIT) {
+      unconfirmedTicks++;
+      if (unconfirmedTicks > RESUME_POLL_LIMIT) {
         entry.cancel(poll);
         overrides.delete(key);
         void loadDeployments(true);
@@ -1615,6 +1625,7 @@ export function initializeDeployingPage(
             (status.attempt.environment === "" ||
               status.attempt.environment === environment);
           if (status.active && sameAttempt) {
+            unconfirmedTicks = 0;
             // Once the real record replaces the synthetic row, keep polling
             // for the terminal transition but stop fanning out fresh=1 list
             // fetches every tick.
@@ -1716,6 +1727,7 @@ export function initializeDeployingPage(
 
     let failedPolls = 0;
     let wfTicks = 0;
+    let unconfirmedTicks = 0;
     let recordSeen = false;
     const refreshList = createInFlightListRefresh();
     // The deploy-status slot is per-canvas, not per-run: it keeps the previous
@@ -1736,7 +1748,8 @@ export function initializeDeployingPage(
     let startNotified = false;
     const wfPoll = entry.every(DEPLOY_WORKFLOW_POLL_MS, () => {
       wfTicks++;
-      if (wfTicks > DEPLOY_WORKFLOW_POLL_LIMIT) {
+      unconfirmedTicks++;
+      if (unconfirmedTicks > DEPLOY_WORKFLOW_POLL_LIMIT) {
         entry.cancel(wfPoll);
         cancelAutoHide();
         overrides.delete(key);
@@ -1772,6 +1785,7 @@ export function initializeDeployingPage(
             void loadDeployments(true);
             return;
           }
+          if (status.status === "in_progress") unconfirmedTicks = 0;
           // The server only supplies a run URL after workflow discovery has
           // resolved a real GitHub Actions run for this attempt.
           if (

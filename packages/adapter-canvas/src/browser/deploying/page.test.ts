@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEPLOYMENT_MONITOR_LIMITS } from "@radius-project/core";
 import {
   DELETE_DIALOG_CONFIRM_BUTTON_ID,
   DELETE_DIALOG_CONFIRM_INPUT_ID,
@@ -3874,10 +3873,7 @@ describe("deploy flow", () => {
       await flushPromises();
       page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
       page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-        jsonResponse({
-          status: "in_progress",
-          deployRunUrl: "https://example.test/run/1"
-        })
+        Promise.reject(new Error("canvas server unavailable"))
       );
       page.deployBtn.dispatch("click");
       await flushPromises();
@@ -4683,17 +4679,74 @@ describe("in-flight listing refresh", () => {
     expect(page.browser.net.aborted).toBe(aborted);
   });
 
+  // The server's watch window counts only waits between GitHub reads, so a
+  // deploy with slow reads can stay in progress well past 70 minutes.
   it.each([
-    ["deploy", DEPLOY_WORKFLOW_POLL_LIMIT * DEPLOY_WORKFLOW_POLL_MS],
-    ["resume", RESUME_POLL_LIMIT * RESUME_POLL_MS]
-  ])(
-    "keeps the %s status poll running past the server's watch window",
-    (_, pageWindowMs) => {
-      const { runWatchMs, discoveryAttempts, pollIntervalMs } =
-        DEPLOYMENT_MONITOR_LIMITS;
-      expect(pageWindowMs).toBeGreaterThan(
-        runWatchMs + discoveryAttempts * pollIntervalMs
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "keeps polling %s for as long as the server reports it running",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      slowListing(page, () => []);
+      let finished = false;
+      const running = {
+        status: "in_progress",
+        active: true,
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      };
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse(
+          finished ? { ...running, status: "success", active: false } : running
+        )
       );
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      await advance(page, 80 * 60 * 1000, 60_000);
+      expect(inlineMessage(page.inlineStatus)).not.toContain(
+        "taking longer than expected"
+      );
+      expect(page.browser.clock.intervals).toBe(1);
+
+      finished = true;
+      await advance(page, step, step);
+      expect(page.browser.clock.intervals).toBe(0);
+    }
+  );
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "restarts the cap for %s each time the server confirms it is running",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      slowListing(page, () => []);
+      let available = false;
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        available ?
+          jsonResponse({
+            status: "in_progress",
+            active: true,
+            attempt: { targetRepo: "octo/app", environment: "dev" }
+          })
+        : Promise.reject(new Error("canvas server unavailable"))
+      );
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      const limit =
+        entry === "click" ? DEPLOY_WORKFLOW_POLL_LIMIT : RESUME_POLL_LIMIT;
+      await advance(page, (limit - 1) * step, step);
+      available = true;
+      await advance(page, step, step);
+      available = false;
+      await advance(page, (limit - 1) * step, step);
+      expect(page.browser.clock.intervals).toBe(1);
+
+      await advance(page, 2 * step, step);
+      expect(page.browser.clock.intervals).toBe(0);
     }
   );
 });
@@ -4971,6 +5024,38 @@ describe("delete completion poll", () => {
     expect(page.tableBody.innerHTML).toContain("Deleting");
   });
 
+  it.each([
+    ["the deleted record's ID", "&deployment=1", true],
+    ["no deleted record ID", "", false],
+    ["a malformed deleted record ID", "&deployment=1%26x", false]
+  ])(
+    "matches a redirected forced delete's failure without a run by %s",
+    async (_, param, stops) => {
+      const page = fixture({
+        search: `?delete=forced&application=app&environment=dev&run=${param}`
+      });
+      let polls = 0;
+      page.browser.net.handle(freshListing(page.repo), () => {
+        polls++;
+        return jsonResponse({
+          deployments: [
+            {
+              ...listed("app", "dev", "delete-failed"),
+              deploymentId: "2"
+            }
+          ]
+        });
+      });
+      init(page);
+      await flushPromises();
+      await advance(page, 2 * 60 * 1000, 15_000);
+
+      expect(inlineMessage(page.inlineStatus).includes("failed.")).toBe(stops);
+      if (stops) expect(page.browser.clock.pending).toBe(0);
+      else expect(polls).toBeGreaterThan(4);
+    }
+  );
+
   it("names a failed forced delete handed over from another page", async () => {
     const page = fixture({
       search:
@@ -5211,10 +5296,7 @@ describe("resuming a redirected deployment", () => {
   it("gives up after the resume poll cap", async () => {
     const page = fixture({ search: "?application=app&environment=dev" });
     page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({
-        active: true,
-        attempt: { targetRepo: "octo/app", environment: "dev" }
-      })
+      Promise.reject(new Error("canvas server unavailable"))
     );
     init(page);
     await flushPromises();
