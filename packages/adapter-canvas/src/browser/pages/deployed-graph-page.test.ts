@@ -1814,11 +1814,17 @@ describe("initializeDeployedGraphPage", () => {
   // The redirect hands the delete to the Deployments page; a forced one has to
   // arrive there still forced, or its completion drops the orphan caution.
   it.each([
-    ["unverified", undefined],
-    ["known", { state: "known", application: "app" }]
+    ["unverified", undefined, "https://github.com/octo/app/actions/runs/42"],
+    [
+      "known",
+      { state: "known", application: "app" },
+      "https://github.com/octo/app/actions/runs/42"
+    ],
+    ["unverified", undefined, ""],
+    ["known", { state: "known", application: "app" }, ""]
   ])(
-    "carries the forced delete, its run and the %s record into the Deployments page",
-    async (_, identity) => {
+    "carries the forced delete and the %s record into the Deployments page (case %#)",
+    async (_, identity, runUrl) => {
       const page = fixture({
         deployments: [
           {
@@ -1847,7 +1853,7 @@ describe("initializeDeployedGraphPage", () => {
           })
       );
       browser.net.handle("/api/delete-deployment", () =>
-        jsonResponse({ runUrl: "https://github.com/octo/app/actions/runs/42" })
+        jsonResponse({ runUrl })
       );
       initializeDeployedGraphPage(
         browser.context,
@@ -1868,9 +1874,7 @@ describe("initializeDeployedGraphPage", () => {
       expect(redirect).toContain("delete=forced");
       expect(redirect).toContain("application=app");
       expect(redirect).toContain("environment=dev");
-      expect(redirect).toContain(
-        `run=${encodeURIComponent("https://github.com/octo/app/actions/runs/42")}`
-      );
+      expect(redirect).toContain(`run=${encodeURIComponent(runUrl)}`);
       expect(redirect).toContain("&deployment=11");
     }
   );
