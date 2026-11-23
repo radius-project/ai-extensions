@@ -552,6 +552,47 @@ describe("readDeploymentRows", () => {
 
   it("returns an empty list for a listing with no deployments", () => {
     expect(readDeploymentRows({ deployments: [] })).toEqual([]);
+    expect(
+      readDeploymentRows({ deployments: [], environmentDiagnostics: [] })
+    ).toEqual([]);
+  });
+
+  it.each(["error", "incomplete"])(
+    "does not read an environment %s as an empty deployment listing",
+    (kind) => {
+      expect(() =>
+        readDeploymentRows({
+          deployments: [],
+          environmentDiagnostics: [
+            {
+              environment: "radtest-env",
+              kind,
+              message: "Deployment history could not be verified."
+            }
+          ]
+        })
+      ).toThrow(
+        /deployment listing is incomplete: radtest-env: Deployment history could not be verified/
+      );
+    }
+  );
+
+  it.each([null, {}, "unavailable"])(
+    "rejects malformed environment diagnostics %j",
+    (environmentDiagnostics) => {
+      expect(() =>
+        readDeploymentRows({ deployments: [], environmentDiagnostics })
+      ).toThrow(/environmentDiagnostics.*array/);
+    }
+  );
+
+  it("keeps an unreadable diagnostic from proving absence", () => {
+    expect(() =>
+      readDeploymentRows({
+        deployments: [],
+        environmentDiagnostics: [null]
+      })
+    ).toThrow(/deployment listing is incomplete/);
   });
 
   it.each([
@@ -750,6 +791,81 @@ describe("requireDeploymentDeleted", () => {
 });
 
 describe("createTolerantProbe", () => {
+  it("waits through an unverified delete listing until deletion is confirmed", async () => {
+    const responses = [
+      {
+        deployments: [
+          {
+            app: "",
+            environment: "radtest-env",
+            status: "deleting",
+            identity: { state: "unavailable" }
+          }
+        ]
+      },
+      {
+        deployments: [],
+        environmentDiagnostics: [
+          {
+            environment: "radtest-env",
+            kind: "error",
+            message: "Could not identify GitHub deployment 42."
+          }
+        ]
+      },
+      {
+        deployments: [
+          {
+            app: "demo",
+            environment: "radtest-env",
+            status: "deleting",
+            runUrl: "https://github.com/owner/repo/actions/runs/42"
+          }
+        ]
+      },
+      { deployments: [] }
+    ];
+    const probe = createTolerantProbe(async () => {
+      const rows = readDeploymentRows(responses.shift());
+      return isDeploymentDeletionSettled(
+        classifyDeploymentDeletion(
+          classifyDeploymentPresence(rows, "demo", "radtest-env")
+        )
+      );
+    });
+
+    expect(await probe.read()).toBeUndefined();
+    expect(await probe.read()).toBeUndefined();
+    expect(probe.lastFailure()).toContain(
+      "radtest-env: Could not identify GitHub deployment 42."
+    );
+    expect(await probe.read()).toBe(false);
+    expect(await probe.read()).toBe(true);
+    expect(probe.lastFailure()).toBe("");
+  });
+
+  it("retains a persistent environment lookup failure in the delete timeout", async () => {
+    const probe = createTolerantProbe(async () =>
+      readDeploymentRows({
+        deployments: [],
+        environmentDiagnostics: [
+          {
+            environment: "radtest-env",
+            kind: "error",
+            message: "Could not identify GitHub deployment 42."
+          }
+        ]
+      })
+    );
+
+    expect(await probe.read()).toBeUndefined();
+    const error = probe.explain(new Error("Timed out waiting"));
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
+      "radtest-env: Could not identify GitHub deployment 42."
+    );
+  });
+
   it("passes a successful reading straight through", async () => {
     const probe = createTolerantProbe(async () => "ready");
     expect(await probe.read()).toBe("ready");

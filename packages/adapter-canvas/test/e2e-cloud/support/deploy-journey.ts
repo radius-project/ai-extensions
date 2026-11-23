@@ -220,6 +220,28 @@ export interface DeploymentRow {
 export function readDeploymentRows(payload: unknown): DeploymentRow[] {
   const record = asRecord(payload);
   rejectEndpointError(record, "deployment listing");
+  const diagnostics = record?.environmentDiagnostics;
+  if (diagnostics !== undefined) {
+    if (!Array.isArray(diagnostics))
+      throw new Error(
+        'The deployment listing carried an "environmentDiagnostics" value that was not an array.'
+      );
+    if (diagnostics.length)
+      throw new Error(
+        `The deployment listing is incomplete: ${diagnostics
+          .map((entry) => {
+            const diagnostic = asRecord(entry);
+            const environment =
+              optionalText(diagnostic?.environment, "environment") ||
+              "<unknown environment>";
+            const message =
+              optionalText(diagnostic?.message, "message") ||
+              "Deployment history could not be verified.";
+            return `${environment}: ${message}`;
+          })
+          .join("; ")}`
+      );
+  }
   const list = record?.deployments;
   if (!Array.isArray(list))
     throw new Error(
