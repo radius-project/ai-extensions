@@ -4715,6 +4715,38 @@ describe("delete completion poll", () => {
     );
   });
 
+  // Guard: passes on the code that introduced it. The strict listing turns an
+  // environment reported only as a diagnostic into an unverified row, so the
+  // poll must never read the missing deployment row as a finished delete.
+  it("never reads a listing with only a diagnostic for the environment as deleted", async () => {
+    const { page, button } = await startDelete();
+    let polls = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      polls++;
+      return jsonResponse({
+        deployments: [],
+        environmentDiagnostics: [
+          {
+            environment: "dev",
+            kind: "error",
+            message:
+              "Could not identify GitHub deployment 5 for environment dev."
+          }
+        ]
+      });
+    });
+    await confirm(page, button);
+    const before = polls;
+    await advance(page, 2 * 60 * 1000, 15_000);
+
+    expect(polls).toBeGreaterThan(before + 3);
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+    expect(inlineMessage(page.inlineStatus)).not.toContain("failed.");
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+  });
+
   it("names a failed forced delete handed over from another page", async () => {
     const page = fixture({
       search:
