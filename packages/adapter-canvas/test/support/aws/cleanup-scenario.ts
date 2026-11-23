@@ -1,5 +1,11 @@
 import {
   AWS_EKS_CLUSTER_ADMIN_POLICY_ARN,
+  AWS_MANAGED_TAG,
+  AWS_REPOSITORY_ID_TAG,
+  AWS_REPOSITORY_TAG,
+  buildAwsAppBoundaryPolicy,
+  buildAwsAppRolesPolicy,
+  buildAwsAppRolesPolicyName,
   buildEnvironmentSuffix,
   buildGitHubTrustPolicy,
   removeGitHubTrustSubject
@@ -24,14 +30,19 @@ import {
   createAwsCleanupAccessRemoval,
   readRepositoryId
 } from "../../e2e-cloud/support/aws-cloud-cleanup-ports.js";
-import { FakeAws } from "./fake-aws.js";
+import {
+  FakeAws,
+  type FakeIamRole,
+  type FakeManagedPolicy
+} from "./fake-aws.js";
 import { FakeGitHub } from "./fake-github.js";
 import { FakeKubernetes } from "./fake-kubernetes.js";
 import { MemoryDisk, OutsideWorld } from "./stop-points.js";
 
 // The world the AWS Cloud E2E cleanup sweep runs against: the two test
 // clusters, the fixture's deploy role, the fixture repository's environments,
-// deployment records, and state packages, and each cluster's workloads. The
+// deployment records, and state packages, each environment's app boundary,
+// app roles, and Pod Identity associations, and each cluster's workloads. The
 // sweep's deploy-role removal is the product's own, composed as the workflow
 // composes it, over the same fake AWS and GitHub. Every outside call goes
 // through one OutsideWorld, so a test can stop the sweep at any of them.
@@ -48,6 +59,9 @@ export const MAIN_VPC = "vpc-main";
 export const SECOND_VPC = "vpc-second";
 export const ROLE = defaultAwsDeployRoleName(REPO);
 export const ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role/${ROLE}`;
+export const APP_ROLES_POLICY = buildAwsAppRolesPolicyName(REPO_ID);
+// The fixture app's one container.
+export const CONTAINER = "web";
 const START = Date.parse("2026-11-14T02:23:00Z");
 const DAY = 24 * 3600 * 1000;
 
@@ -74,7 +88,8 @@ export interface CleanupScenario {
   readonly clock: { now: number };
   ports: AwsCleanupPorts;
   // How delete-application.yml behaves for each environment: "fail" throws,
-  // "leave" succeeds but leaves the database, as when Radius loses track.
+  // "leave" succeeds but leaves the database, the app role, and its Pod
+  // Identity association, as when Radius loses track.
   readonly appDelete: Map<string, "fail" | "leave">;
   readonly log: string[];
   // Each environment's trust subjects and cluster, as setup added them.
@@ -129,6 +144,37 @@ export function recipeTags(environment: string) {
 
 export function databaseName(environment: string): string {
   return `mysql-${environment.slice(PREFIX.length).replace(/[^a-z0-9]/g, "")}`;
+}
+
+/** The containers Recipe's tags on a container's app role and association. */
+export function containerTags(environment: string): Record<string, string> {
+  return {
+    "radapp.io/application": `/planes/radius/local/resourcegroups/default/providers/Radius.Core/applications/${APPLICATION}`,
+    "radapp.io/environment": environmentId(environment),
+    "radapp.io/resource": `/planes/radius/local/resourcegroups/default/providers/Radius.Compute/containers/${CONTAINER}`
+  };
+}
+
+export function tagList(tags: Record<string, string>) {
+  return Object.entries(tags).map(([Key, Value]) => ({ Key, Value }));
+}
+
+/**
+ * The containers Recipe's role name: `take('radius-app-<name>', 50)`, a dash,
+ * and a 13-character uniqueString, here made from the environment's name.
+ */
+export function appRoleName(environment: string): string {
+  const unique = environment
+    .slice(PREFIX.length)
+    .replace(/[^a-z0-9]/g, "")
+    .padEnd(13, "0")
+    .slice(0, 13);
+  return `radius-app-${CONTAINER}-${unique}`;
+}
+
+/** The environment's app boundary, as setup names it. */
+export function appBoundary(environment: string) {
+  return awsAppBoundary(ACCOUNT, REPO_ID, environment);
 }
 
 /**
@@ -196,6 +242,15 @@ function githubPort(scenario: CleanupScenario): AwsCleanupGitHub {
             throw new Error(
               "delete-application.yml run 9 ended failure: Could not assume the deploy role."
             );
+          // Cloud Control deletes the app role with the deploy role's
+          // app-roles policy.
+          if (
+            scenario.aws.role(appRoleName(environment)) &&
+            !scenario.aws.role(ROLE)?.inline.has(APP_ROLES_POLICY)
+          )
+            throw new Error(
+              "delete-application.yml run 9 ended failure: AccessDenied for iam:DeleteRole."
+            );
           deleteApplication(scenario, environment, behavior === "leave");
         }
       ),
@@ -255,13 +310,14 @@ function kubernetesPort(scenario: CleanupScenario): AwsCleanupKubernetes {
 
 /**
  * What delete-application.yml does for an environment: Cloud Control deletes
- * the database with a final snapshot that carries its tags, and Radius
- * deletes the workloads it rendered.
+ * the database with a final snapshot that carries its tags, and the
+ * container's Pod Identity association and app role, and Radius deletes the
+ * workloads it rendered.
  */
 function deleteApplication(
   scenario: CleanupScenario,
   environment: string,
-  leaveDatabase: boolean
+  leave: boolean
 ): void {
   const variables = scenario.github.environment(environment)?.variables;
   const region = variables?.get("AWS_REGION") ?? "";
@@ -269,7 +325,7 @@ function deleteApplication(
   const name = databaseName(environment);
   const rds = scenario.aws.rds;
   const instance = rds.instances.get(`${region}:${name}`);
-  if (instance && !leaveDatabase) {
+  if (instance && !leave) {
     rds.addSnapshot({
       id: `rds-snapshot-${name}`,
       region,
@@ -280,6 +336,15 @@ function deleteApplication(
     rds.instances.delete(`${region}:${name}`);
     rds.subnetGroups.delete(`${region}:${name}`);
     rds.parameterGroups.delete(`${region}:${name}`);
+  }
+  const appRole = scenario.aws.role(appRoleName(environment));
+  if (appRole && !leave) {
+    const podIdentity = scenario.aws.clusters.get(
+      `${region}:${cluster}`
+    )?.podIdentity;
+    for (const [id, item] of podIdentity ?? [])
+      if (item.roleArn === appRole.Arn) podIdentity?.delete(id);
+    scenario.aws.roles.delete(appRole.RoleName.toLowerCase());
   }
   for (const item of JSON.parse(
     JSON.stringify(scenario.kube.list(`${region}/${cluster}`))
@@ -356,6 +421,7 @@ export function createCleanupScenario(): CleanupScenario {
     accountId: ACCOUNT,
     now: () => (clock.now += 1000)
   });
+  aws.iamSettleMs = 10_000;
   aws.addCluster(MAIN.name, MAIN.region, "API", MAIN_VPC);
   aws.addCluster(SECOND.name, SECOND.region, "API", SECOND_VPC);
   aws.addNodegroup(MAIN.region, MAIN.name, "default", {
@@ -407,21 +473,19 @@ export interface AwsEnvironmentOptions {
   readonly ageHours?: number;
   // Deployed: a database, its workloads, a deployment record, and state.
   readonly deployed?: boolean;
-  // An app role the app delete left, which still uses the environment's app
-  // boundary, so IAM refuses to delete the boundary.
+  // A role outside the app path that still uses the environment's app
+  // boundary. The sweep doesn't own it, so IAM keeps refusing to delete the
+  // boundary.
   readonly appRoleKeepsBoundary?: boolean;
-}
-
-/** The ARN of the app boundary setup writes for an environment. */
-export function appBoundaryArn(name: string): string {
-  return awsAppBoundary(ACCOUNT, REPO_ID, name).arn;
 }
 
 /**
  * An AWS environment as setup and a deploy leave it: the GitHub environment
- * and its variables, the role's trust subjects, inline policy, app boundary,
- * and the cluster's access entry, and, once deployed, the recipe's database, the
- * app's workloads, a deployment record, and the state package.
+ * and its variables, the role's trust subjects, inline policy, and the
+ * repository's app-roles policy, the environment's app boundary, and the
+ * cluster's access entry, and, once deployed, the recipe's database, the
+ * container's app role and Pod Identity association, the app's workloads, a
+ * deployment record, and the state package.
  */
 export async function addAwsEnvironment(
   scenario: CleanupScenario,
@@ -449,23 +513,16 @@ export async function addAwsEnvironment(
     Version: "2012-10-17",
     Statement: []
   });
-  // The product's setup tags the boundary it creates as the repository's.
-  const boundary = awsAppBoundary(ACCOUNT, REPO_ID, name);
-  scenario.aws.addManagedPolicy({
-    path: boundary.path,
-    name: boundary.name,
-    document: { Version: "2012-10-17", Statement: [] },
-    tags: [
-      { Key: "radius-managed", Value: "true" },
-      { Key: "radius-repository", Value: REPO },
-      { Key: "radius-repository-id", Value: String(REPO_ID) }
-    ]
-  });
+  scenario.aws
+    .role(ROLE)
+    ?.inline.set(APP_ROLES_POLICY, buildAwsAppRolesPolicy(ACCOUNT, REPO_ID));
+  if (!scenario.aws.policies.has(appBoundary(name).arn))
+    addAppBoundary(scenario, name, cluster.region);
   if (options.appRoleKeepsBoundary)
     scenario.aws.addRole({
       name: `radius-app-web-${name}`,
       trust: { Version: "2012-10-17", Statement: [] },
-      boundary: boundary.arn
+      boundary: appBoundary(name).arn
     });
   const entries = scenario.aws.clusters.get(
     `${cluster.region}:${cluster.name}`
@@ -496,6 +553,13 @@ export async function addAwsEnvironment(
     vpcId: vpc,
     tags: recipeTags(name)
   });
+  const appRole = addAppRole(scenario, name);
+  scenario.aws.addPodIdentityAssociation(cluster.region, cluster.name, {
+    namespace: NAMESPACE,
+    serviceAccount: `radius-app-${CONTAINER}`,
+    roleArn: appRole.Arn,
+    tags: containerTags(name)
+  });
   scenario.kube.addWorkload(clusterKey(cluster), {
     kind: "Deployment",
     name: "web",
@@ -518,6 +582,66 @@ export async function addAwsEnvironment(
     repository: REPO,
     updated_at: created
   });
+}
+
+// The environment's app boundary, as setup creates it.
+function addAppBoundary(
+  scenario: CleanupScenario,
+  environment: string,
+  region: string
+): FakeManagedPolicy {
+  const boundary = appBoundary(environment);
+  return scenario.aws.addManagedPolicy({
+    path: boundary.path,
+    name: boundary.name,
+    document: buildAwsAppBoundaryPolicy(ACCOUNT, region),
+    tags: [
+      { Key: AWS_MANAGED_TAG, Value: "true" },
+      { Key: AWS_REPOSITORY_TAG, Value: REPO },
+      { Key: AWS_REPOSITORY_ID_TAG, Value: String(REPO_ID) }
+    ]
+  });
+}
+
+export const POD_IDENTITY_TRUST = {
+  Version: "2012-10-17",
+  Statement: [
+    {
+      Effect: "Allow",
+      Principal: { Service: "pods.eks.amazonaws.com" },
+      Action: ["sts:AssumeRole", "sts:TagSession"]
+    }
+  ]
+};
+
+// The container's app role, as the containers Recipe creates it.
+function addAppRole(
+  scenario: CleanupScenario,
+  environment: string
+): FakeIamRole {
+  const boundary = appBoundary(environment);
+  return scenario.aws.addRole({
+    name: appRoleName(environment),
+    trust: POD_IDENTITY_TRUST,
+    path: boundary.path,
+    boundary: boundary.arn,
+    tags: tagList(containerTags(environment)),
+    inline: { connections: { Version: "2012-10-17", Statement: [] } }
+  });
+}
+
+/**
+ * What an environment deleted a week ago left when its app delete lost track
+ * of its app role: the role, and the app boundary it still uses.
+ */
+export function addOrphanedAppRole(
+  scenario: CleanupScenario,
+  environment: string
+): FakeIamRole {
+  addAppBoundary(scenario, environment, MAIN.region).CreateDate = iso(
+    scenario.clock.now - 7 * DAY
+  );
+  return addAppRole(scenario, environment);
 }
 
 /** Run the sweep once, as one scheduled cleanup run does. */
@@ -551,6 +675,7 @@ export function retryInputs(scenario: CleanupScenario, name: string): string[] {
       trust.includes(subject) ? `trust ${subject}` : ""
     ),
     role?.inline.has(awsEnvironmentPolicyName(REPO_ID, name)) ? "policy" : "",
+    scenario.aws.policies.has(appBoundary(name).arn) ? "boundary" : "",
     (
       scenario.aws.clusters
         .get(`${cluster?.region}:${cluster?.name}`)
@@ -573,6 +698,9 @@ export function appResources(
   const tagged = (tags: Array<{ Key: string; Value: string }>) =>
     tags.some((item) => item.Value === tag) &&
     !tags.some((item) => item.Key === "RadiusCreationTimestamp");
+  // App roles are the environment's only in its folder of the fixture
+  // repository's app path.
+  const folder = `arn:aws:iam::${ACCOUNT}:role${appBoundary(name).path}`;
   return [
     ...[...rds.instances.values()]
       .filter((item) => tagged(item.tags))
@@ -586,6 +714,20 @@ export function appResources(
     ...[...rds.snapshots.values()]
       .filter((item) => tagged(item.tags))
       .map((item) => `snapshot ${item.id}`),
+    ...[...scenario.aws.roles.values()]
+      .filter((item) => item.Arn.startsWith(folder) && tagged(item.Tags))
+      .map((item) => `app role ${item.RoleName}`),
+    ...[...scenario.aws.clusters.values()].flatMap((cluster) =>
+      [...cluster.podIdentity.values()]
+        .filter(
+          (item) =>
+            item.roleArn.startsWith(folder) && tagged(tagList(item.tags))
+        )
+        .map(
+          (item) =>
+            `${cluster.name} association ${item.namespace}/${item.serviceAccount}`
+        )
+    ),
     ...[...scenario.kube.clusters].flatMap(([key, cluster]) =>
       cluster.workloads
         .filter((item) => item.labels["radapp.io/environment"] === name)
