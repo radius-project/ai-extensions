@@ -688,6 +688,8 @@ describe("P0-C built Radius extension artifact", () => {
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/references/source-code-references.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
+      "skills/radius-app-bicep/scripts/promote-app-model.mjs",
+      "skills/radius-app-bicep/scripts/app-model-staging.mjs",
       "skills/radius-app-bicep/scripts/validate-bicep.mjs",
       "skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
       "skills/radius-report-issue/SKILL.md",
@@ -848,6 +850,29 @@ describe("P0-C built Radius extension artifact", () => {
     }
     expect(notices).not.toContain("===== reactflow@");
     expect(notices).not.toContain("===== @reactflow/");
+  });
+
+  it("starts and aborts staged modeling using only the packaged skill assets", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "radius-packaged-staging-"));
+    try {
+      const script = join(DIST_SKILL, "scripts", "promote-app-model.mjs");
+      const radius = join(workspace, ".radius");
+      const run = (args: string[]) =>
+        spawnSync(process.execPath, [script, "--radius-dir", radius, ...args], {
+          cwd: workspace,
+          encoding: "utf8",
+          timeout: 5_000
+        });
+      const started = run(["--begin", "--run-id", "artifact"]);
+      expect(started.stderr).toBe("");
+      expect(started.status).toBe(0);
+      const staging = started.stdout.trim();
+      expect(existsSync(join(staging, "run.json"))).toBe(true);
+      expect(run(["--abort", "--staging", staging]).status).toBe(0);
+      expect(existsSync(staging)).toBe(false);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   it("packages environment-independent authoring so a missing deploy Environment cannot block modeling", () => {

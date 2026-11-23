@@ -16,6 +16,26 @@ export interface AppPublicationPorts {
 }
 
 export function createAppPublication(ports: AppPublicationPorts) {
+  const recipePublications = new Map<string, Promise<unknown>>();
+
+  async function publishRecipeInOrder<T>(target: string, publish: () => T) {
+    // A late push must settle before another request can publish that tag.
+    // This queue belongs to one runtime, not to the registry or the workspace.
+    const key = target.toLowerCase();
+    const preceding = recipePublications.get(key);
+    const publication = Promise.resolve(preceding)
+      .catch(() => undefined)
+      .then(publish);
+    recipePublications.set(key, publication);
+    try {
+      return await publication;
+    } finally {
+      if (recipePublications.get(key) === publication) {
+        recipePublications.delete(key);
+      }
+    }
+  }
+
   return {
     async compileExtension(
       workspace: WorkspacePath,
@@ -47,13 +67,14 @@ export function createAppPublication(ports: AppPublicationPorts) {
     ) {
       const error = ports.validateRegistryTarget(input.target, repo);
       if (error) return { kind: "refused", error } as const;
-      const file = ports.resolveExisting(workspace, input.file, null);
-      if (!ports.exists(file)) return { kind: "missing", path: file } as const;
-      const published = await ports.publishRecipe(
-        file,
-        String(input.target).trim()
-      );
-      return { kind: "published", reference: String(published) } as const;
+      const target = String(input.target).trim();
+      return publishRecipeInOrder(target, async () => {
+        const file = ports.resolveExisting(workspace, input.file, null);
+        if (!ports.exists(file))
+          return { kind: "missing", path: file } as const;
+        const published = await ports.publishRecipe(file, target);
+        return { kind: "published", reference: String(published) } as const;
+      });
     }
   };
 }

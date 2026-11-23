@@ -20,6 +20,7 @@ import {
   publishableFiles
 } from "@radius-project/core/modeling";
 import { hashAppBicep } from "./app-bicep-hash.js";
+import { beginManagedRun } from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 
 // The promote script ships inside the installed plugin, where the workspace
 // packages are unavailable, so it re-implements the rules that
@@ -154,6 +155,120 @@ function gitStatus(root: string): string[] {
     .split("\n")
     .filter(Boolean);
 }
+
+describe("managed staging", () => {
+  it("reserves managed IDs and refuses standalone publication and abort", async () => {
+    const target = repo();
+    const reserved = run(target.root, ["--begin", "--run-id", "Managed-test"]);
+    expect(reserved.status).toBe(1);
+    expect(reserved.stderr).toContain("reserved for the runtime");
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    for (const args of [[], ["--abort"]]) {
+      const result = run(target.root, [
+        ...args,
+        "--staging",
+        managed.stagingDir
+      ]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Only the runtime that started");
+      expect(fs.existsSync(managed.stagingDir)).toBe(true);
+    }
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+    expect(stagedInGit(target.root)).toEqual([]);
+    await managed.validate(async (app) => {
+      expect(fs.readFileSync(app, "utf8")).toBe(MODEL);
+    });
+    expect(managed.promote()).toEqual({
+      published: REQUIRED_STAGED_FILES.map((file) =>
+        path.join(target.radiusDir, file)
+      ),
+      gitError: ""
+    });
+    expect(stagedInGit(target.root)).toContain(".radius/app.bicep");
+    expect(() => managed.promote()).toThrow("no longer active");
+  });
+
+  it("rejects canceled work without removing a successor's staging or changing the index", async () => {
+    const target = repo();
+    const predecessor = beginManagedRun(target.root);
+    predecessor.cancel();
+    const successor = beginManagedRun(target.root);
+    stageCompleteRun(predecessor.stagingDir);
+    stageCompleteRun(successor.stagingDir);
+    expect(() => predecessor.promote()).toThrow("no longer active");
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+    expect(stagedInGit(target.root)).toEqual([]);
+    await successor.validate(async () => {});
+    expect(successor.promote().gitError).toBe("");
+    expect(fs.existsSync(predecessor.stagingDir)).toBe(true);
+  });
+
+  it("uses its initial baseline even if staged bookkeeping is modified", async () => {
+    const target = repo("original");
+    const managed = beginManagedRun(target.root);
+    const app = path.join(target.radiusDir, "app.bicep");
+    fs.writeFileSync(app, "user edit");
+    stageCompleteRun(managed.stagingDir);
+    fs.writeFileSync(
+      path.join(managed.stagingDir, STAGING_RUN_RECORD),
+      JSON.stringify({ baseline: {} })
+    );
+    await managed.validate(async () => {});
+    expect(() => managed.promote()).toThrow("changed while modeling");
+    expect(fs.readFileSync(app, "utf8")).toBe("user edit");
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("protects a recipe that appeared after the run began", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    const recipe = "postgres-recipe.bicep";
+    fs.writeFileSync(path.join(managed.stagingDir, recipe), "generated recipe");
+    const existing = path.join(target.radiusDir, recipe);
+    fs.writeFileSync(existing, "user recipe");
+    await managed.validate(async () => {});
+    expect(() => managed.promote()).toThrow("changed while modeling");
+    expect(fs.readFileSync(existing, "utf8")).toBe("user recipe");
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("rejects a replaced staging directory without deleting the replacement", () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    fs.renameSync(managed.stagingDir, `${managed.stagingDir}-abandoned`);
+    fs.mkdirSync(managed.stagingDir);
+    stageCompleteRun(managed.stagingDir);
+    expect(() => managed.promote()).toThrow("directory or its parent changed");
+    expect(stagedNames(managed.stagingDir)).toContain("app.bicep");
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+  });
+
+  it("refuses to promote a different config from the validated one", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    fs.writeFileSync(path.join(managed.stagingDir, "bicepconfig.json"), "{}\n");
+    expect(() => managed.promote()).toThrow("changed afterward");
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("rejects changes the validator itself observed during a run", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await expect(
+      managed.validate(async (app) => {
+        fs.appendFileSync(app, "// changed\n");
+      })
+    ).rejects.toThrow("changed while Radius was validating");
+    expect(() => managed.promote()).toThrow("not passed validation");
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+  });
+});
 
 describe("--begin", () => {
   it("creates a staging directory inside .radius and prints it", () => {
