@@ -27,7 +27,12 @@ import type { HandoffMessage } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
 import type { CanvasState } from "../shared.js";
 import type { GraphProgressView } from "../shared.js";
-import type { AppSourceEvaluation } from "@radius-project/core";
+import {
+  appAuthoringRequired,
+  findAppModelRefresh,
+  hasModelableSource,
+  type AppSourceEvaluation
+} from "@radius-project/core";
 import { WorkspaceGraphBranchChanged } from "@radius-project/adapter-shared";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
@@ -291,11 +296,7 @@ export function createAppModelHandoff(
       }
     };
 
-    const present = statuses.filter(
-      (status) => status.freshness.status !== "missing"
-    );
-
-    if (!present.length) {
+    if (appAuthoringRequired(statuses)) {
       // Claim extension-wide before consuming the per-panel reservation. A
       // reopened panel that loses this claim must remain free to retry if the
       // owner later abandons delivery.
@@ -329,7 +330,7 @@ export function createAppModelHandoff(
       // The modeling skill cannot author this repository at all. Deliberately
       // does NOT consume the key: adding a Dockerfile later must make the next
       // render eligible for the handoff.
-      if (sources.every((source) => source.status === "none")) {
+      if (!hasModelableSource(sources)) {
         releaseReservation();
         return;
       }
@@ -374,10 +375,7 @@ export function createAppModelHandoff(
         releaseReservation();
         return;
       }
-      if (
-        !settled ||
-        settled.some((status) => status.freshness.status !== "missing")
-      ) {
+      if (!settled || !appAuthoringRequired(settled)) {
         releaseReservation();
         return;
       }
@@ -477,6 +475,9 @@ export function createAppModelHandoff(
 
     if (observedClaim) deps.missingModelHandoffs.release(observedClaim);
     reserveState();
+    const present = statuses.filter(
+      (status) => status.freshness.status !== "missing"
+    );
 
     // A Radius CLI older than the one that generated the model is reported,
     // never refreshed: the skill cannot regenerate with it, and a regeneration
@@ -492,15 +493,14 @@ export function createAppModelHandoff(
     // Checked before plain staleness: a model this extension cannot prove it
     // generated needs the user's agreement, because regenerating it destroys
     // whatever they wrote by hand.
-    const unverified = present.find(
-      (status) => status.refreshable && status.freshness.requiresConfirmation
-    );
-    if (unverified) {
-      const refreshKey = refreshRequestKey(unverified);
+    const refresh = findAppModelRefresh(present);
+    if (refresh) {
+      const { model } = refresh;
+      const refreshKey = refreshRequestKey(model);
       let memoOwned = false;
       try {
         if (
-          !(await sourcesStillCurrent([unverified])) ||
+          !(await sourcesStillCurrent([model])) ||
           !stillCurrent() ||
           !ownsStateReservation() ||
           !(memoOwned = deps.shouldRequestRefresh(refreshKey))
@@ -509,33 +509,11 @@ export function createAppModelHandoff(
           return;
         }
         const skillHandoff = await buildSkillHandoff();
-        await deps.send(appModelUnverifiedMessage(unverified, skillHandoff));
-      } catch (error) {
-        releaseStateReservation();
-        if (memoOwned) deps.releaseRefreshMemo(refreshKey);
-        throw error;
-      }
-      return;
-    }
-
-    const outdated = present.find(
-      (status) => status.refreshable && status.freshness.stale
-    );
-    if (outdated) {
-      const refreshKey = refreshRequestKey(outdated);
-      let memoOwned = false;
-      try {
-        if (
-          !(await sourcesStillCurrent([outdated])) ||
-          !stillCurrent() ||
-          !ownsStateReservation() ||
-          !(memoOwned = deps.shouldRequestRefresh(refreshKey))
-        ) {
-          releaseStateReservation();
-          return;
+        if (refresh.kind === "confirmation") {
+          await deps.send(appModelUnverifiedMessage(model, skillHandoff));
+        } else {
+          await deps.send(appModelRefreshMessage(model, skillHandoff));
         }
-        const skillHandoff = await buildSkillHandoff();
-        await deps.send(appModelRefreshMessage(outdated, skillHandoff));
       } catch (error) {
         releaseStateReservation();
         if (memoOwned) deps.releaseRefreshMemo(refreshKey);

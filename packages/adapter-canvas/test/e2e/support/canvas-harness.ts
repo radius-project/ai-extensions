@@ -769,6 +769,7 @@ export function baseCanvasState(workspacePath: string): CanvasState {
 }
 
 export function defaultFakeCliScenario(): FakeCliScenario {
+  const inspectionRevision = "a".repeat(40);
   const appBicep404 = {
     tool: "gh",
     args: [
@@ -1097,6 +1098,19 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         ]
       },
       appBicep404,
+      ...[WORKTREE_BRANCH, inspectionRevision].map((ref) => ({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/commits/${encodeURIComponent(ref)}`
+        ],
+        stdout: JSON.stringify({ sha: inspectionRevision })
+      })),
+      ...[".radius/app.bicep", "app.bicep"].map((file) =>
+        missingGhContent(
+          `/repos/${REPOSITORY}/contents/${file}?ref=${inspectionRevision}`
+        )
+      ),
       missingGhContent(
         "/repos/radius-project/radius/contents/.github/extension/verify-azure.yml?ref=main"
       ),
@@ -1174,17 +1188,6 @@ export function cleanupHistoryScenario(
       args: ["api", `/repos/${REPOSITORY}`, "--jq", ".default_branch"],
       stdout: WORKTREE_BRANCH
     },
-    ...[".radius/app.bicep", "app.bicep"].map((file) => ({
-      tool: "gh",
-      args: [
-        "api",
-        `/repos/${REPOSITORY}/contents/${file}?ref=${WORKTREE_BRANCH}`,
-        "--jq",
-        ".content"
-      ],
-      exitCode: 1,
-      stderr: "gh: Not Found (HTTP 404)"
-    })),
     ...[
       "verify-azure.yml",
       "verify-aws.yml",

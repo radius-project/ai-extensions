@@ -310,7 +310,8 @@ describe("core package in a host without HTTP or DOM globals", () => {
       "./modeling": "./src/modeling/index.ts",
       "./platforms": "./src/platforms/index.ts",
       "./remediations": "./src/remediations.ts",
-      "./deployment-command-display": "./src/deployment-command-display.ts"
+      "./deployment-command-display": "./src/deployment-command-display.ts",
+      "./inspection": "./src/inspection/index.ts"
     });
 
     // Loaded through the manifest's own targets rather than hardcoded source
@@ -320,15 +321,23 @@ describe("core package in a host without HTTP or DOM globals", () => {
         pathToFileURL(join(packageRoot, manifest.exports[subpath])).href
       ) as Promise<Record<string, unknown>>;
 
-    const [barrel, graph, modeling, platforms, remediations, commands] =
-      await Promise.all([
-        load("."),
-        load("./graph"),
-        load("./modeling"),
-        load("./platforms"),
-        load("./remediations"),
-        load("./deployment-command-display")
-      ]);
+    const [
+      barrel,
+      graph,
+      modeling,
+      platforms,
+      remediations,
+      commands,
+      inspection
+    ] = await Promise.all([
+      load("."),
+      load("./graph"),
+      load("./modeling"),
+      load("./platforms"),
+      load("./remediations"),
+      load("./deployment-command-display"),
+      load("./inspection")
+    ]);
 
     expect(typeof barrel.computeGraphDiff).toBe("function");
     expect(typeof graph.filterGraphVisualizationResources).toBe("function");
@@ -337,5 +346,7 @@ describe("core package in a host without HTTP or DOM globals", () => {
     expect(typeof remediations.remediationView).toBe("function");
     expect(typeof commands.displayShellCommand).toBe("function");
     expect(commands.displayGhCommand).toBe(barrel.displayGhCommand);
+    expect(typeof inspection.inspectApplicationDefinition).toBe("function");
+    expect(typeof inspection.inspectDeploymentGraph).toBe("function");
   });
 });
