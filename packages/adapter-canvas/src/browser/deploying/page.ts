@@ -84,8 +84,10 @@ export const RESUME_POLL_LIMIT = 1680; // ~70 min at 2.5s/tick
 export const IN_FLIGHT_LIST_REFRESH_MS = 15_000;
 export const IN_FLIGHT_LIST_SLOW_REFRESH_MS = 60_000;
 export const IN_FLIGHT_LIST_FAST_WINDOW_MS = 120_000;
-// Matches the delete workflows' 30-minute job limit; an AWS app delete that
-// removes an RDS database can take well over the old 3 minutes.
+// How long the page follows an app delete. The app delete workflows set no job
+// limit; an AWS delete that removes an RDS database can take far longer than
+// the old 3 minutes (see docs/eng/CLOUD_E2E_RUNBOOK.md). After this, the row
+// shows its real status from GitHub without a completion message.
 export const DELETE_POLL_MAX_MS = 30 * 60 * 1000;
 
 const ARROW_SVG =
