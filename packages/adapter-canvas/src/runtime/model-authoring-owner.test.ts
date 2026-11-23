@@ -33,6 +33,29 @@ function fixture() {
 }
 
 describe("model authoring owner", () => {
+  it("does not start publication once validation has begun", async () => {
+    const { owner, validate, first } = fixture();
+    const started = createDeferred<void>();
+    const checked = createDeferred<void>();
+    validate.mockImplementationOnce(() => {
+      started.resolve();
+      return checked.promise;
+    });
+    const completion = owner.finish("one");
+    await started.promise;
+    const publish = vi.fn(async () => "unexpected publication");
+    try {
+      await expect(owner.publish("one", publish)).rejects.toThrow(
+        "already finalizing"
+      );
+      expect(publish).not.toHaveBeenCalled();
+    } finally {
+      checked.resolve();
+      await completion;
+    }
+    expect(first.promote).toHaveBeenCalledOnce();
+  });
+
   it("lets a started publication settle, but only the replacement can publish or promote afterward", async () => {
     const { owner, target, first, second } = fixture();
     const started = createDeferred<void>();
