@@ -1,5 +1,37 @@
 # radius
 
+## 0.6.1
+
+### Patch Changes
+
+- [#1278](https://github.com/radius-project/ai-extensions/pull/1278) [@kachawla](https://github.com/kachawla) - **Security:** In any region, app IAM roles in an AWS environment can no longer change the account's S3 Block Public Access or EC2 snapshot Block Public Access, turn off EBS default encryption or EC2 image Block Public Access, change or reset the default EBS KMS key, stop, delete, or update CloudTrail trails or change their event selectors, delete or update GuardDuty detectors, or create or update GuardDuty filters or trusted IP lists.
+
+- [#1289](https://github.com/radius-project/ai-extensions/pull/1289) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Application model generation and refresh requested from the Radius graph now start even when Copilot cannot find the Radius tools at that moment, for example while the extension is reconnecting or when the selected agent's tool list leaves them out.
+
+- [#1283](https://github.com/radius-project/ai-extensions/pull/1283) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep outdated graph comparisons opened by Copilot from replacing a newer comparison or requesting repairs. Clean up temporary compilation files and report cleanup failures without hiding the graph result.
+
+- [#1283](https://github.com/radius-project/ai-extensions/pull/1283) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep application graph comparisons opened by Copilot on the selected workspace or committed revision. Stop automatic regeneration when the model or its workspace provenance cannot be read. If model generation leaves an empty file, Canvas names the file, explains how to recover, and preserves the original diagnostic.
+
+- [#1283](https://github.com/radius-project/ai-extensions/pull/1283) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Generate pull request graph diffs from the commits currently pushed to GitHub and report their exact SHAs. Unpublished branches cannot be compared, and saved worktree edits or unpushed commits do not appear in the diff.
+
+- [#1287](https://github.com/radius-project/ai-extensions/pull/1287) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep the deployed graph polling the current deployment instead of displaying stale results from a superseded run.
+
+- [#1281](https://github.com/radius-project/ai-extensions/pull/1281) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Accept comments and trailing commas in Bicep configuration during graph compilation, and recognize built-in extension mappings without looking for local files. Canvas graph refreshes, planning, interactive comparisons, and deployment graph recovery also handle blank extension aliases and padded Radius pins.
+
+- [#1281](https://github.com/radius-project/ai-extensions/pull/1281) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Identify the file and GitHub's 1 MiB inline limit when a committed graph input cannot be read because it is too large. Recheck access to the selected commit so a permission failure is not mistaken for a missing graph input.
+
+- [#1282](https://github.com/radius-project/ai-extensions/pull/1282) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** If Canvas cannot save a newly built application graph, it keeps the previous saved file and shows a warning alongside the new graph. Canvas also cleans up temporary compilation files and discards plans and interactive comparisons that are superseded by a workspace checkout.
+
+- [#1286](https://github.com/radius-project/ai-extensions/pull/1286) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Allow model refresh to update older Radius release pins when legacy origin records have no saved Radius version.
+
+- [#1303](https://github.com/radius-project/ai-extensions/pull/1303) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Starting a Radius modeling run no longer deletes or reuses another run's staging directory, so a long-running model can finish without losing its staged work.
+
+- [#1297](https://github.com/radius-project/ai-extensions/pull/1297) [@kachawla](https://github.com/kachawla) - **Fixed:** Deleting an application no longer fails in routes Gateway cleanup when nothing was ever deployed to the environment, or when the environment has no routes recipe. Cleanup now keeps the Gateway in those cases, and an environment read failure is reported as a read failure instead of a missing routes recipe.
+
+- [#1282](https://github.com/radius-project/ai-extensions/pull/1282) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Keep Canvas graph refreshes, planning, and interactive branch comparisons on the selected saved workspace or GitHub revision. Report unreadable or empty models instead of silently substituting another source, and do not request authoring after a workspace branch change.
+
+- [#1279](https://github.com/radius-project/ai-extensions/pull/1279) [@kachawla](https://github.com/kachawla) - **Fixed:** When the application model is out of date because of uncommitted source changes and no commits have been made since it was generated, the refresh request now says so instead of reporting that the branch moved to the same commit the model was generated from.
+
 ## 0.6.0
 
 ### Minor Changes
