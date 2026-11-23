@@ -33,6 +33,28 @@ function fixture() {
 }
 
 describe("model authoring owner", () => {
+  it("rejects reuse of a live request token without replacing its staging", async () => {
+    const { owner, target, first, second, ports, validate } = fixture();
+    expect(() => owner.begin("one", target, () => true, validate)).toThrow(
+      "Duplicate authoring request"
+    );
+    expect(ports.staging).toHaveBeenCalledOnce();
+    expect(first.cancel).not.toHaveBeenCalled();
+    await owner.finish("one");
+    expect(first.promote).toHaveBeenCalledOnce();
+    expect(second.promote).not.toHaveBeenCalled();
+  });
+
+  it("allows standalone publication in an unrelated worktree", async () => {
+    const { owner, target } = fixture();
+    expect(() => owner.assertStandalone(target.workspace)).toThrow(
+      "active managed Radius authoring request"
+    );
+    expect(() => owner.assertStandalone("/other-worktree")).not.toThrow();
+    await owner.close();
+    expect(() => owner.assertStandalone(target.workspace)).not.toThrow();
+  });
+
   it("does not start publication once validation has begun", async () => {
     const { owner, validate, first } = fixture();
     const started = createDeferred<void>();
