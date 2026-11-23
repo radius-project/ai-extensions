@@ -6,9 +6,8 @@ import {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,
   createGraphOrchestrator,
-  evaluateAppModelFreshness,
   evaluateAppSource,
-  parseAppOrigin
+  readAppModelEvidence
 } from "@radius-project/core";
 import type {
   AppModelFreshness,
@@ -190,99 +189,31 @@ export function createGraphContextHelpers(
     state: CanvasState
   ): Promise<AppModelStatus> {
     const read = await readBicepForBranch(repo, branch, state);
-    const assertSource = () =>
-      deps.graphSources.assertWorkspaceSource(read.source);
-    await assertSource();
-    if (read.status === "unavailable") throw new Error(read.diagnostic);
-    const model = read.status === "present" ? read.content : null;
-    if (model !== null && !model.trim()) {
-      throw new Error(
-        `Application definition ${read.source.definitionPath} is empty.`
-      );
-    }
-    const fromWorkspace = read.source.kind === "workspace";
     const workspacePath = read.source.workspacePath;
-    async function workspaceProbe<T>(probe: () => Promise<T>): Promise<T> {
-      await assertSource();
-      const result = await probe();
-      await assertSource();
-      return result;
-    }
-
-    const originText = await readAppOrigin(read.source).catch(
-      async (error: unknown) => {
-        await assertSource();
-        throw error;
-      }
-    );
-    const headCommit =
-      // Only the worktree's head is worth fetching. On any other branch the
-      // comparison it feeds cannot say anything useful, because committing an
-      // app model is itself a commit past the one its record names, so the two
-      // never match. Nothing consumes that verdict, and skipping it saves a
-      // GitHub round trip per branch on the graph-diff path.
-      fromWorkspace ?
-        await workspaceProbe(() =>
-          deps.appModel.workspaceHeadCommit(workspacePath).catch(() => "")
-        )
-      : "";
-
-    // Head equality alone is not a usable freshness test: committing a freshly
-    // generated model advances the head past the commit that model recorded. The
-    // worktree can answer the real question (did application source change,
-    // ignoring the model's own directory), so ask it there. A remote branch has
-    // no cheap equivalent, and its only consequence is an advisory notice, so it
-    // falls back to the coarse comparison.
-    const recorded = parseAppOrigin(originText);
-    const recordedCommit = recorded?.sourceCommit;
-    const sourceChanged =
-      fromWorkspace && recordedCommit ?
-        await workspaceProbe(() =>
-          deps.appModel
-            .workspaceSourceChangedSince(workspacePath, recordedCommit)
-            .catch(() => undefined)
-        )
-      : undefined;
-
-    // Only asked when there is no record to judge the model by, which is the one
-    // case where we would replace a file without being able to say we wrote it.
-    // Once a record exists this never runs again for that model, so the cost is
-    // a one-time migration cost rather than a per-open one. Off the workspace
-    // branch nothing is regenerated at all, so the answer would go unused.
-    const modelRecoverable =
-      fromWorkspace && !recordedCommit ?
-        await workspaceProbe(() =>
-          deps.appModel
-            .workspaceModelRecoverable(workspacePath)
-            .catch(() => undefined)
-        )
-      : undefined;
-
-    // Only asked when the record saved a Radius version to compare with. A
-    // record written before the field existed skips the check anyway, so there
-    // is no reason to run the CLI for it. A failed read is unknown, which skips
-    // the check rather than failing the graph.
-    const radiusVersion =
-      recorded?.radiusVersion ?
-        await deps.appModel.radiusVersion().catch(() => "")
-      : "";
-    await assertSource();
-
+    const { freshness, observation } = await readAppModelEvidence(read, {
+      assertSource: () => deps.graphSources.assertWorkspaceSource(read.source),
+      origin: () => readAppOrigin(read.source),
+      headCommit: () =>
+        deps.appModel.workspaceHeadCommit(workspacePath).catch(() => ""),
+      sourceChangedSince: (commit) =>
+        deps.appModel
+          .workspaceSourceChangedSince(workspacePath, commit)
+          .catch(() => undefined),
+      modelRecoverable: () =>
+        deps.appModel
+          .workspaceModelRecoverable(workspacePath)
+          .catch(() => undefined),
+      generatorVersion: () => deps.appModel.generatorVersion(),
+      radiusVersion: () => deps.appModel.radiusVersion().catch(() => ""),
+      hashAppBicep
+    });
     return {
       repo,
       branch,
       source: read.source,
-      refreshable: fromWorkspace && model !== null,
-      freshness: evaluateAppModelFreshness({
-        model,
-        originText,
-        headCommit,
-        sourceChanged,
-        modelRecoverable,
-        generatorVersion: deps.appModel.generatorVersion(),
-        radiusVersion,
-        hashAppBicep
-      })
+      refreshable:
+        read.source.kind === "workspace" && observation.kind === "present",
+      freshness
     };
   }
 

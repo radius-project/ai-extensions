@@ -552,7 +552,57 @@ describe("readDeploymentRows", () => {
 
   it("returns an empty list for a listing with no deployments", () => {
     expect(readDeploymentRows({ deployments: [] })).toEqual([]);
+    expect(
+      readDeploymentRows({ deployments: [], environmentDiagnostics: [] })
+    ).toEqual([]);
   });
+
+  it("keeps polling after an environment lookup failure instead of declaring deletion complete", async () => {
+    const responses = [
+      {
+        deployments: [],
+        environmentDiagnostics: [
+          {
+            environment: "radtest-env",
+            kind: "error",
+            message: "Could not identify GitHub deployment 7990692706."
+          }
+        ]
+      },
+      {
+        deployments: [
+          { app: "demo", environment: "radtest-env", status: "deleting" }
+        ]
+      },
+      { deployments: [] }
+    ];
+    const probe = createTolerantProbe(async () =>
+      isDeploymentDeletionSettled(
+        classifyDeploymentDeletion(
+          classifyDeploymentPresence(
+            readDeploymentRows(responses.shift()),
+            "demo",
+            "radtest-env"
+          )
+        )
+      )
+    );
+    expect(await probe.read()).toBeUndefined();
+    expect(probe.lastFailure()).toContain(
+      "Could not identify GitHub deployment"
+    );
+    expect(await probe.read()).toBe(false);
+    expect(await probe.read()).toBe(true);
+  });
+
+  it.each([null, {}, [{ kind: "incomplete" }]])(
+    "rejects malformed or incomplete environment diagnostics %#",
+    (environmentDiagnostics) => {
+      expect(() =>
+        readDeploymentRows({ deployments: [], environmentDiagnostics })
+      ).toThrow(/environment diagnostics/);
+    }
+  );
 
   it.each([
     [null, /must be an object/],

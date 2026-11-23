@@ -276,6 +276,26 @@ function statuses(body: unknown): string[] {
 }
 
 describe("bounded verification history over HTTP", () => {
+  it("only bypasses the selected verification run's terminal failure", async () => {
+    const variables =
+      "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nRADIUS_VERIFICATION_BYPASSED\t42";
+    const runs =
+      "/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100";
+    const deploymentStatus =
+      "/repos/octo/app/deployments/100/statuses?per_page=1";
+    const script = listingScript("7\tdev", variables);
+    script[runs] = { stdout: "42\tcompleted\tfailure" };
+    const harness = await start(script);
+    expect(statuses((await harness.list()).body)).toEqual(["bypassed"]);
+
+    script[runs] = { stdout: "43\tcompleted\tfailure\n42\tcompleted\tfailure" };
+    script[deploymentStatus] = {
+      stdout: "https://github.com/octo/app/actions/runs/43"
+    };
+    harness.invalidate(REPO);
+    expect(statuses((await harness.list()).body)).toEqual(["failed"]);
+  });
+
   it("reads an older verification by id, rejects partial failure, and recovers on a fresh listing", async () => {
     const script = listingScript("7\tdev");
     const runPath =

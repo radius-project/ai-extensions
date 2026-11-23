@@ -24,9 +24,7 @@
 // `packages/core` is compiled into the browser bundle through its barrel. The
 // caller supplies the directory listing, the file contents, and a hasher.
 
-// Directory holding an in-flight run, relative to `.radius/`. The prefix is
-// matched to find leftovers, so it must stay a prefix no other `.radius/` entry
-// can claim.
+// Reserved prefix for modeling staging directories directly under `.radius/`.
 export const STAGING_DIR_PREFIX = ".staging-";
 
 // Ignore rule written into `.radius/.gitignore` when a run publishes, so the
@@ -44,10 +42,8 @@ export const STAGING_IGNORE_PATTERN = `${STAGING_DIR_PREFIX}*/`;
 // directory including the ignore file itself, so the whole run is invisible to
 // git from the moment it exists rather than from the moment it publishes.
 //
-// It lives inside the directory every failure path already deletes, so no
-// failure path has to remember to undo it. That is what lets an in-flight run be
-// hidden without weakening "a failed run leaves `.radius/` byte-identical",
-// which a file written outside the staging directory at `--begin` would.
+// It lives inside the staging directory, so cleanup does not have to undo a
+// change to any published file or to the repository-level ignore file.
 //
 // It is never published: `publishableFiles` moves a fixed required set plus an
 // explicit artifact allowlist, and this file is in neither.
@@ -92,9 +88,7 @@ export function stagingDirName(runId: unknown): string {
   return `${STAGING_DIR_PREFIX}${sanitizeRunId(runId) || "run"}`;
 }
 
-// Whether a `.radius/` entry name is a staging directory. Used to sweep up
-// leftovers at the start of the next run: a run that finished always removed its
-// own, so anything still matching belongs to a run that did not.
+// Recognizes a staging name, not whether the entry is active or safe to remove.
 export function isStagingDirName(name: unknown): boolean {
   return (
     typeof name === "string" &&

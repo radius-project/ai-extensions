@@ -1,4 +1,4 @@
-import type { DeployProgress } from "../../deploy-artifacts.js";
+import type { DeployProgress } from "../deploy-artifact-evidence.js";
 
 export interface DeletionInventory {
   application: string;
