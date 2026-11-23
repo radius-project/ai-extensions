@@ -1,5 +1,7 @@
 import type { ManagedModelStaging } from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 
+export type AuthoringValidator = (appFile: string) => Promise<void>;
+
 export interface AuthoringTarget {
   repo: string;
   branch: string;
@@ -11,6 +13,7 @@ interface AuthoringRequest {
   token: string;
   target: AuthoringTarget;
   staging: ManagedModelStaging;
+  validate: AuthoringValidator;
   current(): boolean;
   inFlight: number;
   finalizing: boolean;
@@ -28,9 +31,9 @@ function sameTarget(left: AuthoringTarget, right: AuthoringTarget): boolean {
 export function createModelAuthoringOwner(ports: {
   staging(workspace: string): ManagedModelStaging;
   resolveTarget(): Promise<AuthoringTarget | null>;
-  validate(staging: ManagedModelStaging): Promise<void>;
 }) {
   const requests = new Map<string, AuthoringRequest>();
+  const publications = new Set<Promise<unknown>>();
   let closed = false;
 
   function cancel(request: AuthoringRequest) {
@@ -66,7 +69,12 @@ export function createModelAuthoringOwner(ports: {
   }
 
   return {
-    begin(token: string, target: AuthoringTarget, current: () => boolean) {
+    begin(
+      token: string,
+      target: AuthoringTarget,
+      current: () => boolean,
+      validate: AuthoringValidator
+    ) {
       if (closed || !token || !target.sourceRevision || !current()) {
         throw new Error("Cannot establish a current Radius authoring source.");
       }
@@ -79,6 +87,7 @@ export function createModelAuthoringOwner(ports: {
         token,
         target: { ...target },
         staging,
+        validate,
         current,
         inFlight: 0,
         finalizing: false
@@ -87,15 +96,24 @@ export function createModelAuthoringOwner(ports: {
     },
     cancel(token: string) {
       const request = requests.get(token);
-      if (request) cancel(request);
+      if (!request) return false;
+      cancel(request);
+      return true;
     },
     close() {
       closed = true;
       for (const request of requests.values()) cancel(request);
+      return Promise.allSettled(publications);
+    },
+    assertCurrent(token: string) {
+      assertCurrent(requestFor(token));
     },
     async publish<T>(
       token: string,
-      start: (stagingDir: string) => Promise<T>
+      start: (
+        staging: ManagedModelStaging,
+        target: Readonly<AuthoringTarget>
+      ) => Promise<T>
     ): Promise<T> {
       const request = requestFor(token);
       await assertCurrentTarget(request);
@@ -106,7 +124,13 @@ export function createModelAuthoringOwner(ports: {
       try {
         // No await between the current check and starting the publisher. The
         // caller prepares credentials and takes any registry queue slot first.
-        return await start(request.staging.stagingDir);
+        const publication = start(request.staging, request.target);
+        publications.add(publication);
+        try {
+          return await publication;
+        } finally {
+          publications.delete(publication);
+        }
       } finally {
         request.inFlight--;
       }
@@ -122,7 +146,7 @@ export function createModelAuthoringOwner(ports: {
       request.finalizing = true;
       try {
         await assertCurrentTarget(request);
-        await ports.validate(request.staging);
+        await request.staging.validate(request.validate);
         await assertCurrentTarget(request);
         assertCurrent(request);
         return request.staging.promote();

@@ -280,12 +280,30 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
     }
   },
   {
+    name: "radius_complete_app_authoring",
+    description:
+      "Completes or cancels a managed Radius Canvas authoring handoff. Pass its request token. Completion validates the exact staged model and promotes it only if the originating worktree and attempt are still current.",
+    parameters: {
+      type: "object",
+      properties: {
+        requestToken: { type: "string" },
+        outcome: { type: "string", enum: ["complete", "cancel"] }
+      },
+      required: ["requestToken", "outcome"]
+    }
+  },
+  {
     name: "radius_publish_custom_type_extension",
     description:
       "Compiles a Radius resource-type manifest into a local Bicep extension package using the extension's managed rad binary, so a generated app.bicep can reference the Radius.Resources/* custom types it declares. Use this instead of running `rad bicep publish-extension` directly. Produces a local .tgz (no registry, no authentication). Paths are confined to the workspace .radius/ directory.",
     parameters: {
       type: "object",
       properties: {
+        requestToken: {
+          type: "string",
+          description:
+            "The managed authoring request token, when provided by the Canvas. Pass no paths with this token."
+        },
         manifestPath: {
           type: "string",
           description:
@@ -311,10 +329,15 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
     parameters: {
       type: "object",
       properties: {
+        requestToken: {
+          type: "string",
+          description:
+            "The managed authoring request token, when provided by the Canvas."
+        },
         file: {
           type: "string",
           description:
-            "Path to the recipe Bicep file, relative to the workspace .radius/ directory (e.g. .radius/<type>-recipe.bicep)."
+            "For managed authoring, the staged recipe filename only (e.g. <type>-recipe.bicep); otherwise the path relative to the workspace .radius/ directory."
         },
         target: {
           type: "string",

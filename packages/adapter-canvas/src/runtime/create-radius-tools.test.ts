@@ -14,6 +14,7 @@ import {
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
 import { createDeferred } from "../../test/support/browser/fakes.js";
+import { createModelAuthoringOwner } from "./model-authoring-owner.js";
 
 function findTool(
   tools: ReturnType<typeof createRadiusTools>,
@@ -40,7 +41,11 @@ function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
   const tools = createRadiusTools(
     fake.deps,
     modelingActivity,
-    missingModelHandoffs
+    missingModelHandoffs,
+    createModelAuthoringOwner({
+      staging: fake.deps.beginManagedModel,
+      resolveTarget: async () => null
+    })
   );
   return { ...fake, tools, modelingActivity, missingModelHandoffs };
 }

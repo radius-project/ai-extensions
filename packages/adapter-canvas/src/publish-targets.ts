@@ -18,9 +18,17 @@ function nearestExistingParent(p: string): string {
     if (parent === dir) return dir; // filesystem root
     dir = parent;
   }
+
   return dir;
 }
 
+function assertStandaloneArtifact(file: string): void {
+  if (/(?:^|[\\/])\.staging-managed-/iu.test(file)) {
+    throw new Error(
+      "Managed staging can only be published with its request token."
+    );
+  }
+}
 // Lexical confinement of a tool-supplied path under the workspace `.radius/`:
 // rejects absolute paths, `..` traversal, null bytes (via toSafeRepoRelPath),
 // and any result that escapes `.radius/`. Returns { radiusRoot, resolved, raw }.
@@ -69,6 +77,7 @@ function confineUnderRadius(
     value,
     fallback
   );
+  assertStandaloneArtifact(resolved.slice(radiusRoot.length));
   // No `.radius/` yet: nothing to canonicalize against; the lexical check
   // already confined the path and the caller reports a missing source.
   if (!existsSync(radiusRoot)) return resolved;
@@ -81,6 +90,7 @@ function confineUnderRadius(
       `Path escapes the workspace .radius directory via a symlink: ${raw}`
     );
   }
+  assertStandaloneArtifact(realProbe.slice(realRoot.length));
   return existsSync(resolved) ? realProbe : resolved;
 }
 
@@ -129,6 +139,7 @@ export function resolveStagingDirPrefix(
     null
   );
   const name = resolved.slice(radiusRoot.length + 1);
+  assertStandaloneArtifact(name);
   if (
     !name ||
     name.includes(sep) ||

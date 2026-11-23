@@ -514,6 +514,7 @@ describe("RU-19: onSessionStart hook", () => {
 describe("RU-19: host-channel callback wiring (context/permission/session)", () => {
   it("registers an app.bicep handoff that sends the full prompt to the agent and a short display prompt to the timeline", async () => {
     const { ext, deps, capturedHostCallbacks } = setup();
+    deps.appModel.workspaceSourceRevision = async () => "saved-source";
     const session = createFakeSession();
     ext.attachSession(session);
     await ext.canvases[0].open({
@@ -537,7 +538,14 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     if (!attemptToken) throw new Error("expected current modeling attempt");
     // The Canvas embeds the skill bootstrap, so the agent never has to find
     // and call radius_generate_app to start modeling.
-    const skillHandoff = deps.radiusAppBicepSkill();
+    const skillHandoff = JSON.stringify({
+      ...JSON.parse(deps.radiusAppBicepSkill()),
+      repoPath: "/workspace",
+      managedAuthoring: {
+        requestToken: attemptToken,
+        stagingDir: "/workspace/.radius/.staging-managed-test"
+      }
+    });
     // The agent half must carry the full instructions...
     expect(sent.prompt).toBe(
       appBicepHandoffPrompt(

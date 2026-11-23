@@ -39,6 +39,7 @@ import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { appModelTargetKey } from "../app-model-authoring-failure.js";
 import { errorMessage } from "./util.js";
+import type { createCanvasModelAuthoring } from "./canvas-model-authoring.js";
 
 export interface AppModelHandoffRequest {
   repo: string;
@@ -60,6 +61,8 @@ export interface AppModelHandoffRequest {
 }
 
 export interface AppModelHandoffDependencies {
+  beginManaged: ReturnType<typeof createCanvasModelAuthoring>["begin"];
+  cancelManaged(token: string): void;
   // Branch context to read against when no panel state was supplied. Without it
   // the workspace repository would be judged from its remote instead of the
   // worktree the canvas actually renders.
@@ -433,6 +436,24 @@ export function createAppModelHandoff(
         }
       }
       try {
+        const branch = targets[0];
+        if (
+          page === "graph" &&
+          targets.length === 1 &&
+          branch &&
+          state &&
+          attemptToken &&
+          settled[0]?.source.kind === "workspace"
+        ) {
+          skillHandoff = deps.beginManaged(
+            state,
+            repo,
+            branch,
+            attemptToken,
+            sourceRevisions[0],
+            skillHandoff
+          );
+        }
         await deps.send(
           appBicepHandoffMessage(
             repo,
@@ -451,6 +472,7 @@ export function createAppModelHandoff(
         );
       } catch (sendError) {
         if (state && attemptToken) {
+          deps.cancelManaged(attemptToken);
           for (const branch of targets) {
             const tokenKey = appModelTargetKey(repo, branch);
             if (state.appModelAttemptTokens?.[tokenKey] === attemptToken) {

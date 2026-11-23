@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Prevent overlapping recipe publications from the same Radius session from writing to the same registry tag out of order.
+**Fixed:** Validate the generated model before updating the worktree from the Radius graph, and prevent superseded modeling attempts from starting publication or replacing the current model.

@@ -433,6 +433,18 @@ export function beginManagedRun(workspaceRoot) {
   }
   return {
     stagingDir,
+    artifact(name, required) {
+      assertActive();
+      if (!/^[a-z0-9][a-z0-9.-]*$/iu.test(name)) {
+        fail("A managed artifact must be a direct staging file.");
+      }
+      const file = path.join(stagingDir, name);
+      const stat = lstatSync(file, { throwIfNoEntry: false });
+      if (stat ? !stat.isFile() || stat.nlink !== 1 : required) {
+        fail(`Expected a regular managed staging file at ${file}.`);
+      }
+      return file;
+    },
     cancel() {
       finished = true;
     },
@@ -763,7 +775,7 @@ export function runPromotionCli() {
   }
 }
 
-function isManagedRun(stagingPath) {
+export function isManagedRun(stagingPath) {
   return path
     .basename(stagingPath)
     .toLowerCase()

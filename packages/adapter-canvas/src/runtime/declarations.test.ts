@@ -132,6 +132,7 @@ describe("RU-03: tool declarations", () => {
       "radius_generate_app",
       "radius_report_modeling_failure",
       "radius_generate_pr_diff_markdown",
+      "radius_complete_app_authoring",
       "radius_publish_custom_type_extension",
       "radius_publish_recipe",
       "radius_deploy",

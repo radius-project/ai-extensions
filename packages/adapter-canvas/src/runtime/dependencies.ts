@@ -225,7 +225,7 @@ export interface ProcessDependencies {
   execFile(
     cmd: string,
     args: string[],
-    options: { timeout?: number; encoding?: BufferEncoding }
+    options: { cwd?: string; timeout?: number; encoding?: BufferEncoding }
   ): Promise<{ stdout: string; stderr: string }>;
 }
 
@@ -326,6 +326,7 @@ export interface RadiusExtensionDependencies {
   process: ProcessDependencies;
   operations: OperationsDependencies;
   appModel: AppModelDependencies;
+  beginManagedModel: typeof import("../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs").beginManagedRun;
   radiusAppBicepSkill(repoPath?: string, brief?: string): string;
   renderPrDiffMarkdown(
     resources: CanvasGraphResource[],
