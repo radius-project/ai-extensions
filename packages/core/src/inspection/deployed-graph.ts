@@ -45,7 +45,7 @@ export async function inspectDeploymentGraph(input: {
   openReader(runId: RunId | null): DeploymentInspectionReader;
   context?: WorkflowReadContext;
   assertObserving(): void;
-  acceptProgress(progress: DeployProgress | null, newerRun: boolean): void;
+  acceptProgress(progress: DeployProgress | null): void;
   inventorySelection: Readonly<{ application: string; environment: string }>;
   inventoryIsCurrent(): boolean;
 }): Promise<
@@ -108,7 +108,7 @@ export async function inspectDeploymentGraph(input: {
     observation.progress = progress;
     observation.artifactRunId = artifactRunId;
     observation.newerRun = newerRun;
-    input.acceptProgress(progress, newerRun);
+    input.acceptProgress(progress);
     const snapshot = await reader.read(input.context);
     input.assertObserving();
     if (!run.active && input.inventoryIsCurrent()) {
