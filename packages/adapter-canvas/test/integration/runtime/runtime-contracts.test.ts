@@ -1485,6 +1485,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     "stale",
     "stale during credentials",
     "no node",
+    "invalid bootstrap",
+    "missing revision",
     "send failed"
   ] as const)(
     "binds the managed Canvas graph handoff to registered tools: %s",
@@ -1495,7 +1497,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       const stage = resolve(".radius", ".staging-managed-test");
       const node = resolve("test", "bin", "node");
       const skillBase = resolve("test", "skills", "radius-app-bicep");
-      let revision = "saved-source-1";
+      let revision = outcome === "missing revision" ? "" : "saved-source-1";
       const artifact = vi.fn((name: string) => join(stage, name));
       const cancel = vi.fn();
       const credentialsStarted = createDeferred<void>();
@@ -1529,11 +1531,13 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         (deps) => {
           deps.appModel.workspaceSourceRevision = async () => revision;
           deps.radiusAppBicepSkill = () =>
-            JSON.stringify({
-              skill: "radius-app-bicep",
-              skillBase,
-              nodeCommand: outcome === "no node" ? null : node
-            });
+            outcome === "invalid bootstrap" ? "null" : (
+              JSON.stringify({
+                skill: "radius-app-bicep",
+                skillBase,
+                nodeCommand: outcome === "no node" ? null : node
+              })
+            );
           deps.beginManagedModel = () => ({
             stagingDir: stage,
             artifact,
@@ -1577,6 +1581,17 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           );
           await expect(handoff(request)).rejects.toThrow("SDK delivery failed");
           expect(cancel).toHaveBeenCalledOnce();
+          return;
+        }
+        if (outcome === "invalid bootstrap" || outcome === "missing revision") {
+          await expect(handoff(request)).rejects.toThrow(
+            outcome === "invalid bootstrap" ?
+              "did not provide a bootstrap"
+            : "Cannot establish the managed Radius authoring source"
+          );
+          expect(harness.session.send).not.toHaveBeenCalled();
+          expect(state.appModelAttemptTokens).toEqual({});
+          expect(promote).not.toHaveBeenCalled();
           return;
         }
         await handoff(request);
