@@ -447,6 +447,7 @@ describe("sweepAwsCloudE2E", () => {
     // counts the app role step 2 deleted. Slow Kubernetes deletes are
     // covered below.
     s.kube.terminatingReads = 0;
+    s.kube.dependentLagReads = 0;
     s.appDelete.set(OLD, "leave");
     const report = await runSweep(s);
 
@@ -678,6 +679,78 @@ describe("sweepAwsCloudE2E", () => {
     await expect(
       t.ports.github.deleteApplication(OLD, APPLICATION)
     ).rejects.toThrow("AccessDenied for iam:DeleteRole");
+  });
+
+  describe("Pods that outlive a Deployment the failed app delete removed", () => {
+    const NEWER = "radtest-aws-dddd77778888";
+    const KEY = `${MAIN.region}/${MAIN.name}`;
+
+    // The failed delete got as far as the Deployment, in the background, so
+    // its ReplicaSet and Pod are still going. A newer environment on the same
+    // cluster keeps the namespace.
+    async function world(dependentLagReads: number) {
+      const s = await twoEnvironments();
+      await addAwsEnvironment(s, NEWER, { ageHours: 1 });
+      s.appDelete.set(OLD, "fail");
+      s.kube.dependentLagReads = dependentLagReads;
+      s.kube.delete(KEY, "Deployment", "web", NAMESPACE);
+      return s;
+    }
+
+    it("keeps the environment while its Pods are still there, and the next run finishes", async () => {
+      const s = await world(1000);
+      const before = retryInputs(s, OLD);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([
+        deleteFailed(OLD),
+        `Leaked workloads on cluster ${MAIN.name} (${MAIN.region}) were still there after deletion.`
+      ]);
+      expect(report.warnings).not.toContain(wentOn(OLD));
+      expect(retryInputs(s, OLD)).toEqual(before);
+      expect(s.github.environment(NEWER)).toBeDefined();
+      expect(s.kube.namespaceExists(KEY, NAMESPACE)).toBe(true);
+      expect((await runVerify(s)).findings).toContain(
+        `Pod ${NAMESPACE}/web-aaaa11112222-a on cluster ${MAIN.name}`
+      );
+
+      nextDay(s);
+      expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+      expect(retryInputs(s, OLD)).toEqual([]);
+      expect(s.kube.snapshot().filter((item) => item.includes("web-"))).toEqual(
+        []
+      );
+    });
+
+    it("goes on once its Pods are gone", async () => {
+      const s = await world(3);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([deleteFailed(OLD)]);
+      expect(report.warnings).toContain(wentOn(OLD));
+      // The newer environment still uses the cluster's access entry.
+      expect(retryInputs(s, OLD)).toEqual(["access entry"]);
+      expect(s.github.environment(OLD)).toBeUndefined();
+      expect(s.kube.snapshot().filter((item) => item.includes("web-"))).toEqual(
+        []
+      );
+      expect(retryInputs(s, NEWER)).toContain("GitHub environment");
+    });
+
+    it("keeps the environment when the Pods can't be read", async () => {
+      const s = await world(1000);
+      const before = retryInputs(s, OLD);
+      const list = s.ports.kubernetes.listWorkloads;
+      s.ports.kubernetes.listWorkloads = async (cluster) => {
+        if (cluster.name === MAIN.name)
+          throw new Error("Listing workloads on main: Forbidden");
+        return list(cluster);
+      };
+      const report = await runSweep(s);
+      expect(report.failures).toContain(
+        `Workload sweep of cluster ${MAIN.name} stopped without deleting further: Listing workloads on main: Forbidden`
+      );
+      expect(report.warnings).not.toContain(wentOn(OLD));
+      expect(retryInputs(s, OLD)).toEqual(before);
+    });
   });
 
   it("keeps an environment whose app delete fails while anything of it is left, and says what on every run", async () => {
@@ -1749,6 +1822,9 @@ describe("findAwsLeftovers", () => {
       `RDS DB subnet group ${name} in ${REGION}`,
       `RDS DB parameter group ${name} in ${REGION}`,
       `Deployment ${NAMESPACE}/web on cluster ${MAIN.name}`,
+      `ServiceAccount ${NAMESPACE}/radius-app-web on cluster ${MAIN.name}`,
+      `ReplicaSet ${NAMESPACE}/web-aaaa11112222 on cluster ${MAIN.name}`,
+      `Pod ${NAMESPACE}/web-aaaa11112222-a on cluster ${MAIN.name}`,
       `namespace ${NAMESPACE} on cluster ${MAIN.name}`,
       `app role ${appRole.Arn}`,
       `Pod Identity association ${association.associationId} (${NAMESPACE}/radius-app-web) on cluster ${MAIN.name}, for ${appRole.Arn}`,

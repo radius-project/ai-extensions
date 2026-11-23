@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { FakeKubernetes } from "./fake-kubernetes.js";
 
+const KINDS = ["deployments", "jobs"];
+
 const LABELS = {
   "radapp.io/environment": "env",
   "radapp.io/application": "app"
@@ -24,7 +26,7 @@ describe("FakeKubernetes", () => {
       labels: {},
       creationTimestamp: "2026-01-01T00:00:00Z"
     });
-    expect(kube.list("c")).toEqual({
+    expect(kube.list("c", KINDS)).toEqual({
       kind: "List",
       items: [
         {
@@ -56,7 +58,7 @@ describe("FakeKubernetes", () => {
     // Still listed while it terminates, with a deletionTimestamp.
     const listed = (key: string) =>
       (
-        kube.list(key) as {
+        kube.list(key, KINDS) as {
           items: Array<{
             metadata: { name: string; deletionTimestamp?: string };
           }>;
@@ -120,6 +122,95 @@ describe("FakeKubernetes", () => {
     expect(kube.namespaceExists("c", "one")).toBe(false);
   });
 
+  it("lists only the resource types asked for, in that order, and refuses one it doesn't know", () => {
+    const kube = new FakeKubernetes();
+    kube.addCluster("c");
+    for (const [kind, name] of [
+      ["Pod", "p"],
+      ["Job", "j"],
+      ["Deployment", "d"]
+    ] as const)
+      kube.addWorkload("c", {
+        kind,
+        name,
+        namespace: "ns",
+        labels: LABELS,
+        creationTimestamp: ""
+      });
+    const kinds = (resources: string[]) =>
+      (
+        kube.list("c", resources) as { items: Array<{ kind: string }> }
+      ).items.map((item) => item.kind);
+    expect(kinds(["deployments", "jobs"])).toEqual(["Deployment", "Job"]);
+    expect(kinds(["pods", "deployments"])).toEqual(["Pod", "Deployment"]);
+    expect(() => kube.list("c", ["deployment"])).toThrow(
+      'error: the server doesn\'t have a resource type "deployment"'
+    );
+  });
+
+  describe("deleting an owner", () => {
+    function chain() {
+      const kube = new FakeKubernetes();
+      kube.addCluster("c");
+      const add = (
+        kind: string,
+        name: string,
+        owner?: { kind: string; name: string }
+      ) =>
+        kube.addWorkload("c", {
+          kind,
+          name,
+          namespace: "ns",
+          labels: LABELS,
+          creationTimestamp: "",
+          ...(owner ? { owner } : {})
+        });
+      add("Deployment", "web");
+      add("ReplicaSet", "web-1", { kind: "Deployment", name: "web" });
+      add("Pod", "web-1-a", { kind: "ReplicaSet", name: "web-1" });
+      // Another Deployment's Pod, and one in another namespace, stay.
+      add("Pod", "other", { kind: "ReplicaSet", name: "other" });
+      return kube;
+    }
+    const names = (kube: FakeKubernetes) =>
+      (
+        kube.list("c", ["deployments", "replicasets", "pods"]) as {
+          items: Array<{ metadata: { name: string } }>;
+        }
+      ).items.map((item) => item.metadata.name);
+
+    it("in the background removes the owner first and leaves its dependents a while", () => {
+      const kube = chain();
+      kube.terminatingReads = 1;
+      kube.dependentLagReads = 2;
+      kube.delete("c", "Deployment", "web", "ns");
+      expect(names(kube)).toEqual(["web", "web-1", "web-1-a", "other"]);
+      expect(names(kube)).toEqual(["web-1", "web-1-a", "other"]);
+      expect(names(kube)).toEqual(["web-1", "web-1-a", "other"]);
+      expect(names(kube)).toEqual(["other"]);
+    });
+
+    it("in the foreground keeps the owner listed until its dependents are gone", () => {
+      const kube = chain();
+      kube.terminatingReads = 1;
+      kube.dependentLagReads = 5;
+      kube.delete("c", "Deployment", "web", "ns", "foreground");
+      expect(names(kube)).toEqual(["web", "web-1", "web-1-a", "other"]);
+      expect(names(kube)).toEqual(["other"]);
+    });
+
+    it("doesn't restart a dependent already going, and ignores one it can't find", () => {
+      const kube = chain();
+      kube.terminatingReads = 1;
+      kube.dependentLagReads = 3;
+      kube.delete("c", "Pod", "web-1-a", "ns");
+      kube.delete("c", "Deployment", "web", "ns");
+      kube.delete("c", "Deployment", "gone", "ns");
+      expect(names(kube)).toEqual(["web", "web-1", "web-1-a", "other"]);
+      expect(names(kube)).toEqual(["web-1", "other"]);
+    });
+  });
+
   it("refuses a cluster it wasn't given, so a mistyped target can't pass", () => {
     const kube = new FakeKubernetes();
     kube.addCluster("us-east-2/main");
@@ -133,7 +224,8 @@ describe("FakeKubernetes", () => {
     kube.addWorkload("us-east-2/main", workload);
     const typo = "us-east-2/mian";
     for (const call of [
-      () => kube.list(typo),
+      () => kube.list(typo, KINDS),
+      () => kube.objects(typo),
       () => kube.delete(typo, "Deployment", "web", "ns"),
       () => kube.namespaceExists(typo, "ns"),
       () => kube.deleteNamespace(typo, "ns"),

@@ -22,6 +22,7 @@ import {
   type AwsCleanupGitHub,
   type AwsCleanupKubernetes
 } from "./aws-cloud-cleanup.js";
+import { RADIUS_CLEANUP_KINDS } from "./radius-workload-kinds.js";
 import type { LeakedClusterWorkload } from "./cloud-cleanup.js";
 
 // The CLI-backed ports the AWS cleanup sweep runs on in CI: `gh` for GitHub,
@@ -509,10 +510,8 @@ export function createGhCleanupGitHub(
   };
 }
 
-// Every Radius-rendered kind the label rule reclaims. Jobs are the connection
-// probes, which carry the app's Radius labels.
-const WORKLOAD_KINDS =
-  "deployments,statefulsets,daemonsets,jobs,services,horizontalpodautoscalers";
+// Every kind the label rule reclaims, owners first.
+const WORKLOAD_KINDS = RADIUS_CLEANUP_KINDS.join(",");
 
 export interface KubectlCleanupOptions {
   run: CommandRunner;

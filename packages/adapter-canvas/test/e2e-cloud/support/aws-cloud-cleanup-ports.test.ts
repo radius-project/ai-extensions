@@ -720,7 +720,7 @@ describe("createKubectlCleanupKubernetes", () => {
       "--kubeconfig",
       "/tmp/kube/us-east-2-main.kubeconfig",
       "get",
-      "deployments,statefulsets,daemonsets,jobs,services,horizontalpodautoscalers",
+      "deployments,statefulsets,daemonsets,services,horizontalpodautoscalers,jobs,serviceaccounts,replicasets,pods",
       "--all-namespaces",
       "--selector",
       "radapp.io/environment",

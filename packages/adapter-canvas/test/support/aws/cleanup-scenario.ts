@@ -16,6 +16,7 @@ import {
   defaultAwsDeployRoleName
 } from "../../../src/aws-deploy-role-name.js";
 import { resolveOidcSubject } from "../../../src/azure-oidc.js";
+import { RADIUS_CLEANUP_KINDS } from "../../e2e-cloud/support/radius-workload-kinds.js";
 import {
   ApplicationDeleteFailed,
   sweepAwsCloudE2E,
@@ -302,7 +303,7 @@ function kubernetesPort(scenario: CleanupScenario): AwsCleanupKubernetes {
   return {
     listWorkloads: (cluster) =>
       outside.outside(`kubectl get workloads ${cluster.name}`, false, () =>
-        kube.list(clusterKey(cluster))
+        kube.list(clusterKey(cluster), RADIUS_CLEANUP_KINDS)
       ),
     deleteWorkload: (cluster, workload) =>
       outside.outside(
@@ -313,7 +314,8 @@ function kubernetesPort(scenario: CleanupScenario): AwsCleanupKubernetes {
             clusterKey(cluster),
             workload.kind,
             workload.name,
-            workload.namespace
+            workload.namespace,
+            "foreground"
           )
       ),
     namespaceExists: (cluster, namespace) =>
@@ -365,17 +367,16 @@ function deleteApplication(
       if (item.roleArn === appRole.Arn) podIdentity?.delete(id);
     scenario.aws.roles.delete(appRole.RoleName.toLowerCase());
   }
-  for (const item of JSON.parse(
-    JSON.stringify(scenario.kube.list(`${region}/${cluster}`))
-  ).items as Array<{ kind: string; metadata: Record<string, any> }>) {
-    if (item.metadata.labels["radapp.io/environment"] === environment)
-      scenario.kube.delete(
-        `${region}/${cluster}`,
-        item.kind,
-        item.metadata.name,
-        item.metadata.namespace
-      );
-  }
+  // Radius deletes what it rendered, and the probe Jobs go with it, in the
+  // background: the ReplicaSets and Pods outlive their Deployment a while.
+  const key = `${region}/${cluster}`;
+  for (const item of scenario.kube.objects(key))
+    if (
+      !item.owner &&
+      item.terminating === undefined &&
+      item.labels["radapp.io/environment"] === environment
+    )
+      scenario.kube.delete(key, item.kind, item.name, item.namespace);
 }
 
 // A new process's ports: nothing a crashed run cached carries over.
@@ -581,16 +582,7 @@ export async function addAwsEnvironment(
     roleArn: appRole.Arn,
     tags: containerTags(name)
   });
-  scenario.kube.addWorkload(clusterKey(cluster), {
-    kind: "Deployment",
-    name: "web",
-    namespace: NAMESPACE,
-    labels: {
-      "radapp.io/environment": name,
-      "radapp.io/application": APPLICATION
-    },
-    creationTimestamp: created
-  });
+  addRenderedContainer(scenario, clusterKey(cluster), name, created);
   scenario.deployments.push({
     id: 1000 + scenario.deployments.length,
     environment: name,
@@ -648,6 +640,48 @@ function addAppRole(
     boundary: boundary.arn,
     tags: tagList(containerTags(environment)),
     inline: { connections: { Version: "2012-10-17", Statement: [] } }
+  });
+}
+
+/**
+ * What the containers Recipe renders for the app's container, and what the
+ * Deployment's controllers make from it, all with the Recipe's labels: the
+ * ServiceAccount, the Deployment, its ReplicaSet, and its Pod.
+ */
+function addRenderedContainer(
+  scenario: CleanupScenario,
+  key: string,
+  environment: string,
+  created: string
+): void {
+  const suffix = environment.slice(PREFIX.length);
+  const labels = {
+    "radapp.io/environment": environment,
+    "radapp.io/application": APPLICATION,
+    "radapp.io/resource": CONTAINER
+  };
+  const add = (
+    kind: string,
+    name: string,
+    owner?: { kind: string; name: string }
+  ) =>
+    scenario.kube.addWorkload(key, {
+      kind,
+      name,
+      namespace: NAMESPACE,
+      labels,
+      creationTimestamp: created,
+      ...(owner ? { owner } : {})
+    });
+  add("ServiceAccount", `radius-app-${CONTAINER}`);
+  add("Deployment", CONTAINER);
+  add("ReplicaSet", `${CONTAINER}-${suffix}`, {
+    kind: "Deployment",
+    name: CONTAINER
+  });
+  add("Pod", `${CONTAINER}-${suffix}-a`, {
+    kind: "ReplicaSet",
+    name: `${CONTAINER}-${suffix}`
   });
 }
 
