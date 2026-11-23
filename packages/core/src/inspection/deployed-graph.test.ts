@@ -114,7 +114,7 @@ it("accepts progress for the exact active run even without a graph artifact", as
       inventory: null
     }
   });
-  expect(input.acceptProgress).toHaveBeenCalledExactlyOnceWith(progress, false);
+  expect(input.acceptProgress).toHaveBeenCalledExactlyOnceWith(progress);
 });
 
 it("uses zero as an exact active run id and does not consult inventory currency", async () => {
@@ -176,8 +176,7 @@ it("accepts a newer terminal run for display but not as the tracked run's invent
     observation: { graph, newerRun: true, artifactRunId: 43, inventory: null }
   });
   expect(input.acceptProgress).toHaveBeenCalledWith(
-    expect.objectContaining({ runId: 43 }),
-    true
+    expect.objectContaining({ runId: 43 })
   );
 });
 
