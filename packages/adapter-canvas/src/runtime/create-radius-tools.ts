@@ -96,10 +96,16 @@ export function createRadiusTools(
         target,
         log: logToSession
       }),
-    publishRecipe: (file, target) =>
-      deps.withGhcrDockerConfig((env) =>
-        deps.rad.runRadBicepPublish({ file, target, env, log: logToSession })
-      )
+    publishRecipe: (file, target, workspace) =>
+      deps.withGhcrDockerConfig((env) => {
+        authoring.assertStandalone(workspace);
+        return deps.rad.runRadBicepPublish({
+          file,
+          target,
+          env,
+          log: logToSession
+        });
+      })
   });
 
   // Records that a modeling run is about to start, so a graph render that finds
@@ -362,6 +368,7 @@ export function createRadiusTools(
             });
           }
           const { workspacePath } = await workspaceState();
+          authoring.assertStandalone(workspacePath);
           const result = await publication.compileExtension(
             workspacePath,
             args
@@ -387,6 +394,7 @@ export function createRadiusTools(
             );
           }
           const { workspacePath, workspaceRepo } = await workspaceState();
+          if (!token) authoring.assertStandalone(workspacePath);
           const result = await publication.publishRecipe(
             workspacePath,
             workspaceRepo,

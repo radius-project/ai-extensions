@@ -41,7 +41,8 @@ export function createCanvasModelAuthoring(
       branch: string,
       token: string,
       revision: string | undefined,
-      skillHandoff: string
+      skillHandoff: string,
+      selectionIsCurrent: () => boolean
     ): string {
       const instanceId = state.canvasInstanceId;
       const workspace = state.workspacePath;
@@ -49,6 +50,8 @@ export function createCanvasModelAuthoring(
       const current = () =>
         !!instanceId &&
         deps.servers.get(instanceId)?.state === state &&
+        state.workspacePath === workspace &&
+        selectionIsCurrent() &&
         state.appModelAttemptTokens?.[key] === token;
       const handoff: unknown = JSON.parse(skillHandoff);
       if (typeof handoff !== "object" || !handoff) {

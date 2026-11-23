@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Validate the generated model before updating the worktree from the Radius graph, and prevent superseded modeling attempts from starting publication or replacing the current model.
+**Fixed:** Validate new and refreshed models before updating the worktree from a Radius graph, and keep model comparisons from automatically refreshing either branch.

@@ -1403,8 +1403,8 @@ describe("createAppModelHandoff", () => {
     expect(sent[0].displayPrompt).toContain("Asking before regenerating");
   });
 
-  it("prefers the confirmation conversation over a plain refresh when both apply", async () => {
-    const { handOff, sent } = harness({
+  it("does not start either automatic or confirmation refresh from a comparison", async () => {
+    const { handOff, sent, logged } = harness({
       statuses: {
         main: modelStatus("a/b", "main", { status: "source-changed" }),
         feat: modelStatus("a/b", "feat", { status: "manually-edited" })
@@ -1417,8 +1417,12 @@ describe("createAppModelHandoff", () => {
       page: "graph-diff"
     });
 
-    expect(sent).toHaveLength(1);
-    expect(sent[0].prompt).toContain("would discard content");
+    expect(sent).toHaveLength(0);
+    expect(logged).toContainEqual(
+      expect.stringContaining(
+        "The comparison does not regenerate either branch."
+      )
+    );
   });
 
   it("asks for a refresh when the installed Radius CLI is newer than the model's", async () => {
@@ -1468,9 +1472,7 @@ describe("createAppModelHandoff", () => {
     }
   );
 
-  // A diff can put an older-CLI branch beside a stale one. The note must not be
-  // lost because the stale branch's refresh returns first.
-  it("notes an older Radius CLI even when another branch is refreshed", async () => {
+  it("notes both the older Radius CLI and the stale comparison branch without refreshing", async () => {
     const { handOff, sent, logged } = harness({
       statuses: {
         main: modelStatus("a/b", "main", {
@@ -1487,8 +1489,8 @@ describe("createAppModelHandoff", () => {
       page: "graph-diff"
     });
 
-    expect(sent).toHaveLength(1);
-    expect(logged).toHaveLength(1);
+    expect(sent).toHaveLength(0);
+    expect(logged).toHaveLength(2);
     expect(logged[0]).toContain("on branch `main` was not refreshed");
   });
 
@@ -1840,7 +1842,29 @@ describe("createAppModelHandoff", () => {
     expect(sent[0].prompt).toContain("needs to be regenerated");
   });
 
-  it("retries a superseding stale-model handoff after the shared delivery fails", async () => {
+  it("abandons a generated-model refresh if the model changes before staging", async () => {
+    const original = modelStatus("a/b", "main", { status: "source-changed" });
+    const state: CanvasState = { canvasInstanceId: "model-panel" };
+    const beginManaged = vi.fn();
+    const { handOff, sent } = harness({
+      beginManaged,
+      resolveStatus: vi
+        .fn()
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce({
+          ...original,
+          freshness: { ...original.freshness, appBicepHash: "replacement" }
+        })
+    });
+
+    await handOff({ repo: "a/b", branches: ["main"], page: "graph", state });
+
+    expect(beginManaged).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+    expect(state.appBicepHandoffKey).toBeUndefined();
+  });
+
+  it("deduplicates a pending single-branch refresh and retries after delivery fails", async () => {
     const state: CanvasState = {};
     let rejectFirstSend!: (error: Error) => void;
     let sendAttempt = 0;
@@ -1849,8 +1873,7 @@ describe("createAppModelHandoff", () => {
         main: modelStatus("a/b", "main", {
           status: "source-changed",
           sourceCommit: "aaa"
-        }),
-        feature: modelStatus("a/b", "feature", { status: "up-to-date" })
+        })
       },
       send: (message) => {
         sendAttempt++;
@@ -1874,19 +1897,20 @@ describe("createAppModelHandoff", () => {
 
     await handOff({
       repo: "a/b",
-      branches: ["main", "feature"],
-      page: "graph-diff",
+      branches: ["main"],
+      page: "graph",
       state
     });
-    expect(state.appBicepHandoffKey).toBeUndefined();
+    expect(state.appBicepHandoffKey).toBeDefined();
 
     rejectFirstSend(new Error("session closed"));
     await expect(first).rejects.toThrow("session closed");
+    expect(state.appBicepHandoffKey).toBeUndefined();
 
     await handOff({
       repo: "a/b",
-      branches: ["main", "feature"],
-      page: "graph-diff",
+      branches: ["main"],
+      page: "graph",
       state
     });
     expect(sent).toHaveLength(1);
