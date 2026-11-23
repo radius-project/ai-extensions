@@ -185,6 +185,18 @@ export function createRadiusExtension(
       resolveAppModelStatus(repo, branch, state),
     assertWorkspaceSource: (source) =>
       deps.graphSources.assertWorkspaceSource(source),
+    authorizeMissingModel(page, state, statuses) {
+      if (
+        page !== "graph" ||
+        !state?.canvasInstanceId ||
+        statuses.length !== 1 ||
+        statuses[0].source.kind !== "workspace"
+      ) {
+        throw new Error(
+          "This graph selection is read-only. To create .radius/app.bicep, open the modeled graph for the branch checked out in this workspace."
+        );
+      }
+    },
     evaluateSource: (repo, branch, state) =>
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>

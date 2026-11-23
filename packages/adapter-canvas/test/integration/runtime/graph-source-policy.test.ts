@@ -78,6 +78,7 @@ async function fixture(
         );
         return {};
       }
+
       expect(command).toBe("gh");
       const endpoint = args[1];
       effects.push(`read:${endpoint}`);
@@ -210,6 +211,31 @@ async function fixture(
 }
 
 describe("registered runtime graph source policy", () => {
+  it.each([
+    { page: "graph", branches: ["main"] },
+    { page: "graph-diff", branches: ["main", "feature"] }
+  ])(
+    "does not author a missing model for $page on $branches",
+    async ({ page, branches }) => {
+      const f = await fixture();
+      try {
+        await rm(path.join(f.workspace, MODEL_PATH));
+        f.files.delete(`${BASE}:${MODEL_PATH}`);
+        f.files.delete(`${HEAD}:${MODEL_PATH}`);
+        await f.harness.host.open("radius-panel", { page: "graph" });
+        const state = f.harness.servers.get("radius-panel")?.state;
+        const handoff = f.harness.capturedHostCallbacks.appBicepHandoff;
+        if (!state || !handoff) throw new Error("Missing modeling handoff");
+        await expect(
+          handoff({ repo: REPO, branches, page, state })
+        ).rejects.toThrow("This graph selection is read-only");
+        expect(f.harness.session.send).not.toHaveBeenCalled();
+        expect(state.appModelAttemptTokens).toBeUndefined();
+      } finally {
+        await f.close();
+      }
+    }
+  );
   it.each(["before", "after"])(
     "abandons freshness handoff when the checkout changes %s the origin read",
     async (phase) => {
