@@ -597,10 +597,17 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
   });
 
   it("reports the same unchanged model only once per panel", async () => {
-    const { ext, capturedHostCallbacks } = setup();
+    const { ext, capturedHostCallbacks, deps } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
-    const state = {};
+    const { state } = await deps.getOrCreateServer("model-panel", "graph");
+    Object.assign(state, {
+      canvasInstanceId: "model-panel",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "main",
+      workspacePath: "/workspace"
+    });
+    deps.appModel.workspaceSourceRevision = async () => "fixture-source";
 
     await capturedHostCallbacks.appBicepHandoff!({
       repo: "acme/widgets",
@@ -665,19 +672,28 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
   });
 
   it("releases the handoff reservation when the session rejects delivery, allowing a later call to deliver", async () => {
-    const { ext, capturedHostCallbacks } = setup();
+    const { ext, capturedHostCallbacks, deps } = setup();
     const session = createFakeSession();
     const send = session.send as ReturnType<typeof vi.fn>;
     send.mockRejectedValueOnce(new Error("session closed"));
     send.mockResolvedValueOnce(undefined);
     ext.attachSession(session);
+    const { state } = await deps.getOrCreateServer("model-panel", "graph");
+    Object.assign(state, {
+      canvasInstanceId: "model-panel",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "main",
+      workspacePath: "/workspace"
+    });
+    deps.appModel.workspaceSourceRevision = async () => "fixture-source";
 
     // First call fails — the reservation must be released.
     await expect(
       capturedHostCallbacks.appBicepHandoff!({
         repo: "acme/widgets",
         branches: ["main"],
-        page: "graph"
+        page: "graph",
+        state
       })
     ).rejects.toThrow("session closed");
     expect(send).toHaveBeenCalledOnce();
@@ -686,7 +702,8 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     await capturedHostCallbacks.appBicepHandoff!({
       repo: "acme/widgets",
       branches: ["main"],
-      page: "graph"
+      page: "graph",
+      state
     });
     expect(send).toHaveBeenCalledTimes(2);
   });

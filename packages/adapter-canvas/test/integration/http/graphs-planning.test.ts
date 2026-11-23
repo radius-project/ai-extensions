@@ -379,9 +379,17 @@ describe("graph concurrency through production HTTP routes", () => {
         stagingRoot: workspace
       });
       const sdk = await createRuntimeSdkHarness(
-        { workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] } },
+        {
+          workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] },
+          workspaceContext: {
+            workspacePath: workspace,
+            repo: "octo/app",
+            branch: "main"
+          }
+        },
         (deps) => {
           deps.graphSources = sources;
+          deps.appModel.workspaceSourceRevision = async () => "fixture-source";
         }
       );
       let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
@@ -405,6 +413,8 @@ describe("graph concurrency through production HTTP routes", () => {
           }
         });
         h = await concurrentGraphRuntime(workspace);
+        h.entry.state.canvasInstanceId = "graph-races";
+        sdk.servers.set("graph-races", h.entry);
         expect(await (await h.load()).json()).toMatchObject({
           needsAppBicep: true
         });
