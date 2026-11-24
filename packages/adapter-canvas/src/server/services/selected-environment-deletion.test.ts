@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
   buildDeleteStages,
+  beginRetryAttempt,
+  canRetryDeletion,
   createOperation,
   fromPersistedOperation,
   reconcileRestoredOperation,
@@ -12,6 +14,7 @@ import {
 } from "../../operations.js";
 import type { EnvironmentDeletionPorts } from "./environment-deletion.js";
 import type { EnvironmentDeletionDispatch } from "./radius-environment-workflow-deletion.js";
+import type { EnvironmentDispatchAttempt } from "./environment-dispatch-evidence.js";
 import {
   hasSelectedEnvironmentDeletion,
   runSelectedEnvironmentDeletion
@@ -133,6 +136,62 @@ function fixture() {
 }
 
 describe("saved-account environment deletion", () => {
+  it("appends a dispatch generation to the same operation after a saved refusal", async () => {
+    const f = fixture();
+    const first = {
+      ...f.dispatch,
+      branch: "main",
+      head: "a".repeat(40),
+      operationAttempt: 0,
+      state: "refused"
+    };
+    const second: EnvironmentDispatchAttempt = {
+      ...f.dispatch,
+      correlationId: "del-ya-second",
+      branch: "main",
+      head: "a".repeat(40),
+      operationAttempt: 1,
+      state: "unresolved"
+    };
+    f.operation.request.selectedDispatchAttempts = [first];
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(f.operation))
+    );
+    beginRetryAttempt(restored, "deletion");
+    const claimDispatch = vi.fn(async (_generation: number) => {});
+    await runSelectedEnvironmentDeletion(restored, {
+      ...f.dependencies,
+      claimDispatch,
+      verifyRetryTarget: async () => {},
+      bind(executor, current, legacyDispatch, legacyRecovery, journal) {
+        return {
+          ...f.bind(executor, current, legacyDispatch, legacyRecovery),
+          async deleteRadiusEnvironment() {
+            expect(journal.latest()).toEqual(first);
+            await journal.begin(second);
+            expect(restored.request.selectedDispatchAttempts).toEqual([
+              first,
+              second
+            ]);
+            await journal.record({ ...second, state: "refused" });
+            return { outcome: "failed" };
+          }
+        };
+      }
+    });
+    expect(claimDispatch).toHaveBeenCalledExactlyOnceWith(2);
+    expect(restored.operationId).toBe(f.operation.operationId);
+    expect(restored.request.selectedDispatchAttempts).toEqual([
+      first,
+      { ...second, state: "refused" }
+    ]);
+    expect(canRetryDeletion(restored)).toMatchObject({
+      ok: true,
+      resumeFrom: STAGE_DELETE_RADIUS_ENV
+    });
+    expect(f.deleteGitHubEnvironment).not.toHaveBeenCalled();
+  });
+
   it("reacquires the exact saved account and resumes only package cleanup after restart", async () => {
     const f = fixture();
     for (const stage of f.operation.stages) {
@@ -149,7 +208,8 @@ describe("saved-account environment deletion", () => {
       f.executor,
       expect.any(Function),
       expect.any(Function),
-      expect.any(Function)
+      expect.any(Function),
+      expect.objectContaining({ owner: "octocat" })
     );
     expect(f.deleteRadius).not.toHaveBeenCalled();
     expect(f.deleteStatePackage).toHaveBeenCalledExactlyOnceWith({

@@ -4,6 +4,7 @@ import {
   DELETE_ENV_GUARD_STEP_NAME
 } from "@radius-project/core";
 import type { GhCommandResult } from "./gh-command-result.js";
+import type { EnvironmentDispatchAttempt } from "./environment-dispatch-evidence.js";
 import {
   createRadiusEnvironmentWorkflowDeletion,
   type RadiusEnvironmentWorkflowDeletionDependencies
@@ -33,7 +34,11 @@ function harness(
   overrides: Partial<
     Omit<
       RadiusEnvironmentWorkflowDeletionDependencies,
-      "readIdentity" | "getBranchHead" | "beforeDispatch" | "recoverDispatch"
+      | "readIdentity"
+      | "getBranchHead"
+      | "beforeDispatch"
+      | "recoverDispatch"
+      | "selectedAttempts"
     >
   > = {},
   options: {
@@ -44,7 +49,10 @@ function harness(
         RadiusEnvironmentWorkflowDeletionDependencies,
         { readIdentity: "selected" }
       >,
-      "getBranchHead" | "beforeDispatch" | "recoverDispatch"
+      | "getBranchHead"
+      | "beforeDispatch"
+      | "recoverDispatch"
+      | "selectedAttempts"
     >;
   } = {}
 ) {
@@ -55,7 +63,11 @@ function harness(
   const sleeps: number[] = [];
   const base: Omit<
     RadiusEnvironmentWorkflowDeletionDependencies,
-    "readIdentity" | "getBranchHead" | "beforeDispatch" | "recoverDispatch"
+    | "readIdentity"
+    | "getBranchHead"
+    | "beforeDispatch"
+    | "recoverDispatch"
+    | "selectedAttempts"
   > = {
     workflowFiles: FILES,
     ensureWorkflowsCurrent: vi.fn(async () => ({ created: [] })),
@@ -105,6 +117,184 @@ function harness(
 }
 
 describe("deleting a Radius environment through its workflow", () => {
+  it("does not redispatch after restart if a refusal was saved before that operation attempt finished", async () => {
+    const attempt: EnvironmentDispatchAttempt = {
+      state: "refused",
+      operationAttempt: 1,
+      dispatchedAt: 1_000_000,
+      correlationId: "del-test-fixture",
+      branch: "main",
+      head: HEAD
+    };
+    const runGh = vi.fn(async () => {
+      throw new Error("Unexpected GitHub request");
+    });
+    const h = harness(
+      { runGh },
+      {
+        selected: {
+          getBranchHead: async () => HEAD,
+          beforeDispatch: async () => {
+            throw new Error("Unexpected legacy dispatch");
+          },
+          selectedAttempts: {
+            owner: "octocat",
+            operationAttempt: () => 1,
+            latest: () => attempt,
+            begin: async () => {
+              throw new Error("Unexpected new attempt");
+            },
+            record: async () => {
+              throw new Error("Unexpected outcome");
+            }
+          }
+        }
+      }
+    );
+    await expect(h.run()).resolves.toMatchObject({
+      outcome: "failed",
+      detail: expect.stringContaining("Confirm a retry")
+    });
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it("persists one selected dispatch before POST and stops on a definitive refusal", async () => {
+    const calls: string[] = [];
+    const begin = vi.fn(async (_attempt: EnvironmentDispatchAttempt) => {
+      calls.push("claim");
+    });
+    const record = vi.fn(async (_attempt: EnvironmentDispatchAttempt) => {
+      calls.push("record");
+    });
+    const runGh = vi.fn(async (args: string[]) => {
+      expect(args.slice(0, 3)).toEqual(["api", "--method", "POST"]);
+      calls.push("post");
+      return {
+        code: 1,
+        stderr: "gh: not found",
+        stdout:
+          "HTTP/2.0 404 Not Found\r\nX-GitHub-Request-Id: ABC:123\r\n\r\n{}"
+      };
+    });
+    const h = harness(
+      { runGh, ensureWorkflowsCurrent: async () => ({ created: FILES }) },
+      {
+        selected: {
+          getBranchHead: async () => HEAD,
+          beforeDispatch: async () => {
+            throw new Error("Legacy dispatch bypass");
+          },
+          selectedAttempts: {
+            owner: "octocat",
+            operationAttempt: () => 0,
+            latest: () => undefined,
+            begin,
+            record
+          }
+        }
+      }
+    );
+    expect(await h.run()).toMatchObject({ outcome: "failed" });
+    expect(calls).toEqual(["claim", "post", "record"]);
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "refused" })
+    );
+    expect(runGh).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not POST when the selected dispatch claim cannot be persisted", async () => {
+    const runGh = vi.fn(async () => {
+      throw new Error("Unexpected GitHub request");
+    });
+    const h = harness(
+      { runGh },
+      {
+        selected: {
+          getBranchHead: async () => HEAD,
+          beforeDispatch: async () => {
+            throw new Error("Legacy dispatch bypass");
+          },
+          selectedAttempts: {
+            owner: "octocat",
+            operationAttempt: () => 0,
+            latest: () => undefined,
+            begin: async () => {
+              throw new Error("Durable claim failed");
+            },
+            record: async () => {
+              throw new Error("Unexpected saved outcome");
+            }
+          }
+        }
+      }
+    );
+    await expect(h.run()).rejects.toThrow("Durable claim failed");
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it("observes an unresolved saved attempt without sending a second request", async () => {
+    const attempt: EnvironmentDispatchAttempt = {
+      operationAttempt: 0,
+      dispatchedAt: 1_000_000,
+      correlationId: "del-test-fixture",
+      branch: "main",
+      head: HEAD,
+      state: "unresolved"
+    };
+    const runGh = vi.fn(async (args: string[]) => {
+      expect(args.slice(0, 3)).toEqual(["api", "--method", "GET"]);
+      return ok(
+        JSON.stringify({
+          total_count: 1,
+          workflow_runs: [
+            {
+              id: 21,
+              display_title: `Radius - Delete Environment dev ${attempt.correlationId}`,
+              event: "workflow_dispatch",
+              path: `.github/workflows/${DELETE_ENV_DISPATCHER_FILE}`,
+              head_branch: "main",
+              head_sha: HEAD,
+              actor: { login: "octocat" },
+              created_at: new Date(attempt.dispatchedAt).toISOString(),
+              updated_at: new Date(attempt.dispatchedAt + 5000).toISOString(),
+              run_attempt: 1,
+              status: "completed",
+              conclusion: "success"
+            }
+          ]
+        })
+      );
+    });
+    const record = vi.fn(async (_attempt: EnvironmentDispatchAttempt) => {});
+    const h = harness(
+      { runGh },
+      {
+        selected: {
+          getBranchHead: async () => HEAD,
+          beforeDispatch: async () => {
+            throw new Error("Legacy dispatch bypass");
+          },
+          selectedAttempts: {
+            owner: "octocat",
+            operationAttempt: () => 0,
+            latest: () => attempt,
+            begin: async () => {
+              throw new Error("Unexpected new attempt");
+            },
+            record
+          }
+        }
+      }
+    );
+    expect(await h.run()).toEqual({ outcome: "deleted" });
+    expect(runGh).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledWith({
+      ...attempt,
+      state: "correlated",
+      runId: 21
+    });
+  });
+
   it("observes only the saved dispatch after a restart", async () => {
     const beforeDispatch = vi.fn(async () => {});
     const h = harness(

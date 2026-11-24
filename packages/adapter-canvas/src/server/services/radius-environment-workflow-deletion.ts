@@ -1,5 +1,6 @@
 import {
   DELETE_ENV_DISPATCHER_FILE,
+  DELETE_ENV_GUARD_STEP_NAME,
   WORKFLOW_READ_LIMITS,
   type WorkflowRunDetail
 } from "@radius-project/core";
@@ -12,6 +13,12 @@ import { verifyWorkflowFilesMatchSource } from "./delete-environment-workflow-ve
 import type { RadiusEnvDeletionOutcome } from "./environment-deletion.js";
 import type { GhCommandResult } from "./gh-command-result.js";
 import { shouldRetryWithKeyringCredential } from "./workflow-credential-fallback.js";
+import {
+  dispatchSelectedEnvironmentWorkflow,
+  findSelectedEnvironmentDispatch,
+  proveSelectedEnvironmentGuard,
+  type EnvironmentDispatchAttempt
+} from "./environment-dispatch-evidence.js";
 
 export interface EnvironmentDeletionDispatch {
   dispatchedAt: number;
@@ -70,12 +77,23 @@ export type RadiusEnvironmentWorkflowDeletionDependencies = {
       getBranchHead(repo: string, branch: string): Promise<string>;
       beforeDispatch(dispatch: EnvironmentDeletionDispatch): Promise<void>;
       recoverDispatch?(): EnvironmentDeletionDispatch | undefined;
+      selectedAttempts?: {
+        owner: string;
+        operationAttempt(): number;
+        latest(): EnvironmentDispatchAttempt | undefined;
+        begin(
+          attempt: EnvironmentDispatchAttempt,
+          verifyPrevious?: () => Promise<void>
+        ): Promise<void>;
+        record(attempt: EnvironmentDispatchAttempt): Promise<void>;
+      };
     }
   | {
       readonly readIdentity?: undefined;
       getBranchHead?: never;
       beforeDispatch?: never;
       recoverDispatch?: never;
+      selectedAttempts?: never;
     }
 );
 
@@ -155,8 +173,81 @@ export function createRadiusEnvironmentWorkflowDeletion(
           : "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
       };
     }
+    const journal = dependencies.selectedAttempts;
+    const target = journal && { repo, environment, owner: journal.owner };
+    async function observeSelected(
+      initial: EnvironmentDispatchAttempt | EnvironmentDeletionDispatch
+    ): Promise<RadiusEnvDeletionOutcome> {
+      if (!journal || !target)
+        throw new Error("Missing selected dispatch journal.");
+      const deadline = dependencies.now() + 30 * 60 * 1000;
+      let attempt = initial;
+      let delay = 5000;
+      while (dependencies.now() < deadline) {
+        const run = await findSelectedEnvironmentDispatch(
+          dependencies.runGh,
+          target,
+          attempt
+        );
+        if (run) {
+          if ("state" in attempt && attempt.state === "unresolved") {
+            attempt = { ...attempt, state: "correlated", runId: run.runId };
+            await journal.record(attempt);
+          }
+          if (run.status === "completed") {
+            if (run.conclusion === "success") return { outcome: "deleted" };
+            const guarded =
+              "state" in attempt ?
+                await proveSelectedEnvironmentGuard(
+                  dependencies.runGh,
+                  target,
+                  attempt
+                )
+              : null;
+            if (guarded) {
+              await journal.record(guarded);
+              return classifyCompletedDeleteEnvRun("failure", [
+                {
+                  name: DELETE_ENV_GUARD_STEP_NAME,
+                  conclusion: "failure"
+                }
+              ]);
+            }
+            return {
+              outcome: "failed",
+              detail:
+                "The selected delete workflow failed without proof that another dispatch is safe."
+            };
+          }
+        }
+        await onHeartbeat?.();
+        await dependencies.sleep(
+          Math.min(delay, Math.max(0, deadline - dependencies.now()))
+        );
+        delay = Math.min(Math.ceil(delay * 1.5), 15000);
+      }
+      return {
+        outcome: "failed",
+        detail:
+          "GitHub may have accepted the delete-environment workflow, but Radius could not confirm its outcome. Check GitHub Actions before starting another deletion."
+      };
+    }
+    const previous = journal?.latest();
+    if (previous?.state === "unresolved" || previous?.state === "correlated")
+      return observeSelected(previous);
+    if (
+      journal &&
+      previous &&
+      journal.operationAttempt() <= previous.operationAttempt
+    )
+      return {
+        outcome: "failed",
+        detail:
+          "The previous delete workflow attempt is finished. Confirm a retry before dispatching again."
+      };
     const recovered = dependencies.recoverDispatch?.();
-    if (recovered) return observe(recovered);
+    if (recovered)
+      return journal ? observeSelected(recovered) : observe(recovered);
     const workflowFiles = [...dependencies.workflowFiles];
     const sync = await dependencies.ensureWorkflowsCurrent(
       repo,
@@ -252,6 +343,62 @@ export function createRadiusEnvironmentWorkflowDeletion(
       .random()
       .toString(36)
       .slice(2, 10)}`;
+    if (journal && target && dependencies.readIdentity === "selected") {
+      const branch = workflowVerification.branch;
+      if (
+        !verifiedHead ||
+        (await dependencies.getDefaultBranch(repo)) !== branch ||
+        (await dependencies.getBranchHead(repo, branch)) !== verifiedHead
+      ) {
+        return {
+          outcome: "failed",
+          detail:
+            "The default branch changed after workflow verification. Radius did not start the deletion."
+        };
+      }
+      const verifyPrevious =
+        previous?.state === "guarded" ?
+          async () => {
+            const latest = await proveSelectedEnvironmentGuard(
+              dependencies.runGh,
+              target,
+              previous
+            );
+            if (
+              !latest ||
+              latest.runAttempt !== previous.runAttempt ||
+              latest.updatedAt !== previous.updatedAt
+            )
+              throw new Error(
+                "The previous delete workflow attempt is no longer verified. Radius did not dispatch again."
+              );
+          }
+        : undefined;
+      const attempt = {
+        state: "unresolved" as const,
+        operationAttempt: journal.operationAttempt(),
+        dispatchedAt,
+        correlationId,
+        branch,
+        head: verifiedHead
+      };
+      await journal.begin(attempt, verifyPrevious);
+      const dispatched = await dispatchSelectedEnvironmentWorkflow(
+        dependencies.runGh,
+        repo,
+        environment,
+        attempt
+      );
+      if (dispatched.state === "refused") {
+        await journal.record(dispatched);
+        return {
+          outcome: "failed",
+          detail:
+            "GitHub refused the delete-environment dispatch. Radius did not start the workflow."
+        };
+      }
+      return observeSelected(dispatched);
+    }
     const dispatchArgs = [
       "workflow",
       "run",

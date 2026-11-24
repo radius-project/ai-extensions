@@ -32,7 +32,7 @@ Application deletion from chat uses the selected GitHub account and requires tru
 
 For an Azure environment in the current workspace repository, use `radius_delete_environment` with the exact `repo` and `environment`. The tool uses the selected GitHub account and requires a trusted host confirmation. Missing confirmation is not approval; do not open Canvas silently or pass approval flags. The direct tool requires current Azure-capable deletion workflows on the repository's default branch and fails closed rather than synchronizing workflows through a different account.
 
-An accepted environment deletion returns an `operationId`, not a completed deletion. Call `radius_delete_environment` with `mode: "status"` and the same `repo`, `environment`, and `operationId` to read progress. When the exact operation reports `retryable`, use `mode: "retry"` with those same inputs and a new trusted confirmation. Retry preserves completed stages. Do not create a second deletion or claim success while the operation is running or incomplete.
+An accepted environment deletion returns an `operationId`, not a completed deletion. Call `radius_delete_environment` with `mode: "status"` and the same `repo`, `environment`, and `operationId` to read progress. When the exact operation reports `retryable`, use `mode: "retry"` with those same inputs and a new trusted confirmation. Retry preserves completed stages. If GitHub rejected the dispatch or the workflow stopped at the deployed-applications guard, correct the cause before retrying. If Radius cannot confirm the outcome, check GitHub Actions; do not start a second deletion or manually rerun the workflow.
 
 ### Canvas
 

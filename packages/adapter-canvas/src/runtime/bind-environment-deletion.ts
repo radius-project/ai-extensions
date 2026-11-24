@@ -15,6 +15,7 @@ interface EnvironmentDeletionBinding {
     repo: string;
     environment: string;
     login: string;
+    retryEvidence?: string;
     isCurrent(): boolean;
   }): Promise<{ status: number; body: unknown }>;
   confirm(message: string): Promise<boolean | undefined>;
@@ -68,8 +69,19 @@ export function bindEnvironmentDeletion(ports: EnvironmentDeletionBinding) {
         ) {
           return { kind: "refused", code: "deletion-not-retryable" };
         }
+        const retryEvidence =
+          (
+            "retryEvidence" in status.body &&
+            typeof status.body.retryEvidence === "string"
+          ) ?
+            status.body.retryEvidence
+          : undefined;
+        const action =
+          retryEvidence ?
+            "Dispatch another delete workflow for"
+          : "Retry unresolved deletion stages for";
         const decision = await ports.confirm(
-          `Retry unresolved deletion stages for Azure-backed Radius environment ${JSON.stringify(environment)} in ${scope.repo} as ${scope.login} (operation ${operationId})?`
+          `${action} Azure-backed Radius environment ${JSON.stringify(environment)} in ${scope.repo} as ${scope.login} (operation ${operationId})?`
         );
         if (decision === undefined) {
           return {
@@ -82,7 +94,11 @@ export function bindEnvironmentDeletion(ports: EnvironmentDeletionBinding) {
         if (!(await scope.validate())) {
           return { kind: "refused", code: "workspace-target-unavailable" };
         }
-        const result = await ports.control({ ...input, command: "retry" });
+        const result = await ports.control({
+          ...input,
+          command: "retry",
+          ...(retryEvidence === undefined ? {} : { retryEvidence })
+        });
         return { kind: "operation_retry", ...result };
       },
       redact: ports.redact

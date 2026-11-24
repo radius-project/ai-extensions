@@ -63,7 +63,11 @@ import {
   remediationView,
   stateRegistryForEnvironment
 } from "@radius-project/core";
-import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
+import {
+  admitEnvironmentDeletion,
+  STAGE_DELETE_RADIUS_ENV,
+  WORKFLOW_READ_LIMITS
+} from "@radius-project/core";
 import type { Remediation, RemediationView } from "@radius-project/core";
 import {
   buildGraphViaRad,
@@ -400,6 +404,10 @@ import {
 import type { EnvironmentDeletionToolPorts } from "./runtime/environment-deletion-tool.js";
 import { environmentDiagnostic } from "./runtime/environment-tool-result.js";
 import { createRadiusEnvironmentWorkflowDeletion } from "./server/services/radius-environment-workflow-deletion.js";
+import {
+  proveSelectedEnvironmentGuard,
+  readEnvironmentDispatchAttempts
+} from "./server/services/environment-dispatch-evidence.js";
 import {
   ProviderMutationRecoveryError,
   recordProviderReconciliationFailure
@@ -6514,6 +6522,36 @@ export function createProductionCanvasServerRuntime(
     verificationStatus,
     runSelectedDeletion: (operation) =>
       runSelectedEnvironmentDeletion(operation, {
+        async verifyRetryTarget(executor, assertCurrent) {
+          const { repo, environment } = operation;
+          const request = operation.request;
+          if (!repo || !environment || !request)
+            throw new Error(
+              "The saved environment retry target is unavailable."
+            );
+          await executor.verifyIdentity();
+          const admission = await admitEnvironmentDeletion(
+            { repo, environment },
+            selectedDeletionAdmission(executor, assertCurrent),
+            false
+          );
+          assertCurrent();
+          if (
+            admission.kind !== "ready" ||
+            admission.configuration.repoId !== request.repoId ||
+            admission.configuration.environmentId !== request.environmentId ||
+            admission.configuration.clientId !== request.clientId ||
+            admission.configuration.tenantId !== request.tenantId
+          )
+            throw new Error(
+              "The saved target is no longer eligible for environment deletion."
+            );
+        },
+        claimDispatch: (generation) =>
+          operations.claimEnvironmentDispatch(
+            operation.operationId,
+            generation
+          ),
         isCurrent: () =>
           !executionOwner.isShuttingDown() &&
           operations.get(operation.operationId) === operation,
@@ -6547,7 +6585,13 @@ export function createProductionCanvasServerRuntime(
                 })
             })
           ).absent,
-        bind: (executor, assertCurrent, beforeDispatch, recoverDispatch) => {
+        bind: (
+          executor,
+          assertCurrent,
+          beforeDispatch,
+          recoverDispatch,
+          selectedAttempts
+        ) => {
           const base = productionEnvironmentDeletionPorts(
             false,
             awsEnvironmentAccess
@@ -6580,6 +6624,7 @@ export function createProductionCanvasServerRuntime(
                 selectedGetBranchHeadSha(executor, repo, branch),
               beforeDispatch,
               recoverDispatch,
+              selectedAttempts,
               findWorkflowRun: (
                 repo,
                 workflow,
@@ -6705,6 +6750,7 @@ export function createProductionCanvasServerRuntime(
     repo: string;
     environment: string;
     login: string;
+    retryEvidence?: string;
     isCurrent(): boolean;
   }) {
     const operation = operations.get(input.operationId);
@@ -6748,13 +6794,111 @@ export function createProductionCanvasServerRuntime(
       !current()
     )
       return unavailable;
+    const savedAttempts: unknown = request.selectedDispatchAttempts;
+    let attempts = readEnvironmentDispatchAttempts(savedAttempts);
+    let latest = attempts?.at(-1);
+    let retry = canRetryDeletion(operation);
+    // A run can appear or finish after the poller timed out. Look only for
+    // proof that the original attempt failed safely; status never dispatches.
+    if (
+      attempts &&
+      latest &&
+      ((retry.target === STAGE_DELETE_RADIUS_ENV &&
+        latest.state === "guarded") ||
+        (input.command === "status" &&
+          retry.code === "deletion-dispatch-unconfirmed" &&
+          (latest.state === "unresolved" || latest.state === "correlated")))
+    ) {
+      const guarded = await proveSelectedEnvironmentGuard(
+        (args) =>
+          executor.run(args, {
+            timeout: 30000,
+            beforeExecute: () => {
+              if (!current())
+                throw new Error("The saved deletion is no longer current.");
+            }
+          }),
+        { repo: input.repo, environment: input.environment, owner },
+        latest
+      );
+      if (!current() || request.selectedDispatchAttempts !== savedAttempts)
+        return unavailable;
+      const currentRetry = canRetryDeletion(operation);
+      if (
+        currentRetry.target !== STAGE_DELETE_RADIUS_ENV &&
+        currentRetry.code !== "deletion-dispatch-unconfirmed"
+      )
+        return unavailable;
+      const needsNewApproval =
+        !guarded ||
+        latest.state !== "guarded" ||
+        guarded.runAttempt !== latest.runAttempt ||
+        guarded.updatedAt !== latest.updatedAt;
+      if (needsNewApproval && input.command === "retry") {
+        return {
+          status: 409,
+          body: {
+            code: "deletion-retry-evidence-changed",
+            error:
+              "The original workflow is active or its guard result changed. Check its status and confirm again."
+          }
+        };
+      }
+      if (guarded && needsNewApproval) {
+        attempts = [...attempts.slice(0, -1), guarded];
+        request.selectedDispatchAttempts = attempts;
+        try {
+          await operations.persist();
+        } catch (error) {
+          if (request.selectedDispatchAttempts === attempts)
+            request.selectedDispatchAttempts = savedAttempts;
+          throw error;
+        }
+        if (!current() || request.selectedDispatchAttempts !== attempts)
+          return unavailable;
+        latest = guarded;
+        retry = canRetryDeletion(operation);
+      } else if (!guarded) {
+        retry = { ok: false, code: "deletion-dispatch-unconfirmed" };
+      }
+    }
+    const retryEvidence =
+      latest && retry.target === STAGE_DELETE_RADIUS_ENV ?
+        createHash("sha256")
+          .update(
+            JSON.stringify([
+              operation.operationId,
+              owner,
+              request.repoId,
+              request.environmentId,
+              request.clientId,
+              request.tenantId,
+              attempts?.length,
+              latest
+            ])
+          )
+          .digest("hex")
+      : undefined;
     if (input.command === "retry") {
+      if (retryEvidence !== input.retryEvidence) {
+        return {
+          status: 409,
+          body: {
+            code: "deletion-retry-evidence-changed",
+            error:
+              "The saved workflow attempt changed. Check its status and confirm the retry again."
+          }
+        };
+      }
+      const approvedAttempts: unknown = request.selectedDispatchAttempts;
       const result = await operationControl({
         command: "retry",
         retryKind: "deletion",
         operationId: input.operationId,
         authorizeSelectedDeletionRetry: (operationId) =>
-          operationId === input.operationId && current(),
+          operationId === input.operationId &&
+          current() &&
+          request.selectedDispatchAttempts === approvedAttempts,
         isCurrent: current
       });
       if (result.status >= 400) {
@@ -6777,7 +6921,6 @@ export function createProductionCanvasServerRuntime(
         body: { operationId: input.operationId }
       };
     }
-    const retry = canRetryDeletion(operation);
     return {
       status: 200,
       body: {
@@ -6792,13 +6935,63 @@ export function createProductionCanvasServerRuntime(
             operation.currentStage
           : null,
         retryable: retry.ok === true,
+        ...(retryEvidence ? { retryEvidence } : {}),
         message:
           retry.code === "deletion-dispatch-unconfirmed" ?
             "Radius will not dispatch the deletion again. Verify the original workflow outcome in GitHub Actions."
+          : retryEvidence && latest?.state === "guarded" ?
+            "The workflow stopped at the deployed-applications guard. Remove the applications before retrying."
           : typeof operation.failure?.message === "string" ?
             environmentDiagnostic(operation.failure.message, executor.redact)
           : null
       }
+    };
+  }
+
+  function selectedDeletionAdmission(
+    executor: SelectedGhExecutor,
+    assertCurrent: () => void
+  ): Pick<
+    typeof environmentsDependencies,
+    "resolveEnvDeployment" | "discoverEnvironmentTarget"
+  > {
+    const execute: DeploymentLookupExecute = (
+      command,
+      args,
+      options,
+      callback
+    ) => {
+      void Promise.resolve()
+        .then(async () => {
+          assertCurrent();
+          if (command !== "gh")
+            throw new Error(
+              "The selected GitHub deletion scope is unavailable."
+            );
+          const result = await executor.run(args, {
+            timeout: options.timeout,
+            beforeExecute: assertCurrent
+          });
+          if (result.code !== 0)
+            throw new Error(
+              result.stderr || "The selected GitHub read failed."
+            );
+          return result;
+        })
+        .then(
+          (result) => callback(null, result.stdout, result.stderr),
+          (error: unknown) =>
+            callback(new Error(executor.errorMessage(error)), "", "")
+        );
+      return {};
+    };
+    return {
+      resolveEnvDeployment: (target, name, app) =>
+        resolveEnvDeployment(target, name, app, execute),
+      discoverEnvironmentTarget: selectedDeletionTargetReader(
+        executor,
+        assertCurrent
+      )
     };
   }
 
@@ -6816,32 +7009,6 @@ export function createProductionCanvasServerRuntime(
       executor.login.toLowerCase() !== login.toLowerCase()
     )
       return null;
-    const execute: DeploymentLookupExecute = (
-      command,
-      args,
-      options,
-      callback
-    ) => {
-      void Promise.resolve()
-        .then(async () => {
-          if (command !== "gh" || !current())
-            throw new Error(
-              "The selected GitHub deletion scope is unavailable."
-            );
-          const result = await executor.run(args, { timeout: options.timeout });
-          if (result.code !== 0)
-            throw new Error(
-              result.stderr || "The selected GitHub read failed."
-            );
-          return result;
-        })
-        .then(
-          (result) => callback(null, result.stdout, result.stderr),
-          (error: unknown) =>
-            callback(new Error(executor.errorMessage(error)), "", "")
-        );
-      return {};
-    };
     return {
       repo,
       login: executor.login,
@@ -6851,18 +7018,13 @@ export function createProductionCanvasServerRuntime(
         setupExecution.scheduleEnvironmentOperation(operation),
       registration: {
         ...environmentsDependencies,
-        resolveEnvDeployment: (target, name, app) =>
-          resolveEnvDeployment(target, name, app, execute),
-        discoverEnvironmentTarget: selectedDeletionTargetReader(
-          executor,
-          () => {
-            if (!current()) {
-              throw new Error(
-                "The selected GitHub deletion scope is unavailable."
-              );
-            }
+        ...selectedDeletionAdmission(executor, () => {
+          if (!current()) {
+            throw new Error(
+              "The selected GitHub deletion scope is unavailable."
+            );
           }
-        )
+        })
       }
     };
   }

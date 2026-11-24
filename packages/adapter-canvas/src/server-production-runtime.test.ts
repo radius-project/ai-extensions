@@ -338,18 +338,27 @@ describe("production canvas server runtime", () => {
       "moved"
     ],
     ["Could not confirm the selected GitHub repository ID", "invalid-id"],
-    ["The default branch changed after workflow verification", "branch-moved"]
+    ["The default branch changed after workflow verification", "branch-moved"],
+    ["GitHub refused the delete-environment dispatch", "refused"]
   ])(
     "refuses recovery and retry without a panel when %s (%s)",
     async (diagnostic, scenario) => {
+      const save = vi.fn(async (_envelope: { operations: unknown[] }) => {});
+      const claimEnvironmentDispatch = vi.fn(
+        async (_id: string, _generation: number) => {}
+      );
       await configureOperationStore({
         ...disabledOperationStore(),
-        durable: true
+        durable: true,
+        save,
+        claimEnvironmentDispatch
       });
       const createServerForPanel = vi.fn(() => {
         throw new Error("Unexpected panel server");
       });
       const head = "a".repeat(40);
+      const stableBranch = scenario === "refused";
+      const workflowAvailable = stableBranch || scenario === "branch-moved";
       let headReads = 0;
       const readTemplate = (file: string) =>
         readFile(
@@ -357,23 +366,57 @@ describe("production canvas server runtime", () => {
           "utf8"
         );
       const generated =
-        scenario === "branch-moved" ?
+        workflowAvailable ?
           await generateDeleteWorkflow("dev", {
             readTemplate: (_repo, path) =>
               readTemplate(path.split("/").pop() ?? "")
           })
         : {};
       const run = vi.fn(async (args: string[]) => {
-        if (scenario === "branch-moved") {
+        if (workflowAvailable) {
           const success = (stdout: string) => ({ code: 0, stdout, stderr: "" });
           const endpoint = args[1] ?? "";
+          if (
+            stableBranch &&
+            args.slice(0, 3).join(" ") === "api --method POST"
+          ) {
+            expect(save.mock.calls.at(-1)?.[0].operations).toContainEqual(
+              expect.objectContaining({
+                deleteRecovery: expect.objectContaining({
+                  selectedDispatchAttempts: expect.arrayContaining([
+                    expect.objectContaining({ state: "unresolved" })
+                  ])
+                })
+              })
+            );
+            return {
+              code: 1,
+              stderr: "gh: not found",
+              stdout:
+                "HTTP/2.0 404 Not Found\r\nX-GitHub-Request-Id: ABC:123\r\n\r\n{}"
+            };
+          }
+          if (
+            stableBranch &&
+            endpoint ===
+              "/repos/octo/app/deployments?per_page=100&environment=dev"
+          )
+            return success("");
+          if (
+            stableBranch &&
+            endpoint ===
+              "/repos/octo/app/environments/dev/variables?per_page=100"
+          )
+            return success("AZURE_CLIENT_ID\nAZURE_TENANT_ID\n");
           if (args[0] !== "api") throw new Error("Unexpected GH mutation");
           if (endpoint === "/repos/octo/app") {
             if (args[3] === ".id") return success("7");
             if (args[3] === ".default_branch") return success("release");
           }
           if (endpoint === "/repos/octo/app/git/ref/heads/release")
-            return success(++headReads % 2 === 1 ? head : "b".repeat(40));
+            return success(
+              ++headReads % 2 === 1 || stableBranch ? head : "b".repeat(40)
+            );
           const canonical = endpoint.match(
             /^\/repos\/radius-project\/ai-extensions\/contents\/\.github\/extension\/(delete[\w-]*\.yml)\?ref=(.+)$/
           );
@@ -408,7 +451,24 @@ describe("production canvas server runtime", () => {
         scopes: [],
         verifyIdentity: async () => {},
         run,
-        runOrThrow: unexpectedDeletion,
+        runOrThrow:
+          stableBranch ?
+            async (args: string[]) => {
+              if (args[1] === "/repos/octo/app/environments/dev")
+                return { code: 0, stdout: "17", stderr: "" };
+              if (
+                args[1] ===
+                "/repos/octo/app/environments/dev/variables?per_page=100"
+              )
+                return {
+                  code: 0,
+                  stdout:
+                    "AZURE_CLIENT_ID\tfixture-client\nAZURE_TENANT_ID\tfixture-tenant\n",
+                  stderr: ""
+                };
+              return run(args);
+            }
+          : unexpectedDeletion,
         packageCredentials: () => {
           throw new Error("Unexpected GHCR call");
         },
@@ -525,8 +585,7 @@ describe("production canvas server runtime", () => {
       expect(earlyRetry.status).toBeGreaterThanOrEqual(400);
       expect(accountLeaseCalls).not.toHaveBeenCalled();
       runtime.recoverSelectedEnvironmentDeletions();
-      const expectedState =
-        scenario === "branch-moved" ? "failed_partial" : "failed";
+      const expectedState = workflowAvailable ? "failed_partial" : "failed";
       await vi.waitFor(() => expect(operation.state).toBe(expectedState));
       expect(accountLeaseCalls).toHaveBeenCalledExactlyOnceWith(
         "octocat",
@@ -535,19 +594,24 @@ describe("production canvas server runtime", () => {
       );
       expect(createServerForPanel).not.toHaveBeenCalled();
       expect(operation.failure.message).toContain(diagnostic);
-      expect(
-        await runtime.controlSelectedEnvironmentDeletion({
-          ...target,
-          command: "status"
-        })
-      ).toMatchObject({
+      const latestStatus = await runtime.controlSelectedEnvironmentDeletion({
+        ...target,
+        command: "status"
+      });
+      expect(latestStatus).toMatchObject({
         status: 200,
         body: { terminal: true, message: expect.stringContaining(diagnostic) }
       });
+      const evidence =
+        "retryEvidence" in latestStatus.body ?
+          latestStatus.body.retryEvidence
+        : undefined;
+      if (stableBranch) expect(evidence).toEqual(expect.any(String));
       setStageState(operation, STAGE_DELETE_RADIUS_ENV, "failed");
       const retry = await runtime.controlSelectedEnvironmentDeletion({
         ...target,
-        command: "retry"
+        command: "retry",
+        retryEvidence: evidence
       });
       expect(retry).toMatchObject({
         status: 202,
@@ -556,7 +620,19 @@ describe("production canvas server runtime", () => {
       await vi.waitFor(() => expect(operation.state).toBe(expectedState));
       expect(operation.failure.message).toContain(diagnostic);
       expect(accountLeaseCalls).toHaveBeenCalledTimes(2);
-      if (scenario === "branch-moved") {
+      if (stableBranch) {
+        expect(
+          run.mock.calls.filter(([args]) => args[2] === "POST")
+        ).toHaveLength(2);
+        expect(claimEnvironmentDispatch.mock.calls).toEqual([
+          [operation.operationId, 1],
+          [operation.operationId, 2]
+        ]);
+        expect(operation.request.selectedDispatchAttempts).toEqual([
+          expect.objectContaining({ state: "refused", operationAttempt: 0 }),
+          expect.objectContaining({ state: "refused", operationAttempt: 1 })
+        ]);
+      } else if (scenario === "branch-moved") {
         expect(headReads).toBe(4);
         expect(operation.request?.selectedDispatchStarted).toBeUndefined();
         expect(run.mock.calls.every(([args]) => args[0] === "api")).toBe(true);
@@ -582,6 +658,46 @@ describe("production canvas server runtime", () => {
           status: 409,
           body: { code: "deletion-dispatch-unconfirmed" }
         });
+        const priorAttempt = {
+          state: "refused",
+          operationAttempt: 1,
+          dispatchedAt: 1234,
+          correlationId: "del-ya-fixture",
+          branch: "main",
+          head: "a".repeat(40)
+        };
+        operation.request.selectedDispatchAttempts = [priorAttempt];
+        const status = await runtime.controlSelectedEnvironmentDeletion({
+          ...target,
+          command: "status"
+        });
+        expect(status).toMatchObject({
+          status: 200,
+          body: { retryable: true, retryEvidence: expect.any(String) }
+        });
+        const retryEvidence =
+          "retryEvidence" in status.body ?
+            status.body.retryEvidence
+          : undefined;
+        operation.request.selectedDispatchAttempts = [
+          priorAttempt,
+          {
+            ...priorAttempt,
+            operationAttempt: 2,
+            correlationId: "del-ya-following"
+          }
+        ];
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "retry",
+            retryEvidence
+          })
+        ).toMatchObject({
+          status: 409,
+          body: { code: "deletion-retry-evidence-changed" }
+        });
+        expect(accountLeaseCalls).toHaveBeenCalledTimes(2);
       } else {
         expect(run).toHaveBeenCalledTimes(scenario === "removed" ? 0 : 2);
       }

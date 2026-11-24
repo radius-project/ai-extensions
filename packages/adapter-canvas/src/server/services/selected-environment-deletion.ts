@@ -1,11 +1,17 @@
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { EnvironmentDeletionConfiguration } from "@radius-project/core";
+import { readOperationControl } from "../../operations.js";
 import {
   runEnvironmentDeletion,
   type DeletionOperation,
   type EnvironmentDeletionPorts
 } from "./environment-deletion.js";
 import type { EnvironmentDeletionDispatch } from "./radius-environment-workflow-deletion.js";
+import {
+  readEnvironmentDispatchAttempts,
+  selectedEnvironmentDispatchAllowsRetry,
+  type EnvironmentDispatchAttempt
+} from "./environment-dispatch-evidence.js";
 
 export function hasSelectedEnvironmentDeletion(operation: {
   request?: unknown;
@@ -21,6 +27,11 @@ export async function runSelectedEnvironmentDeletion(
   operation: DeletionOperation,
   dependencies: {
     isCurrent(): boolean;
+    claimDispatch?(generation: number): Promise<void>;
+    verifyRetryTarget?(
+      executor: SelectedGhExecutor,
+      assertCurrent: () => void
+    ): Promise<void>;
     withOwner(
       login: string,
       work: (executor: SelectedGhExecutor) => Promise<void>
@@ -41,7 +52,17 @@ export async function runSelectedEnvironmentDeletion(
       executor: SelectedGhExecutor,
       assertCurrent: () => void,
       beforeDispatch: (dispatch: EnvironmentDeletionDispatch) => Promise<void>,
-      recoverDispatch: () => EnvironmentDeletionDispatch | undefined
+      recoverDispatch: () => EnvironmentDeletionDispatch | undefined,
+      selectedAttempts: {
+        owner: string;
+        operationAttempt(): number;
+        latest(): EnvironmentDispatchAttempt | undefined;
+        begin(
+          attempt: EnvironmentDispatchAttempt,
+          verifyPrevious?: () => Promise<void>
+        ): Promise<void>;
+        record(attempt: EnvironmentDispatchAttempt): Promise<void>;
+      }
     ): EnvironmentDeletionPorts;
   }
 ): Promise<void> {
@@ -66,6 +87,7 @@ export async function runSelectedEnvironmentDeletion(
   ) {
     throw new Error("The deletion has no valid saved GitHub owner and target.");
   }
+  const { repoId, environmentId, clientId, tenantId } = request;
   const assertCurrent = () => {
     if (
       !dependencies.isCurrent() ||
@@ -73,7 +95,11 @@ export async function runSelectedEnvironmentDeletion(
       operation.repo !== repo ||
       operation.environment !== environment ||
       operation.provider !== provider ||
-      request.selectedOwner !== login
+      request.selectedOwner !== login ||
+      request.repoId !== repoId ||
+      request.environmentId !== environmentId ||
+      request.clientId !== clientId ||
+      request.tenantId !== tenantId
     ) {
       throw new Error("The saved environment deletion is no longer current.");
     }
@@ -147,6 +173,8 @@ export async function runSelectedEnvironmentDeletion(
         assertCurrent();
       },
       () => {
+        if (Object.hasOwn(request, "selectedDispatchAttempts"))
+          return undefined;
         const dispatchedAt = request.selectedDispatchTime;
         const correlationId = request.selectedDispatchCorrelation;
         if (
@@ -154,12 +182,104 @@ export async function runSelectedEnvironmentDeletion(
           typeof dispatchedAt === "number" &&
           Number.isSafeInteger(dispatchedAt) &&
           dispatchedAt > 0 &&
+          dispatchedAt <= 8_640_000_000_000_000 &&
           typeof correlationId === "string" &&
           /^del-[a-z0-9]+-[a-z0-9]{1,8}$/.test(correlationId)
         ) {
           return { dispatchedAt, correlationId };
         }
         return undefined;
+      },
+      {
+        owner: login,
+        operationAttempt: () =>
+          readOperationControl(operation.control).attempts.deletion,
+        latest() {
+          const attempts = readEnvironmentDispatchAttempts(
+            request.selectedDispatchAttempts
+          );
+          if (!attempts && Object.hasOwn(request, "selectedDispatchAttempts")) {
+            throw new Error(
+              "The saved delete workflow dispatch history is invalid."
+            );
+          }
+          return attempts?.at(-1);
+        },
+        async begin(attempt, verifyPrevious) {
+          const previous = request.selectedDispatchAttempts;
+          const history = readEnvironmentDispatchAttempts(previous) ?? [];
+          const previousAttempt = history.at(-1);
+          const currentAttempt = readOperationControl(operation.control)
+            .attempts.deletion;
+          if (
+            !dependencies.claimDispatch ||
+            !selectedEnvironmentDispatchAllowsRetry(request) ||
+            attempt.operationAttempt !== currentAttempt ||
+            (previousAttempt !== undefined &&
+              currentAttempt <= previousAttempt.operationAttempt) ||
+            (previousAttempt?.state === "guarded" && !verifyPrevious) ||
+            history.some(
+              (entry) => entry.correlationId === attempt.correlationId
+            )
+          )
+            throw new Error(
+              "Cannot safely claim another delete workflow dispatch."
+            );
+          await assertTarget();
+          if (history.length > 0) {
+            if (!dependencies.verifyRetryTarget)
+              throw new Error(
+                "Cannot verify the saved environment retry target."
+              );
+            await dependencies.verifyRetryTarget(executor, assertCurrent);
+          }
+          await verifyPrevious?.();
+          assertCurrent();
+          if (previous !== request.selectedDispatchAttempts)
+            throw new Error(
+              "The saved delete workflow dispatch attempt changed."
+            );
+          await dependencies.claimDispatch(history.length + 1);
+          assertCurrent();
+          if (previous !== request.selectedDispatchAttempts)
+            throw new Error(
+              "The saved delete workflow dispatch attempt changed."
+            );
+          request.selectedDispatchStarted = true;
+          request.selectedDispatchAttempts = [...history, attempt];
+          await ports.persist();
+          assertCurrent();
+        },
+        async record(attempt) {
+          assertCurrent();
+          const history = readEnvironmentDispatchAttempts(
+            request.selectedDispatchAttempts
+          );
+          const current = history?.at(-1);
+          if (
+            !history ||
+            !current ||
+            current.correlationId !== attempt.correlationId ||
+            current.operationAttempt !== attempt.operationAttempt ||
+            current.dispatchedAt !== attempt.dispatchedAt ||
+            current.branch !== attempt.branch ||
+            current.head !== attempt.head ||
+            !(
+              (current.state === "unresolved" &&
+                (attempt.state === "refused" ||
+                  attempt.state === "correlated")) ||
+              (current.state === "correlated" &&
+                attempt.state === "guarded" &&
+                current.runId === attempt.runId)
+            )
+          )
+            throw new Error(
+              "The saved delete workflow dispatch attempt changed."
+            );
+          request.selectedDispatchAttempts = [...history.slice(0, -1), attempt];
+          await ports.persist();
+          assertCurrent();
+        }
       }
     );
     if ((await ports.readRepositoryId(repo)) !== request.repoId) {

@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 export const PERSISTED_OPERATIONS_VERSION = 1;
@@ -12,6 +13,10 @@ export interface OperationStore {
   readonly durable?: true;
   load(): Promise<PersistedOperationsEnvelope | null>;
   save(envelope: PersistedOperationsEnvelope): Promise<void>;
+  claimEnvironmentDispatch?(
+    operationId: string,
+    generation: number
+  ): Promise<void>;
   report?(diagnostic: OperationStoreDiagnostic): void;
 }
 
@@ -54,7 +59,8 @@ export function createFileOperationStore({
 }: {
   filePath: string;
   report?: OperationStoreReporter;
-}): OperationStore {
+}): OperationStore &
+  Required<Pick<OperationStore, "claimEnvironmentDispatch">> {
   return {
     durable: true,
     report,
@@ -94,19 +100,44 @@ export function createFileOperationStore({
       const directory = path.dirname(filePath);
       const temporary = path.join(
         directory,
-        `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`
+        `.${path.basename(filePath)}.${randomUUID()}.tmp`
       );
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
       try {
         await fs.writeFile(
           temporary,
           `${JSON.stringify(validated, null, 2)}\n`,
-          { encoding: "utf8", mode: 0o600 }
+          {
+            encoding: "utf8",
+            mode: 0o600,
+            flush: true
+          }
         );
         await fs.rename(temporary, filePath);
       } catch (error) {
         await fs.rm(temporary, { force: true }).catch(() => {});
         throw error;
+      }
+    },
+
+    async claimEnvironmentDispatch(operationId, generation) {
+      if (
+        !/^[A-Za-z0-9_-]{1,128}$/.test(operationId) ||
+        !Number.isSafeInteger(generation) ||
+        generation < 1
+      )
+        throw new Error("Invalid environment dispatch claim identity.");
+      const directory = `${filePath}.environment-dispatch`;
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      const handle = await fs.open(
+        path.join(directory, `${operationId}.${generation}`),
+        "wx",
+        0o600
+      );
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
       }
     }
   };

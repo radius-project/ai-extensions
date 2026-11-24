@@ -64,6 +64,32 @@ describe("file operation store", () => {
     ).toEqual([]);
   });
 
+  it("allows only one dispatch claim per operation generation across store instances", async () => {
+    const filePath = await temporaryFile();
+    const first = createFileOperationStore({ filePath });
+    const second = createFileOperationStore({ filePath });
+    const results = await Promise.allSettled([
+      first.claimEnvironmentDispatch("op_1", 1),
+      second.claimEnvironmentDispatch("op_1", 1)
+    ]);
+
+    expect(results.map(({ status }) => status).sort()).toEqual([
+      "fulfilled",
+      "rejected"
+    ]);
+    await expect(
+      second.claimEnvironmentDispatch("op_1", 1)
+    ).rejects.toMatchObject({
+      code: "EEXIST"
+    });
+    await expect(
+      second.claimEnvironmentDispatch("op_1", 2)
+    ).resolves.toBeUndefined();
+    await expect(
+      first.claimEnvironmentDispatch("../outside", 1)
+    ).rejects.toThrow("Invalid environment dispatch claim identity");
+  });
+
   it.skipIf(process.platform === "win32")(
     "restricts the persisted file to its owner on POSIX systems",
     async () => {

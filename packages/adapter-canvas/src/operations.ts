@@ -38,6 +38,11 @@ import {
 import { redactGhCredentials } from "./gh.js";
 import { remediationReference } from "./remediation-reference.js";
 import {
+  readEnvironmentDispatchAttempts,
+  selectedEnvironmentDispatchAllowsRetry,
+  type EnvironmentDispatchAttempt
+} from "./server/services/environment-dispatch-evidence.js";
+import {
   acceptAzureAppCreateContinuationPrompt,
   normalizeAzureAppCreateContinuation,
   type AzureAppCreateContinuation
@@ -4511,7 +4516,7 @@ export function canRetryDeletion(op: any): any {
   );
   if (
     stage?.id === STAGE_DELETE_RADIUS_ENV &&
-    op.request?.selectedDispatchStarted === true
+    !selectedEnvironmentDispatchAllowsRetry(op.request)
   ) {
     return { ok: false, code: "deletion-dispatch-unconfirmed" };
   }
@@ -6319,6 +6324,7 @@ interface PersistedDeleteRecovery {
   selectedDispatchStarted?: boolean;
   selectedDispatchTime?: number;
   selectedDispatchCorrelation?: string;
+  selectedDispatchAttempts?: EnvironmentDispatchAttempt[] | null;
 }
 
 function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
@@ -6371,6 +6377,22 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
   if (Object.hasOwn(request, "selectedDispatchStarted")) {
     // Malformed evidence must not authorize a second dispatch.
     out.selectedDispatchStarted = request.selectedDispatchStarted !== false;
+  }
+  if (Object.hasOwn(request, "selectedDispatchAttempts")) {
+    out.selectedDispatchAttempts = readEnvironmentDispatchAttempts(
+      request.selectedDispatchAttempts
+    );
+    // Older builds must still see evidence of a possible dispatch.
+    out.selectedDispatchStarted = true;
+  }
+  if (
+    (Object.hasOwn(request, "selectedDispatchTime") ||
+      Object.hasOwn(request, "selectedDispatchCorrelation")) &&
+    request.selectedDispatchStarted !== true
+  ) {
+    out.selectedDispatchStarted = true;
+    delete out.selectedDispatchCorrelation;
+    return out;
   }
   if (
     Number.isSafeInteger(request.selectedDispatchTime) &&
@@ -6868,6 +6890,12 @@ export function createRegistry({
     },
     hasDurableStore() {
       return store.durable === true;
+    },
+    async claimEnvironmentDispatch(operationId: string, generation: number) {
+      if (store.durable !== true || !store.claimEnvironmentDispatch) {
+        throw new Error("Durable environment dispatch claims are unavailable.");
+      }
+      await store.claimEnvironmentDispatch(operationId, generation);
     },
     async persist() {
       const envelope = snapshot();

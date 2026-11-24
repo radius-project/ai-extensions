@@ -23,6 +23,8 @@ export default defineConfig({
       "src/server/services/radius-environment-workflow-deletion.test.ts",
       "src/server/services/environment-deletion.test.ts",
       "src/server/services/selected-environment-deletion.test.ts",
+      "src/server/services/environment-dispatch-evidence.test.ts",
+      "src/operation-store.test.ts",
       "src/runtime/environment-deletion-tool.test.ts",
       "src/server/services/{azure-setup,configure-environment,setup-outcome}.test.ts",
       "src/server/services/azure-setup-orchestration.test.ts",

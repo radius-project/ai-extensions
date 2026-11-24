@@ -183,7 +183,10 @@ describe("P0-A Radius runtime registration contract", () => {
         Parameters<typeof bindEnvironmentDeletion>[0]["control"]
       >(async ({ command }) =>
         command === "status" ?
-          { status: 200, body: { retryable: true } }
+          {
+            status: 200,
+            body: { retryable: true, retryEvidence: "saved-guard-attempt" }
+          }
         : { status: 202, body: { operationId: request.operationId } }
       );
       const harness = await createRuntimeSdkHarness({}, (deps, session) => {
@@ -219,6 +222,13 @@ describe("P0-A Radius runtime registration contract", () => {
         expect(control.mock.calls.map(([input]) => input.command)).toEqual(
           elicitation && approved ? ["status", "retry"] : ["status"]
         );
+        if (elicitation && approved) {
+          expect(control).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              retryEvidence: "saved-guard-attempt"
+            })
+          );
+        }
         expect(harness.deps.servers.size).toBe(0);
       } finally {
         await harness.extension.shutdown();
