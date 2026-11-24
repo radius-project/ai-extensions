@@ -1479,11 +1479,13 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     "complete",
     "refresh",
     "refresh cancelled",
+    "refresh refused",
     "refresh selection changed",
     "invalid",
     "cancel",
     "stale",
     "stale during credentials",
+    "cancel while resolving publisher",
     "no node",
     "invalid bootstrap",
     "missing revision",
@@ -1502,9 +1504,14 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       const cancel = vi.fn();
       const credentialsStarted = createDeferred<void>();
       const credentialsReady = createDeferred<void>();
+      const publisherStarted = createDeferred<void>();
+      const publisherReady = createDeferred<void>();
+      const spawnPublisher = vi.fn();
+      let preparingPublishers = 0;
       const promote = vi.fn(() => ({ published: ["app.bicep"], gitError: "" }));
       const execFile = vi.fn(async () => {
-        if (outcome === "invalid") throw new Error("invalid test model");
+        if (outcome === "invalid" || outcome === "refresh refused")
+          throw new Error("invalid test model");
         return { stdout: "", stderr: "" };
       });
       const harness = await createRuntimeSdkHarness(
@@ -1546,6 +1553,21 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             validate: (check) => check(join(stage, "app.bicep"))
           });
           deps.process.execFile = execFile;
+          if (outcome === "cancel while resolving publisher") {
+            const publish = async ({
+              beforeSpawn
+            }: {
+              beforeSpawn?: () => void;
+            }) => {
+              if (++preparingPublishers === 2) publisherStarted.resolve();
+              await publisherReady.promise;
+              beforeSpawn?.();
+              spawnPublisher();
+              return "published";
+            };
+            deps.rad.runRadBicepPublishExtension = publish;
+            deps.rad.runRadBicepPublish = publish;
+          }
           if (outcome === "stale during credentials") {
             deps.withGhcrDockerConfig = async (publish) => {
               credentialsStarted.resolve();
@@ -1623,7 +1645,26 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           })
         );
 
-        if (outcome === "stale during credentials") {
+        if (outcome === "cancel while resolving publisher") {
+          const publishing = [
+            tool("radius_publish_custom_type_extension").handler({
+              requestToken
+            }),
+            tool("radius_publish_recipe").handler({
+              requestToken,
+              file: "service-recipe.bicep",
+              target: "br:ghcr.io/acme/widgets/service:1"
+            })
+          ];
+          await publisherStarted.promise;
+          await expect(
+            complete.handler({ requestToken, outcome: "cancel" })
+          ).resolves.toEqual({ kind: "cancelled" });
+          publisherReady.resolve();
+          for (const result of await Promise.all(publishing))
+            expect(result).toContain("expired");
+          expect(spawnPublisher).not.toHaveBeenCalled();
+        } else if (outcome === "stale during credentials") {
           const publish = tool("radius_publish_recipe").handler({
             requestToken,
             file: "service-recipe.bicep",
@@ -1711,6 +1752,20 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             )
           });
           expect(promote).not.toHaveBeenCalled();
+        }
+        if (outcome === "refresh cancelled" || outcome === "refresh refused") {
+          await handoff(request);
+          expect(harness.session.send).toHaveBeenCalledTimes(2);
+          const replacement =
+            state.appModelAttemptTokens?.["acme/widgets::main"];
+          expect(replacement).toBeTruthy();
+          expect(replacement).not.toBe(requestToken);
+          await expect(
+            complete.handler({ requestToken, outcome: "cancel" })
+          ).resolves.toMatchObject({ kind: "refused" });
+          expect(state.appModelAttemptTokens?.["acme/widgets::main"]).toBe(
+            replacement
+          );
         }
       } finally {
         await harness.extension.shutdown("test");

@@ -15,6 +15,7 @@ interface AuthoringRequest {
   staging: ManagedModelStaging;
   validate: AuthoringValidator;
   current(): boolean;
+  settled?(): void;
   inFlight: number;
   finalizing: boolean;
 }
@@ -38,7 +39,11 @@ export function createModelAuthoringOwner(ports: {
 
   function cancel(request: AuthoringRequest) {
     requests.delete(request.token);
-    request.staging.cancel();
+    try {
+      request.staging.cancel();
+    } finally {
+      request.settled?.();
+    }
   }
 
   function assertCurrent(request: AuthoringRequest) {
@@ -73,7 +78,8 @@ export function createModelAuthoringOwner(ports: {
       token: string,
       target: AuthoringTarget,
       current: () => boolean,
-      validate: AuthoringValidator
+      validate: AuthoringValidator,
+      settled?: () => void
     ) {
       if (closed || !token || !target.sourceRevision || !current()) {
         throw new Error("Cannot establish a current Radius authoring source.");
@@ -89,6 +95,7 @@ export function createModelAuthoringOwner(ports: {
         staging,
         validate,
         current,
+        settled,
         inFlight: 0,
         finalizing: false
       });

@@ -80,6 +80,7 @@ export type Logger = (message: string) => void;
 
 interface SpawnManagedRadOptions extends SpawnRadOptions {
   log?: Logger;
+  beforeSpawn?: () => void;
 }
 
 /**
@@ -181,6 +182,7 @@ export interface RunRadBicepPublishExtensionOptions {
   target: string;
   log?: Logger;
   timeout?: number;
+  beforeSpawn?: () => void;
 }
 
 /** Options for {@link runRadBicepPublish}. */
@@ -190,6 +192,7 @@ export interface RunRadBicepPublishOptions {
   env?: NodeJS.ProcessEnv;
   log?: Logger;
   timeout?: number;
+  beforeSpawn?: () => void;
 }
 
 // Narrows an unknown catch binding to a human-readable message without ever
@@ -992,10 +995,12 @@ async function spawnManagedRad(
     env = {},
     timeout = 120000,
     label = "rad",
-    log = noop
+    log = noop,
+    beforeSpawn
   }: SpawnManagedRadOptions = {}
 ): Promise<ProcessResult> {
   const radPath = await ensureRadBinary({ log });
+  beforeSpawn?.();
   return await spawnRad(radPath, args, {
     cwd,
     env: managedBicepEnv(env),
@@ -1038,7 +1043,8 @@ export async function runRadBicepPublishExtension({
   fromFile,
   target,
   log = noop,
-  timeout = 120000
+  timeout = 120000,
+  beforeSpawn
 }: RunRadBicepPublishExtensionOptions): Promise<string> {
   const from = path.resolve(fromFile);
   const to = path.resolve(target);
@@ -1047,7 +1053,8 @@ export async function runRadBicepPublishExtension({
       cwd: path.dirname(to),
       timeout,
       label: "rad bicep publish-extension",
-      log
+      log,
+      beforeSpawn
     });
     return to;
   } catch (err) {
@@ -1072,7 +1079,8 @@ export async function runRadBicepPublish({
   target,
   env = {},
   log = noop,
-  timeout = 120000
+  timeout = 120000,
+  beforeSpawn
 }: RunRadBicepPublishOptions): Promise<string> {
   const src = path.resolve(file);
   try {
@@ -1081,7 +1089,8 @@ export async function runRadBicepPublish({
       env,
       timeout,
       label: "rad bicep publish",
-      log
+      log,
+      beforeSpawn
     });
     return target;
   } catch (err) {

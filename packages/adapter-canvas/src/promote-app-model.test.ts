@@ -227,6 +227,27 @@ describe("managed staging", () => {
     expect(fs.existsSync(predecessor.stagingDir)).toBe(true);
   });
 
+  it("rolls back a managed promotion when the staging ignore rule cannot be written", async () => {
+    const target = repo("original");
+    const ignore = path.join(target.radiusDir, ".gitignore");
+    fs.mkdirSync(ignore);
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+
+    expect(() => managed.promote()).toThrow(
+      /\.gitignore is not a regular file/
+    );
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe("original");
+    expect(fs.statSync(ignore).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(target.radiusDir, "app.origin.json"))).toBe(
+      false
+    );
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
   it("uses its initial baseline even if staged bookkeeping is modified", async () => {
     const target = repo("original");
     const managed = beginManagedRun(target.root);

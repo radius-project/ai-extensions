@@ -42,7 +42,8 @@ export function createCanvasModelAuthoring(
       token: string,
       revision: string | undefined,
       skillHandoff: string,
-      selectionIsCurrent: () => boolean
+      selectionIsCurrent: () => boolean,
+      settled?: () => void
     ): string {
       const instanceId = state.canvasInstanceId;
       const workspace = state.workspacePath;
@@ -107,7 +108,8 @@ export function createCanvasModelAuthoring(
               { cause: error }
             );
           }
-        }
+        },
+        settled
       );
       return JSON.stringify({
         ...handoff,
