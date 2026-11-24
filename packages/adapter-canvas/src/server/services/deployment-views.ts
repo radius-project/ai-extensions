@@ -300,11 +300,21 @@ export function createDeploymentViews(runtime: DeploymentRuntime) {
     captureDeletion,
     reserve(
       _state: CanvasState,
-      input: Pick<DeploymentViewReservation, "repo" | "environment" | "kind">
+      input: Pick<
+        DeploymentViewReservation,
+        "repo" | "environment" | "kind"
+      > & {
+        untilReleased?: boolean;
+      }
     ): DeploymentViewReservation | null {
-      const owned = runtime.owner.reserve(input, input.kind);
+      const { repo, environment, kind, untilReleased } = input;
+      const owned = runtime.owner.reserve(
+        { repo, environment },
+        kind,
+        untilReleased
+      );
       if (!owned) return null;
-      const lease = { ...input, expiresAt: owned.expiresAt };
+      const lease = { repo, environment, kind, expiresAt: owned.expiresAt };
       leases.set(lease, owned);
       return lease;
     },

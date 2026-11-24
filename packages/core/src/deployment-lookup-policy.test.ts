@@ -7,6 +7,7 @@ import {
   selectDeploymentRecord,
   deploymentIdentityRefusal,
   deploymentRunId,
+  canonicalDeletionRunUrl,
   readDeleteApplicationName,
   type DeploymentRecord
 } from "./deployment-lookup-policy.js";
@@ -239,6 +240,29 @@ describe("deployment record selection", () => {
       );
       if (expected === null) expect(actual).toBeNull();
       else expect(actual).toMatchObject({ status: expected });
+    }
+  );
+});
+
+describe("canonical application-deletion run URLs", () => {
+  it("uses the bound repository and run ID rather than the submitted spelling", () => {
+    expect(
+      canonicalDeletionRunUrl(
+        "org/app",
+        "https://github.com/ORG/APP/actions/runs/42/job/19/"
+      )
+    ).toBe("https://github.com/org/app/actions/runs/42");
+  });
+
+  it.each(["42/attempts/2", "42?view=1", "42/job/0", "9007199254740992"])(
+    "refuses unsupported or lossy run identity %s",
+    (suffix) => {
+      expect(
+        canonicalDeletionRunUrl(
+          "org/app",
+          `https://github.com/org/app/actions/runs/${suffix}`
+        )
+      ).toBeNull();
     }
   );
 });

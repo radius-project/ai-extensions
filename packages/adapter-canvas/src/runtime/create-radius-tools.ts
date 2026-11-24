@@ -10,6 +10,7 @@ import {
   prepareAppAuthoring,
   unsupportedAppSourceReport
 } from "@radius-project/core";
+import { isRadProcessExitUnconfirmed } from "@radius-project/adapter-shared";
 import { errorMessage, optionalString } from "./util.js";
 import {
   createGraphContextHelpers,
@@ -89,6 +90,9 @@ export function createRadiusTools(
     resolveTarget: deps.publishTargets.resolveRadiusArtifactTarget,
     stagingPrefix: deps.publishTargets.resolveStagingDirPrefix,
     validateRegistryTarget: deps.publishTargets.validateGhcrTargetForRepo,
+    isUnconfirmedExit: isRadProcessExitUnconfirmed,
+    localTargetKey: (target) =>
+      process.platform === "win32" ? target.toLowerCase() : target,
     exists: deps.process.existsSync,
     compileExtension: (fromFile, target, workspace) =>
       deps.rad.runRadBicepPublishExtension({
@@ -358,22 +362,28 @@ export function createRadiusTools(
               throw new Error(
                 "Managed compilation takes a request token only; the staging paths are fixed."
               );
-            return await authoring.publish(token, async (staging) => {
-              const fromFile = staging.artifact("custom-types.yaml", true);
-              const target = staging.artifact("custom-types.tgz", false);
-              await deps.rad.runRadBicepPublishExtension({
-                fromFile,
-                target,
-                log: logToSession,
-                prepareSpawn: () => authoring.assertCurrentSource(token),
-                beforeSpawn() {
-                  authoring.assertCurrent(token);
-                  staging.artifact("custom-types.yaml", true);
-                  staging.artifact("custom-types.tgz", false);
-                }
-              });
-              return `Published custom-type extension to ${target}. Reference it from the staged bicepconfig.json.`;
-            });
+            return await authoring.publish(
+              token,
+              () => "extension",
+              async (staging, _, guards) => {
+                const fromFile = staging.artifact("custom-types.yaml", true);
+                const target = staging.artifact("custom-types.tgz", false);
+                await publication.compileInOrder(target, () =>
+                  deps.rad.runRadBicepPublishExtension({
+                    fromFile,
+                    target,
+                    log: logToSession,
+                    prepareSpawn: guards.prepareSpawn,
+                    beforeSpawn() {
+                      guards.beforeSpawn();
+                      staging.artifact("custom-types.yaml", true);
+                      staging.artifact("custom-types.tgz", false);
+                    }
+                  })
+                );
+                return `Published custom-type extension to ${target}. Reference it from the staged bicepconfig.json.`;
+              }
+            );
           }
           const { workspacePath } = await workspaceState();
           authoring.assertStandalone(workspacePath);
@@ -401,38 +411,55 @@ export function createRadiusTools(
               "Managed publication requires a staged recipe filename, not a path."
             );
           }
-          const { workspacePath, workspaceRepo } = await workspaceState();
-          if (!token) authoring.assertStandalone(workspacePath);
-          const result = await publication.publishRecipe(
-            workspacePath,
-            workspaceRepo,
-            args,
+          const result =
             token ?
-              (target) => {
-                authoring.assertCurrent(token);
-                return deps.withGhcrDockerConfig((env) =>
-                  authoring.publish(token, (staging, source) => {
-                    const error = deps.publishTargets.validateGhcrTargetForRepo(
-                      target,
-                      source.repo
-                    );
-                    if (error) throw new Error(error);
-                    return deps.rad.runRadBicepPublish({
-                      file: staging.artifact(recipe, true),
-                      target,
-                      env,
-                      log: logToSession,
-                      prepareSpawn: () => authoring.assertCurrentSource(token),
-                      beforeSpawn() {
-                        authoring.assertCurrent(token);
-                        staging.artifact(recipe, true);
-                      }
-                    });
-                  })
+              await authoring.publish(
+                token,
+                (source) => {
+                  const error = deps.publishTargets.validateGhcrTargetForRepo(
+                    args.target,
+                    source.repo
+                  );
+                  if (error) throw new Error(error);
+                  return `recipe:${String(args.target).trim().toLowerCase()}`;
+                },
+                async (staging, source, guards) => {
+                  const published = await publication.publishRecipe(
+                    source.workspace,
+                    source.repo,
+                    args,
+                    async (target) => {
+                      await guards.prepareSpawn();
+                      return deps.withGhcrDockerConfig((env) => {
+                        guards.assertCurrent();
+                        return deps.rad.runRadBicepPublish({
+                          file: staging.artifact(recipe, true),
+                          target,
+                          env,
+                          log: logToSession,
+                          prepareSpawn: guards.prepareSpawn,
+                          beforeSpawn() {
+                            guards.beforeSpawn();
+                            staging.artifact(recipe, true);
+                          }
+                        });
+                      });
+                    }
+                  );
+                  if (published.kind === "refused")
+                    throw new Error(published.error);
+                  return published;
+                }
+              )
+            : await (async () => {
+                const { workspacePath, workspaceRepo } = await workspaceState();
+                authoring.assertStandalone(workspacePath);
+                return publication.publishRecipe(
+                  workspacePath,
+                  workspaceRepo,
+                  args
                 );
-              }
-            : undefined
-          );
+              })();
           if (result.kind === "refused") return result.error;
           if (result.kind === "missing") {
             return `Recipe file not found at ${result.path}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;

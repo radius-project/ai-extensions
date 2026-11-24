@@ -33,12 +33,18 @@ export type ApplicationDeletionResult =
 
 export type ApplicationDeletionDispatch =
   | { kind: "accepted"; discoverRunUrl(): Promise<string> }
-  | { kind: "refused" | "ambiguous"; error: string };
+  | { kind: "refused"; error: string }
+  | { kind: "ambiguous"; error: string; discoverRunUrl?(): Promise<string> };
 
 export interface ApplicationDeletionPorts {
-  reserve(
-    target: ApplicationDeletionTarget
-  ): { release(): void; retain(): void } | { error: string };
+  reserve(target: ApplicationDeletionTarget):
+    | {
+        release(): void;
+        retain(
+          dispatch: Exclude<ApplicationDeletionDispatch, { kind: "refused" }>
+        ): void;
+      }
+    | { error: string };
   captureAcceptedDeletion(target: ApplicationDeletionTarget): () => void;
   resolveDeployment(
     target: ApplicationDeletionTarget
@@ -122,7 +128,7 @@ export async function deleteApplication(
       }
       const dispatch = await ports.dispatch(request);
       retain = dispatch.kind !== "refused";
-      if (retain) lease.retain();
+      if (dispatch.kind !== "refused") lease.retain(dispatch);
       if (dispatch.kind === "ambiguous")
         return { ...refuse(400, dispatch.error), dispatchUnconfirmed: true };
       if (dispatch.kind !== "accepted") return refuse(400, dispatch.error);

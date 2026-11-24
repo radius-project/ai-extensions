@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   CanvasGraphResource,
   CanvasState,
@@ -21,6 +22,16 @@ export interface SourceRefContextInput {
 export interface SourceRefUpdate {
   id: string;
   codeReference: string;
+}
+
+// Unlike the public source-ref token, this identity distinguishes a selection
+// from a later return to it without tying it to a particular render.
+export function captureSourceRefSelection(
+  state: CanvasState,
+  view: GraphView
+): () => boolean {
+  const epoch = state.sourceRefSelectionEpochs?.[view];
+  return () => state.sourceRefSelectionEpochs?.[view] === epoch;
 }
 
 function isGraphView(view: unknown): view is GraphView {
@@ -48,6 +59,10 @@ export function prepareSourceRefResources(
   if (!entry.state.sourceRefContexts) entry.state.sourceRefContexts = {};
   const previousToken = entry.state.sourceRefContexts[view]?.token;
   entry.state.sourceRefContexts[view] = { ...context, view, token };
+  if (previousToken !== token) {
+    entry.state.sourceRefSelectionEpochs ??= {};
+    entry.state.sourceRefSelectionEpochs[view] = randomUUID();
+  }
   if (previousToken && previousToken !== token) {
     setResources(entry.state, view, null);
     if (Array.isArray(entry.state.pendingSourceRefs)) {

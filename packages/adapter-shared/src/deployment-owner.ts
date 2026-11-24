@@ -95,7 +95,8 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
 
   function reserve(
     target: Pick<DeploymentTarget, "repo" | "environment">,
-    kind: DeploymentReservation["kind"]
+    kind: DeploymentReservation["kind"],
+    untilReleased = false
   ): DeploymentReservation | null {
     if (stopped) return null;
     if (!target.repo.trim() || !target.environment.trim())
@@ -112,7 +113,7 @@ export function createDeploymentOwner<State>(ports: DeploymentOwnerPorts) {
     const reservation: DeploymentReservation = Object.freeze({
       target: Object.freeze({ ...target }),
       kind,
-      expiresAt: ports.now() + RESERVATION_MS
+      expiresAt: untilReleased ? Infinity : ports.now() + RESERVATION_MS
     });
     reservations.set(targetKey, reservation);
     return reservation;

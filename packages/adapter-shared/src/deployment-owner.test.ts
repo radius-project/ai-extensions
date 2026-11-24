@@ -44,6 +44,21 @@ function deferred() {
 afterEach(() => vi.useRealTimers());
 
 describe("runtime deployment ownership", () => {
+  it("keeps an uncertain delete exclusive beyond the ordinary reservation timeout", () => {
+    const { owner, advance } = fixture();
+    const deleteLease = owner.reserve(target, "delete", true);
+    if (!deleteLease) throw new Error("Missing guarded deletion reservation");
+    const sameTarget = { repo: "FIXTURE/APP", environment: "DEV" };
+    advance(24 * 60 * 60 * 1000);
+    expect(owner.reserve(sameTarget, "deploy")).toBeNull();
+    expect(owner.reserve(sameTarget, "delete")).toBeNull();
+    expect(
+      owner.reserve({ ...target, environment: "staging" }, "deploy")
+    ).not.toBeNull();
+    owner.release(deleteLease);
+    expect(owner.reserve(sameTarget, "deploy")).not.toBeNull();
+  });
+
   it("looks up one current repository record without choosing among environments", () => {
     const { owner, begin } = fixture();
     expect(owner.lookupRepository("fixture/app")).toEqual({ kind: "missing" });

@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { RadProcessError, spawnRad } from "./rad-process.mjs";
+import {
+  RadProcessError,
+  RadProcessExitUnconfirmedError,
+  spawnRad
+} from "./rad-process.mjs";
 import { resolveExistingRadBinary, resolveRadiusExtensionRef } from "./rad.js";
 
 const describeWindows = process.platform === "win32" ? describe : describe.skip;
@@ -98,10 +102,11 @@ describeWindows("spawnRad Windows process integration", () => {
     });
   });
 
-  it("kills the timed-out executable and its descendant process", async () => {
+  it("drains the timed-out executable and its descendant before settling", async () => {
     const error = await spawnRad(radPath, [childHarnessPath, "process-tree"], {
       timeout: 3_000,
-      label: "managed rad fixture"
+      label: "managed rad fixture",
+      drainOnTimeout: true
     }).catch((reason: unknown) => reason);
 
     expect(error).toBeInstanceOf(RadProcessError);
@@ -116,10 +121,8 @@ describeWindows("spawnRad Windows process integration", () => {
     expect(processTree.parentPid).toBeGreaterThan(0);
     expect(processTree.descendantPid).toBeGreaterThan(0);
 
-    await waitForProcessesToExit([
-      processTree.parentPid,
-      processTree.descendantPid
-    ]);
+    expect(isProcessRunning(processTree.parentPid)).toBe(false);
+    expect(isProcessRunning(processTree.descendantPid)).toBe(false);
   }, 15_000);
 
   it("drains the cancelled executable and its descendant before settling", async () => {
@@ -152,6 +155,26 @@ describeWindows("spawnRad Windows process integration", () => {
     }
   });
 
+  it("reports unconfirmed tree exit if the native taskkill executable cannot start", async () => {
+    const result = spawnRad(radPath, [childHarnessPath, "wait"], {
+      timeout: 500,
+      drainOnTimeout: true
+    }).catch((error: unknown) => error);
+    vi.stubEnv("SystemRoot", join(directory, "missing-system-root"));
+    try {
+      const failure = await result;
+
+      expect(failure).toBeInstanceOf(RadProcessExitUnconfirmedError);
+      expect(failure).toMatchObject({
+        message: expect.stringContaining(
+          "Windows process-tree exit could not be confirmed; do not use the affected target."
+        )
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("rejects with a RadProcessError when rad.exe cannot be spawned", async () => {
     const error = await spawnRad(join(directory, "missing-rad.exe"), ["x"], {
       timeout: 2_000
@@ -165,16 +188,6 @@ describeWindows("spawnRad Windows process integration", () => {
     expect((error as RadProcessError).message).toContain("ENOENT");
   });
 });
-
-async function waitForProcessesToExit(pids: number[]): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (pids.some(isProcessRunning)) {
-    if (Date.now() >= deadline) {
-      throw new Error(`Timed-out process tree is still running: ${pids}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}
 
 function isProcessRunning(pid: number): boolean {
   try {

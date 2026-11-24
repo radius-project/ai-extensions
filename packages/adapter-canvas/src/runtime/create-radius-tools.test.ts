@@ -38,17 +38,75 @@ function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
   const missingModelHandoffs = createMissingModelHandoffClaims(() =>
     Date.now()
   );
+  const authoring = createModelAuthoringOwner({
+    staging: fake.deps.beginManagedModel,
+    resolveTarget: async () => null
+  });
   const tools = createRadiusTools(
     fake.deps,
     modelingActivity,
     missingModelHandoffs,
-    createModelAuthoringOwner({
-      staging: fake.deps.beginManagedModel,
-      resolveTarget: async () => null
-    })
+    authoring
   );
-  return { ...fake, tools, modelingActivity, missingModelHandoffs };
+  return { ...fake, tools, modelingActivity, missingModelHandoffs, authoring };
 }
+
+describe("managed authoring tool input boundaries", () => {
+  it.each(["stagingDir", "manifestPath", "targetPath"])(
+    "refuses caller-selected compilation through %s",
+    async (field) => {
+      const { deps, tools, authoring } = setup();
+      const publish = vi.spyOn(authoring, "publish");
+      const result = await findTool(
+        tools,
+        "radius_publish_custom_type_extension"
+      ).handler({ requestToken: "live", [field]: "caller-chosen" });
+      expect(result).toContain("the staging paths are fixed");
+      expect(publish).not.toHaveBeenCalled();
+      expect(deps.rad.runRadBicepPublishExtension).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([undefined, "nested/postgres-recipe.bicep", "app.bicep", 123])(
+    "refuses managed recipe filename %j before publication or credential setup",
+    async (file) => {
+      const { deps, tools, authoring } = setup();
+      const publish = vi.spyOn(authoring, "publish");
+      const result = await findTool(tools, "radius_publish_recipe").handler({
+        requestToken: "live",
+        file
+      });
+      expect(result).toContain("requires a staged recipe filename");
+      expect(publish).not.toHaveBeenCalled();
+      expect(deps.withGhcrDockerConfig).not.toHaveBeenCalled();
+      expect(deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    [undefined, "complete", "token is required"],
+    [" ", "complete", "valid Radius authoring request token"],
+    [22, "cancel", "valid Radius authoring request token"],
+    ["live", "replace", "Choose complete or cancel."]
+  ])(
+    "refuses completion token %j and outcome %j",
+    async (requestToken, outcome, error) => {
+      const { tools, authoring } = setup();
+      const finish = vi.spyOn(authoring, "finish");
+      const cancel = vi.spyOn(authoring, "cancel");
+      const result = await findTool(
+        tools,
+        "radius_complete_app_authoring"
+      ).handler({ requestToken, outcome });
+      expect(result).toMatchObject({
+        kind: "refused",
+        error: expect.stringContaining(error)
+      });
+      expect(finish).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+    }
+  );
+});
 
 function parseSkillHandoff(value: unknown): Record<string, unknown> {
   if (typeof value !== "string") {

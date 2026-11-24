@@ -185,6 +185,20 @@ export function deploymentRunId(repo: string, runUrl: string): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+export function canonicalDeletionRunUrl(
+  repo: string,
+  runUrl: string
+): string | null {
+  const prefix = `https://github.com/${repo}/actions/runs/`;
+  if (
+    !runUrl.toLowerCase().startsWith(prefix.toLowerCase()) ||
+    !/^[1-9]\d*(?:\/job\/[1-9]\d*)?\/?$/.test(runUrl.slice(prefix.length))
+  )
+    return null;
+  const id = deploymentRunId(repo, runUrl);
+  return id === null ? null : `${prefix}${id}`;
+}
+
 /** Retains the workflow-compatible first-name fallback for older application models. */
 export function extractAppName(source: unknown): string {
   if (typeof source !== "string" || !source) return "";

@@ -147,6 +147,7 @@ export interface DeploymentsDependencies {
       repo: string;
       environment: string;
       kind: "delete";
+      untilReleased?: boolean;
     }
   ): DeploymentDispatchLease | null;
   releaseDeploymentMutation(

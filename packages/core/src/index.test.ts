@@ -44,6 +44,7 @@ const EXPECTED_FUNCTIONS = [
   "commandsMatchWorkflowApplication",
   "deploymentIdentityRefusal",
   "deploymentRunId",
+  "canonicalDeletionRunUrl",
   "readDeleteApplicationName",
   "normalizeProvisioningState",
   "parseBicepParams",

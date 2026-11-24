@@ -1,16 +1,20 @@
 import {
   collectWorkflowFailure,
+  DEPLOY_STATUS_FILES,
   redactCredentials
 } from "@radius-project/core";
 import { redactGhCredentials } from "../../../src/gh.js";
 import { createServer } from "node:http";
 import { ChildProcess } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseDocument } from "yaml";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
 import { isValidRepoSlug } from "../../../src/azure-oidc.js";
+import { generateDeleteWorkflow } from "../../../src/infra.js";
 import { createDeploymentAbandonmentService } from "../../../src/server/services/deployment-abandonment.js";
 import {
   createDeployRequestService,
@@ -420,6 +424,189 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
+  it("reports selected delete preparation and an admitted dispatch during bounded shutdown", async () => {
+    const repo = "octo/todolist";
+    const environment = "dev";
+    const application = "todolist";
+    const runUrl = `https://github.com/${repo}/actions/runs/17`;
+    const ref = "a".repeat(40);
+    const heldPreparation = createDeferred<void>();
+    const enteredPreparation = createDeferred<void>();
+    const enteredDispatch = createDeferred<void>();
+    const heldDispatch = createDeferred<void>();
+    const readTemplate = (path: string) =>
+      readFileSync(
+        new URL(
+          `../../../../../.github/extension/${path.split("/").pop()}`,
+          import.meta.url
+        ),
+        "utf8"
+      );
+    const templates = await generateDeleteWorkflow(environment, {
+      readTemplate: async (_repo, path) => readTemplate(path)
+    });
+    const endpoint = `/repos/${repo}/deployments`;
+    const selected: SelectedGhExecutor = {
+      login: "fixture-owner",
+      credentialSource: "injected",
+      requiresKeyringSwitch: false,
+      scopes: ["workflow"],
+      async verifyIdentity() {
+        enteredPreparation.resolve();
+        await heldPreparation.promise;
+      },
+      async run(args, options) {
+        await options?.beforeExecute?.();
+        const [command, path, jq] = args;
+        const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+        if (command === "workflow") {
+          expect(args).toContain("approved_deployment_id=42");
+          expect(args).toContain("approved_provider=azure");
+          enteredDispatch.resolve();
+          await heldDispatch.promise;
+          return { code: 1, stdout: "", stderr: "EPIPE: broken pipe" };
+        }
+        if (command === "run" && path === "download") {
+          expect(args.slice(2, 6)).toEqual([
+            "17",
+            "--name",
+            "radius-deploy-status-dev-todolist",
+            "--dir"
+          ]);
+          writeFileSync(
+            join(args[6], DEPLOY_STATUS_FILES.progress),
+            JSON.stringify({
+              schemaVersion: 1,
+              environment,
+              application,
+              runId: 17,
+              sequence: 1,
+              resources: []
+            })
+          );
+          return success();
+        }
+        expect(command).toBe("api");
+        if (path === `/repos/${repo}/environments/dev/variables?per_page=100`)
+          return success("AZURE_CLIENT_ID");
+        if (path === `${endpoint}?environment=dev&per_page=10`)
+          return success('[{"id":42}]');
+        if (path === `${endpoint}?per_page=100&environment=dev`)
+          return success("42");
+        if (path === `${endpoint}/42/statuses?per_page=1`)
+          return success(
+            jq ?
+              `success\t${runUrl}\t`
+            : JSON.stringify([{ id: 100, state: "success", log_url: runUrl }])
+          );
+        if (path === `/repos/${repo}/actions/runs/17`)
+          return success(
+            [
+              ".github/workflows/run-rad-commands.yml",
+              "completed",
+              "success",
+              1,
+              ref,
+              "",
+              17,
+              repo,
+              "workflow_dispatch"
+            ].join("\t")
+          );
+        if (path.startsWith(`/repos/${repo}/actions/runs/17/artifacts?`))
+          return success(
+            "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n" +
+              JSON.stringify({
+                total_count: 1,
+                artifacts: [
+                  {
+                    id: 21,
+                    name: "radius-deploy-status-dev-todolist",
+                    workflow_run: { id: 17 }
+                  }
+                ]
+              })
+          );
+        if (path === `/repos/${repo}`) return success("main");
+        if (path === `/repos/${repo}/git/ref/heads/main`) return success(ref);
+        const file = path.split("?")[0].split("/").pop() ?? "";
+        if (path.startsWith("/repos/radius-project/ai-extensions/contents/"))
+          return success(Buffer.from(readTemplate(file)).toString("base64"));
+        if (path.startsWith(`/repos/${repo}/contents/.github/workflows/`)) {
+          expect(path.endsWith(`?ref=${ref}`)).toBe(true);
+          return success(Buffer.from(templates[file] ?? "").toString("base64"));
+        }
+        throw new Error(`Unexpected selected read: ${args.join(" ")}`);
+      },
+      runOrThrow() {
+        throw new Error("Unexpected command");
+      },
+      packageCredentials() {
+        throw new Error("Unexpected credentials read");
+      },
+      redact: (value) => value,
+      errorMessage: String
+    };
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createEnvironmentAccountContext("application-delete", {
+        createReadOnlyExecutor: async () => selected,
+        withSelectedAccount() {
+          throw new Error("Unexpected account switch");
+        }
+      }),
+      cliExec() {
+        throw new Error("Ambient GitHub is forbidden");
+      }
+    });
+    const owner = runtime.deploymentRuntime.owner;
+    const preparation = runtime.prepareApplicationDeletion({
+      login: selected.login,
+      isCurrent: () => true,
+      request: {
+        repo,
+        environment,
+        application,
+        runUrl,
+        deploymentId: "42",
+        force: false
+      }
+    });
+    let active: Promise<unknown> | undefined;
+    try {
+      await Promise.race([enteredPreparation.promise, preparation]);
+      expect(owner.hasActiveWork()).toBe(true);
+      heldPreparation.resolve();
+      active = (await preparation).execute();
+      await Promise.race([
+        enteredDispatch.promise,
+        active.then((result) => {
+          throw new Error(
+            `Expected held dispatch, got ${JSON.stringify(result)}`
+          );
+        })
+      ]);
+      expect(owner.hasActiveWork()).toBe(true);
+      await expect(owner.shutdown(0)).resolves.toEqual({
+        complete: false,
+        pending: [expect.stringMatching(/^admission:/)]
+      });
+      heldDispatch.resolve();
+      await expect(active).resolves.toMatchObject({
+        dispatchUnconfirmed: true
+      });
+      await expect(owner.shutdown(0)).resolves.toEqual({
+        complete: true,
+        pending: []
+      });
+    } finally {
+      heldPreparation.resolve();
+      heldDispatch.resolve();
+      await Promise.allSettled([preparation, active]);
+      await owner.shutdown(1000);
+    }
+  });
+
   it("shares a production reservation across panel-free delete, Canvas delete, and deploy", async () => {
     const repo = "octo/todolist";
     const environment = "dev";

@@ -6,6 +6,8 @@ import {
 import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_FAILED_STATUS,
+  canonicalDeletionRunUrl,
+  confirmedWorkflowConclusion,
   deploymentIdentityRefusal,
   probeDeleteConflict,
   deploymentRunId,
@@ -69,13 +71,16 @@ export function createSelectedApplicationDeletion(ports: {
       throw new Error(
         "A valid GitHub login is required before confirming deletion."
       );
-    const approvedRun =
+    const canonicalRun =
       approvedTarget.runUrl &&
-      deploymentRunId(approvedTarget.repo, approvedTarget.runUrl);
+      canonicalDeletionRunUrl(approvedTarget.repo, approvedTarget.runUrl);
+    const approvedRun =
+      canonicalRun && deploymentRunId(approvedTarget.repo, canonicalRun);
     if (!approvedTarget.deploymentId || !approvedRun)
       throw new Error(
         "Select an exact Radius deployment before confirming deletion."
       );
+    approvedTarget.runUrl = canonicalRun;
     const assertCurrent = () => {
       if (!isCurrent())
         throw new Error("Application deletion authorization expired.");
@@ -149,7 +154,24 @@ export function createSelectedApplicationDeletion(ports: {
             );
           return {};
         };
-        const { resolveEnvDeployment } = ports.createLookup(execute);
+        const lookup = ports.createLookup(execute);
+        const resolveEnvDeployment: typeof lookup.resolveEnvDeployment = async (
+          repo,
+          environment,
+          application
+        ) => {
+          const row = await lookup.resolveEnvDeployment(
+            repo,
+            environment,
+            application
+          );
+          return (
+            row && {
+              ...row,
+              runUrl: canonicalDeletionRunUrl(repo, row.runUrl) ?? row.runUrl
+            }
+          );
+        };
         const reads = createDeploymentObservationBindings({
           execute,
           redactDiagnostic: executor.redact
@@ -159,157 +181,261 @@ export function createSelectedApplicationDeletion(ports: {
         );
         let verified: { branch: string; sha: string } | undefined;
         try {
-          return await requestApplicationDeletion(approvedTarget, {
-            ...ports.deletion,
-            resolveEnvDeployment,
-            async probeDeleteConflict(target, _instance, selection) {
-              const read = scope.observe(
-                undefined,
-                WORKFLOW_READ_LIMITS.deleteConflictMs
-              );
-              return probeDeleteConflict(
-                target,
-                {
-                  resolveEnvDeployment,
-                  listArtifacts: (repo, runId) =>
-                    reads.listWorkflowArtifacts(
-                      repo,
-                      runId,
-                      undefined,
-                      read.context
-                    ),
-                  downloadArtifact: (repo, artifact) =>
-                    reads.downloadWorkflowArtifact(repo, artifact, read.context)
-                },
-                selection
-              );
-            },
-            async ensureWorkflowsCurrent(repo, environment, _provider, files) {
-              const branch = await selectedGetDefaultBranch(executor, repo);
-              if (!branch)
-                throw new Error(
-                  "Could not determine the default branch for workflow verification."
+          return await requestApplicationDeletion(
+            approvedTarget,
+            {
+              ...ports.deletion,
+              resolveEnvDeployment,
+              async probeDeleteConflict(target, _instance, selection) {
+                const read = scope.observe(
+                  undefined,
+                  WORKFLOW_READ_LIMITS.deleteConflictMs
                 );
-              const sha = await selectedGetBranchHeadSha(
-                executor,
+                return probeDeleteConflict(
+                  target,
+                  {
+                    resolveEnvDeployment,
+                    listArtifacts: (repo, runId) =>
+                      reads.listWorkflowArtifacts(
+                        repo,
+                        runId,
+                        undefined,
+                        read.context
+                      ),
+                    downloadArtifact: (repo, artifact) =>
+                      reads.downloadWorkflowArtifact(
+                        repo,
+                        artifact,
+                        read.context
+                      )
+                  },
+                  selection
+                );
+              },
+              async ensureWorkflowsCurrent(
                 repo,
-                branch
-              );
-              if (!/^[A-Fa-f0-9]{40}$/.test(sha))
-                throw new Error(
-                  "Could not verify the default branch revision."
-                );
-              const templates = await generateDeleteWorkflow(environment, {
-                includeAws: ports.awsEnabled,
-                readTemplate: (repo, path, ref) =>
-                  selectedFetchFileFromRepo(executor, repo, path, ref)
-              });
-              for (const file of files) {
-                const path = `.github/workflows/${file}`;
-                const expected = templates[file];
-                const actual = await selectedFetchFileFromRepo(
-                  executor,
-                  repo,
-                  path,
-                  sha
-                );
-                const matches =
-                  (
-                    file === DELETE_APP_DISPATCHER_FILE &&
-                    actual !== null &&
-                    expected
-                  ) ?
-                    normalizeDispatcherDefault(actual) ===
-                    normalizeDispatcherDefault(expected)
-                  : actual === expected;
-                if (!expected || !matches)
+                environment,
+                _provider,
+                files
+              ) {
+                const branch = await selectedGetDefaultBranch(executor, repo);
+                if (!branch)
                   throw new Error(
-                    `${file} is missing or outdated on "${branch}". Update the Radius workflows before deleting.`
+                    "Could not determine the default branch for workflow verification."
                   );
-              }
-              verified = { branch, sha };
-              return { created: [], failed: [] };
-            },
-            readProcessEnv: () => ({}),
-            async runGh(args, timeout = 20000) {
-              const repo = approvedTarget.repo;
-              const current = await resolveEnvDeployment(
-                repo,
-                approvedTarget.environment,
-                approvedTarget.application
-              );
-              if (
-                deploymentIdentityRefusal(
-                  current,
-                  approvedTarget.application,
-                  approvedTarget
-                ) ||
-                (current &&
-                  ports.deletion.deploymentStatusBlocksMutation(
-                    current.status
-                  )) ||
-                (approvedTarget.force &&
-                  current?.status !== DELETE_FAILED_STATUS)
-              )
-                throw new Error(
-                  "The deployment changed before dispatch. Refresh the listing and confirm again."
-                );
-              if (
-                (await readApplicationDeletionHistory(
-                  executor,
-                  historyTarget,
-                  assertCurrent
-                )) !== approvedHistory
-              )
-                throw new Error(
-                  "GitHub deployment history changed after confirmation. Confirm the deletion again."
-                );
-              if (
-                !verified ||
-                (await selectedGetDefaultBranch(executor, repo)) !==
-                  verified.branch ||
-                (await selectedGetBranchHeadSha(
+                const sha = await selectedGetBranchHeadSha(
                   executor,
                   repo,
-                  verified.branch
-                )) !== verified.sha
-              )
-                throw new Error(
-                  "The default branch changed after workflow verification. Confirm the deletion again."
+                  branch
                 );
-              return executor.run(
-                [
-                  ...args,
-                  "-f",
-                  `approved_deployment_id=${approvedTarget.deploymentId}`,
-                  "-f",
-                  `approved_run_id=${approvedRun}`,
-                  "--ref",
-                  verified.branch
-                ],
-                {
-                  timeout,
-                  beforeExecute: async () => {
-                    if (validateWorkspace && !(await validateWorkspace()))
-                      throw new Error("The workspace changed before deletion.");
-                    assertCurrent();
-                  }
+                if (!/^[A-Fa-f0-9]{40}$/.test(sha))
+                  throw new Error(
+                    "Could not verify the default branch revision."
+                  );
+                const templates = await generateDeleteWorkflow(environment, {
+                  includeAws: ports.awsEnabled,
+                  readTemplate: (repo, path, ref) =>
+                    selectedFetchFileFromRepo(executor, repo, path, ref)
+                });
+                for (const file of files) {
+                  const path = `.github/workflows/${file}`;
+                  const expected = templates[file];
+                  const actual = await selectedFetchFileFromRepo(
+                    executor,
+                    repo,
+                    path,
+                    sha
+                  );
+                  const matches =
+                    (
+                      file === DELETE_APP_DISPATCHER_FILE &&
+                      actual !== null &&
+                      expected
+                    ) ?
+                      normalizeDispatcherDefault(actual) ===
+                      normalizeDispatcherDefault(expected)
+                    : actual === expected;
+                  if (!expected || !matches)
+                    throw new Error(
+                      `${file} is missing or outdated on "${branch}". Update the Radius workflows before deleting.`
+                    );
                 }
-              );
+                verified = { branch, sha };
+                return { created: [], failed: [] };
+              },
+              readProcessEnv: () => ({}),
+              async runGh(args, timeout = 20000) {
+                const repo = approvedTarget.repo;
+                const current = await resolveEnvDeployment(
+                  repo,
+                  approvedTarget.environment,
+                  approvedTarget.application
+                );
+                if (
+                  deploymentIdentityRefusal(
+                    current,
+                    approvedTarget.application,
+                    approvedTarget
+                  ) ||
+                  (current &&
+                    ports.deletion.deploymentStatusBlocksMutation(
+                      current.status
+                    )) ||
+                  (approvedTarget.force &&
+                    current?.status !== DELETE_FAILED_STATUS)
+                )
+                  throw new Error(
+                    "The deployment changed before dispatch. Refresh the listing and confirm again."
+                  );
+                if (
+                  current?.provider !== "azure" &&
+                  !(ports.awsEnabled && current?.provider === "aws")
+                )
+                  throw new Error(
+                    "Could not verify a supported provider for the selected deployment. No deletion was dispatched."
+                  );
+                if (
+                  (await readApplicationDeletionHistory(
+                    executor,
+                    historyTarget,
+                    assertCurrent
+                  )) !== approvedHistory
+                )
+                  throw new Error(
+                    "GitHub deployment history changed after confirmation. Confirm the deletion again."
+                  );
+                if (
+                  !verified ||
+                  (await selectedGetDefaultBranch(executor, repo)) !==
+                    verified.branch ||
+                  (await selectedGetBranchHeadSha(
+                    executor,
+                    repo,
+                    verified.branch
+                  )) !== verified.sha
+                )
+                  throw new Error(
+                    "The default branch changed after workflow verification. Confirm the deletion again."
+                  );
+                let admitted = false;
+                try {
+                  return await executor.run(
+                    [
+                      ...args,
+                      "-f",
+                      `approved_deployment_id=${approvedTarget.deploymentId}`,
+                      "-f",
+                      `approved_run_id=${approvedRun}`,
+                      "-f",
+                      `approved_provider=${current.provider}`,
+                      "--ref",
+                      verified.branch
+                    ],
+                    {
+                      timeout,
+                      beforeExecute: async () => {
+                        if (validateWorkspace && !(await validateWorkspace()))
+                          throw new Error(
+                            "The workspace changed before deletion."
+                          );
+                        assertCurrent();
+                        admitted = true;
+                      }
+                    }
+                  );
+                } catch (error) {
+                  if (!admitted) throw error;
+                  return { code: 1, stdout: "", stderr: "", timedOut: true };
+                }
+              },
+              findWorkflowRun: (repo, file, since, known, correlation) =>
+                reads.findWorkflowRun(
+                  repo,
+                  file,
+                  since,
+                  known,
+                  undefined,
+                  undefined,
+                  correlation
+                ),
+              logError: (message) =>
+                ports.deletion.logError(executor.redact(message))
             },
-            findWorkflowRun: (repo, file, since, known, correlation) =>
-              reads.findWorkflowRun(
-                repo,
-                file,
-                since,
-                known,
-                undefined,
-                undefined,
-                correlation
-              ),
-            logError: (message) =>
-              ports.deletion.logError(executor.redact(message))
-          });
+            undefined,
+            {
+              observe(dispatch, release) {
+                const { discoverRunUrl } = dispatch;
+                if (!discoverRunUrl) return;
+                void (async () => {
+                  let runId: number | null = null;
+                  for (let poll = 1; isCurrent(); poll++) {
+                    try {
+                      runId ??= deploymentRunId(
+                        approvedTarget.repo,
+                        await discoverRunUrl()
+                      );
+                      if (runId) {
+                        const result = await executor.run(
+                          [
+                            "api",
+                            `/repos/${approvedTarget.repo}/actions/runs/${runId}`
+                          ],
+                          { timeout: 10000, beforeExecute: assertCurrent }
+                        );
+                        if (result.code !== 0) throw new Error(result.stderr);
+                        const run: unknown = JSON.parse(result.stdout);
+                        if (
+                          isCurrent() &&
+                          run &&
+                          typeof run === "object" &&
+                          "id" in run &&
+                          run.id === runId &&
+                          "repository" in run &&
+                          run.repository &&
+                          typeof run.repository === "object" &&
+                          "full_name" in run.repository &&
+                          typeof run.repository.full_name === "string" &&
+                          run.repository.full_name.toLowerCase() ===
+                            approvedTarget.repo.toLowerCase() &&
+                          "run_attempt" in run &&
+                          run.run_attempt === 1 &&
+                          "event" in run &&
+                          run.event === "workflow_dispatch" &&
+                          "path" in run &&
+                          run.path ===
+                            `.github/workflows/${DELETE_APP_DISPATCHER_FILE}` &&
+                          "status" in run &&
+                          typeof run.status === "string" &&
+                          "conclusion" in run &&
+                          typeof run.conclusion === "string" &&
+                          confirmedWorkflowConclusion({
+                            status: run.status,
+                            conclusion: run.conclusion
+                          })
+                        ) {
+                          release();
+                          return;
+                        }
+                      }
+                    } catch (error) {
+                      ports.deletion.logError(
+                        "[radius delete] Could not verify the dispatched workflow: " +
+                          executor
+                            .redact(executor.errorMessage(error))
+                            .slice(0, 2000)
+                      );
+                    }
+                    if ((!runId && poll >= 6) || !isCurrent()) return;
+                    await new Promise<void>((resolve) => {
+                      ports.deletion
+                        .setTimer(resolve, poll < 6 ? 5000 : 30000)
+                        .unref?.();
+                    });
+                  }
+                })();
+              }
+            }
+          );
         } finally {
           scope.stop();
         }

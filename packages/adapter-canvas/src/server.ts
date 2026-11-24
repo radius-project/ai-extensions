@@ -6751,16 +6751,29 @@ export function createProductionCanvasServerRuntime(
   return {
     servers: canvasServer.instances,
     deploymentRuntime,
-    prepareApplicationDeletion: (
+    prepareApplicationDeletion: async (
       input: Parameters<typeof prepareSelectedDelete>[0]
-    ) =>
-      prepareSelectedDelete({
-        ...input,
-        isCurrent: () =>
-          input.isCurrent() &&
-          !executionOwner.isShuttingDown() &&
-          !deploymentRuntime.owner.isShuttingDown()
-      }),
+    ) => {
+      const isCurrent = () =>
+        input.isCurrent() &&
+        !executionOwner.isShuttingDown() &&
+        !deploymentRuntime.owner.isShuttingDown();
+      if (!isCurrent())
+        throw new Error("Application deletion authorization expired.");
+      return deploymentRuntime.owner.trackAdmission(async () => {
+        const prepared = await prepareSelectedDelete({
+          ...input,
+          isCurrent
+        });
+        return {
+          login: prepared.login,
+          execute: (validateWorkspace?: () => Promise<boolean>) =>
+            deploymentRuntime.owner.trackAdmission(() =>
+              prepared.execute(validateWorkspace)
+            )
+        };
+      });
+    },
     detachDeploymentView: deploymentViews.detach,
     setupExecution,
     verificationStatus,

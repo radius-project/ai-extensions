@@ -118,4 +118,15 @@ describe("application delete workflow dispatch", () => {
       expect(ports.runGh).toHaveBeenCalledOnce();
     }
   );
+
+  it("uses the guarded dispatch receipt without looking up a run by correlation", async () => {
+    const ports = { ...fixture(), guarded: true };
+    const url = "https://github.com/octo/app/actions/runs/942";
+    ports.runGh.mockResolvedValue({ ...success, stdout: `${url}\n` });
+    const dispatch = await dispatchApplicationDelete(request, ports);
+    if (dispatch.kind !== "accepted")
+      throw new Error("Dispatch was not accepted");
+    await expect(dispatch.discoverRunUrl()).resolves.toBe(url);
+    expect(ports.findWorkflowRun).not.toHaveBeenCalled();
+  });
 });

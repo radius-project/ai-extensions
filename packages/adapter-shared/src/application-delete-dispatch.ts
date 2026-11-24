@@ -1,5 +1,6 @@
 import {
   BARE_GH_COMMAND_PRESENTATION,
+  canonicalDeletionRunUrl,
   DELETE_APP_DISPATCHER_FILE,
   displayGhCommand,
   shouldRetryWithKeyringCredential,
@@ -36,6 +37,7 @@ export interface ApplicationDeleteDispatchPorts {
   ): Promise<CommandResult>;
   readProcessEnv(): NodeJS.ProcessEnv;
   sleep(ms: number): Promise<void>;
+  guarded?: boolean;
 }
 
 interface CommandResult {
@@ -58,6 +60,9 @@ export async function dispatchApplicationDelete(
   { repo, environment, application, force }: ApplicationDeletionRequest,
   dependencies: ApplicationDeleteDispatchPorts
 ): Promise<ApplicationDeletionDispatch> {
+  const unconfirmed = (result: CommandResult) =>
+    // The selected CLI provides no structured rejection receipt after spawn.
+    dependencies.guarded === true || dispatchUnconfirmed(result);
   // Dispatching a workflow requires the `workflow` scope, which an injected
   // GH_TOKEN often lacks. Retry with it stripped ONLY when that fallback is
   // safe: the failure names the missing scope, and the dispatch did not time
@@ -65,7 +70,7 @@ export async function dispatchApplicationDelete(
   // would start a second delete run).
   const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
     const first = await dependencies.runGh(args);
-    if (first.code === 0 || dispatchUnconfirmed(first)) return first;
+    if (first.code === 0 || unconfirmed(first)) return first;
     const env = dependencies.readProcessEnv();
     const retryAllowed = shouldRetryWithKeyringCredential({
       stderr: first.stderr,
@@ -79,7 +84,7 @@ export async function dispatchApplicationDelete(
     delete fallbackEnv.GH_TOKEN;
     delete fallbackEnv.GITHUB_TOKEN;
     const retry = await dependencies.runGh(args, 20000, fallbackEnv);
-    return retry.code === 0 || dispatchUnconfirmed(retry) ? retry : first;
+    return retry.code === 0 || unconfirmed(retry) ? retry : first;
   };
 
   // Deleting a deployment runs `rad app delete` via the committed
@@ -161,6 +166,27 @@ export async function dispatchApplicationDelete(
   // not-yet-registered workflow gets, rather than reporting a failure the
   // user cannot act on.
   const dispatchDelays = [0, 2000, 5000];
+  let discovered = "";
+  let discovery: Promise<string> | undefined;
+  const discoverRunUrl = () => {
+    if (discovered) return Promise.resolve(discovered);
+    return (discovery ??= dependencies
+      .findWorkflowRun(
+        repo,
+        DELETE_APP_DISPATCHER_FILE,
+        dispatchedAt,
+        null,
+        correlationId
+      )
+      .then((runId) => {
+        if (runId)
+          discovered = `https://github.com/${repo}/actions/runs/${runId}`;
+        return discovered;
+      })
+      .finally(() => {
+        discovery = undefined;
+      }));
+  };
   if (justCreated) await dependencies.sleep(3000);
   for (const delay of dispatchDelays) {
     // `> 0` vs `> 1` is equivalent over the fixed delay set {0, 2000, 5000}:
@@ -168,7 +194,7 @@ export async function dispatchApplicationDelete(
     if (delay > 0) await dependencies.sleep(delay);
     dispatch = await ghWorkflow(dispatchArgs);
     if (dispatch.code === 0) break;
-    if (dispatchUnconfirmed(dispatch)) break;
+    if (unconfirmed(dispatch)) break;
     // Only the not-found registration race and the unexpected-input race
     // self-resolve; any other failure (scope, Actions disabled, …) won't, so
     // stop retrying.
@@ -181,10 +207,15 @@ export async function dispatchApplicationDelete(
   }
   if (dispatch.code !== 0) {
     const de = (dispatch.stderr || "").trim();
-    if (dispatchUnconfirmed(dispatch))
+    if (unconfirmed(dispatch))
       return {
         kind: "ambiguous",
-        error: `GitHub did not confirm whether the delete workflow started on ${repo}. Check Actions before retrying.`
+        error: `GitHub did not confirm whether the delete workflow started on ${repo}. ${
+          dependencies.guarded ?
+            `Check Actions for ${correlationId} before retrying.`
+          : "Check Actions before retrying."
+        }`,
+        ...(dependencies.guarded ? { discoverRunUrl } : {})
       };
     // `{0,20}` vs `{1,20}` differs only for the literal "workflowscope" with
     // no separator, which no real `gh` diagnostic emits; left alive.
@@ -239,17 +270,10 @@ export async function dispatchApplicationDelete(
     };
   }
 
+  if (dependencies.guarded)
+    discovered = canonicalDeletionRunUrl(repo, dispatch.stdout.trim()) ?? "";
   return {
     kind: "accepted",
-    async discoverRunUrl() {
-      const runId = await dependencies.findWorkflowRun(
-        repo,
-        DELETE_APP_DISPATCHER_FILE,
-        dispatchedAt,
-        null,
-        correlationId
-      );
-      return runId ? `https://github.com/${repo}/actions/runs/${runId}` : "";
-    }
+    discoverRunUrl
   };
 }

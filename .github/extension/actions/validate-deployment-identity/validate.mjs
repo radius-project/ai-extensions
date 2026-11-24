@@ -12,7 +12,7 @@ if (process.env.IDENTITY_KIND === "delete") {
     throw new Error(
       "The delete target is not a supported literal application name. No cloud work was started."
     );
-  await verifyApprovedDeployment(process.env, async (path) => {
+  await verifyApprovedDeployment(process.env, async (path, body) => {
     if (!process.env.GH_TOKEN)
       throw new Error(
         "Deployment records are unavailable. No cloud work was started."
@@ -20,8 +20,10 @@ if (process.env.IDENTITY_KIND === "delete") {
     const response = await fetch(`https://api.github.com${path}`, {
       headers: {
         authorization: `Bearer ${process.env.GH_TOKEN}`,
-        accept: "application/vnd.github+json"
+        accept: "application/vnd.github+json",
+        ...(body ? { "content-type": "application/json" } : {})
       },
+      ...(body ? { method: "POST", body: JSON.stringify(body) } : {}),
       redirect: "error",
       signal: AbortSignal.timeout(10000)
     });

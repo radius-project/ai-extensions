@@ -42,8 +42,9 @@ function findAction(
 function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
   const fake = createFakeDependencies(options);
   fake.sessionHolder.set(createFakeSession());
-  const canvas = createRadiusCanvas(fake.deps);
-  return { ...fake, canvas };
+  const authoring = { openPanel: vi.fn(), closePanel: vi.fn() };
+  const canvas = createRadiusCanvas(fake.deps, authoring);
+  return { ...fake, canvas, authoring };
 }
 
 async function seedGraph(
@@ -923,13 +924,15 @@ describe("RU-17: canvas instance reuse", () => {
 // RU-18 (canvas half): onClose closes exactly once per instance.
 describe("RU-18: onClose closes the underlying server exactly once", () => {
   it("closes the server on first onClose and is a no-op on a duplicate call", async () => {
-    const { canvas, deps } = setup();
+    const { canvas, deps, authoring } = setup();
     await canvas.open(ctx("radius-panel", { page: "graph" }));
     const entry = deps.servers.get("radius-panel")!;
     const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
+    expect(authoring.openPanel).toHaveBeenCalledExactlyOnceWith(entry.state);
 
     await canvas.onClose(ctx("radius-panel"));
     expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(authoring.closePanel).toHaveBeenCalledExactlyOnceWith(entry.state);
     expect(deps.servers.has("radius-panel")).toBe(false);
 
     // Second onClose for the same (now-removed) instance must not close again.
@@ -945,7 +948,7 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
   });
 
   it("defers close until the last server-owned environment task settles", async () => {
-    const { canvas, deps } = setup();
+    const { canvas, deps, authoring } = setup();
     let settled: (() => void) | undefined;
     vi.mocked(deps.executionOwner.hasActiveDeletionTasks).mockReturnValue(true);
     vi.mocked(deps.executionOwner.onDeletionTasksSettled).mockImplementation(
@@ -967,6 +970,7 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
       expect.any(Function)
     );
     expect(closeSpy).not.toHaveBeenCalled();
+    expect(authoring.closePanel).toHaveBeenCalledExactlyOnceWith(entry.state);
     expect(deps.servers.has("radius-panel")).toBe(true);
 
     settled?.();

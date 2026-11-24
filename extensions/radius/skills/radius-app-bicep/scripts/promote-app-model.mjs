@@ -2,4 +2,4 @@
 
 import { runPromotionCli } from "./app-model-staging.mjs";
 
-runPromotionCli();
+await runPromotionCli();

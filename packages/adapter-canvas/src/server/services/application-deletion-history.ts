@@ -16,9 +16,7 @@ export async function readApplicationDeletionHistory(
     );
   const base = `/repos/${target.repo}/deployments`;
   const history = `${base}?environment=${encodeURIComponent(target.environment)}&per_page=10`;
-  async function readFirst(
-    path: string
-  ): Promise<{ record: object; id: number }> {
+  async function readRecords(path: string) {
     assertCurrent();
     const result = await executor
       .run(["api", path], { timeout: 10000, beforeExecute: assertCurrent })
@@ -33,29 +31,33 @@ export async function readApplicationDeletionHistory(
       throw unavailable();
     }
     if (!Array.isArray(value) || value.length === 0) throw unavailable();
-    const record: unknown = value[0];
-    if (
-      !record ||
-      typeof record !== "object" ||
-      !("id" in record) ||
-      typeof record.id !== "number" ||
-      !Number.isSafeInteger(record.id) ||
-      record.id <= 0
-    )
-      throw unavailable();
-    return { record, id: record.id };
+    return value.map((record: unknown) => {
+      if (
+        !record ||
+        typeof record !== "object" ||
+        !("id" in record) ||
+        typeof record.id !== "number" ||
+        !Number.isSafeInteger(record.id) ||
+        record.id <= 0
+      )
+        throw unavailable();
+      return { record, id: record.id };
+    });
   }
   async function checkHead() {
     // Read in GitHub's order, just as the provider guard does. A different
     // first record may own newer state regardless of its workflow or ID.
-    const current = String((await readFirst(history)).id);
+    const ids = (await readRecords(history)).map(({ id }) => id);
+    if (new Set(ids).size !== ids.length) throw unavailable();
+    const current = String(ids[0]);
     if (current !== target.deploymentId)
       throw new Error(
         `GitHub deployment ${current} is the first record in this environment's history, not the selected deployment. Chat deletion is blocked; refreshing the Radius listing alone will not clear this record.`
       );
+    return ids;
   }
-  await checkHead();
-  const { record: status, id: statusId } = await readFirst(
+  const before = await checkHead();
+  const [{ record: status, id: statusId }] = await readRecords(
     `${base}/${target.deploymentId}/statuses?per_page=1`
   );
   const state = "state" in status ? status.state : undefined;
@@ -71,6 +73,8 @@ export async function readApplicationDeletionHistory(
   )
     throw unavailable();
   // Fence a new head arriving while the selected deployment's status was read.
-  await checkHead();
-  return `${statusId}:${state}`;
+  const after = await checkHead();
+  if (after.length !== before.length || after.some((id, i) => id !== before[i]))
+    throw unavailable();
+  return `${statusId}:${state}:${before.join(",")}`;
 }

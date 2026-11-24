@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SelectedGhExecutor } from "../../gh.js";
 import { generateDeleteWorkflow } from "../../infra.js";
@@ -30,8 +31,10 @@ const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
 
 async function fixture({
   force = false,
+  forceArtifact = false,
   dispatcherEnvironment = "dev",
-  lookupCommand = "gh"
+  lookupCommand = "gh",
+  provider = "azure"
 } = {}) {
   const templates = await generateDeleteWorkflow(dispatcherEnvironment, {
     readTemplate: async (_repo, path) =>
@@ -44,11 +47,41 @@ async function fixture({
   let active = false;
   let statusId = 100;
   let headId = 42;
+  let downloadDirectory: string | undefined;
   const dispatch = vi.fn(() => ok());
+  const setTimer = vi.fn<ApplicationDeletionDependencies["setTimer"]>(
+    () => ({})
+  );
+  const logError = vi.fn();
   const run = vi.fn<SelectedGhExecutor["run"]>(async (args, options) => {
     await options?.beforeExecute?.();
     if (args[0] === "workflow") return dispatch();
-    if (args[0] === "run") return ok("[]");
+    if (args[0] === "run") {
+      if (args[1] === "download" && forceArtifact) {
+        expect(args.slice(2, 6)).toEqual([
+          "17",
+          "--name",
+          "rad-delete-result",
+          "--dir"
+        ]);
+        expect(args.slice(7)).toEqual(["--repo", request.repo]);
+        downloadDirectory = args[6];
+        writeFileSync(
+          join(downloadDirectory, "rad-delete-result.json"),
+          JSON.stringify({
+            schemaVersion: "1.0",
+            outcome: "failed",
+            exitCode: 1,
+            resourceType: "application",
+            name: request.application,
+            forced: false,
+            output:
+              'RESPONSE 409: 409 Conflict\nERROR CODE: Conflict\n{"error":{"code":"Conflict","message":"The target resource is in progress state: Updating."}}'
+          })
+        );
+      }
+      return ok("[]");
+    }
     const path = args[1];
     if (path === historyPath) return ok(JSON.stringify([{ id: headId }]));
     if (path === statusPath)
@@ -62,7 +95,20 @@ async function fixture({
       return ok(branchChanged ? "b".repeat(40) : sha);
     if (force && path.startsWith("/repos/octo/app/actions/runs/17/artifacts?"))
       return ok(
-        'HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n{"total_count":0,"artifacts":[]}'
+        "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n" +
+          JSON.stringify({
+            total_count: forceArtifact ? 1 : 0,
+            artifacts:
+              forceArtifact ?
+                [
+                  {
+                    id: 21,
+                    name: "rad-delete-result",
+                    workflow_run: { id: 17 }
+                  }
+                ]
+              : []
+          })
       );
     const ref = path.split("?ref=")[1];
     const file = path.split("?")[0].split("/").pop() ?? "";
@@ -118,8 +164,8 @@ async function fixture({
     findWorkflowRun: refused,
     runGh: refused,
     readProcessEnv: refused,
-    setTimer: () => ({}),
-    logError: refused
+    setTimer,
+    logError
   };
   const prepare = createSelectedApplicationDeletion({
     createExecutor,
@@ -141,7 +187,7 @@ async function fixture({
           environment: request.environment,
           deploymentId,
           runUrl: request.runUrl,
-          provider: "azure",
+          provider,
           status:
             active ? "in_progress"
             : force ? "delete-failed"
@@ -156,6 +202,9 @@ async function fixture({
     dispatch,
     verifyIdentity,
     release,
+    setTimer,
+    logError,
+    downloadDirectory: () => downloadDirectory,
     createExecutor,
     changeHistoryHead: () => {
       headId = 43;
@@ -267,6 +316,20 @@ describe("selected application deletion", () => {
     }
   );
 
+  it("retains the lease when the selected process throws after final admission", async () => {
+    const f = await fixture();
+    f.dispatch.mockImplementation(() => {
+      throw new Error("Process exited without a dispatch receipt");
+    });
+    const prepared = await f.prepare();
+    await expect(prepared.execute()).resolves.toMatchObject({
+      dispatchUnconfirmed: true,
+      body: { error: expect.stringContaining("dep-fixture") }
+    });
+    expect(f.dispatch).toHaveBeenCalledOnce();
+    expect(f.release).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       label: "the fallback job URL",
@@ -304,11 +367,223 @@ describe("selected application deletion", () => {
       const f = await fixture();
       f.run
         .mockResolvedValueOnce(ok('[{"id":42},{"id":7}]'))
-        .mockResolvedValueOnce(ok(JSON.stringify([status])));
+        .mockResolvedValueOnce(ok(JSON.stringify([status])))
+        .mockResolvedValueOnce(ok('[{"id":42},{"id":7}]'));
       if (allowed) await expect(f.prepare()).resolves.toHaveProperty("execute");
       else await expect(f.prepare()).rejects.toThrow("could not be verified");
     }
   );
+
+  it.each(['[{"id":42},{"id":8}]', '[{"id":42},{"id":42}]', '[{"id":42},{}]'])(
+    "refuses a changed or malformed ordered snapshot even if the first ID matches: %s",
+    async (second) => {
+      const f = await fixture();
+      f.run
+        .mockResolvedValueOnce(ok('[{"id":42},{"id":7}]'))
+        .mockResolvedValueOnce(
+          ok(
+            JSON.stringify([
+              { id: 100, state: "success", log_url: request.runUrl }
+            ])
+          )
+        )
+        .mockResolvedValueOnce(ok(second));
+      await expect(f.prepare()).rejects.toThrow("could not be verified");
+      expect(f.dispatch).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    `${request.runUrl}/job/31`,
+    `${request.runUrl}/`,
+    request.runUrl.replace("/octo/app/", "/OCTO/APP/")
+  ])("dispatches with the canonical run ID for %s", async (runUrl) => {
+    const f = await fixture();
+    const prepared = await f.prepare({ target: { runUrl } });
+    await expect(prepared.execute()).resolves.toMatchObject({ status: 200 });
+    expect(f.run).toHaveBeenCalledWith(
+      expect.arrayContaining(["workflow", "approved_run_id=17"]),
+      expect.any(Object)
+    );
+  });
+
+  it.each([
+    `${request.runUrl}/attempts/2`,
+    request.runUrl.replace("/octo/app/", "/octo/other/")
+  ])(
+    "refuses an attempt or foreign repository URL before reading as the selected account: %s",
+    async (runUrl) => {
+      const f = await fixture();
+      await expect(f.prepare({ target: { runUrl } })).rejects.toThrow(
+        "Select an exact Radius deployment"
+      );
+      expect(f.createExecutor).not.toHaveBeenCalled();
+    }
+  );
+
+  it("downloads exact conflict evidence with the selected account before forced dispatch", async () => {
+    const f = await fixture({ force: true, forceArtifact: true });
+    const prepared = await f.prepare();
+    await expect(prepared.execute()).resolves.toMatchObject({
+      status: 200,
+      body: { forced: true }
+    });
+    expect(f.run).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        "workflow",
+        "force=true",
+        "approved_deployment_id=42",
+        "approved_run_id=17"
+      ]),
+      expect.any(Object)
+    );
+    const directory = f.downloadDirectory();
+    expect(directory).toBeDefined();
+    if (directory) expect(existsSync(directory)).toBe(false);
+  });
+
+  it.each([
+    "context deadline exceeded",
+    "EPIPE: broken pipe",
+    "HTTP 403 text without a receipt"
+  ])("retains an ambiguous dispatch and does not retry: %s", async (stderr) => {
+    const f = await fixture();
+    f.dispatch.mockReturnValue({ code: 1, stderr, stdout: "" });
+    const prepared = await f.prepare();
+    await expect(prepared.execute()).resolves.toMatchObject({
+      dispatchUnconfirmed: true,
+      body: { error: expect.stringContaining("dep-fixture") }
+    });
+    expect(f.dispatch).toHaveBeenCalledOnce();
+    expect(f.release).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "queued" },
+    { repository: { full_name: "octo/other" } },
+    { run_attempt: 2 },
+    { path: ".github/workflows/other.yml" },
+    { event: "push" },
+    { id: 20 },
+    { conclusion: "unrecognized" }
+  ])(
+    "shares discovery and retains the lease for nonterminal or unmatched evidence: %j",
+    async (invalidEvidence) => {
+      const f = await fixture();
+      const run = f.run.getMockImplementation();
+      if (!run) throw new Error("Missing selected command fixture");
+      let evidence: Partial<typeof invalidEvidence> = invalidEvidence;
+      f.run.mockImplementation(async (args, options) => {
+        if (args[0] === "run" && args[1] === "list") {
+          await options?.beforeExecute?.();
+          return ok(
+            JSON.stringify([
+              { databaseId: 99, displayTitle: "different dep-other" },
+              {
+                databaseId: 19,
+                displayTitle: "Radius - Delete dev dep-fixture"
+              }
+            ])
+          );
+        }
+        if (args[1] === "/repos/octo/app/actions/runs/19") {
+          await options?.beforeExecute?.();
+          return ok(
+            JSON.stringify({
+              id: 19,
+              repository: { full_name: request.repo },
+              run_attempt: 1,
+              event: "workflow_dispatch",
+              path: ".github/workflows/delete-application.yml",
+              status: "completed",
+              conclusion: "failure",
+              ...evidence
+            })
+          );
+        }
+        return run(args, options);
+      });
+
+      const prepared = await f.prepare();
+      await expect(prepared.execute()).resolves.toMatchObject({
+        status: 200,
+        body: { runUrl: "https://github.com/octo/app/actions/runs/19" }
+      });
+      const polls = "status" in invalidEvidence ? 7 : 1;
+      for (let poll = 1; poll <= polls; poll++) {
+        await vi.waitFor(() => expect(f.setTimer).toHaveBeenCalledTimes(poll));
+        expect(f.release).not.toHaveBeenCalled();
+        if (poll < polls) f.setTimer.mock.calls[poll - 1][0]();
+      }
+      expect(
+        f.run.mock.calls.filter(
+          ([args]) => args[0] === "run" && args[1] === "list"
+        )
+      ).toHaveLength(1);
+      expect(f.release).not.toHaveBeenCalled();
+      evidence = {};
+      f.setTimer.mock.calls[polls - 1][0]();
+      await vi.waitFor(() => expect(f.release).toHaveBeenCalledOnce());
+    }
+  );
+
+  it("does not release after bounded inconclusive discovery", async () => {
+    const f = await fixture();
+    const prepared = await f.prepare();
+    await expect(prepared.execute()).resolves.toMatchObject({
+      status: 200,
+      body: { runUrl: "" }
+    });
+    for (let index = 0; index < 5; index++) {
+      await vi.waitFor(() =>
+        expect(f.setTimer).toHaveBeenCalledTimes(index + 1)
+      );
+      f.setTimer.mock.calls[index][0]();
+    }
+    await vi.waitFor(() => {
+      expect(
+        f.run.mock.calls.filter(
+          ([args]) => args[0] === "run" && args[1] === "list"
+        )
+      ).toHaveLength(6);
+    });
+    expect(f.release).not.toHaveBeenCalled();
+  });
+
+  it("retains the lease when the exact run becomes unreadable and stops observing on shutdown", async () => {
+    const f = await fixture();
+    const run = f.run.getMockImplementation();
+    if (!run) throw new Error("Missing selected command fixture");
+    const runUrl = "https://github.com/octo/app/actions/runs/19";
+    f.dispatch.mockReturnValue(ok(runUrl));
+    const terminalRead = vi.fn(() => ({
+      code: 1,
+      stderr: "Forbidden",
+      stdout: ""
+    }));
+    f.run.mockImplementation(async (args, options) => {
+      if (args[1] !== "/repos/octo/app/actions/runs/19")
+        return run(args, options);
+      await options?.beforeExecute?.();
+      return terminalRead();
+    });
+    const prepared = await f.prepare();
+    await expect(prepared.execute()).resolves.toMatchObject({
+      status: 200,
+      body: { runUrl }
+    });
+    await vi.waitFor(() => expect(f.setTimer).toHaveBeenCalledOnce());
+    expect(f.logError).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Could not verify the dispatched workflow: Error: Forbidden"
+      )
+    );
+    f.expire();
+    f.setTimer.mock.calls[0][0]();
+    await Promise.resolve();
+    expect(terminalRead).toHaveBeenCalledOnce();
+    expect(f.release).not.toHaveBeenCalled();
+  });
 
   it("will not run a non-GitHub command with the selected credential", async () => {
     const f = await fixture({ lookupCommand: "rad" });
@@ -318,9 +593,23 @@ describe("selected application deletion", () => {
       status: 503,
       body: { error: expect.stringContaining("current deployment state") }
     });
+
     expect(f.run).not.toHaveBeenCalled();
     expect(f.release).toHaveBeenCalledOnce();
   });
+
+  it.each(["", "aws"])(
+    "refuses an unavailable or disabled provider before dispatch: %s",
+    async (provider) => {
+      const f = await fixture({ provider });
+      const prepared = await f.prepare();
+      await expect(prepared.execute()).resolves.toMatchObject({
+        body: { error: expect.stringContaining("supported provider") }
+      });
+      expect(f.dispatch).not.toHaveBeenCalled();
+      expect(f.release).toHaveBeenCalledOnce();
+    }
+  );
 
   it("refuses a deployment that became active while verifying the workflow", async () => {
     const f = await fixture();

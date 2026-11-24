@@ -26,6 +26,8 @@
 // within one filesystem, which either happens or does not, rather than a
 // cross-filesystem copy that can fail halfway.
 //
+// Git index failures are reported separately after promotion has committed.
+//
 // The rules below MUST stay behavior-compatible with
 // packages/core/src/modeling/app-staging.ts, and the hash with
 // packages/adapter-canvas/src/app-bicep-hash.ts. They are duplicated here rather
@@ -33,12 +35,13 @@
 // workspace packages do not exist; promote-app-model.test.ts asserts the copies
 // agree.
 
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -51,6 +54,9 @@ import {
   writeFileSync
 } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const STAGING_DIR_PREFIX = ".staging-";
 const MANAGED_RUN_PREFIX = `${STAGING_DIR_PREFIX}managed-`;
@@ -252,9 +258,7 @@ function managedFilesFor(radiusDir) {
   const existing =
     existsSync(radiusDir) ?
       readdirSync(radiusDir, { withFileTypes: true })
-        .filter(
-          (entry) => entry.isFile() && isPublishableExtraArtifact(entry.name)
-        )
+        .filter((entry) => isPublishableExtraArtifact(entry.name))
         .map((entry) => entry.name)
     : [];
   return [...new Set([...MANAGED_FILES, ...existing])].sort();
@@ -327,43 +331,51 @@ function ensureStagingIgnored(radiusDir, stagingDir) {
   }
   const body = text && !text.endsWith("\n") ? `${text}\n` : text;
   const pending = path.join(stagingDir, ".radius-gitignore.pending");
-  writeFileSync(pending, `${body}${STAGING_IGNORE_PATTERN}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-    mode
-  });
+  const fd = openSync(pending, "wx", mode === undefined ? undefined : 0o600);
+  try {
+    writeFileSync(fd, `${body}${STAGING_IGNORE_PATTERN}\n`, "utf8");
+    // Creation applies the process umask; restore the original mode on the
+    // inode we opened before installing it at the destination.
+    if (mode !== undefined) fchmodSync(fd, mode & 0o7777);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(pending, ignoreFile);
   return true;
 }
 
-// The repository root, asked of git rather than assumed to be `.radius/`'s
-// parent. `resolveRadiusDir` canonicalizes through realpath, so a symlinked
-// `.radius` would otherwise put the parent of the REAL location here, which may
-// be outside the repository entirely.
-function repositoryRoot(radiusDir) {
-  const result = spawnSync(
-    "git",
-    ["-C", radiusDir, "rev-parse", "--show-toplevel"],
-    {
-      encoding: "utf8",
-      timeout: 15_000,
-      windowsHide: true
-    }
-  );
-  if (result.error || result.status !== 0) return path.dirname(radiusDir);
-  return (result.stdout || "").trim() || path.dirname(radiusDir);
-}
+const gitOptions = {
+  encoding: "utf8",
+  timeout: 15_000,
+  windowsHide: true
+};
 
-function gitAdd(repoRoot, files) {
-  const result = spawnSync("git", ["-C", repoRoot, "add", "--", ...files], {
-    encoding: "utf8",
-    timeout: 15_000,
-    windowsHide: true
-  });
-  if (result.error || result.status !== 0) {
-    return (result.stderr || result.error?.message || "git add failed").trim();
+const git = {
+  async discoverRepositoryRoot(radiusDir) {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", radiusDir, "rev-parse", "--show-toplevel"],
+      gitOptions
+    );
+    return stdout.trim();
+  },
+  async stageFiles(repoRoot, files) {
+    await execFileAsync(
+      "git",
+      ["-C", repoRoot, "add", "--", ...files],
+      gitOptions
+    );
   }
-  return "";
+};
+
+function gitDiagnostic(error, fallback) {
+  const stderr = error?.stderr;
+  const message = error instanceof Error ? error.message : error;
+  return (
+    (typeof stderr === "string" && stderr.trim()) ||
+    (typeof message === "string" && message.trim()) ||
+    fallback
+  );
 }
 
 function resolveRadiusDir(requested) {
@@ -481,6 +493,26 @@ export function beginManagedRun(workspaceRoot) {
   }
   return {
     stagingDir,
+    assertBaseline() {
+      assertActive();
+      const unreadable = Object.keys(baseline).filter(
+        (file) => baseline[file] === "unreadable"
+      );
+      if (unreadable.length > 0) {
+        fail(
+          `Cannot verify the managed model baseline: ${unreadable.join(", ")}.`
+        );
+      }
+      const files = [
+        ...new Set([...Object.keys(baseline), ...managedFilesFor(radiusDir)])
+      ];
+      const changed = changedManagedFiles(baseline, radiusDir, files, true);
+      if (changed.length > 0) {
+        fail(
+          `Managed model files changed while modeling: ${changed.join(", ")}.`
+        );
+      }
+    },
     artifact(name, required) {
       assertActive();
       if (!/^[a-z0-9][a-z0-9.-]*$/iu.test(name)) {
@@ -507,15 +539,24 @@ export function beginManagedRun(workspaceRoot) {
       }
       validatedSnapshot = before;
     },
-    promote() {
+    async promote(prepareCommit, beforeCommit, options = {}) {
       assertActive();
-      finished = true;
-      if (!validatedSnapshot || validatedSnapshot !== snapshot()) {
-        fail(
-          "Radius cannot promote artifacts that have not passed validation or changed afterward."
-        );
-      }
-      return publish(radiusDir, stagingDir, baseline);
+      const expectedSnapshot = validatedSnapshot;
+      return publish(radiusDir, stagingDir, {
+        ...options,
+        managedBaseline: baseline,
+        prepareCommit,
+        beforeCommit() {
+          assertActive();
+          beforeCommit();
+          finished = true;
+          if (!expectedSnapshot || expectedSnapshot !== snapshot()) {
+            fail(
+              "Radius cannot promote artifacts that have not passed validation or changed afterward."
+            );
+          }
+        }
+      });
     }
   };
 }
@@ -601,7 +642,7 @@ function concurrentEditMessage(changed) {
   return `${names} changed while modeling was running, so the generated model was discarded rather than written over it. Your version${plural} of ${changed.length === 1 ? "that file is" : "those files are"} intact. Re-run modeling when you are ready to replace ${changed.length === 1 ? "it" : "them"}.`;
 }
 
-function publish(radiusDir, requested, managedBaseline) {
+function resolveStagingDirectory(radiusDir, requested, managedBaseline) {
   if (!requested) {
     fail(
       "A staging directory is required: pass --staging <dir> naming the directory this run wrote into."
@@ -631,6 +672,67 @@ function publish(radiusDir, requested, managedBaseline) {
       "Only the runtime that started this managed modeling run can promote it."
     );
   }
+  return stagingDir;
+}
+
+async function publish(
+  radiusDir,
+  requested,
+  {
+    gitPorts = git,
+    managedBaseline,
+    prepareCommit,
+    beforeCommit,
+    onFilesystemCommitted
+  } = {}
+) {
+  const stagingDir = resolveStagingDirectory(
+    radiusDir,
+    requested,
+    managedBaseline
+  );
+  const stagingIdentity = directoryIdentity(stagingDir);
+  const radiusIdentity = directoryIdentity(radiusDir);
+  let repoRoot;
+  let gitError = "";
+  try {
+    repoRoot = await gitPorts.discoverRepositoryRoot(radiusDir);
+    if (!path.isAbsolute(repoRoot))
+      fail("Git did not identify a repository root.");
+  } catch (error) {
+    gitError = gitDiagnostic(error, "Git repository discovery failed");
+  }
+
+  if (prepareCommit) await prepareCommit();
+  if (
+    !stagingIdentity ||
+    !radiusIdentity ||
+    directoryIdentity(stagingDir) !== stagingIdentity ||
+    directoryIdentity(radiusDir) !== radiusIdentity
+  ) {
+    fail(
+      "The modeling staging directory or its parent changed before promotion."
+    );
+  }
+  // Admission and the filesystem transaction stay in the same synchronous turn.
+  beforeCommit?.();
+  const { published, staged } = commitPromotion(
+    radiusDir,
+    stagingDir,
+    managedBaseline
+  );
+  onFilesystemCommitted?.();
+  if (!gitError) {
+    try {
+      await gitPorts.stageFiles(repoRoot, staged);
+    } catch (error) {
+      gitError = gitDiagnostic(error, "git add failed");
+    }
+  }
+  return { published, gitError };
+}
+
+function commitPromotion(radiusDir, stagingDir, managedBaseline) {
   const record =
     managedBaseline ? { baseline: managedBaseline } : readRunRecord(stagingDir);
   const refuse = refuseWith(stagingDir);
@@ -754,9 +856,6 @@ function publish(radiusDir, requested, managedBaseline) {
     );
   }
 
-  // Staging in git is the last thing that happens, so a run that failed anywhere
-  // above leaves nothing in the index.
-  const repoRoot = repositoryRoot(radiusDir);
   const published = files.map((file) => path.join(radiusDir, file));
   // The ignore rule is staged only when THIS run wrote it. A `.gitignore` that
   // was already there may hold unrelated changes of the user's, and staging
@@ -765,8 +864,7 @@ function publish(radiusDir, requested, managedBaseline) {
     wroteIgnore ?
       [...published, path.join(radiusDir, ".gitignore")]
     : published;
-  const gitError = gitAdd(repoRoot, staged);
-  return { published, gitError };
+  return { published, staged };
 }
 
 // --- abort -----------------------------------------------------------------
@@ -800,7 +898,7 @@ function abort(radiusDir, requested) {
   );
 }
 
-export function runPromotionCli() {
+export async function runPromotionCli() {
   try {
     const radiusDir = resolveRadiusDir(flag("radius-dir"));
     if (hasFlag("begin")) {
@@ -814,7 +912,7 @@ export function runPromotionCli() {
     } else if (hasFlag("abort")) {
       abort(radiusDir, flag("staging"));
     } else {
-      const { published, gitError } = publish(radiusDir, flag("staging"));
+      const { published, gitError } = await publish(radiusDir, flag("staging"));
       for (const file of published) console.log(file);
       if (gitError) {
         console.error(

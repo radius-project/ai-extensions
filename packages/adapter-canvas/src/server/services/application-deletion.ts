@@ -1,5 +1,6 @@
 import {
   deleteApplication,
+  type ApplicationDeletionDispatch,
   type ApplicationDeletionResult
 } from "@radius-project/core";
 import { dispatchApplicationDelete } from "@radius-project/adapter-shared";
@@ -34,7 +35,13 @@ export type ApplicationDeletionDependencies = Pick<
 export async function requestApplicationDeletion(
   payload: unknown,
   dependencies: ApplicationDeletionDependencies,
-  instanceId?: string
+  instanceId?: string,
+  guarded?: {
+    observe(
+      dispatch: Exclude<ApplicationDeletionDispatch, { kind: "refused" }>,
+      release: () => void
+    ): void;
+  }
 ): Promise<ApplicationDeletionResult> {
   if (payload === null)
     return {
@@ -106,7 +113,8 @@ export async function requestApplicationDeletion(
         const lease = dependencies.reserveDeploymentMutation(state, {
           repo: target.repo,
           environment: target.environment,
-          kind: "delete"
+          kind: "delete",
+          ...(guarded ? { untilReleased: true } : {})
         });
         if (!lease) {
           const conflict = dependencies.activeDeploymentMutation(state);
@@ -125,7 +133,11 @@ export async function requestApplicationDeletion(
         };
         return {
           release,
-          retain() {
+          retain(dispatch) {
+            if (guarded) {
+              guarded.observe(dispatch, release);
+              return;
+            }
             dependencies
               .setTimer(release, dependencies.deployListTtlMs * 2)
               .unref?.();
@@ -165,7 +177,8 @@ export async function requestApplicationDeletion(
           sleep: (ms) =>
             new Promise((resolve) => {
               dependencies.setTimer(() => resolve(), ms);
-            })
+            }),
+          guarded: guarded !== undefined
         }),
       invalidateListing: (repo) => dependencies.deployListCache.delete(repo),
       reportDiscoveryError: (error) => {

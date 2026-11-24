@@ -46,6 +46,7 @@ permissions:
   # its last deployment, so the canvas Deployed graph does not keep rendering a
   # deployment that no longer exists.
   actions: write
+  checks: read
   deployments: read
 
 concurrency:
@@ -75,6 +76,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Refuse changed guarded provider
+        if: ${{ (inputs.approved_deployment_id != '' || inputs.approved_run_id != '') && vars.AZURE_CLIENT_ID == '' }}
+        run: |
+          echo '::error::The selected environment is no longer configured for Azure.'
+          exit 1
 
       - name: Validate declared application identity
         id: identity

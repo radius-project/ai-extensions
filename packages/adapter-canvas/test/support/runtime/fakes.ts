@@ -467,11 +467,12 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       artifact: () => {
         throw new Error("No test publication artifact configured");
       },
+      assertBaseline: vi.fn(),
       cancel: vi.fn(),
       validate: async () => {
         throw new Error("No test model validation configured");
       },
-      promote: () => {
+      promote: async () => {
         throw new Error("No test promotion configured");
       }
     })),

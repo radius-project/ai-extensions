@@ -37,6 +37,10 @@ on:
         description: 'Exact run ID associated with the approved deployment'
         type: string
         required: false
+      approved_provider:
+        description: 'Provider read from the selected deployment environment for guarded dispatch'
+        type: string
+        required: false
 
 permissions:
   id-token: write
@@ -46,20 +50,29 @@ permissions:
   # artifact describing the deleted application's last deployment. A called
   # workflow can never hold more permission than its caller.
   actions: write
+  checks: read
   deployments: read
 
 jobs:
+  reject-incomplete-approval:
+    if: ${{ (inputs.approved_deployment_id != '' || inputs.approved_run_id != '' || inputs.approved_provider != '') && (inputs.approved_deployment_id == '' || inputs.approved_run_id == '' || (inputs.approved_provider != 'azure' && inputs.approved_provider != 'aws')) }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - run: |
+          echo '::error::Guarded deletion requires an exact deployment, run, and provider.'
+          exit 1
   # Bind to the GitHub Environment so environment-scoped variables are visible, then
   # pick the provider from whichever identifying variable is set. A job that calls a
   # reusable workflow (`uses:`) can't bind an environment itself, so this routing
   # decision has to happen in a regular job first.
   detect:
     name: Detect provider
+    # Guarded callers already verified the provider. This routing job must not
+    # publish a successful deployment or inactivate the approved deployment.
+    if: ${{ inputs.approved_deployment_id == '' && inputs.approved_run_id == '' && inputs.approved_provider == '' }}
     runs-on: ubuntu-24.04
-    environment:
-      name: ${{ inputs.environment || '{{ENV}}' }}
-      # Routing must not mark the approved deployment inactive before the guard.
-      deployment: ${{ inputs.approved_deployment_id == '' }}
+    environment: ${{ inputs.environment || '{{ENV}}' }}
     outputs:
       provider: ${{ steps.detect.outputs.provider }}
     steps:
@@ -86,7 +99,7 @@ jobs:
   azure:
     name: Azure
     needs: detect
-    if: ${{ needs.detect.outputs.provider == 'azure' }}
+    if: ${{ !cancelled() && ((needs.detect.result == 'success' && needs.detect.outputs.provider == 'azure') || (needs.detect.result == 'skipped' && inputs.approved_deployment_id != '' && inputs.approved_run_id != '' && inputs.approved_provider == 'azure')) }}
     uses: ./.github/workflows/delete-azure.yml
     with:
       environment: ${{ inputs.environment || '{{ENV}}' }}
@@ -104,7 +117,7 @@ jobs:
   aws:
     name: AWS
     needs: detect
-    if: ${{ needs.detect.outputs.provider == 'aws' }}
+    if: ${{ !cancelled() && ((needs.detect.result == 'success' && needs.detect.outputs.provider == 'aws') || (needs.detect.result == 'skipped' && inputs.approved_deployment_id != '' && inputs.approved_run_id != '' && inputs.approved_provider == 'aws')) }}
     uses: ./.github/workflows/delete-aws.yml
     with:
       environment: ${{ inputs.environment || '{{ENV}}' }}

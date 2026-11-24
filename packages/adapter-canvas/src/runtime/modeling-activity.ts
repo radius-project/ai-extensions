@@ -60,7 +60,7 @@ export interface ModelingActivityDependencies {
 }
 
 export interface ModelingActivity {
-  announce(announcement: ModelingAnnouncement): void;
+  announce(announcement: ModelingAnnouncement): () => void;
   release(announcement: ModelingAnnouncement): void;
   inFlight(
     repo: string,
@@ -96,7 +96,7 @@ const ANNOUNCEMENT_LIMIT = 100;
 export function createModelingActivity(
   deps: ModelingActivityDependencies
 ): ModelingActivity {
-  const announcements = new Map<string, number>();
+  const announcements = new Map<string, { atMs: number }>();
   const keyFor = (repo: string, branch: string): string => `${repo}::${branch}`;
 
   // Bounds the map against a pathological caller. Expiry itself is enforced when
@@ -121,18 +121,22 @@ export function createModelingActivity(
       return false;
     }
     return branches.some((branch) => {
-      const atMs = announcements.get(keyFor(repo, branch));
-      return atMs !== undefined && nowMs - atMs < MODELING_ANNOUNCEMENT_TTL_MS;
+      const entry = announcements.get(keyFor(repo, branch));
+      return !!entry && nowMs - entry.atMs < MODELING_ANNOUNCEMENT_TTL_MS;
     });
   };
 
   return {
-    announce({ repo, branch }: ModelingAnnouncement): void {
-      if (!repo || !branch) return;
-      const nowMs = deps.now();
-      announcements.delete(keyFor(repo, branch));
-      announcements.set(keyFor(repo, branch), nowMs);
+    announce({ repo, branch }: ModelingAnnouncement): () => void {
+      if (!repo || !branch) return () => {};
+      const key = keyFor(repo, branch);
+      const entry = { atMs: deps.now() };
+      announcements.delete(key);
+      announcements.set(key, entry);
       trim();
+      return () => {
+        if (announcements.get(key) === entry) announcements.delete(key);
+      };
     },
 
     release({ repo, branch }: ModelingAnnouncement): void {

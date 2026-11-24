@@ -1,5 +1,5 @@
 import {
-  deploymentRunId,
+  canonicalDeletionRunUrl,
   type ApplicationDeletionRequest
 } from "@radius-project/core";
 import { isValidRepoSlug } from "@radius-project/core/platforms";
@@ -75,6 +75,10 @@ export function createApplicationDeletionTool(
       );
       const { repo, environment, application, deploymentId, runUrl, mode } =
         args;
+      const canonicalRun =
+        typeof repo === "string" && typeof runUrl === "string" ?
+          canonicalDeletionRunUrl(repo, runUrl)
+        : null;
       if (
         typeof repo !== "string" ||
         !isValidRepoSlug(repo) ||
@@ -82,11 +86,7 @@ export function createApplicationDeletionTool(
         !cleanText(application) ||
         typeof deploymentId !== "string" ||
         !/^[1-9]\d*$/.test(deploymentId) ||
-        typeof runUrl !== "string" ||
-        !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/\d+(?:\/job\/\d+)?\/?$/.test(
-          runUrl
-        ) ||
-        !deploymentRunId(repo, runUrl) ||
+        !canonicalRun ||
         (mode !== "normal" && mode !== "force_retry") ||
         Object.keys(args).some(
           (key) => !Object.hasOwn(parameters.properties, key)
@@ -98,7 +98,7 @@ export function createApplicationDeletionTool(
         );
 
       const force = mode === "force_retry";
-      const target = `${JSON.stringify(application)} in ${JSON.stringify(environment)} of ${repo} (deployment ${deploymentId}, ${runUrl})`;
+      const target = `${JSON.stringify(application)} in ${JSON.stringify(environment)} of ${repo} (deployment ${deploymentId}, ${canonicalRun})`;
       const unavailable = (error: unknown) =>
         ({
           kind: "unavailable",
@@ -113,7 +113,7 @@ export function createApplicationDeletionTool(
           environment,
           application,
           deploymentId,
-          runUrl,
+          runUrl: canonicalRun,
           force
         });
       } catch (error) {
@@ -122,7 +122,7 @@ export function createApplicationDeletionTool(
       if (!scope)
         return interaction(
           "application-deletion-account-required",
-          "Select and verify the GitHub account that will delete the application."
+          "Use an active Radius session in the target repository's workspace, then select and verify a GitHub account with access to that repository."
         );
       const prompt =
         force ?

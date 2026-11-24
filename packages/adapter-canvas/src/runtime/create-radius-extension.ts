@@ -219,8 +219,10 @@ export function createRadiusExtension(
         waitStartedAtMs
       }),
     announceModelingRun: (repo, branches) => {
-      for (const branch of branches)
-        modelingActivity.announce({ repo, branch });
+      const releases = branches.map((branch) =>
+        modelingActivity.announce({ repo, branch })
+      );
+      return () => releases.forEach((release) => release());
     },
     wait: (ms) => deps.clock.wait(ms),
     log: (message) => {
@@ -242,16 +244,19 @@ export function createRadiusExtension(
       state,
       isCurrent,
       environmentKey
-    }) =>
-      handOffAppModel({
+    }) => {
+      const panelIsCurrent = state && authoring.capturePanel(state);
+      return handOffAppModel({
         repo,
         branches,
         page,
         progressView,
         state,
-        isCurrent,
+        isCurrent: () =>
+          panelIsCurrent?.() !== false && isCurrent?.() !== false,
         environmentKey
-      })
+      });
+    }
   );
   deps.hostCallbacks.setDeployRepairHandoff(
     ({ repo, branch, error, deployRunUrl, attemptId, appFile }) =>
@@ -574,7 +579,7 @@ export function createRadiusExtension(
   }
 
   return {
-    canvases: [createRadiusCanvas(deps, canvasInstances)],
+    canvases: [createRadiusCanvas(deps, authoring, canvasInstances)],
     tools: createRadiusTools(
       deps,
       modelingActivity,

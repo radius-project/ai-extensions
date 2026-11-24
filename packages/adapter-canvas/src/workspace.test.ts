@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import os from "node:os";
+import { beginManagedRun } from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import {
   commitWorkspaceBranchResolution,
   resolveWorktreePath,
@@ -1036,6 +1037,27 @@ describe("modelingRunLastActivityAtMs", () => {
   async function workspaceDir(): Promise<string> {
     return fs.mkdtemp(path.join(os.tmpdir(), "radius-staging-"));
   }
+
+  it("does not suppress a new handoff for a managed staging directory left by a previous owner", async () => {
+    const dir = await workspaceDir();
+    try {
+      const managed = beginManagedRun(dir);
+      await fs.writeFile(
+        path.join(managed.stagingDir, "app.bicep"),
+        "// staged model\n"
+      );
+      managed.cancel();
+
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
+      const standalone = path.join(dir, ".radius", ".staging-standalone");
+      await fs.mkdir(standalone);
+      expect(await modelingRunLastActivityAtMs(dir)).toBe(
+        (await fs.stat(standalone)).mtimeMs
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it("reports when a staging directory was created", async () => {
     const dir = await workspaceDir();
