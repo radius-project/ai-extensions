@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { SelectedGhExecutor } from "../../gh.js";
 import { generateDeleteWorkflow } from "../../infra.js";
+import { createApplicationDeletionTool } from "../../runtime/application-deletion-tool.js";
 import type { ApplicationDeletionDependencies } from "./application-deletion.js";
 import { createSelectedApplicationDeletion } from "./selected-application-deletion.js";
 
@@ -15,6 +16,8 @@ const request = {
 };
 const files = ["delete-application.yml", "delete-azure.yml"];
 const sha = "a".repeat(40);
+const historyPath = "/repos/octo/app/deployments?environment=dev&per_page=10";
+const statusPath = "/repos/octo/app/deployments/42/statuses?per_page=1";
 const refused = () => {
   throw new Error("Unexpected ambient dependency");
 };
@@ -39,11 +42,20 @@ async function fixture({
   let isCurrent = true;
   let deploymentId = request.deploymentId;
   let active = false;
+  let statusId = 100;
+  let headId = 42;
   const run = vi.fn<SelectedGhExecutor["run"]>(async (args, options) => {
     options?.beforeExecute?.();
     if (args[0] === "workflow") return ok();
     if (args[0] === "run") return ok("[]");
     const path = args[1];
+    if (path === historyPath) return ok(JSON.stringify([{ id: headId }]));
+    if (path === statusPath)
+      return ok(
+        JSON.stringify([
+          { id: statusId, state: "success", log_url: request.runUrl }
+        ])
+      );
     if (path === "/repos/octo/app") return ok("main");
     if (path === "/repos/octo/app/git/ref/heads/main")
       return ok(branchChanged ? "b".repeat(40) : sha);
@@ -143,6 +155,12 @@ async function fixture({
     verifyIdentity,
     release,
     createExecutor,
+    changeHistoryHead: () => {
+      headId = 43;
+    },
+    changeHistoryStatus: () => {
+      statusId++;
+    },
     prepare: (
       input: {
         login?: string;
@@ -173,9 +191,127 @@ async function fixture({
 }
 
 describe("selected application deletion", () => {
+  it.each([
+    {
+      label: "a newer record ahead of the selection despite a lower ID",
+      rows: '[{"id":7},{"id":42}]',
+      message: "GitHub deployment 7"
+    },
+    { label: "missing history", rows: "[]", message: "could not be verified" },
+    {
+      label: "partial history",
+      rows: '[{},{"id":42}]',
+      message: "could not be verified"
+    },
+    {
+      label: "malformed history",
+      rows: '[{"id":42}',
+      message: "could not be verified"
+    }
+  ])("does not ask for confirmation with $label", async ({ rows, message }) => {
+    const f = await fixture();
+    f.run.mockResolvedValueOnce(ok(rows));
+    const confirm = vi.fn(async () => true);
+    const tool = createApplicationDeletionTool({
+      confirm,
+      prepare: (target) => f.prepare({ target: { ...target, force: false } }),
+      redact: (value) => value
+    });
+    const { force: _force, ...args } = request;
+    await expect(
+      tool.handler({ ...args, mode: "normal" })
+    ).resolves.toMatchObject({
+      kind: "unavailable",
+      message: expect.stringContaining(message)
+    });
+    expect(confirm).not.toHaveBeenCalled();
+    expect(f.run.mock.calls.map(([command]) => command[1])).toEqual([
+      historyPath
+    ]);
+  });
+
+  it("blocks an interleaved record before offering confirmation", async () => {
+    const f = await fixture();
+    const run = f.run.getMockImplementation();
+    if (!run) throw new Error("Missing selected command fixture");
+    f.run.mockImplementation(async (args, options) => {
+      const result = await run(args, options);
+      if (args[1] === statusPath) f.changeHistoryHead();
+      return result;
+    });
+    await expect(f.prepare()).rejects.toThrow("GitHub deployment 43");
+    expect(f.run.mock.calls.map(([args]) => args[1])).toEqual([
+      historyPath,
+      statusPath,
+      historyPath
+    ]);
+  });
+
+  it.each(["forbidden", "transport failure"])(
+    "does not expose GitHub response details or prepare deletion after %s",
+    async (failure) => {
+      const f = await fixture();
+      if (failure === "forbidden")
+        f.run.mockResolvedValueOnce({
+          code: 1,
+          stdout: "",
+          stderr: "private diagnostic"
+        });
+      else f.run.mockRejectedValueOnce(new Error("private diagnostic"));
+      await expect(f.prepare()).rejects.toThrow(
+        /^GitHub deployment history could not be verified\. No deletion was started\.$/
+      );
+      expect(f.run).toHaveBeenCalledOnce();
+    }
+  );
+
+  it.each([
+    {
+      label: "the fallback job URL",
+      status: {
+        id: 100,
+        state: "success",
+        log_url: "",
+        target_url: `${request.runUrl}/job/31`
+      },
+      allowed: true
+    },
+    {
+      label: "an active deployment",
+      status: { id: 100, state: "in_progress", log_url: request.runUrl },
+      allowed: false
+    },
+    {
+      label: "a different run",
+      status: { id: 100, state: "success", log_url: `${request.runUrl}9` },
+      allowed: false
+    },
+    {
+      label: "an unversioned status",
+      status: { state: "success", log_url: request.runUrl },
+      allowed: false
+    },
+    {
+      label: "a missing status state",
+      status: { id: 100, log_url: request.runUrl },
+      allowed: false
+    }
+  ])(
+    "checks terminal status evidence with $label",
+    async ({ status, allowed }) => {
+      const f = await fixture();
+      f.run
+        .mockResolvedValueOnce(ok('[{"id":42},{"id":7}]'))
+        .mockResolvedValueOnce(ok(JSON.stringify([status])));
+      if (allowed) await expect(f.prepare()).resolves.toHaveProperty("execute");
+      else await expect(f.prepare()).rejects.toThrow("could not be verified");
+    }
+  );
+
   it("will not run a non-GitHub command with the selected credential", async () => {
     const f = await fixture({ lookupCommand: "rad" });
     const scope = await f.prepare();
+    f.run.mockClear();
     await expect(scope.execute()).resolves.toMatchObject({
       status: 503,
       body: { error: expect.stringContaining("current deployment state") }
@@ -298,7 +434,11 @@ describe("selected application deletion", () => {
     const scope = await f.prepare();
     expect(scope.login).toBe("fixture-owner");
     expect(f.verifyIdentity).toHaveBeenCalledOnce();
-    expect(f.run).not.toHaveBeenCalled();
+    expect(f.run.mock.calls.map(([args]) => args[1])).toEqual([
+      historyPath,
+      statusPath,
+      historyPath
+    ]);
     await expect(scope.execute()).resolves.toMatchObject({ status: 200 });
     expect(f.createExecutor.mock.calls).toEqual([
       ["fixture-owner"],
@@ -336,6 +476,7 @@ describe("selected application deletion", () => {
     async (reason) => {
       const f = await fixture();
       const scope = await f.prepare();
+      f.run.mockClear();
       if (reason === "credential changed") f.changeCredential();
       else f.expire();
       await expect(scope.execute()).rejects.toThrow(reason);
@@ -351,6 +492,7 @@ describe("selected application deletion", () => {
       ...executor,
       login: "different-owner"
     });
+    f.run.mockClear();
     await expect(scope.execute()).rejects.toThrow("does not match");
     expect(f.verifyIdentity).toHaveBeenCalledOnce();
     expect(f.run).not.toHaveBeenCalled();
@@ -361,6 +503,7 @@ describe("selected application deletion", () => {
     async (failure) => {
       const f = await fixture();
       const scope = await f.prepare();
+      f.run.mockClear();
       f.run.mockImplementationOnce(async () => {
         if (failure === "executor rejection")
           throw new Error("Selected account became unavailable");
@@ -410,6 +553,7 @@ describe("selected application deletion", () => {
   it("checks force evidence under the selected account and refuses when the failed run has no result", async () => {
     const f = await fixture({ force: true });
     const scope = await f.prepare();
+    f.run.mockClear();
     await expect(scope.execute()).resolves.toMatchObject({
       status: 409,
       body: { error: expect.stringContaining("no longer has") }
@@ -424,6 +568,30 @@ describe("selected application deletion", () => {
     ]);
     expect(f.release).toHaveBeenCalledOnce();
   });
+
+  it.each(["head", "status"] as const)(
+    "refuses dispatch and releases the reservation when the raw %s changes after confirmation",
+    async (changed) => {
+      const f = await fixture();
+      const scope = await f.prepare();
+      if (changed === "head") f.changeHistoryHead();
+      else f.changeHistoryStatus();
+      await expect(scope.execute()).resolves.toMatchObject({
+        status: 400,
+        body: {
+          error: expect.stringContaining(
+            changed === "head" ?
+              "GitHub deployment 43"
+            : "history changed after confirmation"
+          )
+        }
+      });
+      expect(f.run.mock.calls.some(([args]) => args[0] === "workflow")).toBe(
+        false
+      );
+      expect(f.release).toHaveBeenCalledOnce();
+    }
+  );
 
   it("refuses workflow drift and does not try ambient dispatch", async () => {
     const f = await fixture();
