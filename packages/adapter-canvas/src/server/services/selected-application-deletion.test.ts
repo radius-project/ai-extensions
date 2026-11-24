@@ -44,9 +44,10 @@ async function fixture({
   let active = false;
   let statusId = 100;
   let headId = 42;
+  const dispatch = vi.fn(() => ok());
   const run = vi.fn<SelectedGhExecutor["run"]>(async (args, options) => {
-    options?.beforeExecute?.();
-    if (args[0] === "workflow") return ok();
+    await options?.beforeExecute?.();
+    if (args[0] === "workflow") return dispatch();
     if (args[0] === "run") return ok("[]");
     const path = args[1];
     if (path === historyPath) return ok(JSON.stringify([{ id: headId }]));
@@ -152,6 +153,7 @@ async function fixture({
   });
   return {
     run,
+    dispatch,
     verifyIdentity,
     release,
     createExecutor,
@@ -381,13 +383,38 @@ describe("selected application deletion", () => {
       );
     }
   );
-  it("accepts a canonical dispatcher written for another environment and explicitly targets this one", async () => {
-    const f = await fixture({ dispatcherEnvironment: "production" });
+  it.each(["production", "prod:west", "qa/eu", "développement"])(
+    "accepts a canonical dispatcher written for %s and explicitly targets dev",
+    async (dispatcherEnvironment) => {
+      const f = await fixture({ dispatcherEnvironment });
+      const scope = await f.prepare();
+      await expect(scope.execute()).resolves.toMatchObject({ status: 200 });
+      expect(
+        f.run.mock.calls.find(([args]) => args[0] === "workflow")?.[0]
+      ).toContain("environment=dev");
+    }
+  );
+
+  it("does not start gh dispatch if the workspace changed during workflow verification", async () => {
+    const f = await fixture();
+    const run = f.run.getMockImplementation();
+    if (!run) throw new Error("Missing selected command fixture");
+    let workspaceCurrent = true;
+    f.run.mockImplementation(async (args, options) => {
+      if (args[1]?.includes("/contents/.github/workflows/"))
+        workspaceCurrent = false;
+      return run(args, options);
+    });
     const scope = await f.prepare();
-    await expect(scope.execute()).resolves.toMatchObject({ status: 200 });
-    expect(
-      f.run.mock.calls.find(([args]) => args[0] === "workflow")?.[0]
-    ).toContain("environment=dev");
+    await expect(
+      scope.execute(async () => workspaceCurrent)
+    ).resolves.toMatchObject({
+      status: 400,
+      body: {
+        error: expect.stringContaining("workspace changed before deletion")
+      }
+    });
+    expect(f.dispatch).not.toHaveBeenCalled();
   });
 
   it("refuses a deployment replaced while verifying workflow files", async () => {

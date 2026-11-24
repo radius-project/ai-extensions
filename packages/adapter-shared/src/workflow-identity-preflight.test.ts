@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const script = resolve(
   import.meta.dirname,
@@ -17,6 +18,22 @@ describe("approved deployment guard", () => {
   const statuses = (run: number, state = "success") => [
     { state, log_url: `https://github.com/octo/app/actions/runs/${run}/job/5` }
   ];
+
+  it("suppresses routing deployment records only for guarded dispatch", () => {
+    const workflow = parse(
+      readFileSync(
+        resolve(
+          import.meta.dirname,
+          "../../../.github/extension/delete-application.yml"
+        ),
+        "utf8"
+      )
+    );
+    expect(workflow.jobs.detect.environment).toEqual({
+      name: "${{ inputs.environment || '{{ENV}}' }}",
+      deployment: "${{ inputs.approved_deployment_id == '' }}"
+    });
+  });
 
   it.each([
     {
@@ -80,6 +97,13 @@ describe("approved deployment guard", () => {
       rows: [{ id: 2 }],
       current: [],
       approved: statuses(17, "in_progress"),
+      ok: false
+    },
+    {
+      case: "approved deployment became inactive even when the new record is ours",
+      rows: [{ id: 3 }, { id: 2 }],
+      current: statuses(19),
+      approved: statuses(17, "inactive"),
       ok: false
     },
     {
