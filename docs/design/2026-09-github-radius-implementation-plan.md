@@ -273,6 +273,10 @@ Tie interaction responses to their originating request/source and reject stale c
 
 Extract existing application/deployment discovery and inspection using the current `rad` and artifact readers, distinguishing definition files, observed resources, and individual workflow attempts. Do not add a new discovery product or expand provider support.
 
+**Delivery split:** Land request-owned staging, validation and promotion, publication safeguards, and read-only inspection independently of host outcome reporting. The current slice keeps explicit request-token completion and cancellation. It does not infer an authoring outcome from a queued prompt, an assistant reply, or session-wide events.
+
+**Deferred: Copilot host outcome reporting.** The public SDK does not reliably report rejection, host interruption, missing required agent tools, or agent failure for the exact authoring request across supported hosts. The follow-up needs a supported API that detects host support before dispatch and reports those outcomes against the originating request, without a silent fallback. Then wire those outcomes to invalidate only that request, and test that late callbacks cannot promote a model or start a publication. Already-started publications may still settle. See the [migration inventory](./2026-09-github-radius-migration-inventory.md#stage-5-authoring-and-inspection) for the SDK details.
+
 **Exit gate:** Exercise unsupported agent capability, rejection, cancellation, agent failure, invalid or incomplete output, stale completion, modified workspace, successful validation/promotion, and publication refusal. Run actual runtime bindings and generated-plugin checks so authoring and custom-type/recipe publication remain usable. Missing deployment artifacts must not imply deletion.
 
 ## Stage 6: extract deletion and remove its panel prerequisite
