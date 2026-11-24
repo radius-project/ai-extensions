@@ -97,12 +97,14 @@ export interface RadDependencies {
     fromFile: string;
     target: string;
     log?: (message: string) => void;
+    beforeSpawn?: () => void;
   }): Promise<unknown>;
   runRadBicepPublish(options: {
     file: string;
     target: string;
     env?: Record<string, string>;
     log?: (message: string) => void;
+    beforeSpawn?: () => void;
   }): Promise<unknown>;
 }
 

@@ -2540,6 +2540,35 @@ describe("managed Bicep publishing", () => {
     });
   });
 
+  it("rechecks admission before either managed publish command spawns", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    writeManagedBicepStub();
+    let cancelled = false;
+    const beforeSpawn = () => {
+      if (cancelled) throw new Error("request cancelled");
+    };
+    const compilation = mod.runRadBicepPublishExtension({
+      fromFile: path.join(root, "manifest.yaml"),
+      target: path.join(root, "extension.tgz"),
+      beforeSpawn
+    });
+    const publication = mod.runRadBicepPublish({
+      file: path.join(root, "recipe.bicep"),
+      target: "br:registry.invalid/acme/recipe:v1",
+      beforeSpawn
+    });
+    cancelled = true;
+
+    for (const result of await Promise.allSettled([compilation, publication])) {
+      expect(result).toMatchObject({
+        status: "rejected",
+        reason: { message: expect.stringContaining("request cancelled") }
+      });
+    }
+    expect(fs.existsSync(invocation)).toBe(false);
+  });
+
   it("publishes a Bicep module with caller authentication isolated in the child environment", async () => {
     vi.resetModules();
     const mod = await import("./rad.js");

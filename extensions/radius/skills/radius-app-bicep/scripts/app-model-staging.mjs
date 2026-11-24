@@ -276,15 +276,22 @@ function managedFilesFor(radiusDir) {
 //
 // Returns true when the file was written, so only a rule this run added is
 // staged in git.
-function ensureStagingIgnored(radiusDir) {
+function ensureStagingIgnored(radiusDir, stagingDir) {
   const ignoreFile = path.join(radiusDir, ".gitignore");
-  const existing = readFile(ignoreFile);
-  const text = existing || "";
+  const stat = lstatSync(ignoreFile, { throwIfNoEntry: false });
+  if (stat && !stat.isFile()) fail(`${ignoreFile} is not a regular file.`);
+  const text = stat ? readFileSync(ignoreFile, "utf8") : "";
   if (text.split("\n").some((line) => line.trim() === STAGING_IGNORE_PATTERN)) {
     return false;
   }
   const body = text && !text.endsWith("\n") ? `${text}\n` : text;
-  writeFileSync(ignoreFile, `${body}${STAGING_IGNORE_PATTERN}\n`, "utf8");
+  const pending = path.join(stagingDir, ".radius-gitignore.pending");
+  writeFileSync(pending, `${body}${STAGING_IGNORE_PATTERN}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: stat?.mode
+  });
+  renameSync(pending, ignoreFile);
   return true;
 }
 
@@ -672,6 +679,7 @@ function publish(radiusDir, requested, managedBaseline) {
   // so without an entry for it a later failure would leave it published by a run
   // that was refused — the common case, not an exotic one.
   const moves = [];
+  let wroteIgnore;
   try {
     for (const file of files) {
       const destination = path.join(radiusDir, file);
@@ -684,6 +692,7 @@ function publish(radiusDir, requested, managedBaseline) {
       renameSync(path.join(stagingDir, file), destination);
       entry.published = true;
     }
+    wroteIgnore = ensureStagingIgnored(radiusDir, stagingDir);
   } catch (error) {
     for (const entry of moves.reverse()) {
       // Remove what this run put there, then restore what it displaced. A
@@ -696,8 +705,13 @@ function publish(radiusDir, requested, managedBaseline) {
       `Publishing the application model failed partway (${error.message}), so every file was put back as it was.`
     );
   }
-  rmSync(stagingDir, { recursive: true, force: true });
-  const wroteIgnore = ensureStagingIgnored(radiusDir);
+  try {
+    rmSync(stagingDir, { recursive: true, force: true });
+  } catch (error) {
+    console.error(
+      `Note: the model was promoted, but the staging directory at ${stagingDir} could not be removed (${error.message}).`
+    );
+  }
 
   // Staging in git is the last thing that happens, so a run that failed anywhere
   // above leaves nothing in the index.

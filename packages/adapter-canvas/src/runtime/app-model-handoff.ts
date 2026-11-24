@@ -588,7 +588,14 @@ export function createAppModelHandoff(
               attemptToken,
               revision,
               skillHandoff,
-              stillCurrent
+              stillCurrent,
+              () => {
+                const tokens = state.appModelAttemptTokens;
+                if (!tokens || tokens[tokenKey] !== attemptToken) return;
+                delete tokens[tokenKey];
+                releaseStateReservation();
+                deps.releaseRefreshMemo(refreshKey);
+              }
             );
           }
           await deps.send(appModelRefreshMessage(model, skillHandoff));

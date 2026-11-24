@@ -362,7 +362,12 @@ export function createRadiusTools(
               await deps.rad.runRadBicepPublishExtension({
                 fromFile,
                 target,
-                log: logToSession
+                log: logToSession,
+                beforeSpawn() {
+                  authoring.assertCurrent(token);
+                  staging.artifact("custom-types.yaml", true);
+                  staging.artifact("custom-types.tgz", false);
+                }
               });
               return `Published custom-type extension to ${target}. Reference it from the staged bicepconfig.json.`;
             });
@@ -413,7 +418,11 @@ export function createRadiusTools(
                       file: staging.artifact(recipe, true),
                       target,
                       env,
-                      log: logToSession
+                      log: logToSession,
+                      beforeSpawn() {
+                        authoring.assertCurrent(token);
+                        staging.artifact(recipe, true);
+                      }
                     });
                   })
                 );
