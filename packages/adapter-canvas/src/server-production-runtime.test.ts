@@ -359,6 +359,10 @@ describe("production canvas server runtime", () => {
       const head = "a".repeat(40);
       const stableBranch = scenario === "refused";
       const workflowAvailable = stableBranch || scenario === "branch-moved";
+      let observeGuard = false;
+      let rerunStarted = false;
+      let beforeGuardResponse: () => void = () => {};
+      const historicalDispatchTime = Date.parse("2026-01-02T03:04:05Z");
       let headReads = 0;
       const readTemplate = (file: string) =>
         readFile(
@@ -376,6 +380,68 @@ describe("production canvas server runtime", () => {
         if (workflowAvailable) {
           const success = (stdout: string) => ({ code: 0, stdout, stderr: "" });
           const endpoint = args[1] ?? "";
+          if (observeGuard && args[2] === "GET") {
+            const details = {
+              id: 21,
+              display_title:
+                "Radius - Delete Environment dev del-test-recovery",
+              event: "workflow_dispatch",
+              path: ".github/workflows/delete-environment.yml",
+              head_branch: "release",
+              head_sha: head,
+              actor: { login: "octocat" },
+              created_at: new Date(historicalDispatchTime).toISOString(),
+              updated_at: "2026-01-02T03:05:00Z",
+              run_attempt: rerunStarted ? 2 : 1,
+              status: rerunStarted ? "in_progress" : "completed",
+              conclusion: rerunStarted ? null : "failure"
+            };
+            const path = args[3];
+            if (path.includes("/workflows/delete-environment.yml/runs?"))
+              return success(
+                JSON.stringify({ total_count: 1, workflow_runs: [details] })
+              );
+            if (path === "/repos/octo/app/actions/runs/21") {
+              beforeGuardResponse();
+              return success(JSON.stringify(details));
+            }
+            if (
+              path ===
+              "/repos/octo/app/actions/runs/21/attempts/1/jobs?per_page=100"
+            )
+              return success(
+                JSON.stringify({
+                  total_count: 1,
+                  jobs: [
+                    {
+                      name: "Azure / Delete with Radius",
+                      run_id: 21,
+                      run_attempt: 1,
+                      status: "completed",
+                      conclusion: "failure",
+                      steps: [
+                        {
+                          name: "Guard - environment has no deployed applications",
+                          status: "completed",
+                          conclusion: "failure"
+                        },
+                        {
+                          name: "Delete Radius resource",
+                          status: "completed",
+                          conclusion: "skipped"
+                        },
+                        {
+                          name: "Teardown",
+                          status: "completed",
+                          conclusion: "success"
+                        }
+                      ]
+                    }
+                  ]
+                })
+              );
+            throw new Error(`Unexpected guard evidence read: ${path}`);
+          }
           if (
             stableBranch &&
             args.slice(0, 3).join(" ") === "api --method POST"
@@ -632,6 +698,82 @@ describe("production canvas server runtime", () => {
           expect.objectContaining({ state: "refused", operationAttempt: 0 }),
           expect.objectContaining({ state: "refused", operationAttempt: 1 })
         ]);
+        operation.request.selectedDispatchAttempts = [
+          {
+            state: "correlated",
+            operationAttempt: 1,
+            runId: 21,
+            branch: "release",
+            head,
+            dispatchedAt: historicalDispatchTime,
+            correlationId: "del-test-recovery"
+          }
+        ];
+        observeGuard = true;
+        const correlatedAttempts = operation.request.selectedDispatchAttempts;
+        save.mockRejectedValueOnce(
+          new Error("Fixture operation store is full")
+        );
+        await expect(
+          runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "status"
+          })
+        ).rejects.toThrow("Fixture operation store is full");
+        expect(operation.request.selectedDispatchAttempts).toBe(
+          correlatedAttempts
+        );
+        let current = true;
+        beforeGuardResponse = () => {
+          current = false;
+        };
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "status",
+            isCurrent: () => current
+          })
+        ).toMatchObject({ status: 404 });
+        expect(operation.request.selectedDispatchAttempts).toBe(
+          correlatedAttempts
+        );
+        beforeGuardResponse = () => {};
+        const guarded = await runtime.controlSelectedEnvironmentDeletion({
+          ...target,
+          command: "status"
+        });
+        expect(guarded).toMatchObject({
+          status: 200,
+          body: {
+            retryable: true,
+            retryEvidence: expect.any(String),
+            message: expect.stringContaining("applications guard")
+          }
+        });
+        rerunStarted = true;
+        const guardedEvidence =
+          "retryEvidence" in guarded.body ?
+            guarded.body.retryEvidence
+          : undefined;
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "retry",
+            retryEvidence: guardedEvidence
+          })
+        ).toMatchObject({
+          status: 409,
+          body: { code: "deletion-retry-evidence-changed" }
+        });
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "status"
+          })
+        ).toMatchObject({ status: 200, body: { retryable: false } });
+        expect(
+          run.mock.calls.filter(([args]) => args[2] === "POST")
+        ).toHaveLength(2);
       } else if (scenario === "branch-moved") {
         expect(headReads).toBe(4);
         expect(operation.request?.selectedDispatchStarted).toBeUndefined();

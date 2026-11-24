@@ -232,68 +232,117 @@ describe("deleting a Radius environment through its workflow", () => {
     expect(runGh).not.toHaveBeenCalled();
   });
 
-  it("observes an unresolved saved attempt without sending a second request", async () => {
-    const attempt: EnvironmentDispatchAttempt = {
-      operationAttempt: 0,
-      dispatchedAt: 1_000_000,
-      correlationId: "del-test-fixture",
-      branch: "main",
-      head: HEAD,
-      state: "unresolved"
-    };
-    const runGh = vi.fn(async (args: string[]) => {
-      expect(args.slice(0, 3)).toEqual(["api", "--method", "GET"]);
-      return ok(
-        JSON.stringify({
-          total_count: 1,
-          workflow_runs: [
-            {
-              id: 21,
-              display_title: `Radius - Delete Environment dev ${attempt.correlationId}`,
-              event: "workflow_dispatch",
-              path: `.github/workflows/${DELETE_ENV_DISPATCHER_FILE}`,
-              head_branch: "main",
-              head_sha: HEAD,
-              actor: { login: "octocat" },
-              created_at: new Date(attempt.dispatchedAt).toISOString(),
-              updated_at: new Date(attempt.dispatchedAt + 5000).toISOString(),
-              run_attempt: 1,
-              status: "completed",
-              conclusion: "success"
-            }
-          ]
-        })
-      );
-    });
-    const record = vi.fn(async (_attempt: EnvironmentDispatchAttempt) => {});
-    const h = harness(
-      { runGh },
-      {
-        selected: {
-          getBranchHead: async () => HEAD,
-          beforeDispatch: async () => {
-            throw new Error("Legacy dispatch bypass");
-          },
-          selectedAttempts: {
-            owner: "octocat",
-            operationAttempt: () => 0,
-            latest: () => attempt,
-            begin: async () => {
-              throw new Error("Unexpected new attempt");
+  it.each([
+    ["success", "deleted"],
+    ["guarded", "apps_present"],
+    ["teardown-ran", "failed"]
+  ] as const)(
+    "observes a saved attempt ending in %s without redispatch",
+    async (scenario, outcome) => {
+      const attempt: EnvironmentDispatchAttempt = {
+        operationAttempt: 0,
+        dispatchedAt: 1_000_000,
+        correlationId: "del-test-fixture",
+        branch: "main",
+        head: HEAD,
+        state: "unresolved"
+      };
+      const run = {
+        id: 21,
+        display_title: `Radius - Delete Environment dev ${attempt.correlationId}`,
+        event: "workflow_dispatch",
+        path: `.github/workflows/${DELETE_ENV_DISPATCHER_FILE}`,
+        head_branch: "main",
+        head_sha: HEAD,
+        actor: { login: "octocat" },
+        created_at: new Date(attempt.dispatchedAt).toISOString(),
+        updated_at: new Date(attempt.dispatchedAt + 5000).toISOString(),
+        run_attempt: 1,
+        status: "completed",
+        conclusion: scenario === "success" ? "success" : "failure"
+      };
+      const runGh = vi.fn(async (args: string[]) => {
+        expect(args.slice(0, 3)).toEqual(["api", "--method", "GET"]);
+        if (args[3]?.includes(`/workflows/${DELETE_ENV_DISPATCHER_FILE}/runs?`))
+          return ok(JSON.stringify({ total_count: 1, workflow_runs: [run] }));
+        if (args[3] === `/repos/${REPO}/actions/runs/21`)
+          return ok(JSON.stringify(run));
+        if (
+          args[3] ===
+          `/repos/${REPO}/actions/runs/21/attempts/1/jobs?per_page=100`
+        )
+          return ok(
+            JSON.stringify({
+              total_count: 1,
+              jobs: [
+                {
+                  name: "Azure / Delete with Radius",
+                  run_id: 21,
+                  run_attempt: 1,
+                  status: "completed",
+                  conclusion: "failure",
+                  steps: [
+                    {
+                      name: DELETE_ENV_GUARD_STEP_NAME,
+                      status: "completed",
+                      conclusion: "failure"
+                    },
+                    {
+                      name: "Delete Radius resource",
+                      status: "completed",
+                      conclusion: scenario === "guarded" ? "skipped" : "success"
+                    },
+                    {
+                      name: "Teardown",
+                      status: "completed",
+                      conclusion: "success"
+                    }
+                  ]
+                }
+              ]
+            })
+          );
+        throw new Error(`Unexpected saved run evidence request: ${args[3]}`);
+      });
+      const record = vi.fn(async (_attempt: EnvironmentDispatchAttempt) => {});
+      const h = harness(
+        { runGh },
+        {
+          selected: {
+            getBranchHead: async () => HEAD,
+            beforeDispatch: async () => {
+              throw new Error("Legacy dispatch bypass");
             },
-            record
+            selectedAttempts: {
+              owner: "octocat",
+              operationAttempt: () => 0,
+              latest: () => attempt,
+              begin: async () => {
+                throw new Error("Unexpected new attempt");
+              },
+              record
+            }
           }
         }
+      );
+      expect(await h.run()).toMatchObject({ outcome });
+      expect(record).toHaveBeenNthCalledWith(1, {
+        ...attempt,
+        state: "correlated",
+        runId: 21
+      });
+      if (scenario === "guarded") {
+        expect(record).toHaveBeenNthCalledWith(2, {
+          ...attempt,
+          state: "guarded",
+          runId: 21,
+          runAttempt: 1,
+          updatedAt: run.updated_at
+        });
       }
-    );
-    expect(await h.run()).toEqual({ outcome: "deleted" });
-    expect(runGh).toHaveBeenCalledTimes(1);
-    expect(record).toHaveBeenCalledWith({
-      ...attempt,
-      state: "correlated",
-      runId: 21
-    });
-  });
+      expect(record).toHaveBeenCalledTimes(scenario === "guarded" ? 2 : 1);
+    }
+  );
 
   it("observes only the saved dispatch after a restart", async () => {
     const beforeDispatch = vi.fn(async () => {});
