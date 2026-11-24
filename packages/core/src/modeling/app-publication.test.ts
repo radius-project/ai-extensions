@@ -25,7 +25,8 @@ describe("application publication", () => {
     });
     expect(ports.compileExtension).toHaveBeenCalledWith(
       ".radius/.staging-run/custom-types.yaml",
-      ".radius/.staging-run/custom-types.tgz"
+      ".radius/.staging-run/custom-types.tgz",
+      "workspace"
     );
     expect(ports.publishRecipe).not.toHaveBeenCalled();
   });

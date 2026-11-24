@@ -23,6 +23,7 @@ export interface SpawnRadOptions {
   env?: NodeJS.ProcessEnv;
   timeout?: number;
   label?: string;
+  signal?: AbortSignal;
 }
 
 // bicepPath is required: this low-level helper has no default, so omitting it
@@ -43,7 +44,7 @@ export function windowsTaskkillPath(env?: NodeJS.ProcessEnv): string;
 export function killChildTree(
   child: ChildProcessLike | null | undefined,
   platform?: NodeJS.Platform
-): void;
+): Promise<void> | undefined;
 
 export function radSpawnOptions(platform?: NodeJS.Platform): RadSpawnOptions;
 

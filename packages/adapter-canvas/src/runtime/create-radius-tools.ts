@@ -90,11 +90,12 @@ export function createRadiusTools(
     stagingPrefix: deps.publishTargets.resolveStagingDirPrefix,
     validateRegistryTarget: deps.publishTargets.validateGhcrTargetForRepo,
     exists: deps.process.existsSync,
-    compileExtension: (fromFile, target) =>
+    compileExtension: (fromFile, target, workspace) =>
       deps.rad.runRadBicepPublishExtension({
         fromFile,
         target,
-        log: logToSession
+        log: logToSession,
+        beforeSpawn: () => authoring.assertStandalone(workspace)
       }),
     publishRecipe: (file, target, workspace) =>
       deps.withGhcrDockerConfig((env) => {
@@ -103,7 +104,8 @@ export function createRadiusTools(
           file,
           target,
           env,
-          log: logToSession
+          log: logToSession,
+          beforeSpawn: () => authoring.assertStandalone(workspace)
         });
       })
   });
@@ -363,6 +365,7 @@ export function createRadiusTools(
                 fromFile,
                 target,
                 log: logToSession,
+                prepareSpawn: () => authoring.assertCurrentSource(token),
                 beforeSpawn() {
                   authoring.assertCurrent(token);
                   staging.artifact("custom-types.yaml", true);
@@ -419,6 +422,7 @@ export function createRadiusTools(
                       target,
                       env,
                       log: logToSession,
+                      prepareSpawn: () => authoring.assertCurrentSource(token),
                       beforeSpawn() {
                         authoring.assertCurrent(token);
                         staging.artifact(recipe, true);

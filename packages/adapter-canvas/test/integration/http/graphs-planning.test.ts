@@ -15,6 +15,7 @@ import {
   createWorkflowArtifactReader
 } from "@radius-project/adapter-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createModelAuthoringOwner } from "../../../src/runtime/model-authoring-owner.js";
 import {
   createWorkflowObservationScope,
   type WorkflowObservationScope
@@ -188,6 +189,67 @@ async function concurrentGraphRuntime(
 }
 
 describe("graph concurrency through production HTTP routes", () => {
+  it("keeps a managed refresh completable across graph loads", async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "radius-refresh-http-"));
+    const h = await concurrentGraphRuntime(workspace);
+    const target = "octo/app::main";
+    const promote = vi.fn(() => ({ published: ["app.bicep"], gitError: "" }));
+    const source = {
+      repo: "octo/app",
+      branch: "main",
+      workspace,
+      sourceRevision: "saved-source"
+    };
+    const appFile = path.join(workspace, ".radius", "app.bicep");
+    const owner = createModelAuthoringOwner({
+      resolveTarget: async () => source,
+      staging: () => ({
+        stagingDir: path.dirname(appFile),
+        artifact: () => appFile,
+        cancel() {},
+        validate: (check) => check(appFile),
+        promote
+      })
+    });
+    try {
+      initCommittedGraphWorkspace(workspace);
+      mkdirSync(path.dirname(appFile));
+      writeFileSync(appFile, "resource fixture\n");
+      const first = h.load();
+      await vi.waitFor(() => expect(h.builds).toHaveLength(1));
+      h.builds[0].resolve();
+      expect((await first).ok).toBe(true);
+
+      h.entry.state.appModelAttemptTokens = { [target]: "refresh" };
+      owner.begin(
+        "refresh",
+        source,
+        () => h.entry.state.appModelAttemptTokens?.[target] === "refresh",
+        async () => {}
+      );
+      const reloadFinished = vi.fn();
+      const reload = h.load().then((response) => {
+        reloadFinished();
+        return response;
+      });
+      await vi.waitFor(() =>
+        expect(
+          h.builds.length > 1 || reloadFinished.mock.calls.length > 0
+        ).toBe(true)
+      );
+      h.builds[1]?.resolve();
+      expect((await reload).ok).toBe(true);
+      await expect(owner.finish("refresh")).resolves.toMatchObject({
+        published: ["app.bicep"]
+      });
+      expect(promote).toHaveBeenCalledOnce();
+    } finally {
+      await owner.close();
+      await h.close();
+      rmSync(workspace, { force: true, recursive: true });
+    }
+  });
+
   it.each(["JSON", "SSE"] as const)(
     "reports stale instead of blank-model recovery after another request takes ownership (%s)",
     async (transport) => {

@@ -80,7 +80,7 @@ describe("rad process spawn policy", () => {
       kill: vi.fn(() => true)
     });
 
-    killChildTree(child, "win32");
+    void killChildTree(child, "win32");
 
     expect(spawn).toHaveBeenCalledWith(
       "C:\\Windows\\System32\\taskkill.exe",
@@ -99,7 +99,7 @@ describe("rad process spawn policy", () => {
       kill: vi.fn(() => true)
     };
 
-    killChildTree(child, "win32");
+    void killChildTree(child, "win32");
     taskkill.emit("error", new Error("taskkill unavailable"));
 
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
@@ -184,6 +184,74 @@ describe("rad process spawn policy", () => {
       })
     );
     expect(RadProcessError).toBeDefined();
+  });
+
+  it("waits for both the aborted process and Windows tree cleanup", async () => {
+    setProcessPlatform("win32");
+    const child = new FakeSpawnedProcess();
+    const taskkill = new EventEmitter();
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(child)
+      .mockReturnValueOnce(taskkill);
+    vi.doMock("node:child_process", () => ({ spawn }));
+    const { spawnRad } = await import("./rad-process.mjs");
+    const controller = new AbortController();
+    const settled = vi.fn();
+    const result = spawnRad("validator", [], {
+      label: "validator",
+      signal: controller.signal
+    }).catch(settled);
+
+    controller.abort();
+    child.emit("close", null, "SIGKILL");
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+    taskkill.emit("close", 0);
+
+    await result;
+    expect(settled).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "validator was cancelled" })
+    );
+  });
+
+  it("drains the child after timeout for an abortable invocation", async () => {
+    setProcessPlatform("linux");
+    vi.useFakeTimers();
+    const child = new FakeSpawnedProcess();
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    vi.doMock("node:child_process", () => ({ spawn: () => child }));
+    const { spawnRad } = await import("./rad-process.mjs");
+    const settled = vi.fn();
+    const result = spawnRad("validator", [], {
+      label: "validator",
+      timeout: 30,
+      signal: new AbortController().signal
+    }).catch(settled);
+
+    await vi.advanceTimersByTimeAsync(30);
+    expect(kill).toHaveBeenCalledWith(-child.pid, "SIGKILL");
+    expect(settled).not.toHaveBeenCalled();
+    child.emit("close", null, "SIGKILL");
+
+    await result;
+    expect(settled).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "validator timed out after 30ms" })
+    );
+  });
+
+  it("does not spawn for a signal already cancelled", async () => {
+    const spawn = vi.fn();
+    vi.doMock("node:child_process", () => ({ spawn }));
+    const { spawnRad } = await import("./rad-process.mjs");
+    const controller = new AbortController();
+    const reason = new Error("shutdown already started");
+    controller.abort(reason);
+
+    await expect(
+      spawnRad("validator", [], { signal: controller.signal })
+    ).rejects.toBe(reason);
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it("caps both captured output streams without changing process success", async () => {
