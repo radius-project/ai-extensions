@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  captureSourceRefSelection,
   getSourceRefResources,
   prepareSourceRefResources,
   setSourceRefResources,
@@ -33,6 +34,26 @@ describe("source-code reference state", () => {
     expect(prepareSourceRefResources(entry(), "diff", {}).token).toBe(
       "diff||..."
     );
+  });
+
+  it("retains a selection across reloads but never reactivates it after switching away", () => {
+    const graph = entry();
+    const selected = { repo: "acme/app", branch: "main" };
+    const original = prepareSourceRefResources(graph, "graph", selected);
+    const current = captureSourceRefSelection(graph.state, "graph");
+
+    prepareSourceRefResources(graph, "graph", selected);
+    prepareSourceRefResources(graph, "planned", {
+      ...selected,
+      branch: "other"
+    });
+    expect(current()).toBe(true);
+
+    prepareSourceRefResources(graph, "graph", { ...selected, branch: "other" });
+    expect(current()).toBe(false);
+    const returned = prepareSourceRefResources(graph, "graph", selected);
+    expect(returned.token).toBe(original.token);
+    expect(current()).toBe(false);
   });
 
   it("rejects unknown graph views", () => {

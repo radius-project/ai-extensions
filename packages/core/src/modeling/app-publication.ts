@@ -10,6 +10,8 @@ export interface AppPublicationPorts {
   resolveTarget: ArtifactPath;
   stagingPrefix(workspace: WorkspacePath, input: unknown): string;
   validateRegistryTarget(target: unknown, repo: WorkspacePath): string | null;
+  isUnconfirmedExit(error: unknown): boolean;
+  localTargetKey(path: string): string;
   exists(path: string): boolean;
   compileExtension(
     fromFile: string,
@@ -24,27 +26,42 @@ export interface AppPublicationPorts {
 }
 
 export function createAppPublication(ports: AppPublicationPorts) {
-  const recipePublications = new Map<string, Promise<unknown>>();
+  const publications = new Map<string, Promise<unknown>>();
+  const blockedTargets = new Set<string>();
 
-  async function publishRecipeInOrder<T>(target: string, publish: () => T) {
-    // A late push must settle before another request can publish that tag.
+  async function publishInOrder<T>(key: string, publish: () => T) {
+    // A late writer must settle before another request can use that target.
     // This queue belongs to one runtime, not to the registry or the workspace.
-    const key = target.toLowerCase();
-    const preceding = recipePublications.get(key);
+    const preceding = publications.get(key);
     const publication = Promise.resolve(preceding)
       .catch(() => undefined)
-      .then(publish);
-    recipePublications.set(key, publication);
+      .then(async () => {
+        if (blockedTargets.has(key)) {
+          throw new Error(
+            "Publication to this target is blocked because the previous Windows process tree could not be confirmed stopped."
+          );
+        }
+        try {
+          return await publish();
+        } catch (error) {
+          if (ports.isUnconfirmedExit(error)) blockedTargets.add(key);
+          throw error;
+        }
+      });
+    publications.set(key, publication);
     try {
       return await publication;
     } finally {
-      if (recipePublications.get(key) === publication) {
-        recipePublications.delete(key);
-      }
+      if (publications.get(key) === publication) publications.delete(key);
     }
   }
 
+  function compileInOrder<T>(target: string, publish: () => T) {
+    return publishInOrder(`extension:${ports.localTargetKey(target)}`, publish);
+  }
+
   return {
+    compileInOrder,
     async compileExtension(
       workspace: WorkspacePath,
       input: {
@@ -65,7 +82,9 @@ export function createAppPublication(ports: AppPublicationPorts) {
         `.radius/${prefix}custom-types.tgz`
       );
       if (!ports.exists(from)) return { kind: "missing", path: from } as const;
-      await ports.compileExtension(from, target, workspace);
+      await compileInOrder(target, () =>
+        ports.compileExtension(from, target, workspace)
+      );
       return { kind: "compiled", target } as const;
     },
     async publishRecipe(
@@ -77,7 +96,7 @@ export function createAppPublication(ports: AppPublicationPorts) {
       const error = ports.validateRegistryTarget(input.target, repo);
       if (error) return { kind: "refused", error } as const;
       const target = String(input.target).trim();
-      return publishRecipeInOrder(target, async () => {
+      return publishInOrder(`recipe:${target.toLowerCase()}`, async () => {
         if (managedPublish) {
           const published = await managedPublish(target);
           return { kind: "published", reference: String(published) } as const;

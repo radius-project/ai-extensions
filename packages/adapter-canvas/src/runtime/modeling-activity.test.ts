@@ -111,6 +111,18 @@ describe("createModelingActivity", () => {
     expect(await activity.inFlight("a/b", ["main"])).toBe(true);
   });
 
+  it("does not erase a replacement announcement made at the same clock tick", async () => {
+    const { activity } = harness();
+    const target = { repo: "a/b", branch: "feat" };
+    const releaseFirst = activity.announce(target);
+    const releaseReplacement = activity.announce(target);
+
+    releaseFirst();
+    expect(await activity.inFlight("a/b", ["feat"])).toBe(true);
+    releaseReplacement();
+    expect(await activity.inFlight("a/b", ["feat"])).toBe(false);
+  });
+
   it("does not let one repo's announcement silence another repo or branch", async () => {
     const { activity } = harness();
 

@@ -14,6 +14,7 @@ import {
   type LoadGraphStreamBicepSelection
 } from "./graphs-planning.js";
 import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../graph-progress-contract.js";
+import { prepareSourceRefResources } from "../../source-refs.js";
 
 // ── Recorder ─────────────────────────────────────────────────────────────────
 // The stream handler writes SSE frames through `response.write` and terminates
@@ -288,6 +289,26 @@ function frames(stream: string): { event: string; data: unknown }[] {
 }
 
 describe("graphs-planning load-graph-stream route", () => {
+  it("keeps a handoff current across identical streams but not across a selection round trip", async () => {
+    const { deps } = fakes();
+    deps.prepareSourceRef = (entry, selection) =>
+      prepareSourceRefResources(entry, "graph", selection);
+    deps.isCurrentSourceRef = (entry, token) =>
+      entry.state.sourceRefContexts?.graph?.token === token;
+    const handoff = vi.spyOn(deps, "triggerAppBicepHandoff");
+    const load = (branch: string) =>
+      run(`/api/load-graph-stream?repo=${REPO}&branch=${branch}`, deps);
+
+    await load("main");
+    const current = handoff.mock.calls[0]?.[3];
+    if (!current) throw new Error("Missing stream handoff");
+    await load("main");
+    expect(current()).toBe(true);
+    await load("alternate");
+    await load("main");
+    expect(current()).toBe(false);
+  });
+
   it("declares exactly the one route it owns", () => {
     const routes = createGraphsPlanningStreamRoutes(fakes().deps);
     expect(Object.keys(routes)).toEqual(["GET /api/load-graph-stream"]);

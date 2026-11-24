@@ -1,6 +1,15 @@
 import { redactCredentials, type DeploymentState } from "@radius-project/core";
+import { RadProcessExitUnconfirmedError } from "@radius-project/adapter-shared";
 import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi
+} from "vitest";
 import {
   APP_ORIGIN_REPO_PATH,
   UNIDENTIFIED_APPLICATION_MESSAGE,
@@ -10,6 +19,10 @@ import {
 import { collectWorkflowFailure } from "@radius-project/core";
 import { hashAppBicep } from "../../../src/app-bicep-hash.js";
 import type { RadiusExtension } from "../../../src/runtime/create-radius-extension.js";
+import type {
+  ProcessDependencies,
+  RadiusExtensionDependencies
+} from "../../../src/runtime/dependencies.js";
 import {
   KEEPALIVE_ACTIVE_WINDOW_MS,
   KEEPALIVE_INTERVAL_MS
@@ -616,13 +629,16 @@ describe("P0-A Radius runtime registration contract", () => {
     try {
       const [
         { createRadiusCanvas: importRadiusCanvas },
-        { createRadiusExtension: importRadiusExtension }
+        { createRadiusExtension: importRadiusExtension },
+        { createCanvasModelAuthoring }
       ] = await Promise.all([
         import("../../../src/runtime/create-radius-canvas.js"),
-        import("../../../src/runtime/create-radius-extension.js")
+        import("../../../src/runtime/create-radius-extension.js"),
+        import("../../../src/runtime/canvas-model-authoring.js")
       ]);
       const fake = createFakeDependencies();
-      expect(() => importRadiusCanvas(fake.deps)).not.toThrow();
+      const authoring = createCanvasModelAuthoring(fake.deps, async () => ({}));
+      expect(() => importRadiusCanvas(fake.deps, authoring)).not.toThrow();
       expect(() => importRadiusExtension(fake.deps)).not.toThrow();
       expect(productionJoinSession).not.toHaveBeenCalled();
     } finally {
@@ -1475,66 +1491,52 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     await harness.extension.shutdown("test");
   });
 
-  it.each([
-    "complete",
-    "refresh",
-    "refresh cancelled",
-    "refresh refused",
-    "refresh selection changed",
-    "refresh no node",
-    "invalid",
-    "cancel",
-    "stale",
-    "stale during credentials",
-    "cancel while resolving publisher",
-    "stale extension while resolving publisher",
-    "stale recipe while resolving publisher",
-    "standalone while resolving publisher",
-    "shutdown during validation",
-    "no node",
-    "invalid bootstrap",
-    "missing revision",
-    "send failed"
-  ] as const)(
-    "binds the managed Canvas graph handoff to registered tools: %s",
-    async (outcome) => {
+  describe("managed Canvas graph authoring through registered tools", () => {
+    const repo = "acme/widgets";
+    const tokenKey = `${repo}::main`;
+    const stage = resolve(".radius", ".staging-managed-test");
+    const node = resolve("test", "bin", "node");
+    const skillBase = resolve("test", "skills", "radius-app-bicep");
+    const stopInstruction = "Stop and ask the user to install Node.js.";
+    const recipeArgs = {
+      file: "service-recipe.bicep",
+      target: "br:ghcr.io/acme/widgets/service:1"
+    };
+
+    async function setup({
+      refresh = false,
+      nodeAvailable = true,
+      revision = "saved-source-1",
+      bootstrap,
+      publicationFilesExist = false
+    }: {
+      refresh?: boolean;
+      nodeAvailable?: boolean;
+      revision?: string;
+      bootstrap?: string;
+      publicationFilesExist?: boolean;
+    } = {}) {
       const model =
         "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
-      let selectionIsCurrent = true;
-      const stage = resolve(".radius", ".staging-managed-test");
-      const node = resolve("test", "bin", "node");
-      const skillBase = resolve("test", "skills", "radius-app-bicep");
-      const stopInstruction = "Stop and ask the user to install Node.js.";
-      let nodeAvailable =
-        outcome !== "no node" && outcome !== "refresh no node";
-      let revision = outcome === "missing revision" ? "" : "saved-source-1";
+      const source = { nodeAvailable, revision, selectionIsCurrent: true };
       const artifact = vi.fn((name: string) => join(stage, name));
       const cancel = vi.fn();
-      const credentialsStarted = createDeferred<void>();
-      const credentialsReady = createDeferred<void>();
-      const publisherStarted = createDeferred<void>();
-      const publisherReady = createDeferred<void>();
-      const spawnPublisher = vi.fn();
-      let preparingPublishers = 0;
-      const promote = vi.fn(() => ({ published: ["app.bicep"], gitError: "" }));
-      const validatorStarted = createDeferred<AbortSignal>();
-      const validatorClosed = createDeferred<void>();
-      const runValidator = vi.fn<
-        import("../../../src/runtime/dependencies.js").ProcessDependencies["runValidator"]
-      >(async (_node, _args, { signal }) => {
-        if (outcome === "invalid" || outcome === "refresh refused")
-          throw new Error("invalid test model");
-        if (outcome === "shutdown during validation") {
-          validatorStarted.resolve(signal);
-          await validatorClosed.promise;
-          signal.throwIfAborted();
-        }
-        return { stdout: "", stderr: "" };
+      const assertBaseline = vi.fn();
+      const promote = vi.fn<
+        ReturnType<RadiusExtensionDependencies["beginManagedModel"]>["promote"]
+      >(async (prepareCommit, beforeCommit, options) => {
+        await prepareCommit();
+        beforeCommit();
+        options?.onFilesystemCommitted?.();
+        return { published: ["app.bicep"], gitError: "" };
       });
+      const runValidator = vi.fn<ProcessDependencies["runValidator"]>(
+        async () => ({ stdout: "", stderr: "" })
+      );
       const harness = await createRuntimeSdkHarness(
         {
           workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] },
-          ...(outcome.startsWith("refresh") ?
+          ...(refresh ?
             {
               bicepByRepoBranch: { "workspace:acme/widgets@main": model },
               filesByRepoBranch: {
@@ -1553,262 +1555,138 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           : {})
         },
         (deps) => {
-          deps.appModel.workspaceSourceRevision = async () => revision;
+          deps.appModel.workspaceSourceRevision = async () => source.revision;
           deps.radiusAppBicepSkill = () =>
-            outcome === "invalid bootstrap" ? "null" : (
-              JSON.stringify({
-                skill: "radius-app-bicep",
-                skillBase,
-                nodeCommand: nodeAvailable ? node : null,
-                instruction: nodeAvailable ? "Run the skill." : stopInstruction
-              })
-            );
+            bootstrap ??
+            JSON.stringify({
+              skill: "radius-app-bicep",
+              skillBase,
+              nodeCommand: source.nodeAvailable ? node : null,
+              instruction:
+                source.nodeAvailable ? "Run the skill." : stopInstruction
+            });
           deps.beginManagedModel = () => ({
             stagingDir: stage,
             artifact,
             cancel,
+            assertBaseline,
             promote,
             validate: (check) => check(join(stage, "app.bicep"))
           });
           deps.process.runValidator = runValidator;
-          if (outcome.endsWith("while resolving publisher")) {
-            const publish = async ({
-              prepareSpawn,
-              beforeSpawn
-            }: {
-              prepareSpawn?: () => Promise<void>;
-              beforeSpawn?: () => void;
-            }) => {
-              if (
-                ++preparingPublishers === (outcome.startsWith("stale") ? 1 : 2)
-              )
-                publisherStarted.resolve();
-              await publisherReady.promise;
-              if (prepareSpawn) await prepareSpawn();
-              beforeSpawn?.();
-              spawnPublisher();
-              return "published";
-            };
-            deps.rad.runRadBicepPublishExtension = publish;
-            deps.rad.runRadBicepPublish = publish;
-            if (outcome === "standalone while resolving publisher") {
-              deps.process.existsSync = () => true;
-            }
-          }
-          if (outcome === "stale during credentials") {
-            deps.withGhcrDockerConfig = async (publish) => {
-              credentialsStarted.resolve();
-              await credentialsReady.promise;
-              return publish({ DOCKER_CONFIG: "fixture-config" });
-            };
-          }
+          if (publicationFilesExist) deps.process.existsSync = () => true;
         }
       );
-      try {
-        const { state } = await harness.deps.getOrCreateServer(
-          "model-panel",
-          "graph"
+      const releaseGates: (() => void)[] = [];
+      onTestFinished(async () => {
+        for (const release of releaseGates) release();
+        await harness.extension.shutdown("test");
+      });
+      const { state } = await harness.deps.getOrCreateServer(
+        "model-panel",
+        "graph"
+      );
+      Object.assign(state, {
+        canvasInstanceId: "model-panel",
+        workspacePath: "/workspace",
+        workspaceRepo: repo,
+        workspaceBranch: "main"
+      });
+      const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+      if (!handoff) throw new Error("No Canvas modeling handoff registered");
+      const tool = (name: string) => {
+        const result = harness.extension.tools.find(
+          (candidate) => candidate.name === name
         );
-        Object.assign(state, {
-          canvasInstanceId: "model-panel",
-          workspacePath: "/workspace",
-          workspaceRepo: "acme/widgets",
-          workspaceBranch: "main"
-        });
-        const handoff = harness.capturedHostCallbacks.appBicepHandoff;
-        if (!handoff) throw new Error("No Canvas modeling handoff registered");
-        const request = {
-          repo: "acme/widgets",
-          branches: ["main"],
-          page: "graph",
-          state,
-          isCurrent: () => selectionIsCurrent
-        };
-        if (outcome === "send failed") {
-          vi.mocked(harness.session.send).mockRejectedValueOnce(
-            new Error("SDK delivery failed")
-          );
-          await expect(handoff(request)).rejects.toThrow("SDK delivery failed");
-          expect(cancel).toHaveBeenCalledOnce();
-          return;
-        }
-        if (outcome === "invalid bootstrap" || outcome === "missing revision") {
-          await expect(handoff(request)).rejects.toThrow(
-            outcome === "invalid bootstrap" ?
-              "did not provide a bootstrap"
-            : "Cannot establish the managed Radius authoring source"
-          );
-          expect(harness.session.send).not.toHaveBeenCalled();
-          expect(state.appModelAttemptTokens).toEqual({});
-          expect(promote).not.toHaveBeenCalled();
-          return;
-        }
-        const recipeArgs = {
-          file: "service-recipe.bicep",
-          target: "br:ghcr.io/acme/widgets/service:1"
-        };
-        const tool = (name: string) => {
-          const result = harness.extension.tools.find(
-            (candidate) => candidate.name === name
-          );
-          if (!result) throw new Error(`Missing tool: ${name}`);
-          return result;
-        };
-        if (outcome === "standalone while resolving publisher") {
-          const publishing = [
-            tool("radius_publish_custom_type_extension").handler({}),
-            tool("radius_publish_recipe").handler(recipeArgs)
-          ];
-          await publisherStarted.promise;
-          await handoff(request);
-          publisherReady.resolve();
-          for (const result of await Promise.all(publishing))
-            expect(result).toContain("active managed");
-          expect(spawnPublisher).not.toHaveBeenCalled();
-          return;
-        }
-        await handoff(request);
-        if (outcome === "refresh no node") {
-          expect(harness.session.send).toHaveBeenCalledExactlyOnceWith(
-            expect.objectContaining({
-              prompt: expect.stringContaining(stopInstruction)
-            })
-          );
-          expect(harness.session.send).not.toHaveBeenCalledWith(
-            expect.objectContaining({
-              prompt: expect.stringContaining("managedAuthoring")
-            })
-          );
-          expect(state.appModelAttemptTokens).toEqual({});
-          expect(state.appBicepHandoffKey).toBeUndefined();
-          nodeAvailable = true;
-          await handoff(request);
-          expect(harness.session.send).toHaveBeenCalledTimes(2);
-        }
-        const requestToken =
-          state.appModelAttemptTokens?.["acme/widgets::main"];
-        expect(requestToken).toBeTruthy();
-        const complete = tool("radius_complete_app_authoring");
-        if (outcome === "no node") {
-          await expect(
-            complete.handler({ requestToken, outcome: "complete" })
-          ).resolves.toMatchObject({
-            kind: "refused",
-            error: expect.stringContaining("expired")
-          });
-          return;
-        }
-        expect(harness.session.send).toHaveBeenCalledWith(
-          expect.objectContaining({
-            prompt: expect.stringContaining(
-              JSON.stringify({ requestToken, stagingDir: stage })
-            )
-          })
-        );
+        if (!result) throw new Error(`Missing tool: ${name}`);
+        return result.handler;
+      };
+      return {
+        harness,
+        state,
+        source,
+        artifact,
+        cancel,
+        assertBaseline,
+        promote,
+        runValidator,
+        releaseGates,
+        handoff: () =>
+          handoff({
+            repo,
+            branches: ["main"],
+            page: "graph",
+            state,
+            isCurrent: () => source.selectionIsCurrent
+          }),
+        complete: tool("radius_complete_app_authoring"),
+        publishExtension: tool("radius_publish_custom_type_extension"),
+        publishRecipe: tool("radius_publish_recipe"),
+        currentToken: () => state.appModelAttemptTokens?.[tokenKey]
+      };
+    }
 
-        if (outcome === "shutdown during validation") {
-          const finishing = complete.handler({
-            requestToken,
-            outcome: "complete"
-          });
-          const signal = await validatorStarted.promise;
-          const closed = vi.fn();
-          const shuttingDown = harness.extension.shutdown("test").then(closed);
-          expect(signal.aborted).toBe(true);
-          await Promise.resolve();
-          expect(closed).not.toHaveBeenCalled();
-          validatorClosed.resolve();
-          await expect(finishing).resolves.toMatchObject({ kind: "refused" });
-          await shuttingDown;
-          expect(closed).toHaveBeenCalledWith({ complete: true, exitCode: 0 });
-          expect(promote).not.toHaveBeenCalled();
-        } else if (
-          outcome === "stale extension while resolving publisher" ||
-          outcome === "stale recipe while resolving publisher"
-        ) {
-          const publishing =
-            outcome.startsWith("stale extension") ?
-              tool("radius_publish_custom_type_extension").handler({
-                requestToken
-              })
-            : tool("radius_publish_recipe").handler({
-                requestToken,
-                ...recipeArgs
-              });
-          await publisherStarted.promise;
-          revision = "saved-source-2";
-          publisherReady.resolve();
-          await expect(publishing).resolves.toContain(
-            "source or worktree changed"
+    type ManagedAuthoringFixture = Awaited<ReturnType<typeof setup>>;
+
+    function expectHandoffToken({
+      harness,
+      currentToken
+    }: ManagedAuthoringFixture) {
+      const requestToken = currentToken();
+      expect(requestToken).toBeTruthy();
+      expect(harness.session.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: expect.stringContaining(
+            JSON.stringify({ requestToken, stagingDir: stage })
+          )
+        })
+      );
+      return requestToken;
+    }
+
+    describe("completion and promotion", () => {
+      it.each([
+        { model: "new", refresh: false },
+        { model: "refreshed", refresh: true }
+      ])(
+        "validates and promotes a $model model after managed publication",
+        async ({ refresh }) => {
+          const fixture = await setup({ refresh });
+          const {
+            harness,
+            handoff,
+            publishExtension,
+            publishRecipe,
+            artifact,
+            complete,
+            runValidator,
+            promote
+          } = fixture;
+          await handoff();
+          const requestToken = expectHandoffToken(fixture);
+
+          await expect(publishExtension({})).resolves.toContain(
+            "active managed"
           );
-          expect(spawnPublisher).not.toHaveBeenCalled();
-        } else if (outcome === "cancel while resolving publisher") {
-          const publishing = [
-            tool("radius_publish_custom_type_extension").handler({
-              requestToken
-            }),
-            tool("radius_publish_recipe").handler({
-              requestToken,
-              file: "service-recipe.bicep",
-              target: "br:ghcr.io/acme/widgets/service:1"
-            })
-          ];
-          await publisherStarted.promise;
-          await expect(
-            complete.handler({ requestToken, outcome: "cancel" })
-          ).resolves.toEqual({ kind: "cancelled" });
-          publisherReady.resolve();
-          for (const result of await Promise.all(publishing))
-            expect(result).toContain("expired");
-          expect(spawnPublisher).not.toHaveBeenCalled();
-        } else if (outcome === "stale during credentials") {
-          const publish = tool("radius_publish_recipe").handler({
-            requestToken,
-            file: "service-recipe.bicep",
-            target: "br:ghcr.io/acme/widgets/service:1"
-          });
-          await credentialsStarted.promise;
-          revision = "saved-source-2";
-          credentialsReady.resolve();
-          await expect(publish).resolves.toContain(
-            "source or worktree changed"
+          await expect(publishRecipe(recipeArgs)).resolves.toContain(
+            "active managed"
           );
-          expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
-        } else if (
-          outcome === "complete" ||
-          outcome === "refresh" ||
-          outcome === "refresh no node"
-        ) {
-          await expect(
-            tool("radius_publish_custom_type_extension").handler({})
-          ).resolves.toContain("active managed");
-          await expect(
-            tool("radius_publish_recipe").handler({
-              file: "service-recipe.bicep",
-              target: "br:ghcr.io/acme/widgets/service:1"
-            })
-          ).resolves.toContain("active managed");
           expect(
             harness.deps.rad.runRadBicepPublishExtension
           ).not.toHaveBeenCalled();
           expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
-          await expect(
-            tool("radius_publish_custom_type_extension").handler({
-              requestToken
-            })
-          ).resolves.toContain("custom-types.tgz");
+          await expect(publishExtension({ requestToken })).resolves.toContain(
+            "custom-types.tgz"
+          );
           expect(artifact).toHaveBeenCalledWith("custom-types.yaml", true);
           expect(artifact).toHaveBeenCalledWith("custom-types.tgz", false);
           await expect(
-            tool("radius_publish_recipe").handler({
-              requestToken,
-              file: "service-recipe.bicep",
-              target: "br:ghcr.io/acme/widgets/service:1"
-            })
+            publishRecipe({ requestToken, ...recipeArgs })
           ).resolves.toContain("Published recipe");
           expect(artifact).toHaveBeenCalledWith("service-recipe.bicep", true);
+
           await expect(
-            complete.handler({ requestToken, outcome: "complete" })
+            complete({ requestToken, outcome: "complete" })
           ).resolves.toMatchObject({
             kind: "promoted",
             published: ["app.bicep"]
@@ -1823,62 +1701,642 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             expect.objectContaining({ cwd: "/workspace" })
           );
           expect(promote).toHaveBeenCalledOnce();
-        } else if (outcome === "refresh selection changed") {
-          selectionIsCurrent = false;
-          await expect(
-            complete.handler({ requestToken, outcome: "complete" })
-          ).resolves.toMatchObject({ kind: "refused" });
-          expect(runValidator).not.toHaveBeenCalled();
-          expect(promote).not.toHaveBeenCalled();
-          expect(cancel).toHaveBeenCalledOnce();
-          selectionIsCurrent = true;
-        } else if (outcome === "cancel" || outcome === "refresh cancelled") {
-          await expect(
-            complete.handler({ requestToken, outcome: "cancel" })
-          ).resolves.toEqual({ kind: "cancelled" });
-          await expect(
-            complete.handler({ requestToken, outcome: "complete" })
-          ).resolves.toMatchObject({ kind: "refused" });
-          expect(runValidator).not.toHaveBeenCalled();
-        } else {
-          if (outcome === "stale") revision = "saved-source-2";
-          await expect(
-            complete.handler({ requestToken, outcome: "complete" })
-          ).resolves.toMatchObject({
-            kind: "refused",
-            error: expect.stringContaining(
-              outcome === "stale" ?
-                "source or worktree changed"
-              : "invalid test model"
-            )
-          });
-          expect(promote).not.toHaveBeenCalled();
         }
-        if (
-          outcome === "refresh cancelled" ||
-          outcome === "refresh refused" ||
-          outcome === "refresh selection changed"
-        ) {
-          await handoff(request);
-          expect(harness.session.send).toHaveBeenCalledTimes(2);
-          const replacement =
-            state.appModelAttemptTokens?.["acme/widgets::main"];
-          expect(replacement).toBeTruthy();
-          expect(replacement).not.toBe(requestToken);
-          await expect(
-            complete.handler({ requestToken, outcome: "cancel" })
-          ).resolves.toMatchObject({ kind: "refused" });
-          expect(state.appModelAttemptTokens?.["acme/widgets::main"]).toBe(
-            replacement
-          );
-        }
-      } finally {
-        validatorClosed.resolve();
-        publisherReady.resolve();
-        await harness.extension.shutdown("test");
+      );
+
+      it("does not promote a model that fails validation", async () => {
+        const fixture = await setup();
+        const { handoff, runValidator, complete, promote } = fixture;
+        runValidator.mockRejectedValue(new Error("invalid test model"));
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({
+          kind: "refused",
+          error: expect.stringContaining("invalid test model")
+        });
+        expect(promote).not.toHaveBeenCalled();
+      });
+
+      it("does not promote after the workspace source changes", async () => {
+        const fixture = await setup();
+        const { handoff, source, complete, promote } = fixture;
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+        source.revision = "saved-source-2";
+
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({
+          kind: "refused",
+          error: expect.stringContaining("source or worktree changed")
+        });
+        expect(promote).not.toHaveBeenCalled();
+      });
+
+      it("refuses completion after cancellation without running validation", async () => {
+        const fixture = await setup();
+        const { handoff, complete, runValidator } = fixture;
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        await expect(
+          complete({ requestToken, outcome: "cancel" })
+        ).resolves.toEqual({ kind: "cancelled" });
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({ kind: "refused" });
+        expect(runValidator).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("refresh replacement", () => {
+      it("offers a new attempt after a cancelled refresh", async () => {
+        const fixture = await setup({ refresh: true });
+        const { harness, handoff, complete, currentToken, runValidator } =
+          fixture;
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        await expect(
+          complete({ requestToken, outcome: "cancel" })
+        ).resolves.toEqual({ kind: "cancelled" });
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({ kind: "refused" });
+        expect(runValidator).not.toHaveBeenCalled();
+
+        await handoff();
+        expect(harness.session.send).toHaveBeenCalledTimes(2);
+        const replacement = currentToken();
+        expect(replacement).toBeTruthy();
+        expect(replacement).not.toBe(requestToken);
+        await expect(
+          complete({ requestToken, outcome: "cancel" })
+        ).resolves.toMatchObject({ kind: "refused" });
+        expect(currentToken()).toBe(replacement);
+      });
+
+      it("offers a new attempt after refresh validation fails", async () => {
+        const fixture = await setup({ refresh: true });
+        const {
+          harness,
+          handoff,
+          runValidator,
+          complete,
+          currentToken,
+          promote
+        } = fixture;
+        runValidator.mockRejectedValue(new Error("invalid test model"));
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({
+          kind: "refused",
+          error: expect.stringContaining("invalid test model")
+        });
+        expect(promote).not.toHaveBeenCalled();
+
+        await handoff();
+        expect(harness.session.send).toHaveBeenCalledTimes(2);
+        const replacement = currentToken();
+        expect(replacement).toBeTruthy();
+        expect(replacement).not.toBe(requestToken);
+        await expect(
+          complete({ requestToken, outcome: "cancel" })
+        ).resolves.toMatchObject({ kind: "refused" });
+        expect(currentToken()).toBe(replacement);
+      });
+
+      it("offers a new attempt after the original selection becomes current again", async () => {
+        const fixture = await setup({ refresh: true });
+        const {
+          harness,
+          handoff,
+          source,
+          complete,
+          currentToken,
+          runValidator,
+          promote,
+          cancel
+        } = fixture;
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+        source.selectionIsCurrent = false;
+
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({ kind: "refused" });
+        expect(runValidator).not.toHaveBeenCalled();
+        expect(promote).not.toHaveBeenCalled();
+        expect(cancel).toHaveBeenCalledOnce();
+
+        source.selectionIsCurrent = true;
+        await handoff();
+        expect(harness.session.send).toHaveBeenCalledTimes(2);
+        const replacement = currentToken();
+        expect(replacement).toBeTruthy();
+        expect(replacement).not.toBe(requestToken);
+        await expect(
+          complete({ requestToken, outcome: "cancel" })
+        ).resolves.toMatchObject({ kind: "refused" });
+        expect(currentToken()).toBe(replacement);
+      });
+    });
+
+    describe("publication preparation races", () => {
+      function holdRecipeCredentials({
+        harness,
+        releaseGates
+      }: ManagedAuthoringFixture) {
+        const started = createDeferred<void>();
+        const ready = createDeferred<void>();
+        harness.deps.withGhcrDockerConfig = async (publish) => {
+          started.resolve();
+          await ready.promise;
+          return publish({ DOCKER_CONFIG: "fixture-config" });
+        };
+        releaseGates.push(ready.resolve);
+        return { started: started.promise, release: ready.resolve };
       }
-    }
-  );
+
+      function holdPublishers(
+        { harness, releaseGates }: ManagedAuthoringFixture,
+        count: number
+      ) {
+        const started = createDeferred<void>();
+        const ready = createDeferred<void>();
+        const spawn = vi.fn();
+        let preparing = 0;
+        const publish = async ({
+          prepareSpawn,
+          beforeSpawn
+        }: {
+          prepareSpawn?: () => Promise<void>;
+          beforeSpawn?: () => void;
+        }) => {
+          if (++preparing === count) started.resolve();
+          await ready.promise;
+          if (prepareSpawn) await prepareSpawn();
+          beforeSpawn?.();
+          spawn();
+          return "published";
+        };
+        harness.deps.rad.runRadBicepPublishExtension = publish;
+        harness.deps.rad.runRadBicepPublish = publish;
+        releaseGates.push(ready.resolve);
+        return { started: started.promise, release: ready.resolve, spawn };
+      }
+
+      it.each([
+        {
+          name: "custom-type extension",
+          handler: "publishExtension",
+          args: {}
+        },
+        { name: "recipe", handler: "publishRecipe", args: recipeArgs }
+      ] as const)(
+        "refuses to spawn a $name publisher after the source changes",
+        async ({ handler, args }) => {
+          const fixture = await setup();
+          const { handoff, source } = fixture;
+          const publisher = holdPublishers(fixture, 1);
+          await handoff();
+          const requestToken = expectHandoffToken(fixture);
+
+          const publishing = fixture[handler]({ requestToken, ...args });
+          await publisher.started;
+          source.revision = "saved-source-2";
+          publisher.release();
+
+          await expect(publishing).resolves.toContain(
+            "source or worktree changed"
+          );
+          expect(publisher.spawn).not.toHaveBeenCalled();
+        }
+      );
+
+      it("refuses both managed publishers when cancelled before they spawn", async () => {
+        const fixture = await setup();
+        const { handoff, complete, publishExtension, publishRecipe } = fixture;
+        const publisher = holdPublishers(fixture, 2);
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        const publishing = [
+          publishExtension({ requestToken }),
+          publishRecipe({ requestToken, ...recipeArgs })
+        ];
+        await publisher.started;
+        await expect(
+          complete({ requestToken, outcome: "cancel" })
+        ).resolves.toEqual({ kind: "cancelled" });
+        publisher.release();
+
+        for (const result of await Promise.all(publishing)) {
+          expect(result).toContain("no longer current");
+        }
+        expect(publisher.spawn).not.toHaveBeenCalled();
+      });
+
+      it("refuses standalone publishers if managed authoring starts before they spawn", async () => {
+        const fixture = await setup({ publicationFilesExist: true });
+        const { handoff, publishExtension, publishRecipe } = fixture;
+        const publisher = holdPublishers(fixture, 2);
+
+        const publishing = [publishExtension({}), publishRecipe(recipeArgs)];
+        await publisher.started;
+        await handoff();
+        publisher.release();
+
+        for (const result of await Promise.all(publishing)) {
+          expect(result).toContain("active managed");
+        }
+        expect(publisher.spawn).not.toHaveBeenCalled();
+      });
+
+      it("refuses recipe publication if the source changes during credential setup", async () => {
+        const fixture = await setup();
+        const { handoff, source, publishRecipe } = fixture;
+        const credentials = holdRecipeCredentials(fixture);
+        const publisher = holdPublishers(fixture, 1);
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        const publishing = publishRecipe({ requestToken, ...recipeArgs });
+        await credentials.started;
+        source.revision = "saved-source-2";
+        publisher.release();
+        credentials.release();
+
+        await expect(publishing).resolves.toContain(
+          "source or worktree changed"
+        );
+        expect(publisher.spawn).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ["custom-type extension", "publishExtension", {}],
+        ["recipe", "publishRecipe", recipeArgs]
+      ] as const)(
+        "refuses to spawn a %s publisher after a managed output is edited",
+        async (_, handler, args) => {
+          const fixture = await setup();
+          const { assertBaseline, handoff } = fixture;
+          const publisher = holdPublishers(fixture, 1);
+          await handoff();
+          const requestToken = expectHandoffToken(fixture);
+
+          const publishing = fixture[handler]({ requestToken, ...args });
+          await publisher.started;
+          assertBaseline.mockImplementationOnce(() => {
+            throw new Error(
+              "Managed model files changed while modeling: app.bicep."
+            );
+          });
+          publisher.release();
+
+          await expect(publishing).resolves.toContain(
+            "files changed while modeling"
+          );
+          expect(publisher.spawn).not.toHaveBeenCalled();
+        }
+      );
+
+      it.each([false, true])(
+        "holds a same-target successor through timeout cleanup (cancel queued request: %s)",
+        async (cancelQueued) => {
+          const fixture = await setup();
+          const {
+            assertBaseline,
+            complete,
+            handoff,
+            harness,
+            publishRecipe,
+            releaseGates
+          } = fixture;
+          const started = createDeferred<void>();
+          const cleanup = createDeferred<void>();
+          releaseGates.push(cleanup.resolve);
+          const spawn = vi.mocked(harness.deps.rad.runRadBicepPublish);
+          spawn.mockImplementationOnce(async () => {
+            started.resolve();
+            await cleanup.promise;
+            throw new Error("publisher timed out after tree cleanup");
+          });
+          await handoff();
+          const requestToken = expectHandoffToken(fixture);
+
+          const first = publishRecipe({ requestToken, ...recipeArgs });
+          await started.promise;
+          assertBaseline.mockClear();
+          const second = publishRecipe({ requestToken, ...recipeArgs });
+          await vi.waitFor(() => expect(assertBaseline).toHaveBeenCalledOnce());
+          const finishing = complete({ requestToken, outcome: "complete" });
+          expect(spawn).toHaveBeenCalledOnce();
+          if (cancelQueued) {
+            await expect(
+              complete({ requestToken, outcome: "cancel" })
+            ).resolves.toEqual({ kind: "cancelled" });
+          }
+          cleanup.resolve();
+
+          await expect(first).resolves.toContain(
+            "timed out after tree cleanup"
+          );
+          await expect(second).resolves.toContain(
+            cancelQueued ? "no longer current" : "Published recipe"
+          );
+          await expect(finishing).resolves.toMatchObject(
+            cancelQueued ?
+              {
+                kind: "refused",
+                error: expect.stringContaining("no longer current")
+              }
+            : { kind: "promoted", published: ["app.bicep"] }
+          );
+          expect(spawn).toHaveBeenCalledTimes(cancelQueued ? 1 : 2);
+        }
+      );
+
+      it("seals completion during recipe credential setup and waits for publication before promoting", async () => {
+        const fixture = await setup();
+        const {
+          handoff,
+          publishRecipe,
+          publishExtension,
+          complete,
+          runValidator,
+          promote
+        } = fixture;
+        const credentials = holdRecipeCredentials(fixture);
+        const publisher = holdPublishers(fixture, 1);
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        const publishing = publishRecipe({ requestToken, ...recipeArgs });
+        await credentials.started;
+        const settled = vi.fn();
+        const finishing = complete({ requestToken, outcome: "complete" }).then(
+          (result) => {
+            settled();
+            return result;
+          }
+        );
+        await expect(publishExtension({ requestToken })).resolves.toContain(
+          "already finalizing"
+        );
+        expect(settled).not.toHaveBeenCalled();
+        expect(runValidator).not.toHaveBeenCalled();
+        expect(promote).not.toHaveBeenCalled();
+
+        credentials.release();
+        await publisher.started;
+        expect(settled).not.toHaveBeenCalled();
+        expect(runValidator).not.toHaveBeenCalled();
+        publisher.release();
+
+        await expect(publishing).resolves.toContain("Published recipe");
+        await expect(finishing).resolves.toMatchObject({
+          kind: "promoted",
+          published: ["app.bicep"]
+        });
+        expect(publisher.spawn).toHaveBeenCalledOnce();
+        expect(runValidator).toHaveBeenCalledOnce();
+        expect(promote).toHaveBeenCalledOnce();
+      });
+
+      it("reports an unconfirmed exit, refuses promotion, and keeps the registry tag blocked for a replacement", async () => {
+        const fixture = await setup();
+        const { harness, handoff, publishRecipe, complete, promote } = fixture;
+        const spawn = vi.mocked(harness.deps.rad.runRadBicepPublish);
+        const unconfirmed = new RadProcessExitUnconfirmedError(
+          "rad bicep publish timed out",
+          "",
+          "fixture diagnostics"
+        );
+        spawn.mockRejectedValueOnce(
+          new Error(unconfirmed.message, { cause: unconfirmed })
+        );
+
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+        await expect(
+          publishRecipe({ requestToken, ...recipeArgs })
+        ).resolves.toContain(
+          "Windows process-tree exit could not be confirmed"
+        );
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({ kind: "refused" });
+        expect(promote).not.toHaveBeenCalled();
+
+        await handoff();
+        const replacement = expectHandoffToken(fixture);
+        expect(replacement).not.toBe(requestToken);
+        await expect(
+          publishRecipe({ requestToken: replacement, ...recipeArgs })
+        ).resolves.toContain("previous Windows process tree");
+        expect(spawn).toHaveBeenCalledOnce();
+      });
+
+      it("refuses completion without validating or promoting if admitted recipe publication fails", async () => {
+        const fixture = await setup();
+        const {
+          harness,
+          handoff,
+          publishRecipe,
+          complete,
+          runValidator,
+          promote,
+          cancel
+        } = fixture;
+        const credentials = holdRecipeCredentials(fixture);
+        vi.mocked(harness.deps.rad.runRadBicepPublish).mockRejectedValueOnce(
+          new Error("registry unavailable")
+        );
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        const publishing = publishRecipe({ requestToken, ...recipeArgs });
+        await credentials.started;
+        const finishing = complete({ requestToken, outcome: "complete" });
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({
+          kind: "refused",
+          error: expect.stringContaining("already finalizing")
+        });
+        credentials.release();
+
+        await expect(publishing).resolves.toContain("registry unavailable");
+        await expect(finishing).resolves.toMatchObject({
+          kind: "refused",
+          error: expect.stringContaining("required Radius publication failed")
+        });
+        expect(runValidator).not.toHaveBeenCalled();
+        expect(promote).not.toHaveBeenCalled();
+        expect(cancel).toHaveBeenCalledOnce();
+      });
+    });
+
+    it("aborts validation at SDK shutdown and waits for it to close without promoting", async () => {
+      const fixture = await setup();
+      const {
+        harness,
+        handoff,
+        runValidator,
+        complete,
+        promote,
+        releaseGates
+      } = fixture;
+      const validatorStarted = createDeferred<AbortSignal>();
+      const validatorClosed = createDeferred<void>();
+      runValidator.mockImplementation(async (_node, _args, { signal }) => {
+        validatorStarted.resolve(signal);
+        await validatorClosed.promise;
+        signal.throwIfAborted();
+        return { stdout: "", stderr: "" };
+      });
+      releaseGates.push(validatorClosed.resolve);
+      await handoff();
+      const requestToken = expectHandoffToken(fixture);
+
+      const finishing = complete({ requestToken, outcome: "complete" });
+      const signal = await validatorStarted.promise;
+      const closed = vi.fn();
+      const shuttingDown = harness.extension.shutdown("test").then(closed);
+      expect(signal.aborted).toBe(true);
+      await Promise.resolve();
+      expect(closed).not.toHaveBeenCalled();
+      validatorClosed.resolve();
+
+      await expect(finishing).resolves.toMatchObject({ kind: "refused" });
+      await shuttingDown;
+      expect(closed).toHaveBeenCalledWith({ complete: true, exitCode: 0 });
+      expect(promote).not.toHaveBeenCalled();
+    });
+
+    describe("handoff bootstrap and delivery", () => {
+      it("retries a refresh after Node.js becomes available", async () => {
+        const fixture = await setup({ refresh: true, nodeAvailable: false });
+        const {
+          harness,
+          handoff,
+          state,
+          source,
+          publishExtension,
+          publishRecipe,
+          artifact,
+          complete,
+          runValidator,
+          promote
+        } = fixture;
+        await handoff();
+
+        expect(harness.session.send).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            prompt: expect.stringContaining(stopInstruction)
+          })
+        );
+        expect(harness.session.send).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            prompt: expect.stringContaining("managedAuthoring")
+          })
+        );
+        expect(state.appModelAttemptTokens).toEqual({});
+        expect(state.appBicepHandoffKey).toBeUndefined();
+
+        source.nodeAvailable = true;
+        await handoff();
+        expect(harness.session.send).toHaveBeenCalledTimes(2);
+        const requestToken = expectHandoffToken(fixture);
+
+        await expect(publishExtension({})).resolves.toContain("active managed");
+        await expect(publishRecipe(recipeArgs)).resolves.toContain(
+          "active managed"
+        );
+        expect(
+          harness.deps.rad.runRadBicepPublishExtension
+        ).not.toHaveBeenCalled();
+        expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
+        await expect(publishExtension({ requestToken })).resolves.toContain(
+          "custom-types.tgz"
+        );
+        expect(artifact).toHaveBeenCalledWith("custom-types.yaml", true);
+        expect(artifact).toHaveBeenCalledWith("custom-types.tgz", false);
+        await expect(
+          publishRecipe({ requestToken, ...recipeArgs })
+        ).resolves.toContain("Published recipe");
+        expect(artifact).toHaveBeenCalledWith("service-recipe.bicep", true);
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({
+          kind: "promoted",
+          published: ["app.bicep"]
+        });
+        expect(runValidator).toHaveBeenCalledWith(
+          node,
+          [
+            join(skillBase, "scripts", "validate-bicep.mjs"),
+            join(stage, "app.bicep"),
+            "--managed-final"
+          ],
+          expect.objectContaining({ cwd: "/workspace" })
+        );
+        expect(promote).toHaveBeenCalledOnce();
+      });
+
+      it("does not leave a usable token when Node.js is unavailable", async () => {
+        const { handoff, currentToken, complete } = await setup({
+          nodeAvailable: false
+        });
+        await handoff();
+        expect(currentToken()).toBeUndefined();
+
+        await expect(
+          complete({ requestToken: "unissued-token", outcome: "complete" })
+        ).resolves.toMatchObject({
+          kind: "refused",
+          error: expect.stringContaining("expired")
+        });
+      });
+
+      it.each([
+        {
+          name: "invalid bootstrap",
+          options: { bootstrap: "null" },
+          error: "did not provide a bootstrap"
+        },
+        {
+          name: "missing source revision",
+          options: { revision: "" },
+          error: "Cannot establish the managed Radius authoring source"
+        }
+      ])("refuses to send a handoff with $name", async ({ options, error }) => {
+        const { harness, handoff, state, promote } = await setup(options);
+
+        await expect(handoff()).rejects.toThrow(error);
+        expect(harness.session.send).not.toHaveBeenCalled();
+        expect(state.appModelAttemptTokens).toEqual({});
+        expect(promote).not.toHaveBeenCalled();
+      });
+
+      it("cancels the attempt when the SDK fails to deliver the handoff", async () => {
+        const { harness, handoff, cancel } = await setup();
+        vi.mocked(harness.session.send).mockRejectedValueOnce(
+          new Error("SDK delivery failed")
+        );
+
+        await expect(handoff()).rejects.toThrow("SDK delivery failed");
+        expect(cancel).toHaveBeenCalledOnce();
+      });
+    });
+  });
 
   // The memo key includes the commit the record names, so a long session with
   // many regenerations would otherwise grow it without limit.

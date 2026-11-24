@@ -67,6 +67,10 @@ function isCurrentSourceRefToken(
 // over `deps` instead of module-level imports of server.ts/gh.ts/workspace.ts.
 export function createRadiusCanvas(
   deps: RadiusExtensionDependencies,
+  authoring: {
+    openPanel(state: CanvasState): void;
+    closePanel(state: CanvasState): void;
+  },
   canvasInstances: RadiusCanvasInstanceRegistry = createRadiusCanvasInstanceRegistry()
 ) {
   const closeGenerations = new Map<string, number>();
@@ -205,6 +209,7 @@ export function createRadiusCanvas(
         deps.servers.get(ctx.instanceId) === entry &&
         closeGenerations.get(ctx.instanceId) === openGeneration;
       if (!isCurrentOpen()) return { title: "Radius", url: entry.url };
+      authoring.openPanel(entry.state);
       entry.state.canvasInstanceId = ctx.instanceId;
       entry.state.activeGraphView =
         page === "graph-diff" ? "diff"
@@ -407,6 +412,7 @@ export function createRadiusCanvas(
       }
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
+        authoring.closePanel(entry.state);
         if (deps.executionOwner.hasActiveDeletionTasks(ctx.instanceId)) {
           const closeGeneration = closeGenerations.get(ctx.instanceId) || 0;
           let closeTimer: ReturnType<typeof setTimeout> | undefined;

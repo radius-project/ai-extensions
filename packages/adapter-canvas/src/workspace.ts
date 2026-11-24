@@ -3,6 +3,7 @@
 // checkout for generated app model files on the active branch.
 
 import { execFile } from "node:child_process";
+import { isManagedRun } from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import {
   safeWorkspacePath,
   readWorkspaceFile,
@@ -457,7 +458,8 @@ function isLegacyRadiusAppModel(content: string): boolean {
   );
 }
 
-// The newest filesystem activity from a modeling run in the workspace checkout.
+// The newest filesystem activity from a standalone modeling run. Managed runs
+// have a live request owner; an old directory is not evidence that one exists.
 //
 // A run creates `.radius/.staging-<runId>/` before it writes anything and
 // removes it when it finishes. The newest mtime proves that the run existed and
@@ -474,7 +476,10 @@ export async function modelingRunLastActivityAtMs(
     const dir = safeWorkspacePath(workspacePath, ".radius");
     const entries = await fs.readdir(dir, { withFileTypes: true });
     const stagingDirs = entries.filter(
-      (entry) => entry.isDirectory() && isStagingDirName(entry.name)
+      (entry) =>
+        entry.isDirectory() &&
+        isStagingDirName(entry.name) &&
+        !isManagedRun(entry.name)
     );
     const activityTimes = await Promise.all(
       stagingDirs.map(async (entry): Promise<number | null> => {

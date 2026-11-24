@@ -6,8 +6,31 @@ import type { RadiusExtensionDependencies } from "./dependencies.js";
 import { createModelAuthoringOwner } from "./model-authoring-owner.js";
 import { errorMessage } from "./util.js";
 
+export function readCanvasAuthoringBootstrap(skillHandoff: string) {
+  const handoff: unknown = JSON.parse(skillHandoff);
+  if (typeof handoff !== "object" || !handoff) {
+    throw new Error("The Radius authoring skill did not provide a bootstrap.");
+  }
+  const node = Reflect.get(handoff, "nodeCommand");
+  const skillBase = Reflect.get(handoff, "skillBase");
+  return {
+    handoff,
+    node:
+      node === null ? null
+      : typeof node === "string" && isAbsolute(node) ? node
+      : undefined,
+    skillBase:
+      typeof skillBase === "string" && isAbsolute(skillBase) ?
+        skillBase
+      : undefined
+  };
+}
+
 export function createCanvasModelAuthoring(
-  deps: RadiusExtensionDependencies,
+  deps: Pick<
+    RadiusExtensionDependencies,
+    "beginManagedModel" | "appModel" | "servers" | "process" | "logError"
+  >,
   workspaceState: () => Promise<CanvasState>
 ) {
   const owner = createModelAuthoringOwner({
@@ -33,8 +56,37 @@ export function createCanvasModelAuthoring(
     }
   });
 
+  const panels = new WeakMap<CanvasState, Set<string> | null>();
+  const panelRequests = (state: CanvasState): Set<string> | null => {
+    const active = panels.get(state);
+    if (active !== undefined) return active;
+    const created = new Set<string>();
+    panels.set(state, created);
+    return created;
+  };
+
   return {
     owner,
+    openPanel(state: CanvasState): void {
+      if (panels.get(state) === null) panels.set(state, new Set());
+    },
+    closePanel(state: CanvasState): void {
+      const active = panelRequests(state);
+      panels.set(state, null);
+      for (const token of active ?? []) {
+        try {
+          owner.cancel(token);
+        } catch (error) {
+          deps.logError(
+            `Could not cancel Radius canvas authoring: ${redactCredentials(errorMessage(error))}`
+          );
+        }
+      }
+    },
+    capturePanel(state: CanvasState): () => boolean {
+      const active = panelRequests(state);
+      return () => active !== null && panels.get(state) === active;
+    },
     begin(
       state: CanvasState,
       repo: string,
@@ -43,38 +95,28 @@ export function createCanvasModelAuthoring(
       revision: string | undefined,
       skillHandoff: string,
       selectionIsCurrent: () => boolean,
-      settled?: () => void
+      settled?: (promoted: boolean) => void
     ): string {
       const instanceId = state.canvasInstanceId;
       const workspace = state.workspacePath;
       const key = appModelTargetKey(repo, branch);
+      const active = panelRequests(state);
       const current = () =>
+        active !== null &&
+        panels.get(state) === active &&
         !!instanceId &&
         deps.servers.get(instanceId)?.state === state &&
         state.workspacePath === workspace &&
         selectionIsCurrent() &&
         state.appModelAttemptTokens?.[key] === token;
-      const handoff: unknown = JSON.parse(skillHandoff);
-      if (typeof handoff !== "object" || !handoff) {
-        throw new Error(
-          "The Radius authoring skill did not provide a bootstrap."
-        );
-      }
-      const node = Reflect.get(handoff, "nodeCommand");
-      const skillBase = Reflect.get(handoff, "skillBase");
+      const { handoff, node, skillBase } =
+        readCanvasAuthoringBootstrap(skillHandoff);
       // The packaged bootstrap carries a specific stop instruction for this case.
       if (node === null) {
-        settled?.();
+        settled?.(false);
         return skillHandoff;
       }
-      if (
-        !workspace ||
-        !revision ||
-        typeof node !== "string" ||
-        !isAbsolute(node) ||
-        typeof skillBase !== "string" ||
-        !isAbsolute(skillBase)
-      ) {
+      if (!active || !workspace || !revision || !node || !skillBase) {
         throw new Error(
           "Cannot establish the managed Radius authoring source or validator."
         );
@@ -112,8 +154,12 @@ export function createCanvasModelAuthoring(
             );
           }
         },
-        settled
+        (promoted) => {
+          active.delete(token);
+          settled?.(promoted);
+        }
       );
+      active.add(token);
       return JSON.stringify({
         ...handoff,
         repoPath: workspace,

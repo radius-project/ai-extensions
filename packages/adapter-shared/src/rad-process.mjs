@@ -36,6 +36,28 @@ export class RadProcessError extends Error {
   }
 }
 
+export class RadProcessExitUnconfirmedError extends RadProcessError {
+  constructor(message, stdout, stderr) {
+    super(
+      `${message}. Windows process-tree exit could not be confirmed; do not use the affected target.`,
+      stdout,
+      stderr
+    );
+    this.name = "RadProcessExitUnconfirmedError";
+  }
+}
+
+/** @param {unknown} error */
+export function isRadProcessExitUnconfirmed(error) {
+  const seen = new Set();
+  while (error instanceof Error && !seen.has(error)) {
+    if (error instanceof RadProcessExitUnconfirmedError) return true;
+    seen.add(error);
+    error = error.cause;
+  }
+  return false;
+}
+
 export function windowsTaskkillPath(env = process.env) {
   const systemRoot = env.SystemRoot || env.WINDIR;
   return systemRoot ?
@@ -46,8 +68,8 @@ export function windowsTaskkillPath(env = process.env) {
 // Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
 // the whole process tree while leaving rad in the caller's Job Object; on POSIX,
 // rad is a process-group leader (spawned detached), so signalling the group
-// (-pid) stops rad and its children together. Best-effort — any failure is
-// swallowed.
+// (-pid) stops rad and its children together. On Windows the result indicates
+// whether taskkill reported success; falling back to SIGKILL only targets rad.
 export function killChildTree(child, platform = process.platform) {
   if (!child || child.pid == null) return;
   const killChild = () => {
@@ -68,10 +90,14 @@ export function killChildTree(child, platform = process.platform) {
         }
       );
       return new Promise((resolve) => {
-        taskkill.once("error", killChild);
+        let failed = false;
+        taskkill.once("error", () => {
+          failed = true;
+          killChild();
+        });
         taskkill.once("close", (code) => {
-          if (code !== null && code !== 0) killChild();
-          resolve();
+          if (!failed && code !== 0) killChild();
+          resolve(!failed && code === 0);
         });
       });
     } else {
@@ -79,6 +105,7 @@ export function killChildTree(child, platform = process.platform) {
     }
   } catch {
     killChild();
+    if (platform === "win32") return Promise.resolve(false);
   }
 }
 
@@ -110,15 +137,26 @@ export function radSpawnOptions(platform = process.platform) {
  * grandchild, so POSIX runs rad as a detached process-group leader while
  * Windows keeps rad in the caller's Job Object and relies on taskkill /t for
  * tree cleanup. `label` only names the command in timeout/exit error messages;
- * `env` is merged over process.env.
+ * `env` is merged over process.env. An invocation with `drainOnTimeout` or
+ * `signal` waits for process cleanup before rejecting on timeout. A draining
+ * Windows invocation rejects with RadProcessExitUnconfirmedError when cleanup
+ * cannot confirm tree termination, even if the direct child has not closed.
  */
 export function spawnRad(
   radPath,
   args,
-  { cwd, env = {}, timeout = 120000, label = "rad", signal: abortSignal } = {}
+  {
+    cwd,
+    env = {},
+    timeout = 120000,
+    label = "rad",
+    signal: abortSignal,
+    drainOnTimeout = false
+  } = {}
 ) {
   return new Promise((resolve, reject) => {
     abortSignal?.throwIfAborted();
+    const drainOnStop = Boolean(abortSignal || drainOnTimeout);
     const child = spawn(radPath, args, {
       cwd,
       env: { ...process.env, ...env },
@@ -132,7 +170,8 @@ export function spawnRad(
     let graceTimer = null;
     let exited = null;
     let stopReason;
-    let treeCleanup;
+    let childClosed = false;
+    let treeDrained = false;
     child.stdout?.on("data", (chunk) => {
       if (stdout.length < maxOutput) stdout += chunk.toString();
     });
@@ -143,7 +182,7 @@ export function spawnRad(
     const timer = setTimeout(() => {
       if (settled) return;
       const message = `${label} timed out after ${timeout}ms`;
-      if (abortSignal) {
+      if (drainOnStop) {
         stop(message);
         return;
       }
@@ -158,14 +197,30 @@ export function spawnRad(
       stopReason = message;
       clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
-      treeCleanup = killChildTree(child);
+      // An exited Windows root cannot identify its former descendants, and
+      // its PID could already belong to an unrelated process.
+      const treeCleanup =
+        exited && process.platform === "win32" ?
+          Promise.resolve(false)
+        : killChildTree(child);
+      void Promise.resolve(treeCleanup).then((terminated) => {
+        if (terminated === false) {
+          complete();
+          reject(new RadProcessExitUnconfirmedError(message, stdout, stderr));
+        } else {
+          treeDrained = true;
+          if (childClosed) {
+            complete();
+            reject(new RadProcessError(message, stdout, stderr));
+          }
+        }
+      });
     }
 
     const abort = () => stop(`${label} was cancelled`);
     abortSignal?.addEventListener("abort", abort, { once: true });
 
-    function finalize(code, signal) {
-      if (settled) return;
+    function complete() {
       settled = true;
       clearTimeout(timer);
       abortSignal?.removeEventListener("abort", abort);
@@ -180,10 +235,19 @@ export function spawnRad(
       } catch {
         // Best-effort cleanup.
       }
+    }
+
+    function finalize(code, signal) {
+      if (settled) return;
       if (stopReason) {
-        const error = new RadProcessError(stopReason, stdout, stderr);
-        void Promise.resolve(treeCleanup).then(() => reject(error));
-      } else if (code === 0) {
+        childClosed = true;
+        if (!treeDrained) return;
+        complete();
+        reject(new RadProcessError(stopReason, stdout, stderr));
+        return;
+      }
+      complete();
+      if (code === 0) {
         resolve({ stdout, stderr });
       } else {
         // rad prints Bicep compile errors (BCP*) to stdout, not stderr, so keep
@@ -199,7 +263,7 @@ export function spawnRad(
     }
 
     child.on("error", (error) => {
-      if (settled) return;
+      if (settled || stopReason) return;
       settled = true;
       clearTimeout(timer);
       abortSignal?.removeEventListener("abort", abort);
@@ -209,6 +273,9 @@ export function spawnRad(
     child.on("exit", (code, signal) => {
       exited = { code, signal };
       if (settled || graceTimer || stopReason) return;
+      // The exit grace period can truncate inherited stdio while a descendant
+      // is still running. Draining Windows callers must wait for close instead.
+      if (drainOnStop && process.platform === "win32") return;
       graceTimer = setTimeout(() => finalize(code, signal), 2000);
     });
     child.on("close", (code, signal) => {

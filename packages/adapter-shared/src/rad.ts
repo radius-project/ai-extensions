@@ -39,9 +39,11 @@ import {
   projectSafeApplicationGraph
 } from "@radius-project/core";
 import {
+  isRadProcessExitUnconfirmed,
   killChildTree,
   managedBicepEnv as processManagedBicepEnv,
   RadProcessError,
+  RadProcessExitUnconfirmedError,
   radSpawnOptions,
   spawnRad
 } from "./rad-process.mjs";
@@ -59,7 +61,13 @@ import { RADIUS_RELEASE_TAG } from "./radius-release.js";
 import { isNonFileExtensionReference } from "./bicep-extension-reference.js";
 import { readBicepConfigJsonc } from "./bicep-config-jsonc.js";
 
-export { killChildTree, RadProcessError, spawnRad };
+export {
+  isRadProcessExitUnconfirmed,
+  killChildTree,
+  RadProcessError,
+  RadProcessExitUnconfirmedError,
+  spawnRad
+};
 export type { ProcessResult, SpawnRadOptions };
 export { RADIUS_EXTENSION_REGISTRY };
 
@@ -216,6 +224,7 @@ function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
 // preferring stderr, then stdout (rad prints BCP* errors there), then the
 // error's own message.
 function radErrorDetail(err: unknown): string {
+  if (err instanceof RadProcessExitUnconfirmedError) return err.message;
   if (err instanceof RadProcessError) {
     const stderr = err.stderr.trim();
     const stdout = err.stdout.trim();
@@ -1010,7 +1019,8 @@ async function spawnManagedRad(
     cwd,
     env: managedBicepEnv(env),
     timeout,
-    label
+    label,
+    drainOnTimeout: true
   });
 }
 
