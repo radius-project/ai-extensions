@@ -236,7 +236,7 @@ describe("managed staging", () => {
     await managed.validate(async () => {});
 
     expect(() => managed.promote()).toThrow(
-      /\.gitignore is not a regular file/
+      /Publishing the application model failed partway.*\.gitignore/
     );
     expect(
       fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
@@ -247,6 +247,24 @@ describe("managed staging", () => {
     );
     expect(stagedInGit(target.root)).toEqual([]);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "preserves an existing staging ignore file's contents and permissions on promotion",
+    async () => {
+      const target = repo();
+      const ignore = path.join(target.radiusDir, ".gitignore");
+      fs.writeFileSync(ignore, "*.tmp\n");
+      fs.chmodSync(ignore, 0o640);
+      const managed = beginManagedRun(target.root);
+      stageCompleteRun(managed.stagingDir);
+      await managed.validate(async () => {});
+
+      expect(managed.promote().gitError).toBe("");
+      expect(fs.readFileSync(ignore, "utf8")).toBe("*.tmp\n.staging-*/\n");
+      expect(fs.statSync(ignore).mode & 0o777).toBe(0o640);
+      expect(stagedInGit(target.root)).toContain(".radius/.gitignore");
+    }
+  );
 
   it("uses its initial baseline even if staged bookkeeping is modified", async () => {
     const target = repo("original");

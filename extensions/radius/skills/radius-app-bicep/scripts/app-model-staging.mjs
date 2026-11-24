@@ -36,9 +36,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -276,11 +280,48 @@ function managedFilesFor(radiusDir) {
 //
 // Returns true when the file was written, so only a rule this run added is
 // staged in git.
+function readStagingIgnoreFile(ignoreFile) {
+  let fd;
+  try {
+    fd = openSync(
+      ignoreFile,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0)
+    );
+  } catch (error) {
+    if (
+      error.code === "ENOENT" &&
+      !lstatSync(ignoreFile, { throwIfNoEntry: false })
+    )
+      return { text: "" };
+    throw error;
+  }
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    // Windows lacks O_NOFOLLOW. Verify that the open handle identifies the
+    // regular directory entry before reading through that same handle.
+    const entry = lstatSync(ignoreFile, {
+      bigint: true,
+      throwIfNoEntry: false
+    });
+    if (
+      !opened.isFile() ||
+      !entry?.isFile() ||
+      entry.dev !== opened.dev ||
+      entry.ino !== opened.ino
+    ) {
+      fail(`${ignoreFile} is not a stable regular file.`);
+    }
+    return { text: readFileSync(fd, "utf8"), mode: Number(opened.mode) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function ensureStagingIgnored(radiusDir, stagingDir) {
   const ignoreFile = path.join(radiusDir, ".gitignore");
-  const stat = lstatSync(ignoreFile, { throwIfNoEntry: false });
-  if (stat && !stat.isFile()) fail(`${ignoreFile} is not a regular file.`);
-  const text = stat ? readFileSync(ignoreFile, "utf8") : "";
+  const { text, mode } = readStagingIgnoreFile(ignoreFile);
   if (text.split("\n").some((line) => line.trim() === STAGING_IGNORE_PATTERN)) {
     return false;
   }
@@ -289,7 +330,7 @@ function ensureStagingIgnored(radiusDir, stagingDir) {
   writeFileSync(pending, `${body}${STAGING_IGNORE_PATTERN}\n`, {
     encoding: "utf8",
     flag: "wx",
-    mode: stat?.mode
+    mode
   });
   renameSync(pending, ignoreFile);
   return true;
