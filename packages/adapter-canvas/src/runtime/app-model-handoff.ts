@@ -118,12 +118,9 @@ export interface AppModelHandoffDependencies {
   // so nothing here owns a timer.
   wait(ms: number): Promise<void>;
   log(message: string): void;
-  // False once the same staleness evidence has already been handed off. Owned by
-  // the caller so the memo outlives any single canvas instance.
-  shouldRequestRefresh(key: string): boolean;
-  // Releases an extension-scoped refresh memo entry. Called when delivery fails
-  // so a later attempt can re-deliver the same staleness signal.
-  releaseRefreshMemo(key: string): void;
+  // Returns a release function for this exact claim, or undefined if the same
+  // staleness evidence is already reserved or delivered across Canvas instances.
+  claimRefreshMemo(key: string): (() => void) | undefined;
   missingModelHandoffs: MissingModelHandoffClaims;
 }
 
@@ -528,23 +525,35 @@ export function createAppModelHandoff(
     if (refresh) {
       const { model } = refresh;
       const refreshKey = refreshRequestKey(model);
-      let memoOwned = false;
+      let releaseMemo: (() => void) | undefined;
       let attemptToken: string | undefined;
       const tokenKey = appModelTargetKey(repo, model.branch);
+      const releaseRefresh = (): void => {
+        if (!attemptToken) {
+          releaseStateReservation();
+        } else {
+          const tokens = state?.appModelAttemptTokens;
+          if (tokens?.[tokenKey] === attemptToken) {
+            delete tokens[tokenKey];
+            releaseStateReservation();
+          }
+        }
+        releaseMemo?.();
+        releaseMemo = undefined;
+      };
       try {
         if (
           !(await sourcesStillCurrent([model])) ||
           !stillCurrent() ||
           !ownsStateReservation() ||
-          !(memoOwned = deps.shouldRequestRefresh(refreshKey))
+          !(releaseMemo = deps.claimRefreshMemo(refreshKey))
         ) {
           releaseStateReservation();
           return;
         }
         let skillHandoff = await buildSkillHandoff();
         if (!stillCurrent() || !ownsStateReservation()) {
-          releaseStateReservation();
-          deps.releaseRefreshMemo(refreshKey);
+          releaseRefresh();
           return;
         }
         if (refresh.kind === "confirmation") {
@@ -571,8 +580,7 @@ export function createAppModelHandoff(
               findAppModelRefresh([latest])?.kind !== "refresh" ||
               refreshRequestKey(latest) !== refreshKey
             ) {
-              releaseStateReservation();
-              deps.releaseRefreshMemo(refreshKey);
+              releaseRefresh();
               return;
             }
             attemptToken = randomUUID();
@@ -589,26 +597,17 @@ export function createAppModelHandoff(
               revision,
               skillHandoff,
               stillCurrent,
-              () => {
-                const tokens = state.appModelAttemptTokens;
-                if (!tokens || tokens[tokenKey] !== attemptToken) return;
-                delete tokens[tokenKey];
-                releaseStateReservation();
-                deps.releaseRefreshMemo(refreshKey);
-              }
+              releaseRefresh
             );
           }
           await deps.send(appModelRefreshMessage(model, skillHandoff));
         }
       } catch (error) {
-        if (attemptToken) {
-          deps.cancelManaged(attemptToken);
-          if (state?.appModelAttemptTokens?.[tokenKey] === attemptToken) {
-            delete state.appModelAttemptTokens[tokenKey];
-          }
+        try {
+          if (attemptToken) deps.cancelManaged(attemptToken);
+        } finally {
+          releaseRefresh();
         }
-        releaseStateReservation();
-        if (memoOwned) deps.releaseRefreshMemo(refreshKey);
         throw error;
       }
       return;

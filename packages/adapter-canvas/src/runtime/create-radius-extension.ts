@@ -111,22 +111,25 @@ export function createRadiusExtension(
   // instance's state.
   //
   // Bounded because the key includes the commit the record names, so every
-  // regeneration produces a new one and the set would otherwise grow for as
-  // long as the process runs. Set preserves insertion order, so dropping the
+  // regeneration produces a new one and the map would otherwise grow for as
+  // long as the process runs. Map preserves insertion order, so dropping the
   // oldest evicts the least recently seen problem. Re-asking about a signal
   // that fell out is harmless: the point is to stop a tight loop, not to
   // remember forever.
   const REFRESH_MEMO_LIMIT = 100;
-  const requestedRefreshes = new Set<string>();
+  const requestedRefreshes = new Map<string, symbol>();
 
-  function shouldRequestRefresh(key: string): boolean {
-    if (requestedRefreshes.has(key)) return false;
-    requestedRefreshes.add(key);
+  function claimRefreshMemo(key: string): (() => void) | undefined {
+    if (requestedRefreshes.has(key)) return undefined;
+    const claim = Symbol(key);
+    requestedRefreshes.set(key, claim);
     if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
-      const oldest = requestedRefreshes.values().next().value;
+      const oldest = requestedRefreshes.keys().next().value;
       if (oldest !== undefined) requestedRefreshes.delete(oldest);
     }
-    return true;
+    return () => {
+      if (requestedRefreshes.get(key) === claim) requestedRefreshes.delete(key);
+    };
   }
 
   const missingModelHandoffs = createMissingModelHandoffClaims(() =>
@@ -227,10 +230,7 @@ export function createRadiusExtension(
         /* session.log unavailable → drop the notice */
       }
     },
-    shouldRequestRefresh,
-    releaseRefreshMemo: (key: string) => {
-      requestedRefreshes.delete(key);
-    },
+    claimRefreshMemo,
     missingModelHandoffs
   });
   deps.hostCallbacks.setAppBicepHandoff(

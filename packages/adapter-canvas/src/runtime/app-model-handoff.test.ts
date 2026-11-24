@@ -24,6 +24,7 @@ import {
 } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { createModelingActivity } from "./modeling-activity.js";
+import { createDeferred } from "../../test/support/browser/fakes.js";
 
 interface StatusOverrides {
   status?: AppModelFreshnessStatus;
@@ -156,13 +157,12 @@ function harness(
     log: (message) => {
       logged.push(message);
     },
-    shouldRequestRefresh: (key: string) => {
-      if (requested.has(key)) return false;
+    claimRefreshMemo: (key: string) => {
+      if (requested.has(key)) return undefined;
       requested.add(key);
-      return true;
-    },
-    releaseRefreshMemo: (key: string) => {
-      requested.delete(key);
+      return () => {
+        requested.delete(key);
+      };
     },
     missingModelHandoffs: createMissingModelHandoffClaims(() => nowMs),
     ...overrides
@@ -281,7 +281,7 @@ describe("createAppModelHandoff", () => {
   it.each(["outdated", "unrecorded", "missing"] as const)(
     "does not act on a %s model after the final workspace assertion detects drift",
     async (status) => {
-      const memo = vi.fn(() => true);
+      const memo = vi.fn(() => () => {});
       const assertWorkspaceSource = vi.fn(async () => {
         throw new WorkspaceGraphBranchChanged("checkout moved");
       });
@@ -292,7 +292,7 @@ describe("createAppModelHandoff", () => {
           })
         },
         assertWorkspaceSource,
-        shouldRequestRefresh: memo
+        claimRefreshMemo: memo
       });
       const state: CanvasState = { canvasInstanceId: "panel" };
       await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
@@ -1651,7 +1651,7 @@ describe("createAppModelHandoff", () => {
   it("releases the panel key when the stale-model memo suppresses the message", async () => {
     const state: CanvasState = {};
     const { handOff, sent } = harness({
-      shouldRequestRefresh: () => false,
+      claimRefreshMemo: () => undefined,
       statuses: {
         feat: modelStatus("a/b", "feat", { status: "source-changed" })
       }
@@ -1666,7 +1666,7 @@ describe("createAppModelHandoff", () => {
   it("releases the panel key when an unverified-model memo suppresses the message", async () => {
     const state: CanvasState = {};
     const { handOff, sent } = harness({
-      shouldRequestRefresh: () => false,
+      claimRefreshMemo: () => undefined,
       statuses: {
         feat: modelStatus("a/b", "feat", { status: "manually-edited" })
       }
@@ -1863,6 +1863,87 @@ describe("createAppModelHandoff", () => {
     expect(beginManaged).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
     expect(state.appBicepHandoffKey).toBeUndefined();
+  });
+
+  it("releases a managed refresh if staging throws and retries the same source", async () => {
+    const state: CanvasState = { canvasInstanceId: "model-panel" };
+    const beginManaged = vi
+      .fn<AppModelHandoffDependencies["beginManaged"]>(
+        (_state, _repo, _branch, _token, _revision, handoff) => handoff
+      )
+      .mockImplementationOnce(() => {
+        throw new Error("staging unavailable");
+      });
+    const { handOff, sent } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", { status: "source-changed" })
+      },
+      beginManaged
+    });
+    const request = { repo: "a/b", branches: ["main"], page: "graph", state };
+
+    await expect(handOff(request)).rejects.toThrow("staging unavailable");
+    expect(state.appModelAttemptTokens).toEqual({});
+    expect(state.appBicepHandoffKey).toBeUndefined();
+    expect(sent).toEqual([]);
+
+    await handOff(request);
+    expect(beginManaged).toHaveBeenCalledTimes(2);
+    expect(beginManaged.mock.calls[0][3]).not.toBe(
+      beginManaged.mock.calls[1][3]
+    );
+    expect(sent).toHaveLength(1);
+  });
+
+  it("does not release a replacement when an ownerless refresh's send fails late", async () => {
+    const state: CanvasState = { canvasInstanceId: "model-panel" };
+    const stopDelivery = createDeferred<void>();
+    const stopStarted = createDeferred<void>();
+    let sendCount = 0;
+    const { handOff } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", { status: "source-changed" })
+      },
+      beginManaged: vi
+        .fn<AppModelHandoffDependencies["beginManaged"]>(
+          (_state, _repo, _branch, _token, _revision, handoff) => handoff
+        )
+        .mockImplementationOnce(
+          (
+            _state,
+            _repo,
+            _branch,
+            _token,
+            _revision,
+            handoff,
+            _current,
+            settled
+          ) => {
+            settled?.();
+            return handoff;
+          }
+        ),
+      send: async () => {
+        if (++sendCount !== 1) return;
+        stopStarted.resolve();
+        await stopDelivery.promise;
+      }
+    });
+    const request = { repo: "a/b", branches: ["main"], page: "graph", state };
+
+    const first = handOff(request);
+    await stopStarted.promise;
+    await handOff(request);
+    const replacement = state.appModelAttemptTokens?.["a/b::main"];
+    expect(replacement).toBeTruthy();
+
+    stopDelivery.reject(new Error("SDK failed to deliver stop instruction"));
+    await expect(first).rejects.toThrow(
+      "SDK failed to deliver stop instruction"
+    );
+    expect(state.appModelAttemptTokens?.["a/b::main"]).toBe(replacement);
+    await handOff({ ...request, state: {} });
+    expect(sendCount).toBe(2);
   });
 
   it("deduplicates a pending single-branch refresh and retries after delivery fails", async () => {
