@@ -1519,9 +1519,14 @@ describe("selected GitHub executor", { concurrent: false }, () => {
     }
   );
 
-  it.each([false, true])(
-    "checks command authority after held identity verification (stale=%s)",
-    async (stale) => {
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true]
+  ])(
+    "checks command authority after held identity verification (stale=%s, async=%s)",
+    async (stale, asynchronous) => {
       const gh = await loadGh("linux", {
         token: "selected-injected-token",
         withToken: STATUS.tokenWithWorkflow,
@@ -1538,9 +1543,12 @@ describe("selected GitHub executor", { concurrent: false }, () => {
           return { stdin: { end() {} } };
         }
       );
-      const beforeExecute = vi.fn(() => {
+      const assertCurrent = () => {
         if (stale) throw new Error("Authorization expired");
-      });
+      };
+      const beforeExecute = vi.fn(() =>
+        asynchronous ? Promise.resolve().then(assertCurrent) : assertCurrent()
+      );
       const pending = executor.run(
         ["api", "--method", "POST", "repos/fixture/app/actions/runs/42/cancel"],
         { beforeExecute }

@@ -154,6 +154,22 @@ describe("workspace application deletion", () => {
     expect(f.execute).not.toHaveBeenCalled();
   });
 
+  it("does not offer confirmation if preparation finishes in a different workspace", async () => {
+    const f = toolFixture();
+    f.prepare.mockImplementationOnce(async () => {
+      f.ports.workspace.mockResolvedValue({
+        ...original,
+        workspacePath: "/other"
+      });
+      return { login: "octocat", execute: f.execute };
+    });
+    await expect(f.handle(request)).resolves.toMatchObject({
+      message: "The workspace changed before deletion."
+    });
+    expect(f.confirm).not.toHaveBeenCalled();
+    expect(f.execute).not.toHaveBeenCalled();
+  });
+
   it("does not prompt when the selected deletion service cannot prepare the target", async () => {
     const f = toolFixture();
     f.prepare.mockResolvedValueOnce(undefined);

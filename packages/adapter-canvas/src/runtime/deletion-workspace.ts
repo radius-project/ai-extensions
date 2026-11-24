@@ -113,6 +113,8 @@ export function createWorkspaceApplicationDeletion(
         isCurrent: scope.isCurrent
       });
       if (!prepared) return undefined;
+      if (!(await scope.validate()))
+        throw new Error("The workspace changed before deletion.");
       return {
         login: prepared.login,
         async execute() {
@@ -122,7 +124,7 @@ export function createWorkspaceApplicationDeletion(
               body: { error: "The workspace changed before deletion." }
             };
           }
-          return prepared.execute();
+          return prepared.execute(scope.validate);
         }
       };
     },

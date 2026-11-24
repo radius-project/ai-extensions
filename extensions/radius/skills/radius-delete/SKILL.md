@@ -30,6 +30,8 @@ For an application in the current workspace repository, use `radius_delete_appli
 
 Application deletion from chat uses the selected GitHub account and requires trusted host confirmation. Before requesting confirmation and again before dispatch, the tool verifies that the selected deployment is first in the environment's GitHub deployment history and that its latest status belongs to the selected run. If another deployment record blocks it, the tool reports that record's ID; refreshing the Radius listing alone will not clear the blocker. If deployment history cannot be verified, the tool does not offer deletion. The workflow independently rechecks the approved deployment under the deployment concurrency group before touching cloud state. Missing confirmation is not approval; do not open Canvas silently or pass approval flags. To delete an environment, use the Canvas flow below.
 
+The chat dispatcher’s routing job reads GitHub Environment variables without creating a deployment record. GitHub does not support this mode for environments with custom deployment protection rules from GitHub Apps; the routing job fails before deletion in those environments. Do not remove protection rules to make deletion run.
+
 ### Canvas
 
 Open the canvas hub and use the deployed-application view:

@@ -124,7 +124,7 @@ export interface CommandOptions extends CliOptions {
 }
 
 export interface SelectedGhCommandOptions extends CommandOptions {
-  beforeExecute?(): void;
+  beforeExecute?(): void | Promise<void>;
 }
 
 export interface SelectedGhCommandResult {
@@ -982,7 +982,8 @@ export async function createSelectedGhExecutor(
   ): Promise<SelectedGhCommandResult> => {
     await verifyIdentity();
     const { beforeExecute, ...commandOptions } = options;
-    beforeExecute?.();
+    const admission = beforeExecute?.();
+    if (admission) await admission;
     return await runRaw(args, commandOptions);
   };
 
