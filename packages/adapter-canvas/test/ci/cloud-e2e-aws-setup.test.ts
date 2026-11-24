@@ -17,6 +17,7 @@ import { awsAppBoundary } from "../../src/aws-deploy-role-name.js";
 import { AWS_MAIN_NODE_GROUPS } from "../e2e-cloud/support/aws-cloud-cleanup.js";
 import { collectAwsPreflightFindings } from "../e2e-cloud/support/aws-cloud-fixture.js";
 import { checkAwsFootprint } from "../e2e-cloud/support/aws-footprint.js";
+import { RADIUS_CLEANUP_KINDS } from "../e2e-cloud/support/radius-workload-kinds.js";
 import {
   scaleAwsNodeGroupsToZero,
   startAwsNodeGroups
@@ -808,7 +809,7 @@ describe("build/cloud-e2e/aws", () => {
       log: () => {},
       kubernetes: {
         listWorkloads: async (target: { region: string; name: string }) =>
-          kube.list(`${target.region}/${target.name}`),
+          kube.list(`${target.region}/${target.name}`, RADIUS_CLEANUP_KINDS),
         namespaceExists: async (
           target: { region: string; name: string },
           namespace: string

@@ -382,6 +382,16 @@ export class FakeRds {
     };
   }
 
+  /** Finish every delete and snapshot, as RDS has a day later. */
+  settle(): void {
+    for (const instance of this.instances.values()) instance.deletingReads = 0;
+    for (const snapshot of this.snapshots.values()) {
+      snapshot.creatingReads = 0;
+      snapshot.deletingReads = 0;
+    }
+    this.advance();
+  }
+
   // Each read moves a `deleting` instance one step closer to gone, as RDS
   // finishes the delete while the caller polls.
   private advance(): void {

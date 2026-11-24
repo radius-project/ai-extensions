@@ -29,6 +29,11 @@ import { evaluateIam } from "./iam-policy-evaluator.js";
 // - ListPolicies filters by scope and path prefix and leaves out Description
 //   and Tags.
 //   https://docs.aws.amazon.com/IAM/latest/APIReference/API_ListPolicies.html
+// - IAM is eventually consistent: a role just deleted can still be read. How
+//   long isn't documented, so a role deleted through the CLI stays in
+//   ListRoles and ListRoleTags for `lingeringReads` ListRoles reads. GetRole
+//   and every write already see it gone.
+//   https://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_general.html#troubleshoot_general_eventual-consistency
 export interface FakeIamRole {
   RoleName: string;
   RoleId: string;
@@ -64,6 +69,9 @@ export interface FakeManagedPolicy {
 // https://docs.aws.amazon.com/eks/latest/APIReference/API_ListPodIdentityAssociations.html
 // https://docs.aws.amazon.com/eks/latest/APIReference/API_PodIdentityAssociationSummary.html
 // https://docs.aws.amazon.com/eks/latest/APIReference/API_DeletePodIdentityAssociation.html
+// Whether a deleted association is still listed for a while isn't
+// documented, so one deleted through the CLI stays in the list and its
+// describe for `lingeringReads` list reads. Deleting it again is refused.
 export interface FakePodIdentityAssociation {
   associationId: string;
   associationArn: string;
@@ -107,6 +115,11 @@ export interface FakeEksCluster {
   entries: Map<string, FakeAccessEntry>;
   nodegroups: Map<string, FakeNodegroup>;
   podIdentity: Map<string, FakePodIdentityAssociation>;
+  // Deleted associations still listed, with the list reads left for each.
+  lingering: Map<
+    string,
+    { association: FakePodIdentityAssociation; reads: number }
+  >;
 }
 
 // A managed node group. UpdateNodegroupConfig refuses a group that is not
@@ -232,6 +245,18 @@ function ok(value?: unknown): AwsCommandResult {
   };
 }
 
+// Each list read moves every lingering delete one step closer to gone, and
+// returns what is still listed.
+function advanceLingering<T extends { reads: number }>(
+  lingering: Map<string, T>
+): T[] {
+  for (const [key, item] of lingering) {
+    if (item.reads <= 0) lingering.delete(key);
+    else item.reads -= 1;
+  }
+  return [...lingering.values()];
+}
+
 // The value after `--flag`, or "" when the flag is absent.
 function flag(args: readonly string[], name: string): string {
   const index = args.indexOf(name);
@@ -309,6 +334,13 @@ export class FakeAws {
   readonly rds: FakeRds;
   // Set to make every call fail the way an expired sign-in does.
   sessionExpired = false;
+  // How many list reads a deleted role or association is still listed for.
+  lingeringReads = 2;
+  // Deleted roles still listed, with the ListRoles reads left for each.
+  private readonly lingeringRoles = new Map<
+    string,
+    { role: FakeIamRole; reads: number }
+  >();
   // IAM is eventually consistent, and how long a delete takes to reach
   // other calls isn't documented. Set this to model the slow side: for that
   // long after a delete, a role still counts an inline policy just deleted
@@ -366,7 +398,8 @@ export class FakeAws {
       podIdentityAgent: "ACTIVE",
       entries: new Map(),
       nodegroups: new Map(),
-      podIdentity: new Map()
+      podIdentity: new Map(),
+      lingering: new Map()
     };
     this.clusters.set(`${region}:${name}`, cluster);
     return cluster;
@@ -542,6 +575,13 @@ export class FakeAws {
     return this.roles.get(name.toLowerCase());
   }
 
+  /** Finish every slow delete, as AWS has a day later. */
+  settle(): void {
+    this.lingeringRoles.clear();
+    for (const cluster of this.clusters.values()) cluster.lingering.clear();
+    this.rds.settle();
+  }
+
   // The lock policies that exist, as Radius names them.
   locks(): FakeManagedPolicy[] {
     return [...this.policies.values()].filter((policy) =>
@@ -660,13 +700,19 @@ export class FakeAws {
         return this.listRoles(args);
       case "iam simulate-principal-policy":
         return this.simulatePrincipalPolicy(args);
-      case "iam list-role-tags":
-        return this.withRole(args, "ListRoleTags", (role) =>
+      case "iam list-role-tags": {
+        const tags = (role: FakeIamRole) =>
           ok({
             Tags: role.Tags.map((tag) => ({ ...tag })),
             IsTruncated: false
-          })
+          });
+        const lingering = this.lingeringRoles.get(
+          flag(args, "--role-name").toLowerCase()
         );
+        return lingering ?
+            tags(lingering.role)
+          : this.withRole(args, "ListRoleTags", tags);
+      }
       case "iam create-role":
         return this.createRole(args);
       case "iam update-assume-role-policy":
@@ -690,6 +736,11 @@ export class FakeAws {
             );
           }
           this.roles.delete(role.RoleName.toLowerCase());
+          if (this.lingeringReads > 0)
+            this.lingeringRoles.set(role.RoleName.toLowerCase(), {
+              role,
+              reads: this.lingeringReads
+            });
           if (role.boundary)
             this.settlingBoundaryUse.push({
               arn: role.boundary,
@@ -815,19 +866,33 @@ export class FakeAws {
         });
       case "eks list-pod-identity-associations":
         return this.listPodIdentityAssociations(args);
-      case "eks describe-pod-identity-association":
+      case "eks describe-pod-identity-association": {
+        const cluster = this.cluster(args);
+        const lingering = cluster?.lingering.get(
+          flag(args, "--association-id")
+        );
+        if (cluster && lingering)
+          return ok({
+            association: this.associationView(cluster, lingering.association)
+          });
         return this.withAssociation(
           args,
           "DescribePodIdentityAssociation",
-          (cluster, association) =>
-            ok({ association: this.associationView(cluster, association) })
+          (found, association) =>
+            ok({ association: this.associationView(found, association) })
         );
+      }
       case "eks delete-pod-identity-association":
         return this.withAssociation(
           args,
           "DeletePodIdentityAssociation",
           (cluster, association) => {
             cluster.podIdentity.delete(association.associationId);
+            if (this.lingeringReads > 0)
+              cluster.lingering.set(association.associationId, {
+                association,
+                reads: this.lingeringReads
+              });
             return ok({
               association: this.associationView(cluster, association)
             });
@@ -1268,8 +1333,11 @@ export class FakeAws {
   // Roles under `--path-prefix`, without PermissionsBoundary and Tags.
   private listRoles(args: readonly string[]): AwsCommandResult {
     const prefix = flag(args, "--path-prefix") || "/";
+    const lingering = advanceLingering(this.lingeringRoles).map(
+      (item) => item.role
+    );
     return ok({
-      Roles: [...this.roles.values()]
+      Roles: [...this.roles.values(), ...lingering]
         .filter((role) => role.Path.startsWith(prefix))
         .map((role) => ({
           Path: role.Path,
@@ -1339,6 +1407,7 @@ export class FakeAws {
         `Role with name ${name} already exists.`
       );
     }
+    this.lingeringRoles.delete(name.toLowerCase());
     const path = flag(args, "--path") || "/";
     if (!/^(\/|\/[\u0021-\u007E]+\/)$/.test(path)) {
       return serviceError(
@@ -1523,8 +1592,11 @@ export class FakeAws {
       );
     }
     const namespace = flag(args, "--namespace");
+    const lingering = advanceLingering(cluster.lingering).map(
+      (item) => item.association
+    );
     return ok({
-      associations: [...cluster.podIdentity.values()]
+      associations: [...cluster.podIdentity.values(), ...lingering]
         .filter((item) => !namespace || item.namespace === namespace)
         .map((item) => ({
           clusterName: cluster.name,

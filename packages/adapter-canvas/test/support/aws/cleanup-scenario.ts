@@ -16,7 +16,9 @@ import {
   defaultAwsDeployRoleName
 } from "../../../src/aws-deploy-role-name.js";
 import { resolveOidcSubject } from "../../../src/azure-oidc.js";
+import { RADIUS_CLEANUP_KINDS } from "../../e2e-cloud/support/radius-workload-kinds.js";
 import {
+  ApplicationDeleteFailed,
   sweepAwsCloudE2E,
   findAwsLeftovers,
   statePackageName,
@@ -87,15 +89,22 @@ export interface CleanupScenario {
   readonly packages: Map<string, FakePackage>;
   readonly clock: { now: number };
   ports: AwsCleanupPorts;
-  // How delete-application.yml behaves for each environment: "fail" throws,
-  // "leave" succeeds but leaves the database, the app role, and its Pod
-  // Identity association, as when Radius loses track.
-  readonly appDelete: Map<string, "fail" | "leave">;
+  // How delete-application.yml behaves for each environment: "fail" ends
+  // failed, "leave" succeeds but leaves the database, the app role, and its
+  // Pod Identity association, as when Radius loses track, and `unfinished`
+  // throws that error while its run keeps going until the next day.
+  readonly appDelete: Map<string, AppDeleteBehavior>;
+  // Runs still going, by environment, and the ones that then couldn't sign
+  // in because the sweep had removed the access they needed.
+  readonly runningDeletes: string[];
+  readonly strandedDeletes: string[];
   readonly log: string[];
   // Each environment's trust subjects and cluster, as setup added them.
   readonly subjects: Map<string, string[]>;
   readonly clusters: Map<string, { region: string; name: string }>;
 }
+
+export type AppDeleteBehavior = "fail" | "leave" | { unfinished: string };
 
 export function cleanupConfig(
   scenario: Pick<CleanupScenario, "clock">,
@@ -230,16 +239,27 @@ function githubPort(scenario: CleanupScenario): AwsCleanupGitHub {
           if (application !== APPLICATION)
             throw new Error(`Unexpected application ${application}`);
           const behavior = scenario.appDelete.get(environment);
-          if (behavior === "fail")
-            throw new Error("delete-application.yml run 9 ended failure.");
-          // The delete workflow signs in as the deploy role through the
-          // environment's trust subject and acts with its inline policy.
-          const access = retryInputs(scenario, environment);
+          // As the port does, a run that ended, failed or not, while an
+          // earlier one for the environment is still going doesn't count.
           if (
-            !access.includes("policy") ||
-            !access.some((item) => item.startsWith("trust "))
+            typeof behavior !== "object" &&
+            scenario.runningDeletes.includes(environment)
           )
             throw new Error(
+              `delete-application.yml run 9 ${behavior === "fail" ? "ended failure" : "succeeded"}. Run 8 for ${environment} is still going.`
+            );
+          if (behavior === "fail")
+            throw new ApplicationDeleteFailed(
+              "delete-application.yml run 9 ended failure."
+            );
+          if (typeof behavior === "object") {
+            scenario.runningDeletes.push(environment);
+            throw new Error(behavior.unfinished);
+          }
+          // The delete workflow signs in as the deploy role through the
+          // environment's trust subject and acts with its inline policy.
+          if (!canSignIn(scenario, environment))
+            throw new ApplicationDeleteFailed(
               "delete-application.yml run 9 ended failure: Could not assume the deploy role."
             );
           // Cloud Control deletes the app role with the deploy role's
@@ -248,7 +268,7 @@ function githubPort(scenario: CleanupScenario): AwsCleanupGitHub {
             scenario.aws.role(appRoleName(environment)) &&
             !scenario.aws.role(ROLE)?.inline.has(APP_ROLES_POLICY)
           )
-            throw new Error(
+            throw new ApplicationDeleteFailed(
               "delete-application.yml run 9 ended failure: AccessDenied for iam:DeleteRole."
             );
           deleteApplication(scenario, environment, behavior === "leave");
@@ -283,7 +303,7 @@ function kubernetesPort(scenario: CleanupScenario): AwsCleanupKubernetes {
   return {
     listWorkloads: (cluster) =>
       outside.outside(`kubectl get workloads ${cluster.name}`, false, () =>
-        kube.list(clusterKey(cluster))
+        kube.list(clusterKey(cluster), RADIUS_CLEANUP_KINDS)
       ),
     deleteWorkload: (cluster, workload) =>
       outside.outside(
@@ -294,7 +314,8 @@ function kubernetesPort(scenario: CleanupScenario): AwsCleanupKubernetes {
             clusterKey(cluster),
             workload.kind,
             workload.name,
-            workload.namespace
+            workload.namespace,
+            "foreground"
           )
       ),
     namespaceExists: (cluster, namespace) =>
@@ -346,17 +367,16 @@ function deleteApplication(
       if (item.roleArn === appRole.Arn) podIdentity?.delete(id);
     scenario.aws.roles.delete(appRole.RoleName.toLowerCase());
   }
-  for (const item of JSON.parse(
-    JSON.stringify(scenario.kube.list(`${region}/${cluster}`))
-  ).items as Array<{ kind: string; metadata: Record<string, any> }>) {
-    if (item.metadata.labels["radapp.io/environment"] === environment)
-      scenario.kube.delete(
-        `${region}/${cluster}`,
-        item.kind,
-        item.metadata.name,
-        item.metadata.namespace
-      );
-  }
+  // Radius deletes what it rendered, and the probe Jobs go with it, in the
+  // background: the ReplicaSets and Pods outlive their Deployment a while.
+  const key = `${region}/${cluster}`;
+  for (const item of scenario.kube.objects(key))
+    if (
+      !item.owner &&
+      item.terminating === undefined &&
+      item.labels["radapp.io/environment"] === environment
+    )
+      scenario.kube.delete(key, item.kind, item.name, item.namespace);
 }
 
 // A new process's ports: nothing a crashed run cached carries over.
@@ -458,6 +478,8 @@ export function createCleanupScenario(): CleanupScenario {
     packages: new Map(),
     clock,
     appDelete: new Map(),
+    runningDeletes: [],
+    strandedDeletes: [],
     log,
     subjects: new Map(),
     clusters: new Map(),
@@ -560,16 +582,7 @@ export async function addAwsEnvironment(
     roleArn: appRole.Arn,
     tags: containerTags(name)
   });
-  scenario.kube.addWorkload(clusterKey(cluster), {
-    kind: "Deployment",
-    name: "web",
-    namespace: NAMESPACE,
-    labels: {
-      "radapp.io/environment": name,
-      "radapp.io/application": APPLICATION
-    },
-    creationTimestamp: created
-  });
+  addRenderedContainer(scenario, clusterKey(cluster), name, created);
   scenario.deployments.push({
     id: 1000 + scenario.deployments.length,
     environment: name,
@@ -631,6 +644,48 @@ function addAppRole(
 }
 
 /**
+ * What the containers Recipe renders for the app's container, and what the
+ * Deployment's controllers make from it, all with the Recipe's labels: the
+ * ServiceAccount, the Deployment, its ReplicaSet, and its Pod.
+ */
+function addRenderedContainer(
+  scenario: CleanupScenario,
+  key: string,
+  environment: string,
+  created: string
+): void {
+  const suffix = environment.slice(PREFIX.length);
+  const labels = {
+    "radapp.io/environment": environment,
+    "radapp.io/application": APPLICATION,
+    "radapp.io/resource": CONTAINER
+  };
+  const add = (
+    kind: string,
+    name: string,
+    owner?: { kind: string; name: string }
+  ) =>
+    scenario.kube.addWorkload(key, {
+      kind,
+      name,
+      namespace: NAMESPACE,
+      labels,
+      creationTimestamp: created,
+      ...(owner ? { owner } : {})
+    });
+  add("ServiceAccount", `radius-app-${CONTAINER}`);
+  add("Deployment", CONTAINER);
+  add("ReplicaSet", `${CONTAINER}-${suffix}`, {
+    kind: "Deployment",
+    name: CONTAINER
+  });
+  add("Pod", `${CONTAINER}-${suffix}-a`, {
+    kind: "ReplicaSet",
+    name: `${CONTAINER}-${suffix}`
+  });
+}
+
+/**
  * What an environment deleted a week ago left when its app delete lost track
  * of its app role: the role, and the app boundary it still uses.
  */
@@ -642,6 +697,23 @@ export function addOrphanedAppRole(
     scenario.clock.now - 7 * DAY
   );
   return addAppRole(scenario, environment);
+}
+
+/**
+ * An app role in the environment's folder without the Recipe's environment
+ * tag, as when Cloud Control made the role but its tags didn't apply. The
+ * sweep can't tie it to the environment, so it keeps it, and the environment
+ * keeps everything step 4 removes while it is there.
+ */
+export function addUntaggedAppRole(
+  scenario: CleanupScenario,
+  environment: string
+): FakeIamRole {
+  return scenario.aws.addRole({
+    name: `radius-app-untagged-${environment.slice(PREFIX.length)}`,
+    trust: POD_IDENTITY_TRUST,
+    path: appBoundary(environment).path
+  });
 }
 
 /** Run the sweep once, as one scheduled cleanup run does. */
@@ -657,11 +729,29 @@ export function runVerify(scenario: CleanupScenario) {
   return findAwsLeftovers(cleanupConfig(scenario), scenario.ports);
 }
 
-/** The next day's run: a new process, a day later. */
+// The delete workflow signs in as the deploy role through the environment's
+// trust subject and acts with its inline policy.
+function canSignIn(scenario: CleanupScenario, environment: string): boolean {
+  const access = retryInputs(scenario, environment);
+  return (
+    access.includes("policy") &&
+    access.some((item) => item.startsWith("trust "))
+  );
+}
+
+/**
+ * The next day's run: a new process, a day later. Each delete run still going
+ * has ended by then, and records whether it could still sign in.
+ */
 export function nextDay(scenario: CleanupScenario): void {
+  for (const environment of scenario.runningDeletes.splice(0))
+    if (!canSignIn(scenario, environment))
+      scenario.strandedDeletes.push(environment);
   scenario.outside.startProcess();
   scenario.ports = createPorts(scenario);
   scenario.clock.now += DAY;
+  scenario.aws.settle();
+  scenario.kube.settle();
 }
 
 /** What one environment still has that a retry of its cleanup needs. */
