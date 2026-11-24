@@ -405,7 +405,7 @@ import type { EnvironmentDeletionToolPorts } from "./runtime/environment-deletio
 import { environmentDiagnostic } from "./runtime/environment-tool-result.js";
 import { createRadiusEnvironmentWorkflowDeletion } from "./server/services/radius-environment-workflow-deletion.js";
 import {
-  proveSelectedEnvironmentGuard,
+  proveSelectedEnvironmentOutcome,
   readEnvironmentDispatchAttempts
 } from "./server/services/environment-dispatch-evidence.js";
 import {
@@ -6282,9 +6282,11 @@ export function createProductionCanvasServerRuntime(
     logError: (message) => console.error(message),
     discoverEnvironmentTarget: createEnvironmentTargetReader(runCommand),
     activeDeleteOperation: (repo, environment) => {
-      return matchDeleteOperationEnvironment(
-        operations.running(repo),
-        environment
+      return (
+        matchDeleteOperationEnvironment(
+          operations.running(repo),
+          environment
+        ) ?? operations.deletionBlocker(repo, environment)
       );
     },
     createOperation,
@@ -6592,10 +6594,9 @@ export function createProductionCanvasServerRuntime(
           recoverDispatch,
           selectedAttempts
         ) => {
-          const base = productionEnvironmentDeletionPorts(
-            false,
-            awsEnvironmentAccess
-          );
+          const base =
+            environmentDeletionPorts ??
+            productionEnvironmentDeletionPorts(false, awsEnvironmentAccess);
           const runGh = (args: string[]) =>
             executor.run(args, {
               timeout: 30000,
@@ -6744,6 +6745,7 @@ export function createProductionCanvasServerRuntime(
     );
   }
 
+  const savingSelectedDeletionEvidence = new Set<string>();
   async function controlSelectedEnvironmentDeletion(input: {
     command: "status" | "retry";
     operationId: string;
@@ -6764,6 +6766,10 @@ export function createProductionCanvasServerRuntime(
     if (!operation) return unavailable;
     const request = operation.request;
     const owner = request?.selectedOwner;
+    const repoId = request?.repoId;
+    const environmentId = request?.environmentId;
+    const clientId = request?.clientId;
+    const tenantId = request?.tenantId;
     const current = () =>
       input.isCurrent() &&
       !executionOwner.isShuttingDown() &&
@@ -6781,10 +6787,15 @@ export function createProductionCanvasServerRuntime(
       request.provider === "azure" &&
       request.repo === input.repo &&
       request.environment === input.environment &&
-      Number.isSafeInteger(request.repoId) &&
-      Number(request.repoId) > 0 &&
+      Number.isSafeInteger(repoId) &&
+      Number(repoId) > 0 &&
+      request.repoId === repoId &&
+      request.environmentId === environmentId &&
+      request.clientId === clientId &&
+      request.tenantId === tenantId &&
       owner.toLowerCase() === input.login.toLowerCase();
-    if (!current()) return unavailable;
+    if (!current() || savingSelectedDeletionEvidence.has(input.operationId))
+      return unavailable;
     const executor = await githubAccountCoordinator.createReadOnlyExecutor(
       input.login
     );
@@ -6798,8 +6809,8 @@ export function createProductionCanvasServerRuntime(
     let attempts = readEnvironmentDispatchAttempts(savedAttempts);
     let latest = attempts?.at(-1);
     let retry = canRetryDeletion(operation);
-    // A run can appear or finish after the poller timed out. Look only for
-    // proof that the original attempt failed safely; status never dispatches.
+    // A run can appear or finish after the poller timed out. Only status may
+    // promote new evidence; retry requires a confirmation for the saved proof.
     if (
       attempts &&
       latest &&
@@ -6809,7 +6820,7 @@ export function createProductionCanvasServerRuntime(
           retry.code === "deletion-dispatch-unconfirmed" &&
           (latest.state === "unresolved" || latest.state === "correlated")))
     ) {
-      const guarded = await proveSelectedEnvironmentGuard(
+      const observed = await proveSelectedEnvironmentOutcome(
         (args) =>
           executor.run(args, {
             timeout: 30000,
@@ -6821,7 +6832,29 @@ export function createProductionCanvasServerRuntime(
         { repo: input.repo, environment: input.environment, owner },
         latest
       );
-      if (!current() || request.selectedDispatchAttempts !== savedAttempts)
+      const proof =
+        input.command === "retry" && observed?.state === "deleted" ?
+          null
+        : observed;
+      if (proof?.state === "deleted") {
+        const target = await selectedDeletionTargetReader(executor, () => {
+          if (!current())
+            throw new Error("The saved deletion is no longer current.");
+        })(input.repo, input.environment);
+        if (
+          target.repoId !== repoId ||
+          target.environmentId !== environmentId ||
+          target.provider !== "azure" ||
+          target.clientId !== clientId ||
+          target.tenantId !== tenantId
+        )
+          return unavailable;
+      }
+      if (
+        !current() ||
+        savingSelectedDeletionEvidence.has(input.operationId) ||
+        request.selectedDispatchAttempts !== savedAttempts
+      )
         return unavailable;
       const currentRetry = canRetryDeletion(operation);
       if (
@@ -6830,10 +6863,11 @@ export function createProductionCanvasServerRuntime(
       )
         return unavailable;
       const needsNewApproval =
-        !guarded ||
+        !proof ||
         latest.state !== "guarded" ||
-        guarded.runAttempt !== latest.runAttempt ||
-        guarded.updatedAt !== latest.updatedAt;
+        proof.state !== latest.state ||
+        proof.runAttempt !== latest.runAttempt ||
+        proof.updatedAt !== latest.updatedAt;
       if (needsNewApproval && input.command === "retry") {
         return {
           status: 409,
@@ -6844,26 +6878,46 @@ export function createProductionCanvasServerRuntime(
           }
         };
       }
-      if (guarded && needsNewApproval) {
-        attempts = [...attempts.slice(0, -1), guarded];
+      if (proof && needsNewApproval) {
+        const stage =
+          proof.state === "deleted" ?
+            operation.stages?.find(
+              (entry: { id: string }) => entry.id === STAGE_DELETE_RADIUS_ENV
+            )
+          : undefined;
+        const stageState = stage?.state;
+        if (proof.state === "deleted" && !stage) return unavailable;
+        savingSelectedDeletionEvidence.add(input.operationId);
+        attempts = [...attempts.slice(0, -1), proof];
         request.selectedDispatchAttempts = attempts;
+        if (stage)
+          setStageState(operation, STAGE_DELETE_RADIUS_ENV, "succeeded");
         try {
           await operations.persist();
         } catch (error) {
-          if (request.selectedDispatchAttempts === attempts)
+          if (request.selectedDispatchAttempts === attempts) {
             request.selectedDispatchAttempts = savedAttempts;
+            if (stage && stage.state === "succeeded")
+              setStageState(operation, STAGE_DELETE_RADIUS_ENV, stageState);
+          }
           throw error;
+        } finally {
+          savingSelectedDeletionEvidence.delete(input.operationId);
         }
         if (!current() || request.selectedDispatchAttempts !== attempts)
           return unavailable;
-        latest = guarded;
+        latest = proof;
         retry = canRetryDeletion(operation);
-      } else if (!guarded) {
+      } else if (!proof) {
         retry = { ok: false, code: "deletion-dispatch-unconfirmed" };
       }
     }
     const retryEvidence =
-      latest && retry.target === STAGE_DELETE_RADIUS_ENV ?
+      (
+        latest &&
+        (retry.target === STAGE_DELETE_RADIUS_ENV ||
+          (latest.state === "deleted" && retry.ok))
+      ) ?
         createHash("sha256")
           .update(
             JSON.stringify([
@@ -6898,6 +6952,7 @@ export function createProductionCanvasServerRuntime(
         authorizeSelectedDeletionRetry: (operationId) =>
           operationId === input.operationId &&
           current() &&
+          !savingSelectedDeletionEvidence.has(input.operationId) &&
           request.selectedDispatchAttempts === approvedAttempts,
         isCurrent: current
       });
@@ -6941,6 +6996,8 @@ export function createProductionCanvasServerRuntime(
             "Radius will not dispatch the deletion again. Verify the original workflow outcome in GitHub Actions."
           : retryEvidence && latest?.state === "guarded" ?
             "The workflow stopped at the deployed-applications guard. Remove the applications before retrying."
+          : latest?.state === "deleted" && retry.ok ?
+            "The original workflow completed. Confirm a retry to continue only the remaining cleanup."
           : typeof operation.failure?.message === "string" ?
             environmentDiagnostic(operation.failure.message, executor.redact)
           : null

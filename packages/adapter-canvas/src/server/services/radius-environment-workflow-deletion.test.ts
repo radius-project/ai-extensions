@@ -121,6 +121,33 @@ function harness(
 }
 
 describe("deleting a Radius environment through its workflow", () => {
+  it("rejects a modified dispatcher even when its generated default belongs to another environment", async () => {
+    const dispatcher = (env: string) =>
+      `on:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '${env}'\njobs:\n  expected-job:\n`;
+    const beforeDispatch = vi.fn(async () => {});
+    const h = harness(
+      {
+        generateDeleteWorkflow: async (env) => ({
+          ...TEMPLATES,
+          [DELETE_ENV_DISPATCHER_FILE]: dispatcher(env)
+        }),
+        fetchFileFromRepo: async (_repo, path) => {
+          const file = path.split("/").pop() ?? "";
+          return file === DELETE_ENV_DISPATCHER_FILE ?
+              dispatcher("prod").replace("expected-job", "changed-job")
+            : TEMPLATES[file];
+        }
+      },
+      { selected: { getBranchHead: async () => HEAD, beforeDispatch } }
+    );
+    expect(await h.run()).toMatchObject({
+      outcome: "failed",
+      detail: expect.stringContaining(DELETE_ENV_DISPATCHER_FILE)
+    });
+    expect(beforeDispatch).not.toHaveBeenCalled();
+    expect(h.calls).toEqual([]);
+  });
+
   it("does not redispatch after restart if a refusal was saved before that operation attempt finished", async () => {
     const attempt: EnvironmentDispatchAttempt = {
       state: "refused",
@@ -458,12 +485,12 @@ describe("deleting a Radius environment through its workflow", () => {
                   run_id: 21,
                   run_attempt: 1,
                   status: "completed",
-                  conclusion: "failure",
+                  conclusion: run.conclusion,
                   steps: [
                     {
                       name: DELETE_ENV_GUARD_STEP_NAME,
                       status: "completed",
-                      conclusion: "failure"
+                      conclusion: run.conclusion
                     },
                     {
                       name: "Delete Radius resource",

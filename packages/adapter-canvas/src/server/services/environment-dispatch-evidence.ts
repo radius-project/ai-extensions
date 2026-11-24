@@ -11,13 +11,19 @@ type DispatchContext = {
   branch: string;
   head: string;
 };
+type SettledDispatch = DispatchContext & {
+  state: "guarded" | "deleted";
+  runId: number;
+  runAttempt: number;
+  updatedAt: string;
+};
 
 export type EnvironmentDispatchAttempt = DispatchContext &
   (
     | { state: "unresolved" }
     | { state: "refused" }
     | { state: "correlated"; runId: number }
-    | { state: "guarded"; runId: number; runAttempt: number; updatedAt: string }
+    | SettledDispatch
   );
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -66,7 +72,7 @@ export function readEnvironmentDispatchAttempts(
     } else if (entry.state === "correlated" && positiveInt(entry.runId)) {
       attempts.push({ ...context, state: entry.state, runId: entry.runId });
     } else if (
-      entry.state === "guarded" &&
+      (entry.state === "guarded" || entry.state === "deleted") &&
       positiveInt(entry.runId) &&
       positiveInt(entry.runAttempt) &&
       timestamp(entry.updatedAt)
@@ -173,27 +179,14 @@ export async function findSelectedEnvironmentDispatch(
     | Pick<DispatchContext, "dispatchedAt" | "correlationId">
 ) {
   const repo = `/repos/${target.repo}`;
-  const runs = await readJson(
-    run,
-    `${repo}/actions/workflows/${DELETE_ENV_DISPATCHER_FILE}/runs?event=workflow_dispatch&per_page=100&created=${encodeURIComponent(`>=${new Date(Math.floor(attempt.dispatchedAt / 1000) * 1000).toISOString()}`)}`
-  );
-  if (
-    !record(runs) ||
-    !Array.isArray(runs.workflow_runs) ||
-    runs.total_count !== runs.workflow_runs.length ||
-    !runs.workflow_runs.every(
-      (entry) => record(entry) && typeof entry.display_title === "string"
-    )
-  )
-    return null;
   const title = `Radius - Delete Environment ${target.environment} ${attempt.correlationId}`;
-  const matching = runs.workflow_runs.filter(
-    (entry) => entry.display_title === title
-  );
-  const entry = matching[0];
+  const entry =
+    "runId" in attempt ?
+      await readJson(run, `${repo}/actions/runs/${attempt.runId}`)
+    : await discoverDispatchRun(run, repo, title, attempt.dispatchedAt);
   if (
-    matching.length !== 1 ||
-    !entry ||
+    !record(entry) ||
+    entry.display_title !== title ||
     !positiveInt(entry.id) ||
     ("runId" in attempt && entry.id !== attempt.runId) ||
     entry.event !== "workflow_dispatch" ||
@@ -219,14 +212,75 @@ export async function findSelectedEnvironmentDispatch(
   };
 }
 
+async function discoverDispatchRun(
+  run: Execute,
+  repo: string,
+  title: string,
+  dispatchedAt: number
+) {
+  const pageSize = 100;
+  const maxPages = 10;
+  const created = new Date(Math.floor(dispatchedAt / 1000) * 1000);
+  const query = `${repo}/actions/workflows/${DELETE_ENV_DISPATCHER_FILE}/runs?event=workflow_dispatch&per_page=${pageSize}&created=${encodeURIComponent(`>=${created.toISOString()}`)}`;
+  let total: number | undefined;
+  const seen = new Set<number>();
+  let exact: Record<string, unknown> | undefined;
+  for (let page = 1; page <= maxPages; page++) {
+    const data = await readJson(run, `${query}&page=${page}`);
+    if (
+      !record(data) ||
+      typeof data.total_count !== "number" ||
+      !Number.isSafeInteger(data.total_count) ||
+      data.total_count < 0 ||
+      data.total_count >= maxPages * pageSize ||
+      (total !== undefined && data.total_count !== total) ||
+      !Array.isArray(data.workflow_runs) ||
+      data.workflow_runs.length !==
+        Math.min(pageSize, data.total_count - (page - 1) * pageSize)
+    )
+      return null;
+    total = data.total_count;
+    for (const entry of data.workflow_runs) {
+      if (
+        !record(entry) ||
+        !positiveInt(entry.id) ||
+        seen.has(entry.id) ||
+        typeof entry.display_title !== "string"
+      )
+        return null;
+      seen.add(entry.id);
+      if (entry.display_title === title) {
+        if (exact) return null;
+        exact = entry;
+      }
+    }
+    if (seen.size === total) return exact;
+  }
+  return null;
+}
+
 export async function proveSelectedEnvironmentGuard(
   run: Execute,
   target: { repo: string; environment: string; owner: string },
   attempt: EnvironmentDispatchAttempt
-): Promise<Extract<EnvironmentDispatchAttempt, { state: "guarded" }> | null> {
+) {
+  const result = await proveSelectedEnvironmentOutcome(run, target, attempt);
+  return result?.state === "guarded" ? result : null;
+}
+
+export async function proveSelectedEnvironmentOutcome(
+  run: Execute,
+  target: { repo: string; environment: string; owner: string },
+  attempt: EnvironmentDispatchAttempt
+): Promise<SettledDispatch | null> {
   const observed = await findSelectedEnvironmentDispatch(run, target, attempt);
-  if (observed?.status !== "completed" || observed.conclusion !== "failure")
+  if (
+    observed?.status !== "completed" ||
+    (observed.conclusion !== "success" && observed.conclusion !== "failure")
+  )
     return null;
+  const conclusion = observed.conclusion;
+  const state = conclusion === "failure" ? "guarded" : "deleted";
   const endpoint = `/repos/${target.repo}/actions/runs/${observed.runId}`;
   const jobs = await readJson(
     run,
@@ -248,32 +302,35 @@ export async function proveSelectedEnvironmentGuard(
     job.run_id !== observed.runId ||
     job.run_attempt !== observed.runAttempt ||
     job.status !== "completed" ||
-    job.conclusion !== "failure" ||
+    job.conclusion !== conclusion ||
     !Array.isArray(job.steps) ||
     !job.steps.every(record)
   )
     return null;
-  for (const [name, conclusion] of [
-    [DELETE_ENV_GUARD_STEP_NAME, "failure"],
-    ["Delete Radius resource", "skipped"],
+  for (const [name, expected] of [
+    [DELETE_ENV_GUARD_STEP_NAME, conclusion],
+    ["Delete Radius resource", state === "guarded" ? "skipped" : "success"],
     ["Teardown", "success"]
   ]) {
     const steps = job.steps.filter((step) => step.name === name);
     if (
       steps.length !== 1 ||
       steps[0].status !== "completed" ||
-      steps[0].conclusion !== conclusion
+      steps[0].conclusion !== expected
     )
       return null;
   }
-  const latest = await readJson(run, endpoint);
+  const latest = await findSelectedEnvironmentDispatch(run, target, {
+    ...attempt,
+    state: "correlated",
+    runId: observed.runId
+  });
   if (
-    !record(latest) ||
-    latest.id !== observed.runId ||
-    latest.run_attempt !== observed.runAttempt ||
-    latest.updated_at !== observed.updatedAt ||
+    !latest ||
+    latest.runAttempt !== observed.runAttempt ||
+    latest.updatedAt !== observed.updatedAt ||
     latest.status !== "completed" ||
-    latest.conclusion !== "failure"
+    latest.conclusion !== conclusion
   )
     return null;
   return {
@@ -282,7 +339,7 @@ export async function proveSelectedEnvironmentGuard(
     correlationId: attempt.correlationId,
     branch: attempt.branch,
     head: attempt.head,
-    state: "guarded",
+    state,
     runId: observed.runId,
     runAttempt: observed.runAttempt,
     updatedAt: observed.updatedAt

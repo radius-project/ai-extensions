@@ -17,6 +17,7 @@ import {
   dispatchSelectedEnvironmentWorkflow,
   findSelectedEnvironmentDispatch,
   proveSelectedEnvironmentGuard,
+  proveSelectedEnvironmentOutcome,
   type EnvironmentDispatchAttempt
 } from "./environment-dispatch-evidence.js";
 
@@ -195,17 +196,17 @@ export function createRadiusEnvironmentWorkflowDeletion(
             await journal.record(attempt);
           }
           if (run.status === "completed") {
-            if (run.conclusion === "success") return { outcome: "deleted" };
-            const guarded =
+            const proof =
               "state" in attempt ?
-                await proveSelectedEnvironmentGuard(
+                await proveSelectedEnvironmentOutcome(
                   dependencies.runGh,
                   target,
                   attempt
                 )
               : null;
-            if (guarded) {
-              await journal.record(guarded);
+            if (proof?.state === "deleted") return { outcome: "deleted" };
+            if (proof?.state === "guarded") {
+              await journal.record(proof);
               return classifyCompletedDeleteEnvRun("failure", [
                 {
                   name: DELETE_ENV_GUARD_STEP_NAME,
@@ -216,7 +217,7 @@ export function createRadiusEnvironmentWorkflowDeletion(
             return {
               outcome: "failed",
               detail:
-                "The selected delete workflow failed without proof that another dispatch is safe."
+                "Radius could not verify the selected delete workflow's outcome. Check GitHub Actions before retrying."
             };
           }
         }
@@ -295,8 +296,32 @@ export function createRadiusEnvironmentWorkflowDeletion(
           }
           return branch;
         },
-        readFile: (path, branch) =>
-          dependencies.fetchFileFromRepo(repo, path, verifiedHead ?? branch),
+        async readFile(path, branch) {
+          const committed = await dependencies.fetchFileFromRepo(
+            repo,
+            path,
+            verifiedHead ?? branch
+          );
+          if (
+            dependencies.readIdentity !== "selected" ||
+            path !== `.github/workflows/${DELETE_ENV_DISPATCHER_FILE}` ||
+            !committed ||
+            committed === expectedDeleteWorkflows[DELETE_ENV_DISPATCHER_FILE]
+          )
+            return committed;
+          // Setup publishes this shared dispatcher with its environment's
+          // defaults. The selected dispatch explicitly supplies environment.
+          const published =
+            /^        default: '([A-Za-z0-9._ -]{1,255})'\r?$/m.exec(
+              committed
+            )?.[1];
+          if (!published || published === environment) return committed;
+          const alternate =
+            await dependencies.generateDeleteWorkflow(published);
+          return committed === alternate[DELETE_ENV_DISPATCHER_FILE] ?
+              expectedDeleteWorkflows[DELETE_ENV_DISPATCHER_FILE]
+            : committed;
+        },
         errorMessage: dependencies.errorMessage
       }
     );

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { DeleteStartResult } from "../server/routes/environments-types.js";
 import {
   createEnvironmentDeletionTool,
   type EnvironmentDeletionToolPorts
@@ -18,7 +19,10 @@ function harness() {
   const calls: string[] = [];
   const discover = vi.fn(async () => azure);
   const createOperation = vi.fn(() => operation);
-  const startOperation = vi.fn(() => {
+  const activeDeleteOperation = vi.fn<() => typeof operation | null>(
+    () => null
+  );
+  const startOperation = vi.fn<() => DeleteStartResult>(() => {
     calls.push("register");
     return { ok: true as const, operation };
   });
@@ -40,7 +44,7 @@ function harness() {
       repo: target.repo,
       login: "octocat",
       registration: {
-        activeDeleteOperation: () => null,
+        activeDeleteOperation,
         resolveEnvDeployment: async () => null,
         discoverEnvironmentTarget: discover,
         createOperation,
@@ -67,6 +71,7 @@ function harness() {
     operation,
     calls,
     discover,
+    activeDeleteOperation,
     createOperation,
     startOperation,
     persistOperations,
@@ -80,6 +85,54 @@ function harness() {
 }
 
 describe("the independent environment deletion tool", () => {
+  it.each(["known", "during confirmation", "at registration"] as const)(
+    "returns the existing operation ID when another deletion is found %s",
+    async (when) => {
+      const f = harness();
+      const existing = { operationId: "op-existing", currentStage: null };
+      if (when === "known") f.activeDeleteOperation.mockReturnValue(existing);
+      if (when === "during confirmation")
+        f.activeDeleteOperation
+          .mockReturnValueOnce(null)
+          .mockReturnValue(existing);
+      if (when === "at registration")
+        f.startOperation.mockReturnValue({
+          ok: false,
+          reason: "previous-deletion-required",
+          conflict: existing
+        });
+      expect(await f.invoke(target)).toEqual({
+        kind: "refused",
+        code:
+          when === "at registration" ? "operation-conflict" : (
+            "already-deleting"
+          ),
+        operationId: existing.operationId
+      });
+      if (when === "known") expect(f.confirm).not.toHaveBeenCalled();
+      expect(f.persistOperations).not.toHaveBeenCalled();
+      expect(f.schedule).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["operation-in-progress", "previous-cleanup-required"] as const)(
+    "does not advertise a recovery ID for a repository-wide %s conflict",
+    async (reason) => {
+      const f = harness();
+      f.startOperation.mockReturnValue({
+        ok: false,
+        reason,
+        conflict: { operationId: "op-unrelated" }
+      });
+      expect(await f.invoke(target)).toEqual({
+        kind: "refused",
+        code: "operation-conflict"
+      });
+      expect(f.persistOperations).not.toHaveBeenCalled();
+      expect(f.schedule).not.toHaveBeenCalled();
+    }
+  );
+
   it("requires explicit target input and never selects a different workspace", async () => {
     const f = harness();
     expect(await f.invoke(null)).toMatchObject({ kind: "requires_input" });

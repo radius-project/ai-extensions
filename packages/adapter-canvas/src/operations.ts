@@ -4541,6 +4541,23 @@ export function canRetryDeletion(op: any): any {
   return { ok: false, code: "deletion-retry-nothing-unresolved" };
 }
 
+function retainsSelectedDeletion(op: any): boolean {
+  if (
+    op.kind !== OPERATION_KIND_DELETE ||
+    op.state === "succeeded" ||
+    op.state === "succeeded_with_warnings" ||
+    !op.request ||
+    !Object.hasOwn(op.request, "selectedOwner")
+  )
+    return false;
+  const latest = readEnvironmentDispatchAttempts(
+    op.request.selectedDispatchAttempts
+  )?.at(-1);
+  return latest ?
+      latest.state !== "refused"
+    : !selectedEnvironmentDispatchAllowsRetry(op.request);
+}
+
 /**
  * Position a reopened delete operation at its first unfinished stage.
  *
@@ -6807,7 +6824,8 @@ export function createRegistry({
       // Cleanup authority is a repository lock, not display history. Retaining
       // it is what lets a restart recover the old operation and prevents age or
       // count pruning from silently authorizing a second setup.
-      if (hasUnfinishedCleanupAuthority(op)) continue;
+      if (hasUnfinishedCleanupAuthority(op) || retainsSelectedDeletion(op))
+        continue;
       const age = now - new Date(op.endedAt || op.startedAt).getTime();
       if (age > RETAIN_TERMINAL_MS) {
         byId.delete(id);
@@ -6928,6 +6946,27 @@ export function createRegistry({
       }
       return null;
     },
+    deletionBlocker(
+      repo: string,
+      environment: string,
+      repoId?: number,
+      environmentId?: number
+    ) {
+      for (const op of byId.values()) {
+        if (
+          retainsSelectedDeletion(op) &&
+          ((normalizeIdentityPart(op.repo) === normalizeIdentityPart(repo) &&
+            normalizeIdentityPart(op.environment) ===
+              normalizeIdentityPart(environment)) ||
+            (repoId !== undefined &&
+              environmentId !== undefined &&
+              op.request.repoId === repoId &&
+              op.request.environmentId === environmentId))
+        )
+          return op;
+      }
+      return null;
+    },
     /**
      * The terminal operation that must finish rollback before a new setup may
      * start for this repository.
@@ -7032,6 +7071,20 @@ export function createRegistry({
     start(op) {
       const conflict = this.startConflict(op.repo);
       if (conflict) return conflict;
+      if (op.kind === OPERATION_KIND_DELETE) {
+        const blocker = this.deletionBlocker(
+          op.repo,
+          op.environment,
+          op.request?.repoId,
+          op.request?.environmentId
+        );
+        if (blocker)
+          return {
+            ok: false,
+            reason: "previous-deletion-required",
+            conflict: blocker
+          };
+      }
       prune();
       byId.set(op.operationId, op);
       return { ok: true, operation: op };

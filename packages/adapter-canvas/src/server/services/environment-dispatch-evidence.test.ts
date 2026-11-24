@@ -7,6 +7,7 @@ import {
   dispatchSelectedEnvironmentWorkflow,
   findSelectedEnvironmentDispatch,
   proveSelectedEnvironmentGuard,
+  proveSelectedEnvironmentOutcome,
   readEnvironmentDispatchAttempts,
   selectedEnvironmentDispatchAllowsRetry,
   type EnvironmentDispatchAttempt
@@ -179,6 +180,109 @@ describe("selected environment dispatch evidence", () => {
       findSelectedEnvironmentDispatch(run, target, attempt)
     ).resolves.toBeNull();
   });
+
+  it.each(["unique", "ambiguous", "shifting pages"] as const)(
+    "walks multiple pages of runs and requires complete, unique evidence (%s)",
+    async (scenario) => {
+      const unrelated = Array.from({ length: 100 }, (_, index) => ({
+        id: 1000 + index,
+        display_title: `Other deletion ${index}`
+      }));
+      const read = vi.fn(async (args: string[]) => {
+        const endpoint = args[3];
+        const payload =
+          endpoint.endsWith("&page=1") ?
+            {
+              total_count: 101,
+              workflow_runs:
+                scenario === "ambiguous" ?
+                  [runInfo, ...unrelated.slice(1)]
+                : unrelated
+            }
+          : endpoint.endsWith("&page=2") ?
+            {
+              total_count: 101,
+              workflow_runs: [
+                scenario === "shifting pages" ?
+                  unrelated[99]
+                : { ...runInfo, id: scenario === "ambiguous" ? 22 : 21 }
+              ]
+            }
+          : undefined;
+        if (!payload) throw new Error(`Unexpected read: ${endpoint}`);
+        return { code: 0, stdout: JSON.stringify(payload), stderr: "" };
+      });
+      const found = await findSelectedEnvironmentDispatch(
+        read,
+        target,
+        attempt
+      );
+      if (scenario === "unique") expect(found).toMatchObject({ runId: 21 });
+      else expect(found).toBeNull();
+      expect(read).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  it("reads a saved run directly and rejects a different head or run identity", async () => {
+    const saved: EnvironmentDispatchAttempt = {
+      ...attempt,
+      state: "correlated",
+      runId: 21
+    };
+    const read = fixture({ runs: null });
+    await expect(
+      findSelectedEnvironmentDispatch(read, target, saved)
+    ).resolves.toMatchObject({ runId: 21 });
+    expect(read).toHaveBeenCalledExactlyOnceWith([
+      "api",
+      "--method",
+      "GET",
+      "/repos/octo/shop/actions/runs/21"
+    ]);
+    for (const latest of [
+      { ...runInfo, id: 22 },
+      { ...runInfo, head_sha: "b".repeat(40) }
+    ]) {
+      await expect(
+        findSelectedEnvironmentDispatch(fixture({ latest }), target, saved)
+      ).resolves.toBeNull();
+    }
+  });
+
+  it.each(["success", "skipped"] as const)(
+    "accepts late success only if Azure deletion actually ran (%s)",
+    async (deletion) => {
+      const latest = { ...runInfo, conclusion: "success" };
+      const job = {
+        ...azureJob,
+        conclusion: "success",
+        steps: [
+          step(DELETE_ENV_GUARD_STEP_NAME, "success"),
+          step("Delete Radius resource", deletion),
+          step("Teardown", "success")
+        ]
+      };
+      const saved: EnvironmentDispatchAttempt = {
+        ...attempt,
+        state: "correlated",
+        runId: 21
+      };
+      const proof = await proveSelectedEnvironmentOutcome(
+        fixture({ latest, jobs: { total_count: 1, jobs: [job] } }),
+        target,
+        saved
+      );
+      if (deletion === "success") {
+        expect(proof).toMatchObject({
+          ...saved,
+          state: "deleted",
+          runAttempt: 2,
+          updatedAt
+        });
+        expect(readEnvironmentDispatchAttempts([proof])).toEqual([proof]);
+      } else expect(proof).toBeNull();
+    }
+  );
 
   it("proves the exact latest attempt stopped at the guard without deleting resources", async () => {
     const run = fixture();

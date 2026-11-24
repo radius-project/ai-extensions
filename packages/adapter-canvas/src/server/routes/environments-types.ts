@@ -30,7 +30,14 @@ export interface DeleteOperationRecord {
 
 export type DeleteStartResult =
   | { ok: true; operation: DeleteOperationRecord }
-  | { ok: false; conflict: { operationId: string; [key: string]: unknown } };
+  | {
+      ok: false;
+      reason:
+        | "operation-in-progress"
+        | "previous-cleanup-required"
+        | "previous-deletion-required";
+      conflict: { operationId: string; [key: string]: unknown };
+    };
 
 // A workflow run's status/conclusion as `list-environments` reads it. The values
 // are the raw GitHub API strings, so both are plain strings (the empty string is

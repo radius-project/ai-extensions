@@ -3558,6 +3558,70 @@ describe("registry", () => {
     ).not.toContain(first.operationId);
   });
 
+  it("keeps an unresolved selected deletion after terminal pruning and restart", async () => {
+    const now = Date.parse("2026-08-22T12:00:00.000Z");
+    const reg = createRegistry({ clock: () => now });
+    const first = createOperation({
+      kind: "delete",
+      repo: "octo/app",
+      environment: "dev",
+      provider: "azure",
+      stages: buildDeleteStages()
+    });
+    first.request = {
+      repo: first.repo,
+      environment: first.environment,
+      provider: "azure",
+      repoId: 7,
+      environmentId: 17,
+      selectedOwner: "octocat",
+      selectedDispatchStarted: true
+    };
+    finish(first, "failed_partial", {
+      failure: { code: "dispatch-unconfirmed" }
+    });
+    first.endedAt = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+    reg.put(first);
+    for (let index = 0; index < 21; index++) {
+      const completed = newOp({ repo: `octo/completed-${index}` });
+      finishSucceeded(completed);
+      completed.endedAt = new Date(now + index).toISOString();
+      reg.put(completed);
+    }
+    const snapshot = reg.snapshot();
+    const restarted = createRegistry({
+      clock: () => now,
+      store: {
+        ...disabledOperationStore(),
+        durable: true,
+        load: async () => snapshot
+      }
+    });
+    await restarted.hydrate();
+    expect(restarted.deletionBlocker("OCTO/APP", "Dev")?.operationId).toBe(
+      first.operationId
+    );
+    const replacement = createOperation({
+      kind: "delete",
+      repo: "octo/renamed",
+      environment: "renamed",
+      provider: "azure",
+      stages: buildDeleteStages()
+    });
+    replacement.request = { repoId: 7, environmentId: 17 };
+    expect(restarted.start(replacement)).toMatchObject({
+      ok: false,
+      conflict: { operationId: first.operationId }
+    });
+    expect(restarted.deletionBlocker("octo/app", "prod")).toBeNull();
+    const restored = restarted.get(first.operationId);
+    beginRetryAttempt(restored, "deletion");
+    applyDeletionRetry(restored);
+    finishSucceeded(restored);
+    expect(restarted.deletionBlocker("octo/app", "dev")).toBeNull();
+    expect(restarted.start(replacement)).toMatchObject({ ok: true });
+  });
+
   it("excludes cleanup authority from the terminal-count cap until cleanup is resolved", () => {
     const now = Date.parse("2026-08-22T12:00:00.000Z");
     const reg = createRegistry({ clock: () => now });
@@ -11766,3 +11830,4 @@ function hasTrackedSetupArtifactsForTest(op) {
     0
   );
 }
+import { disabledOperationStore } from "./operation-store.js";

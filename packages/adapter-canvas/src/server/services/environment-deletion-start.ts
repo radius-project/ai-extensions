@@ -82,6 +82,7 @@ export async function registerEnvironmentDeletion(
   if (!started.ok) {
     return {
       kind: "operation-conflict" as const,
+      reason: started.reason,
       operationId: started.conflict.operationId
     };
   }

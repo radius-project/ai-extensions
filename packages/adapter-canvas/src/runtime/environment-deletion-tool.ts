@@ -118,6 +118,16 @@ export function createEnvironmentDeletionTool(
         return refusal("workspace-target-unavailable");
       }
       const target = { repo: scope.repo, environment };
+      const existing = scope.registration.activeDeleteOperation(
+        repo,
+        environment
+      );
+      if (existing)
+        return {
+          kind: "refused" as const,
+          code: "already-deleting",
+          operationId: existing.operationId
+        };
       const admission = await admitEnvironmentDeletion(
         target,
         scope.registration,
@@ -161,6 +171,21 @@ export function createEnvironmentDeletionTool(
             configuration.tenantId === tenantId
         }
       );
+      if (result.kind === "already-deleting")
+        return {
+          kind: "refused" as const,
+          code: result.kind,
+          operationId: result.operation.operationId
+        };
+      if (
+        result.kind === "operation-conflict" &&
+        result.reason === "previous-deletion-required"
+      )
+        return {
+          kind: "refused" as const,
+          code: result.kind,
+          operationId: result.operationId
+        };
       if (result.kind !== "registered") return refusal(result.kind);
       const operation = result.operation;
       const scheduled = await scheduleRegisteredEnvironmentDeletion(

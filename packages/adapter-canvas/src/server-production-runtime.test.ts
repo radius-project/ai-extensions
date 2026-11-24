@@ -18,6 +18,7 @@ import {
 } from "./server.js";
 import {
   buildDeleteStages,
+  canRetryDeletion,
   buildStages,
   configureOperationStore,
   createOperation,
@@ -361,6 +362,11 @@ describe("production canvas server runtime", () => {
       const workflowAvailable = stableBranch || scenario === "branch-moved";
       let observeGuard = false;
       let rerunStarted = false;
+      let completedDeletion = false;
+      let replacedEnvironment = false;
+      const readAzureIdentity = vi.fn(async () => {
+        throw new Error("Fixture Azure identity is unavailable.");
+      });
       let beforeGuardResponse: () => void = () => {};
       const historicalDispatchTime = Date.parse("2026-01-02T03:04:05Z");
       let headReads = 0;
@@ -371,7 +377,7 @@ describe("production canvas server runtime", () => {
         );
       const generated =
         workflowAvailable ?
-          await generateDeleteWorkflow("dev", {
+          await generateDeleteWorkflow(stableBranch ? "prod" : "dev", {
             readTemplate: (_repo, path) =>
               readTemplate(path.split("/").pop() ?? "")
           })
@@ -394,7 +400,10 @@ describe("production canvas server runtime", () => {
               updated_at: "2026-01-02T03:05:00Z",
               run_attempt: rerunStarted ? 2 : 1,
               status: rerunStarted ? "in_progress" : "completed",
-              conclusion: rerunStarted ? null : "failure"
+              conclusion:
+                rerunStarted ? null
+                : completedDeletion ? "success"
+                : "failure"
             };
             const path = args[3];
             if (path.includes("/workflows/delete-environment.yml/runs?"))
@@ -418,17 +427,17 @@ describe("production canvas server runtime", () => {
                       run_id: 21,
                       run_attempt: 1,
                       status: "completed",
-                      conclusion: "failure",
+                      conclusion: completedDeletion ? "success" : "failure",
                       steps: [
                         {
                           name: "Guard - environment has no deployed applications",
                           status: "completed",
-                          conclusion: "failure"
+                          conclusion: completedDeletion ? "success" : "failure"
                         },
                         {
                           name: "Delete Radius resource",
                           status: "completed",
-                          conclusion: "skipped"
+                          conclusion: completedDeletion ? "success" : "skipped"
                         },
                         {
                           name: "Teardown",
@@ -446,6 +455,7 @@ describe("production canvas server runtime", () => {
             stableBranch &&
             args.slice(0, 3).join(" ") === "api --method POST"
           ) {
+            expect(args).toContain("inputs[environment]=dev");
             expect(save.mock.calls.at(-1)?.[0].operations).toContainEqual(
               expect.objectContaining({
                 deleteRecovery: expect.objectContaining({
@@ -521,7 +531,11 @@ describe("production canvas server runtime", () => {
           stableBranch ?
             async (args: string[]) => {
               if (args[1] === "/repos/octo/app/environments/dev")
-                return { code: 0, stdout: "17", stderr: "" };
+                return {
+                  code: 0,
+                  stdout: replacedEnvironment ? "18" : "17",
+                  stderr: ""
+                };
               if (
                 args[1] ===
                 "/repos/octo/app/environments/dev/variables?per_page=100"
@@ -579,7 +593,11 @@ describe("production canvas server runtime", () => {
           createReadOnlyExecutor,
           withSelectedAccount
         }),
-        environmentDeletionPorts: deletionPorts,
+        environmentDeletionPorts: {
+          ...deletionPorts,
+          readAzureIdentity,
+          log: vi.fn()
+        },
         serverDependencies: { createHttpServer: createServerForPanel }
       });
       const operation = createOperation({
@@ -794,6 +812,99 @@ describe("production canvas server runtime", () => {
             command: "status"
           })
         ).toMatchObject({ status: 200, body: { retryable: false } });
+        expect(
+          run.mock.calls.filter(([args]) => args[2] === "POST")
+        ).toHaveLength(2);
+        rerunStarted = false;
+        completedDeletion = true;
+        replacedEnvironment = true;
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "status"
+          })
+        ).toMatchObject({ status: 404 });
+        expect(
+          operations.deletionBlocker(target.repo, target.environment)
+        ).toBe(operation);
+        replacedEnvironment = false;
+        save.mockRejectedValueOnce(
+          new Error("Fixture operation store is full")
+        );
+        await expect(
+          runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "status"
+          })
+        ).rejects.toThrow("Fixture operation store is full");
+        expect(canRetryDeletion(operation)).toMatchObject({
+          target: STAGE_DELETE_RADIUS_ENV
+        });
+        const lateSuccess = await runtime.controlSelectedEnvironmentDeletion({
+          ...target,
+          command: "status"
+        });
+        expect(lateSuccess).toMatchObject({
+          status: 200,
+          body: {
+            retryable: true,
+            retryEvidence: expect.any(String),
+            message: expect.stringContaining("remaining cleanup")
+          }
+        });
+        expect(operation.request.selectedDispatchAttempts).toEqual([
+          expect.objectContaining({
+            state: "deleted",
+            runId: 21,
+            runAttempt: 1
+          })
+        ]);
+        expect(operation.stages).toContainEqual(
+          expect.objectContaining({
+            id: STAGE_DELETE_RADIUS_ENV,
+            state: "succeeded"
+          })
+        );
+        expect(canRetryDeletion(operation).target).not.toBe(
+          STAGE_DELETE_RADIUS_ENV
+        );
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "retry",
+            retryEvidence: guardedEvidence
+          })
+        ).toMatchObject({
+          status: 409,
+          body: { code: "deletion-retry-evidence-changed" }
+        });
+        expect(
+          run.mock.calls.filter(([args]) => args[2] === "POST")
+        ).toHaveLength(2);
+        const cleanupEvidence =
+          "retryEvidence" in lateSuccess.body ?
+            lateSuccess.body.retryEvidence
+          : undefined;
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "retry",
+            retryEvidence: cleanupEvidence
+          })
+        ).toMatchObject({
+          status: 202,
+          body: { operationId: operation.operationId }
+        });
+        await vi.waitFor(() =>
+          expect(readAzureIdentity).toHaveBeenCalledWith("fixture-client")
+        );
+        await vi.waitFor(() => expect(operation.state).toBe("failed_partial"));
+        expect(operation.stages).toContainEqual(
+          expect.objectContaining({
+            id: STAGE_DELETE_RADIUS_ENV,
+            state: "succeeded"
+          })
+        );
         expect(
           run.mock.calls.filter(([args]) => args[2] === "POST")
         ).toHaveLength(2);

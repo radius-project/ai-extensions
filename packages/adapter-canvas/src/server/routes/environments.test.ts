@@ -800,6 +800,7 @@ describe("environments — delete-environment refusal ladder", () => {
     };
     const startOperation = vi.fn(() => ({
       ok: false as const,
+      reason: "operation-in-progress" as const,
       conflict: { operationId: "op-existing" }
     }));
     const { recording, ctx } = context(
