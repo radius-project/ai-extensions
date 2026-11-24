@@ -128,6 +128,8 @@ export default defineConfig({
       "test/e2e-cloud/support/deploy-journey.test.ts",
       "test/e2e-cloud/support/workflow-run-observer.test.ts",
       "test/e2e-cloud/support/cloud-discovery-diagnostics.test.ts",
+      "test/e2e-cloud/support/aws-cloud-cleanup{,-ports}.test.ts",
+      "test/integration/runtime/aws-cleanup-stop-points.test.ts",
       "test/e2e-cloud/support/copilot-app-*.test.ts",
       "test/e2e/support/**/*.test.ts",
       "test/integration/http/**/*.test.ts",

@@ -88,6 +88,8 @@ To keep the two provider paths from duplicating the ~80% of steps they share, it
 
 The deploy flow generates the dispatcher and both provider workflows, commits them to the target repo under `.github/workflows/`, and dispatches `run-rad-commands.yml`.
 
+The shared control-plane setup retries the node-readiness read only when the new local Kubernetes API returns `ServiceUnavailable`. It makes at most five attempts with delays of 1, 2, 4, and 8 seconds, within the existing 120-second readiness limit. Permission errors, node-readiness timeouts, and other failures stop setup without a retry. This does not retry deployment or deletion commands.
+
 ### Deployment input and observation contract
 
 The dispatcher accepts optional string inputs `app_file` and `correlation_id`. It forwards `app_file` to each enabled provider workflow, which uses that input as `APP_FILE`, falling back to its generated model path when the input is empty. The command runner receives the same `APP_FILE` for parameter resolution and workflow artifacts. The dispatcher includes `correlation_id` in its run name so simultaneous deployments remain attached to their own results.

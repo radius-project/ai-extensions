@@ -4,6 +4,7 @@ import { awsEnvironmentPolicyName } from "../../../src/aws-deploy-role-name.js";
 import {
   ACCOUNT,
   addAwsEnvironment,
+  addUntaggedAppRole,
   APP_ROLES_POLICY,
   addOrphanedAppRole,
   appBoundary,
@@ -431,9 +432,22 @@ async function twoEnvironments(): Promise<CleanupScenario> {
   return s;
 }
 
+function deleteFailed(environment: string): string {
+  return `Deleting the Radius application in ${environment} failed: delete-application.yml run 9 ended failure.`;
+}
+
+function wentOn(environment: string): string {
+  return `The Radius application delete in ${environment} failed, but AWS and the clusters list none of its RDS resources, app roles, Pod Identity associations, or workloads, so the sweep goes on to remove its access and GitHub environment.`;
+}
+
 describe("sweepAwsCloudE2E", () => {
   it("deletes each stale environment's app, then its leftovers, then its access and GitHub state", async () => {
     const s = await twoEnvironments();
+    // Kubernetes deletes at once here, so step 4 starts while IAM still
+    // counts the app role step 2 deleted. Slow Kubernetes deletes are
+    // covered below.
+    s.kube.terminatingReads = 0;
+    s.kube.dependentLagReads = 0;
     s.appDelete.set(OLD, "leave");
     const report = await runSweep(s);
 
@@ -535,25 +549,284 @@ describe("sweepAwsCloudE2E", () => {
     expect(writes(s)).not.toContain("rds delete-db-instance");
   });
 
-  it("keeps everything a retry needs when the app delete fails, and finishes the next day", async () => {
+  it("goes on to step 4 when the app delete fails but AWS and the clusters list nothing of the environment", async () => {
     const s = await twoEnvironments();
     s.appDelete.set(OLD, "fail");
-    const before = retryInputs(s, OLD);
     const report = await runSweep(s);
 
+    expect(report.failures).toEqual([deleteFailed(OLD)]);
+    expect(report.warnings).toContain(wentOn(OLD));
+    // The sweep deleted what the app delete would have.
+    expect(report.done).toEqual(
+      expect.arrayContaining([
+        `Deleted RDS DB instance ${databaseName(OLD)} in ${REGION}`,
+        `Deleted app role arn:aws:iam::${ACCOUNT}:role${appBoundary(OLD).path}${appRoleName(OLD)}`,
+        `Deleted GitHub environment ${OLD}`
+      ])
+    );
+    for (const name of [OLD, SECOND_ENV]) {
+      expect(retryInputs(s, name)).toEqual([]);
+      expect(appResources(s, name)).toEqual([]);
+    }
+    expect(s.deployments).toEqual([]);
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+
+    // The environment is gone, so the next run has no delete to retry.
+    nextDay(s);
+    const rerun = await runSweep(s);
+    expect([rerun.failures, rerun.warnings, rerun.done]).toEqual([[], [], []]);
+    expect(
+      s.outside.calls.filter(
+        (call) => call.command === `dispatch delete-application ${OLD}`
+      )
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    [
+      "its dispatch's answer was lost",
+      "Could not dispatch delete-application.yml (gh: connection reset). Check that it exists on main."
+    ],
+    [
+      "its run never appeared",
+      "The delete-application.yml run never appeared."
+    ],
+    ["its run couldn't be read", "Reading run 9: gh: Something (HTTP 502)"],
+    [
+      "its run didn't finish in time",
+      "delete-application.yml run 9 did not finish in time."
+    ]
+  ])(
+    "keeps everything while the app delete may still be going, when %s",
+    async (_, message) => {
+      const s = await twoEnvironments();
+      s.appDelete.set(OLD, { unfinished: message });
+      const before = retryInputs(s, OLD);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([
+        `Deleting the Radius application in ${OLD} failed: ${message} A delete run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
+      ]);
+      expect(report.warnings).not.toContain(wentOn(OLD));
+      expect(retryInputs(s, OLD)).toEqual(before);
+      expect(retryInputs(s, SECOND_ENV)).toEqual([]);
+
+      // The run could sign in until it ended. The next day's delete ends
+      // failed, and nothing is left, so the sweep finishes.
+      nextDay(s);
+      expect(s.strandedDeletes).toEqual([]);
+      s.appDelete.set(OLD, "fail");
+      expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+      expect(retryInputs(s, OLD)).toEqual([]);
+      expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+    }
+  );
+
+  it("keeps everything when a retry's run succeeds while an earlier run for the environment is still going", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, {
+      unfinished: "delete-application.yml run 8 did not finish in time."
+    });
+    const before = retryInputs(s, OLD);
+    await runSweep(s);
+    s.appDelete.delete(OLD);
+    const report = await runSweep(s);
     expect(report.failures).toEqual([
-      `Deleting the Radius application in ${OLD} failed: delete-application.yml run 9 ended failure.`
+      `Deleting the Radius application in ${OLD} failed: delete-application.yml run 9 succeeded. Run 8 for ${OLD} is still going. A delete run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
     ]);
     expect(retryInputs(s, OLD)).toEqual(before);
-    expect(appResources(s, OLD)).toEqual([]);
-    expect(retryInputs(s, SECOND_ENV)).toEqual([]);
-    expect(s.deployments.map((item) => item.environment)).toEqual([OLD]);
 
     nextDay(s);
-    s.appDelete.clear();
+    expect(s.strandedDeletes).toEqual([]);
     expect((await runSweep(s)).failures).toEqual([]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+  });
+
+  it("keeps everything when a retry's run ends failed while an earlier run for the environment is still going", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, {
+      unfinished: "delete-application.yml run 8 did not finish in time."
+    });
+    const before = retryInputs(s, OLD);
+    await runSweep(s);
+    // A second sweep the same day, before the first run has ended.
+    s.appDelete.set(OLD, "fail");
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([
+      `Deleting the Radius application in ${OLD} failed: delete-application.yml run 9 ended failure. Run 8 for ${OLD} is still going. A delete run may still be going, so ${OLD} keeps its access and GitHub state for a retry.`
+    ]);
+    expect(retryInputs(s, OLD)).toEqual(before);
+
+    nextDay(s);
+    expect(s.strandedDeletes).toEqual([]);
+    expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+  });
+
+  it("has a scenario whose delete runs fail without the access they need", async () => {
+    const s = await twoEnvironments();
+    // A run still going when its environment's policy goes is stranded.
+    s.appDelete.set(OLD, { unfinished: "late" });
+    await expect(
+      s.ports.github.deleteApplication(OLD, APPLICATION)
+    ).rejects.toThrow("late");
+    s.aws.role(ROLE)!.inline.delete(awsEnvironmentPolicyName(REPO_ID, OLD));
+    nextDay(s);
+    expect(s.strandedDeletes).toEqual([OLD]);
+
+    // Cloud Control can't delete the app role without the app-roles policy.
+    const t = await twoEnvironments();
+    t.aws.role(ROLE)!.inline.delete(APP_ROLES_POLICY);
+    await expect(
+      t.ports.github.deleteApplication(OLD, APPLICATION)
+    ).rejects.toThrow("AccessDenied for iam:DeleteRole");
+  });
+
+  describe("Pods that outlive a Deployment the failed app delete removed", () => {
+    const NEWER = "radtest-aws-dddd77778888";
+    const KEY = `${MAIN.region}/${MAIN.name}`;
+
+    // The failed delete got as far as the Deployment, in the background, so
+    // its ReplicaSet and Pod are still going. A newer environment on the same
+    // cluster keeps the namespace.
+    async function world(dependentLagReads: number) {
+      const s = await twoEnvironments();
+      await addAwsEnvironment(s, NEWER, { ageHours: 1 });
+      s.appDelete.set(OLD, "fail");
+      s.kube.dependentLagReads = dependentLagReads;
+      s.kube.delete(KEY, "Deployment", "web", NAMESPACE);
+      return s;
+    }
+
+    it("keeps the environment while its Pods are still there, and the next run finishes", async () => {
+      const s = await world(1000);
+      const before = retryInputs(s, OLD);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([
+        deleteFailed(OLD),
+        `Leaked workloads on cluster ${MAIN.name} (${MAIN.region}) were still there after deletion.`
+      ]);
+      expect(report.warnings).not.toContain(wentOn(OLD));
+      expect(retryInputs(s, OLD)).toEqual(before);
+      expect(s.github.environment(NEWER)).toBeDefined();
+      expect(s.kube.namespaceExists(KEY, NAMESPACE)).toBe(true);
+      expect((await runVerify(s)).findings).toContain(
+        `Pod ${NAMESPACE}/web-aaaa11112222-a on cluster ${MAIN.name}`
+      );
+
+      nextDay(s);
+      expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+      expect(retryInputs(s, OLD)).toEqual([]);
+      expect(s.kube.snapshot().filter((item) => item.includes("web-"))).toEqual(
+        []
+      );
+    });
+
+    it("goes on once its Pods are gone", async () => {
+      const s = await world(3);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([deleteFailed(OLD)]);
+      expect(report.warnings).toContain(wentOn(OLD));
+      // The newer environment still uses the cluster's access entry.
+      expect(retryInputs(s, OLD)).toEqual(["access entry"]);
+      expect(s.github.environment(OLD)).toBeUndefined();
+      expect(s.kube.snapshot().filter((item) => item.includes("web-"))).toEqual(
+        []
+      );
+      expect(retryInputs(s, NEWER)).toContain("GitHub environment");
+    });
+
+    it("keeps the environment when the Pods can't be read", async () => {
+      const s = await world(1000);
+      const before = retryInputs(s, OLD);
+      const list = s.ports.kubernetes.listWorkloads;
+      s.ports.kubernetes.listWorkloads = async (cluster) => {
+        if (cluster.name === MAIN.name)
+          throw new Error("Listing workloads on main: Forbidden");
+        return list(cluster);
+      };
+      const report = await runSweep(s);
+      expect(report.failures).toContain(
+        `Workload sweep of cluster ${MAIN.name} stopped without deleting further: Listing workloads on main: Forbidden`
+      );
+      expect(report.warnings).not.toContain(wentOn(OLD));
+      expect(retryInputs(s, OLD)).toEqual(before);
+    });
+  });
+
+  it("keeps an environment whose app delete fails while anything of it is left, and says what on every run", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, "fail");
+    const kept = addUntaggedAppRole(s, OLD);
+    const before = retryInputs(s, OLD);
+    for (let day = 0; day < 2; day += 1) {
+      if (day > 0) nextDay(s);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual([
+        deleteFailed(OLD),
+        `The Radius application delete in ${OLD} failed, and it still has app role ${kept.RoleName}, so it keeps its access and GitHub state for a retry.`
+      ]);
+      expect(report.warnings).not.toContain(wentOn(OLD));
+      expect(retryInputs(s, OLD)).toEqual(before);
+      expect(s.aws.role(kept.RoleName)).toBeDefined();
+      expect((await runVerify(s)).findings).toContain(`app role ${kept.Arn}`);
+    }
+    expect(retryInputs(s, SECOND_ENV)).toEqual([]);
+
+    // Once a person deletes the role, the next run finishes.
+    s.aws.roles.delete(kept.RoleName.toLowerCase());
+    nextDay(s);
+    expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+    expect(retryInputs(s, OLD)).toEqual([]);
     expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
   });
+
+  it.each([
+    [
+      "RDS is still deleting the database",
+      (s: CleanupScenario) => {
+        s.aws.rds.deletingReads = 1000;
+      },
+      `RDS DB instance ${databaseName(OLD)} in ${REGION} was still there after ${RDS_DELETE_TIMEOUT_MS / 60000} minutes.`
+    ],
+    [
+      "Kubernetes is still terminating the workload",
+      (s: CleanupScenario) => {
+        s.kube.terminatingReads = 1000;
+      },
+      `Leaked workloads on cluster ${MAIN.name} (${MAIN.region}) were still there after deletion.`
+    ],
+    [
+      "IAM and EKS still list the app role and association",
+      (s: CleanupScenario) => {
+        s.aws.lingeringReads = 1000;
+      },
+      expect.stringMatching(
+        new RegExp(
+          `^The Radius application delete in ${OLD} failed, and it still has app role ${appRoleName(OLD)}, Pod Identity association \\S+ \\(${NAMESPACE}/radius-app-web\\) on cluster ${MAIN.name}, so it keeps its access and GitHub state for a retry\\.$`
+        )
+      )
+    ]
+  ])(
+    "doesn't go on after a failed app delete while %s",
+    async (_, slow, line) => {
+      const s = await twoEnvironments();
+      s.appDelete.set(OLD, "fail");
+      slow(s);
+      const before = retryInputs(s, OLD);
+      const report = await runSweep(s);
+      expect(report.failures).toEqual(
+        expect.arrayContaining([deleteFailed(OLD), line])
+      );
+      expect(report.warnings).not.toContain(wentOn(OLD));
+      expect(retryInputs(s, OLD)).toEqual(before);
+
+      // A day later the delete has finished, and the delete still fails.
+      nextDay(s);
+      expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+      expect(retryInputs(s, OLD)).toEqual([]);
+      expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+    }
+  );
 
   it("keeps a newer environment and everything it made", async () => {
     const s = createCleanupScenario();
@@ -891,7 +1164,7 @@ describe("sweepAwsCloudE2E", () => {
     const start = s.clock.now;
     const report = await runSweep(s);
     expect(report.failures).toHaveLength(1);
-    expect(s.clock.now - start).toBeLessThan(60 * 1000);
+    expect(s.clock.now - start).toBeLessThan(RDS_DELETE_TIMEOUT_MS);
     expect(
       s.outside.calls.filter(
         (call) =>
@@ -921,7 +1194,7 @@ describe("sweepAwsCloudE2E", () => {
     expect(report.failures[0]).toContain(
       `Deleting RDS DB instance ${databaseName(OLD)} in ${REGION}: An error occurred (InvalidDBInstanceState)`
     );
-    expect(s.clock.now - start).toBeLessThan(60 * 1000);
+    expect(s.clock.now - start).toBeLessThan(RDS_DELETE_TIMEOUT_MS);
     expect(retryInputs(s, OLD)).toHaveLength(7);
 
     // The app delete started deleting it after the sweep read the list.
@@ -1027,12 +1300,19 @@ describe("sweepAwsCloudE2E", () => {
 
   it("keeps the GitHub environment when the leftover check finds something", async () => {
     const s = await twoEnvironments();
-    let reads = 0;
+    // The main cluster's namespace goes last in its sweep, so its next list
+    // is the check after the sweep, which sees a workload the sweep did not.
+    let swept = false;
+    const deleteNamespace = s.ports.kubernetes.deleteNamespace;
+    s.ports.kubernetes.deleteNamespace = async (cluster, namespace) => {
+      await deleteNamespace(cluster, namespace);
+      if (cluster.name === MAIN.name) swept = true;
+    };
+    let injected = false;
     const list = s.ports.kubernetes.listWorkloads;
     s.ports.kubernetes.listWorkloads = async (cluster) => {
-      reads += 1;
-      // The check after the sweep sees a workload the sweep did not.
-      if (reads === 3)
+      if (swept && !injected && cluster.name === MAIN.name) {
+        injected = true;
         return {
           items: [
             {
@@ -1049,9 +1329,11 @@ describe("sweepAwsCloudE2E", () => {
             }
           ]
         };
+      }
       return list(cluster);
     };
     const report = await runSweep(s);
+    expect(injected).toBe(true);
     expect(report.failures).toEqual([
       `${OLD} still has Job ${NAMESPACE}/probe on cluster ${MAIN.name}, so it keeps its access and GitHub state for a retry.`
     ]);
@@ -1540,6 +1822,9 @@ describe("findAwsLeftovers", () => {
       `RDS DB subnet group ${name} in ${REGION}`,
       `RDS DB parameter group ${name} in ${REGION}`,
       `Deployment ${NAMESPACE}/web on cluster ${MAIN.name}`,
+      `ServiceAccount ${NAMESPACE}/radius-app-web on cluster ${MAIN.name}`,
+      `ReplicaSet ${NAMESPACE}/web-aaaa11112222 on cluster ${MAIN.name}`,
+      `Pod ${NAMESPACE}/web-aaaa11112222-a on cluster ${MAIN.name}`,
       `namespace ${NAMESPACE} on cluster ${MAIN.name}`,
       `app role ${appRole.Arn}`,
       `Pod Identity association ${association.associationId} (${NAMESPACE}/radius-app-web) on cluster ${MAIN.name}, for ${appRole.Arn}`,
@@ -2389,9 +2674,75 @@ describe("sweepAwsCloudE2E app roles and Pod Identity", () => {
     );
   });
 
+  it("doesn't go on after a failed app delete while IAM still refuses the app role's delete", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, "fail");
+    // IAM still counts the role's deleted inline policy past the retries.
+    s.aws.iamSettleMs = 10 * 60 * 1000;
+    const role = appRoleName(OLD);
+    const before = retryInputs(s, OLD);
+    const report = await runSweep(s);
+    expect(report.failures).toEqual(
+      expect.arrayContaining([
+        deleteFailed(OLD),
+        expect.stringContaining(
+          `Deleting app role arn:aws:iam::${ACCOUNT}:role${appBoundary(OLD).path}${role}: An error occurred (DeleteConflict)`
+        )
+      ])
+    );
+    expect(report.warnings).not.toContain(wentOn(OLD));
+    expect(retryInputs(s, OLD)).toEqual(before);
+    expect(s.aws.role(role)).toBeDefined();
+
+    s.aws.iamSettleMs = 10_000;
+    nextDay(s);
+    expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+    expect(await runVerify(s)).toEqual({ findings: [], warnings: [] });
+  });
+
+  it("doesn't go on after a failed app delete while AWS lists an app role or association it no longer describes", async () => {
+    const s = await twoEnvironments();
+    s.appDelete.set(OLD, "fail");
+    s.aws.lingeringReads = 1000;
+    const role = appRoleName(OLD);
+    // The lists still show both, but their describes already say not found.
+    answer(s, "list-role-tags", (args) =>
+      args.includes(role) && !s.aws.role(role) ?
+        failed("NoSuchEntity", "ListRoleTags")
+      : null
+    );
+    answer(s, "describe-pod-identity-association", (args) =>
+      (
+        ![...s.aws.clusters.values()].some((cluster) =>
+          cluster.podIdentity.has(args[args.indexOf("--association-id") + 1]!)
+        )
+      ) ?
+        failed("ResourceNotFoundException", "DescribePodIdentityAssociation")
+      : null
+    );
+    const before = retryInputs(s, OLD);
+    const report = await runSweep(s);
+    expect(report.failures).toEqual([
+      deleteFailed(OLD),
+      expect.stringMatching(
+        new RegExp(
+          `^The Radius application delete in ${OLD} failed, and it still has app role ${role} \\(still listed\\), Pod Identity association \\S+ \\(${NAMESPACE}/radius-app-web\\) on cluster ${MAIN.name} \\(still listed\\), so it keeps`
+        )
+      )
+    ]);
+    expect(retryInputs(s, OLD)).toEqual(before);
+    expect(retryInputs(s, SECOND_ENV)).toEqual([]);
+
+    nextDay(s);
+    expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
+    expect(retryInputs(s, OLD)).toEqual([]);
+  });
+
   it("keeps the app-roles policy while another environment still uses the deploy role", async () => {
     const s = await twoEnvironments();
     s.appDelete.set(OLD, "fail");
+    const kept = addUntaggedAppRole(s, OLD);
     await runSweep(s);
     expect(retryInputs(s, SECOND_ENV)).toEqual([]);
     expect([...s.aws.role(ROLE)!.inline.keys()].sort()).toEqual(
@@ -2399,8 +2750,8 @@ describe("sweepAwsCloudE2E app roles and Pod Identity", () => {
     );
 
     nextDay(s);
-    s.appDelete.clear();
-    expect((await runSweep(s)).failures).toEqual([]);
+    s.aws.roles.delete(kept.RoleName.toLowerCase());
+    expect((await runSweep(s)).failures).toEqual([deleteFailed(OLD)]);
     expect(s.aws.role(ROLE)!.inline.size).toBe(0);
   });
 });

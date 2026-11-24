@@ -44,6 +44,7 @@ import {
   FIXTURE_AWS_BASELINE_SHA,
   FIXTURE_BASELINE_SHA
 } from "./fixture-repository.js";
+import { RADIUS_CLEANUP_KINDS } from "./radius-workload-kinds.js";
 
 const MAIN_LABEL = `${MAIN.name} (${MAIN.region})`;
 const SECOND_LABEL = `${SECOND.name} (${SECOND.region})`;
@@ -90,7 +91,8 @@ function world(): World {
       },
       log: () => {},
       kubernetes: {
-        listWorkloads: async (cluster) => kube.list(key(cluster)),
+        listWorkloads: async (cluster) =>
+          kube.list(key(cluster), RADIUS_CLEANUP_KINDS),
         namespaceExists: async (cluster, namespace) =>
           kube.namespaceExists(key(cluster), namespace),
         listNodes: async (cluster, selector) => {

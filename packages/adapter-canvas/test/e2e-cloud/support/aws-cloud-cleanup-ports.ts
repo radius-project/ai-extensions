@@ -15,17 +15,15 @@ import {
   createSelectedNamespaceClaimsPorts,
   type NamespaceClaimsPorts
 } from "../../../src/server/routes/create-environment-namespace-claims.js";
-import type {
-  AwsAccessRemovalRequest,
-  AwsCleanupCluster,
-  AwsCleanupGitHub,
-  AwsCleanupKubernetes
-} from "./aws-cloud-cleanup.js";
-import type { LeakedClusterWorkload } from "./cloud-cleanup.js";
 import {
-  findNewWorkflowRunId,
-  readWorkflowRunIds
-} from "./workflow-run-discovery.js";
+  ApplicationDeleteFailed,
+  type AwsAccessRemovalRequest,
+  type AwsCleanupCluster,
+  type AwsCleanupGitHub,
+  type AwsCleanupKubernetes
+} from "./aws-cloud-cleanup.js";
+import { RADIUS_CLEANUP_KINDS } from "./radius-workload-kinds.js";
+import type { LeakedClusterWorkload } from "./cloud-cleanup.js";
 
 // The CLI-backed ports the AWS cleanup sweep runs on in CI: `gh` for GitHub,
 // `kubectl` for the clusters, and the product's own deploy-role removal.
@@ -153,12 +151,51 @@ export interface GhCleanupOptions {
   gh(args: readonly string[], packages?: boolean): Promise<CommandResult>;
   sleep(milliseconds: number): Promise<void>;
   now(): number;
+  // A new unique ID for each dispatch, so its run can be told apart from any
+  // other, such as the Azure job's, by its title.
+  correlationId(): string;
+}
+
+/**
+ * The ID of the one listed run with `title`, or undefined when none is
+ * listed yet. More than one can't be this dispatch's, so that throws.
+ */
+export function findRunByTitle(
+  payload: unknown,
+  title: string
+): string | undefined {
+  if (!Array.isArray(payload))
+    throw new Error("The workflow run listing was not a JSON array.");
+  const matches = payload
+    .map((value) => asRecord(value))
+    .filter((run) => run?.displayTitle === title);
+  if (matches.length > 1)
+    throw new Error(
+      `${matches.length} delete-application.yml runs are titled "${title}".`
+    );
+  const id = matches[0]?.databaseId;
+  if (
+    matches.length === 1 &&
+    (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)
+  )
+    throw new Error(`The run titled "${title}" has no valid database id.`);
+  return matches.length === 1 ? String(id) : undefined;
 }
 
 // How long a delete-application run may take: its RDS delete alone can take
 // 15 minutes.
 export const APPLICATION_DELETE_TIMEOUT_MS = 60 * 60 * 1000;
 const RUN_DISCOVERY_ATTEMPTS = 24;
+// Every status GitHub gives a workflow run that hasn't finished.
+// https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository
+const ACTIVE_RUN_STATUSES = [
+  "requested",
+  "queued",
+  "pending",
+  "waiting",
+  "in_progress"
+] as const;
+const ACTIVE_RUN_LIMIT = 100;
 const RUN_POLL_MS = 15 * 1000;
 const GONE_ATTEMPTS = 12;
 const GONE_POLL_MS = 5 * 1000;
@@ -211,7 +248,65 @@ export function createGhCleanupGitHub(
     return packagesBase;
   }
 
-  async function runIds(): Promise<ReadonlySet<string>> {
+  // The delete-application.yml runs for `environment`, other than `own`, that
+  // haven't finished. One listing of the newest runs with their statuses sees
+  // each recent run at a single moment, so a run that moves between unfinished
+  // statuses can't slip past. A read of each unfinished status then finds
+  // older ones.
+  async function activeRuns(
+    environment: string,
+    own: string
+  ): Promise<string[]> {
+    const prefix = `Radius - Delete ${environment} [`;
+    // A run can be listed more than once.
+    const active = new Set<string>();
+    const add = (item: Record<string, unknown> | null) => {
+      const id = String(item?.databaseId ?? "with no ID");
+      if (
+        id !== own &&
+        typeof item?.displayTitle === "string" &&
+        item.displayTitle.startsWith(prefix)
+      )
+        active.add(id);
+    };
+    const recent = await listRuns();
+    if (!Array.isArray(recent))
+      throw new Error("The workflow run listing was not a JSON array.");
+    // A run without a status can't be shown to be finished.
+    for (const item of recent.map(asRecord))
+      if (item?.status !== "completed") add(item);
+    for (const status of ACTIVE_RUN_STATUSES) {
+      const result = await gh([
+        "run",
+        "list",
+        "--repo",
+        repo,
+        "--workflow",
+        "delete-application.yml",
+        "--status",
+        status,
+        "--limit",
+        String(ACTIVE_RUN_LIMIT),
+        "--json",
+        "databaseId,displayTitle"
+      ]);
+      if (result.code !== 0)
+        throw new Error(
+          `Listing ${status} delete-application.yml runs: ${detail(result)}`
+        );
+      const runs = parse(result, "gh run list");
+      if (!Array.isArray(runs))
+        throw new Error("The workflow run listing was not a JSON array.");
+      if (runs.length >= ACTIVE_RUN_LIMIT)
+        throw new Error(
+          `${runs.length} delete-application.yml runs are ${status}, so the sweep can't tell whether one is for ${environment}.`
+        );
+      for (const item of runs.map(asRecord)) add(item);
+    }
+    return [...active];
+  }
+
+  async function listRuns(): Promise<unknown> {
     const result = await gh([
       "run",
       "list",
@@ -224,11 +319,11 @@ export function createGhCleanupGitHub(
       "--limit",
       "100",
       "--json",
-      "databaseId"
+      "databaseId,displayTitle,status"
     ]);
     if (result.code !== 0)
       throw new Error(`Listing delete-application.yml runs: ${detail(result)}`);
-    return readWorkflowRunIds(parse(result, "gh run list"));
+    return parse(result, "gh run list");
   }
 
   return {
@@ -271,7 +366,9 @@ export function createGhCleanupGitHub(
     },
 
     async deleteApplication(environment, application) {
-      const before = await runIds();
+      const correlationId = options.correlationId();
+      // The run title delete-application.yml sets, as the product reads it.
+      const title = `Radius - Delete ${environment} [radius:v1 app=${application}] ${correlationId}`;
       const dispatch = await gh([
         "workflow",
         "run",
@@ -283,7 +380,9 @@ export function createGhCleanupGitHub(
         "-f",
         `environment=${environment}`,
         "-f",
-        `application=${application}`
+        `application=${application}`,
+        "-f",
+        `correlation_id=${correlationId}`
       ]);
       if (dispatch.code !== 0)
         throw new Error(
@@ -296,7 +395,7 @@ export function createGhCleanupGitHub(
         attempt += 1
       ) {
         await options.sleep(GONE_POLL_MS);
-        runId = findNewWorkflowRunId(before, await runIds());
+        runId = findRunByTitle(await listRuns(), title);
       }
       if (!runId)
         throw new Error("The delete-application.yml run never appeared.");
@@ -315,10 +414,18 @@ export function createGhCleanupGitHub(
           throw new Error(`Reading run ${runId}: ${detail(view)}`);
         const run = asRecord(parse(view, "gh run view"));
         if (run?.status === "completed") {
-          if (run.conclusion === "success") return;
-          throw new Error(
-            `delete-application.yml run ${runId} ended ${String(run.conclusion)}.`
-          );
+          const succeeded = run.conclusion === "success";
+          const ended = `delete-application.yml run ${runId} ${succeeded ? "succeeded" : `ended ${String(run.conclusion)}`}.`;
+          // Another run for the environment, such as an earlier one from a
+          // sweep that stopped waiting, may still be deleting with the access
+          // step 4 removes, whether this one succeeded or not.
+          const others = await activeRuns(environment, runId);
+          if (others.length > 0)
+            throw new Error(
+              `${ended} Run ${others.join(", ")} for ${environment} is still going.`
+            );
+          if (succeeded) return;
+          throw new ApplicationDeleteFailed(ended);
         }
         if (options.now() >= deadline)
           throw new Error(
@@ -403,10 +510,8 @@ export function createGhCleanupGitHub(
   };
 }
 
-// Every Radius-rendered kind the label rule reclaims. Jobs are the connection
-// probes, which carry the app's Radius labels.
-const WORKLOAD_KINDS =
-  "deployments,statefulsets,daemonsets,jobs,services,horizontalpodautoscalers";
+// Every kind the label rule reclaims, owners first.
+const WORKLOAD_KINDS = RADIUS_CLEANUP_KINDS.join(",");
 
 export interface KubectlCleanupOptions {
   run: CommandRunner;
@@ -489,6 +594,11 @@ export function createKubectlCleanupKubernetes(
         "--namespace",
         workload.namespace,
         "--ignore-not-found",
+        // The workload stays listed until its Pods are gone, so the sweep's
+        // wait and check cover them. Kubernetes's default, background,
+        // removes it at once and its Pods later.
+        "--cascade=foreground",
+        "--wait=false",
         "--request-timeout=60s"
       ]);
       if (result.code !== 0) throw new Error(detail(result));

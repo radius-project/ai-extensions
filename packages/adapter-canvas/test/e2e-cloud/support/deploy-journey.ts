@@ -25,6 +25,7 @@ import {
   DEPLOY_DISPATCHER_FILE
 } from "../../../src/infra.js";
 import { DELETE_FAILED_STATUS } from "../../../src/server/services/delete-conflict.js";
+import { RADIUS_WORKLOAD_KINDS } from "./radius-workload-kinds.js";
 import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
 import {
   CloudCommandError,
@@ -564,22 +565,7 @@ export function radiusApplicationSelector(application: string): string {
   ).toLowerCase()}`;
 }
 
-/**
- * The Kubernetes kinds Radius renders for an application.
- *
- * Presence and absence are asserted over the same set on purpose. Listing
- * fewer kinds on the delete side would let a delete that removed the Deployment
- * but stranded its Service or autoscaler report success, and cleanup already
- * reclaims all of them - so the assertion would be weaker than the sweep that
- * backs it.
- */
-export const RADIUS_WORKLOAD_KINDS = [
-  "deployments",
-  "statefulsets",
-  "daemonsets",
-  "services",
-  "horizontalpodautoscalers"
-] as const;
+export { RADIUS_WORKLOAD_KINDS };
 
 /** The `kubectl get` argument covering every rendered kind. */
 export const RADIUS_WORKLOAD_RESOURCES = RADIUS_WORKLOAD_KINDS.join(",");
