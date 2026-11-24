@@ -107,10 +107,10 @@ function looksLikeNotFound(stderr: string | undefined): boolean {
 // non-zero exit) or one that still names the environment is treated as "not
 // confirmed absent", so a permission-masked 404 can never be recorded as a
 // successful idempotent deletion.
-async function confirmGitHubEnvironmentAbsent(
+export async function confirmGitHubEnvironmentAbsent(
   repo: string,
   environment: string,
-  ports: GitHubEnvironmentDeletionPorts
+  ports: Pick<GitHubEnvironmentDeletionPorts, "runGh">
 ): Promise<{ absent: boolean; detail?: string }> {
   const listing = await ports.runGh(buildGitHubEnvironmentListArgs(repo));
   const code = Number(listing.code);

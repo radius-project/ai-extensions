@@ -154,7 +154,8 @@ import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 import {
   createEnvironmentProviderReader,
-  createEnvironmentTargetReader
+  createEnvironmentTargetReader,
+  createSelectedEnvironmentTargetReader
 } from "./server/services/environment-target.js";
 import { createAwsTrustRepairService } from "./server/services/aws-trust-repair.js";
 import { requireCurrentAwsWorkflows } from "./server/services/aws-workflow-compatibility.js";
@@ -189,6 +190,7 @@ import {
   createOperation,
   buildStages,
   buildDeleteStages,
+  canRetryDeletion,
   OPERATION_KIND_DELETE,
   matchDeleteOperationEnvironment,
   enterStage,
@@ -255,6 +257,7 @@ import {
 import {
   generateVerifyWorkflow,
   syncRepoWorkflows,
+  generateDeleteWorkflow,
   deleteApplicationWorkflowFiles,
   deleteEnvironmentWorkflowFiles,
   workflowTemplates,
@@ -390,6 +393,12 @@ import { createDeployRequestService } from "./server/services/deploy-request.js"
 import { createDeployModelSource } from "./server/services/deploy-model-source.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
+import {
+  hasSelectedEnvironmentDeletion,
+  runSelectedEnvironmentDeletion
+} from "./server/services/selected-environment-deletion.js";
+import type { EnvironmentDeletionToolPorts } from "./runtime/environment-deletion-tool.js";
+import { environmentDiagnostic } from "./runtime/environment-tool-result.js";
 import { createRadiusEnvironmentWorkflowDeletion } from "./server/services/radius-environment-workflow-deletion.js";
 import {
   ProviderMutationRecoveryError,
@@ -407,6 +416,7 @@ import {
 import {
   buildGitHubEnvironmentDeleteArgs,
   deleteGitHubEnvironmentIdempotent as deleteGitHubEnvironmentPrimitive,
+  confirmGitHubEnvironmentAbsent,
   parseEnvironmentProviderId,
   selectedEnvironmentReader
 } from "./server/services/github-environment.js";
@@ -1753,7 +1763,7 @@ function sleepMs(milliseconds: number): Promise<void> {
 function ghOrThrow(
   args: string[],
   timeout = 12000,
-  execute: typeof cliExec = cliExec
+  execute: DeploymentLookupExecute = cliExec
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execute("gh", args, { timeout }, (err, stdout) => {
@@ -3492,7 +3502,7 @@ async function resolveEnvDeployment(
   repo: string,
   environment: string,
   appName: string,
-  execute: typeof cliExec = cliExec
+  execute: DeploymentLookupExecute = cliExec
 ): Promise<DeploymentRow | null> {
   return deploymentLookupFor(execute).resolveEnvDeployment(
     repo,
@@ -3792,6 +3802,9 @@ export interface EnvironmentOperationExecutionDependencies {
   runDeletion?(
     operation: Parameters<typeof runEnvironmentDeletion>[0]
   ): Promise<void>;
+  runSelectedDeletion?(
+    operation: Parameters<typeof runEnvironmentDeletion>[0]
+  ): Promise<void>;
 }
 
 async function admitRecoveryRollback(
@@ -4029,11 +4042,20 @@ export function createEnvironmentOperationExecution(
   }
 
   async function runEnvironmentOperation(operationId: string): Promise<void> {
+    const op = operations.get(operationId);
+    if (op?.kind === "delete" && hasSelectedEnvironmentDeletion(op)) {
+      if (!dependencies.runSelectedDeletion) {
+        throw new Error(
+          "Saved-account deletion requires the runtime-owned executor."
+        );
+      }
+      await dependencies.runSelectedDeletion(op);
+      return;
+    }
     if (dependencies.environmentOperationRunner) {
       await dependencies.environmentOperationRunner(operationId);
       return;
     }
-    const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
       if (!dependencies.runDeletion) {
@@ -5250,6 +5272,7 @@ export function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
+      if (hasSelectedEnvironmentDeletion(op)) return;
       if (!attachment.isCurrent() || deletionAttachment.isShuttingDown())
         return;
       if (
@@ -5715,6 +5738,13 @@ export function createProductionCanvasServerRuntime(
       return result.value;
     },
     schedule: ({ kind, instanceId, operation, commandId }) => {
+      if (
+        kind === "deletion_retry" &&
+        operation.kind === "delete" &&
+        hasSelectedEnvironmentDeletion(operation)
+      ) {
+        return setupExecution.scheduleEnvironmentOperation(operation);
+      }
       if (instanceId === undefined && operation.kind === "delete") return false;
       const coordinator = resolveInstanceRunner(
         instanceId,
@@ -6482,12 +6512,360 @@ export function createProductionCanvasServerRuntime(
     accountContext,
     setupServices,
     verificationStatus,
+    runSelectedDeletion: (operation) =>
+      runSelectedEnvironmentDeletion(operation, {
+        isCurrent: () =>
+          !executionOwner.isShuttingDown() &&
+          operations.get(operation.operationId) === operation,
+        withOwner: async (login, work) => {
+          await githubAccountCoordinator.withSelectedAccount(
+            login,
+            {
+              ownerKey: accountContext.ownerKey,
+              operationId: operation.operationId
+            },
+            work
+          );
+        },
+        readTarget: (executor, repo, environment, assertCurrent) =>
+          selectedDeletionTargetReader(executor, assertCurrent)(
+            repo,
+            environment
+          ),
+        isEnvironmentAbsent: async (
+          executor,
+          repo,
+          environment,
+          assertCurrent
+        ) =>
+          (
+            await confirmGitHubEnvironmentAbsent(repo, environment, {
+              runGh: (args) =>
+                executor.run(args, {
+                  timeout: 30000,
+                  beforeExecute: assertCurrent
+                })
+            })
+          ).absent,
+        bind: (executor, assertCurrent, beforeDispatch, recoverDispatch) => {
+          const base = productionEnvironmentDeletionPorts(
+            false,
+            awsEnvironmentAccess
+          );
+          const runGh = (args: string[]) =>
+            executor.run(args, {
+              timeout: 30000,
+              beforeExecute: assertCurrent
+            });
+          return {
+            ...base,
+            errorMessage: (error) => executor.errorMessage(error),
+            deleteRadiusEnvironment: createRadiusEnvironmentWorkflowDeletion({
+              workflowFiles: deleteEnvironmentWorkflowFiles(false),
+              // The normal workflow verifier below must confirm existing templates.
+              // A tool must not publish through the legacy ambient synchronizer.
+              ensureWorkflowsCurrent: async () => ({ created: [] }),
+              generateDeleteWorkflow: (environment) =>
+                generateDeleteWorkflow(environment, {
+                  readTemplate: (repo, path, ref) =>
+                    selectedFetchFileFromRepo(executor, repo, path, ref)
+                }),
+              getDefaultBranch: (repo) =>
+                selectedGetDefaultBranch(executor, repo),
+              fetchFileFromRepo: (repo, path, branch) =>
+                selectedFetchFileFromRepo(executor, repo, path, branch),
+              runGh,
+              readIdentity: "selected",
+              getBranchHead: (repo, branch) =>
+                selectedGetBranchHeadSha(executor, repo, branch),
+              beforeDispatch,
+              recoverDispatch,
+              findWorkflowRun: (
+                repo,
+                workflow,
+                since,
+                known,
+                _executor,
+                after,
+                correlation
+              ) =>
+                findWorkflowRun(
+                  repo,
+                  workflow,
+                  since,
+                  known,
+                  executor,
+                  after,
+                  correlation
+                ),
+              getRunDetail: (repo, run, _executor, request) =>
+                getRunDetail(repo, run, executor, request),
+              sleep: async (ms) => {
+                assertCurrent();
+                await sleepMs(ms);
+                assertCurrent();
+              },
+              now: Date.now,
+              random: Math.random,
+              errorMessage: (error) => executor.errorMessage(error)
+            }),
+            runAz: (args) => {
+              assertCurrent();
+              return base.runAz(args);
+            },
+            readRepositoryId: async (repo) => {
+              const result = await runGh([
+                "api",
+                `/repos/${repo}`,
+                "--jq",
+                ".id"
+              ]);
+              const id = Number(result.stdout.trim());
+              if (result.code !== 0 || !Number.isSafeInteger(id) || id <= 0)
+                throw new Error(
+                  "Could not confirm the selected GitHub repository ID."
+                );
+              return id;
+            },
+            deleteGitHubEnvironment: ({ repo, environment }) =>
+              deleteGitHubEnvironmentPrimitive(repo, environment, {
+                runGh,
+                invalidateEnvListCache: (target) =>
+                  envListCache.invalidate(target)
+              }),
+            deleteStatePackage: createStatePackageDeletion({
+              stateRegistryForEnvironment,
+              getCredentials: async () => {
+                assertCurrent();
+                await executor.verifyIdentity();
+                assertCurrent();
+                return executor.packageCredentials();
+              },
+              deletePackage: deleteGHCRStatePackage,
+              ghCommandPresentation: GH_COMMAND_PRESENTATION
+            }),
+            reportStatePackageDeletionFailure: async ({ message }) => {
+              operations.report?.({
+                scope: "selected-environment-deletion",
+                operationId: operation.operationId,
+                message: executor.redact(message)
+              });
+            }
+          };
+        }
+      }),
     admitRecoveryRollback: (operationId, isCurrent) =>
       admitRecoveryRollback(operationControl, operationId, isCurrent),
     get environmentOperationRunner() {
       return options.environmentOperationRunner;
     }
   });
+
+  function recoverSelectedEnvironmentDeletions(): void {
+    function recover(operationId: string): void {
+      if (
+        executionOwner.isShuttingDown() ||
+        executionOwner.deferAdmissionRecovery(operationId, recover)
+      )
+        return;
+      const operation = operations.get(operationId);
+      if (
+        operation?.kind === "delete" &&
+        !operation.endedAt &&
+        hasSelectedEnvironmentDeletion(operation)
+      ) {
+        setupExecution.scheduleEnvironmentOperation(operation);
+      }
+    }
+    for (const operation of operations.all()) recover(operation.operationId);
+  }
+
+  function selectedDeletionTargetReader(
+    executor: SelectedGhExecutor,
+    assertCurrent: () => void
+  ) {
+    return createSelectedEnvironmentTargetReader(
+      async (command, args, options) => {
+        assertCurrent();
+        if (command !== "gh")
+          throw new Error("Expected a GitHub environment read.");
+        const result = await executor.runOrThrow(
+          args,
+          "Could not read the selected GitHub environment.",
+          { ...options, beforeExecute: assertCurrent }
+        );
+        return result.stdout;
+      }
+    );
+  }
+
+  async function controlSelectedEnvironmentDeletion(input: {
+    command: "status" | "retry";
+    operationId: string;
+    repo: string;
+    environment: string;
+    login: string;
+    isCurrent(): boolean;
+  }) {
+    const operation = operations.get(input.operationId);
+    const unavailable = {
+      status: 404,
+      body: {
+        code: "deletion-operation-unavailable",
+        error: "No saved deletion matches this target and account."
+      }
+    };
+    if (!operation) return unavailable;
+    const request = operation.request;
+    const owner = request?.selectedOwner;
+    const current = () =>
+      input.isCurrent() &&
+      !executionOwner.isShuttingDown() &&
+      operations.hasDurableStore() &&
+      operations.get(input.operationId) === operation &&
+      operation.operationId === input.operationId &&
+      operation.kind === "delete" &&
+      operation.provider === "azure" &&
+      operation.repo === input.repo &&
+      operation.environment === input.environment &&
+      typeof owner === "string" &&
+      owner.trim().length > 0 &&
+      operation.request === request &&
+      request.selectedOwner === owner &&
+      request.provider === "azure" &&
+      request.repo === input.repo &&
+      request.environment === input.environment &&
+      Number.isSafeInteger(request.repoId) &&
+      Number(request.repoId) > 0 &&
+      owner.toLowerCase() === input.login.toLowerCase();
+    if (!current()) return unavailable;
+    const executor = await githubAccountCoordinator.createReadOnlyExecutor(
+      input.login
+    );
+    await executor.verifyIdentity();
+    if (
+      executor.login.toLowerCase() !== input.login.toLowerCase() ||
+      !current()
+    )
+      return unavailable;
+    if (input.command === "retry") {
+      const result = await operationControl({
+        command: "retry",
+        retryKind: "deletion",
+        operationId: input.operationId,
+        authorizeSelectedDeletionRetry: (operationId) =>
+          operationId === input.operationId && current(),
+        isCurrent: current
+      });
+      if (result.status >= 400) {
+        return {
+          status: result.status,
+          body: {
+            code:
+              typeof result.body.code === "string" ?
+                result.body.code
+              : "deletion-retry-refused",
+            error:
+              typeof result.body.error === "string" ?
+                environmentDiagnostic(result.body.error, executor.redact)
+              : "The saved deletion could not be retried."
+          }
+        };
+      }
+      return {
+        status: result.status,
+        body: { operationId: input.operationId }
+      };
+    }
+    const retry = canRetryDeletion(operation);
+    return {
+      status: 200,
+      body: {
+        operationId: input.operationId,
+        repo: input.repo,
+        environment: input.environment,
+        provider: "azure",
+        state: String(operation.state),
+        terminal: isTerminalState(operation.state),
+        stage:
+          typeof operation.currentStage === "string" ?
+            operation.currentStage
+          : null,
+        retryable: retry.ok === true,
+        message:
+          retry.code === "deletion-dispatch-unconfirmed" ?
+            "Radius will not dispatch the deletion again. Verify the original workflow outcome in GitHub Actions."
+          : typeof operation.failure?.message === "string" ?
+            environmentDiagnostic(operation.failure.message, executor.redact)
+          : null
+      }
+    };
+  }
+
+  async function openEnvironmentDeletionScope(
+    repo: string,
+    login: string,
+    isCurrent: () => boolean
+  ): ReturnType<EnvironmentDeletionToolPorts["openScope"]> {
+    const executor =
+      await githubAccountCoordinator.createReadOnlyExecutor(login);
+    const current = () => isCurrent() && !executionOwner.isShuttingDown();
+    if (
+      !current() ||
+      !operations.hasDurableStore() ||
+      executor.login.toLowerCase() !== login.toLowerCase()
+    )
+      return null;
+    const execute: DeploymentLookupExecute = (
+      command,
+      args,
+      options,
+      callback
+    ) => {
+      void Promise.resolve()
+        .then(async () => {
+          if (command !== "gh" || !current())
+            throw new Error(
+              "The selected GitHub deletion scope is unavailable."
+            );
+          const result = await executor.run(args, { timeout: options.timeout });
+          if (result.code !== 0)
+            throw new Error(
+              result.stderr || "The selected GitHub read failed."
+            );
+          return result;
+        })
+        .then(
+          (result) => callback(null, result.stdout, result.stderr),
+          (error: unknown) =>
+            callback(new Error(executor.errorMessage(error)), "", "")
+        );
+      return {};
+    };
+    return {
+      repo,
+      login: executor.login,
+      isCurrent: current,
+      schedule: (operation) =>
+        operations.get(operation.operationId) === operation &&
+        setupExecution.scheduleEnvironmentOperation(operation),
+      registration: {
+        ...environmentsDependencies,
+        resolveEnvDeployment: (target, name, app) =>
+          resolveEnvDeployment(target, name, app, execute),
+        discoverEnvironmentTarget: selectedDeletionTargetReader(
+          executor,
+          () => {
+            if (!current()) {
+              throw new Error(
+                "The selected GitHub deletion scope is unavailable."
+              );
+            }
+          }
+        )
+      }
+    };
+  }
 
   // Built once per runtime so validation fails before opening any server.
   const serverRoutes = createServerRouteTable({
@@ -6767,6 +7145,9 @@ export function createProductionCanvasServerRuntime(
     operationControl,
     operationResume,
     environmentServices,
+    openEnvironmentDeletionScope,
+    recoverSelectedEnvironmentDeletions,
+    controlSelectedEnvironmentDeletion,
     getOrCreateServer,
     stopServer,
     getLastWebviewActivityAt,

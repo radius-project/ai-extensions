@@ -1,10 +1,11 @@
+import {
+  registerEnvironmentDeletion,
+  scheduleRegisteredEnvironmentDeletion
+} from "../services/environment-deletion-start.js";
 import { observeVerificationStatus } from "../services/verification-status.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
-import type {
-  EnvironmentActiveDeployment,
-  EnvironmentsDependencies
-} from "./environments-types.js";
+import type { EnvironmentsDependencies } from "./environments-types.js";
 import { verificationBypass } from "../services/verification-bypass.js";
 
 // Setup uses direct services rather than this HTTP family. The five
@@ -139,214 +140,89 @@ export async function handleDeleteEnvironment(
       );
       return;
     }
-    const existingDelete = dependencies.activeDeleteOperation(repo, envName);
-    if (existingDelete) {
+    const result = await registerEnvironmentDeletion(
+      { repo, environment: envName },
+      dependencies,
+      dependencies.awsEnabled
+    );
+    const refuse = (status: number, payload: Record<string, unknown>) => {
       response.setHeader("Content-Type", "application/json");
-      response.writeHead(409);
-      response.end(
-        JSON.stringify({
+      response.writeHead(status);
+      response.end(JSON.stringify(payload));
+    };
+    switch (result.kind) {
+      case "already-deleting":
+        return refuse(409, {
           error: `Deletion is already running for environment "${envName}".`,
           code: "delete-operation-in-progress",
-          operationId: existingDelete.operationId,
-          operation: dependencies.toClientView(existingDelete)
-        })
-      );
-      return;
-    }
-    // Guard: an environment must not be deleted while an application is still
-    // deployed to it (its cloud resources would be orphaned). Require the app
-    // deployment to be torn down first and point the client at the app-deletion
-    // flow.
-    let active: EnvironmentActiveDeployment | null = null;
-    try {
-      active = await dependencies.resolveEnvDeployment(repo, envName, "");
-    } catch (e) {
-      // Fail closed: if we can't confirm whether an app is still deployed (e.g.
-      // GitHub is unavailable), do NOT delete — that could orphan the
-      // application's cloud resources.
-      dependencies.logError(
-        `[radius delete-environment] active-app check failed for ${repo}/${envName}: ${dependencies.errorMessage(
-          e
-        )}`
-      );
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(503);
-      response.end(
-        JSON.stringify({
-          error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${dependencies.errorMessage(
-            e
-          )}). The environment was not deleted — please try again.`
-        })
-      );
-      return;
-    }
-    if (active) {
-      if (active.identity?.state !== "known") {
-        response.setHeader("Content-Type", "application/json");
-        response.writeHead(active.identity?.readFailed ? 503 : 409);
-        response.end(
-          JSON.stringify({
-            error:
-              active.identity?.reason ||
-              "A deployment exists but its application identity is unavailable. The environment was not deleted.",
-            code: "app-identity-unavailable",
-            environment: envName
-          })
+          operationId: result.operation.operationId,
+          operation: dependencies.toClientView(result.operation)
+        });
+      case "deployment-unreadable": {
+        const detail = dependencies.errorMessage(result.error);
+        dependencies.logError(
+          `[radius delete-environment] active-app check failed for ${repo}/${envName}: ${detail}`
         );
-        return;
+        return refuse(503, {
+          error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${detail}). The environment was not deleted — please try again.`
+        });
       }
-      const deleting = active.status === "deleting";
-      const deleteFailed = active.status === "delete-failed";
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(409);
-      response.end(
-        JSON.stringify({
+      case "identity-unavailable":
+        return refuse(result.readFailed ? 503 : 409, {
+          error:
+            result.reason ||
+            "A deployment exists but its application identity is unavailable. The environment was not deleted.",
+          code: "app-identity-unavailable",
+          environment: envName
+        });
+      case "app-deployed": {
+        const { app, status } = result;
+        const deleting = status === "deleting";
+        const deleteFailed = status === "delete-failed";
+        return refuse(409, {
           error:
             deleting ?
-              `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
+              `Application "${app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
             : deleteFailed ?
-              `The previous teardown of application "${active.app}" from environment "${envName}" failed. Retry Delete or stop tracking the deployment before deleting the environment.`
-            : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
+              `The previous teardown of application "${app}" from environment "${envName}" failed. Retry Delete or stop tracking the deployment before deleting the environment.`
+            : `Application "${app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
           code: "app-deployed",
-          app: active.app,
+          app,
           environment: envName,
           redirect:
             deleteFailed ?
-              `/?page=deployed&application=${encodeURIComponent(
-                active.app
-              )}&environment=${encodeURIComponent(envName)}`
-            : `/?page=deploying&app=${encodeURIComponent(
-                active.app
-              )}&env=${encodeURIComponent(envName)}`
-        })
-      );
-      return;
-    }
-    // Deleting an environment is now an async operation (issue #303): it tears
-    // down the Radius environment on the cluster, removes the per-environment
-    // federated credential, deletes the GitHub environment and its dedicated
-    // GHCR state package, and records that the shared app registration remains.
-    // The work runs
-    // in the background under the same OperationRecord + progress-panel model as
-    // environment creation, so the route only starts it and returns 202.
-    let target: {
-      provider: string;
-      clientId: string;
-      tenantId: string;
-      repoId: number;
-      roleArn?: string;
-      trustSubjects?: string[] | null;
-      region?: string;
-      cluster?: string;
-    };
-    try {
-      target = await dependencies.discoverEnvironmentTarget(repo, envName);
-    } catch (e) {
-      // Fail closed: without the provider/identity we cannot clean up the cloud
-      // artifacts, so refuse rather than delete only the GitHub environment and
-      // silently orphan the federated credential.
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(503);
-      response.end(
-        JSON.stringify({
-          error: `Could not read the configuration for environment "${envName}" (${dependencies.errorMessage(
-            e
-          )}). The environment was not deleted — please try again.`
-        })
-      );
-      return;
-    }
-    const provider = target.provider;
-    // Radius deletes Azure-backed environments, and AWS-backed ones while the
-    // developer-only AWS switch is on. Anything else has no delete workflow, so
-    // refuse up front, leaving the environment in place, rather than start an
-    // operation that is guaranteed to fail closed deep in the runner.
-    if (
-      provider !== "azure" &&
-      !(provider === "aws" && dependencies.awsEnabled)
-    ) {
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(400);
-      response.end(
-        JSON.stringify({
+              `/?page=deployed&application=${encodeURIComponent(app)}&environment=${encodeURIComponent(envName)}`
+            : `/?page=deploying&app=${encodeURIComponent(app)}&env=${encodeURIComponent(envName)}`
+        });
+      }
+      case "configuration-unreadable":
+        return refuse(503, {
+          error: `Could not read the configuration for environment "${envName}" (${dependencies.errorMessage(result.error)}). The environment was not deleted — please try again.`
+        });
+      case "provider-unsupported":
+        return refuse(400, {
           error:
-            provider === "aws" ?
+            result.provider === "aws" ?
               `Deleting AWS environments isn't supported yet. "${envName}" was not deleted. Remove its resources in AWS and delete the GitHub environment manually.`
             : `Deleting this environment isn't supported: Radius can only delete ${dependencies.awsEnabled ? "Azure- and AWS-backed" : "Azure-backed"} environments today. "${envName}" was not deleted.`,
           code: "provider-unsupported"
-        })
-      );
-      return;
-    }
-    const clientId = target.clientId;
-    // An environment is only classified Azure when its canonical
-    // AZURE_CLIENT_ID variable is present, and AWS when AWS_ROLE_ARN is, so the
-    // identity each cleanup stage targets was readable.
-    const includeAzureCleanup = provider === "azure";
-    const includeAwsCleanup = provider === "aws";
-    const op = dependencies.createOperation({
-      kind: "delete",
-      provider,
-      repo,
-      environment: envName,
-      stages: dependencies.buildDeleteStages({
-        includeAzureCleanup,
-        includeAwsCleanup
-      })
-    });
-    op.request = {
-      repo,
-      repoId: target.repoId,
-      environment: envName,
-      provider,
-      clientId,
-      tenantId: target.tenantId,
-      ...(includeAwsCleanup ?
-        {
-          roleArn: target.roleArn || "",
-          trustSubjects: target.trustSubjects,
-          region: target.region || "",
-          cluster: target.cluster || ""
-        }
-      : {})
-    };
-    const started = dependencies.startOperation(op);
-    if (!started.ok) {
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(409);
-      response.end(
-        JSON.stringify({
+        });
+      case "operation-conflict":
+        return refuse(409, {
           error: `An operation is already running for ${repo}.`,
           code: "operation-in-progress",
-          operationId: started.conflict.operationId
-        })
-      );
-      return;
-    }
-    try {
-      await dependencies.persistOperations();
-    } catch (e) {
-      dependencies.finish(op, "failed", {
-        failure: {
-          code: "operation-registration-persist-failed",
-          stage: op.currentStage,
-          stepSeq: null,
-          message: "Radius could not durably register the delete operation.",
-          classification: "unknown",
-          evidence: dependencies.errorMessage(e)
-        }
-      });
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(500);
-      response.end(
-        JSON.stringify({
+          operationId: result.operationId
+        });
+      case "registration-failed":
+        return refuse(500, {
           error:
             "Radius could not durably register the delete operation. Nothing was deleted.",
           code: "operation-registration-persist-failed"
-        })
-      );
-      return;
+        });
+      case "target-changed":
+        return refuse(409, { error: "The environment configuration changed." });
     }
+    const op = result.operation;
     const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
     response.setHeader("Content-Type", "application/json");
     response.setHeader("Location", statusUrl);
@@ -358,24 +234,12 @@ export async function handleDeleteEnvironment(
         operation: dependencies.toClientView(op)
       })
     );
-    const scheduled = dependencies.scheduleEnvironmentOperation(
-      context.instanceId,
-      op
+    await scheduleRegisteredEnvironmentDeletion(
+      op,
+      () => dependencies.scheduleEnvironmentOperation(context.instanceId, op),
+      dependencies,
+      `No server-owned task runner was available for instance ${context.instanceId}.`
     );
-    if (!scheduled) {
-      dependencies.finish(op, "failed", {
-        failure: {
-          code: "operation-scheduling-failed",
-          stage: op.currentStage,
-          stepSeq: null,
-          message:
-            "Radius accepted the delete operation but could not start any work for it.",
-          classification: "unknown",
-          evidence: `No server-owned task runner was available for instance ${context.instanceId}.`
-        }
-      });
-      await dependencies.persistOperations().catch(() => {});
-    }
   } catch (e) {
     response.setHeader("Content-Type", "application/json");
     response.writeHead(400);

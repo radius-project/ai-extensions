@@ -61,22 +61,21 @@ export function createDeletionWorkspace(ports: DeletionWorkspacePorts) {
   };
 }
 
-export function createWorkspaceApplicationDeletion(
-  ports: Omit<DeletionWorkspacePorts, "account"> &
-    Pick<ApplicationDeletionToolPorts, "confirm" | "redact"> & {
-      listLogins(): Promise<string[]>;
-      createExecutor(
-        login: string
-      ): Promise<Pick<SelectedGhExecutor, "login" | "verifyIdentity">>;
-      chooseAccount(): Parameters<typeof selectGitHubAccount>[1]["choose"];
-      prepare(input: {
-        login: string;
-        request: Parameters<ApplicationDeletionToolPorts["prepare"]>[0];
-        isCurrent(): boolean;
-      }): ReturnType<ApplicationDeletionToolPorts["prepare"]>;
-    }
+type SelectedDeletionWorkspacePorts = Omit<
+  DeletionWorkspacePorts,
+  "account"
+> & {
+  listLogins(): Promise<string[]>;
+  createExecutor(
+    login: string
+  ): Promise<Pick<SelectedGhExecutor, "login" | "verifyIdentity">>;
+  chooseAccount(): Parameters<typeof selectGitHubAccount>[1]["choose"];
+};
+
+export function createSelectedDeletionWorkspace(
+  ports: SelectedDeletionWorkspacePorts
 ) {
-  const workspace = createDeletionWorkspace({
+  return createDeletionWorkspace({
     ...ports,
     account: ({ target, isCurrent }) =>
       selectGitHubAccount(
@@ -102,6 +101,19 @@ export function createWorkspaceApplicationDeletion(
         }
       )
   });
+}
+
+export function createWorkspaceApplicationDeletion(
+  ports: SelectedDeletionWorkspacePorts &
+    Pick<ApplicationDeletionToolPorts, "confirm" | "redact"> & {
+      prepare(input: {
+        login: string;
+        request: Parameters<ApplicationDeletionToolPorts["prepare"]>[0];
+        isCurrent(): boolean;
+      }): ReturnType<ApplicationDeletionToolPorts["prepare"]>;
+    }
+) {
+  const workspace = createSelectedDeletionWorkspace(ports);
   return createApplicationDeletionTool({
     confirm: ports.confirm,
     async prepare(request) {

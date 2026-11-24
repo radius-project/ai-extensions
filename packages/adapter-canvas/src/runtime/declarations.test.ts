@@ -140,6 +140,7 @@ describe("RU-03: tool declarations", () => {
       "radius_setup_environment",
       "radius_environment_status",
       "radius_environment_control",
+      "radius_delete_environment",
       "radius_delete_application"
     ]);
   });

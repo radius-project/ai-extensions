@@ -115,8 +115,12 @@ import { githubAccountChoice } from "./runtime/github-account-choice.js";
 import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
 import { createGitHubAccountReadinessService } from "./server/services/github-account-readiness.js";
 import { createEnvironmentTools } from "./runtime/environment-tools.js";
+import { bindEnvironmentDeletion } from "./runtime/bind-environment-deletion.js";
 import { confirmDeletion } from "./runtime/deletion-confirmation.js";
-import { createWorkspaceApplicationDeletion } from "./runtime/deletion-workspace.js";
+import {
+  createSelectedDeletionWorkspace,
+  createWorkspaceApplicationDeletion
+} from "./runtime/deletion-workspace.js";
 import { setupDevSelfReload } from "./runtime/dev-reload.js";
 import {
   configureProcessLifecycle,
@@ -170,7 +174,10 @@ const {
   stopServer,
   getLastWebviewActivityAt,
   environmentServices,
-  prepareApplicationDeletion
+  prepareApplicationDeletion,
+  openEnvironmentDeletionScope,
+  controlSelectedEnvironmentDeletion,
+  recoverSelectedEnvironmentDeletions
 } = createProductionCanvasServerRuntime({
   executionOwner,
   accountContext,
@@ -178,6 +185,20 @@ const {
   awsEnabled
 });
 const deletionIsActive = () => !executionOwner.isShuttingDown();
+const deletionWorkspacePorts = {
+  session: sessionHolder,
+  isActive: deletionIsActive,
+  workspace: detectWorkspaceContext,
+  async listLogins() {
+    resetGhIdentityCache();
+    return (await getGitHubIdentity()).accounts.map(({ login }) => login);
+  },
+  createExecutor: (login: string) =>
+    accountContext.coordinator.createReadOnlyExecutor(login),
+  chooseAccount: () => githubAccountChoice(sessionHolder.tryGet())
+};
+const confirmDeletionWithHost = (message: string) =>
+  confirmDeletion(sessionHolder, message, deletionIsActive);
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
   automaticPluginUpdates: automaticPluginUpdatesEnabled(process.env),
@@ -193,19 +214,16 @@ const dependencies: RadiusExtensionDependencies = {
   deployment: deploymentRuntime,
   readDeploymentModel,
   executionOwner,
+  deleteEnvironment: bindEnvironmentDeletion({
+    workspace: createSelectedDeletionWorkspace(deletionWorkspacePorts),
+    confirm: confirmDeletionWithHost,
+    openScope: openEnvironmentDeletionScope,
+    control: controlSelectedEnvironmentDeletion,
+    redact: redactGhCredentials
+  }),
   deleteApplication: createWorkspaceApplicationDeletion({
-    session: sessionHolder,
-    isActive: deletionIsActive,
-    workspace: detectWorkspaceContext,
-    async listLogins() {
-      resetGhIdentityCache();
-      return (await getGitHubIdentity()).accounts.map(({ login }) => login);
-    },
-    createExecutor: (login) =>
-      accountContext.coordinator.createReadOnlyExecutor(login),
-    chooseAccount: () => githubAccountChoice(sessionHolder.tryGet()),
-    confirm: (message) =>
-      confirmDeletion(sessionHolder, message, deletionIsActive),
+    ...deletionWorkspacePorts,
+    confirm: confirmDeletionWithHost,
     prepare: prepareApplicationDeletion,
     redact: redactGhCredentials
   }),
@@ -388,6 +406,7 @@ onOperationTerminal((op: any) => {
     return false;
   }
 });
+recoverSelectedEnvironmentDeletions();
 
 // Prepare the `rad` binary once per extension load. This is the preferred place
 // to download/reconcile rad and run the `rad version --cli` check; doing it here

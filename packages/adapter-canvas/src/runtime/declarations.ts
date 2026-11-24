@@ -12,6 +12,7 @@
 // cannot mutate the canonical shape out from under other importers.
 
 import { ENVIRONMENT_TOOL_DECLARATIONS } from "./environment-tool-schema.js";
+import { ENVIRONMENT_DELETION_TOOL } from "./environment-deletion-tool.js";
 import { APPLICATION_DELETION_TOOL } from "./application-deletion-tool.js";
 
 function deepFreeze<T>(value: T): T {
@@ -416,5 +417,6 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
     }
   },
   ...ENVIRONMENT_TOOL_DECLARATIONS,
+  ENVIRONMENT_DELETION_TOOL,
   APPLICATION_DELETION_TOOL
 ]);

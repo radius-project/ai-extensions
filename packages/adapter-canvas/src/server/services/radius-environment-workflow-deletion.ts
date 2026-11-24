@@ -13,7 +13,12 @@ import type { RadiusEnvDeletionOutcome } from "./environment-deletion.js";
 import type { GhCommandResult } from "./gh-command-result.js";
 import { shouldRetryWithKeyringCredential } from "./workflow-credential-fallback.js";
 
-export interface RadiusEnvironmentWorkflowDeletionDependencies {
+export interface EnvironmentDeletionDispatch {
+  dispatchedAt: number;
+  correlationId: string;
+}
+
+export type RadiusEnvironmentWorkflowDeletionDependencies = {
   // The delete dispatcher and every provider workflow it `uses:`.
   readonly workflowFiles: readonly string[];
   ensureWorkflowsCurrent(
@@ -35,7 +40,7 @@ export interface RadiusEnvironmentWorkflowDeletionDependencies {
     options?: { env?: NodeJS.ProcessEnv }
   ): Promise<GhCommandResult>;
   // The live process environment, read when a dispatch fails.
-  readonly processEnv: NodeJS.ProcessEnv;
+  readonly processEnv?: NodeJS.ProcessEnv;
   findWorkflowRun(
     repo: string,
     workflowFile: string,
@@ -59,7 +64,20 @@ export interface RadiusEnvironmentWorkflowDeletionDependencies {
   now(): number;
   random(): number;
   errorMessage(error: unknown): string;
-}
+} & (
+  | {
+      readonly readIdentity: "selected";
+      getBranchHead(repo: string, branch: string): Promise<string>;
+      beforeDispatch(dispatch: EnvironmentDeletionDispatch): Promise<void>;
+      recoverDispatch?(): EnvironmentDeletionDispatch | undefined;
+    }
+  | {
+      readonly readIdentity?: undefined;
+      getBranchHead?: never;
+      beforeDispatch?: never;
+      recoverDispatch?: never;
+    }
+);
 
 // Dispatch the just-committed delete-environment workflow and wait for its run
 // to finish. Tearing down the Radius environment needs cluster access, so it
@@ -77,6 +95,68 @@ export function createRadiusEnvironmentWorkflowDeletion(
     { repo, environment },
     onHeartbeat
   ): Promise<RadiusEnvDeletionOutcome> => {
+    async function observe({
+      dispatchedAt,
+      correlationId
+    }: EnvironmentDeletionDispatch): Promise<RadiusEnvDeletionOutcome> {
+      const deadline = dependencies.now() + 30 * 60 * 1000;
+      let runId: number | string | null = null;
+      const reads = createWorkflowReadSession();
+      let delayMs = 5000;
+      while (dependencies.now() < deadline) {
+        if (!runId) {
+          runId = await dependencies.findWorkflowRun(
+            repo,
+            DELETE_ENV_DISPATCHER_FILE,
+            dispatchedAt,
+            null,
+            undefined,
+            undefined,
+            correlationId
+          );
+        }
+        if (dependencies.now() >= deadline) break;
+        if (runId) {
+          const detail = await dependencies.getRunDetail(
+            repo,
+            runId,
+            undefined,
+            {
+              identity: dependencies.readIdentity ?? "ambient",
+              context: reads.observe(WORKFLOW_READ_LIMITS.runMs)
+            }
+          );
+          if (detail && detail.status === "completed") {
+            return classifyCompletedDeleteEnvRun(
+              detail.conclusion,
+              detail.steps || []
+            );
+          }
+        }
+        if (onHeartbeat) {
+          try {
+            await onHeartbeat();
+          } catch {
+            // A heartbeat failure must never abort an in-flight deletion.
+          }
+        }
+        await dependencies.sleep(
+          Math.min(delayMs, Math.max(0, deadline - dependencies.now()))
+        );
+        delayMs = Math.min(Math.ceil(delayMs * 1.5), 15000);
+      }
+      return {
+        outcome: "failed",
+        detail:
+          runId ?
+            "The delete-environment workflow did not complete within 30 minutes."
+          : dependencies.readIdentity === "selected" ?
+            "GitHub may have accepted the delete-environment workflow, but Radius could not confirm its outcome. Check GitHub Actions before starting another deletion."
+          : "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
+      };
+    }
+    const recovered = dependencies.recoverDispatch?.();
+    if (recovered) return observe(recovered);
     const workflowFiles = [...dependencies.workflowFiles];
     const sync = await dependencies.ensureWorkflowsCurrent(
       repo,
@@ -107,6 +187,7 @@ export function createRadiusEnvironmentWorkflowDeletion(
         )}`
       };
     }
+    let verifiedHead: string | undefined;
     const workflowVerification = await verifyWorkflowFilesMatchSource(
       workflowFiles.map((file) => ({
         file,
@@ -114,10 +195,17 @@ export function createRadiusEnvironmentWorkflowDeletion(
         expected: expectedDeleteWorkflows[file] || ""
       })),
       {
-        defaultBranch: async () =>
-          (await dependencies.getDefaultBranch(repo)) || "",
+        defaultBranch: async () => {
+          const branch = (await dependencies.getDefaultBranch(repo)) || "";
+          if (branch && dependencies.readIdentity === "selected") {
+            verifiedHead = await dependencies.getBranchHead(repo, branch);
+            if (!/^[a-f0-9]{40}$/i.test(verifiedHead))
+              throw new Error("Could not verify the default branch revision.");
+          }
+          return branch;
+        },
         readFile: (path, branch) =>
-          dependencies.fetchFileFromRepo(repo, path, branch),
+          dependencies.fetchFileFromRepo(repo, path, verifiedHead ?? branch),
         errorMessage: dependencies.errorMessage
       }
     );
@@ -129,7 +217,8 @@ export function createRadiusEnvironmentWorkflowDeletion(
     }
     const ghWorkflow = async (args: string[]): Promise<GhCommandResult> => {
       const first = await dependencies.runGh(args);
-      if (first.code === 0) return first;
+      if (first.code === 0 || dependencies.readIdentity === "selected")
+        return first;
       const env = dependencies.processEnv;
       // Dispatching a workflow requires the `workflow` scope, which an injected
       // GH_TOKEN often lacks. Retry with it stripped ONLY when that fallback is
@@ -142,7 +231,7 @@ export function createRadiusEnvironmentWorkflowDeletion(
         stderr: first.stderr,
         timedOut: first.timedOut === true,
         hasInjectedToken: Boolean(
-          env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
+          env?.GH_TOKEN?.trim() || env?.GITHUB_TOKEN?.trim()
         )
       });
       if (!retryAllowed) return first;
@@ -174,11 +263,36 @@ export function createRadiusEnvironmentWorkflowDeletion(
       "--repo",
       repo
     ];
+    if (dependencies.readIdentity === "selected")
+      dispatchArgs.push("--ref", workflowVerification.branch);
     let dispatch: GhCommandResult = { code: 1, stdout: "", stderr: "" };
     const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
     if (justCreated) await dependencies.sleep(3000);
     for (const delay of dispatchDelays) {
       if (delay > 0) await dependencies.sleep(delay);
+      if (dependencies.readIdentity === "selected") {
+        // GitHub dispatch accepts a branch ref, not a commit pin. Refuse
+        // observed drift before recording intent; the API does not make this atomic.
+        const branch = workflowVerification.branch;
+        try {
+          if (
+            (await dependencies.getDefaultBranch(repo)) !== branch ||
+            (await dependencies.getBranchHead(repo, branch)) !== verifiedHead
+          ) {
+            return {
+              outcome: "failed",
+              detail:
+                "The default branch changed after workflow verification. Radius did not start the deletion."
+            };
+          }
+        } catch (error) {
+          return {
+            outcome: "failed",
+            detail: `Could not recheck the default branch before deletion: ${dependencies.errorMessage(error)}`
+          };
+        }
+        await dependencies.beforeDispatch({ dispatchedAt, correlationId });
+      }
       dispatch = await ghWorkflow(dispatchArgs);
       if (dispatch.code === 0) break;
       if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
@@ -191,55 +305,6 @@ export function createRadiusEnvironmentWorkflowDeletion(
           `Failed to start ${DELETE_ENV_DISPATCHER_FILE} on ${repo}.`
       };
     }
-    // Discovery and completion share one budget. GitHub may accept a dispatch
-    // before its run appears in listings; never dispatch another deletion.
-    const deadline = dependencies.now() + 30 * 60 * 1000;
-    let runId: number | string | null = null;
-    const reads = createWorkflowReadSession();
-    let delayMs = 5000;
-    while (dependencies.now() < deadline) {
-      if (!runId) {
-        runId = await dependencies.findWorkflowRun(
-          repo,
-          DELETE_ENV_DISPATCHER_FILE,
-          dispatchedAt,
-          null,
-          undefined,
-          undefined,
-          correlationId
-        );
-      }
-      if (dependencies.now() >= deadline) break;
-      if (runId) {
-        const detail = await dependencies.getRunDetail(repo, runId, undefined, {
-          identity: "ambient",
-          context: reads.observe(WORKFLOW_READ_LIMITS.runMs)
-        });
-        if (detail && detail.status === "completed") {
-          return classifyCompletedDeleteEnvRun(
-            detail.conclusion,
-            detail.steps || []
-          );
-        }
-      }
-      if (onHeartbeat) {
-        try {
-          await onHeartbeat();
-        } catch {
-          // A heartbeat failure must never abort an in-flight deletion.
-        }
-      }
-      await dependencies.sleep(
-        Math.min(delayMs, Math.max(0, deadline - dependencies.now()))
-      );
-      delayMs = Math.min(Math.ceil(delayMs * 1.5), 15000);
-    }
-    return {
-      outcome: "failed",
-      detail:
-        runId ?
-          "The delete-environment workflow did not complete within 30 minutes."
-        : "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
-    };
+    return observe({ dispatchedAt, correlationId });
   };
 }

@@ -28,7 +28,11 @@ Before invoking this skill:
 
 For an application in the current workspace repository, use `radius_delete_application` with the exact `repo`, `environment`, `application`, `deploymentId`, and `runUrl` from the current Radius deployment listing and `mode: "normal"`. Do not guess an ID or run URL. A dispatch is not a successful deletion: check the workflow outcome. If dispatch is unconfirmed, check GitHub Actions before retrying. Only use `mode: "force_retry"` for a known eligible stranded-resource conflict, with a separate trusted confirmation. The tool rechecks the conflict before dispatch and refuses missing or outdated workflows instead of rewriting them.
 
-Application deletion from chat uses the selected GitHub account and requires trusted host confirmation. The delete workflow rechecks the approved deployment inside the same concurrency group as deployment, before touching cloud state. If it cannot verify that the deployment is still current, refresh the deployment listing and confirm again. Missing confirmation is not approval; do not open Canvas silently or pass approval flags. To delete an environment, use the Canvas flow below.
+Application deletion from chat uses the selected GitHub account and requires trusted host confirmation. The delete workflow rechecks the approved deployment inside the same concurrency group as deployment, before touching cloud state. If it cannot verify that the deployment is still current, refresh the deployment listing and confirm again.
+
+For an Azure environment in the current workspace repository, use `radius_delete_environment` with the exact `repo` and `environment`. The tool uses the selected GitHub account and requires a trusted host confirmation. Missing confirmation is not approval; do not open Canvas silently or pass approval flags. The direct tool requires current Azure-capable deletion workflows on the repository's default branch and fails closed rather than synchronizing workflows through a different account.
+
+An accepted environment deletion returns an `operationId`, not a completed deletion. Call `radius_delete_environment` with `mode: "status"` and the same `repo`, `environment`, and `operationId` to read progress. When the exact operation reports `retryable`, use `mode: "retry"` with those same inputs and a new trusted confirmation. Retry preserves completed stages. Do not create a second deletion or claim success while the operation is running or incomplete.
 
 ### Canvas
 

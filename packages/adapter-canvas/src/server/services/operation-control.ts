@@ -51,6 +51,7 @@ import type { OperationRecord } from "../routes/operations-status.js";
 import type { EnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import { cancelOperationWorkflow } from "./operation-workflow-cancellation.js";
 import { releaseRecordedAwsLock } from "./aws-recorded-lock.js";
+import { hasSelectedEnvironmentDeletion } from "./selected-environment-deletion.js";
 import {
   captureWorkflowCancellationTarget,
   WorkflowCancellationRefusal,
@@ -88,6 +89,7 @@ export interface OperationControlResult {
 
 export interface OperationControlInput {
   operationId: string;
+  authorizeSelectedDeletionRetry?(operationId: string): boolean;
   cancellationTarget?: WorkflowCancellationTarget;
   isCurrent?(): boolean;
   instanceId?: string;
@@ -360,6 +362,8 @@ const REFUSAL_MESSAGES: Record<string, string> = {
     "Radius already attempted deletion for this setup. Use Retry deletion for anything still present.",
   "cleanup-retry-not-retryable":
     "The last cleanup attempt did not leave anything Radius can safely retry.",
+  "deletion-dispatch-unconfirmed":
+    "Radius will not dispatch the deletion again. Verify the original workflow outcome in GitHub Actions.",
   "cleanup-retry-provenance-incomplete": PROVENANCE_INCOMPLETE,
   "cleanup-retry-nothing-unresolved":
     "Every resource Radius proved it created has already been removed.",
@@ -1371,6 +1375,18 @@ async function runControlCommand(
   const { operationId, operation, params } = resolved;
   const spec = selectSpec(params, operationId);
   if (!spec) return;
+  if (
+    spec.name === "deletion" &&
+    hasSelectedEnvironmentDeletion(operation) &&
+    context.authorizeSelectedDeletionRetry?.(operationId) !== true
+  ) {
+    sendJson(context, 409, {
+      code: "selected-deletion-requires-chat",
+      error: "Retry this deletion from chat using the saved GitHub account.",
+      operationId
+    });
+    return;
+  }
 
   const repo = operation.repo;
   const environment = operation.environment;

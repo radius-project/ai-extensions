@@ -10,6 +10,7 @@ import {
 } from "./radius-environment-workflow-deletion.js";
 
 const REPO = "octo/shop";
+const HEAD = "a".repeat(40);
 const FILES = [
   "delete-environment.yml",
   "delete-environment-azure.yml",
@@ -29,15 +30,33 @@ const failed = (stderr: string, timedOut = false): GhCommandResult => ({
 // A repository whose default branch already holds every workflow, a dispatch
 // GitHub accepts, a run it finds, and a run that completes successfully.
 function harness(
-  overrides: Partial<RadiusEnvironmentWorkflowDeletionDependencies> = {},
-  options: { dispatch?: GhCommandResult[]; runs?: Array<string | null> } = {}
+  overrides: Partial<
+    Omit<
+      RadiusEnvironmentWorkflowDeletionDependencies,
+      "readIdentity" | "getBranchHead" | "beforeDispatch" | "recoverDispatch"
+    >
+  > = {},
+  options: {
+    dispatch?: GhCommandResult[];
+    runs?: Array<string | null>;
+    selected?: Pick<
+      Extract<
+        RadiusEnvironmentWorkflowDeletionDependencies,
+        { readIdentity: "selected" }
+      >,
+      "getBranchHead" | "beforeDispatch" | "recoverDispatch"
+    >;
+  } = {}
 ) {
   let clock = 1_000_000;
   const dispatch = options.dispatch ?? [ok()];
   const runs = options.runs ?? ["99"];
   const calls: string[][] = [];
   const sleeps: number[] = [];
-  const dependencies: RadiusEnvironmentWorkflowDeletionDependencies = {
+  const base: Omit<
+    RadiusEnvironmentWorkflowDeletionDependencies,
+    "readIdentity" | "getBranchHead" | "beforeDispatch" | "recoverDispatch"
+  > = {
     workflowFiles: FILES,
     ensureWorkflowsCurrent: vi.fn(async () => ({ created: [] })),
     generateDeleteWorkflow: vi.fn(async () => TEMPLATES),
@@ -69,6 +88,10 @@ function harness(
       error instanceof Error ? error.message : String(error),
     ...overrides
   };
+  const dependencies: RadiusEnvironmentWorkflowDeletionDependencies =
+    options.selected ?
+      { ...base, readIdentity: "selected", ...options.selected }
+    : base;
   return {
     dependencies,
     calls,
@@ -82,6 +105,42 @@ function harness(
 }
 
 describe("deleting a Radius environment through its workflow", () => {
+  it("observes only the saved dispatch after a restart", async () => {
+    const beforeDispatch = vi.fn(async () => {});
+    const h = harness(
+      {},
+      {
+        selected: {
+          getBranchHead: async () => HEAD,
+          beforeDispatch,
+          recoverDispatch: () => ({
+            dispatchedAt: 1234,
+            correlationId: "del-ya-fixture"
+          })
+        }
+      }
+    );
+    expect(await h.run()).toEqual({ outcome: "deleted" });
+    expect(h.dependencies.findWorkflowRun).toHaveBeenCalledExactlyOnceWith(
+      REPO,
+      DELETE_ENV_DISPATCHER_FILE,
+      1234,
+      null,
+      undefined,
+      undefined,
+      "del-ya-fixture"
+    );
+    expect(h.dependencies.getRunDetail).toHaveBeenCalledWith(
+      REPO,
+      "99",
+      undefined,
+      expect.objectContaining({ identity: "selected" })
+    );
+    expect(h.dependencies.ensureWorkflowsCurrent).not.toHaveBeenCalled();
+    expect(h.dependencies.runGh).not.toHaveBeenCalled();
+    expect(beforeDispatch).not.toHaveBeenCalled();
+  });
+
   it("commits and verifies every workflow it was given, then dispatches the run it can identify", async () => {
     const h = harness();
 
@@ -229,6 +288,83 @@ describe("deleting a Radius environment through its workflow", () => {
       env: { PATH: "/bin" }
     });
   });
+
+  it("does not reroute a saved-account dispatch on a missing workflow scope", async () => {
+    const beforeDispatch = vi.fn(async () => {});
+    const h = harness(
+      {
+        processEnv: { GH_TOKEN: "injected" }
+      },
+      {
+        dispatch: [failed("HTTP 403: missing the workflow scope"), ok()],
+        selected: { getBranchHead: async () => HEAD, beforeDispatch }
+      }
+    );
+    expect(await h.run()).toEqual({
+      outcome: "failed",
+      detail: "HTTP 403: missing the workflow scope"
+    });
+    expect(beforeDispatch).toHaveBeenCalledTimes(1);
+    expect(h.dependencies.runGh).toHaveBeenCalledTimes(1);
+  });
+
+  it("verifies all selected deletion workflows at one revision before dispatching the checked branch", async () => {
+    const h = harness(
+      { getDefaultBranch: async () => "release/next" },
+      {
+        selected: {
+          getBranchHead: async () => HEAD,
+          beforeDispatch: async () => {}
+        }
+      }
+    );
+    expect(await h.run()).toEqual({ outcome: "deleted" });
+    expect(vi.mocked(h.dependencies.fetchFileFromRepo).mock.calls).toEqual(
+      FILES.map((file) => [REPO, `.github/workflows/${file}`, HEAD])
+    );
+    expect(h.calls[0]?.slice(-2)).toEqual(["--ref", "release/next"]);
+    expect(h.dependencies.getRunDetail).toHaveBeenCalledWith(
+      REPO,
+      "99",
+      undefined,
+      expect.objectContaining({ identity: "selected" })
+    );
+  });
+
+  it.each([
+    { branches: ["main", "other"], heads: [HEAD], detail: "changed" },
+    {
+      branches: ["main", "main"],
+      heads: [HEAD, "b".repeat(40)],
+      detail: "changed"
+    },
+    { branches: ["main"], heads: [""], detail: "Could not verify" },
+    { branches: ["main", "main"], heads: [HEAD], detail: "Could not recheck" }
+  ])(
+    "refuses an unverifiable selected dispatch before recording intent ($detail)",
+    async ({ branches, heads, detail }) => {
+      const beforeDispatch = vi.fn(async () => {});
+      const h = harness(
+        { getDefaultBranch: async () => branches.shift() ?? null },
+        {
+          selected: {
+            getBranchHead: async () => {
+              const head = heads.shift();
+              if (head === undefined) throw new Error("revision unavailable");
+              return head;
+            },
+            beforeDispatch
+          }
+        }
+      );
+      expect(await h.run()).toEqual({
+        outcome: "failed",
+        detail: expect.stringContaining(detail)
+      });
+      expect(beforeDispatch).not.toHaveBeenCalled();
+      expect(h.dependencies.runGh).not.toHaveBeenCalled();
+    }
+  );
 
   it.each([
     ["the scope retry also fails", { GH_TOKEN: "t" }, false, 2],

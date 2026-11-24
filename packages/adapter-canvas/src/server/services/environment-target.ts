@@ -131,3 +131,26 @@ export function createEnvironmentTargetReader(
     };
   };
 }
+
+export function createSelectedEnvironmentTargetReader(
+  runCommand: EnvironmentTargetCommandRunner
+) {
+  const readTarget = createEnvironmentTargetReader(runCommand);
+  return async (repo: string, environment: string) => {
+    const config = await readTarget(repo, environment);
+    const output = await runCommand(
+      "gh",
+      [
+        "api",
+        `/repos/${repo}/environments/${encodeURIComponent(environment)}`,
+        "--jq",
+        ".id"
+      ],
+      { timeout: 15000 }
+    );
+    const environmentId = Number(output.trim());
+    if (!Number.isSafeInteger(environmentId) || environmentId <= 0)
+      throw new Error("GitHub returned an invalid environment ID.");
+    return { ...config, environmentId };
+  };
+}

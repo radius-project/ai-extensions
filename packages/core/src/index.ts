@@ -462,6 +462,10 @@ export {
 export { deploymentStatusBlocksMutation } from "./deploy-admission.js";
 export * from "./graph-source.js";
 export * from "./graph-orchestration.js";
+export * from "./operations/environment-deletion-admission.js";
+export * from "./operations/environment-deletion.js";
+export * from "./operations/environment-deletion-progress.js";
+export * from "./operations/credential-reclamation.js";
 export {
   deleteApplication,
   type ApplicationDeletionDispatch,

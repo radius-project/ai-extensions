@@ -1200,15 +1200,24 @@ export const STAGE_VERIFY = "verify";
 // removes the per-environment federated credential, deletes the GitHub
 // environment and GHCR state package, and finally records that the shared app
 // registration was retained.
-export const STAGE_DELETE_RADIUS_ENV = "delete_radius_environment";
-export const STAGE_DELETE_CREDENTIAL = "delete_federated_credential";
-export const STAGE_DELETE_GITHUB_ENV = "delete_github_environment";
-export const STAGE_DELETE_STATE_PACKAGE = "delete_state_package";
-export const STAGE_REVIEW_APP_REGISTRATION = "review_app_registration";
-// AWS counterparts: remove the environment's trust subject and permission
-// policy from the shared IAM role, then record that the role was retained.
-export const STAGE_DELETE_AWS_ROLE_ACCESS = "delete_aws_role_access";
-export const STAGE_REVIEW_IAM_ROLE = "review_iam_role";
+import {
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_CREDENTIAL,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE,
+  STAGE_REVIEW_APP_REGISTRATION,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
+  STAGE_REVIEW_IAM_ROLE
+} from "@radius-project/core";
+export {
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_CREDENTIAL,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE,
+  STAGE_REVIEW_APP_REGISTRATION,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
+  STAGE_REVIEW_IAM_ROLE
+};
 
 const STAGE_LABELS = {
   [STAGE_AUTHORIZE_IDENTITY]: "Authorize deploy identity",
@@ -4500,6 +4509,12 @@ export function canRetryDeletion(op: any): any {
   const stage = op.stages?.find((entry: any) =>
     ["failed", "warning", "skipped"].includes(entry.state)
   );
+  if (
+    stage?.id === STAGE_DELETE_RADIUS_ENV &&
+    op.request?.selectedDispatchStarted === true
+  ) {
+    return { ok: false, code: "deletion-dispatch-unconfirmed" };
+  }
   if (stage) {
     return {
       ok: true,
@@ -6299,6 +6314,11 @@ interface PersistedDeleteRecovery {
   cluster?: string;
   repoId?: number;
   credentialConsumerRetirementReady?: boolean;
+  selectedOwner?: string | null;
+  environmentId?: number;
+  selectedDispatchStarted?: boolean;
+  selectedDispatchTime?: number;
+  selectedDispatchCorrelation?: string;
 }
 
 function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
@@ -6312,7 +6332,8 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "tenantId",
     "roleArn",
     "region",
-    "cluster"
+    "cluster",
+    "selectedDispatchCorrelation"
   ] as const) {
     if (typeof request[key] === "string") out[key] = request[key];
   }
@@ -6336,6 +6357,26 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
   }
   if (typeof request.repoId === "number" && Number.isFinite(request.repoId)) {
     out.repoId = request.repoId;
+  }
+  if (Object.hasOwn(request, "selectedOwner")) {
+    out.selectedOwner =
+      typeof request.selectedOwner === "string" ? request.selectedOwner : null;
+  }
+  if (
+    Number.isSafeInteger(request.environmentId) &&
+    request.environmentId > 0
+  ) {
+    out.environmentId = request.environmentId;
+  }
+  if (Object.hasOwn(request, "selectedDispatchStarted")) {
+    // Malformed evidence must not authorize a second dispatch.
+    out.selectedDispatchStarted = request.selectedDispatchStarted !== false;
+  }
+  if (
+    Number.isSafeInteger(request.selectedDispatchTime) &&
+    request.selectedDispatchTime > 0
+  ) {
+    out.selectedDispatchTime = request.selectedDispatchTime;
   }
   return Object.keys(out).length > 0 ? out : null;
 }
@@ -6824,6 +6865,9 @@ export function createRegistry({
         }
       }
       return restored;
+    },
+    hasDurableStore() {
+      return store.durable === true;
     },
     async persist() {
       const envelope = snapshot();

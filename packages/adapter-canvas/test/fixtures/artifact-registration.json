@@ -565,6 +565,28 @@
       "handlerCallable": true
     },
     {
+      "name": "radius_delete_environment",
+      "description": "Start, inspect, or retry deletion of an Azure-backed Radius environment in the current repository. Starting or retrying requires trusted user confirmation. Delete all deployed applications first; use the exact operation ID for status and retry.",
+      "parameters": {
+        "type": "object",
+        "required": ["repo", "environment"],
+        "additionalProperties": false,
+        "properties": {
+          "repo": { "type": "string", "description": "Current repository (owner/name)." },
+          "environment": {
+            "type": "string",
+            "description": "Exact name of the Azure-backed deployment environment."
+          },
+          "mode": { "type": "string", "enum": ["delete", "status", "retry"] },
+          "operationId": {
+            "type": "string",
+            "description": "Exact saved deletion operation ID; required for status and retry."
+          }
+        }
+      },
+      "handlerCallable": true
+    },
+    {
       "name": "radius_delete_application",
       "description": "Dispatch deletion of an exact Radius application deployment in the current repository after trusted user confirmation. Force retry requires a separate confirmation and fresh proof of an eligible deletion conflict.",
       "parameters": {

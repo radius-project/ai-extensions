@@ -15,6 +15,9 @@ import * as core from "./index.js";
 const EXPECTED_FUNCTIONS = [
   "deleteApplication",
   "probeDeleteConflict",
+  "admitEnvironmentDeletion",
+  "runEnvironmentDeletion",
+  "planCredentialReclamation",
   "GraphSourceError",
   "createGraphOrchestrator",
   "prepareGraph",
@@ -296,6 +299,13 @@ const EXPECTED_VALUES = [
   // and are reached through the modeling barrel; only the directory prefix is
   // public, because publish-targets.ts confines tool paths against it.
   "STAGING_DIR_PREFIX",
+  "STAGE_DELETE_AWS_ROLE_ACCESS",
+  "STAGE_DELETE_CREDENTIAL",
+  "STAGE_DELETE_GITHUB_ENV",
+  "STAGE_DELETE_RADIUS_ENV",
+  "STAGE_DELETE_STATE_PACKAGE",
+  "STAGE_REVIEW_APP_REGISTRATION",
+  "STAGE_REVIEW_IAM_ROLE",
   "KUBERNETES_NAMESPACE_ERROR",
   "KUBERNETES_NAMESPACE_PATTERN",
   "AWS_CLI_MINIMUM_VERSION",

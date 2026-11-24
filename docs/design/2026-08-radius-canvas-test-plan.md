@@ -207,6 +207,7 @@ The full plan is complete when every requirement in the appendices has a passing
 | TL-12 | `radius_setup_environment`             | Panel-free verify-only Azure/AWS admission, strict provider schemas, explicit branch/account target, durable operation identity                          |
 | TL-13 | `radius_environment_status`            | Saved operation/repository/environment/account binding, read-only observation, bounded redacted results, live interaction identity                       |
 | TL-14 | `radius_environment_control`           | Eligible saved-operation controls, trusted host confirmation, typed resume with stale/replay rejection, permissions-only bypass                          |
+| TL-15 | `radius_delete_environment`            | Azure-only admission; trusted confirmation; durable selected account and exact target; panel-free status and retry of unresolved stages                  |
 | TL-16 | `radius_delete_application`            | Exact deployment identity; selected account; shared reservation; separate force confirmation and conflict revalidation; ambiguous dispatch               |
 
 Every retained action/tool has unit or runtime-integration coverage. Tools reaching a loopback API also have HTTP integration. Path confinement and error propagation are mandatory for both publish tools.

@@ -1,23 +1,46 @@
 import { ChildProcess } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi
+} from "vitest";
+import { DELETE_RADIUS_REF } from "@radius-project/core";
 import {
   createProductionCanvasServerRuntime,
   setOpenSourceHandler,
   type EnvironmentDeletionCoordinatorPorts
 } from "./server.js";
 import {
+  buildDeleteStages,
   buildStages,
   configureOperationStore,
   createOperation,
-  operations
+  operations,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_RADIUS_ENV,
+  setStageState
 } from "./operations.js";
 import { disabledOperationStore } from "./operation-store.js";
+import { configureCredentialProvenanceStore } from "./credential-provenance.js";
 import { createEnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
+import { createEnvironmentDeletionTool } from "./runtime/environment-deletion-tool.js";
 import type { CanvasState } from "./shared.js";
 import { createTestDeploymentRuntime } from "../test/support/server/deployment-runtime.js";
 import { createDeferred } from "../test/support/browser/fakes.js";
+import type { SelectedGhExecutor } from "./gh.js";
+import { generateDeleteWorkflow } from "./infra.js";
+import type {
+  GitHubAccountLease,
+  GitHubAccountLeaseMetadata,
+  GitHubAccountLeaseResult
+} from "./server/services/github-account-coordinator.js";
 
 const unexpectedDeletion = async (): Promise<never> => {
   throw new Error("Unexpected external deletion");
@@ -155,6 +178,659 @@ describe("production canvas server runtime", () => {
       );
     }
   );
+
+  it.each([
+    "unchanged",
+    "replaced",
+    "unreadable",
+    "stale",
+    "invalid-id"
+  ] as const)(
+    "revalidates the selected environment after deletion confirmation (%s)",
+    async (scenario) => {
+      const save = vi.fn(async (_envelope: { operations: unknown[] }) => {});
+      await configureOperationStore({
+        ...disabledOperationStore(),
+        durable: true,
+        save
+      });
+      let environmentId = scenario === "invalid-id" ? 0 : 17;
+      let current = true;
+      let approved = false;
+      const run = vi.fn(async (args: string[]) => {
+        if (
+          args[1] === "/repos/octo/app/environments/dev/variables?per_page=100"
+        ) {
+          expect(args.slice(2)).toEqual(["--jq", ".variables[].name"]);
+          return {
+            code: 0,
+            stdout: "AZURE_CLIENT_ID\nAZURE_TENANT_ID\n",
+            stderr: ""
+          };
+        }
+        expect(args).toEqual([
+          "api",
+          "/repos/octo/app/deployments?per_page=100&environment=dev",
+          "--jq",
+          ".[].id"
+        ]);
+        return approved && scenario === "unreadable" ?
+            { code: 1, stdout: "", stderr: "HTTP 403" }
+          : { code: 0, stdout: "", stderr: "" };
+      });
+      const runOrThrow = vi.fn(async (args: string[]) => {
+        if (args[1] === "/repos/octo/app/environments/dev")
+          return { code: 0, stdout: String(environmentId), stderr: "" };
+        if (
+          args[1] === "/repos/octo/app/environments/dev/variables?per_page=100"
+        )
+          return {
+            code: 0,
+            stdout:
+              "AZURE_CLIENT_ID\tfixture-client\nAZURE_TENANT_ID\tfixture-tenant\n",
+            stderr: ""
+          };
+        expect(args).toEqual(["api", "/repos/octo/app", "--jq", ".id"]);
+        return { code: 0, stdout: "7", stderr: "" };
+      });
+      const createReadOnlyExecutor = vi.fn<() => Promise<SelectedGhExecutor>>(
+        async () => ({
+          login: "octocat",
+          credentialSource: "injected",
+          requiresKeyringSwitch: false,
+          scopes: [],
+          verifyIdentity: async () => {},
+          run,
+          runOrThrow,
+          packageCredentials: () => {
+            throw new Error("Unexpected GHCR call");
+          },
+          redact: String,
+          errorMessage: String
+        })
+      );
+      const withSelectedAccount = vi.fn(async (login: string) => {
+        expect(login).toBe("octocat");
+        expect(save.mock.calls.at(-1)?.[0].operations).toEqual([
+          expect.objectContaining({
+            deleteRecovery: expect.objectContaining({
+              selectedOwner: "octocat",
+              repoId: 7
+            })
+          })
+        ]);
+        throw new Error("Selected account revoked before execution");
+      });
+      const server = createProductionCanvasServerRuntime({
+        deploymentRuntime: createTestDeploymentRuntime(),
+        awsEnabled: false,
+        executionOwner: createEnvironmentExecutionOwner(),
+        accountContext: createEnvironmentAccountContext("admission-test", {
+          createReadOnlyExecutor,
+          withSelectedAccount
+        }),
+        environmentDeletionPorts: deletionPorts
+      });
+      const tool = createEnvironmentDeletionTool({
+        openScope: ({ repo }) =>
+          server.openEnvironmentDeletionScope(repo, "octocat", () => current),
+        async confirm(target) {
+          expect(target).toEqual({
+            repo: "octo/app",
+            environment: "dev",
+            provider: "azure",
+            repoId: 7
+          });
+          if (scenario === "replaced") environmentId = 18;
+          approved = true;
+          if (scenario === "stale") current = false;
+          return "approved";
+        },
+        control: unexpectedDeletion,
+        redact: String
+      });
+      const result = await tool({ repo: "octo/app", environment: "dev" });
+      expect(createReadOnlyExecutor).toHaveBeenCalledExactlyOnceWith("octocat");
+      if (scenario === "unreadable" || scenario === "stale") {
+        expect(result).toEqual({
+          kind: "refused",
+          code: "deployment-unreadable"
+        });
+        expect(save).not.toHaveBeenCalled();
+        expect(withSelectedAccount).not.toHaveBeenCalled();
+        return;
+      }
+      if (scenario === "invalid-id") {
+        expect(result).toEqual({
+          kind: "refused",
+          code: "configuration-unreadable"
+        });
+        expect(save).not.toHaveBeenCalled();
+        expect(withSelectedAccount).not.toHaveBeenCalled();
+        return;
+      }
+      expect(run).toHaveBeenCalledTimes(4);
+      expect(runOrThrow).toHaveBeenCalledTimes(6);
+      if (scenario === "replaced") {
+        expect(result).toEqual({ kind: "refused", code: "target-changed" });
+        expect(operations.all()).toEqual([]);
+        expect(withSelectedAccount).not.toHaveBeenCalled();
+      } else {
+        expect(result).toMatchObject({ kind: "accepted" });
+        await vi.waitFor(() =>
+          expect(operations.all()).toEqual([
+            expect.objectContaining({
+              state: "failed",
+              failure: expect.objectContaining({
+                message: expect.stringContaining("Selected account revoked")
+              })
+            })
+          ])
+        );
+        expect(withSelectedAccount).toHaveBeenCalledOnce();
+      }
+    }
+  );
+  it.each([
+    ["saved account is unavailable", "removed"],
+    [
+      "no longer resolves the saved environment deletion to the same repository",
+      "moved"
+    ],
+    ["Could not confirm the selected GitHub repository ID", "invalid-id"],
+    ["The default branch changed after workflow verification", "branch-moved"]
+  ])(
+    "refuses recovery and retry without a panel when %s (%s)",
+    async (diagnostic, scenario) => {
+      await configureOperationStore({
+        ...disabledOperationStore(),
+        durable: true
+      });
+      const createServerForPanel = vi.fn(() => {
+        throw new Error("Unexpected panel server");
+      });
+      const head = "a".repeat(40);
+      let headReads = 0;
+      const readTemplate = (file: string) =>
+        readFile(
+          new URL(`../../../.github/extension/${file}`, import.meta.url),
+          "utf8"
+        );
+      const generated =
+        scenario === "branch-moved" ?
+          await generateDeleteWorkflow("dev", {
+            readTemplate: (_repo, path) =>
+              readTemplate(path.split("/").pop() ?? "")
+          })
+        : {};
+      const run = vi.fn(async (args: string[]) => {
+        if (scenario === "branch-moved") {
+          const success = (stdout: string) => ({ code: 0, stdout, stderr: "" });
+          const endpoint = args[1] ?? "";
+          if (args[0] !== "api") throw new Error("Unexpected GH mutation");
+          if (endpoint === "/repos/octo/app") {
+            if (args[3] === ".id") return success("7");
+            if (args[3] === ".default_branch") return success("release");
+          }
+          if (endpoint === "/repos/octo/app/git/ref/heads/release")
+            return success(++headReads % 2 === 1 ? head : "b".repeat(40));
+          const canonical = endpoint.match(
+            /^\/repos\/radius-project\/ai-extensions\/contents\/\.github\/extension\/(delete[\w-]*\.yml)\?ref=(.+)$/
+          );
+          if (canonical?.[1] && canonical[2] === DELETE_RADIUS_REF)
+            return success(
+              Buffer.from(await readTemplate(canonical[1])).toString("base64")
+            );
+          const committed = endpoint.match(
+            /^\/repos\/octo\/app\/contents\/\.github\/workflows\/(delete-environment[\w-]*\.yml)\?ref=(.+)$/
+          );
+          if (
+            committed?.[1] &&
+            committed[2] === head &&
+            generated[committed[1]]
+          )
+            return success(
+              Buffer.from(generated[committed[1]]).toString("base64")
+            );
+          throw new Error(`Unexpected selected GitHub read: ${endpoint}`);
+        }
+        expect(args).toEqual(["api", "/repos/octo/app", "--jq", ".id"]);
+        return {
+          code: 0,
+          stdout: scenario === "invalid-id" ? "not an ID" : "8",
+          stderr: ""
+        };
+      });
+      const createReadOnlyExecutor = vi.fn(async () => ({
+        login: "octocat",
+        credentialSource: "injected" as const,
+        requiresKeyringSwitch: false,
+        scopes: [],
+        verifyIdentity: async () => {},
+        run,
+        runOrThrow: unexpectedDeletion,
+        packageCredentials: () => {
+          throw new Error("Unexpected GHCR call");
+        },
+        redact: String,
+        errorMessage: String
+      }));
+      const accountLeaseCalls = vi.fn();
+      async function withSelectedAccount<T>(
+        login: string,
+        context: GitHubAccountLeaseMetadata,
+        work: (
+          executor: SelectedGhExecutor,
+          lease: GitHubAccountLease
+        ) => Promise<T>
+      ): Promise<GitHubAccountLeaseResult<T>> {
+        accountLeaseCalls(login, context, work);
+        if (scenario === "removed")
+          throw new Error("The saved account is unavailable.");
+        const executor = await createReadOnlyExecutor();
+        const value = await work(executor, {
+          release: unexpectedDeletion,
+          retake: unexpectedDeletion
+        });
+        return {
+          value,
+          selectedLogin: executor.login,
+          credentialSource: executor.credentialSource,
+          switched: false,
+          restoration: {
+            state: "not_required",
+            originalLogin: executor.login,
+            currentLogin: executor.login,
+            guidance: null
+          }
+        };
+      }
+      const runtime = createProductionCanvasServerRuntime({
+        deploymentRuntime: createTestDeploymentRuntime(),
+        awsEnabled: false,
+        executionOwner: createEnvironmentExecutionOwner(),
+        accountContext: createEnvironmentAccountContext("recovery-test", {
+          createReadOnlyExecutor,
+          withSelectedAccount
+        }),
+        environmentDeletionPorts: deletionPorts,
+        serverDependencies: { createHttpServer: createServerForPanel }
+      });
+      const operation = createOperation({
+        kind: "delete",
+        repo: "octo/app",
+        environment: "dev",
+        provider: "azure",
+        stages: buildDeleteStages()
+      });
+      operation.request = {
+        repo: "octo/app",
+        repoId: 7,
+        environmentId: 17,
+        clientId: "fixture-client",
+        tenantId: "fixture-tenant",
+        environment: "dev",
+        provider: "azure",
+        selectedOwner: "octocat"
+      };
+      operations.put(operation);
+      const target = {
+        operationId: operation.operationId,
+        repo: "octo/app",
+        environment: "dev",
+        login: "octocat",
+        isCurrent: () => true
+      };
+      for (const mismatch of [
+        { login: "different" },
+        { operationId: "missing" },
+        { repo: "octo/other" },
+        { environment: "prod" }
+      ]) {
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            ...mismatch,
+            command: "retry"
+          })
+        ).toMatchObject({ status: 404 });
+      }
+      expect(createReadOnlyExecutor).not.toHaveBeenCalled();
+      let active = true;
+      const stale = runtime.controlSelectedEnvironmentDeletion({
+        ...target,
+        isCurrent: () => active,
+        command: "retry"
+      });
+      active = false;
+      await expect(stale).resolves.toMatchObject({ status: 404 });
+      expect(accountLeaseCalls).not.toHaveBeenCalled();
+      expect(
+        await runtime.controlSelectedEnvironmentDeletion({
+          ...target,
+          command: "status"
+        })
+      ).toMatchObject({
+        status: 200,
+        body: {
+          operationId: operation.operationId,
+          state: "running",
+          retryable: false
+        }
+      });
+      const earlyRetry = await runtime.controlSelectedEnvironmentDeletion({
+        ...target,
+        command: "retry"
+      });
+      expect(earlyRetry.status).toBeGreaterThanOrEqual(400);
+      expect(accountLeaseCalls).not.toHaveBeenCalled();
+      runtime.recoverSelectedEnvironmentDeletions();
+      const expectedState =
+        scenario === "branch-moved" ? "failed_partial" : "failed";
+      await vi.waitFor(() => expect(operation.state).toBe(expectedState));
+      expect(accountLeaseCalls).toHaveBeenCalledExactlyOnceWith(
+        "octocat",
+        { ownerKey: "recovery-test", operationId: operation.operationId },
+        expect.any(Function)
+      );
+      expect(createServerForPanel).not.toHaveBeenCalled();
+      expect(operation.failure.message).toContain(diagnostic);
+      expect(
+        await runtime.controlSelectedEnvironmentDeletion({
+          ...target,
+          command: "status"
+        })
+      ).toMatchObject({
+        status: 200,
+        body: { terminal: true, message: expect.stringContaining(diagnostic) }
+      });
+      setStageState(operation, STAGE_DELETE_RADIUS_ENV, "failed");
+      const retry = await runtime.controlSelectedEnvironmentDeletion({
+        ...target,
+        command: "retry"
+      });
+      expect(retry).toMatchObject({
+        status: 202,
+        body: { operationId: operation.operationId }
+      });
+      await vi.waitFor(() => expect(operation.state).toBe(expectedState));
+      expect(operation.failure.message).toContain(diagnostic);
+      expect(accountLeaseCalls).toHaveBeenCalledTimes(2);
+      if (scenario === "branch-moved") {
+        expect(headReads).toBe(4);
+        expect(operation.request?.selectedDispatchStarted).toBeUndefined();
+        expect(run.mock.calls.every(([args]) => args[0] === "api")).toBe(true);
+        operation.request.selectedDispatchStarted = true;
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "status"
+          })
+        ).toMatchObject({
+          status: 200,
+          body: {
+            retryable: false,
+            message: expect.stringContaining("GitHub Actions")
+          }
+        });
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "retry"
+          })
+        ).toMatchObject({
+          status: 409,
+          body: { code: "deletion-dispatch-unconfirmed" }
+        });
+      } else {
+        expect(run).toHaveBeenCalledTimes(scenario === "removed" ? 0 : 2);
+      }
+    }
+  );
+  it("refuses to retry a selected-owner deletion through the generic Canvas HTTP route", async () => {
+    const server = runtime();
+    const operation = createOperation({
+      kind: "delete",
+      repo: "octo/app",
+      environment: "dev",
+      provider: "azure",
+      stages: buildDeleteStages()
+    });
+    operation.request = { selectedOwner: "octocat" };
+    setStageState(operation, STAGE_DELETE_RADIUS_ENV, "failed");
+    operation.state = "failed_partial";
+    operations.put(operation);
+    const entry = await server.getOrCreateServer(
+      "selected-retry",
+      "environment"
+    );
+    try {
+      const response = await fetch(
+        `${entry.baseUrl}/api/operations/${operation.operationId}/retry/deletion`,
+        {
+          method: "POST",
+          headers: mutationHeaders(
+            entry.baseUrl,
+            entry.state.browserMutationNonce
+          ),
+          body: JSON.stringify({ authorizeSelectedDeletionRetry: true })
+        }
+      );
+      expect(response.status).toBe(409);
+      expect(await json(response)).toMatchObject({
+        code: "selected-deletion-requires-chat"
+      });
+      expect(operation.state).toBe("failed_partial");
+    } finally {
+      await server.stopServer("selected-retry");
+    }
+  });
+
+  it("retries only the unresolved state package using the saved owner's GitHub and GHCR credentials", async () => {
+    await configureOperationStore({
+      ...disabledOperationStore(),
+      durable: true
+    });
+    await configureCredentialProvenanceStore({
+      load: async () => [],
+      read: unexpectedDeletion,
+      write: unexpectedDeletion,
+      remove: unexpectedDeletion,
+      withLock: async (work) => work()
+    });
+    onTestFinished(() => configureCredentialProvenanceStore(null));
+    const operation = createOperation({
+      kind: "delete",
+      repo: "octo/app",
+      environment: "dev",
+      provider: "azure",
+      stages: buildDeleteStages()
+    });
+    operation.request = {
+      repo: "octo/app",
+      repoId: 7,
+      environmentId: 17,
+      clientId: "fixture-client",
+      tenantId: "fixture-tenant",
+      environment: "dev",
+      provider: "azure",
+      selectedOwner: "octocat",
+      selectedDispatchStarted: true
+    };
+    const completedStageIds = new Set<string>();
+    for (const stage of operation.stages) {
+      if (stage.id === STAGE_DELETE_GITHUB_ENV) break;
+      setStageState(operation, stage.id, "succeeded");
+      completedStageIds.add(stage.id);
+    }
+    completedStageIds.add(STAGE_DELETE_GITHUB_ENV);
+    operations.put(operation);
+
+    let activeLease = false;
+    const run = vi.fn(async (args: string[]) => {
+      expect(activeLease).toBe(true);
+      if (args[1] === "--method") {
+        expect(args).toEqual([
+          "api",
+          "--method",
+          "DELETE",
+          "/repos/octo/app/environments/dev"
+        ]);
+        return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+      }
+      if (args[1] === "--paginate") {
+        expect(args).toEqual([
+          "api",
+          "--paginate",
+          "-H",
+          "Accept: application/vnd.github+json",
+          "/repos/octo/app/environments",
+          "--jq",
+          ".environments[].name"
+        ]);
+        return { code: 0, stdout: "prod\n", stderr: "" };
+      }
+      expect(args).toEqual(["api", "/repos/octo/app", "--jq", ".id"]);
+      return { code: 0, stdout: "7", stderr: "" };
+    });
+    const packageCredentials = vi.fn(() => ({
+      username: "octocat",
+      token: "selected-fixture",
+      source: "injected-token" as const,
+      scopes: ["read:packages", "delete:packages"]
+    }));
+    const executor: SelectedGhExecutor = {
+      login: "octocat",
+      credentialSource: "injected",
+      requiresKeyringSwitch: false,
+      scopes: [],
+      verifyIdentity: vi.fn(async () => {}),
+      run,
+      runOrThrow: async (args) => {
+        const value = new Map([
+          [
+            "/repos/octo/app/environments/dev/variables?per_page=100",
+            "AZURE_CLIENT_ID\tfixture-client\nAZURE_TENANT_ID\tfixture-tenant\n"
+          ],
+          ["/repos/octo/app/environments/dev", "17"],
+          ["/repos/octo/app", "7"]
+        ]).get(args[1] ?? "");
+        if (!value) throw new Error("Unexpected selected environment read");
+        return { code: 0, stdout: value, stderr: "" };
+      },
+      packageCredentials,
+      redact: String,
+      errorMessage: String
+    };
+    const createReadOnlyExecutor = vi.fn(async () => executor);
+    let permitPackageRead = false;
+    let packageDeleted = false;
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, options) => {
+        expect(activeLease).toBe(true);
+        expect(new Headers(options?.headers).get("Authorization")).toBe(
+          "Bearer selected-fixture"
+        );
+        const url = new URL(String(input));
+        expect(url.origin).toBe("https://api.github.com");
+        if (url.pathname === "/users/octo")
+          return Response.json({ type: "User" });
+        expect(url.pathname).toMatch(
+          /^\/users\/octo\/packages\/container\/app-radius-state-dev-/
+        );
+        if (!permitPackageRead) return new Response(null, { status: 403 });
+        if (options?.method === "DELETE") {
+          packageDeleted = true;
+          return new Response(null, { status: 204 });
+        }
+        return packageDeleted ?
+            new Response(null, { status: 404 })
+          : Response.json({
+              visibility: "private",
+              repository: { full_name: "octo/app" }
+            });
+      });
+    const runtime = createProductionCanvasServerRuntime({
+      deploymentRuntime: createTestDeploymentRuntime(),
+      awsEnabled: false,
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createEnvironmentAccountContext("package-retry-test", {
+        createReadOnlyExecutor,
+        async withSelectedAccount(login, metadata, work) {
+          expect(login).toBe("octocat");
+          expect(metadata.operationId).toBe(operation.operationId);
+          activeLease = true;
+          try {
+            return {
+              value: await work(executor, {
+                release: unexpectedDeletion,
+                retake: unexpectedDeletion
+              }),
+              selectedLogin: login,
+              credentialSource: executor.credentialSource,
+              switched: false,
+              restoration: {
+                state: "not_required",
+                originalLogin: login,
+                currentLogin: login,
+                guidance: null
+              }
+            };
+          } finally {
+            activeLease = false;
+          }
+        }
+      }),
+      environmentDeletionPorts: deletionPorts
+    });
+    runtime.recoverSelectedEnvironmentDeletions();
+    await vi.waitFor(() => {
+      expect(operation.state).toBe("failed_partial");
+      expect(activeLease).toBe(false);
+    });
+    expect(operation.failure?.code).toBe("state-package-delete-failed");
+    expect(operation.stages).toContainEqual(
+      expect.objectContaining({
+        id: STAGE_DELETE_GITHUB_ENV,
+        state: "succeeded"
+      })
+    );
+    expect(packageDeleted).toBe(false);
+    const completedSteps = operation.steps.filter((step: { stage: string }) =>
+      completedStageIds.has(step.stage)
+    );
+    fetch.mockClear();
+    run.mockClear();
+    permitPackageRead = true;
+    expect(
+      await runtime.controlSelectedEnvironmentDeletion({
+        command: "retry",
+        operationId: operation.operationId,
+        repo: "octo/app",
+        environment: "dev",
+        login: "octocat",
+        isCurrent: () => true
+      })
+    ).toMatchObject({ status: 202 });
+    await vi.waitFor(() => {
+      expect(operation.state).toBe("succeeded");
+      expect(activeLease).toBe(false);
+    });
+    expect(
+      fetch.mock.calls.map(([, options]) => options?.method ?? "GET")
+    ).toEqual(["GET", "GET", "DELETE", "GET"]);
+    expect(
+      operation.steps.filter((step: { stage: string }) =>
+        completedStageIds.has(step.stage)
+      )
+    ).toEqual(completedSteps);
+    expect(run.mock.calls.map(([args]) => args[1])).toEqual([
+      "/repos/octo/app",
+      "--paginate"
+    ]);
+    expect(packageCredentials).toHaveBeenCalledTimes(2);
+  });
 
   it("reuses a loopback instance, updates its page, isolates instances, and cleans up idempotently", async () => {
     let now = 100;

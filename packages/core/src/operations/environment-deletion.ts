@@ -1,0 +1,1492 @@
+// Environment deletion policy.
+//
+// The background runner that tears an environment down when the user deletes it
+// from the picker. It mirrors the environment-creation operation (issue #303,
+// reusing Ryan Waite's async OperationRecord + progress-panel model) but walks a
+// delete-specific stage inventory:
+//
+//   1. Delete the Radius environment on the cluster (via a dispatched workflow).
+//   2. Remove the per-environment Azure federated credential(s).
+//   3. Delete the GitHub environment.
+//   4. Delete the per-environment GHCR state package.
+//   5. Note the app registration: Radius never touches the Entra app
+//      registration during an environment deletion. An app registration can be
+//      shared by other environments or callers, so deleting it — or even probing
+//      it — is out of scope for an environment teardown. This stage only records
+//      an informational step so the user knows it was intentionally left in
+//      place and can remove it manually if it is no longer needed.
+//
+// Sequencing is load-bearing: the Radius-env-delete workflow authenticates to
+// the cluster with the environment's own federated credential, so the credential
+// must survive until after step 1. Step 1 fails closed: if the Radius
+// environment delete cannot be confirmed (dispatch failure, missing run,
+// timeout, or a non-guard workflow failure) the operation terminates as a
+// retryable partial failure BEFORE any credential or GitHub-environment cleanup
+// runs, so a failed delete never strips the identity a retry needs. Every later
+// mutation is idempotent. The package cleanup intentionally runs after the other
+// environment-owned resources, but an unconfirmed result remains a retryable
+// partial failure rather than being reported as success.
+//
+// Progress and persistence are ports; the host owns the operation record.
+
+import {
+  parseAwsRoleArn,
+  readRecordedAwsLock
+} from "../platforms/aws-identity.js";
+import { stateRegistryForEnvironment } from "../workflows/state.js";
+import {
+  buildFederatedCredentialListArgs,
+  buildFederatedCredentialDeleteArgs,
+  parseFederatedCredentials,
+  federatedCredentialListUnreadable,
+  selectEnvironmentFederatedCredentials,
+  isAzResourceNotFound
+} from "../platforms/setup-azure-identity.js";
+import {
+  planCredentialReclamation,
+  type CredentialProvenanceRecord,
+  type CredentialRetentionReason
+} from "./credential-reclamation.js";
+import {
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_CREDENTIAL,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE,
+  STAGE_REVIEW_APP_REGISTRATION,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
+  STAGE_REVIEW_IAM_ROLE,
+  type EnvironmentDeletionProgress
+} from "./environment-deletion-progress.js";
+
+export interface GitHubEnvDeletionOutcome {
+  outcome: "deleted" | "not_found" | "failed";
+  detail?: string;
+}
+
+export interface AwsLockWait {
+  readonly policyArn: string;
+  readonly policyId: string;
+  readonly holder: string;
+  readonly holderOperationId: string;
+  readonly since: string;
+  readonly stopped: boolean;
+  readonly removable: boolean;
+}
+
+export type AwsLockRemovalResult =
+  | { readonly ok: true; readonly removed: boolean }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+export type StatePackageDeletionOutcome = "deleted" | "not_found";
+
+export interface DeletionCommandResult {
+  code?: string | number;
+  stdout?: string;
+  stderr?: string;
+}
+
+// Outcome of deleting the Radius environment through the dispatched workflow.
+// `notFound` means there was no environment to delete (idempotent success);
+// `failed` stops teardown before any later cleanup;
+// `apps_present` means the environment still has deployed applications, which is
+// a hard stop — the whole deletion is aborted so nothing else is torn down.
+export interface RadiusEnvDeletionOutcome {
+  outcome: "deleted" | "not_found" | "failed" | "apps_present";
+  detail?: string;
+}
+
+// The narrow I/O and progress ports the runner needs.
+export interface EnvironmentDeletionPorts {
+  progress: EnvironmentDeletionProgress;
+  awsLockRecoveryCommand(policyArn: string, policyId: string): string;
+  // Dispatch the delete-environment workflow and wait for the run to finish.
+  // `onHeartbeat`, when provided, is invoked periodically while the run is being
+  // polled so the caller can keep the operation's activity timestamp fresh and
+  // avoid the staleness sweep abandoning a legitimately long-running deletion.
+  deleteRadiusEnvironment(
+    input: {
+      repo: string;
+      environment: string;
+      provider: string;
+    },
+    onHeartbeat?: () => void | Promise<void>
+  ): Promise<RadiusEnvDeletionOutcome>;
+  // Run an `az` command. Never throws; a spawn failure surfaces as a result.
+  runAz(args: string[]): Promise<DeletionCommandResult>;
+  validateCredentialCleanupTarget?(): Promise<void>;
+  withCredentialProvenanceLock<T>(work: () => Promise<T>): Promise<T>;
+  // Delete the GitHub environment (idempotent).
+  deleteGitHubEnvironment(input: {
+    repo: string;
+    environment: string;
+  }): Promise<GitHubEnvDeletionOutcome>;
+  deleteStatePackage(input: {
+    repo: string;
+    environment: string;
+  }): Promise<StatePackageDeletionOutcome>;
+  reportStatePackageDeletionFailure(input: {
+    repo: string;
+    environment: string;
+    message: string;
+  }): Promise<void>;
+  // The durable provenance records for a repo + environment (issue #331). Used
+  // to prove Radius created a live federated credential before deleting it. An
+  // empty list means "no proof", which the plan treats as retain (fail-safe).
+  readCredentialProvenance(
+    clientId: string
+  ): CredentialProvenanceRecord[] | Promise<CredentialProvenanceRecord[]>;
+  readAzureIdentity(clientId: string): Promise<{
+    tenantId: string;
+    applicationObjectId: string;
+  }>;
+  removeCredentialProvenance(
+    clientId: string,
+    credentialId: string
+  ): Promise<void>;
+  clearEnvironmentCredentialProvenance(
+    repoId: number,
+    environment: string
+  ): Promise<void>;
+  // AWS only: the ID of the repository GitHub serves at `repo` now. Throws
+  // when GitHub can't say.
+  readRepositoryId(repo: string): Promise<number>;
+  // AWS only: under the deploy identity lock, remove the environment's trust
+  // subjects and permission policy from the shared deploy role, and its
+  // cluster's access entry when nothing else uses it. The role itself is
+  // never deleted.
+  removeAwsEnvironmentAccess(input: {
+    repo: string;
+    repoId: number;
+    environment: string;
+    roleArn: string;
+    // The subjects setup recorded; empty when it recorded none.
+    trustSubjects: readonly string[];
+    // Empty when the environment did not record its cluster.
+    region: string;
+    cluster: string;
+    operationId: string;
+    // Called on every poll while another run holds the lock, with a progress
+    // line when there is something new to say.
+    waiting(wait: AwsLockWait, line: string | null): Promise<void>;
+    // Runs after a successful removal, before the lock is released.
+    whileLocked(removal: AwsRoleAccessRemoval): Promise<void>;
+    // The policy ID of the lock an earlier attempt of this deletion recorded,
+    // so a retry takes it back instead of waiting on it.
+    adopt?: string;
+    // Called with the lock once it is held and before the first change.
+    onLocked?(lock: { policyArn: string; policyId: string }): Promise<void>;
+    // Called once the lock this run took is released or known gone.
+    onReleased?(): void;
+  }): Promise<
+    | (AwsRoleAccessRemoval & {
+        // Set when the removal finished but the lock was left behind.
+        lockWarning?: string;
+      })
+    | { ok: false; message: string }
+  >;
+  // AWS only: remove exactly the lock a deletion recorded, by its policy ID,
+  // when an earlier attempt finished its changes but not its release.
+  removeAwsDeployIdentityLock(lock: {
+    policyArn: string;
+    policyId: string;
+  }): Promise<AwsLockRemovalResult>;
+  // Durably record the operation after each state transition.
+  persist(): Promise<void>;
+  errorMessage(error: unknown): string;
+  log?(message: string): void;
+}
+
+export interface AwsRoleAccessRemoval {
+  ok: true;
+  removed: readonly string[];
+  kept: readonly string[];
+  warnings: readonly string[];
+}
+
+export interface DeletionOperation {
+  operationId: string;
+  provider?: string;
+  repo?: string;
+  environment?: string;
+  currentStage?: string | null;
+  stages: Array<{ id: string; state: string }>;
+  steps: Array<{ stage?: unknown; label?: unknown }>;
+  request?: {
+    clientId?: string;
+    tenantId?: string;
+    roleArn?: string;
+    trustSubjects?: unknown;
+    region?: string;
+    cluster?: string;
+    repoId?: number;
+    [key: string]: unknown;
+  };
+  inputRequired?: unknown;
+  state?: string;
+  [key: string]: unknown;
+}
+
+function parseFederatedCredentialObject(
+  stdout: string
+): ReturnType<typeof parseFederatedCredentials>[number] | null {
+  try {
+    return parseFederatedCredentials([JSON.parse(stdout)])[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function stageState(op: DeletionOperation, stageId: string): string | null {
+  const stage = op.stages.find((s) => s.id === stageId);
+  return stage ? stage.state : null;
+}
+
+// A stage present in the inventory that has not already reached a terminal
+// verdict still needs its work run. An absent stage (provider without Azure
+// cleanup) returns null and is skipped.
+function stagePending(op: DeletionOperation, stageId: string): boolean {
+  const state = stageState(op, stageId);
+  return state === "pending" || state === "running";
+}
+
+// The trust subjects the deletion recorded, empty when it recorded none, or
+// null when the record is not a list of subjects.
+function recordedTrustSubjects(op: DeletionOperation): string[] | null {
+  const recorded: unknown = op.request?.trustSubjects;
+  if (recorded === undefined) return [];
+  return (
+      Array.isArray(recorded) &&
+        recorded.every(
+          (subject) => typeof subject === "string" && subject !== ""
+        )
+    ) ?
+      (recorded as string[])
+    : null;
+}
+
+// The AWS deletion stages, in order, that act on whatever the repository name
+// reaches now: its Radius environment, trust, GitHub environment, and state
+// package.
+const AWS_REPOSITORY_STAGES = [
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE
+];
+
+// Before any of those stages runs, fresh or resumed, confirm the name still
+// reaches the repository the deletion started for. When the trust is still to
+// be removed, also confirm its recorded history is readable.
+async function checkAwsDeletion(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts,
+  repo: string
+): Promise<
+  | { ok: true; trustSubjects: string[] }
+  | { ok: false; code: string; message: string }
+> {
+  // A retry whose GitHub environment delete is pending removes the trust again.
+  const removesTrust =
+    stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS) ||
+    stagePending(op, STAGE_DELETE_GITHUB_ENV);
+  const trustSubjects = removesTrust ? recordedTrustSubjects(op) : [];
+  if (trustSubjects === null) {
+    return {
+      ok: false,
+      code: "aws-saved-configuration-unreadable",
+      message:
+        "The environment's AWS_TRUST_SUBJECTS GitHub variable is not a JSON list of trust subjects, so Radius can't tell which trust to remove. Radius stopped before making further changes. Restore the complete list, using the deploy role's trust policy to find this environment's subjects, then delete the environment again. Don't delete the variable, because Radius would then leave the older subjects in the role's trust."
+    };
+  }
+  const savedId = op.request?.repoId;
+  if (!Number.isSafeInteger(savedId) || Number(savedId) <= 0) {
+    return {
+      ok: false,
+      code: "aws-repository-unconfirmed",
+      message: `This deletion has no valid GitHub repository ID, so Radius can't confirm ${repo} is the repository it started for. Radius stopped before making further changes. Delete the environment again.`
+    };
+  }
+  let currentId: number;
+  try {
+    currentId = await ports.readRepositoryId(repo);
+  } catch (error) {
+    return {
+      ok: false,
+      code: "aws-repository-unconfirmed",
+      message: `Could not read repository ${repo} from GitHub (${ports.errorMessage(error)}), so Radius couldn't confirm it is the repository this deletion started for. Radius stopped before making further changes. Delete the environment again.`
+    };
+  }
+  if (currentId !== savedId) {
+    return {
+      ok: false,
+      code: "aws-repository-unconfirmed",
+      message: `${repo} is no longer the repository this deletion started for. Radius stopped before making further changes. If the repository was renamed, delete the environment from its new name.`
+    };
+  }
+  return { ok: true, trustSubjects };
+}
+
+/**
+ * Run (or resume) an environment-deletion operation to completion.
+ *
+ * Resume-safe: each stage is skipped when it already holds a terminal verdict,
+ * so re-invoking after an interruption picks up at the first unfinished stage.
+ */
+export async function runEnvironmentDeletion(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts
+): Promise<void> {
+  const { repo, environment, provider } = op;
+  if (!repo?.trim() || !environment?.trim() || !provider?.trim()) {
+    ports.progress.finish(op, "failed", {
+      failure: {
+        code: "environment-deletion-target-missing",
+        stage: STAGE_DELETE_RADIUS_ENV,
+        stepSeq: null,
+        message:
+          "The saved environment deletion has no complete target. No cleanup was attempted.",
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+    await ports.persist();
+    return;
+  }
+  const log = ports.log || (() => {});
+
+  let trustSubjects: string[] = [];
+  const nextAwsStage =
+    stageState(op, STAGE_DELETE_AWS_ROLE_ACCESS) === null ? undefined : (
+      AWS_REPOSITORY_STAGES.find((id) => stagePending(op, id))
+    );
+  if (nextAwsStage) {
+    const checked = await checkAwsDeletion(op, ports, repo);
+    if (!checked.ok) {
+      // An interrupted stage is reset to pending on restart but keeps its
+      // steps, so only a deletion with neither has changed nothing.
+      const untouched =
+        op.steps.length === 0 && op.stages.every((s) => s.state === "pending");
+      ports.progress.addStep(op, {
+        stage: nextAwsStage,
+        kind: "observation",
+        label:
+          "Could not confirm the environment's AWS configuration. Deletion stopped.",
+        state: "failed"
+      });
+      ports.progress.setStageState(op, nextAwsStage, "failed");
+      ports.progress.finish(op, untouched ? "failed" : "failed_partial", {
+        failure: {
+          code: checked.code,
+          stage: nextAwsStage,
+          stepSeq: null,
+          message: checked.message,
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await ports.persist();
+      return;
+    }
+    trustSubjects = checked.trustSubjects;
+  }
+
+  // Stage 1 — delete the Radius environment on the cluster.
+  if (stagePending(op, STAGE_DELETE_RADIUS_ENV)) {
+    ports.progress.enterStage(op, STAGE_DELETE_RADIUS_ENV);
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_RADIUS_ENV,
+      kind: "mutation",
+      label: "Deleting the Radius environment on the cluster",
+      state: "running"
+    });
+    await ports.persist();
+    let outcome: RadiusEnvDeletionOutcome;
+    try {
+      // Heartbeat while the delete workflow run is polled so the operation is
+      // not swept as stale (and its single-flight lock released) during a run
+      // that can legitimately take much longer than the idle-stale window.
+      const heartbeat = async () => {
+        ports.progress.touchOperation(op);
+        await ports.persist();
+      };
+      outcome = await ports.deleteRadiusEnvironment(
+        {
+          repo,
+          environment,
+          provider
+        },
+        heartbeat
+      );
+    } catch (error) {
+      outcome = { outcome: "failed", detail: ports.errorMessage(error) };
+    }
+    if (outcome.outcome === "deleted") {
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_RADIUS_ENV,
+        kind: "mutation",
+        label: "Deleted the Radius environment",
+        state: "succeeded"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_RADIUS_ENV, "succeeded");
+    } else if (outcome.outcome === "not_found") {
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_RADIUS_ENV,
+        kind: "observation",
+        label: "No Radius environment to delete",
+        state: "succeeded"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_RADIUS_ENV, "succeeded");
+    } else if (outcome.outcome === "apps_present") {
+      // A live application is still deployed to this environment. Deleting the
+      // environment out from under it would orphan its resources, so abort the
+      // whole operation before any cleanup (federated credential, GitHub
+      // environment, app registration) runs and tell the user to delete their
+      // application(s) first. This fails closed: nothing was torn down.
+      const userMessage =
+        outcome.detail ||
+        "This environment still has one or more deployed applications. Delete the application(s) first, then delete the environment.";
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_RADIUS_ENV,
+        kind: "observation",
+        label: "Environment still has deployed applications — deletion stopped",
+        state: "failed"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_RADIUS_ENV, "failed");
+      ports.progress.finish(op, "action_required", {
+        terminal: {
+          userMessage,
+          code: "environment-has-applications"
+        }
+      });
+      await ports.persist();
+      return;
+    } else {
+      // The Radius environment delete could not be confirmed: the workflow
+      // dispatch failed, the run was never found, it timed out, or it finished
+      // with a non-guard failure. We must NOT proceed to the destructive
+      // cleanup stages. Removing the federated credential and the GitHub
+      // environment would strip the identity and inputs the delete workflow
+      // needs, leaving the Radius environment stranded on the cluster with no
+      // way to retry. Fail closed as a retryable partial failure and stop here
+      // before any cleanup runs.
+      log(`radius env delete failed: ${outcome.detail || "unknown"}`);
+      const userMessage =
+        outcome.detail ||
+        "Radius could not confirm the environment was deleted from the cluster. Nothing else was removed — retry the deletion.";
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_RADIUS_ENV,
+        kind: "observation",
+        label: "Could not delete the Radius environment — deletion stopped",
+        state: "failed"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_RADIUS_ENV, "failed");
+      ports.progress.finish(op, "failed_partial", {
+        failure: {
+          code: "radius-env-delete-failed",
+          stage: STAGE_DELETE_RADIUS_ENV,
+          stepSeq: null,
+          message: userMessage,
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await ports.persist();
+      return;
+    }
+    await ports.persist();
+  }
+
+  // Stages 2 & 3 — remove the per-environment Azure federated credential(s) and
+  // delete the GitHub environment. For an Azure environment both mutations run
+  // under a SINGLE credential-provenance lock acquisition, so the invariant
+  // "the GitHub-environment delete is owned by the same lock that retired the
+  // credential" is expressed in exactly one place. `deleteEnvironmentCredentials`
+  // sets the `credentialConsumerRetirementReady` handoff that
+  // `deleteGitHubEnvironmentStage` consumes; keeping both inside one lock keeps
+  // that producer/consumer pair together. On the resume path the credential
+  // stage is already done, so only the GitHub delete runs — still under the same
+  // lock. An AWS environment's GitHub delete runs under the deploy identity
+  // lock instead, below. Other environments have nothing to retire, so their
+  // GitHub delete needs no lock.
+  const roleArn = String(op.request?.roleArn || "");
+  // The trust removal and the GitHub environment delete run under one hold of
+  // the deploy identity lock. Repair reads the GitHub environment under that
+  // lock, so if the lock were released between the two steps, Repair could
+  // still see the environment and add its subjects back. For the same reason,
+  // a retry whose GitHub environment delete is still pending removes the
+  // subjects again first. The removal is idempotent.
+  const awsStageState = stageState(op, STAGE_DELETE_AWS_ROLE_ACCESS);
+  const awsStagePending = stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS);
+  const githubStagePending = stagePending(op, STAGE_DELETE_GITHUB_ENV);
+  const recordedLock = readRecordedAwsLock(op.context);
+  if (
+    awsStageState !== null &&
+    !awsStagePending &&
+    !githubStagePending &&
+    recordedLock
+  ) {
+    // An earlier attempt finished the role and the GitHub environment but not
+    // the release. Only that lock goes: by now the environment may have been
+    // created again, and checking the role again would remove its new grant.
+    await releaseLeftoverAwsLock(op, ports, recordedLock);
+  }
+  if (awsStageState !== null && (awsStagePending || githubStagePending)) {
+    ports.progress.enterStage(op, STAGE_DELETE_AWS_ROLE_ACCESS);
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "mutation",
+      label:
+        awsStagePending ?
+          "Removing this environment's trust, policy, and unused cluster access from the deploy identity"
+        : "Checking the deploy identity again before deleting the GitHub environment",
+      state: "running"
+    });
+    await ports.persist();
+    let removal;
+    let stopped = false;
+    // What went wrong in the work run under the lock, after the AWS removal
+    // succeeded. It is not an AWS failure, so it is rethrown once the AWS
+    // outcome is recorded, as a save or GitHub failure would be without the
+    // lock.
+    const lockedWork: { failed: boolean; error: unknown } = {
+      failed: false,
+      error: null
+    };
+    try {
+      removal = await ports.removeAwsEnvironmentAccess({
+        repo,
+        repoId: Number(op.request?.repoId),
+        environment,
+        roleArn,
+        trustSubjects,
+        region: String(op.request?.region || ""),
+        cluster: String(op.request?.cluster || ""),
+        operationId: op.operationId,
+        // Recorded before the first change, so a crash still leaves the lock
+        // named on this deletion, and its retry takes it back by itself.
+        ...(recordedLock ? { adopt: recordedLock.policyId } : {}),
+        onLocked: async (lock) => {
+          ports.progress.setContext(op, { awsDeployIdentityLock: lock });
+          await ports.persist();
+        },
+        onReleased: () => {
+          ports.progress.setContext(op, { awsDeployIdentityLock: null });
+        },
+        // Shown on the deletion's progress, where Remove lock is offered.
+        waiting: async (wait, line) => {
+          // Waiting is activity: without this, a wait longer than the
+          // staleness window would abandon the deletion.
+          ports.progress.touchOperation(op);
+          ports.progress.setContext(op, { awsLockWait: wait });
+          if (!line) return;
+          ports.progress.addStep(op, {
+            stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+            kind: "observation",
+            label: line,
+            state: "running"
+          });
+          await ports.persist();
+        },
+        whileLocked: async (removed) => {
+          ports.progress.setContext(op, { awsLockWait: null });
+          recordAwsRoleAccessRemoval(
+            ports.progress,
+            op,
+            removed,
+            awsStagePending ? null : awsStageState
+          );
+          try {
+            await ports.persist();
+            stopped = await deleteGitHubEnvironmentStage(
+              op,
+              ports,
+              repo,
+              environment,
+              Number(op.request?.repoId)
+            );
+            await ports.persist();
+          } catch (error) {
+            lockedWork.failed = true;
+            lockedWork.error = error;
+          }
+        }
+      });
+    } catch (error) {
+      removal = { ok: false as const, message: ports.errorMessage(error) };
+    }
+    ports.progress.setContext(op, { awsLockWait: null });
+    if (!removal.ok) {
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+        kind: "observation",
+        label: "Could not update the deploy identity. Cleanup stopped.",
+        state: "failed"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "failed");
+      ports.progress.finish(op, "failed_partial", {
+        failure: {
+          code: "aws-role-access-delete-failed",
+          stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+          stepSeq: null,
+          message: `${removal.message} The GitHub environment was kept so deletion can be retried.`,
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await ports.persist();
+      return;
+    }
+    if (removal.lockWarning) {
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+        kind: "warning",
+        label: "Could not release the lock on the IAM role",
+        warning: {
+          code: "aws-lock-release-failed",
+          message: removal.lockWarning,
+          impact:
+            "Other Radius runs that change this IAM role wait until the lock is removed."
+        }
+      });
+      // The stage keeps the role cleanup's own verdict. The lock stays
+      // recorded, so Retry deletion releases only that lock and never runs
+      // the role cleanup again for an environment that may exist again.
+    }
+    await ports.persist();
+    if (lockedWork.failed) throw lockedWork.error;
+    if (stopped) return;
+  }
+
+  const clientId = String(op.request?.clientId || "");
+  const tenantId = String(op.request?.tenantId || "");
+  const repoId = Number(op.request?.repoId);
+  const credentialStagePending = stagePending(op, STAGE_DELETE_CREDENTIAL);
+
+  if (credentialStagePending || stagePending(op, STAGE_DELETE_GITHUB_ENV)) {
+    if (provider === "azure") {
+      try {
+        const stopped = await ports.withCredentialProvenanceLock(async () => {
+          if (stagePending(op, STAGE_DELETE_CREDENTIAL)) {
+            ports.progress.enterStage(op, STAGE_DELETE_CREDENTIAL);
+            await ports.persist();
+            const complete = await deleteEnvironmentCredentials(op, ports, {
+              repo,
+              environment,
+              clientId,
+              tenantId,
+              repoId
+            });
+            await ports.persist();
+            // Credential cleanup failed closed and already latched the terminal
+            // state; do NOT delete the GitHub environment a retry still needs.
+            if (complete === false) return true;
+          }
+          return await deleteGitHubEnvironmentStage(
+            op,
+            ports,
+            repo,
+            environment,
+            repoId
+          );
+        });
+        await ports.persist();
+        if (stopped) return;
+      } catch (error) {
+        // The lock gates BOTH mutations, so a lock-acquisition failure stops the
+        // operation. Attribute it to whichever stage still needed the lock: the
+        // credential stage on a fresh run, or the GitHub stage on resume.
+        const lockFailureStage =
+          credentialStagePending ?
+            STAGE_DELETE_CREDENTIAL
+          : STAGE_DELETE_GITHUB_ENV;
+        ports.progress.addStep(op, {
+          stage: lockFailureStage,
+          kind: "warning",
+          label: "Could not lock credential ownership records",
+          warning: {
+            code: "credential-provenance-lock-unavailable",
+            message: ports.errorMessage(error),
+            impact:
+              credentialStagePending ?
+                "Radius did not mutate credentials without an exclusive lock."
+              : "The GitHub environment was kept so deletion can be retried."
+          }
+        });
+        ports.progress.setStageState(op, lockFailureStage, "failed");
+        ports.progress.finish(op, "failed_partial", {
+          failure: {
+            code: "credential-provenance-lock-unavailable",
+            stage: lockFailureStage,
+            stepSeq: null,
+            message:
+              "Radius could not lock the credential ownership records. The GitHub environment was kept so deletion can be retried.",
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await ports.persist();
+        return;
+      }
+    } else {
+      const stopped = await deleteGitHubEnvironmentStage(
+        op,
+        ports,
+        repo,
+        environment,
+        repoId
+      );
+      await ports.persist();
+      if (stopped) return;
+    }
+  }
+
+  // Stage 4 — delete the dedicated GHCR state package. This runs after the
+  // GitHub environment cleanup so missing package permissions do not retain
+  // other environment-owned resources. A failure is still explicit and
+  // retryable: completed stages stay succeeded and the retry resumes here.
+  if (stagePending(op, STAGE_DELETE_STATE_PACKAGE)) {
+    const statePackage = stateRegistryForEnvironment(repo, environment);
+    ports.progress.enterStage(op, STAGE_DELETE_STATE_PACKAGE);
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_STATE_PACKAGE,
+      kind: "mutation",
+      label: "Deleting the environment's GHCR state package",
+      state: "running"
+    });
+    await ports.persist();
+    try {
+      const outcome = await ports.deleteStatePackage({ repo, environment });
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_STATE_PACKAGE,
+        kind: outcome === "deleted" ? "mutation" : "observation",
+        label:
+          outcome === "deleted" ?
+            "Deleted the environment's GHCR state package"
+          : "No GHCR state package to delete",
+        state: "succeeded"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_STATE_PACKAGE, "succeeded");
+      await ports.persist();
+    } catch (error) {
+      const message = ports.errorMessage(error);
+      const failureMessage =
+        `${message} Resolve the reported package access, visibility, or repository-link issue, then retry deletion. ` +
+        `Only delete "${statePackage}" manually after GitHub shows that it is private or internal and linked to "${repo}".`;
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_STATE_PACKAGE,
+        kind: "observation",
+        label: "Could not delete the GHCR state package — cleanup stopped",
+        state: "failed"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_STATE_PACKAGE, "failed");
+      ports.progress.finish(op, "failed_partial", {
+        failure: {
+          code: "state-package-delete-failed",
+          stage: STAGE_DELETE_STATE_PACKAGE,
+          stepSeq: null,
+          message: failureMessage,
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await ports.persist();
+      try {
+        await ports.reportStatePackageDeletionFailure({
+          repo,
+          environment,
+          message: failureMessage
+        });
+      } catch (reportError) {
+        ports.log?.(
+          `[radius delete-environment] Could not report the GHCR package deletion failure to Copilot chat: ${ports.errorMessage(
+            reportError
+          )}`
+        );
+      }
+      return;
+    }
+  }
+
+  // Stage 5 — the Entra app registration. Radius never touches it during an
+  // environment deletion: an app registration can be shared by other
+  // environments or callers, so removing it — or even probing it — is out of
+  // scope for an environment teardown. Record an informational step so the user
+  // knows it was intentionally left in place and can remove it manually if it is
+  // no longer needed.
+  if (stagePending(op, STAGE_REVIEW_APP_REGISTRATION)) {
+    ports.progress.enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
+    ports.progress.addStep(op, {
+      stage: STAGE_REVIEW_APP_REGISTRATION,
+      kind: "observation",
+      label: `Left the app registration (${clientId}) in place — Radius does not delete Entra app registrations. Remove it manually if it is no longer needed.`,
+      state: "succeeded"
+    });
+    ports.progress.setStageState(
+      op,
+      STAGE_REVIEW_APP_REGISTRATION,
+      "succeeded"
+    );
+    await ports.persist();
+  }
+
+  if (stagePending(op, STAGE_REVIEW_IAM_ROLE)) {
+    ports.progress.enterStage(op, STAGE_REVIEW_IAM_ROLE);
+    // A malformed ARN is shown whole rather than guessed at.
+    const roleName = parseAwsRoleArn(roleArn)?.roleName ?? roleArn;
+    ports.progress.addStep(op, {
+      stage: STAGE_REVIEW_IAM_ROLE,
+      kind: "observation",
+      label: `Radius doesn't delete IAM role ${roleName} or the account's GitHub identity provider, because other environments, repositories, or services may use them.`,
+      state: "succeeded"
+    });
+    // AWS keeps a final snapshot of every database it deleted with the apps.
+    // It holds the app's data, so Radius leaves it, and only says it exists.
+    const region = String(op.request?.region || "").trim();
+    ports.progress.addStep(op, {
+      stage: STAGE_REVIEW_IAM_ROLE,
+      kind: "observation",
+      label: `Kept the final snapshots AWS took of databases deleted with this environment's apps. They hold the apps' data, and AWS bills for them until you delete them. Find them under Snapshots in the RDS console, or run: aws rds describe-db-snapshots --snapshot-type manual${region ? ` --region ${region}` : ""}`,
+      state: "succeeded"
+    });
+    ports.progress.setStageState(op, STAGE_REVIEW_IAM_ROLE, "succeeded");
+    await ports.persist();
+  }
+
+  ports.progress.finishSucceeded(
+    op,
+    ports.progress.hasWarnings(op) ? "succeeded_with_warnings" : "succeeded"
+  );
+  await ports.persist();
+}
+
+// Record what the role cleanup removed, kept, and could not confirm, and close
+// its stage. A recheck before a retried GitHub environment delete passes the
+// stage's earlier verdict: it adds only what it removed this time and any new
+// warning, since the earlier pass already listed what was kept.
+function recordAwsRoleAccessRemoval(
+  progress: EnvironmentDeletionProgress,
+  op: DeletionOperation,
+  removal: AwsRoleAccessRemoval,
+  recheckOf: string | null
+): void {
+  if (recheckOf !== null) {
+    const listed = new Set(
+      op.steps
+        .filter((step) => step.stage === STAGE_DELETE_AWS_ROLE_ACCESS)
+        .map((step) => step.label)
+    );
+    for (const item of removal.removed) {
+      progress.addStep(op, {
+        stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+        kind: "mutation",
+        label: `Removed ${item}`,
+        state: "succeeded"
+      });
+    }
+    for (const warning of removal.warnings) {
+      if (listed.has(warning)) continue;
+      progress.addStep(op, {
+        stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+        kind: "warning",
+        label: warning,
+        warning: { code: "aws-role-cleanup-warning", message: warning }
+      });
+    }
+    progress.setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, recheckOf);
+    return;
+  }
+  if (removal.removed.length === 0) {
+    progress.addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "observation",
+      label: "The deploy identity held nothing for this environment",
+      state: "succeeded"
+    });
+  }
+  for (const item of removal.removed) {
+    progress.addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "mutation",
+      label: `Removed ${item}`,
+      state: "succeeded"
+    });
+  }
+  for (const item of removal.kept) {
+    progress.addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "observation",
+      label: `Kept ${item}`,
+      state: "succeeded"
+    });
+  }
+  for (const warning of removal.warnings) {
+    progress.addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "warning",
+      label: warning,
+      warning: { code: "aws-role-cleanup-warning", message: warning }
+    });
+  }
+  progress.setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "succeeded");
+}
+
+// Remove the lock an earlier attempt recorded and left, by its policy ID, so a
+// newer lock another run took stays. Kept recorded when the removal fails.
+async function releaseLeftoverAwsLock(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts,
+  lock: { policyArn: string; policyId: string; roleName: string }
+): Promise<void> {
+  let result: AwsLockRemovalResult;
+  try {
+    result = await ports.removeAwsDeployIdentityLock({
+      policyArn: lock.policyArn,
+      policyId: lock.policyId
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      code: "aws-lock-remove-failed",
+      message: ports.errorMessage(error)
+    };
+  }
+  if (result.ok || result.code === "aws-lock-changed") {
+    ports.progress.setContext(op, { awsDeployIdentityLock: null });
+  } else {
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "warning",
+      label: "Could not release the lock on the IAM role",
+      warning: {
+        code: "aws-lock-release-failed",
+        message: `This deletion is done with IAM role ${lock.roleName}, but Radius could not release the lock an earlier attempt left on it: ${result.message} ${ports.awsLockRecoveryCommand(lock.policyArn, lock.policyId)}`,
+        impact:
+          "Other Radius runs that change this IAM role wait until the lock is removed."
+      }
+    });
+  }
+  await ports.persist();
+}
+
+async function deleteGitHubEnvironmentStage(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts,
+  repo: string,
+  environment: string,
+  repoId: number
+): Promise<boolean> {
+  if (!stagePending(op, STAGE_DELETE_GITHUB_ENV)) return false;
+  ports.progress.enterStage(op, STAGE_DELETE_GITHUB_ENV);
+  ports.progress.addStep(op, {
+    stage: STAGE_DELETE_GITHUB_ENV,
+    kind: "mutation",
+    label: "Deleting the GitHub environment",
+    state: "running"
+  });
+  await ports.persist();
+  let ghOutcome: GitHubEnvDeletionOutcome;
+  try {
+    ghOutcome = await ports.deleteGitHubEnvironment({ repo, environment });
+  } catch (error) {
+    ghOutcome = { outcome: "failed", detail: ports.errorMessage(error) };
+  }
+  if (ghOutcome.outcome === "failed") {
+    // The GitHub environment is the PRIMARY artifact of this stage, not a
+    // secondary one that a warning could paper over: if its deletion could not
+    // be confirmed the environment may still exist, so the operation must not
+    // report success (or show a success acknowledgement in the panel). Latch a
+    // retryable partial failure at this stage. The completed Radius and
+    // credential stages stay `succeeded`, so a retry resumes here (see
+    // `applyDeletionRetry`) rather than repeating work that already converged.
+    const message =
+      ghOutcome.detail ||
+      "The GitHub environment delete failed. The GitHub environment may still exist — retry the deletion.";
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_GITHUB_ENV,
+      kind: "observation",
+      label: "Could not delete the GitHub environment — deletion stopped",
+      state: "failed"
+    });
+    ports.progress.setStageState(op, STAGE_DELETE_GITHUB_ENV, "failed");
+    ports.progress.finish(op, "failed_partial", {
+      failure: {
+        code: "github-env-delete-failed",
+        stage: STAGE_DELETE_GITHUB_ENV,
+        stepSeq: null,
+        message,
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+    await ports.persist();
+    return true;
+  }
+  ports.progress.addStep(op, {
+    stage: STAGE_DELETE_GITHUB_ENV,
+    kind: "mutation",
+    label:
+      ghOutcome.outcome === "not_found" ?
+        "No GitHub environment to delete"
+      : "Deleted the GitHub environment",
+    state: "succeeded"
+  });
+  ports.progress.setStageState(op, STAGE_DELETE_GITHUB_ENV, "succeeded");
+  if (op.request?.credentialConsumerRetirementReady) {
+    try {
+      await ports.clearEnvironmentCredentialProvenance(repoId, environment);
+    } catch (error) {
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_GITHUB_ENV,
+        kind: "warning",
+        label:
+          "Deleted the environment but could not retire its credential record",
+        warning: {
+          code: "credential-provenance-clear-failed",
+          message: ports.errorMessage(error),
+          impact:
+            "A stale local consumer record may cause Radius to retain a shared credential during later cleanup."
+        }
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_GITHUB_ENV, "warning");
+    }
+  }
+  await ports.persist();
+  return false;
+}
+
+async function deleteEnvironmentCredentials(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts,
+  {
+    repo,
+    environment,
+    clientId,
+    tenantId,
+    repoId
+  }: {
+    repo: string;
+    environment: string;
+    clientId: string;
+    tenantId: string;
+    repoId: number;
+  }
+): Promise<boolean | void> {
+  if (!clientId || !tenantId || !Number.isFinite(repoId) || repoId <= 0) {
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label:
+        "Skipped removing the federated credential (identity evidence incomplete)",
+      warning: {
+        code: "federated-credential-app-unknown",
+        message:
+          "The environment did not record a complete tenant, app registration, and stable repository identity, so its federated credential could not be targeted safely.",
+        impact:
+          "An orphaned federated credential may remain on the app registration."
+      }
+    });
+    return stopCredentialCleanup(
+      ports.progress,
+      op,
+      "federated-credential-app-unknown",
+      "Radius could not establish the complete credential identity. The GitHub environment was kept so deletion can be retried."
+    );
+  }
+  let liveIdentity: {
+    tenantId: string;
+    applicationObjectId: string;
+  };
+  try {
+    liveIdentity = await ports.readAzureIdentity(clientId);
+  } catch (error) {
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Could not verify the app registration identity",
+      warning: {
+        code: "federated-credential-identity-unverified",
+        message: ports.errorMessage(error),
+        impact: "The environment's federated credential may still exist."
+      }
+    });
+    return stopCredentialCleanup(
+      ports.progress,
+      op,
+      "federated-credential-identity-unavailable",
+      "Radius could not verify the active Azure identity. The GitHub environment was kept so deletion can be retried."
+    );
+  }
+  if (liveIdentity.tenantId.toLowerCase() !== tenantId.toLowerCase()) {
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Left federated credentials in place after a tenant mismatch",
+      warning: {
+        code: "federated-credential-tenant-mismatch",
+        message: `The active Entra tenant (${liveIdentity.tenantId}) does not match the environment's recorded tenant (${tenantId}).`,
+        impact: "Radius did not mutate credentials in the unexpected tenant."
+      }
+    });
+    return stopCredentialCleanup(
+      ports.progress,
+      op,
+      "federated-credential-tenant-mismatch",
+      "The active Azure tenant does not match this environment. The GitHub environment was kept so you can switch tenants and retry."
+    );
+  }
+  const listResult = await ports.runAz(
+    buildFederatedCredentialListArgs({ appId: clientId })
+  );
+  if (listNotReadable(listResult)) {
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Could not list the app registration's federated credentials",
+      warning: {
+        code: "federated-credential-list-failed",
+        message:
+          (listResult.stderr || "").trim() ||
+          "Listing federated credentials failed.",
+        impact: "The environment's federated credential may still exist."
+      }
+    });
+    return stopCredentialCleanup(
+      ports.progress,
+      op,
+      "federated-credential-list-failed",
+      "Radius could not list the app registration's credentials. The GitHub environment was kept so deletion can be retried."
+    );
+  }
+  if (federatedCredentialListUnreadable(listResult.stdout)) {
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Could not read the app registration's federated credentials",
+      warning: {
+        code: "federated-credential-list-unreadable",
+        message:
+          "Listing federated credentials returned output that could not be parsed.",
+        impact: "The environment's federated credential may still exist."
+      }
+    });
+    return stopCredentialCleanup(
+      ports.progress,
+      op,
+      "federated-credential-list-unreadable",
+      "Radius could not read the app registration's credentials. The GitHub environment was kept so deletion can be retried."
+    );
+  }
+  let provenance: CredentialProvenanceRecord[];
+  try {
+    provenance = await ports.readCredentialProvenance(clientId);
+  } catch (error) {
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Could not read credential ownership records",
+      warning: {
+        code: "credential-provenance-unavailable",
+        message: ports.errorMessage(error),
+        impact: "Radius could not prove which credentials are safe to remove."
+      }
+    });
+    return stopCredentialCleanup(
+      ports.progress,
+      op,
+      "credential-provenance-unavailable",
+      "Radius could not read the credential ownership records. The GitHub environment was kept so deletion can be retried."
+    );
+  }
+  const context = {
+    tenantId,
+    clientId,
+    applicationObjectId: liveIdentity.applicationObjectId,
+    repoId,
+    environment
+  };
+  const liveCredentials = parseFederatedCredentials(listResult.stdout);
+  const heuristicCandidateIds = new Set(
+    selectEnvironmentFederatedCredentials(liveCredentials, {
+      repoFullName: repo,
+      envName: environment
+    }).map((credential) => credential.id)
+  );
+  const recordedCandidateIds = new Set(
+    provenance
+      .filter(
+        (record) =>
+          record.tenantId.toLowerCase() === tenantId.toLowerCase() &&
+          record.clientId.toLowerCase() === clientId.toLowerCase() &&
+          record.applicationObjectId === liveIdentity.applicationObjectId &&
+          record.repoId === repoId &&
+          record.environment === environment
+      )
+      .map((record) => record.credentialId)
+  );
+  const candidates = liveCredentials.filter(
+    (credential) =>
+      heuristicCandidateIds.has(credential.id) ||
+      recordedCandidateIds.has(credential.id)
+  );
+  const plan = planCredentialReclamation(candidates, provenance, context);
+  if (plan.delete.length === 0 && plan.retain.length === 0) {
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "observation",
+      label: "No federated credential to remove",
+      state: "succeeded"
+    });
+    ports.progress.setStageState(op, STAGE_DELETE_CREDENTIAL, "succeeded");
+    if (op.request) op.request.credentialConsumerRetirementReady = true;
+    return;
+  }
+  let warned = false;
+  for (const target of plan.delete) {
+    const showResult = await ports.runAz([
+      "ad",
+      "app",
+      "federated-credential",
+      "show",
+      "--id",
+      clientId,
+      "--federated-credential-id",
+      target.credential.id,
+      "-o",
+      "json"
+    ]);
+    if (
+      !commandSucceeded(showResult) &&
+      isAzResourceNotFound(showResult.stderr)
+    ) {
+      try {
+        await ports.removeCredentialProvenance(clientId, target.credential.id);
+      } catch (error) {
+        warned = true;
+        ports.progress.addStep(op, {
+          stage: STAGE_DELETE_CREDENTIAL,
+          kind: "warning",
+          label:
+            "Credential was already deleted but its provenance could not be cleared",
+          warning: {
+            code: "credential-provenance-clear-failed",
+            message: ports.errorMessage(error),
+            impact:
+              "The stale local record cannot authorize deletion of a replacement because the Entra credential object id is different."
+          }
+        });
+      }
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_CREDENTIAL,
+        kind: "observation",
+        label: "Federated credential was already deleted",
+        state: "succeeded"
+      });
+      continue;
+    }
+    const revalidated =
+      commandSucceeded(showResult) ?
+        parseFederatedCredentialObject(showResult.stdout || "")
+      : null;
+    if (!revalidated) {
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_CREDENTIAL,
+        kind: "observation",
+        label:
+          "Could not revalidate the federated credential — deletion stopped",
+        state: "failed"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_CREDENTIAL, "failed");
+      ports.progress.finish(op, "failed_partial", {
+        failure: {
+          code: "federated-credential-revalidation-unavailable",
+          stage: STAGE_DELETE_CREDENTIAL,
+          stepSeq: null,
+          message:
+            "Radius could not re-read the federated credential immediately before deletion. Nothing else was removed; retry the environment deletion.",
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      return false;
+    }
+    const revalidatedPlan = planCredentialReclamation(
+      [revalidated],
+      provenance,
+      context
+    );
+    if (revalidatedPlan.delete[0]?.credential.id !== target.credential.id) {
+      warned = true;
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_CREDENTIAL,
+        kind: "warning",
+        label: "Left a changed federated credential in place",
+        warning: {
+          code: "federated-credential-revalidation-failed",
+          message: `Federated credential "${target.credential.name}" changed immediately before deletion.`,
+          impact:
+            "Radius retained the credential because its live identity no longer matched the creation record."
+        }
+      });
+      continue;
+    }
+    await ports.validateCredentialCleanupTarget?.();
+    const result = await ports.runAz(
+      buildFederatedCredentialDeleteArgs({
+        appId: clientId,
+        credentialId: target.credential.id
+      })
+    );
+    if (commandSucceeded(result) || isAzResourceNotFound(result.stderr)) {
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_CREDENTIAL,
+        kind: "mutation",
+        label: "Removed the environment's federated credential",
+        state: "succeeded"
+      });
+      try {
+        await ports.removeCredentialProvenance(clientId, target.credential.id);
+      } catch (error) {
+        warned = true;
+        ports.progress.addStep(op, {
+          stage: STAGE_DELETE_CREDENTIAL,
+          kind: "warning",
+          label: "Removed the credential but could not clear its provenance",
+          warning: {
+            code: "credential-provenance-clear-failed",
+            message: ports.errorMessage(error),
+            impact:
+              "The stale local record cannot authorize deletion of a replacement because the Entra credential object id is different."
+          }
+        });
+      }
+    } else {
+      ports.progress.addStep(op, {
+        stage: STAGE_DELETE_CREDENTIAL,
+        kind: "observation",
+        label: "Could not remove a federated credential — deletion stopped",
+        state: "failed"
+      });
+      ports.progress.setStageState(op, STAGE_DELETE_CREDENTIAL, "failed");
+      ports.progress.finish(op, "failed_partial", {
+        failure: {
+          code: "federated-credential-delete-failed",
+          stage: STAGE_DELETE_CREDENTIAL,
+          stepSeq: null,
+          message:
+            (result.stderr || "").trim() ||
+            "Deleting the federated credential failed. The GitHub environment was kept so you can retry.",
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      return false;
+    }
+  }
+  for (const retained of plan.retain) {
+    warned = true;
+    ports.progress.addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Left a federated credential in place for manual review",
+      warning: {
+        code: retentionWarningCode(retained.reason),
+        message: retentionMessage(retained.reason, retained.credential.name),
+        impact:
+          `Radius did not delete federated credential "${retained.credential.name}" on ` +
+          `app registration ${clientId}. Review it and remove it manually if it is no ` +
+          `longer needed.`
+      }
+    });
+  }
+  if (op.request) {
+    op.request.credentialConsumerRetirementReady = plan.retain.every(
+      (retained) =>
+        retained.reason !== "evidence-changed" &&
+        retained.reason !== "shared-custom-subject"
+    );
+  }
+  ports.progress.setStageState(
+    op,
+    STAGE_DELETE_CREDENTIAL,
+    warned ? "warning" : "succeeded"
+  );
+}
+
+function stopCredentialCleanup(
+  progress: EnvironmentDeletionProgress,
+  op: DeletionOperation,
+  code: string,
+  message: string
+): false {
+  progress.setStageState(op, STAGE_DELETE_CREDENTIAL, "failed");
+  progress.finish(op, "failed_partial", {
+    failure: {
+      code,
+      stage: STAGE_DELETE_CREDENTIAL,
+      stepSeq: null,
+      message,
+      classification: "user-fixable",
+      evidence: null
+    }
+  });
+  return false;
+}
+
+function retentionWarningCode(reason: CredentialRetentionReason): string {
+  switch (reason) {
+    case "reused":
+      return "federated-credential-retained-reused";
+    case "shared-consumer":
+      return "federated-credential-retained-shared";
+    case "shared-custom-subject":
+      return "federated-credential-retained-custom-subject";
+    case "evidence-changed":
+      return "federated-credential-retained-changed";
+    default:
+      return "federated-credential-retained-unverified";
+  }
+}
+
+function retentionMessage(
+  reason: CredentialRetentionReason,
+  name: string
+): string {
+  switch (reason) {
+    case "reused":
+      return (
+        `Federated credential "${name}" was already present when Radius set up this ` +
+        `environment, so Radius reused it rather than creating it. It is left in place.`
+      );
+    case "shared-consumer":
+      return (
+        `Federated credential "${name}" is also recorded as in use by another ` +
+        `Radius environment, so Radius left it in place.`
+      );
+    case "shared-custom-subject":
+      return (
+        `Federated credential "${name}" uses a custom OIDC subject whose historical ` +
+        `configuration does not prove stable repository and environment exclusivity.`
+      );
+    case "evidence-changed":
+      return (
+        `Federated credential "${name}" no longer matches what Radius recorded when it ` +
+        `created it, so Radius cannot safely delete it.`
+      );
+    default:
+      return (
+        `Federated credential "${name}" has no Radius provenance, so Radius cannot prove ` +
+        `it created the credential and will not delete it.`
+      );
+  }
+}
+
+function commandSucceeded(result: DeletionCommandResult): boolean {
+  return result?.code === 0;
+}
+
+// An `az ... list` that failed for a reason OTHER than "the app is gone" is
+// unreadable. A not-found app lists as empty (idempotent), so it is readable.
+function listNotReadable(result: DeletionCommandResult): boolean {
+  if (commandSucceeded(result)) return false;
+  return !isAzResourceNotFound(result?.stderr);
+}

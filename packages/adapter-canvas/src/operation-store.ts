@@ -9,6 +9,7 @@ export interface PersistedOperationsEnvelope {
 }
 
 export interface OperationStore {
+  readonly durable?: true;
   load(): Promise<PersistedOperationsEnvelope | null>;
   save(envelope: PersistedOperationsEnvelope): Promise<void>;
   report?(diagnostic: OperationStoreDiagnostic): void;
@@ -55,6 +56,7 @@ export function createFileOperationStore({
   report?: OperationStoreReporter;
 }): OperationStore {
   return {
+    durable: true,
     report,
     async load() {
       let raw: string;

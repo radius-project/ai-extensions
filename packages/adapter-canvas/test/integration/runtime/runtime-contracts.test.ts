@@ -46,6 +46,7 @@ import {
   type WorkflowRunner
 } from "@radius-project/adapter-shared";
 import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
+import { bindEnvironmentDeletion } from "../../../src/runtime/bind-environment-deletion.js";
 import { createApplicationDeletionTool } from "../../../src/runtime/application-deletion-tool.js";
 import { confirmDeletion } from "../../../src/runtime/deletion-confirmation.js";
 
@@ -63,6 +64,7 @@ const TOOL_NAMES = [
   "radius_setup_environment",
   "radius_environment_status",
   "radius_environment_control",
+  "radius_delete_environment",
   "radius_delete_application"
 ];
 
@@ -162,6 +164,67 @@ describe("P0-A Radius runtime registration contract", () => {
       await harness.extension.shutdown();
     }
   });
+
+  it.each([
+    [false, true, "requires_confirmation"],
+    [true, false, "refused"],
+    [true, true, "operation_retry"]
+  ] as const)(
+    "gates a panel-free registered environment retry on host support=%s and approval=%s",
+    async (elicitation, approved, kind) => {
+      const request = {
+        repo: "org/app",
+        environment: "test",
+        operationId: "saved-operation",
+        mode: "retry"
+      };
+      const confirm = vi.fn(async () => approved);
+      const control = vi.fn<
+        Parameters<typeof bindEnvironmentDeletion>[0]["control"]
+      >(async ({ command }) =>
+        command === "status" ?
+          { status: 200, body: { retryable: true } }
+        : { status: 202, body: { operationId: request.operationId } }
+      );
+      const harness = await createRuntimeSdkHarness({}, (deps, session) => {
+        session.capabilities = { ui: { elicitation } };
+        session.ui = { confirm, select: async () => null };
+        const isCurrent = () => !deps.executionOwner.isShuttingDown();
+        deps.deleteEnvironment = bindEnvironmentDeletion({
+          workspace: async () => ({
+            repo: request.repo,
+            login: "operator",
+            isCurrent,
+            validate: async () => isCurrent()
+          }),
+          openScope: async () => {
+            throw new Error("Retry must not start a new deletion.");
+          },
+          control,
+          confirm: (message) =>
+            confirmDeletion(deps.session, message, isCurrent),
+          redact: redactCredentials
+        });
+      });
+      try {
+        const tool = harness.extension.tools.find(
+          ({ name }) => name === "radius_delete_environment"
+        );
+        if (!tool) throw new Error("Missing environment deletion tool.");
+        const response = await tool.handler(request);
+        if (typeof response !== "string")
+          throw new Error("Expected an environment deletion JSON result.");
+        expect(JSON.parse(response)).toMatchObject({ kind });
+        expect(confirm).toHaveBeenCalledTimes(elicitation ? 1 : 0);
+        expect(control.mock.calls.map(([input]) => input.command)).toEqual(
+          elicitation && approved ? ["status", "retry"] : ["status"]
+        );
+        expect(harness.deps.servers.size).toBe(0);
+      } finally {
+        await harness.extension.shutdown();
+      }
+    }
+  );
 
   it.each([0, 1, 2])(
     "resolves an explicit target without a branch independently of %i unrelated prior deployments",

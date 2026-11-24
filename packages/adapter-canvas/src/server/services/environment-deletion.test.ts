@@ -112,13 +112,17 @@ function createdProvenance(name = "github-octo-app-dev-mutable", subject = "") {
 
 function makePorts(
   over: Partial<EnvironmentDeletionPorts> = {},
-  revalidated: {
-    id: string;
-    name: string;
-    subject: string;
-    issuer: string;
-    audiences: string[];
-  } | null = {
+  revalidated:
+    | {
+        id: string;
+        name: string;
+        subject: string;
+        issuer: string;
+        audiences: string[];
+      }
+    | string
+    | { notFound: true }
+    | null = {
     id: "c1",
     name: "github-octo-app-dev-mutable",
     subject: "",
@@ -129,6 +133,9 @@ function makePorts(
   const suppliedRunAz = over.runAz;
   const runAz = vi.fn(async (args: string[]) => {
     if (args.includes("show") && args.includes("federated-credential")) {
+      if (typeof revalidated === "string") return ok(revalidated);
+      if (revalidated && "notFound" in revalidated)
+        return fail("Request_ResourceNotFound");
       return revalidated ? ok(JSON.stringify(revalidated)) : fail("changed");
     }
     return suppliedRunAz ? suppliedRunAz(args) : ok("[]");
@@ -184,6 +191,26 @@ function markStagesDone(
   }
 }
 
+describe("runEnvironmentDeletion — saved target", () => {
+  it.each(["repo", "environment", "provider"] as const)(
+    "refuses cleanup when the saved %s is missing",
+    async (field) => {
+      const op = makeOp();
+      op[field] = undefined;
+      const ports = makePorts();
+
+      await runEnvironmentDeletion(op, ports);
+
+      expect(op.state).toBe("failed");
+      expect(op.failure?.code).toBe("environment-deletion-target-missing");
+      expect(ports.persist).toHaveBeenCalledOnce();
+      expect(ports.deleteRadiusEnvironment).not.toHaveBeenCalled();
+      expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+      expect(ports.deleteStatePackage).not.toHaveBeenCalled();
+    }
+  );
+});
+
 describe("runEnvironmentDeletion — azure happy path", () => {
   it("holds the provenance lock through credential and GitHub deletion", async () => {
     const op = makeOp();
@@ -205,6 +232,31 @@ describe("runEnvironmentDeletion — azure happy path", () => {
     });
     await runEnvironmentDeletion(op, ports);
     expect(lockHeld).toBe(false);
+  });
+
+  it("stops cleanup before mutating credentials when the authorized target changes", async () => {
+    const op = makeOp();
+    const runAz = vi.fn(async () =>
+      ok(
+        JSON.stringify([
+          { id: "c1", name: "github-octo-app-dev-mutable", subject: "" }
+        ])
+      )
+    );
+    const validateCredentialCleanupTarget = vi.fn(async () => {
+      throw new Error("Approved environment changed");
+    });
+    const ports = makePorts({
+      runAz,
+      validateCredentialCleanupTarget,
+      readCredentialProvenance: () => createdProvenance()
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(validateCredentialCleanupTarget).toHaveBeenCalledOnce();
+    expect(runAz).toHaveBeenCalledOnce();
+    expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+    expect(ports.deleteStatePackage).not.toHaveBeenCalled();
+    expect(op.state).toBe("failed_partial");
   });
 
   it("deletes env, credential, github env, state package, and leaves the app registration in place", async () => {
@@ -1609,11 +1661,55 @@ describe("runEnvironmentDeletion — credential stage edge cases", () => {
         throw new Error("lock timeout");
       }
     });
+
     await runEnvironmentDeletion(op, ports);
     expect(op.state).toBe("failed_partial");
     expect(op.failure?.code).toBe("credential-provenance-lock-unavailable");
     expect(op.failure?.stage).toBe(STAGE_DELETE_GITHUB_ENV);
     expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("failed");
+    expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+  });
+
+  it("does not delete the GitHub environment again when resuming pending credential cleanup", async () => {
+    const op = makeOp();
+    markStagesDone(op, [STAGE_DELETE_RADIUS_ENV, STAGE_DELETE_GITHUB_ENV]);
+    const ports = makePorts();
+
+    await runEnvironmentDeletion(op, ports);
+
+    expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("succeeded");
+    expect(ports.deleteRadiusEnvironment).not.toHaveBeenCalled();
+    expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+    expect(ports.deleteStatePackage).toHaveBeenCalledExactlyOnceWith({
+      repo: "octo/app",
+      environment: "dev"
+    });
+    expect(op.state).toBe("succeeded");
+  });
+
+  it("warns when GitHub deletion succeeds but retiring the consumer record fails", async () => {
+    const op = makeOp();
+    markStagesDone(op, [STAGE_DELETE_RADIUS_ENV, STAGE_DELETE_CREDENTIAL]);
+    op.request.credentialConsumerRetirementReady = true;
+    const ports = makePorts({
+      clearEnvironmentCredentialProvenance: async () => {
+        throw new Error("provenance store unavailable");
+      }
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("warning");
+    expect(ports.deleteStatePackage).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the GitHub environment when the active Azure identity cannot be read", async () => {
+    const op = makeOp();
+    const ports = makePorts({
+      readAzureIdentity: async () => {
+        throw new Error("identity unavailable");
+      }
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(op.failure?.code).toBe("federated-credential-identity-unavailable");
     expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
   });
 
@@ -1739,6 +1835,39 @@ describe("runEnvironmentDeletion — credential stage edge cases", () => {
 });
 
 describe("runEnvironmentDeletion — credential provenance gate (#331)", () => {
+  it("retains a custom-subject credential without historical repository exclusivity", async () => {
+    const op = makeOp();
+    const ports = makePorts({
+      runAz: vi.fn(async () =>
+        ok(
+          JSON.stringify([{ name: "github-octo-app-dev-mutable", subject: "" }])
+        )
+      ),
+      readCredentialProvenance: () =>
+        createdProvenance().map((record) => ({
+          ...record,
+          subjectConfig: {
+            useDefault: false,
+            includeClaimKeys: ["environment"]
+          }
+        }))
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(op.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          warning: expect.objectContaining({
+            code: "federated-credential-retained-custom-subject"
+          })
+        })
+      ])
+    );
+    expect(ports.runAz).not.toHaveBeenCalledWith(
+      expect.arrayContaining(["federated-credential", "delete"])
+    );
+    expect(ports.clearEnvironmentCredentialProvenance).not.toHaveBeenCalled();
+  });
+
   it("retains a matched credential with no provenance and never calls delete", async () => {
     const op = makeOp();
     const runAz = vi
@@ -1863,32 +1992,78 @@ describe("runEnvironmentDeletion — credential provenance gate (#331)", () => {
     ).toBe(true);
   });
 
-  it("stops before deleting the GitHub environment when revalidation is unavailable", async () => {
-    const op = makeOp();
-    const ports = makePorts(
-      {
-        runAz: vi
-          .fn()
-          .mockResolvedValueOnce(
-            ok(
-              JSON.stringify([
-                { id: "c1", name: "github-octo-app-dev-mutable", subject: "" }
-              ])
-            )
-          ),
-        readCredentialProvenance: () => createdProvenance()
-      },
-      null
-    );
-    await runEnvironmentDeletion(op, ports);
-    expect(op.state).toBe("failed_partial");
-    expect(op.failure?.code).toBe(
-      "federated-credential-revalidation-unavailable"
-    );
-    expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
-    expect(ports.removeCredentialProvenance).not.toHaveBeenCalled();
-  });
+  it.each([null, "{malformed", "{}", ""])(
+    "stops before deleting the GitHub environment when revalidation is unavailable (%j)",
+    async (revalidated) => {
+      const op = makeOp();
+      const ports = makePorts(
+        {
+          runAz: vi
+            .fn()
+            .mockResolvedValueOnce(
+              ok(
+                JSON.stringify([
+                  { id: "c1", name: "github-octo-app-dev-mutable", subject: "" }
+                ])
+              )
+            ),
+          readCredentialProvenance: () => createdProvenance()
+        },
+        revalidated
+      );
+      await runEnvironmentDeletion(op, ports);
+      expect(op.state).toBe("failed_partial");
+      expect(op.failure?.code).toBe(
+        "federated-credential-revalidation-unavailable"
+      );
+      expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+      expect(ports.removeCredentialProvenance).not.toHaveBeenCalled();
+    }
+  );
+  it.each([true, false])(
+    "does not delete an Entra credential that disappeared before revalidation (provenance cleared: %s)",
+    async (cleared) => {
+      const op = makeOp();
+      const runAz = vi.fn(async (args: string[]) => {
+        if (args.includes("delete")) throw new Error("Unexpected Entra delete");
+        return ok(
+          JSON.stringify([
+            { id: "c1", name: "github-octo-app-dev-mutable", subject: "" }
+          ])
+        );
+      });
+      const removeCredentialProvenance = vi.fn(async () => {
+        if (!cleared) throw new Error("Provenance store unavailable");
+      });
+      const ports = makePorts(
+        {
+          runAz,
+          readCredentialProvenance: () => createdProvenance(),
+          removeCredentialProvenance
+        },
+        { notFound: true }
+      );
+      await runEnvironmentDeletion(op, ports);
 
+      expect(removeCredentialProvenance).toHaveBeenCalledExactlyOnceWith(
+        "app-1",
+        "c1"
+      );
+      expect(runAz.mock.calls.some(([args]) => args.includes("delete"))).toBe(
+        false
+      );
+      expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe(
+        cleared ? "succeeded" : "warning"
+      );
+      expect(
+        op.steps.some(
+          (step: { warning?: { code?: string } }) =>
+            step.warning?.code === "credential-provenance-clear-failed"
+        )
+      ).toBe(!cleared);
+      expect(ports.deleteGitHubEnvironment).toHaveBeenCalledOnce();
+    }
+  );
   it("stops cleanly when durable provenance cannot be read", async () => {
     const op = makeOp();
     const ports = makePorts({
