@@ -1,8 +1,8 @@
-import { copyFile, mkdtemp, mkdir, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { RadProcessError, spawnRad } from "./rad-process.mjs";
 import { resolveExistingRadBinary, resolveRadiusExtensionRef } from "./rad.js";
 
@@ -121,6 +121,36 @@ describeWindows("spawnRad Windows process integration", () => {
       processTree.descendantPid
     ]);
   }, 15_000);
+
+  it("drains the cancelled executable and its descendant before settling", async () => {
+    const ready = join(directory, "validator-ready.json");
+    const controller = new AbortController();
+    const result = spawnRad(
+      radPath,
+      [childHarnessPath, "process-tree", ready],
+      {
+        label: "validator fixture",
+        signal: controller.signal,
+        timeout: 5000
+      }
+    ).catch((error: unknown) => error);
+    try {
+      const { parentPid, descendantPid } = await vi.waitFor(
+        async () => JSON.parse(await readFile(ready, "utf8")) as ProcessTree
+      );
+      expect(isProcessRunning(parentPid)).toBe(true);
+      expect(isProcessRunning(descendantPid)).toBe(true);
+      controller.abort();
+      expect(await result).toMatchObject({
+        message: "validator fixture was cancelled"
+      });
+      expect(isProcessRunning(parentPid)).toBe(false);
+      expect(isProcessRunning(descendantPid)).toBe(false);
+    } finally {
+      controller.abort();
+      await result;
+    }
+  });
 
   it("rejects with a RadProcessError when rad.exe cannot be spawned", async () => {
     const error = await spawnRad(join(directory, "missing-rad.exe"), ["x"], {

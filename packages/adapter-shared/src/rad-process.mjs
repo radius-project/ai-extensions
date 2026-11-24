@@ -67,7 +67,13 @@ export function killChildTree(child, platform = process.platform) {
           windowsHide: true
         }
       );
-      taskkill.once("error", killChild);
+      return new Promise((resolve) => {
+        taskkill.once("error", killChild);
+        taskkill.once("close", (code) => {
+          if (code !== null && code !== 0) killChild();
+          resolve();
+        });
+      });
     } else {
       process.kill(-child.pid, "SIGKILL");
     }
@@ -109,9 +115,10 @@ export function radSpawnOptions(platform = process.platform) {
 export function spawnRad(
   radPath,
   args,
-  { cwd, env = {}, timeout = 120000, label = "rad" } = {}
+  { cwd, env = {}, timeout = 120000, label = "rad", signal: abortSignal } = {}
 ) {
   return new Promise((resolve, reject) => {
+    abortSignal?.throwIfAborted();
     const child = spawn(radPath, args, {
       cwd,
       env: { ...process.env, ...env },
@@ -124,6 +131,8 @@ export function spawnRad(
     let settled = false;
     let graceTimer = null;
     let exited = null;
+    let stopReason;
+    let treeCleanup;
     child.stdout?.on("data", (chunk) => {
       if (stdout.length < maxOutput) stdout += chunk.toString();
     });
@@ -133,22 +142,33 @@ export function spawnRad(
 
     const timer = setTimeout(() => {
       if (settled) return;
+      const message = `${label} timed out after ${timeout}ms`;
+      if (abortSignal) {
+        stop(message);
+        return;
+      }
       settled = true;
       if (graceTimer) clearTimeout(graceTimer);
-      killChildTree(child);
-      reject(
-        new RadProcessError(
-          `${label} timed out after ${timeout}ms`,
-          stdout,
-          stderr
-        )
-      );
+      void killChildTree(child);
+      reject(new RadProcessError(message, stdout, stderr));
     }, timeout);
+
+    function stop(message) {
+      if (settled || stopReason) return;
+      stopReason = message;
+      clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      treeCleanup = killChildTree(child);
+    }
+
+    const abort = () => stop(`${label} was cancelled`);
+    abortSignal?.addEventListener("abort", abort, { once: true });
 
     function finalize(code, signal) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", abort);
       if (graceTimer) clearTimeout(graceTimer);
       try {
         child.stdout?.destroy();
@@ -160,7 +180,10 @@ export function spawnRad(
       } catch {
         // Best-effort cleanup.
       }
-      if (code === 0) {
+      if (stopReason) {
+        const error = new RadProcessError(stopReason, stdout, stderr);
+        void Promise.resolve(treeCleanup).then(() => reject(error));
+      } else if (code === 0) {
         resolve({ stdout, stderr });
       } else {
         // rad prints Bicep compile errors (BCP*) to stdout, not stderr, so keep
@@ -179,12 +202,13 @@ export function spawnRad(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", abort);
       if (graceTimer) clearTimeout(graceTimer);
       reject(new RadProcessError(error.message, stdout, stderr));
     });
     child.on("exit", (code, signal) => {
       exited = { code, signal };
-      if (settled || graceTimer) return;
+      if (settled || graceTimer || stopReason) return;
       graceTimer = setTimeout(() => finalize(code, signal), 2000);
     });
     child.on("close", (code, signal) => {

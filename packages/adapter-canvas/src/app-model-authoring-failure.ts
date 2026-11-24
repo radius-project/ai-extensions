@@ -117,7 +117,13 @@ export function clearAppModelAuthoringFailure(
   branch: string
 ): void {
   const target = appModelTargetKey(repo, branch);
+  const failure = state.appModelFailures?.[target];
   if (state.appModelFailures) delete state.appModelFailures[target];
+  if (
+    !failure ||
+    state.appModelAttemptTokens?.[target] !== failure.attemptToken
+  )
+    return;
   if (state.appModelAttemptTokens) delete state.appModelAttemptTokens[target];
   if (state.appModelAttemptClaims) delete state.appModelAttemptClaims[target];
   if (state.appModelAttemptEnvironments)
