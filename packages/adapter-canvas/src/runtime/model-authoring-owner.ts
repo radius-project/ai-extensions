@@ -153,7 +153,12 @@ export function createModelAuthoringOwner(ports: {
     },
     async finish(token: string) {
       const request = requestFor(token);
-      assertCurrent(request);
+      try {
+        assertCurrent(request);
+      } catch (error) {
+        cancel(request);
+        throw error;
+      }
       if (request.finalizing || request.inFlight > 0) {
         throw new Error(
           "The Radius authoring request already has work running."

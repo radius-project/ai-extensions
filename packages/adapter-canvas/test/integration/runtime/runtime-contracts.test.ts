@@ -1729,8 +1729,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           ).resolves.toMatchObject({ kind: "refused" });
           expect(execFile).not.toHaveBeenCalled();
           expect(promote).not.toHaveBeenCalled();
-          await complete.handler({ requestToken, outcome: "cancel" });
           expect(cancel).toHaveBeenCalledOnce();
+          selectionIsCurrent = true;
         } else if (outcome === "cancel" || outcome === "refresh cancelled") {
           await expect(
             complete.handler({ requestToken, outcome: "cancel" })
@@ -1753,7 +1753,11 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           });
           expect(promote).not.toHaveBeenCalled();
         }
-        if (outcome === "refresh cancelled" || outcome === "refresh refused") {
+        if (
+          outcome === "refresh cancelled" ||
+          outcome === "refresh refused" ||
+          outcome === "refresh selection changed"
+        ) {
           await handoff(request);
           expect(harness.session.send).toHaveBeenCalledTimes(2);
           const replacement =
