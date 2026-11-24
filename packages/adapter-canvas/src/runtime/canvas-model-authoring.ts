@@ -63,7 +63,10 @@ export function createCanvasModelAuthoring(
       const node = Reflect.get(handoff, "nodeCommand");
       const skillBase = Reflect.get(handoff, "skillBase");
       // The packaged bootstrap carries a specific stop instruction for this case.
-      if (node === null) return skillHandoff;
+      if (node === null) {
+        settled?.();
+        return skillHandoff;
+      }
       if (
         !workspace ||
         !revision ||
