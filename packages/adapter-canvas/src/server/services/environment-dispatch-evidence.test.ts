@@ -164,6 +164,17 @@ describe("selected environment dispatch evidence", () => {
     ).resolves.toBeNull();
   });
 
+  it("does not correlate a run if GitHub returns truncated JSON", async () => {
+    const run = vi.fn(async () => ({
+      code: 0,
+      stdout: '{"total_count":1,"workflow_runs":[',
+      stderr: ""
+    }));
+    await expect(
+      findSelectedEnvironmentDispatch(run, target, attempt)
+    ).resolves.toBeNull();
+  });
+
   it("proves the exact latest attempt stopped at the guard without deleting resources", async () => {
     const run = fixture();
     const guarded = {
@@ -200,6 +211,7 @@ describe("selected environment dispatch evidence", () => {
     },
     { jobs: { total_count: 2, jobs: [azureJob] } },
     { jobs: { total_count: 1, jobs: [{ ...azureJob, run_attempt: 1 }] } },
+    { jobs: { total_count: 1, jobs: [{ ...azureJob, steps: null }] } },
     {
       jobs: {
         total_count: 1,

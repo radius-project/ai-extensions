@@ -192,6 +192,89 @@ describe("saved-account environment deletion", () => {
     expect(f.deleteGitHubEnvironment).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      "no retry target verifier",
+      "Cannot verify the saved environment retry target."
+    ],
+    ["target changed", "The saved deployment eligibility changed."],
+    ["no guard proof", "Cannot safely claim another delete workflow dispatch."],
+    [
+      "history changed before claim",
+      "The saved delete workflow dispatch attempt changed."
+    ],
+    [
+      "history changed during claim",
+      "The saved delete workflow dispatch attempt changed."
+    ]
+  ] as const)(
+    "prevents a second dispatch when %s",
+    async (scenario, reason) => {
+      const f = fixture();
+      const first = {
+        ...f.dispatch,
+        branch: "main",
+        head: "a".repeat(40),
+        operationAttempt: 0,
+        state: "guarded",
+        runId: 7,
+        runAttempt: 1,
+        updatedAt: "2026-01-02T03:04:05Z"
+      };
+      const second: EnvironmentDispatchAttempt = {
+        ...f.dispatch,
+        correlationId: "del-ya-second",
+        branch: first.branch,
+        head: first.head,
+        operationAttempt: 1,
+        state: "unresolved"
+      };
+      f.operation.request.selectedDispatchAttempts = [first];
+      beginRetryAttempt(f.operation, "deletion");
+      const changeGuard = () => {
+        f.operation.request.selectedDispatchAttempts = [
+          { ...first, runAttempt: 2 }
+        ];
+      };
+      const claimDispatch = vi.fn(async (_generation: number) => {
+        if (scenario === "history changed during claim") changeGuard();
+      });
+      const verifyRetryTarget = vi.fn(async () => {
+        if (scenario === "target changed")
+          throw new Error("The saved deployment eligibility changed.");
+      });
+      const verifyGuard = vi.fn(async () => {
+        if (scenario === "history changed before claim") changeGuard();
+      });
+      await runSelectedEnvironmentDeletion(f.operation, {
+        ...f.dependencies,
+        claimDispatch,
+        ...(scenario === "no retry target verifier" ?
+          {}
+        : { verifyRetryTarget }),
+        bind(executor, current, legacyDispatch, legacyRecovery, journal) {
+          return {
+            ...f.bind(executor, current, legacyDispatch, legacyRecovery),
+            async deleteRadiusEnvironment() {
+              await journal.begin(
+                second,
+                scenario === "no guard proof" ? undefined : verifyGuard
+              );
+              return f.deleteRadius();
+            }
+          };
+        }
+      });
+      expect(f.operation.failure.message).toContain(reason);
+      expect(f.operation.request.selectedDispatchAttempts).toHaveLength(1);
+      expect(claimDispatch).toHaveBeenCalledTimes(
+        scenario === "history changed during claim" ? 1 : 0
+      );
+      expect(f.deleteRadius).not.toHaveBeenCalled();
+      expect(f.deleteGitHubEnvironment).not.toHaveBeenCalled();
+    }
+  );
+
   it("reacquires the exact saved account and resumes only package cleanup after restart", async () => {
     const f = fixture();
     for (const stage of f.operation.stages) {

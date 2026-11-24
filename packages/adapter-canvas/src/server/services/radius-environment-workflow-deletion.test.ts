@@ -27,6 +27,10 @@ const failed = (stderr: string, timedOut = false): GhCommandResult => ({
   stderr,
   ...(timedOut ? { timedOut: true } : {})
 });
+const failedRefusal = (): GhCommandResult => ({
+  ...failed("gh: not found"),
+  stdout: "HTTP/2.0 404 Not Found\r\nX-GitHub-Request-Id: ABC:123\r\n\r\n{}"
+});
 
 // A repository whose default branch already holds every workflow, a dispatch
 // GitHub accepts, a run it finds, and a run that completes successfully.
@@ -169,12 +173,7 @@ describe("deleting a Radius environment through its workflow", () => {
     const runGh = vi.fn(async (args: string[]) => {
       expect(args.slice(0, 3)).toEqual(["api", "--method", "POST"]);
       calls.push("post");
-      return {
-        code: 1,
-        stderr: "gh: not found",
-        stdout:
-          "HTTP/2.0 404 Not Found\r\nX-GitHub-Request-Id: ABC:123\r\n\r\n{}"
-      };
+      return failedRefusal();
     });
     const h = harness(
       { runGh, ensureWorkflowsCurrent: async () => ({ created: FILES }) },
@@ -231,6 +230,185 @@ describe("deleting a Radius environment through its workflow", () => {
     await expect(h.run()).rejects.toThrow("Durable claim failed");
     expect(runGh).not.toHaveBeenCalled();
   });
+
+  it("keeps an accepted dispatch unresolved if no matching run appears before the deadline", async () => {
+    const runGh = vi.fn(async (args: string[]) => {
+      if (args[2] === "POST") return ok("HTTP/2.0 204 No Content\r\n\r\n");
+      if (args[2] === "GET" && args[3]?.includes("/runs?"))
+        return ok(JSON.stringify({ total_count: 0, workflow_runs: [] }));
+      throw new Error(`Unexpected workflow request: ${args.join(" ")}`);
+    });
+    const begin = vi.fn(async (_attempt: EnvironmentDispatchAttempt) => {});
+    const record = vi.fn(async (_attempt: EnvironmentDispatchAttempt) => {});
+    const heartbeat = vi.fn();
+    const h = harness(
+      { runGh },
+      {
+        selected: {
+          getBranchHead: async () => HEAD,
+          beforeDispatch: async () => {
+            throw new Error("Unexpected legacy dispatch");
+          },
+          selectedAttempts: {
+            owner: "octocat",
+            operationAttempt: () => 0,
+            latest: () => undefined,
+            begin,
+            record
+          }
+        }
+      }
+    );
+    expect(await h.run(heartbeat)).toMatchObject({
+      outcome: "failed",
+      detail: expect.stringContaining("could not confirm its outcome")
+    });
+    expect(begin).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ state: "unresolved", operationAttempt: 0 }),
+      undefined
+    );
+    expect(record).not.toHaveBeenCalled();
+    expect(
+      runGh.mock.calls.filter(([args]) => args[2] === "POST")
+    ).toHaveLength(1);
+    expect(heartbeat).toHaveBeenCalledTimes(h.sleeps.length);
+    expect(h.sleeps.reduce((elapsed, wait) => elapsed + wait, 0)).toBe(
+      30 * 60 * 1000
+    );
+  });
+
+  it.each([
+    "active rerun",
+    "different terminal attempt",
+    "updated terminal run",
+    "unchanged guard"
+  ] as const)(
+    "rechecks a prior workflow with %s at the dispatch claim",
+    async (change) => {
+      const guarded: EnvironmentDispatchAttempt = {
+        state: "guarded",
+        operationAttempt: 0,
+        dispatchedAt: 900_000,
+        correlationId: "del-test-fixture",
+        branch: "main",
+        head: HEAD,
+        runId: 21,
+        runAttempt: 1,
+        updatedAt: new Date(905_000).toISOString()
+      };
+      const run = {
+        id: 21,
+        display_title: `Radius - Delete Environment dev ${guarded.correlationId}`,
+        event: "workflow_dispatch",
+        path: `.github/workflows/${DELETE_ENV_DISPATCHER_FILE}`,
+        head_branch: "main",
+        head_sha: HEAD,
+        actor: { login: "octocat" },
+        created_at: new Date(guarded.dispatchedAt).toISOString(),
+        updated_at:
+          change === "unchanged guard" ?
+            guarded.updatedAt
+          : new Date(995_000).toISOString(),
+        run_attempt:
+          change === "active rerun" || change === "different terminal attempt" ?
+            2
+          : 1,
+        status: change === "active rerun" ? "in_progress" : "completed",
+        conclusion: change === "active rerun" ? null : "failure"
+      };
+      const runGh = vi.fn(async (args: string[]) => {
+        if (change === "unchanged guard" && args[2] === "POST")
+          return failedRefusal();
+        expect(args.slice(0, 3)).toEqual(["api", "--method", "GET"]);
+        if (args[3]?.includes(`/workflows/${DELETE_ENV_DISPATCHER_FILE}/runs?`))
+          return ok(JSON.stringify({ total_count: 1, workflow_runs: [run] }));
+        if (args[3] === `/repos/${REPO}/actions/runs/21`)
+          return ok(JSON.stringify(run));
+        if (
+          args[3] ===
+          `/repos/${REPO}/actions/runs/21/attempts/${run.run_attempt}/jobs?per_page=100`
+        )
+          return ok(
+            JSON.stringify({
+              total_count: 1,
+              jobs: [
+                {
+                  name: "Azure / Delete with Radius",
+                  run_id: 21,
+                  run_attempt: run.run_attempt,
+                  status: "completed",
+                  conclusion: "failure",
+                  steps: [
+                    {
+                      name: DELETE_ENV_GUARD_STEP_NAME,
+                      status: "completed",
+                      conclusion: "failure"
+                    },
+                    {
+                      name: "Delete Radius resource",
+                      status: "completed",
+                      conclusion: "skipped"
+                    },
+                    {
+                      name: "Teardown",
+                      status: "completed",
+                      conclusion: "success"
+                    }
+                  ]
+                }
+              ]
+            })
+          );
+        throw new Error(`Unexpected guard evidence request: ${args[3]}`);
+      });
+      const claim = vi.fn();
+      const record = vi.fn(async (_attempt: EnvironmentDispatchAttempt) => {});
+      const h = harness(
+        { runGh },
+        {
+          selected: {
+            getBranchHead: async () => HEAD,
+            beforeDispatch: async () => {
+              throw new Error("Unexpected legacy dispatch");
+            },
+            selectedAttempts: {
+              owner: "octocat",
+              operationAttempt: () => 1,
+              latest: () => guarded,
+              begin: async (attempt, verifyPrevious) => {
+                if (!verifyPrevious) throw new Error("Missing guard recheck");
+                await verifyPrevious();
+                claim(attempt);
+              },
+              record
+            }
+          }
+        }
+      );
+      if (change === "unchanged guard") {
+        await expect(h.run()).resolves.toMatchObject({
+          outcome: "failed",
+          detail: expect.stringContaining("GitHub refused")
+        });
+        expect(claim).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ state: "unresolved", operationAttempt: 1 })
+        );
+        expect(record).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ state: "refused", operationAttempt: 1 })
+        );
+        expect(
+          runGh.mock.calls.filter(([args]) => args[2] === "POST")
+        ).toHaveLength(1);
+      } else {
+        await expect(h.run()).rejects.toThrow("no longer verified");
+        expect(claim).not.toHaveBeenCalled();
+        expect(record).not.toHaveBeenCalled();
+        expect(runGh.mock.calls.every(([args]) => args[2] === "GET")).toBe(
+          true
+        );
+      }
+    }
+  );
 
   it.each([
     ["success", "deleted"],

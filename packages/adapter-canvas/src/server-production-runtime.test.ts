@@ -737,6 +737,19 @@ describe("production canvas server runtime", () => {
         expect(operation.request.selectedDispatchAttempts).toBe(
           correlatedAttempts
         );
+        beforeGuardResponse = () => {
+          setStageState(operation, STAGE_DELETE_RADIUS_ENV, "succeeded");
+        };
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "status"
+          })
+        ).toMatchObject({ status: 404 });
+        expect(operation.request.selectedDispatchAttempts).toBe(
+          correlatedAttempts
+        );
+        setStageState(operation, STAGE_DELETE_RADIUS_ENV, "failed");
         beforeGuardResponse = () => {};
         const guarded = await runtime.controlSelectedEnvironmentDeletion({
           ...target,
