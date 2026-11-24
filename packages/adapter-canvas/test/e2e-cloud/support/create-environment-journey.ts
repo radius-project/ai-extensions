@@ -20,6 +20,7 @@
 import type { CanvasState } from "../../../src/shared.js";
 import { TERMINAL_STATES } from "../../../src/operations.js";
 import { describeError, isGitHubApiNotFound } from "./cloud-command-port.js";
+import type { GitHubSignIn } from "./github-sign-in.js";
 
 /** The verify workflow the product publishes, named as a stable anchor. */
 export const VERIFY_WORKFLOW_PATH =
@@ -48,6 +49,10 @@ export type JourneyGate =
 export interface JourneyGateInput {
   /** `RADIUS_CLOUD_E2E`, as read from the environment. */
   readonly cloudE2eFlag?: string;
+  /** Why the fixture selection or `gh` session sign-in failed, if it did. */
+  readonly preparationFailure?: string;
+  /** A `gh` session run doesn't renew a GitHub App token. */
+  readonly githubSignIn: GitHubSignIn;
   readonly fixtureProvisioned: boolean;
   /** What `describeUnprovisionedFixtureRepository()` reported. */
   readonly unprovisionedReason: string;
@@ -60,6 +65,10 @@ export interface JourneyGateInput {
   /** `CLOUD_E2E_BOT_PRIVATE_KEY`. */
   readonly githubAppPrivateKey?: string;
 }
+
+const LOCAL_SIGN_IN_HINT =
+  "A local run signs in with your own gh session only against your own fixture copy outside radius-project; " +
+  "see the Cloud E2E runbook.";
 
 function isSet(value: string | undefined): boolean {
   return typeof value === "string" && value.trim() !== "";
@@ -82,6 +91,12 @@ export function evaluateCreateEnvironmentGate(
       reason:
         "RADIUS_CLOUD_E2E is not set, so the cloud create-environment journey is opt-out by default."
     };
+  if (isSet(input.preparationFailure))
+    return {
+      enabled: false,
+      disposition: "fail",
+      reason: input.preparationFailure ?? ""
+    };
   if (!input.fixtureProvisioned)
     return {
       enabled: false,
@@ -102,19 +117,22 @@ export function evaluateCreateEnvironmentGate(
       reason:
         "GH_TOKEN is not set; the cloud harness needs a token for the fixture repository."
     };
+  if (input.githubSignIn === "gh-session") return { enabled: true };
   if (!isSet(input.githubAppClientId))
     return {
       enabled: false,
       disposition: "fail",
       reason:
-        "CLOUD_E2E_BOT_CLIENT_ID is not set; the journey cannot renew its GitHub App token between lifecycle stages."
+        "CLOUD_E2E_BOT_CLIENT_ID is not set; the journey cannot renew its GitHub App token between lifecycle stages. " +
+        LOCAL_SIGN_IN_HINT
     };
   if (!isSet(input.githubAppPrivateKey))
     return {
       enabled: false,
       disposition: "fail",
       reason:
-        "CLOUD_E2E_BOT_PRIVATE_KEY is not set; the journey cannot renew its GitHub App token between lifecycle stages."
+        "CLOUD_E2E_BOT_PRIVATE_KEY is not set; the journey cannot renew its GitHub App token between lifecycle stages. " +
+        LOCAL_SIGN_IN_HINT
     };
   return { enabled: true };
 }

@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePluginRoot } from "./plugin-root.js";
+import type { DeploymentErrorKind as DeployErrorKind } from "@radius-project/core";
 
 export interface CredentialProfile {
   [key: string]: unknown;
@@ -165,6 +166,7 @@ export interface GraphProgressRecord {
   // browser may already have one retry in flight when progress polling expires
   // the wait; retaining the verdict prevents that request from restarting it.
   graphProgressWaitExpiredMessage?: string;
+  graphProgressHandoffFailure?: string;
 }
 
 // Append one event to the instance's build record.
@@ -294,6 +296,7 @@ export interface CanvasState {
   pendingSourceRefs?: PendingSourceRef[];
   page?: string;
   graphDefinitionHash?: string;
+  graphSaveWarning?: import("./graph-save-warning.js").GraphSaveWarningIdentity;
   graphModelRevision?: string;
   graphBuildGeneration?: number;
   progressMessages?: string[];
@@ -303,7 +306,10 @@ export interface CanvasState {
   // deduplicate both targets.
   appBicepHandoffKeys?: Record<string, string>;
   appBicepHandoffKey?: string;
-  appModelAttemptGeneration?: number;
+  appModelAttemptClaims?: Record<
+    string,
+    import("./runtime/missing-model-handoff-claims.js").MissingModelHandoffClaim
+  >;
   appModelAttemptTokens?: Record<string, string>;
   appModelAttemptEnvironments?: Record<string, string>;
   // Source evidence read when each attempt started, keyed like the tokens.
@@ -366,12 +372,7 @@ export interface CanvasState {
 // strings are matched across server, tests and client. A union rather than
 // string makes a typo in any of them a compile error instead of a guard that
 // silently never fires.
-export type DeployErrorKind =
-  | "branch-not-pushed"
-  | "run-unconfirmed"
-  | "oidc-subject-missing"
-  | "oidc-subject-case-mismatch"
-  | "cloud-auth-drift";
+export type { DeploymentErrorKind as DeployErrorKind } from "@radius-project/core";
 
 export function escapeHtml(str: unknown): string {
   if (!str) return "";
@@ -482,8 +483,14 @@ export function deleteCredentialProfile(repo: string, name: unknown): boolean {
   const list = root[repo];
   if (!Array.isArray(list)) return false;
   const lower = String(name || "").toLowerCase();
-  const next = list.filter((p) => String(p.name).toLowerCase() !== lower);
+  let deleted = false;
+  const next = list.filter((profile) => {
+    if (!isRecord(profile)) return false;
+    const matches = String(profile.name).toLowerCase() === lower;
+    if (matches) deleted = true;
+    return !matches;
+  });
   root[repo] = next;
   saveCredentials();
-  return next.length !== list.length;
+  return deleted;
 }

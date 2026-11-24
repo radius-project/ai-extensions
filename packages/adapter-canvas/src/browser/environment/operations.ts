@@ -197,8 +197,25 @@ const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
   continue_setup: "Continuing setup…",
   retry_setup: "Retrying setup…",
   retry_deletion: "Retrying deletion…",
-  exit_setup: "Closing this setup and removing the resources Radius created…"
+  exit_setup: "Closing this setup and removing the resources Radius created…",
+  remove_aws_lock: "Removing the lock…"
 };
+
+// What a Remove lock answer means once it lands. The run keeps waiting or
+// takes the lock on its own, so the result is a status, not a terminal step.
+// A refusal because the run no longer waits on a removable lock means the
+// lock already stopped blocking it, which is what the person wanted.
+function removeLockOutcome(ok: boolean, payload: unknown): string | null {
+  const code = readString(payload, "code");
+  if (ok) {
+    return code === "aws-lock-already-removed" ?
+        "The lock was already gone. This run continues."
+      : "Lock removed. This run continues.";
+  }
+  return code === "aws-lock-not-removable" ?
+      "The lock is no longer blocking this run, so nothing was removed."
+    : null;
+}
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set([
   "succeeded",
@@ -500,7 +517,9 @@ export interface EnvironmentOperationsController {
   trackProgress(
     environment: string,
     provider: string,
-    onTerminal?: (op: OperationRecord) => void
+    onTerminal?: (op: OperationRecord) => void,
+    // The operation the panel already shows, when it rejoins one.
+    knownOperationId?: string
   ): void;
   resumeProgress(): void;
   applyTerminal(op: OperationRecord): void;
@@ -851,7 +870,10 @@ function visibleOperationActions(
 ): readonly OperationAction[] {
   if (operation === null) return [];
   if (operation.kind !== "delete") return operation.actions;
-  return operation.actions.filter((action) => action.kind === "retry_deletion");
+  return operation.actions.filter(
+    (action) =>
+      action.kind === "retry_deletion" || action.kind === "remove_aws_lock"
+  );
 }
 
 /**
@@ -1037,6 +1059,9 @@ function stepSpec(step: OperationStageOrStep): ElementSpec {
  * always kept so the entry stays identifiable.
  */
 export function previewResourceLabel(entry: OperationPreviewEntry): string {
+  // AWS targets already say what they are, such as "Lock on IAM role …" or
+  // "IAM role … on EKS cluster …".
+  if (entry.kind.startsWith("aws_")) return entry.target;
   const labels: Readonly<Record<string, string>> = {
     azure_app: "App Registration",
     service_principal: "Service Principal",
@@ -2076,6 +2101,15 @@ export function initializeEnvironmentOperations(
         if (!commandIsActive()) return;
         setCommandBusy(false);
         const updated = parseResponse(result.payload);
+        const lockOutcome =
+          action.kind === "remove_aws_lock" ?
+            removeLockOutcome(result.ok, result.payload)
+          : null;
+        if (lockOutcome !== null) setCommandStatus(lockOutcome);
+        if (!result.ok && lockOutcome !== null) {
+          if (updated) renderProgress(updated);
+          return;
+        }
         if (!result.ok) {
           setCommandStatus("");
           setCommandError(
@@ -2103,7 +2137,12 @@ export function initializeEnvironmentOperations(
           return;
         }
         if (repo !== "") {
-          trackProgress(op.environment, op.provider, applyOperationTerminal);
+          trackProgress(
+            op.environment,
+            op.provider,
+            applyOperationTerminal,
+            op.operationId
+          );
           return;
         }
         pollOperation(op.operationId);
@@ -2544,7 +2583,8 @@ export function initializeEnvironmentOperations(
   function trackProgress(
     environment: string,
     provider: string,
-    onTerminal: (op: OperationRecord) => void = applyTerminal
+    onTerminal: (op: OperationRecord) => void = applyTerminal,
+    knownOperationId = ""
   ): void {
     stopProgress();
     session += 1;
@@ -2837,10 +2877,13 @@ export function initializeEnvironmentOperations(
           // The registry retains the latest terminal operation for this
           // repository. During the short gap before a new POST registers,
           // that record belongs to the previous environment and must not
-          // replace the optimistic panel for the setup just requested.
+          // replace the optimistic panel for the setup just requested. A
+          // rejoined operation has no such gap: it may end before this first
+          // poll, as a pause right after Continue does, and that end is its own.
           if (
             !observedOperation &&
             op &&
+            op.operationId !== knownOperationId &&
             (op.environment !== environment || op.terminalState !== null)
           ) {
             scheduleTick(POLL_RETRY_MS);
@@ -2944,7 +2987,12 @@ export function initializeEnvironmentOperations(
         // still offers the same actions.
         renderProgress(op);
         if (op.terminalState !== null) return;
-        trackProgress(op.environment, op.provider, applyOperationTerminal);
+        trackProgress(
+          op.environment,
+          op.provider,
+          applyOperationTerminal,
+          op.operationId
+        );
       })
       .catch(() => {
         /* nothing to resume */

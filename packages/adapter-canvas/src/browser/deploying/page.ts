@@ -8,6 +8,7 @@
 import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
+import { loadCleanupDetails } from "../deployment-cleanup.js";
 import { deletionInventoryResources } from "../deletion-inventory.js";
 import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
 import {
@@ -17,14 +18,13 @@ import {
   probeDeleteConflict
 } from "../force-delete.js";
 import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
-import { isRecord, readBoolean, readRecord, readString } from "../json.js";
+import { readBoolean, readNumber, readRecord, readString } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import { DEPLOYING_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   APPLICATIONS_PATH,
   BRANCHES_PATH,
-  DEFAULT_APP_FILE,
   DEPLOYMENTS_PATH,
   DEPLOY_PATH,
   ENVIRONMENTS_PATH,
@@ -36,7 +36,8 @@ import {
   deploymentStatusBlocksMutation,
   parseApplicationListing,
   parseBranchListing,
-  parseDeploymentListing,
+  parseDeploymentListingWithDiagnostics,
+  parseRequiredDeploymentListing,
   parseEnvironmentListing
 } from "../repositories.js";
 import type { CommandActionHandle } from "../command-action.js";
@@ -62,6 +63,10 @@ export { DEPLOYING_PAGE_STATE_ID };
 export const LIST_DEPLOYMENTS_PATH = DEPLOYMENTS_PATH;
 export const DELETE_DEPLOYMENT_PATH = "/api/delete-deployment";
 export const DEPLOY_STATUS_PATH = "/api/deploy-status";
+export const AWS_REPAIR_PATH = "/api/deploy/repair-aws-trust";
+export const AWS_REPAIR_BUTTON_ID = "deploy-repair-aws-trust";
+export const AWS_REPAIR_HELP_ID = "deploy-repair-aws-trust-help";
+export const AWS_REPAIR_STATUS_ID = "deploy-repair-aws-trust-status";
 
 // Safety caps mirror the legacy script exactly: a deploy-status poll that
 // never reaches a terminal state falls back to whatever the deployments
@@ -134,11 +139,14 @@ interface DeployStatusPayload {
   handoff: DeployHandoff;
   active: boolean;
   attempt: { targetRepo: string; environment: string };
+  generation: number;
 }
 
 interface DeployFailureDetails {
   app: string;
   environment: string;
+  // Which deploy failed, so an action on this panel names it.
+  generation: number;
   errorText: string;
   runUrl: string;
   errorKind: string;
@@ -185,18 +193,15 @@ export function deploymentStatusMarkup(status: string): string {
     success: "Success",
     failed: "Failed",
     pending: "Pending",
+    unverified: "History not verified",
     deleting: "Deleting…",
     "delete-failed": "Delete failed"
   };
   return labels[status] ?? labels.pending;
 }
 
-function hasDeploymentsArray(payload: unknown): boolean {
-  return isRecord(payload) && Array.isArray(payload.deployments);
-}
-
 export function parseDeploymentRecords(payload: unknown): DeploymentRecord[] {
-  return parseDeploymentListing(payload);
+  return parseDeploymentListingWithDiagnostics(payload);
 }
 
 function parseHandoff(payload: unknown): DeployHandoff {
@@ -222,7 +227,8 @@ function parseDeployStatus(payload: unknown): DeployStatusPayload {
     attempt: {
       targetRepo: readString(attempt, "targetRepo"),
       environment: readString(attempt, "environment")
-    }
+    },
+    generation: readNumber(payload, "generation") ?? 0
   };
 }
 
@@ -288,6 +294,9 @@ function buildDeploymentRows(
   const present = new Set<string>();
   for (const deployment of deployments) {
     present.add(opKey(deployment.app, deployment.environment));
+    for (const override of overrides.values())
+      if (override.environment === deployment.environment)
+        present.add(opKey(override.app, override.environment));
   }
   // Surface just-started operations GitHub hasn't recorded yet as synthetic
   // rows. "deleting" is excluded: a delete always acts on an existing row, so
@@ -317,7 +326,9 @@ function computeBlockedEnvironments(
 ): Map<string, string> {
   const blocked = new Map<string, string>();
   for (const row of rows) {
-    const forced = overrides.get(opKey(row.app, row.environment))?.status;
+    const forced = [...overrides.values()].find(
+      (override) => override.environment === row.environment
+    )?.status;
     const status = forced ?? row.status;
     if (deploymentStatusBlocksMutation(status)) {
       blocked.set(row.environment, status);
@@ -330,29 +341,53 @@ function renderDeploymentRow(
   row: DeploymentRow,
   overrides: ReadonlyMap<string, DeploymentOverride>
 ): string {
-  const forced = overrides.get(opKey(row.app, row.environment))?.status;
+  const forced = [...overrides.values()].find(
+    (override) => override.environment === row.environment
+  )?.status;
   const status = forced ?? row.status;
   const statusHtml = deploymentStatusMarkup(status);
   const deployedHref = `/?page=deployed&environment=${encodeURIComponent(row.environment)}&application=${encodeURIComponent(row.app)}`;
-  const monitorCell = `<a class="rad-monitor-link" href="${escapeBrowserHtml(deployedHref)}" title="Monitor the deployed application graph">Monitor Graph</a>`;
+  const known = row.identity?.state === "known";
+  const monitorCell =
+    row.diagnostic ? `<span>${escapeBrowserHtml(row.diagnostic)}</span>`
+    : known ?
+      `<a class="rad-monitor-link" href="${escapeBrowserHtml(deployedHref)}" title="Monitor the deployed application graph">Monitor Graph</a>`
+    : row.synthetic ? "<span>Waiting for workflow evidence.</span>"
+    : `<span>${escapeBrowserHtml(row.identity?.state === "unavailable" ? row.identity.reason : "Application identity is unavailable.")}</span>`;
   const workflowCell =
-    row.runUrl ?
+    /^https:\/\/github\.com\//.test(row.runUrl) ?
       `<a class="rad-deploy-applink" href="${escapeBrowserHtml(row.runUrl)}" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">${ARROW_SVG}View Run</a>`
     : '<span class="rad-cell-empty">—</span>';
   const deleteDisabled =
-    status === "pending" || status === "deleting" || row.synthetic ?
+    !known || deploymentStatusBlocksMutation(status) || row.synthetic ?
       " disabled"
     : "";
   const appName = escapeBrowserHtml(row.app);
   const envName = escapeBrowserHtml(row.environment);
   return (
     "<tr>" +
-    `<td class="rad-table__env"><a class="rad-deploy-applink" href="${escapeBrowserHtml(deployedHref)}" title="View deployed application graph">${ARROW_SVG}${appName}</a></td>` +
+    `<td class="rad-table__env">${
+      known ?
+        `<a class="rad-deploy-applink" href="${escapeBrowserHtml(deployedHref)}" title="View deployed application graph">${ARROW_SVG}${appName}</a>`
+      : row.synthetic ? appName
+      : "Application identity unavailable"
+    }</td>` +
     `<td>${envName}</td>` +
     `<td>${statusHtml}</td>` +
     `<td>${monitorCell}</td>` +
     `<td>${workflowCell}</td>` +
-    `<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep"${deleteDisabled} data-env="${envName}" data-app="${appName}" style="margin:0;">Delete Deployment</button></td>` +
+    `<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep"${deleteDisabled} data-env="${envName}" data-app="${appName}" style="margin:0;">Delete Deployment</button>${
+      (
+        (row.cleanupSelection ||
+          row.recovery?.canMarkCleanupComplete ||
+          row.diagnostic) &&
+        !row.synthetic &&
+        (!known || status !== "success") &&
+        (!deploymentStatusBlocksMutation(status) || status === "unverified")
+      ) ?
+        `<button type="button" class="rad-btn rad-btn--secondary js-cleanup-dep" data-env="${envName}" style="margin:0;">Load cleanup details</button>`
+      : ""
+    }</td>` +
     "</tr>"
   );
 }
@@ -400,23 +435,26 @@ export function initializeDeployingPage(
   let deploymentsAbort: AbortHandle | null = null;
   let deploymentsRequest = 0;
 
-  // Renders the dismissible success/error banner (green check / red warning).
+  // Renders the dismissible status banner.
   // The message uses textContent by default so server-provided strings can
   // never inject markup; isHtml is only for intentionally-built, escaped
   // markup produced below.
   const showInline = (
-    kind: "success" | "error",
+    kind: "success" | "error" | "info",
     message: string,
     isHtml = false
   ): void => {
     inlineStatus.style.display = "flex";
-    inlineStatus.className = `rad-inline rad-inline--${kind === "error" ? "error" : "success"}`;
+    inlineStatus.className = `rad-inline rad-inline--${kind}`;
     release(inlineBindings);
     inlineStatus.replaceChildren();
     const icon = context.dom.createElement("span");
     icon.className = "rad-inline__icon";
     icon.setAttribute("aria-hidden", "true");
-    icon.textContent = kind === "error" ? "⚠" : "✓";
+    icon.textContent =
+      kind === "error" ? "⚠"
+      : kind === "success" ? "✓"
+      : "i";
     const body = context.dom.createElement("span");
     body.className = "rad-inline__msg";
     if (isHtml) body.innerHTML = message;
@@ -551,8 +589,15 @@ export function initializeDeployingPage(
           nextProviders[environment.name] = environment.provider;
           nextStatuses[environment.name] = environment.status;
         }
+        const repairable = (failure: DeployFailureDetails | null) =>
+          failure?.errorKind === "cloud-auth-drift" &&
+          providerFor(providers, failure.environment) !== "aws" &&
+          nextProviders[failure.environment] === "aws";
+        const redraw = repairable(shownFailure) ? shownFailure : null;
         providers = nextProviders;
         environmentStatuses = nextStatuses;
+        // A failure drawn before the listing could not offer Repair.
+        if (redraw) showDeployFailed(redraw);
         context.dom.setOptions(
           envSelect,
           buildEnvironmentOptions(
@@ -616,7 +661,87 @@ export function initializeDeployingPage(
         );
       });
     }
+    for (const button of context.dom.all(
+      context.dom.document,
+      ".js-cleanup-dep"
+    )) {
+      bind(rowBindings, button, "click", () => {
+        const selected = lastRecords.find(
+          (row) => row.environment === button.getAttribute("data-env")
+        );
+        if (
+          !selected ||
+          preparingCleanup.has(selected.environment) ||
+          (!selected.cleanupSelection &&
+            !selected.diagnostic &&
+            !selected.recovery?.canMarkCleanupComplete) ||
+          (deploymentStatusBlocksMutation(
+            rowStatus(selected.app, selected.environment)
+          ) &&
+            selected.status !== "unverified")
+        )
+          return;
+        preparingCleanup.add(selected.environment);
+        button.setAttribute("disabled", "");
+        button.setAttribute("aria-busy", "true");
+        showInline("info", "Loading cleanup details…");
+        void loadCleanupDetails(
+          context,
+          options.repo,
+          selected.environment,
+          options.mutationNonce,
+          selected.diagnostic ? undefined : selected
+        )
+          .then(({ deployment, prepared }) => {
+            if (!entry.active || !lastRecords.includes(selected)) return;
+            lastRecords = [
+              ...lastRecords.filter(
+                (row) => row.environment !== selected.environment
+              ),
+              ...(deployment ? [deployment] : [])
+            ];
+            if (!prepared || !deployment?.recovery) {
+              renderDeployments();
+              showInline(
+                "info",
+                deployment ?
+                  "History verified. Select Load cleanup details for the displayed run to confirm external cleanup."
+                : "History verified. No deployment remains tracked."
+              );
+              return;
+            }
+            cleanupTarget = deployment;
+            const label =
+              deployment.app ||
+              `${options.repo}/run-${deployment.recovery.runId}@${deployment.recovery.runAttempt}`;
+            showInline(
+              "info",
+              "Cleanup details verified. Confirm external cleanup for this run."
+            );
+            button.removeAttribute("disabled");
+            context.focus.focus(button);
+            cleanupDialog?.open(label, deployment.environment);
+          })
+          .catch((error: unknown) => {
+            if (!entry.active || !lastRecords.includes(selected)) return;
+            showInline(
+              "error",
+              error instanceof Error ?
+                error.message
+              : "Cleanup details could not load."
+            );
+          })
+          .finally(() => {
+            preparingCleanup.delete(selected.environment);
+            if (entry.active) {
+              button.removeAttribute("disabled");
+              button.removeAttribute("aria-busy");
+            }
+          });
+      });
+    }
   };
+  const preparingCleanup = new Set<string>();
 
   // Repaints the table from the newest records already held plus the local
   // overrides, so an optimistic row never waits on a round trip. A `fresh=1`
@@ -624,12 +749,23 @@ export function initializeDeployingPage(
   // deploy that shows no row for that long reads as a deploy that never
   // registered.
   const renderDeployments = (): void => {
+    const focused = context.focus.active();
+    const focusedCleanupEnvironment =
+      (
+        focused &&
+        context.dom
+          .all(context.dom.document, ".js-cleanup-dep")
+          .includes(focused)
+      ) ?
+        focused.getAttribute("data-env")
+      : null;
     const { rows, present } = buildDeploymentRows(lastRecords, overrides);
     deployRecordsPresent = present;
     if (rows.length === 0) {
       deployedEnvs = new Map();
       refreshDeployBtn();
       tableBody.innerHTML = NO_DEPLOYMENTS_ROW;
+      if (focusedCleanupEnvironment) context.focus.focus(deployBtn);
       return;
     }
     deployedEnvs = computeBlockedEnvironments(rows, overrides);
@@ -638,6 +774,15 @@ export function initializeDeployingPage(
       .map((row) => renderDeploymentRow(row, overrides))
       .join("");
     wireDeleteButtons();
+    if (focusedCleanupEnvironment)
+      context.focus.focus(
+        context.dom
+          .all(context.dom.document, ".js-cleanup-dep")
+          .find(
+            (button) =>
+              button.getAttribute("data-env") === focusedCleanupEnvironment
+          ) ?? deployBtn
+      );
   };
 
   // True once there is something real to show. A placeholder — loading, retry
@@ -678,7 +823,10 @@ export function initializeDeployingPage(
           if (!quiet && !hasRenderableRows()) tableBody.innerHTML = RETRY_ROW;
           return;
         }
-        lastRecords = parseDeploymentRecords(payload);
+        lastRecords = parseDeploymentListingWithDiagnostics(
+          payload,
+          lastRecords
+        );
         renderDeployments();
       })
       .catch((error: unknown) => {
@@ -707,6 +855,10 @@ export function initializeDeployingPage(
   // for that whole wait: without it the click looks ignored, and a second click
   // would start a second probe and open a second dialog behind the first.
   const probing = new Set<string>();
+  const deletionTargets = new Map<
+    string,
+    { deploymentId?: string; runUrl?: string }
+  >();
 
   const setDeleteBusy = (
     app: string,
@@ -764,6 +916,20 @@ export function initializeDeployingPage(
   ): void => {
     if (!dialog) return;
     const key = opKey(app, environment);
+    const selected = lastRecords.find(
+      (row) => row.app === app && row.environment === environment
+    );
+    if (selected?.identity?.state !== "known") {
+      showInline(
+        "error",
+        "Application identity is unavailable. Refresh the deployment listing."
+      );
+      return;
+    }
+    deletionTargets.set(key, {
+      deploymentId: selected.deploymentId || undefined,
+      runUrl: selected.runUrl || undefined
+    });
     if (probing.has(key)) return;
     probing.add(key);
     setDeleteBusy(app, environment, true);
@@ -815,6 +981,17 @@ export function initializeDeployingPage(
   const runDelete = (app: string, environment: string, force = false): void => {
     if (!options.repo || app === "" || environment === "") return;
     const key = opKey(app, environment);
+    const selected = lastRecords.find(
+      (row) => row.app === app && row.environment === environment
+    );
+    if (selected?.identity?.state !== "known") {
+      showInline(
+        "error",
+        "Application identity is unavailable. Refresh the deployment listing."
+      );
+      return;
+    }
+    const expected = deletionTargets.get(key);
     overrides.set(key, { app, environment, status: "deleting" });
     void loadDeployments(true, true);
     const started = `${force ? "Force deleting" : "Deleting"} deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`;
@@ -827,7 +1004,8 @@ export function initializeDeployingPage(
           repo: options.repo,
           environment,
           application: app,
-          force
+          force,
+          ...expected
         })
       })
       .then((response) =>
@@ -891,18 +1069,13 @@ export function initializeDeployingPage(
           if (!entry.active) return;
           // Only trust a complete, successful listing. A transient failure
           // or a malformed deployments field must not be read as "row gone".
-          if (
-            !result.ok ||
-            readString(result.payload, "error") ||
-            !hasDeploymentsArray(result.payload)
-          ) {
+          const listing = parseRequiredDeploymentListing(result.payload);
+          if (!result.ok || listing.error !== "") {
             pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
             return;
           }
-          const deployments = parseDeploymentRecords(result.payload);
-          const stillThere = deployments.some(
-            (deployment) =>
-              deployment.app === app && deployment.environment === environment
+          const stillThere = listing.deployments.some(
+            (deployment) => deployment.environment === environment
           );
           if (!stillThere) {
             overrides.delete(opKey(app, environment));
@@ -932,6 +1105,54 @@ export function initializeDeployingPage(
     onConfirm: (app, environment) => runDelete(app, environment)
   });
   if (dialog) entry.onTeardown(() => dialog.teardown());
+  let cleanupTarget: DeploymentRecord | undefined;
+  const cleanupDialog = createDeleteDeploymentDialog(context, {
+    modalId: "deploy-abandon-modal",
+    bodyId: "deploy-abandon-body",
+    appId: "deploy-abandon-app",
+    envId: "deploy-abandon-env",
+    closeId: "deploy-abandon-close",
+    variant: "abandon",
+    onConfirm: (label, environment) => {
+      const selected = cleanupTarget;
+      if (!selected?.recovery) return;
+      void context.net
+        .fetch("/api/abandon-deployment", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Mutation-Nonce": options.mutationNonce
+          },
+          body: JSON.stringify({
+            repo: options.repo,
+            environment,
+            application: selected.app,
+            deploymentId: selected.deploymentId,
+            runUrl: selected.runUrl,
+            ...selected.recovery,
+            confirmation: `${label}/${environment}`
+          })
+        })
+        .then(async (response) => {
+          const payload: unknown = await response.json();
+          if (!entry.active) return;
+          showInline(
+            response.ok ? "success" : "error",
+            response.ok ?
+              "Recorded external cleanup for this run only. Canvas did not verify or perform cleanup. Older deployments may still be tracked; environment deletion still checks for live applications."
+            : readString(payload, "error") ||
+                "Could not record cleanup. Refresh and retry."
+          );
+          void loadDeployments(true, true);
+        })
+        .catch((error: unknown) => {
+          if (!entry.active) return;
+          context.logger.error("Radius cleanup attestation failed.", error);
+          showInline("error", "Could not record cleanup. Refresh and retry.");
+        });
+    }
+  });
+  if (cleanupDialog) entry.onTeardown(() => cleanupDialog.teardown());
 
   // The lighter shared confirmation carries the forced-delete question, so it
   // reads like every other confirm in the product rather than repeating the
@@ -942,6 +1163,7 @@ export function initializeDeployingPage(
   // Restores the deploy modal to its default "in progress" (spinner) layout;
   // the modal is mutated in place on failure, so this runs before each attempt.
   const resetDeployModal = (): void => {
+    shownFailure = null;
     if (progressSpinner) progressSpinner.style.display = "";
     if (progressFailIcon) progressFailIcon.style.display = "none";
     if (progressSubtitle) {
@@ -960,9 +1182,10 @@ export function initializeDeployingPage(
   const mountPushAction = (branch: string, paths: string): void => {
     pushAction?.dispose();
     pushAction = null;
-    if (branch === "") return;
     const host = context.dom.byId("deploy-push-action");
     if (!host) return;
+    host.textContent = "";
+    if (branch === "" || options.branch === "") return;
     // `paths` names the generated files the server found uncommitted. Passing
     // it through turns the offer into commit-then-push, because pushing alone
     // would publish the branch without the model the deploy reads.
@@ -983,12 +1206,75 @@ export function initializeDeployingPage(
     });
   };
 
+  // Repair for an AWS deploy that could not sign in. Kept outside the markup
+  // so a re-render of the same failure keeps the result on screen.
+  let awsRepair: {
+    key: string;
+    generation: number;
+    running: boolean;
+    text: string;
+  } = { key: "", generation: 0, running: false, text: "" };
+
+  const showAwsRepair = (): void => {
+    const status = context.dom.byId(AWS_REPAIR_STATUS_ID);
+    if (status) status.textContent = awsRepair.text;
+    const button = context.dom.inputById(AWS_REPAIR_BUTTON_ID);
+    if (button) button.disabled = awsRepair.running;
+  };
+
+  const repairAwsTrust = (): void => {
+    if (awsRepair.running) return;
+    const repair = awsRepair;
+    repair.running = true;
+    repair.text = "Repairing the AWS deploy role…";
+    showAwsRepair();
+    const finish = (text: string): void => {
+      repair.running = false;
+      repair.text = text;
+      // The page was left, or a newer failure replaced this one, while the
+      // request was out. A page opened since has its own controls.
+      if (entry.active && awsRepair === repair) showAwsRepair();
+    };
+    void context.net
+      .fetch(AWS_REPAIR_PATH, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": options.mutationNonce
+        },
+        body: JSON.stringify({ generation: repair.generation })
+      })
+      .then((response) =>
+        response
+          .json()
+          .catch(() => ({}))
+          .then((payload) => {
+            finish(
+              response.ok ?
+                readString(payload, "message") ||
+                  "Radius repaired the AWS deploy role. Deploy again."
+              : readString(payload, "error") ||
+                  "Radius could not repair the AWS deploy role."
+            );
+          })
+      )
+      .catch(() => {
+        finish(
+          "Radius could not reach the canvas server, so nothing was repaired. Try again."
+        );
+      });
+  };
+
   // Switches the deploy modal into a "failed" state. errorKind lets a
   // well-known failure (an unpushed branch, a missing OIDC credential) render a
   // tailored panel instead of raw workflow error text.
   let failureMarkup = "";
   let failureHtml = "";
+  // The failure on screen, so it can be drawn again when the environment
+  // listing arrives after it and names its provider.
+  let shownFailure: DeployFailureDetails | null = null;
   const showDeployFailed = (details: DeployFailureDetails): void => {
+    shownFailure = details;
     if (progressSpinner) progressSpinner.style.display = "none";
     if (progressFailIcon) progressFailIcon.style.display = "";
     if (details.errorKind === "branch-not-pushed") {
@@ -1040,6 +1326,20 @@ export function initializeDeployingPage(
       // now fails before any resource is touched, so the fix is to re-verify
       // the credentials (Part 4) and redeploy — not a model repair. Send the
       // user to the Environments list where each environment can be re-verified.
+      // On AWS the usual cause is a trust subject removed from the shared
+      // deploy role, which Repair puts back.
+      const aws = providerFor(providers, details.environment) === "aws";
+      // One Repair state per failed deploy, so a new failure that reads the
+      // same never shows the last one's result.
+      const repairKey = `${details.generation}\u0000${details.app}\u0000${details.environment}`;
+      if (awsRepair.key !== repairKey) {
+        awsRepair = {
+          key: repairKey,
+          generation: details.generation,
+          running: false,
+          text: ""
+        };
+      }
       if (progressTitle) {
         progressTitle.innerHTML = "Cloud credentials need re-verifying";
       }
@@ -1050,7 +1350,17 @@ export function initializeDeployingPage(
           (details.errorText ?
             `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
           : "") +
-          `<div style="margin-top:12px;"><button type="button" id="deploy-reverify-credentials" class="rad-btn rad-btn--primary" style="margin:0;">Re-verify credentials</button></div>`;
+          (aws ?
+            `<div id="${AWS_REPAIR_HELP_ID}" style="margin-top:10px; color:var(--rad-text-secondary);">Repair adds this environment back to its AWS deploy role's trust policy if it was removed. It changes nothing else.</div>`
+          : "") +
+          `<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">` +
+          (aws ?
+            `<button type="button" id="${AWS_REPAIR_BUTTON_ID}" class="rad-btn rad-btn--primary" style="margin:0;" aria-describedby="${AWS_REPAIR_HELP_ID}"${awsRepair.running ? " disabled" : ""}>Repair</button>`
+          : "") +
+          `<button type="button" id="deploy-reverify-credentials" class="rad-btn ${aws ? "rad-btn--secondary" : "rad-btn--primary"}" style="margin:0;">Re-verify credentials</button></div>` +
+          (aws ?
+            `<div id="${AWS_REPAIR_STATUS_ID}" role="status" style="margin-top:10px; color:var(--rad-text);">${escapeBrowserHtml(awsRepair.text)}</div>`
+          : "");
       }
     } else {
       if (progressTitle) {
@@ -1115,6 +1425,12 @@ export function initializeDeployingPage(
     if (reverifyButton) {
       bind(copyBindings, reverifyButton, "click", () => {
         context.nav.assign("/?page=environment");
+      });
+    }
+    const repairButton = context.dom.byId(AWS_REPAIR_BUTTON_ID);
+    if (repairButton) {
+      bind(copyBindings, repairButton, "click", () => {
+        repairAwsTrust();
       });
     }
     deployBtn.disabled = false;
@@ -1199,6 +1515,7 @@ export function initializeDeployingPage(
             showDeployFailed({
               app,
               environment,
+              generation: status.generation,
               errorText: status.error,
               runUrl: status.deployRunUrl,
               errorKind: status.errorKind,
@@ -1367,6 +1684,7 @@ export function initializeDeployingPage(
               showDeployFailed({
                 app,
                 environment,
+                generation: status.generation,
                 errorText: status.error,
                 runUrl: status.deployRunUrl,
                 errorKind: status.errorKind,
@@ -1382,6 +1700,7 @@ export function initializeDeployingPage(
             showDeployFailed({
               app,
               environment,
+              generation: status.generation,
               errorText: status.error,
               runUrl: status.deployRunUrl,
               errorKind: status.errorKind,
@@ -1425,8 +1744,7 @@ export function initializeDeployingPage(
           environment,
           provider,
           targetRepo: options.repo,
-          branch: deployBranch,
-          appFile: DEFAULT_APP_FILE
+          branch: deployBranch
         })
       })
       .then((response) =>

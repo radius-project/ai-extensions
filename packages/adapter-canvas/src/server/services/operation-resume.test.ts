@@ -86,7 +86,11 @@ function composeControls(
     schedule: () => {
       throw new Error("Stop must not schedule work");
     },
-    invalidateEnvironmentListing: () => {}
+    invalidateEnvironmentListing: () => {},
+    awsEnabled: true,
+    removeAwsDeployIdentityLock: async () => {
+      throw new Error("Unexpected AWS lock removal");
+    }
   });
   return { resume, control };
 }

@@ -12,6 +12,7 @@
 const STAGE_GLYPHS: Readonly<Record<string, string>> = {
   pending: "○",
   running: "◐",
+  paused: "‖",
   succeeded: "✓",
   warning: "⚠",
   failed: "✗",

@@ -11,6 +11,7 @@ import {
 } from "../test/support/azure-setup.js";
 import type { AzureApplicationInput } from "./setup-azure-contracts.js";
 import { buildRadiusAppProvenanceTags } from "./platforms/setup-azure-identity.js";
+import { assertSetupExecutionActive } from "./setup-recovery-error.js";
 
 function input(ports: AzureApplicationInput["ports"]): AzureApplicationInput {
   return {
@@ -349,11 +350,16 @@ describe("Azure application policy ports", () => {
         return command("Directory_ObjectNotFound", 1);
       return run(args);
     };
-    test.application.recovery.execute = async (mutation) => ({
-      state: "applied",
-      value: mutation.accept(await mutation.mutate()),
-      recovered: false
-    });
+    test.application.recovery.execute = async (mutation) => {
+      const result = await mutation.mutate();
+      return result.code === 0 ?
+          {
+            state: "applied",
+            value: mutation.accept(result),
+            recovered: false
+          }
+        : { state: "not_applied", result };
+    };
     expect(await resolveAzureAutoSetupApplication(facts)).toMatchObject({
       clientId,
       state: "created"
@@ -480,6 +486,129 @@ describe("Azure application policy ports", () => {
       "azure_app_tags.patch"
     ]);
   });
+
+  describe.each(["owner", "tags"] as const)(
+    "created %s post-write verification lifetime",
+    (kind) => {
+      it.each([
+        "before-read",
+        "delay",
+        "final-incomplete",
+        "nonretryable",
+        "retryable",
+        "excessive-delay",
+        "malformed",
+        "positive"
+      ] as const)("handles shutdown at %s", async (boundary) => {
+        const { test, facts } = creating();
+        let stopped = false;
+        let reads = 0;
+        const run = test.application.runAz;
+        const mutations: string[] = [];
+        const targetKind =
+          kind === "owner" ? "azure_app_owner.add" : "azure_app_tags.patch";
+        test.application.assertActive = () =>
+          assertSetupExecutionActive(() => stopped);
+        test.application.recovery.execute = async (mutation) => {
+          mutations.push(mutation.kind);
+          const value = mutation.accept(await mutation.mutate());
+          if (mutation.kind === targetKind && boundary === "before-read")
+            stopped = true;
+          return { state: "applied", value, recovered: false };
+        };
+        test.application.runAz = async (args) => {
+          const target =
+            kind === "owner" ?
+              args.slice(0, 4).join(" ") === "ad app owner list"
+            : args.slice(0, 3).join(" ") === "ad app show" &&
+              args.includes("tags");
+          if (!target) return run(args);
+          reads++;
+          if (boundary === "delay") return command("[]");
+          if (boundary === "final-incomplete" && reads < 6)
+            return command("[]");
+          stopped = true;
+          if (boundary === "positive") return run(args);
+          if (boundary === "nonretryable")
+            return command("", 1, "AuthorizationFailed");
+          if (boundary === "retryable") return command("", 1, "HTTP 429");
+          if (boundary === "excessive-delay")
+            return command("", 1, "HTTP 429\nRetry-After: 11");
+          return command(boundary === "malformed" ? "{" : "[]");
+        };
+        const sleeps: number[] = [];
+        test.application.sleep = async (delay) => {
+          sleeps.push(delay);
+          if (boundary === "delay") stopped = true;
+        };
+        // Stop at the next existing logical boundary, not inside the issued read.
+        test.application.stopBoundary = async () => !stopped;
+        test.application.checkpoint = async () =>
+          boundary === "before-read" || !stopped;
+        const finalizer = vi.spyOn(test.application, "finalizeFailure");
+        const pending = resolveAzureAutoSetupApplication(facts);
+        if (boundary === "positive") await expect(pending).resolves.toBeNull();
+        else
+          await expect(pending).rejects.toMatchObject({
+            code: "setup-execution-interrupted"
+          });
+        expect(reads).toBe(
+          boundary === "before-read" ? 0
+          : boundary === "final-incomplete" ? 6
+          : 1
+        );
+        expect(sleeps).toEqual(
+          boundary === "delay" ? [2000]
+          : boundary === "final-incomplete" ? [2000, 4000, 6000, 8000, 10000]
+          : []
+        );
+        expect(mutations).toHaveLength(kind === "owner" ? 2 : 3);
+        expect(finalizer).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        [command("[]"), 6],
+        [command("", 1, "HTTP 429"), 6],
+        [command("", 1, "AuthorizationFailed"), 1]
+      ])(
+        "retains active negative-read behavior %j",
+        async (value, attempts) => {
+          const { test, facts } = creating({ kind, value });
+          const run = vi.spyOn(test.application, "runAz");
+          test.application.recovery.execute = async (mutation) => ({
+            state: "applied",
+            value: mutation.accept(await mutation.mutate()),
+            recovered: false
+          });
+          await expect(
+            resolveAzureAutoSetupApplication(facts)
+          ).resolves.toBeNull();
+          expect(
+            run.mock.calls.filter(([args]) =>
+              kind === "owner" ?
+                args.slice(0, 4).join(" ") === "ad app owner list"
+              : args.slice(0, 3).join(" ") === "ad app show" &&
+                args.includes("tags")
+            )
+          ).toHaveLength(attempts);
+          expect(test.events.at(-1)).toMatchObject({
+            kind:
+              kind === "owner" ?
+                value.code === 0 ?
+                  "app-owner-verify-failed"
+                : "created-application-owner-lookup"
+              : value.code === 0 ? "app-tag-verify-failed"
+              : "app-tag-read-failed",
+            evidence: {
+              azError: value.stderr || value.stdout,
+              clientId,
+              appName: "radius-deploy-owner-repo"
+            }
+          });
+        }
+      );
+    }
+  );
 
   it.each([
     ["owner", command("", 1, "AuthorizationFailed"), "AuthorizationFailed"],

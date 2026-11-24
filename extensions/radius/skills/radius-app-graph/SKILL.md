@@ -9,8 +9,9 @@ Build and display the Radius application graph for a repo. The graph is assemble
 
 ## Execution boundary
 
+- When graph rendering ends in failure and recovery stops, use the `radius-report-issue` skill to offer a report to the Radius team. State that the user can review the issue before submission. Do not collect extra diagnostics until they agree, and require separate explicit permission to submit the reviewed draft. A graph waiting for its model-authoring handoff is not a terminal failure.
 - Never invoke `rad` or `rad.exe` directly from PowerShell, a shell, a subprocess, or a delegated agent. Do not ask another agent to run or troubleshoot the CLI.
-- Perform every Radius graph operation through the Radius canvas and its tools. Open `canvasId: "radius"` with `instanceId: "radius-panel"`, pass the current session repository as `repo` in `owner/repo` form, and treat the current Copilot worktree branch as the graph branch. The Radius extension is the only component allowed to run `rad` internally.
+- Perform every Radius graph operation through the Radius canvas or its tools. For interactive graphs, open `canvasId: "radius"` with `instanceId: "radius-panel"`, pass the current session repository as `repo` in `owner/repo` form, and treat the current Copilot worktree branch as the graph branch. For PR-description graph diffs, use `radius_generate_pr_diff_markdown` without opening a Canvas. The Radius extension is the only component allowed to run `rad` internally.
 - After opening the canvas, do not inspect the workspace for `app.bicep` or poll `get_graph_resources` to detect a missing model. Do not start missing-model generation independently through the `radius-app-bicep` skill, `radius_generate_app`, or a delegated agent. You may call `get_graph_resources` once to inspect an already-ready graph for missing source references; if it returns `ready: false`, stop the reference check without waiting or retrying. Continue with any other part of the user's request, or end the turn. When the model is missing, the canvas owns the single automatic handoff and queues the authoring turn. Starting model generation independently can leave a duplicate handoff queued behind it.
 - The extension honors `RADIUS_RAD_BINARY` when it names an existing binary. Otherwise it uses its managed binary at `%USERPROFILE%\.radius\ai-extensions\bin\rad.exe` on Windows or `$HOME/.radius/ai-extensions/bin/rad` on macOS/Linux. On extension load it downloads the managed binary at the plugin's pinned Radius release when absent, and replaces it when it is not that release (offline/API failures keep the installed binary) unless `RADIUS_RAD_SKIP_VERSION_CHECK` is set. It never resolves `rad` from `PATH` or the separate user CLI installation under `.rad/bin`.
 - Diagnose graph failures only through the Radius extension log (use extension inspection to locate and read it). Do not reproduce a failure by running `rad` directly.
@@ -25,10 +26,10 @@ Build and display the Radius application graph for a repo. The graph is assemble
 
 ## Data flow
 
-1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`. When the selected repository and branch both match the current workspace, it prefers the saved working-tree model; other selections read the model from GitHub. If no model can be read for a graph or planned view, the canvas does **not** generate one directly: it returns `needsAppBicep` and automatically hands off to Copilot to run the `radius-app-bicep` skill and author the definition. App model generation is owned solely by that skill. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet) for lookup, fallback, and graph-diff rules.
+1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, trying the second path only when the first is confirmed absent. When the selected repository and branch both match the authorized current workspace, it reads the saved working-tree model; other selections read a resolved GitHub revision. Missing, empty, or unreadable local files never cause a GitHub fallback. If both model paths are confirmed absent for a graph or planned view, the canvas does **not** generate one directly: it returns `needsAppBicep` and automatically hands off to Copilot to run the `radius-app-bicep` skill and author the definition. Empty, unreadable, or invalid definitions produce diagnostics instead of missing-model authoring. App model generation is owned solely by that skill. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet) for source-selection and graph-diff rules.
 2. The shared graph runner inside the Radius extension invokes offline `rad app graph <app.bicep> --include-icons` and writes `app-graph.json` locally. The modeled Bicep path must not pass `--application`: that flag switches the CLI to the deployed-application API and does not write `app-graph.json`. The required `--include-icons` flag embeds the resource icon metadata used by the canvas. The runner honors an existing `RADIUS_RAD_BINARY`; otherwise it uses the managed binary under `~/.radius/ai-extensions/bin`, downloading it when absent and replacing it when it is not the pinned Radius release. It never resolves `rad` from `PATH` or `~/.rad/bin`.
 3. `packages/core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
-4. The graph, planned graph, auto-open graph diff, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares base and head branch app models and tags resources `added | removed | modified | unchanged`.
+4. The graph, planned graph, auto-open graph diff, and `radius_generate_pr_diff_markdown` share graph build coordination; both comparison entry points use the existing `computeGraphDiff` algorithm and tag resources `added | removed | modified | unchanged`. Canvas branch comparisons can include saved workspace edits independently on either matching side. The PR-description tool always resolves the requested base and head branches through GitHub to committed SHAs, pins each model and its supporting config and artifacts to that SHA, and returns both source identities. It never reads workspace edits.
 5. Each non-application node can carry a **source-code reference** (`codeReference` → node `codeRef`) that deep-links the node to where the resource is defined or initialized in the repo. The `radius-app-bicep` skill owns discovering and authoring this metadata; this skill consumes it from `app.bicep`.
 6. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json --include-icons` for deployed-resource status views. The deployed path requires `--include-icons`.
 
@@ -73,7 +74,7 @@ If `ready` is `false`, stop the reference check without waiting or retrying, and
 
 ## How to invoke
 
-When the user asks to see, build, refresh, or compare the application graph, **open the canvas straight to the graph view**:
+For an interactive request to see, build, refresh, or compare the application graph, **open the canvas straight to the graph view**:
 
 ```javascript
 open_canvas({
@@ -83,7 +84,7 @@ open_canvas({
 })
 ```
 
-For PR diff mode:
+For an interactive branch comparison, including a PR's branches:
 
 ```javascript
 open_canvas({
@@ -92,6 +93,10 @@ open_canvas({
   input: { page: "graph-diff", repo: "<owner/repo>", baseBranch: "main", headBranch: "<pr-branch>" }
 })
 ```
+
+For a graph diff to embed in a PR description, call `radius_generate_pr_diff_markdown` with explicit `repo`, `baseBranch`, and `headBranch` only when the user asks for an application graph diff. The tool reads the commits currently pushed to GitHub. An unpublished branch cannot be compared; a published branch with unpushed changes is compared at its current pushed SHA. If the normal PR workflow already authorizes pushing the intended head, complete that push before requesting the diff. Do not push solely to obtain a diff. The interactive Canvas comparison can still use saved worktree edits.
+
+The tool returns `Base source` and `Head source` as `repo@SHA` when resolved and labels unresolved refs separately. Typed consumers also receive `sources.base` and `sources.head`, with the requested branch in `ref`, the commit SHA in `revision` when resolved, and the selected `definitionPath`. Use the exact returned `textResultForLlm` at the top of the PR description only when it contains a diff; do not prepend source metadata to that Markdown. If the tool reports an unavailable diff or fails, create any separately requested PR without a graph section, report the reason, and do not open the graph-diff Canvas or start authoring to manufacture committed models.
 
 > **Canvas not opening?** If the Radius panel does not appear even though this skill and the Radius plugin are installed, reload extensions (or restart the app) and try again.
 
@@ -105,14 +110,14 @@ The canvas will:
 
 ## Rendering a branch that has no model yet
 
-For graph and planned views, when no `.radius/app.bicep` or `app.bicep` can be read for the selection, the canvas returns `needsAppBicep` and hands off to Copilot to author one with the `radius-app-bicep` skill (via the `radius_generate_app` tool). That skill models the working tree. Where the canvas reads the model depends on both the selected repository and branch:
+For graph and planned views, when no `.radius/app.bicep` or `app.bicep` can be read for the selection, the canvas returns `needsAppBicep` and hands off to Copilot to author one with the `radius-app-bicep` skill. That skill models the working tree. Where the canvas reads the model depends on both the selected repository and branch:
 
 - **Repository and branch match the current workspace:** saving `.radius/app.bicep` or `app.bicep` to disk is enough to preview the graph. Graph and planned views, and the matching side of a graph diff, prefer this saved model. No commit or push is required. Unsaved editor-buffer changes are not read by the model loader.
 - **Repository or branch differs from the current workspace:** the canvas reads the selected branch on GitHub. Its model must describe that branch's code and already be committed and pushed there; a local-only commit is not enough. Publishing is a separate step, not a requirement for a current-workspace preview. Prefer opening a pull request into the target branch rather than committing directly to it, and never push a generated model straight to a protected branch such as `main` without the user's explicit confirmation.
 
-The current workspace lookup tries `.radius/app.bicep`, then `app.bicep`. If neither supplies readable, nonempty content, it falls back to the selected GitHub branch and tries the same paths there. Deleting a local model therefore does not necessarily make the graph report a missing model.
+The selected source lookup tries `.radius/app.bicep`, then `app.bicep` only after confirmed absence of the preferred path. Deleting both local model paths makes a matching workspace selection report a missing model even if GitHub still has an older committed model. An empty or unreadable preferred file does not select the root model or another source. Invalid nonempty Bicep retains the compiler diagnostic; it is not treated as absence.
 
-Graph diffs apply this lookup independently to the explicit base and head selections. A missing model on one side contributes an empty graph, so the other side can still show additions or removals. If both models are unavailable, the Canvas comparison workflow can request authoring; the `radius_generate_pr_diff_markdown` tool instead reports that the diff is unavailable.
+Canvas graph diffs apply this source policy independently to the explicit base and head selections. A confirmed-absent model on one side contributes no resources, so the other side can still show additions or removals. If both models are absent, the Canvas comparison workflow can request authoring. The `radius_generate_pr_diff_markdown` tool instead uses committed GitHub sources for both sides and reports an unavailable diff when both definitions are absent. Read or compilation failures are explicit errors, never added or removed applications. The tool does not open a Canvas or request authoring.
 
 Keep the graph, planned, or graph-diff view open while the Canvas is generating a missing model. All three views retry automatically and update once the saved model is available to the selected repository and branch, while the automatic wait remains active. The wait ends after 5 minutes if no modeling run has been observed for that selection, or after 30 minutes total. If either limit is reached, check the Copilot conversation for the modeling status, then reload to try again. Use Refresh or reopen after manual model edits. For a remote selection, the model must be available on GitHub.
 
@@ -127,7 +132,7 @@ Keep the graph, planned, or graph-diff view open while the Canvas is generating 
 - **Empty graph**: an empty view alone does not prove that a committed model is missing. Check the canvas status and selected repository and branch. If it reports `needsAppBicep`, leave missing-model authoring to the canvas and follow the continuation rule in [How to invoke](#how-to-invoke). Do not start a second authoring path or commit merely to preview a saved workspace model.
 - **Graph build fails**: inspect the Radius extension log and report the failure without modifying the selected Radius CLI. Never download, install, upgrade, downgrade, copy, move, rename, back up, delete, or replace a `rad` binary; never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`; and never search `PATH`, `.rad/bin`, or another location for a fallback. The extension alone owns its managed binary lifecycle. Never run `rad app graph` locally to reproduce the failure. Do not add `--application` to this modeled command. On Windows, the extension keeps its managed `rad.exe` attached and hidden, then terminates the process tree after a valid graph artifact or timeout.
 - **Stale graph**: save model edits to disk, then click Refresh for a matching workspace selection. For another repository or branch, Refresh reads the model available on GitHub, not local-only changes.
-- **PR diff doesn't appear**: check the explicit base and head selections using the [model lookup rules](#rendering-a-branch-that-has-no-model-yet). The matching workspace side needs only a saved model; other sides read GitHub. One missing model is allowed and contributes an empty graph. If the PR-description tool reports the diff unavailable, omit the graph diff section and report the reason rather than committing or pushing the worktree just to compare it. Neither side needs a previous deployment.
+- **PR diff doesn't appear**: check which comparison was requested. An interactive Canvas comparison uses the [workspace-aware model lookup rules](#rendering-a-branch-that-has-no-model-yet); the PR-description tool always uses committed GitHub content and includes the compared `repo@SHA` identities in its returned text. One confirmed-absent model is allowed and contributes no resources. If the PR-description tool reports the diff unavailable or fails, omit the graph diff section, report the reason, and do not open the graph-diff Canvas or commit and push the worktree just to obtain a diff. Neither side needs a previous deployment.
 
 ## Related files
 
@@ -135,7 +140,9 @@ Keep the graph, planned, or graph-diff view open while the Canvas is generating 
 - `extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
 - `packages/adapter-shared/src/rad.ts` — modeled graph build via the real `rad app graph <app.bicep> --include-icons` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/adapter-shared`.
 - `packages/core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`), carrying `codeReference`/`definitionFile`/`definitionLine` through to the node
-- `packages/core/src/modeling/repo.ts` — fetches the `app.bicep` generated by the `radius-app-bicep` skill from the repo (`fetchBicepFromRepo`)
-- `extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
-- `extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`
+- `packages/core/src/graph-orchestration.ts` — source-independent graph compilation and comparison coordination
+- `packages/adapter-shared/src/graph-source-bindings.ts` — typed workspace and commit-pinned GitHub reads
+- `packages/adapter-shared/src/graph-artifacts.ts` — source-consistent configuration and extension-artifact staging
+- `packages/adapter-canvas/src/runtime/create-radius-tools.ts` — committed-only PR graph diff tool and source metadata
+- `packages/adapter-canvas/src/server/routes/graph-workflows.ts` — Canvas graph workflows, including `/api/diff-branches`
 - `extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic

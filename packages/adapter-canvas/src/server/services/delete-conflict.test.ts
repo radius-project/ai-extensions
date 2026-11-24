@@ -33,6 +33,7 @@ const CONFLICT_OUTPUT = [
 function failedDeployment(overrides: Partial<DeploymentRow> = {}) {
   return {
     app: "demo",
+    identity: { state: "known", application: "demo" },
     environment: "dev",
     provider: "azure",
     status: "delete-failed",
@@ -122,6 +123,37 @@ describe("readNonTerminalState", () => {
 });
 
 describe("probeDeleteConflict", () => {
+  it.each([{ resourceType: "container" }, { name: "other-app" }, { name: "" }])(
+    "never proves force-delete from mismatched result identity %j",
+    async (change) => {
+      const h = probe({
+        downloadArtifact: async () =>
+          resultFiles({ ...FAILED_CONFLICT_RESULT, ...change })
+      });
+      expect(await h.run()).toMatchObject({
+        state: "unknown",
+        detail: expect.stringContaining("requested application")
+      });
+    }
+  );
+
+  it("rejects artifacts from a different workflow run", async () => {
+    const h = probe({
+      listArtifacts: async () => [resultArtifact({ workflow_run: { id: 900 } })]
+    });
+    expect(await h.run()).toMatchObject({ state: "unknown" });
+    expect(h.calls.downloaded).toEqual([]);
+  });
+
+  it("rejects missing row identity before reading artifacts", async () => {
+    const h = probe({
+      resolveEnvDeployment: async () =>
+        failedDeployment({ identity: undefined })
+    });
+    expect(await h.run()).toMatchObject({ state: "unknown" });
+    expect(h.calls.listed).toEqual([]);
+  });
+
   it("reports the stranded state from the failed run's result artifact", async () => {
     const { calls, run } = probe();
 
@@ -130,7 +162,7 @@ describe("probeDeleteConflict", () => {
       resourceState: "Updating",
       forced: false
     });
-    expect(calls.listed).toEqual([{ repo: "octo/app", runId: "4242" }]);
+    expect(calls.listed).toEqual([{ repo: "octo/app", runId: 4242 }]);
     expect(calls.downloaded).toEqual([
       { repo: "octo/app", artifact: resultArtifact() }
     ]);

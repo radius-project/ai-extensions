@@ -16,8 +16,14 @@ import {
   selectPrefixedEnvironments,
   selectStaleStatePackages,
   selectStatePackages,
-  selectTestResourceGroups
+  selectTestResourceGroups,
+  AWS_ENVIRONMENT_NAME_PREFIX,
+  SHARED_ENVIRONMENT_NAME_PREFIX
 } from "./cloud-cleanup.js";
+import {
+  AWS_ENVIRONMENT_NAME_PREFIX as PINNED_AWS_ENVIRONMENT_NAME_PREFIX,
+  ENVIRONMENT_NAME_PREFIX as PINNED_ENVIRONMENT_NAME_PREFIX
+} from "./fixture-repository.js";
 
 const CUTOFF = "2026-08-31T12:00:00Z";
 const OLD = "2026-08-31T05:59:59Z";
@@ -1200,5 +1206,125 @@ describe("selectStatePackages", () => {
 
   it("requires a prefix", () => {
     expect(() => selectStatePackages([[]], " ")).toThrow(/prefix is required/);
+  });
+});
+
+describe("each cloud's sweep selects only its own environments", () => {
+  const azure = ENVIRONMENT_PREFIX;
+  const aws = AWS_ENVIRONMENT_NAME_PREFIX;
+  const statePrefix = "ai-extensions-fixture-radius-state-";
+  const environmentNames = [
+    "radtest-6fe9780807f4",
+    "radtest-aws-6fe9780807f4",
+    // Look-alikes: neither is an AWS environment.
+    "radtest-aws6fe9780807",
+    "radtest-awsx-1"
+  ];
+  const environments = [
+    {
+      environments: environmentNames.map((name) => ({ name, created_at: OLD }))
+    }
+  ];
+  const expectedByCloud = {
+    azure: ["radtest-6fe9780807f4", "radtest-aws6fe9780807", "radtest-awsx-1"],
+    aws: ["radtest-aws-6fe9780807f4"]
+  };
+
+  it("keeps the AWS prefix in step with the suite's pin", () => {
+    expect(SHARED_ENVIRONMENT_NAME_PREFIX).toBe(PINNED_ENVIRONMENT_NAME_PREFIX);
+    expect(AWS_ENVIRONMENT_NAME_PREFIX).toBe(
+      PINNED_AWS_ENVIRONMENT_NAME_PREFIX
+    );
+  });
+
+  it.each([
+    ["azure", azure],
+    ["aws", aws]
+  ] as const)("selects only %s environments", (cloud, prefix) => {
+    expect(selectPrefixedEnvironments(environments, prefix)).toEqual(
+      expectedByCloud[cloud]
+    );
+    expect(selectExpiredEnvironments(environments, prefix, CUTOFF)).toEqual(
+      expectedByCloud[cloud]
+    );
+  });
+
+  it.each([
+    ["azure", azure],
+    ["aws", aws]
+  ] as const)("selects only %s deployment records", (cloud, prefix) => {
+    const records = [
+      environmentNames.map((environment, index) => ({
+        id: index + 1,
+        environment,
+        created_at: OLD
+      }))
+    ];
+    expect(
+      selectExpiredDeployments(records, prefix, CUTOFF).map(
+        (id) => environmentNames[id - 1]
+      )
+    ).toEqual(expectedByCloud[cloud]);
+  });
+
+  it.each([
+    ["azure", azure],
+    ["aws", aws]
+  ] as const)("selects only %s state packages", (cloud, prefix) => {
+    const packages = [
+      environmentNames.map((environment) => ({
+        name: `${statePrefix}${environment}-53cf5e9d4628`,
+        updated_at: OLD
+      }))
+    ];
+    const expected = expectedByCloud[cloud].map(
+      (environment) => `${statePrefix}${environment}-53cf5e9d4628`
+    );
+    expect(
+      selectStaleStatePackages(packages, `${statePrefix}${prefix}`, CUTOFF)
+    ).toEqual(expected);
+    expect(selectStatePackages(packages, `${statePrefix}${prefix}`)).toEqual(
+      expected
+    );
+  });
+
+  it.each([
+    ["azure", azure],
+    ["aws", aws]
+  ] as const)("selects only %s cluster workloads", (cloud, prefix) => {
+    const payload = {
+      items: environmentNames.map((environment) => ({
+        kind: "Deployment",
+        metadata: {
+          name: environment,
+          namespace: "default",
+          creationTimestamp: OLD,
+          labels: {
+            "radapp.io/application": "cloud-e2e",
+            "radapp.io/environment": environment
+          }
+        }
+      }))
+    };
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, "cloud-e2e", CUTOFF).map(
+        (entry) => entry.environment
+      )
+    ).toEqual(expectedByCloud[cloud]);
+  });
+
+  it("selects every package when the prefix names no environment", () => {
+    // The prefix that stops at the repository is not scoped to a cloud.
+    expect(
+      selectStatePackages(
+        [
+          [
+            { name: `${statePrefix}radtest-1-aaaaaaaaaaaa` },
+            { name: `${statePrefix}radtest-aws-1-aaaaaaaaaaaa` }
+          ]
+        ],
+        statePrefix
+      )
+    ).toHaveLength(2);
   });
 });

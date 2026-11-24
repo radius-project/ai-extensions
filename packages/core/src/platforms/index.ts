@@ -17,6 +17,7 @@ export {
   KUBERNETES_NAMESPACE_PATTERN,
   isKubernetesNamespace
 } from "./kubernetes.js";
+export * from "./aws-cli-error.js";
 export * from "./aws-identity.js";
 export * from "./aws-network.js";
 

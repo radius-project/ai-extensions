@@ -125,6 +125,36 @@ describe("renderPrDiffMarkdown", () => {
     expect(md).toContain("| 🟢 Added | 1 |");
     expect(md).toContain("| 🔴 Removed | 1 |");
   });
+
+  it("handles absent resources and lists every nonzero status count", () => {
+    expect(renderPrDiffMarkdown(null, "main", "feature")).toContain(
+      "No application graph changes detected"
+    );
+
+    const md = renderPrDiffMarkdown(
+      [
+        { id: "added", diffStatus: "added" },
+        { id: "removed", diffStatus: "removed" },
+        { id: "modified", diffStatus: "modified" },
+        { id: "unchanged", diffStatus: "unchanged" }
+      ],
+      "main",
+      "feature"
+    );
+
+    expect(md).toContain("| 🟢 Added | 1 |");
+    expect(md).toContain("| 🔴 Removed | 1 |");
+    expect(md).toContain("| 🟡 Modified | 1 |");
+    expect(md).toContain("| ⚪ Unchanged | 1 |");
+
+    expect(
+      renderPrDiffMarkdown(
+        [{ id: "only-added", diffStatus: "added" }],
+        "main",
+        "feature"
+      )
+    ).not.toContain("Unchanged");
+  });
 });
 
 describe("renderDiffMermaid", () => {
@@ -158,5 +188,39 @@ describe("renderDiffMermaid", () => {
     expect(nodeIds).toContain("db");
     expect(nodeIds).toContain("db_2");
     expect(nodeIds).toContain("db_3");
+  });
+
+  it("creates safe fallback node labels for incomplete resource data", () => {
+    const mermaid = renderDiffMermaid([
+      { id: "/bad-name/", type: "Provider/type@v1", diffStatus: "unknown" },
+      { name: "name only", type: "type" },
+      { id: "💥", type: "" },
+      {}
+    ]);
+
+    expect(mermaid).toContain('node0["/bad-name/\\ntype"]');
+    expect(mermaid).toContain('name_only["name only\\ntype"]');
+    expect(mermaid).toContain('__["💥\\n"]');
+    expect(mermaid).toContain('node["undefined\\n"]');
+  });
+
+  it("skips invalid, inbound, and duplicate connections and leaves unchanged links unstyled", () => {
+    const mermaid = renderDiffMermaid([
+      {
+        id: "source",
+        connections: [
+          { id: "target" },
+          { id: "target", diffStatus: "added" },
+          { id: "missing" },
+          { id: "target", direction: "Inbound" },
+          { direction: "Outbound" }
+        ]
+      },
+      { id: "target" },
+      { connections: [{ id: "target", direction: "Outbound" }] }
+    ]);
+
+    expect(mermaid.match(/source --> target/g)).toHaveLength(1);
+    expect(mermaid).not.toContain("linkStyle");
   });
 });

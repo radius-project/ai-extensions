@@ -27,7 +27,6 @@ import {
   GRAPH_RETRY_MAX_MS,
   GRAPH_RETRY_SCHEDULE_MS,
   GRAPH_RETRY_TITLE,
-  GRAPH_STALE_RETRY_MS,
   graphRetryDelayMs,
   initializeGraphPage
 } from "./graph-page.js";
@@ -85,12 +84,13 @@ function fixture(options: FixtureOptions = {}) {
   const hint = createFakeElement("modeled-subtitle-hint");
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
+  const warning = createFakeElement("graph-save-warning");
   // The real loading surface mounts this host; the fake render globals do not,
   // so the fixture provides it for the shared progress panel to render into.
   const progressHost = createFakeElement("progress-steps");
   const guidance = createFakeElement("graph-guidance");
   guidance.textContent = "Click a node to view source code links.";
-  const elements = [state, app, container, progressHost];
+  const elements = [state, app, container, progressHost, warning];
   if (withGuidance) elements.push(guidance);
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
@@ -130,6 +130,7 @@ function fixture(options: FixtureOptions = {}) {
     hint,
     container,
     wrapper,
+    warning,
     status,
     progressHost,
     guidance
@@ -146,6 +147,30 @@ function globals(overrides: Record<string, unknown> = {}) {
 }
 
 describe("initializeGraphPage", () => {
+  it("announces a save warning without disabling the loaded graph and clears it on a branch change", async () => {
+    const { browser, branch, button, warning } = fixture({ loaded: false });
+    const later = createDeferred<ReturnType<typeof jsonResponse>>();
+    let requests = 0;
+    browser.net.handle("/api/load-graph", () => {
+      if (requests++ > 0) return later.promise;
+      return jsonResponse({
+        resources: [{ id: "app/available" }],
+        saveWarning: "The saved graph may be stale."
+      });
+    });
+    const teardown = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(warning.textContent).toBe("The saved graph may be stale.");
+    expect(button.disabled).toBe(false);
+    branch.value = "another";
+    branch.dispatch("change");
+    expect(warning.textContent).toBe("");
+    later.resolve(jsonResponse({ resources: [{ id: "app/replacement" }] }));
+    await flushPromises();
+    expect(warning.textContent).toBe("");
+    teardown();
+  });
+
   const withEnvironment = (browser: ReturnType<typeof fixture>["browser"]) =>
     browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
       jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
@@ -1090,26 +1115,29 @@ describe("initializeGraphPage", () => {
     expect(status?.textContent).toBe(generating);
   });
 
-  it("retries quickly after a stale response", async () => {
-    const { browser, status } = fixture({ loaded: false });
-    let calls = 0;
-    browser.net.handle("/api/load-graph", () => {
-      calls++;
-      return calls === 1 ?
-          jsonResponse({ stale: true })
-        : jsonResponse({ resources: [{ id: "app/current" }] });
-    });
-    initializeGraphPage(browser.context, globals());
-    await flushPromises();
+  it.each([true, false])(
+    "ends a superseded load without retrying (wrapper: %s)",
+    async (withWrapper) => {
+      const { browser, status } = fixture({ loaded: false, withWrapper });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return calls === 1 ?
+            jsonResponse({ stale: true })
+          : jsonResponse({ resources: [{ id: "app/current" }] });
+      });
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
 
-    expect(status?.textContent).toContain("newer graph request");
-    expect(browser.clock.timeouts).toBe(1);
+      expect(status?.textContent).toContain("superseded");
+      expect(browser.clock.timeouts).toBe(0);
 
-    browser.clock.tick(GRAPH_STALE_RETRY_MS);
-    await flushPromises();
-    expect(calls).toBe(2);
-    expect(browser.nav.reloads).toBe(0);
-  });
+      browser.clock.tick(5_000);
+      await flushPromises();
+      expect(calls).toBe(1);
+      expect(browser.nav.reloads).toBe(0);
+    }
+  );
 
   // Copilot usually finishes authoring the model within the first few seconds.
   // The wait between polls therefore starts short and only lengthens for a
@@ -1800,7 +1828,7 @@ describe("initializeGraphPage", () => {
     );
   });
 
-  it("retries a stale loaded-graph refresh without replacing the current graph", async () => {
+  it("ignores a stale refresh without retrying or replacing the current graph", async () => {
     const { browser, status } = fixture({ loaded: true });
     const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
     const render = vi.fn(() => controller);
@@ -1817,13 +1845,13 @@ describe("initializeGraphPage", () => {
     );
     await flushPromises();
 
-    expect(status?.textContent).toContain("Retrying");
+    expect(status?.textContent).not.toContain("Retrying");
     expect(controller.destroy).not.toHaveBeenCalled();
-    browser.clock.tick(GRAPH_STALE_RETRY_MS);
+    browser.clock.tick(5_000);
     await flushPromises();
 
-    expect(calls).toBe(2);
-    expect(controller.update).toHaveBeenCalledWith([{ id: "app/refreshed" }]);
+    expect(calls).toBe(1);
+    expect(controller.update).not.toHaveBeenCalled();
     expect(controller.destroy).not.toHaveBeenCalled();
   });
 

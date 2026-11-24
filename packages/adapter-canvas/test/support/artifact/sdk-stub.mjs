@@ -4,6 +4,32 @@ import { join, relative, resolve } from "node:path";
 
 let joinCount = 0;
 let joinedDeclaration;
+let closeCount = 0;
+
+export function artifactCloseCount() {
+  return closeCount;
+}
+
+export async function runArtifactReadiness() {
+  const tool = joinedDeclaration?.tools.find(
+    (candidate) => candidate.name === "radius_setup_environment"
+  );
+  if (!tool) throw new Error("Setup tool was not registered.");
+  return JSON.parse(
+    String(
+      await tool.handler({
+        repo: "fixture/app",
+        environment: "dev",
+        branch: "feature/setup",
+        provider: "azure",
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        subscriptionId: "22222222-2222-4222-8222-222222222222",
+        resourceGroup: "fixture-group",
+        cluster: "fixture-cluster"
+      })
+    )
+  );
+}
 
 const REQUIRED_SKILL_FILES = [
   "SKILL.md",
@@ -60,62 +86,151 @@ export async function joinSession(declaration) {
   ).version;
   await send({
     type: "registered",
-    snapshot: {
-      joinCount,
-      canvases: declaration.canvases.map((canvas) => ({
-        id: canvas.id,
-        displayName: canvas.displayName,
-        description: canvas.description,
-        inputSchema: json(canvas.inputSchema),
-        actions: canvas.actions.map((action) => ({
-          name: action.name,
-          description: action.description,
-          inputSchema: json(action.inputSchema),
-          handlerCallable: typeof action.handler === "function"
-        })),
-        hasOpen: typeof canvas.open === "function",
-        hasOnClose: typeof canvas.onClose === "function"
-      })),
-      tools: declaration.tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: json(tool.parameters),
-        handlerCallable: typeof tool.handler === "function"
-      })),
-      hooks: Object.entries(declaration.hooks)
-        .map(([name, hook]) => ({
-          name,
-          callable: typeof hook === "function"
-        }))
-        .sort((left, right) => left.name.localeCompare(right.name)),
-      bootstrap: {
-        fields: Object.keys(bootstrap),
-        skill: bootstrap.skill,
-        repoPathMatchesWorkspace:
-          bootstrap.repoPath === process.env.RADIUS_ARTIFACT_WORKSPACE,
-        skillBaseRelativeToArtifact: relative(
-          artifactDir,
-          skillBase
-        ).replaceAll("\\", "/"),
-        skillVersionMatchesPackage: bootstrap.skillVersion === packageVersion,
-        nodeCommandRunsScripts: runsScripts(bootstrap.nodeCommand),
-        instruction: bootstrap.instruction,
-        requiredFiles: REQUIRED_SKILL_FILES.filter((requiredFile) =>
-          existsSync(join(skillBase, requiredFile))
-        ),
-        containsLegacyInlinedHeading: String(bootstrapText).includes(
-          LEGACY_INLINED_HEADING
-        )
-      }
-    }
+    snapshot: snapshot(
+      declaration,
+      bootstrap,
+      bootstrapText,
+      artifactDir,
+      skillBase,
+      packageVersion
+    )
   });
+  return session();
+}
+
+export async function assertArtifactPublicationRefusals() {
+  const compileExtension = joinedDeclaration?.tools.find(
+    (tool) => tool.name === "radius_publish_custom_type_extension"
+  );
+  const publishRecipe = joinedDeclaration?.tools.find(
+    (tool) => tool.name === "radius_publish_recipe"
+  );
+  const compilationRefusal = await compileExtension?.handler({
+    stagingDir: ".radius/not-a-staging-directory"
+  });
+  const publicationRefusal = await publishRecipe?.handler({
+    target: "br:example.invalid/fixture/app/recipe:1"
+  });
+  if (
+    !String(compilationRefusal).startsWith(
+      "⚠️ Could not publish the custom-type extension:"
+    ) ||
+    !/Cannot determine the repository being modeled|The recipe target must be br:ghcr\.io/.test(
+      String(publicationRefusal)
+    )
+  ) {
+    throw new Error(
+      "The packaged publication tools did not refuse invalid inputs."
+    );
+  }
+}
+
+function snapshot(
+  declaration,
+  bootstrap,
+  bootstrapText,
+  artifactDir,
+  skillBase,
+  packageVersion
+) {
+  return {
+    joinCount,
+    canvases: declaration.canvases.map((canvas) => ({
+      id: canvas.id,
+      displayName: canvas.displayName,
+      description: canvas.description,
+      inputSchema: json(canvas.inputSchema),
+      actions: canvas.actions.map((action) => ({
+        name: action.name,
+        description: action.description,
+        inputSchema: json(action.inputSchema),
+        handlerCallable: typeof action.handler === "function"
+      })),
+      hasOpen: typeof canvas.open === "function",
+      hasOnClose: typeof canvas.onClose === "function"
+    })),
+    tools: declaration.tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: json(tool.parameters),
+      handlerCallable: typeof tool.handler === "function"
+    })),
+    hooks: Object.entries(declaration.hooks)
+      .map(([name, hook]) => ({
+        name,
+        callable: typeof hook === "function"
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+    bootstrap: {
+      fields: Object.keys(bootstrap),
+      skill: bootstrap.skill,
+      repoPathMatchesWorkspace:
+        bootstrap.repoPath === process.env.RADIUS_ARTIFACT_WORKSPACE,
+      skillBaseRelativeToArtifact: relative(artifactDir, skillBase).replaceAll(
+        "\\",
+        "/"
+      ),
+      skillVersionMatchesPackage: bootstrap.skillVersion === packageVersion,
+      nodeCommandRunsScripts: runsScripts(bootstrap.nodeCommand),
+      instruction: bootstrap.instruction,
+      requiredFiles: REQUIRED_SKILL_FILES.filter((requiredFile) =>
+        existsSync(join(skillBase, requiredFile))
+      ),
+      containsLegacyInlinedHeading: String(bootstrapText).includes(
+        LEGACY_INLINED_HEADING
+      )
+    }
+  };
+}
+
+function session() {
   return {
     workspacePath: process.env.RADIUS_ARTIFACT_WORKSPACE,
     send: async () => undefined,
     log: () => undefined,
-    rpc: { canvas: { open: async () => ({}) } },
+    capabilities: {
+      ui: {
+        elicitation:
+          process.env.RADIUS_ARTIFACT_UPDATE_APPROVAL !== "unavailable"
+      }
+    },
+    ui: {
+      select: async () => {
+        throw new Error("Unexpected artifact selection request.");
+      },
+      confirm: async (message) => {
+        await send({ type: "plugin-approval", detail: message });
+        return process.env.RADIUS_ARTIFACT_UPDATE_APPROVAL === "approve";
+      }
+    },
+    rpc: {
+      canvas: { open: async () => ({}) },
+      plugins: {
+        list: async () => ({
+          plugins: [
+            {
+              name: "radius",
+              marketplace: "radius-plugins",
+              version: "0.4.0",
+              enabled: true
+            }
+          ]
+        }),
+        update: async ({ name }) => {
+          await send({ type: "plugin-update", detail: name });
+          return { skillsInstalled: 5 };
+        }
+      }
+    },
     metadata: { snapshot: async () => ({}) },
-    close: () => send({ type: "shutdown", closeCount: 1 })
+    close: async () => {
+      closeCount++;
+      await send({ type: "shutdown", closeCount: 1 });
+      if (process.env.RADIUS_ARTIFACT_SHUTDOWN === "hung-session")
+        await new Promise(() => {});
+      if (process.env.RADIUS_ARTIFACT_SHUTDOWN === "failed-session")
+        throw new Error("Controlled session teardown failure");
+    }
   };
 }
 

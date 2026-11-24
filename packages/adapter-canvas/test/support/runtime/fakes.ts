@@ -3,21 +3,18 @@
 //
 // Every fake here is in-memory only: no port is bound, no CLI is spawned, no
 // network call is made, and no real filesystem is mutated. Pure, already
-// well-tested adapter modules (deploy-tools.ts, source-refs.ts,
+// well-tested adapter modules (source-refs.ts,
 // publish-targets.ts) are reused as-is since they perform no I/O themselves;
 // everything that actually touches the outside world (servers, github,
 // workspace/git, rad, fetch, fs, execFile, the SDK session) is faked.
 
 import { vi } from "vitest";
 import type { Mock } from "vitest";
-import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
-  summarizeDeployStatus,
-  describeDeployStarted
-} from "../../../src/deploy-tools.js";
+import { computeGraphDiff } from "@radius-project/core";
+import type {
+  GraphSourceIdentity,
+  GraphSourceRead
+} from "@radius-project/core";
 import {
   getSourceRefResources,
   prepareSourceRefResources,
@@ -37,6 +34,7 @@ import {
 import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
 import { createSessionHolder } from "../../../src/runtime/session.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createFakeDeploymentRuntime } from "./deployment.js";
 import type { SessionPort } from "../../../src/runtime/session.js";
 import type {
   RadiusExtensionDependencies,
@@ -125,6 +123,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   const servers = new Map<string, CanvasServerEntry>();
   const sessionHolder = createSessionHolder();
   const executionOwner = createEnvironmentExecutionOwner();
+  const pluginUpdateAnswers = new Map<string, number>();
 
   const workspaceContext: WorkspaceContext = options.workspaceContext ?? {
     workspacePath: "/workspace",
@@ -160,16 +159,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     appBicepHandoff?: Parameters<
       RadiusExtensionDependencies["hostCallbacks"]["setAppBicepHandoff"]
     >[0];
-    deployRepairHandoff?:
-      | ((input: {
-          repo: string;
-          branch: string;
-          error: string;
-          deployRunUrl: string;
-          attemptId: string;
-          instanceId: string;
-        }) => unknown)
-      | null;
+    deployRepairHandoff?: Parameters<
+      RadiusExtensionDependencies["hostCallbacks"]["setDeployRepairHandoff"]
+    >[0];
     deployFailureNotice?:
       | ((input: {
           repo: string;
@@ -190,8 +182,51 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     ) => Promise<unknown>;
   } = {};
 
+  const graphReadFile = vi.fn(
+    async (
+      source: GraphSourceIdentity,
+      repoPath: string
+    ): Promise<GraphSourceRead> => {
+      try {
+        const local = source.kind === "workspace";
+        const content = await (local ?
+          deps.appModel.fetchWorkspaceFile(
+            {
+              workspacePath: source.workspacePath,
+              workspaceRepo: source.repo,
+              workspaceBranch: source.ref
+            },
+            source.repo,
+            source.ref,
+            repoPath
+          )
+        : deps.appModel.fetchRepoFile(source.repo, source.ref, repoPath));
+        return content === null ?
+            {
+              status: "absent",
+              source: { ...source, definitionPath: repoPath }
+            }
+          : {
+              status: "present",
+              source: { ...source, definitionPath: repoPath },
+              content
+            };
+      } catch (error) {
+        return { status: "unavailable", source, diagnostic: String(error) };
+      }
+    }
+  );
+
   const deps: RadiusExtensionDependencies = {
     logError: vi.fn(),
+    automaticPluginUpdates: false,
+    pluginUpdatePreferences: {
+      lastAnsweredAt: async (marketplace) =>
+        pluginUpdateAnswers.get(marketplace),
+      rememberAnswer: async (marketplace, answeredAt) => {
+        pluginUpdateAnswers.set(marketplace, answeredAt);
+      }
+    },
     session: sessionHolder,
     // Instant, so no suite spends real seconds inside a runtime wait. The
     // durations themselves are asserted by the unit tests that own them.
@@ -207,12 +242,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       entry.observation?.stop();
       servers.delete(instanceId);
       if (force) entry.server.closeAllConnections?.();
-      await new Promise<void>((resolve) => {
-        try {
-          entry.server.close(() => resolve());
-        } catch {
-          resolve();
-        }
+      await new Promise<void>((resolve, reject) => {
+        entry.server.close((error) => {
+          if (
+            error &&
+            !("code" in error && error.code === "ERR_SERVER_NOT_RUNNING")
+          )
+            reject(error);
+          else resolve();
+        });
       });
     }),
     getLastWebviewActivityAt: vi.fn(() => lastWebviewActivityAt),
@@ -229,10 +267,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       // rests on it, so a hand-synced copy that drifted looser would let tests
       // assert behavior production cannot produce.
       isWorkspaceSelection: vi.fn(isWorkspaceSelection),
-      fetchWorkspaceBicep: vi.fn(
-        async (_state, repo: string, branch: string) =>
-          bicepByRepoBranch[`workspace:${repo}@${branch}`] ?? null
-      ),
       fetchWorkspaceTree: vi.fn(
         async (
           _state,
@@ -266,26 +300,53 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       ),
       getDefaultBranch: vi.fn(async () => options.defaultBranch ?? "main")
     },
+    graphSources: {
+      assertWorkspaceSource: vi.fn(async () => {}),
+      read: vi.fn(async (request): Promise<GraphSourceRead> => {
+        const workspace = request.workspace;
+        const local =
+          !request.committedOnly &&
+          !!workspace?.authorized &&
+          workspace.repo === request.repo &&
+          workspace.ref === request.ref;
+        const source: GraphSourceIdentity = {
+          kind: local ? "workspace" : "github",
+          repo: request.repo,
+          ref: request.ref,
+          definitionPath: request.definitionPath || ".radius/app.bicep",
+          ...(local ?
+            { workspacePath: workspace?.path }
+          : {
+              revision:
+                headCommits[`${request.repo}@${request.ref}`] || "a".repeat(40)
+            })
+        };
+        try {
+          if (request.definitionPath)
+            return graphReadFile(source, request.definitionPath);
+          const content =
+            bicepByRepoBranch[
+              `${local ? "workspace" : "remote"}:${request.repo}@${request.ref}`
+            ] ?? null;
+          return content === null ?
+              { status: "absent", source }
+            : { status: "present", source, content };
+        } catch (error) {
+          return { status: "unavailable", source, diagnostic: String(error) };
+        }
+      }),
+      readFile: graphReadFile,
+      stage: vi.fn(async () => ({
+        dir: "/workspace/.radius",
+        owned: false,
+        fingerprint: "fixture-artifacts",
+        dispose: vi.fn(async () => {})
+      }))
+    },
     core: {
       computeGraphDiff: vi.fn(
-        (base: CanvasGraphResource[], head: CanvasGraphResource[]) => {
-          const baseIds = new Set(base.map((r) => r.id));
-          const headIds = new Set(head.map((r) => r.id));
-          const added = head
-            .filter((r) => !baseIds.has(r.id))
-            .map((r) => ({ ...r, diffStatus: "added" as const }));
-          const removed = base
-            .filter((r) => !headIds.has(r.id))
-            .map((r) => ({ ...r, diffStatus: "removed" as const }));
-          const unchanged = head
-            .filter((r) => baseIds.has(r.id))
-            .map((r) => ({ ...r, diffStatus: "unchanged" as const }));
-          return [...unchanged, ...added, ...removed];
-        }
-      ),
-      fetchBicepFromRepo: vi.fn(
-        async (_github, repo: string, branch: string) =>
-          bicepByRepoBranch[`remote:${repo}@${branch}`] ?? null
+        (base: CanvasGraphResource[], head: CanvasGraphResource[]) =>
+          computeGraphDiff(base, head)
       ),
       filterGraphVisualizationResources: vi.fn(
         (resources: CanvasGraphResource[]) =>
@@ -296,21 +357,24 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       buildGraphViaRad: vi.fn(async () => []),
       ensureRadBinary: vi.fn(async () => undefined),
       runRadBicepPublishExtension: vi.fn(async () => undefined),
-      runRadBicepPublish: vi.fn(
-        async () => "br:ghcr.io/acme/widgets/recipe:v1"
-      ),
-      radArtifactsDirForSelection: vi.fn(async () => ({
-        dir: "/workspace/.radius",
-        remote: false
-      }))
+      runRadBicepPublish: vi.fn(async () => "br:ghcr.io/acme/widgets/recipe:v1")
     },
-    deployTools: {
-      selectDeployEntry,
-      buildDeployPayload,
-      validateDeployPayload,
-      validateDeployAttempt,
-      summarizeDeployStatus,
-      describeDeployStarted
+    deployment: createFakeDeploymentRuntime(),
+    readDeploymentModel: vi.fn(async () => ({
+      status: "available" as const,
+      content: "fixture managed model",
+      fromWorkspace: true
+    })),
+    environment: {
+      start: vi.fn(async () => {
+        throw new Error("Environment setup was not scripted.");
+      }),
+      status: vi.fn(async () => {
+        throw new Error("Environment status was not scripted.");
+      }),
+      control: vi.fn(async () => {
+        throw new Error("Environment control was not scripted.");
+      })
     },
     sourceRefs: {
       getSourceRefResources,
@@ -345,17 +409,11 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       existsSync: vi.fn(() => true),
       execFile: vi.fn(async () => ({ stdout: "", stderr: "" }))
     },
-    deploy: {
-      fetch: vi.fn(
-        async () =>
-          new Response(JSON.stringify({}), {
-            status: 200,
-            headers: { "Content-Type": "application/json" }
-          })
-      )
-    },
     executionOwner: {
       ...executionOwner,
+      shutdown: vi.fn(executionOwner.shutdown),
+      hasActiveDeletionTasks: vi.fn(executionOwner.hasActiveDeletionTasks),
+      onDeletionTasksSettled: vi.fn(executionOwner.onDeletionTasksSettled),
       hasActiveEnvironmentTasks: vi.fn(
         executionOwner.hasActiveEnvironmentTasks
       ),

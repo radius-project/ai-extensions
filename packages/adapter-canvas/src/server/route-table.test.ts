@@ -109,7 +109,10 @@ const productionHandlers = {
     inspectVerificationWorkflow: () => Promise.resolve("inactive"),
     cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: () => true,
-    invalidateEnvironmentListing: () => {}
+    invalidateEnvironmentListing: () => {},
+    awsEnabled: true,
+    removeAwsDeployIdentityLock: () =>
+      Promise.resolve({ ok: true, removed: true })
   }),
   ...createRepositoriesRoutes({
     cliExec: () => {},
@@ -117,6 +120,7 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    id: () => "fixture",
     probeDeleteConflict: () => Promise.resolve({ state: "clear" as const }),
     isValidRepoSlug: () => true,
     readInstanceEntry: () => undefined,
@@ -128,10 +132,19 @@ const productionHandlers = {
       maxAttempts: 3,
       pending: false
     }),
-    resolveRepoAppName: () => Promise.resolve(""),
+    inspectRepoApplication: () =>
+      Promise.resolve({
+        kind: "unconfirmed",
+        fallbackName: "",
+        unavailable: false
+      }),
     resolveEnvDeployment: () => Promise.resolve(null),
+    listEnvDeployment: () =>
+      Promise.resolve({ deployment: null, incomplete: false }),
     ghOrThrow: () => Promise.resolve(""),
     resetDeploymentViewState: () => {},
+    captureDeletedDeployment: () => () => {},
+    logError: () => {},
     deployListCache: new Map(),
     deployListTtlMs: 0,
     activeDeploymentMutation: () => undefined,
@@ -161,6 +174,13 @@ const productionHandlers = {
           "unexpected deployment abandonment from the route-table suite"
         );
       }
+    },
+    awsTrustRepair: {
+      repair: () => {
+        throw new Error(
+          "unexpected AWS trust repair from the route-table suite"
+        );
+      }
     }
   }),
   ...createAzureDiscoveryRoutes({
@@ -175,6 +195,9 @@ const productionHandlers = {
   }),
   ...createAwsDiscoveryRoutes({ runCli: () => Promise.resolve("") }),
   ...createIdentityProfilesRoutes({
+    runAws: async () => {
+      throw new Error("AWS not scripted");
+    },
     listCredentialProfiles: () => [],
     saveCredentialProfile: () => null,
     deleteCredentialProfile: () => false,
@@ -215,6 +238,9 @@ const productionHandlers = {
     errorMessage: (error) => String(error)
   }),
   ...createIdentityAuthRoutes({
+    runAws: async () => {
+      throw new Error("AWS not scripted");
+    },
     azureCredentialIdValidationError: () => "",
     azureLoginRequiredResponse: () => ({
       error: "",
@@ -287,10 +313,12 @@ const productionHandlers = {
       }),
     listBranchPaths: () => Promise.resolve([]),
     workspaceGraphJsonPath: () => "",
+    graphDefinitionHash: () => "",
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "", remote: false }),
     buildGraphViaRad: () => Promise.resolve([]),
     canvasGraphResources: () => [],
+    removeDirectory: () => {},
     errorMessage: (error) => String(error),
     logError: () => {}
   }),
@@ -318,7 +346,6 @@ const productionHandlers = {
         canvasGraphResources: () => [],
         workspaceGraphJsonPath: () => "",
         graphDefinitionHash: () => "",
-        radArtifactsFingerprint: () => "",
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
@@ -453,6 +480,8 @@ describe("server route ownership boundary", () => {
       "POST /api/bypass-verification",
       "POST /api/operations",
       "POST /api/abandon-deployment",
+      "POST /api/deployment-cleanup-details",
+      "POST /api/deploy/repair-aws-trust",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon",
       "POST /api/operations/:operationId/dismiss",
@@ -461,7 +490,8 @@ describe("server route ownership boundary", () => {
       "POST /api/operations/:operationId/cancel-workflow",
       "POST /api/operations/:operationId/rollback",
       "POST /api/operations/:operationId/exit",
-      "POST /api/operations/:operationId/retry/:retryKind"
+      "POST /api/operations/:operationId/retry/:retryKind",
+      "POST /api/operations/:operationId/aws-lock/remove"
     ]);
     expect(() => assertRouteTable(table)).not.toThrow();
   });

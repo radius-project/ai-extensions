@@ -215,7 +215,7 @@ describe("readModelSnapshot", () => {
     );
   });
 
-  it("rejects old origin evidence even when a real checkout gives every file a fresh timestamp", async () => {
+  it("rejects old origin evidence in a real checkout with fresh file timestamps", async () => {
     const { input, root } = await fixture();
     const config = path.join(root, "empty.gitconfig");
     await fs.writeFile(config, "");
@@ -245,8 +245,17 @@ describe("readModelSnapshot", () => {
       const blob = git(["hash-object", "-w", "--stdin"], contents[index]);
       git(["update-index", "--add", "--cacheinfo", `100644,${blob},${file}`]);
     }
-    const startedAtMs = Date.now();
+    const startedAtMs = Date.parse("2026-01-01T00:00:00Z");
     git(["checkout-index", "--all"]);
+    // Filesystem timestamps need not agree with the wall clock.
+    const checkoutTime = new Date(startedAtMs + 1_000);
+    for (const file of MODEL_FILES) {
+      await fs.utimes(
+        path.join(input.workspacePath, file),
+        checkoutTime,
+        checkoutTime
+      );
+    }
     const snapshot = await readModelSnapshot(input.workspacePath);
     expect(
       Object.values(snapshot.times).every(

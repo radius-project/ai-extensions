@@ -67,6 +67,7 @@ function repo(existingModel?: string): Repo {
   git(root, ["init", "--quiet", "--initial-branch", "main"]);
   git(root, ["config", "user.email", "radius@example.invalid"]);
   git(root, ["config", "user.name", "Radius Test"]);
+  git(root, ["config", "commit.gpgsign", "false"]);
   const radiusDir = path.join(root, ".radius");
   fs.mkdirSync(radiusDir, { recursive: true });
   if (existingModel !== undefined) {
@@ -218,41 +219,44 @@ describe("--begin", () => {
     expect(stagedInGit(target.root)).toEqual([]);
   });
 
-  // The ignore file lives inside the directory the sweep already deletes, so it
-  // needs no separate undo and leaves nothing behind.
-  it("removes the ignore file along with a swept staging directory", () => {
+  it("preserves old staging when a second run begins", () => {
     const target = repo();
     const leftover = begin(target, "old");
+    const file = path.join(leftover, "app.bicep");
+    fs.writeFileSync(file, "in progress\n");
+    const old = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    fs.utimesSync(leftover, old, old);
 
-    run(target.root, ["--begin", "--run-id", "new", "--stale-after-ms", "0"]);
+    begin(target, "new");
 
-    expect(fs.existsSync(leftover)).toBe(false);
+    expect(fs.readFileSync(file, "utf8")).toBe("in progress\n");
     expect(gitStatus(target.root)).toEqual([]);
   });
 
-  it("removes a staging directory left behind by an interrupted run", () => {
+  it("refuses a duplicate run ID without changing the existing staging", () => {
     const target = repo();
-    const leftover = path.join(target.radiusDir, `${STAGING_DIR_PREFIX}old`);
-    fs.mkdirSync(leftover);
-    fs.writeFileSync(path.join(leftover, "app.bicep"), "half written\n");
+    const staging = begin(target, "same");
+    const record = path.join(staging, STAGING_RUN_RECORD);
+    const original = fs.readFileSync(record, "utf8");
+    fs.writeFileSync(path.join(target.radiusDir, "app.bicep"), "new edit");
 
-    // Anything older than the staleness window is fair game: a run that
-    // finished always removed its own.
-    const result = run(target.root, ["--begin", "--stale-after-ms", "0"]);
+    const result = run(target.root, ["--begin", "--run-id", "same"]);
 
-    expect(result.status).toBe(0);
-    expect(fs.existsSync(leftover)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("already exists");
+    expect(fs.readFileSync(record, "utf8")).toBe(original);
   });
 
-  // Runs get unique directory names so two cannot collide; sweeping a
-  // just-started one away would immediately undo that.
-  it("leaves a recently started run alone", () => {
+  it("aborts only the specified run", () => {
     const target = repo();
     const inFlight = begin(target, "first");
     fs.writeFileSync(path.join(inFlight, "app.bicep"), "in progress\n");
+    const second = begin(target, "second");
 
-    begin(target, "second");
+    const result = run(target.root, ["--abort", "--staging", second]);
 
+    expect(result.status).toBe(0);
+    expect(fs.existsSync(second)).toBe(false);
     expect(fs.existsSync(path.join(inFlight, "app.bicep"))).toBe(true);
   });
 
@@ -296,8 +300,6 @@ describe("--begin", () => {
     expect(path.dirname(stagingDir)).toBe(target.radiusDir);
   });
 
-  // Two runs sharing one directory name would sweep each other away, and the
-  // sweep cannot tell a live run from an abandoned one.
   it("gives each run its own directory when no run id is given", () => {
     const target = repo();
     const first = run(target.root, ["--begin"]).stdout;
@@ -356,6 +358,31 @@ describe("publish", () => {
       false
     );
   });
+
+  it.each([
+    "emailCommunicationServices-recipe.bicep",
+    "email-communication-services-recipe.bicep"
+  ])(
+    "publishes and stages the authored recipe %s before removing staging",
+    (name) => {
+      const target = repo();
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+      for (const file of CUSTOM_TYPE_STAGED_FILES) {
+        fs.writeFileSync(path.join(stagingDir, file), "artifact");
+      }
+      fs.writeFileSync(path.join(stagingDir, name), "// authored recipe\n");
+
+      const result = run(target.root, ["--staging", stagingDir]);
+
+      expect(result.status).toBe(0);
+      expect(fs.readFileSync(path.join(target.radiusDir, name), "utf8")).toBe(
+        "// authored recipe\n"
+      );
+      expect(stagedInGit(target.root)).toContain(`.radius/${name}`);
+      expect(fs.existsSync(stagingDir)).toBe(false);
+    }
+  );
 
   it.each(REQUIRED_STAGED_FILES)(
     "refuses a run missing %s and leaves .radius byte-identical",
@@ -682,7 +709,7 @@ describe("publish", () => {
     expect(fs.existsSync(path.join(outside, "app.bicep"))).toBe(true);
   });
 
-  it("does not delete through a symlink while sweeping up leftovers", () => {
+  it("refuses to begin a run at a symlink without modifying its target", () => {
     const target = repo();
     const outside = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), "promote-outside-"))
@@ -695,8 +722,10 @@ describe("publish", () => {
       "junction"
     );
 
-    begin(target);
+    const result = run(target.root, ["--begin", "--run-id", "link"]);
 
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("already exists");
     expect(fs.existsSync(path.join(outside, "keep.txt"))).toBe(true);
   });
 
@@ -704,48 +733,56 @@ describe("publish", () => {
   // re-modelable. The recipe name is a pattern, so the baseline has to pick up
   // whatever is already on disk or the next run reads it as having appeared
   // mid-run and refuses forever, blaming the user for an edit nobody made.
-  it("re-models a repository that already has an authored recipe", () => {
-    const target = repo(MODEL);
-    fs.writeFileSync(
-      path.join(target.radiusDir, "postgres-recipe.bicep"),
-      "// authored\n"
-    );
-    const stagingDir = begin(target);
-    stageCompleteRun(stagingDir);
-    fs.writeFileSync(
-      path.join(stagingDir, "postgres-recipe.bicep"),
-      "// regenerated\n"
-    );
+  it.each(["postgres", "emailCommunicationServices"])(
+    "re-models a repository that already has a %s recipe",
+    (type) => {
+      const target = repo(MODEL);
+      fs.writeFileSync(
+        path.join(target.radiusDir, `${type}-recipe.bicep`),
+        "// authored\n"
+      );
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+      fs.writeFileSync(
+        path.join(stagingDir, `${type}-recipe.bicep`),
+        "// regenerated\n"
+      );
 
-    const result = run(target.root, ["--staging", stagingDir]);
+      const result = run(target.root, ["--staging", stagingDir]);
 
-    expect(result.status).toBe(0);
-    expect(
-      fs.readFileSync(
-        path.join(target.radiusDir, "postgres-recipe.bicep"),
-        "utf8"
-      )
-    ).toBe("// regenerated\n");
-  });
+      expect(result.status).toBe(0);
+      expect(
+        fs.readFileSync(
+          path.join(target.radiusDir, `${type}-recipe.bicep`),
+          "utf8"
+        )
+      ).toBe("// regenerated\n");
+    }
+  );
 
-  it("still refuses when an authored recipe is edited during the run", () => {
-    const target = repo(MODEL);
-    const recipe = path.join(target.radiusDir, "postgres-recipe.bicep");
-    fs.writeFileSync(recipe, "// authored\n");
-    const stagingDir = begin(target);
-    stageCompleteRun(stagingDir);
-    fs.writeFileSync(
-      path.join(stagingDir, "postgres-recipe.bicep"),
-      "// new\n"
-    );
-    fs.writeFileSync(recipe, "// hand edited\n");
+  it.each(["postgres", "emailCommunicationServices"])(
+    "refuses when a %s recipe is edited during the run",
+    (type) => {
+      const target = repo(MODEL);
+      const recipe = path.join(target.radiusDir, `${type}-recipe.bicep`);
+      fs.writeFileSync(recipe, "// authored\n");
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+      fs.writeFileSync(
+        path.join(stagingDir, `${type}-recipe.bicep`),
+        "// new\n"
+      );
+      fs.writeFileSync(recipe, "// hand edited\n");
 
-    const result = run(target.root, ["--staging", stagingDir]);
+      const result = run(target.root, ["--staging", stagingDir]);
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(".radius/postgres-recipe.bicep");
-    expect(fs.readFileSync(recipe, "utf8")).toBe("// hand edited\n");
-  });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`.radius/${type}-recipe.bicep`);
+      expect(fs.readFileSync(recipe, "utf8")).toBe("// hand edited\n");
+      expect(stagedInGit(target.root)).toEqual([]);
+      expect(fs.existsSync(stagingDir)).toBe(false);
+    }
+  );
 
   // A publish that fails PARTWAY: the first renames succeed, then a later one
   // cannot. macOS `chflags uchg` makes one destination immutable, which is the

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  addStep,
   createOperation,
   buildDeleteStages,
   beginRetryAttempt,
@@ -136,8 +137,12 @@ function makePorts(
     deleteRadiusEnvironment: vi.fn(async () => ({
       outcome: "deleted" as const
     })),
+    readRepositoryId: vi.fn(async () => 42),
     removeAwsEnvironmentAccess: vi.fn(async () => {
       throw new Error("unexpected AWS role cleanup");
+    }),
+    removeAwsDeployIdentityLock: vi.fn(async () => {
+      throw new Error("unexpected AWS lock removal");
     }),
     withCredentialProvenanceLock: async (work) => work(),
     readAzureIdentity: vi.fn(async () => ({
@@ -233,6 +238,7 @@ describe("runEnvironmentDeletion — azure happy path", () => {
     expect(op.endedAt).not.toBeNull();
     // Only the two stage-2 calls ran; stage 4 issued no `az` command.
     expect(runAz).toHaveBeenCalledTimes(2);
+    expect(ports.readRepositoryId).not.toHaveBeenCalled();
     expect(
       op.steps.some((s: { label: string }) =>
         /Left the app registration \(app-1\) in place/.test(s.label)
@@ -442,41 +448,83 @@ describe("runEnvironmentDeletion — AWS", () => {
     });
     op.request = {
       repo: "octo/app",
+      repoId: 42,
       environment: "dev",
       provider: "aws",
-      roleArn: ROLE_ARN
+      roleArn: ROLE_ARN,
+      region: "us-west-2",
+      cluster: "shop"
     };
     return op;
   }
+  type Removal = Awaited<
+    ReturnType<EnvironmentDeletionPorts["removeAwsEnvironmentAccess"]>
+  >;
+  type RemovalInput = Parameters<
+    EnvironmentDeletionPorts["removeAwsEnvironmentAccess"]
+  >[0];
+  // Behaves like the real port: a successful removal runs `whileLocked`
+  // before it returns, with the lock still held.
+  const removing = (
+    result: Removal,
+    events: string[] = []
+  ): ReturnType<typeof vi.fn<(input: RemovalInput) => Promise<Removal>>> =>
+    vi.fn(async (input: RemovalInput) => {
+      events.push("lock");
+      if (result.ok) await input.whileLocked(result);
+      events.push("release");
+      return result;
+    });
+  const nothing: Removal = {
+    ok: true,
+    removed: [],
+    kept: [],
+    warnings: []
+  };
+  const stageOf = (op: { stages: Array<{ id: string; state: string }> }) =>
+    op.stages.find((stage) => stage.id === STAGE_DELETE_AWS_ROLE_ACCESS)?.state;
 
-  it("removes the environment from the role after the Radius environment, then keeps the role", async () => {
+  it("removes the environment from the role and deletes the GitHub environment while holding the lock", async () => {
     const op = makeAwsOp();
     const order: string[] = [];
+    const removeAwsEnvironmentAccess = removing(
+      {
+        ok: true,
+        removed: [
+          "trust subject repo:octo/app:environment:dev",
+          "access entry for radius-deploy-octo-app on shop"
+        ],
+        kept: ["IAM role radius-deploy-octo-app"],
+        warnings: []
+      },
+      order
+    );
     const ports = makePorts({
       deleteRadiusEnvironment: vi.fn(async () => {
         order.push("radius");
         return { outcome: "deleted" as const };
       }),
-      removeAwsEnvironmentAccess: vi.fn(async () => {
-        order.push("role");
-        return {
-          ok: true as const,
-          removed: ["trust subject repo:octo/app:environment:dev"],
-          kept: []
-        };
-      }),
+      removeAwsEnvironmentAccess,
       deleteGitHubEnvironment: vi.fn(async () => {
         order.push("github");
         return { outcome: "deleted" as const };
       })
     });
     await runEnvironmentDeletion(op, ports);
-    expect(order).toEqual(["radius", "role", "github"]);
-    expect(ports.removeAwsEnvironmentAccess).toHaveBeenCalledWith({
+    expect(order).toEqual(["radius", "lock", "github", "release"]);
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith({
       repo: "octo/app",
+      repoId: 42,
       environment: "dev",
       roleArn: ROLE_ARN,
-      trustSubjects: []
+      trustSubjects: [],
+      region: "us-west-2",
+      cluster: "shop",
+      operationId: op.operationId,
+      waiting: expect.any(Function),
+      whileLocked: expect.any(Function),
+      onLocked: expect.any(Function),
+      onReleased: expect.any(Function)
     });
     expect(ports.runAz).not.toHaveBeenCalled();
     expect(op.stages.map((s: { id: string }) => s.id)).toEqual([
@@ -487,12 +535,62 @@ describe("runEnvironmentDeletion — AWS", () => {
       STAGE_REVIEW_IAM_ROLE
     ]);
     expect(op.state).toBe("succeeded");
+    expect(ports.deleteGitHubEnvironment).toHaveBeenCalledOnce();
     const labels = op.steps.map((step: { label: string }) => step.label);
-    expect(labels).toContain(
-      "Removed trust subject repo:octo/app:environment:dev from the IAM role"
+    expect(labels).toEqual(
+      expect.arrayContaining([
+        "Removed trust subject repo:octo/app:environment:dev",
+        "Removed access entry for radius-deploy-octo-app on shop",
+        "Kept IAM role radius-deploy-octo-app",
+        "Radius doesn't delete IAM role radius-deploy-octo-app or the account's GitHub identity provider, because other environments, repositories, or services may use them.",
+        "Kept the final snapshots AWS took of databases deleted with this environment's apps. They hold the apps' data, and AWS bills for them until you delete them. Find them under Snapshots in the RDS console, or run: aws rds describe-db-snapshots --snapshot-type manual --region us-west-2"
+      ])
     );
-    expect(labels).toContain(
-      "Left IAM role radius-deploy-octo-app and the account's GitHub identity provider in place. The role serves every environment in this repository. Remove it in the AWS console if nothing needs it."
+    expect(labels).not.toContain(
+      "The deploy identity held nothing for this environment"
+    );
+    // The role cleanup's steps come before the GitHub environment's.
+    const stages = op.steps.map((step: { stage: string }) => step.stage);
+    expect(stages.lastIndexOf(STAGE_DELETE_AWS_ROLE_ACCESS)).toBeLessThan(
+      stages.indexOf(STAGE_DELETE_GITHUB_ENV)
+    );
+  });
+
+  it("finishes with a warning for what it could not confirm", async () => {
+    const op = makeAwsOp();
+    const warning =
+      "Kept the access entry for radius-deploy-octo-app on shop, because Radius couldn't read this repository's environments (HTTP 403).";
+    await runEnvironmentDeletion(
+      op,
+      makePorts({
+        removeAwsEnvironmentAccess: removing({
+          ok: true,
+          removed: ["policy radius-deploy-dev"],
+          kept: [],
+          warnings: [warning]
+        })
+      })
+    );
+    expect(op.state).toBe("succeeded_with_warnings");
+    expect(
+      op.steps.find((step: { label: string }) => step.label === warning)
+    ).toMatchObject({
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      state: "warning",
+      warning: { code: "aws-role-cleanup-warning", message: warning }
+    });
+  });
+
+  it.each([
+    ["no cluster recorded", { region: undefined, cluster: undefined }],
+    ["an empty cluster", { region: "", cluster: "" }]
+  ])("passes an empty cluster for %s", async (_label, recorded) => {
+    const op = makeAwsOp();
+    op.request = { ...op.request, ...recorded };
+    const removeAwsEnvironmentAccess = removing(nothing);
+    await runEnvironmentDeletion(op, makePorts({ removeAwsEnvironmentAccess }));
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
+      expect.objectContaining({ region: "", cluster: "" })
     );
   });
 
@@ -502,28 +600,199 @@ describe("runEnvironmentDeletion — AWS", () => {
       ["repo:octo/app:environment:dev", "id-subject"],
       ["repo:octo/app:environment:dev", "id-subject"]
     ],
-    [
-      "no subjects for a damaged list",
-      ["repo:octo/app:environment:dev", 7],
-      []
-    ],
-    ["no subjects for an empty entry", [""], []],
     ["no subjects when none were recorded", undefined, []]
   ])("passes %s to the role cleanup", async (_label, recorded, expected) => {
     const op = makeAwsOp();
     op.request = { ...op.request, trustSubjects: recorded };
-    const removeAwsEnvironmentAccess = vi.fn(async () => ({
-      ok: true as const,
-      removed: [],
-      kept: []
-    }));
+    const removeAwsEnvironmentAccess = removing(nothing);
     await runEnvironmentDeletion(op, makePorts({ removeAwsEnvironmentAccess }));
     expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
       expect.objectContaining({ trustSubjects: expected })
     );
   });
 
-  it("keeps the role and recorded subjects across a restart and a retry", async () => {
+  // Each refusal must come before stage 1, whose workflow deletes whatever
+  // Radius environment the repository name reaches.
+  const expectNothingRun = (ports: EnvironmentDeletionPorts) => {
+    expect(ports.deleteRadiusEnvironment).not.toHaveBeenCalled();
+    expect(ports.removeAwsEnvironmentAccess).not.toHaveBeenCalled();
+    expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+    expect(ports.deleteStatePackage).not.toHaveBeenCalled();
+  };
+
+  it.each([
+    ["unreadable", null],
+    ["damaged", ["repo:octo/app:environment:dev", 7]],
+    ["an empty entry in", [""]]
+  ])(
+    "refuses %s recorded trust history before deleting anything",
+    async (_label, recorded) => {
+      const op = makeAwsOp();
+      op.request = { ...op.request, trustSubjects: recorded };
+      const ports = makePorts();
+      await runEnvironmentDeletion(op, ports);
+      expectNothingRun(ports);
+      expect(op.state).toBe("failed");
+      expect(op.failure).toMatchObject({
+        code: "aws-saved-configuration-unreadable",
+        stage: STAGE_DELETE_RADIUS_ENV,
+        message:
+          "The environment's AWS_TRUST_SUBJECTS GitHub variable is not a JSON list of trust subjects, so Radius can't tell which trust to remove. Radius stopped before making further changes. Restore the complete list, using the deploy role's trust policy to find this environment's subjects, then delete the environment again. Don't delete the variable, because Radius would then leave the older subjects in the role's trust."
+      });
+    }
+  );
+
+  type RepositoryRefusal = [
+    label: string,
+    repoId: unknown,
+    readRepositoryId: () => Promise<number>,
+    message: string
+  ];
+  const repositoryRefusals: RepositoryRefusal[] = [
+    [
+      "another repository now has the name",
+      42,
+      async () => 7,
+      "octo/app is no longer the repository this deletion started for. Radius stopped before making further changes. If the repository was renamed, delete the environment from its new name."
+    ],
+    [
+      "GitHub can't say which repository has the name",
+      42,
+      async () => {
+        throw new Error("HTTP 502");
+      },
+      "Could not read repository octo/app from GitHub (HTTP 502), so Radius couldn't confirm it is the repository this deletion started for. Radius stopped before making further changes. Delete the environment again."
+    ],
+    ...[undefined, 0, -1, 1.5, "42"].map((repoId): RepositoryRefusal => [
+      `the deletion recorded repository ID ${JSON.stringify(repoId)}`,
+      repoId,
+      async () => 42,
+      "This deletion has no valid GitHub repository ID, so Radius can't confirm octo/app is the repository it started for. Radius stopped before making further changes. Delete the environment again."
+    ])
+  ];
+  it.each(repositoryRefusals)(
+    "stops before deleting anything when %s",
+    async (_label, repoId, readRepositoryId, message) => {
+      const op = makeAwsOp();
+      op.request = { ...op.request, repoId } as typeof op.request;
+      const ports = makePorts({ readRepositoryId: vi.fn(readRepositoryId) });
+      await runEnvironmentDeletion(op, ports);
+      expectNothingRun(ports);
+      expect(op.state).toBe("failed");
+      expect(op.failure).toMatchObject({
+        code: "aws-repository-unconfirmed",
+        stage: STAGE_DELETE_RADIUS_ENV,
+        message
+      });
+    }
+  );
+
+  it.each([
+    ["finished", "succeeded", STAGE_DELETE_AWS_ROLE_ACCESS],
+    ["was interrupted", "running", STAGE_DELETE_RADIUS_ENV]
+  ])(
+    "checks the repository again on resume after stage 1 %s",
+    async (_label, radiusStage, failedStage) => {
+      const op = makeAwsOp();
+      const first = op.stages.find(
+        (s: { id: string }) => s.id === STAGE_DELETE_RADIUS_ENV
+      );
+      if (first) first.state = radiusStage;
+      const ports = makePorts({ readRepositoryId: vi.fn(async () => 7) });
+      await runEnvironmentDeletion(op, ports);
+      expectNothingRun(ports);
+      expect(ports.readRepositoryId).toHaveBeenCalledWith("octo/app");
+      expect(op.state).toBe("failed_partial");
+      expect(op.failure).toMatchObject({
+        code: "aws-repository-unconfirmed",
+        stage: failedStage
+      });
+      expect(stage(op, failedStage)).toBe("failed");
+    }
+  );
+
+  it("reports a partial deletion when a restarted stage 1 is refused", async () => {
+    const op = makeAwsOp();
+    enterStage(op, STAGE_DELETE_RADIUS_ENV);
+    addStep(op, {
+      stage: STAGE_DELETE_RADIUS_ENV,
+      kind: "mutation",
+      label: "Deleting the Radius environment on the cluster",
+      state: "running"
+    });
+    const restarted = reconcileRestoredOperation(
+      fromPersistedOperation(
+        JSON.parse(JSON.stringify(toPersistedOperation(op)))
+      )
+    );
+    expect(stage(restarted, STAGE_DELETE_RADIUS_ENV)).toBe("pending");
+    const ports = makePorts({ readRepositoryId: vi.fn(async () => 7) });
+    await runEnvironmentDeletion(restarted, ports);
+    expectNothingRun(ports);
+    expect(restarted.state).toBe("failed_partial");
+  });
+
+  // The state package is found by repository name too, so a retry that only
+  // deletes it still needs the repository confirmed. Its trust is already
+  // removed, so the recorded trust history isn't read.
+  const packageOnlyRetry = () => {
+    const op = makeAwsOp();
+    op.request = { ...op.request, trustSubjects: null };
+    markStagesDone(op, [
+      STAGE_DELETE_RADIUS_ENV,
+      STAGE_DELETE_AWS_ROLE_ACCESS,
+      STAGE_DELETE_GITHUB_ENV
+    ]);
+    return op;
+  };
+
+  it("stops a state-package retry when another repository now has the name", async () => {
+    const op = packageOnlyRetry();
+    const ports = makePorts({ readRepositoryId: vi.fn(async () => 7) });
+    await runEnvironmentDeletion(op, ports);
+    expectNothingRun(ports);
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure).toMatchObject({
+      code: "aws-repository-unconfirmed",
+      stage: STAGE_DELETE_STATE_PACKAGE
+    });
+    expect(stage(op, STAGE_DELETE_STATE_PACKAGE)).toBe("failed");
+    expect(stage(op, STAGE_DELETE_AWS_ROLE_ACCESS)).toBe("succeeded");
+    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("succeeded");
+  });
+
+  it("deletes the state package on retry when the repository is unchanged", async () => {
+    const op = packageOnlyRetry();
+    const ports = makePorts();
+    await runEnvironmentDeletion(op, ports);
+    expect(ports.readRepositoryId).toHaveBeenCalledWith("octo/app");
+    expect(ports.deleteStatePackage).toHaveBeenCalledOnce();
+    expect(ports.removeAwsEnvironmentAccess).not.toHaveBeenCalled();
+    expect(op.state).toBe("succeeded");
+  });
+
+  it("doesn't read the repository once every stage that reaches it is done", async () => {
+    const op = packageOnlyRetry();
+    markStagesDone(op, [STAGE_DELETE_STATE_PACKAGE]);
+    const ports = makePorts();
+    await runEnvironmentDeletion(op, ports);
+    expect(ports.readRepositoryId).not.toHaveBeenCalled();
+    expect(op.state).toBe("succeeded");
+  });
+
+  it("resumes when the repository is still the one the deletion started for", async () => {
+    const op = makeAwsOp();
+    markStagesDone(op, [STAGE_DELETE_RADIUS_ENV]);
+    const removeAwsEnvironmentAccess = removing(nothing);
+    const ports = makePorts({ removeAwsEnvironmentAccess });
+    await runEnvironmentDeletion(op, ports);
+    expect(ports.readRepositoryId).toHaveBeenCalledWith("octo/app");
+    expect(ports.deleteRadiusEnvironment).not.toHaveBeenCalled();
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledOnce();
+    expect(op.state).toBe("succeeded");
+  });
+
+  it("keeps the role, cluster, and subjects across a restart and a retry", async () => {
     const subjects = [
       "repo:octo/app:environment:dev",
       "repo:octo@7/app@42:environment:dev"
@@ -543,14 +812,16 @@ describe("runEnvironmentDeletion — AWS", () => {
 
     const resumed = restart(op);
     expect(resumed.state).toBe("running");
+    const succeeded = removing({
+      ok: true,
+      removed: subjects.map((subject) => `trust subject ${subject}`),
+      kept: [],
+      warnings: []
+    });
     const removeAwsEnvironmentAccess = vi
-      .fn()
+      .fn<(input: RemovalInput) => Promise<Removal>>()
       .mockResolvedValueOnce({ ok: false as const, message: "AccessDenied" })
-      .mockResolvedValue({
-        ok: true as const,
-        removed: subjects.map((subject) => `trust subject ${subject}`),
-        kept: []
-      });
+      .mockImplementation(succeeded);
     const ports = makePorts({ removeAwsEnvironmentAccess });
     await runEnvironmentDeletion(resumed, ports);
     expect(resumed.state).toBe("failed_partial");
@@ -564,60 +835,594 @@ describe("runEnvironmentDeletion — AWS", () => {
     await runEnvironmentDeletion(retried, ports);
 
     expect(retried.state).toBe("succeeded");
+    const expected = expect.objectContaining({
+      repo: "octo/app",
+      environment: "dev",
+      roleArn: ROLE_ARN,
+      trustSubjects: subjects,
+      region: "us-west-2",
+      cluster: "shop",
+      operationId: retried.operationId
+    });
     expect(removeAwsEnvironmentAccess.mock.calls).toEqual([
-      [
-        {
-          repo: "octo/app",
-          environment: "dev",
-          roleArn: ROLE_ARN,
-          trustSubjects: subjects
-        }
-      ],
-      [
-        {
-          repo: "octo/app",
-          environment: "dev",
-          roleArn: ROLE_ARN,
-          trustSubjects: subjects
-        }
-      ]
+      [expected],
+      [expected]
     ]);
   });
 
+  // Repair adds a subject while it can read the GitHub environment. Between a
+  // failed GitHub delete and the retry, it can add the subjects back.
+  it("removes the subjects again, under the lock, before retrying a failed GitHub environment delete", async () => {
+    const op = makeAwsOp();
+    const events: string[] = [];
+    const removeAwsEnvironmentAccess = removing(
+      {
+        ok: true,
+        removed: ["trust subject repo:octo/app:environment:dev"],
+        kept: [],
+        warnings: []
+      },
+      events
+    );
+    const deleteGitHubEnvironment = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        events.push("github failed");
+        return { outcome: "failed" as const, detail: "HTTP 502" };
+      })
+      .mockImplementation(async () => {
+        events.push("github");
+        return { outcome: "deleted" as const };
+      });
+    const ports = makePorts({
+      removeAwsEnvironmentAccess,
+      deleteGitHubEnvironment
+    });
+
+    await runEnvironmentDeletion(op, ports);
+    expect(op.state).toBe("failed_partial");
+    expect(stageOf(op)).toBe("succeeded");
+
+    beginRetryAttempt(op, "deletion");
+    applyDeletionRetry(op);
+    await runEnvironmentDeletion(op, ports);
+
+    expect(op.state).toBe("succeeded");
+    expect(events).toEqual([
+      "lock",
+      "github failed",
+      "release",
+      "lock",
+      "github",
+      "release"
+    ]);
+    expect(op.steps.map((step: { label: string }) => step.label)).toContain(
+      "Checking the deploy identity again before deleting the GitHub environment"
+    );
+    expect(stageOf(op)).toBe("succeeded");
+  });
+
+  it("lists only what the recheck removed", async () => {
+    const op = makeAwsOp();
+    const unread =
+      "Kept the access entry for radius-deploy-octo-app on shop, because Radius couldn't read this repository's environments (HTTP 403).";
+    const kept = { kept: ["IAM role radius-deploy-octo-app"] };
+    const shared =
+      "Kept trust subject repository_id:42, because it doesn't name one repository and the environment dev, so other environments or repositories may present it too. If nothing else needs it, remove it from the role's trust policy by hand.";
+    const removeAwsEnvironmentAccess = vi
+      .fn<(input: RemovalInput) => Promise<Removal>>()
+      .mockImplementationOnce(async ({ whileLocked }) => {
+        const removed = {
+          ok: true as const,
+          removed: ["trust subject repo:octo/app:environment:dev"],
+          kept: kept.kept,
+          warnings: [unread]
+        };
+        await whileLocked(removed);
+        return removed;
+      })
+      .mockImplementation(async ({ whileLocked }) => {
+        // Repair added the subject back before the retry.
+        const removed = {
+          ok: true as const,
+          removed: ["trust subject repo:octo@7/app@42:environment:dev"],
+          kept: kept.kept,
+          warnings: [unread, shared]
+        };
+        await whileLocked(removed);
+        return removed;
+      });
+    const ports = makePorts({
+      removeAwsEnvironmentAccess,
+      deleteGitHubEnvironment: vi
+        .fn()
+        .mockResolvedValueOnce({ outcome: "failed" as const, detail: "502" })
+        .mockResolvedValue({ outcome: "deleted" as const })
+    });
+
+    await runEnvironmentDeletion(op, ports);
+    beginRetryAttempt(op, "deletion");
+    applyDeletionRetry(op);
+    await runEnvironmentDeletion(op, ports);
+
+    expect(op.state).toBe("succeeded_with_warnings");
+    expect(
+      op.steps
+        .filter(
+          (step: { stage: string }) =>
+            step.stage === STAGE_DELETE_AWS_ROLE_ACCESS
+        )
+        .map((step: { label: string }) => step.label)
+    ).toEqual([
+      "Removing this environment's trust, policy, and unused cluster access from the deploy identity",
+      "Removed trust subject repo:octo/app:environment:dev",
+      "Kept IAM role radius-deploy-octo-app",
+      unread,
+      "Checking the deploy identity again before deleting the GitHub environment",
+      "Removed trust subject repo:octo@7/app@42:environment:dev",
+      shared
+    ]);
+    expect(stageOf(op)).toBe("succeeded");
+  });
+
+  it("keeps the role cleanup's warning verdict when a restart resumes the GitHub environment delete", async () => {
+    const op = makeAwsOp();
+    setStageState(op, STAGE_DELETE_RADIUS_ENV, "succeeded");
+    setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "warning");
+    enterStage(op, STAGE_DELETE_GITHUB_ENV);
+    setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "warning");
+    const removeAwsEnvironmentAccess = removing(nothing);
+
+    await runEnvironmentDeletion(op, makePorts({ removeAwsEnvironmentAccess }));
+
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledOnce();
+    expect(stageOf(op)).toBe("warning");
+    expect(op.steps.map((step: { label: string }) => step.label)).not.toContain(
+      "The deploy identity held nothing for this environment"
+    );
+  });
+
+  describe("when saving fails after the AWS cleanup", () => {
+    const removed: Removal = {
+      ok: true,
+      removed: ["trust subject repo:octo/app:environment:dev"],
+      kept: [],
+      warnings: []
+    };
+    const failingSave = (failAt: number) => {
+      let saves = 0;
+      return vi.fn(async () => {
+        saves += 1;
+        if (saves === failAt) throw new Error("disk full");
+      });
+    };
+    // Saves before the AWS cleanup: one entering the Radius stage, one after
+    // it, one entering the AWS stage. The work under the lock saves next.
+    const SAVES_BEFORE_LOCKED_WORK = 3;
+
+    it("reports the save failure, not an AWS failure, after GitHub confirmed the delete", async () => {
+      const op = makeAwsOp();
+      const events: string[] = [];
+      const deleteGitHubEnvironment = vi.fn(async () => {
+        events.push("github");
+        return { outcome: "deleted" as const };
+      });
+      const persist = vi.fn(async () => {
+        if (events.at(-1) === "github") throw new Error("disk full");
+      });
+      const ports = makePorts({
+        removeAwsEnvironmentAccess: removing(removed, events),
+        deleteGitHubEnvironment,
+        persist
+      });
+
+      await expect(runEnvironmentDeletion(op, ports)).rejects.toThrow(
+        "disk full"
+      );
+
+      expect(events).toEqual(["lock", "github", "release"]);
+      expect(stageOf(op)).toBe("succeeded");
+      expect(
+        op.stages.find(
+          (stage: { id: string }) => stage.id === STAGE_DELETE_GITHUB_ENV
+        )?.state
+      ).toBe("succeeded");
+      expect(op.failure ?? null).toBeNull();
+      expect(
+        op.steps.map((step: { label: string }) => step.label)
+      ).not.toContain("Could not update the deploy identity. Cleanup stopped.");
+    });
+
+    it("keeps the GitHub environment and the AWS verdict when the save before its delete fails", async () => {
+      const op = makeAwsOp();
+      const ports = makePorts({
+        removeAwsEnvironmentAccess: removing(removed),
+        persist: failingSave(SAVES_BEFORE_LOCKED_WORK + 1)
+      });
+
+      await expect(runEnvironmentDeletion(op, ports)).rejects.toThrow(
+        "disk full"
+      );
+
+      expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+      expect(stageOf(op)).toBe("succeeded");
+      expect(op.failure ?? null).toBeNull();
+    });
+  });
+
+  it("does not run the role cleanup again once the GitHub environment is gone", async () => {
+    const op = makeAwsOp();
+    const removeAwsEnvironmentAccess = removing(nothing);
+    const ports = makePorts({
+      removeAwsEnvironmentAccess,
+      deleteStatePackage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("forbidden"))
+        .mockResolvedValue("deleted")
+    });
+
+    await runEnvironmentDeletion(op, ports);
+    expect(op.state).toBe("failed_partial");
+    beginRetryAttempt(op, "deletion");
+    applyDeletionRetry(op);
+    await runEnvironmentDeletion(op, ports);
+
+    expect(op.state).toBe("succeeded");
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledOnce();
+  });
+
+  describe("the deploy identity lock it takes", () => {
+    const LOCK_ARN =
+      "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-octo-app";
+    // Takes the lock, then releases it, unless `release` is "failed".
+    const locking = (release: "released" | "failed") =>
+      vi.fn(async (input: RemovalInput): Promise<Removal> => {
+        await input.onLocked?.({ policyArn: LOCK_ARN, policyId: "LOCK1" });
+        await input.whileLocked(nothing);
+        if (release === "released") input.onReleased?.();
+        return release === "released" ? nothing : (
+            { ...nothing, lockWarning: "Radius could not release its lock." }
+          );
+      });
+
+    it("records the lock and saves it before the first change, then clears it once released", async () => {
+      const op = makeAwsOp();
+      const saved: unknown[] = [];
+      const ports = makePorts({
+        removeAwsEnvironmentAccess: locking("released"),
+        persist: vi.fn(async () => {
+          saved.push(op.context?.awsDeployIdentityLock ?? null);
+        })
+      });
+
+      await runEnvironmentDeletion(op, ports);
+
+      expect(saved).toContainEqual({ policyArn: LOCK_ARN, policyId: "LOCK1" });
+      expect(op.context.awsDeployIdentityLock).toBeNull();
+      expect(op.state).toBe("succeeded");
+    });
+
+    it("keeps the lock recorded, and the role cleanup done, when its release did not happen", async () => {
+      const op = makeAwsOp();
+      const removeAwsEnvironmentAccess = locking("failed");
+      const removeAwsDeployIdentityLock = vi.fn(async () => ({
+        ok: true as const,
+        removed: true
+      }));
+      const ports = makePorts({
+        removeAwsEnvironmentAccess,
+        removeAwsDeployIdentityLock
+      });
+      await runEnvironmentDeletion(op, ports);
+
+      expect(op.context.awsDeployIdentityLock).toEqual({
+        policyArn: LOCK_ARN,
+        policyId: "LOCK1"
+      });
+      expect(stageOf(op)).toBe("succeeded");
+      expect(op.state).toBe("succeeded_with_warnings");
+
+      // Retry deletion, after a restart, releases only that lock.
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(op))
+      );
+      expect(canRetryDeletion(restored)).toMatchObject({ ok: true });
+      beginRetryAttempt(restored, "deletion");
+      applyDeletionRetry(restored);
+      await runEnvironmentDeletion(restored, ports);
+
+      expect(removeAwsEnvironmentAccess).toHaveBeenCalledOnce();
+      expect(removeAwsDeployIdentityLock).toHaveBeenCalledExactlyOnceWith({
+        policyArn: LOCK_ARN,
+        policyId: "LOCK1"
+      });
+      expect(restored.context.awsDeployIdentityLock).toBeNull();
+      expect(restored.state).toBe("succeeded");
+    });
+
+    it("takes back the lock an earlier attempt recorded", async () => {
+      const op = makeAwsOp();
+      op.context = {
+        awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+      };
+      const removeAwsEnvironmentAccess = locking("released");
+      await runEnvironmentDeletion(
+        op,
+        makePorts({ removeAwsEnvironmentAccess })
+      );
+
+      expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
+        expect.objectContaining({ adopt: "LOCK0" })
+      );
+      expect(op.context.awsDeployIdentityLock).toBeNull();
+    });
+
+    // An earlier attempt finished the role and the GitHub environment and
+    // stopped before its release, so only the recorded lock is left.
+    function finishedButLocked() {
+      const op = makeAwsOp();
+      for (const stage of [
+        STAGE_DELETE_RADIUS_ENV,
+        STAGE_DELETE_AWS_ROLE_ACCESS,
+        STAGE_DELETE_GITHUB_ENV
+      ]) {
+        setStageState(op, stage, "succeeded");
+      }
+      op.context = {
+        awsDeployIdentityLock: { policyArn: LOCK_ARN, policyId: "LOCK0" }
+      };
+      return op;
+    }
+
+    it.each([
+      ["removed", { ok: true as const, removed: true }],
+      ["already gone", { ok: true as const, removed: false }],
+      [
+        "replaced by another run's",
+        {
+          ok: false as const,
+          code: "aws-lock-changed",
+          message: "The lock changed since it was shown."
+        }
+      ]
+    ])(
+      "releases only that lock, by its policy ID, without touching the role, when it is %s",
+      async (_label, answer) => {
+        const op = finishedButLocked();
+        const removeAwsDeployIdentityLock = vi.fn(async () => answer);
+        const ports = makePorts({ removeAwsDeployIdentityLock });
+
+        await runEnvironmentDeletion(op, ports);
+
+        expect(removeAwsDeployIdentityLock).toHaveBeenCalledExactlyOnceWith({
+          policyArn: LOCK_ARN,
+          policyId: "LOCK0"
+        });
+        expect(ports.removeAwsEnvironmentAccess).not.toHaveBeenCalled();
+        expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+        expect(op.context.awsDeployIdentityLock).toBeNull();
+        expect(stageOf(op)).toBe("succeeded");
+        expect(op.state).toBe("succeeded");
+      }
+    );
+
+    it.each([
+      [
+        "fails",
+        async () => ({
+          ok: false as const,
+          code: "aws-lock-denied",
+          message: "Not allowed iam:DeletePolicy."
+        })
+      ],
+      [
+        "throws",
+        async () => {
+          throw new Error("aws exited");
+        }
+      ]
+    ])(
+      "keeps the lock recorded, with a warning naming it, when its removal %s",
+      async (_label, removal) => {
+        const op = finishedButLocked();
+        const ports = makePorts({
+          removeAwsDeployIdentityLock: vi.fn(removal)
+        });
+
+        await runEnvironmentDeletion(op, ports);
+
+        expect(ports.removeAwsEnvironmentAccess).not.toHaveBeenCalled();
+        expect(op.context.awsDeployIdentityLock).toEqual({
+          policyArn: LOCK_ARN,
+          policyId: "LOCK0"
+        });
+        expect(stageOf(op)).toBe("succeeded");
+        const warning = op.steps.find(
+          (step: { warning?: { code: string } }) =>
+            step.warning?.code === "aws-lock-release-failed"
+        );
+        expect(warning?.warning.message).toContain("prints LOCK0");
+
+        // Retry deletion tries only that lock again, never the role.
+        expect(canRetryDeletion(op)).toMatchObject({ ok: true });
+        beginRetryAttempt(op, "deletion");
+        applyDeletionRetry(op);
+        await runEnvironmentDeletion(op, ports);
+        expect(ports.removeAwsEnvironmentAccess).not.toHaveBeenCalled();
+        expect(ports.removeAwsDeployIdentityLock).toHaveBeenCalledTimes(2);
+        expect(stageOf(op)).toBe("succeeded");
+        expect(op.context.awsDeployIdentityLock).not.toBeNull();
+      }
+    );
+  });
+
   it.each([
-    ["arn:aws:iam::123456789012:role/team/deploy", "Left IAM role deploy "],
-    ["arn:aws:iam::1:role/team/x", "Left IAM role arn:aws:iam::1:role/team/x "]
+    [
+      "arn:aws:iam::123456789012:role/team/deploy",
+      "Radius doesn't delete IAM role deploy "
+    ],
+    [
+      "arn:aws:iam::1:role/team/x",
+      "Radius doesn't delete IAM role arn:aws:iam::1:role/team/x "
+    ]
   ])("names the kept role from %s", async (roleArn, label) => {
     const op = makeAwsOp();
     op.request = { ...op.request, roleArn };
     await runEnvironmentDeletion(
       op,
-      makePorts({
-        removeAwsEnvironmentAccess: vi.fn(async () => ({
-          ok: true as const,
-          removed: [],
-          kept: []
-        }))
-      })
+      makePorts({ removeAwsEnvironmentAccess: removing(nothing) })
     );
     expect(
       op.steps.some((step: { label: string }) => step.label.startsWith(label))
     ).toBe(true);
   });
 
-  it("reports a role that held nothing for the environment", async () => {
+  it("shows each new wait for the lock, keeps the deletion fresh, and clears the wait", async () => {
+    const op = makeAwsOp();
+    const wait = {
+      policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
+      policyId: "LOCK0",
+      holder: "Another run",
+      since: "",
+      removable: false
+    };
+    const seen: unknown[] = [];
+    const ports = makePorts({
+      removeAwsEnvironmentAccess: vi.fn(async ({ waiting, whileLocked }) => {
+        op.lastActivityAt = "2000-01-01T00:00:00.000Z";
+        await waiting(wait, "⏳ Waiting for the lock on IAM role deploy.");
+        seen.push(op.lastActivityAt, op.context?.awsLockWait);
+        await waiting({ ...wait, removable: true }, null);
+        seen.push(op.context?.awsLockWait);
+        await whileLocked(nothing as Extract<Removal, { ok: true }>);
+        seen.push(op.context?.awsLockWait);
+        return nothing;
+      })
+    });
+
+    await runEnvironmentDeletion(op, ports);
+
+    expect(seen[0]).not.toBe("2000-01-01T00:00:00.000Z");
+    expect(seen[1]).toEqual(wait);
+    expect(seen[2]).toEqual({ ...wait, removable: true });
+    expect(seen[3]).toBeNull();
+    expect(op.context.awsLockWait).toBeNull();
+    const labels = op.steps.map((step: { label: string }) => step.label);
+    expect(labels.filter((label: string) => label.startsWith("⏳"))).toEqual([
+      "⏳ Waiting for the lock on IAM role deploy."
+    ]);
+    expect(op.state).toBe("succeeded");
+  });
+
+  it("finishes with a warning when the lock could not be released", async () => {
     const op = makeAwsOp();
     const ports = makePorts({
-      removeAwsEnvironmentAccess: vi.fn(async () => ({
-        ok: true as const,
-        removed: [],
-        kept: []
+      removeAwsEnvironmentAccess: vi.fn(async ({ whileLocked }) => {
+        const removed = {
+          ok: true as const,
+          removed: ["policy radius-deploy-dev"],
+          kept: [],
+          warnings: []
+        };
+        await whileLocked(removed);
+        return { ...removed, lockWarning: "not allowed iam:DeletePolicy" };
+      })
+    });
+
+    await runEnvironmentDeletion(op, ports);
+
+    const warning = op.steps.find(
+      (step: { label: string }) =>
+        step.label === "Could not release the lock on the IAM role"
+    );
+    expect(warning).toMatchObject({
+      state: "warning",
+      warning: {
+        code: "aws-lock-release-failed",
+        message: "not allowed iam:DeletePolicy"
+      }
+    });
+    // The role cleanup finished, whatever happened to the lock.
+    expect(stageOf(op)).toBe("succeeded");
+    expect(ports.deleteGitHubEnvironment).toHaveBeenCalled();
+    expect(op.state).toBe("succeeded_with_warnings");
+  });
+
+  it("reports a lock it could not release after a failed GitHub environment delete", async () => {
+    const op = makeAwsOp();
+    const ports = makePorts({
+      removeAwsEnvironmentAccess: vi.fn(async ({ whileLocked }) => {
+        await whileLocked(nothing as Extract<Removal, { ok: true }>);
+        return { ...nothing, lockWarning: "not allowed iam:DeletePolicy" };
+      }),
+      deleteGitHubEnvironment: vi.fn(async () => ({
+        outcome: "failed" as const,
+        detail: "HTTP 502"
       }))
     });
+
     await runEnvironmentDeletion(op, ports);
-    expect(op.steps.map((step: { label: string }) => step.label)).toContain(
-      "The IAM role held nothing for this environment"
+
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure?.code).toBe("github-env-delete-failed");
+    expect(
+      op.steps.some(
+        (step: { label: string }) =>
+          step.label === "Could not release the lock on the IAM role"
+      )
+    ).toBe(true);
+  });
+
+  it.each([
+    ["no region recorded", undefined],
+    ["an empty region", " "]
+  ])(
+    "names the snapshots without a region for %s, even when the role was already gone",
+    async (_label, region) => {
+      const op = makeAwsOp();
+      op.request = { ...op.request, region };
+      await runEnvironmentDeletion(
+        op,
+        makePorts({
+          removeAwsEnvironmentAccess: removing({
+            ...nothing,
+            warnings: ["IAM role radius-deploy-octo-app was already gone."]
+          })
+        })
+      );
+      expect(
+        op.steps.find((step: { label: string }) =>
+          step.label.startsWith("Kept the final snapshots")
+        )
+      ).toMatchObject({
+        stage: STAGE_REVIEW_IAM_ROLE,
+        label: expect.stringMatching(
+          /run: aws rds describe-db-snapshots --snapshot-type manual$/
+        )
+      });
+    }
+  );
+
+  it("never mentions database snapshots for an Azure environment", async () => {
+    const op = makeOp();
+    await runEnvironmentDeletion(op, makePorts());
+    expect(
+      op.steps.some((step: { label: string }) =>
+        step.label.includes("snapshot")
+      )
+    ).toBe(false);
+  });
+
+  it("reports a role that held nothing for the environment", async () => {
+    const op = makeAwsOp();
+    await runEnvironmentDeletion(
+      op,
+      makePorts({ removeAwsEnvironmentAccess: removing(nothing) })
     );
+    expect(op.steps.map((step: { label: string }) => step.label)).toContain(
+      "The deploy identity held nothing for this environment"
+    );
+    expect(op.state).toBe("succeeded");
   });
 
   it.each([
@@ -652,7 +1457,7 @@ describe("runEnvironmentDeletion — AWS", () => {
 describe("runEnvironmentDeletion — best-effort warnings", () => {
   it("fails closed and stops before cleanup when the radius env delete fails", async () => {
     const op = makeOp({ provider: "aws", includeAzureCleanup: false });
-    const ports = makePorts({
+    const { log: _log, ...ports } = makePorts({
       deleteRadiusEnvironment: vi.fn(async () => ({
         outcome: "failed" as const,
         detail: "workflow failed"
@@ -1283,6 +2088,12 @@ describe("runEnvironmentDeletion — fallbacks and optional ports", () => {
       deleteRadiusEnvironment: vi.fn(async () => ({
         outcome: "deleted" as const
       })),
+      removeAwsDeployIdentityLock: async () => {
+        throw new Error("Unexpected lock removal");
+      },
+      readRepositoryId: vi.fn(async () => {
+        throw new Error("unexpected repository read");
+      }),
       removeAwsEnvironmentAccess: vi.fn(async () => {
         throw new Error("unexpected AWS role cleanup");
       }),

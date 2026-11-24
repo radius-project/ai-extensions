@@ -247,6 +247,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   /* ─── Status banners ──────────────────────────────────────────────────── */
   .status { padding: 12px 14px; border-radius: var(--rad-radius); margin: 12px 0; font-size: 13px; }
   .status.info { background: var(--rad-info-bg); border: 1px solid var(--rad-info); color: var(--rad-text); }
+  .graph-save-warning:not(:empty) { padding: 12px 14px; border-radius: var(--rad-radius); margin: 12px 0; font-size: 13px; background: var(--rad-warning-bg); border: 1px solid var(--rad-warning); color: var(--rad-text); }
   .status.success { background: var(--rad-success-bg); border: 1px solid var(--rad-success); color: var(--rad-text); }
   .status.error { background: var(--rad-danger-bg); border: 1px solid var(--rad-danger); color: var(--rad-text); }
 

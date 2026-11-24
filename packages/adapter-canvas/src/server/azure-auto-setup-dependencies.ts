@@ -9,6 +9,7 @@ import type { AzureSetupDependencies } from "./services/azure-setup.js";
 export interface AzureAutoSetupCompositionSeams extends Pick<
   AzureAutoSetupDependencies,
   | "external"
+  | "isStopped"
   | "tempFile"
   | "ensureServicePrincipal"
   | "finalizeSetupFailure"

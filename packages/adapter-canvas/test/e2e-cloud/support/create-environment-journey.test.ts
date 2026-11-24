@@ -29,6 +29,7 @@ import {
 } from "./create-environment-journey.js";
 
 const PROVISIONED = {
+  githubSignIn: "github-app" as const,
   fixtureProvisioned: true,
   unprovisionedReason: "The fixture repository is provisioned.",
   githubAppClientId: "Iv1.example",
@@ -75,6 +76,7 @@ describe("evaluateCreateEnvironmentGate", () => {
   it("fails preflight with the fixture repository's own reason before looking at credentials", () => {
     const gate = evaluateCreateEnvironmentGate({
       cloudE2eFlag: "1",
+      githubSignIn: "github-app",
       fixtureProvisioned: false,
       unprovisionedReason: "FIXTURE_BASELINE_SHA still holds a placeholder.",
       subscriptionId: "",
@@ -123,6 +125,58 @@ describe("evaluateCreateEnvironmentGate", () => {
     });
     expect(gate.enabled === false && gate.disposition).toBe("fail");
     expect(gate.enabled === false && gate.reason).toContain(variable);
+    // The hint names the only case a local run may skip the App.
+    expect(gate.enabled === false && gate.reason).toContain(
+      "only against your own fixture copy outside radius-project"
+    );
+  });
+
+  it("does not need the GitHub App for a gh session run", () => {
+    expect(
+      evaluateCreateEnvironmentGate({
+        cloudE2eFlag: "1",
+        ...PROVISIONED,
+        githubSignIn: "gh-session",
+        githubAppClientId: undefined,
+        githubAppPrivateKey: undefined,
+        subscriptionId: "sub-1",
+        githubToken: "gho_session"
+      })
+    ).toEqual({ enabled: true });
+  });
+
+  it("still needs the token a gh session run signs in with", () => {
+    const gate = evaluateCreateEnvironmentGate({
+      cloudE2eFlag: "1",
+      ...PROVISIONED,
+      githubSignIn: "gh-session",
+      subscriptionId: "sub-1",
+      githubToken: ""
+    });
+    expect(gate.enabled === false && gate.reason).toContain("GH_TOKEN");
+  });
+
+  it("fails preflight with the preparation failure before anything else", () => {
+    expect(
+      evaluateCreateEnvironmentGate({
+        cloudE2eFlag: "1",
+        ...PROVISIONED,
+        preparationFailure: "Set all four together.",
+        fixtureProvisioned: false
+      })
+    ).toEqual({
+      enabled: false,
+      disposition: "fail",
+      reason: "Set all four together."
+    });
+  });
+
+  it("skips without opt-in even when preparation failed", () => {
+    const gate = evaluateCreateEnvironmentGate({
+      ...PROVISIONED,
+      preparationFailure: "Set all four together."
+    });
+    expect(gate.enabled === false && gate.disposition).toBe("skip");
   });
 });
 

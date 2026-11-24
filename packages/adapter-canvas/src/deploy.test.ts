@@ -14,9 +14,11 @@ import {
   isRepoNotFoundError,
   findWorkflowRun,
   fetchRunLog,
+  ghJson,
   getRunDetail,
   isSelectedGhAuthorizationError,
-  selectWorkflowRunId
+  latestWorkflowRunId,
+  selectDeploymentWorkflowRunId
 } from "./deploy.js";
 import * as gh from "./gh.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
@@ -453,6 +455,128 @@ describe("ambient workflow callback binding", () => {
   );
 });
 
+describe("ambient workflow discovery parsing", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("parses trimmed JSON with the requested timeout", async () => {
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (command, args, options, callback) => {
+        expect(command).toBe("gh");
+        expect(args).toEqual(["run", "list"]);
+        expect(options).toEqual({ timeout: 4321 });
+        queueMicrotask(() => callback(null, '  {"status":"queued"} \n', ""));
+        return new ChildProcess();
+      }
+    );
+
+    await expect(ghJson(["run", "list"], null, 4321)).resolves.toEqual({
+      status: "queued"
+    });
+  });
+
+  it.each([
+    {
+      name: "CLI failure",
+      error: new Error("gh unavailable"),
+      stdout: '{"status":"completed"}'
+    },
+    {
+      name: "malformed JSON",
+      error: null,
+      stdout: '{"status":'
+    }
+  ])("returns the caller fallback for $name", async ({ error, stdout }) => {
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (_command, _args, _options, callback) => {
+        queueMicrotask(() => callback(error, stdout, ""));
+        return new ChildProcess();
+      }
+    );
+    const fallback = { status: "unavailable" };
+
+    await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
+  });
+
+  it("finds the greatest numeric run id while ignoring malformed run fields", async () => {
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (_command, _args, _options, callback) => {
+        queueMicrotask(() =>
+          callback(
+            null,
+            JSON.stringify([
+              null,
+              [],
+              "not-a-run",
+              {
+                databaseId: "12",
+                createdAt: 7,
+                status: false,
+                conclusion: false,
+                displayTitle: 9
+              },
+              {
+                databaseId: 4,
+                createdAt: "2026-10-15T12:00:00Z",
+                status: "completed",
+                conclusion: null,
+                displayTitle: "older"
+              },
+              { databaseId: 11, conclusion: "success" },
+              { databaseId: 8 }
+            ]),
+            ""
+          )
+        );
+        return new ChildProcess();
+      }
+    );
+
+    await expect(
+      latestWorkflowRunId("contoso/store", "deploy.yml")
+    ).resolves.toBe(11);
+    expect(gh.cliExec).toHaveBeenCalledWith(
+      "gh",
+      [
+        "run",
+        "list",
+        "--workflow=deploy.yml",
+        "--limit",
+        "20",
+        "--json",
+        "databaseId,createdAt",
+        "--repo",
+        "contoso/store"
+      ],
+      { timeout: 15000 },
+      expect.any(Function)
+    );
+  });
+
+  it("returns no latest run when GitHub returns a valid non-list payload", async () => {
+    vi.spyOn(gh, "cliExec").mockImplementation(
+      (_command, _args, _options, callback) => {
+        queueMicrotask(() => callback(null, '{"message":"unexpected"}', ""));
+        return new ChildProcess();
+      }
+    );
+
+    await expect(
+      latestWorkflowRunId("contoso/store", "deploy.yml")
+    ).resolves.toBeNull();
+  });
+
+  it("returns a known run id without reading GitHub", async () => {
+    const cli = vi.spyOn(gh, "cliExec");
+
+    await expect(
+      findWorkflowRun("contoso/store", "deploy.yml", Date.now(), "known-run")
+    ).resolves.toBe("known-run");
+    expect(cli).not.toHaveBeenCalled();
+  });
+});
+
 describe("selected-account workflow discovery", () => {
   it.each([["run discovery", 401, "gh: Unauthorized (HTTP 401)", "list"]])(
     "surfaces %s HTTP %i instead of degrading to pending",
@@ -741,7 +865,7 @@ describe("explainRepoAccessForEnvSetup", () => {
     );
 
     expect(out).toContain(
-      "& 'C:\\Copilot Tools\\gh.exe' auth switch --user <account>"
+      "& 'C:\\Copilot Tools\\gh.exe' auth switch --user '<account>'"
     );
     expect(out).toContain("Install GitHub CLI system-wide.");
   });
@@ -848,13 +972,13 @@ describe("isRepoNotFoundError", () => {
   });
 });
 
-describe("selectWorkflowRunId", () => {
+describe("selectDeploymentWorkflowRunId", () => {
   const at = (iso: string) => Date.parse(iso);
   const since = at("2026-08-20T10:00:00Z");
 
   it("returns null for a non-array payload", () => {
-    expect(selectWorkflowRunId(null, since)).toBeNull();
-    expect(selectWorkflowRunId({}, since)).toBeNull();
+    expect(selectDeploymentWorkflowRunId(null, since)).toBeNull();
+    expect(selectDeploymentWorkflowRunId({}, since)).toBeNull();
   });
 
   it("picks the newest run created within the skew window", () => {
@@ -862,17 +986,17 @@ describe("selectWorkflowRunId", () => {
       { databaseId: 3, createdAt: "2026-08-20T10:00:05Z" },
       { databaseId: 2, createdAt: "2026-08-20T09:59:59Z" }
     ];
-    expect(selectWorkflowRunId(runs, since)).toBe(3);
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBe(3);
   });
 
   it("ignores stale runs created before the ~60s cutoff", () => {
     const runs = [{ databaseId: 9, createdAt: "2026-08-20T09:58:00Z" }];
-    expect(selectWorkflowRunId(runs, since)).toBeNull();
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBeNull();
   });
 
   it("tolerates ~60s of clock skew before dispatch", () => {
     const runs = [{ databaseId: 7, createdAt: "2026-08-20T09:59:10Z" }];
-    expect(selectWorkflowRunId(runs, since)).toBe(7);
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBe(7);
   });
 
   it("matches only the run whose display title carries the correlation id", () => {
@@ -888,7 +1012,7 @@ describe("selectWorkflowRunId", () => {
         displayTitle: "Radius - Delete Environment prod del-abc-123"
       }
     ];
-    expect(selectWorkflowRunId(runs, since, "del-abc-123")).toBe(4);
+    expect(selectDeploymentWorkflowRunId(runs, since, "del-abc-123")).toBe(4);
   });
 
   it("returns null when no run carries the requested correlation id", () => {
@@ -899,7 +1023,9 @@ describe("selectWorkflowRunId", () => {
         displayTitle: "Radius - Delete Environment prod other-id"
       }
     ];
-    expect(selectWorkflowRunId(runs, since, "del-missing")).toBeNull();
+    expect(
+      selectDeploymentWorkflowRunId(runs, since, "del-missing")
+    ).toBeNull();
   });
 
   it("skips entries missing a databaseId", () => {
@@ -907,6 +1033,6 @@ describe("selectWorkflowRunId", () => {
       { createdAt: "2026-08-20T10:00:06Z" },
       { databaseId: 8, createdAt: "2026-08-20T10:00:05Z" }
     ];
-    expect(selectWorkflowRunId(runs, since)).toBe(8);
+    expect(selectDeploymentWorkflowRunId(runs, since)).toBe(8);
   });
 });

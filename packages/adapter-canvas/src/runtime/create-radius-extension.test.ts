@@ -26,6 +26,66 @@ import {
 // all (a module that never imports it cannot call it), so that is what these
 // checks assert rather than banning the word "joinSession" from comments.
 describe("RU-20: createRadiusExtension never joins a session", () => {
+  it("requires a deployment runtime at construction", () => {
+    const { deps } = createFakeDependencies();
+    Reflect.deleteProperty(deps, "deployment");
+    expect(() => createRadiusExtension(deps)).toThrow(
+      "Missing Radius runtime dependency: deployment"
+    );
+  });
+
+  it("bounds pending readiness at 2000ms without releasing it and gives SDK teardown its separate budget", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { deps } = createFakeDependencies();
+    const extension = createRadiusExtension(deps);
+    let release = () => {};
+    let releaseSdk = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sdkGate = new Promise<void>((resolve) => {
+      releaseSdk = resolve;
+    });
+    const close = vi.fn(async () => sdkGate);
+    extension.attachSession(Object.assign(createFakeSession(), { close }));
+    const work = deps.executionOwner.runReadiness(async () => gate);
+    try {
+      const shutdown = extension.shutdown();
+      const done = vi.fn();
+      void shutdown.then(done);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(close).not.toHaveBeenCalled();
+      expect(deps.executionOwner.pendingReadinessCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(close).toHaveBeenCalledOnce();
+      expect(deps.logError).toHaveBeenCalledWith(
+        expect.stringContaining("pending readiness checks: 1")
+      );
+      expect(deps.executionOwner.pendingReadinessCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(done).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(shutdown).resolves.toEqual({ complete: false, exitCode: 1 });
+      expect(deps.executionOwner.pendingReadinessCount()).toBe(1);
+      release();
+      await work;
+      expect(deps.executionOwner.pendingReadinessCount()).toBe(0);
+      const callback = vi.fn(async () => {});
+      await expect(
+        deps.executionOwner.runReadiness(callback)
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(callback).not.toHaveBeenCalled();
+    } finally {
+      release();
+      releaseSdk();
+      await work;
+      await extension.shutdown();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
+
   it("this module never imports the SDK's joinSession", () => {
     const source = readFileSync(
       new URL("./create-radius-extension.ts", import.meta.url),
@@ -254,7 +314,7 @@ describe("RU-19: onPreToolUse hook", () => {
 
   it("never inspects the application model for an open_canvas call", async () => {
     const { ext, deps } = setup();
-    const fetchBicep = deps.core.fetchBicepFromRepo as ReturnType<typeof vi.fn>;
+    const fetchBicep = vi.mocked(deps.graphSources.read);
     fetchBicep.mockClear();
 
     await ext.hooks.onPreToolUse({
@@ -353,7 +413,7 @@ describe("RU-19: onSessionStart hook", () => {
     expect(session.send).not.toHaveBeenCalled();
     expect(session.rpc.canvas.open).not.toHaveBeenCalled();
     expect(fake.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
-    expect(fake.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+    expect(fake.deps.graphSources.read).not.toHaveBeenCalled();
   });
 
   it("returns no context when the working directory is unavailable", async () => {
@@ -432,6 +492,23 @@ describe("RU-19: onSessionStart hook", () => {
 
     expect(() => ext.attachSession(session)).not.toThrow();
   });
+
+  it("does not leak an asynchronous startup diagnostic logging failure", async () => {
+    const fake = createFakeDependencies();
+    const ext = createRadiusExtension(fake.deps);
+    (
+      fake.deps.workspace.hasRadiusApplicationModel as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(new Error("worktree still materializing"));
+    await ext.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    const session = createFakeSession({
+      log: vi.fn(() => Promise.reject(new Error("log unavailable")))
+    });
+
+    expect(() => ext.attachSession(session)).not.toThrow();
+    await Promise.resolve();
+  });
 });
 
 describe("RU-19: host-channel callback wiring (context/permission/session)", () => {
@@ -458,13 +535,23 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       .calls[0][0] as { prompt: string; displayPrompt: string };
     const attemptToken = state?.appModelAttemptTokens?.["acme/widgets::main"];
     if (!attemptToken) throw new Error("expected current modeling attempt");
+    // The Canvas embeds the skill bootstrap, so the agent never has to find
+    // and call radius_generate_app to start modeling.
+    const skillHandoff = deps.radiusAppBicepSkill();
     // The agent half must carry the full instructions...
     expect(sent.prompt).toBe(
-      appBicepHandoffPrompt("acme/widgets", "graph", ["main"], "app-graph", {
-        attemptToken,
-        instanceId: "app-graph",
-        branches: ["main"]
-      })
+      appBicepHandoffPrompt(
+        "acme/widgets",
+        skillHandoff,
+        "graph",
+        ["main"],
+        "app-graph",
+        {
+          attemptToken,
+          instanceId: "app-graph",
+          branches: ["main"]
+        }
+      )
     );
     // ...and the timeline half must be the short stand-in, not the reverse.
     expect(sent.displayPrompt).toBe(
@@ -601,6 +688,7 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     const session = createFakeSession();
     ext.attachSession(session);
     await capturedHostCallbacks.deployRepairHandoff!({
+      appFile: "models/custom.bicep",
       repo: "acme/widgets",
       branch: "main",
       error: "BCP037",
@@ -613,6 +701,8 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       .calls[0][0] as { prompt: string; displayPrompt: string };
     expect(sent.prompt).toContain("BCP037");
     expect(sent.prompt).toContain("attempt-A");
+    expect(sent.prompt).toContain("Repair `models/custom.bicep` in place");
+    expect(sent.prompt).not.toContain(".radius/app.bicep");
     expect(sent.displayPrompt).toBe(
       deployRepairHandoffDisplayPrompt("acme/widgets", "main")
     );
@@ -760,21 +850,25 @@ describe("RU-19: keepalive", () => {
     expect(session.metadata!.snapshot).not.toHaveBeenCalled();
   });
 
-  it("pings when a deploy is in flight even if the panel is not recently active", async () => {
+  it("pings during deployment admission without an open panel", async () => {
     const { ext, deps, setLastWebviewActivityAt } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
     setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1000);
-    deps.servers.set("radius-panel", {
-      server: {} as never,
-      baseUrl: "http://127.0.0.1:0",
-      url: "http://127.0.0.1:0/?page=deployed",
-      page: "deployed",
-      state: { deployStatus: "in_progress" }
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
-
-    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
-    expect(session.metadata!.snapshot).toHaveBeenCalled();
+    const admission = deps.deployment.owner.trackAdmission(() => gate);
+    try {
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
+      expect(session.metadata!.snapshot).toHaveBeenCalled();
+      expect(deps.servers.size).toBe(0);
+    } finally {
+      release();
+      await admission;
+      await ext.shutdown("test");
+    }
   });
 
   it("never throws even when session.metadata.snapshot rejects", async () => {
@@ -883,6 +977,205 @@ describe("RU-21: operation-aware host keepalive", () => {
 // RU-18 (extension half): shutdown closes every server and tears down the
 // session exactly once, even under a duplicate/concurrent call.
 describe("RU-18: shutdown is idempotent and closes every server exactly once", () => {
+  it.each([1999, 2000, 2001])(
+    "drains panel-free deployment work against the 2000ms deadline (settles at %dms)",
+    async (delay) => {
+      vi.useFakeTimers();
+      const { ext, deps } = setup();
+      const owner = deps.deployment.owner;
+      const target = {
+        repo: "org/app",
+        branch: "feature",
+        environment: "production",
+        provider: "azure",
+        appFile: ".radius/app.bicep"
+      };
+      const reservation = owner.reserve(target, "deploy");
+      if (!reservation) throw new Error("Expected an available target");
+      const invocation = owner.begin(
+        target,
+        { deployStatus: "in_progress" },
+        reservation
+      );
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const work = owner.run(invocation, () => held);
+      owner.release(reservation);
+      const close = vi.fn();
+      ext.attachSession(createFakeSession({ close }));
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        const stopping = ext.shutdown("SIGTERM");
+        expect(ext.shutdown("SIGINT")).toBe(stopping);
+        expect(invocation.signal.aborted).toBe(true);
+        expect(owner.hasActiveWork()).toBe(true);
+        expect(owner.retire(invocation)).toBe(false);
+        setTimeout(release, delay);
+        await vi.advanceTimersByTimeAsync(1998);
+        expect(close).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(2);
+        await expect(stopping).resolves.toEqual({
+          complete: delay < 2000,
+          exitCode: delay < 2000 ? 0 : 1
+        });
+        expect(close).toHaveBeenCalledOnce();
+        expect(deps.servers.size).toBe(0);
+        if (delay >= 2000) {
+          expect(deps.logError).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `pending attempts: ${invocation.observationId}`
+            )
+          );
+        } else {
+          expect(deps.logError).not.toHaveBeenCalled();
+        }
+        await vi.advanceTimersByTimeAsync(1);
+        await work;
+        expect(owner.hasActiveWork()).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        release();
+        await work;
+        await ext.shutdown("test");
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it("reports a server-only timeout without inventing a pending operation", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ext, deps } = setup();
+      deps.servers.set(
+        "held-panel",
+        createFakeServerEntry("held-panel", "deployed")
+      );
+      let release = () => {};
+      vi.mocked(deps.stopServer).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          })
+      );
+      const stopping = ext.shutdown();
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(stopping).resolves.toEqual({ complete: false, exitCode: 1 });
+      expect(deps.logError).toHaveBeenCalledWith(
+        expect.stringContaining("pending operations: none")
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      release();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("reports a rejected task finalizer and still tears down the session", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ext, deps } = setup();
+    const close = vi.fn();
+    ext.attachSession(createFakeSession({ close }));
+    let release = () => {};
+    let started = () => {};
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    deps.executionOwner.attachRuntime().schedule("failed-finalizer", {
+      run: async () => {
+        started();
+        await held;
+      },
+      failed: async () => {},
+      settling: () => {},
+      settled: async () => {
+        throw new Error("sensitive provider diagnostic");
+      }
+    });
+    await entered;
+    const stopping = ext.shutdown();
+    release();
+    await expect(stopping).resolves.toEqual({ complete: false, exitCode: 1 });
+    expect(close).toHaveBeenCalledOnce();
+    expect(deps.logError).toHaveBeenCalledExactlyOnceWith(
+      "Radius setup drain failed: operation failed-finalizer: finalization failed"
+    );
+    vi.restoreAllMocks();
+  });
+  it.each(["throws", "rejects"] as const)(
+    "returns failure when session teardown %s",
+    async (failure) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { ext } = setup();
+      ext.attachSession(
+        createFakeSession({
+          close: () => {
+            if (failure === "throws") throw new Error("session close failed");
+            return Promise.reject(new Error("session close failed"));
+          }
+        })
+      );
+      await expect(ext.shutdown()).resolves.toEqual({
+        complete: false,
+        exitCode: 1
+      });
+      vi.restoreAllMocks();
+    }
+  );
+  it.each([1999, 2000, 2001])(
+    "uses a single 2000ms task/server deadline for settlement at %dms",
+    async (delay) => {
+      vi.useFakeTimers();
+      try {
+        const { ext, deps } = setup();
+        const scope = deps.executionOwner.attachRuntime();
+        let release = () => {};
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        scope.schedule("held-operation", {
+          run: () => held,
+          failed: async () => {},
+          settling: () => {},
+          settled: () => {}
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        deps.servers.set(
+          "held-panel",
+          createFakeServerEntry("held-panel", "deployed")
+        );
+        vi.mocked(deps.stopServer).mockImplementation(() => held);
+        const close = vi.fn();
+        ext.attachSession(createFakeSession({ close }));
+        const stopping = ext.shutdown("SIGTERM");
+        expect(ext.shutdown("SIGINT")).toBe(stopping);
+        setTimeout(release, delay);
+        let outcome: unknown;
+        void stopping.then((value) => {
+          outcome = value;
+        });
+        await vi.advanceTimersByTimeAsync(1998);
+        expect(outcome).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(2);
+        expect(outcome).toMatchObject({
+          complete: delay < 2000,
+          exitCode: delay < 2000 ? 0 : 1
+        });
+        expect(close).toHaveBeenCalledOnce();
+        if (delay >= 2000)
+          expect(deps.logError).toHaveBeenCalledWith(
+            expect.stringContaining("held-operation")
+          );
+        await vi.advanceTimersByTimeAsync(1);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
   it.each(["rejects", "throws", "marking throws"] as const)(
     "reports a server stop that %s and still closes its sibling and session once",
     async (failure) => {
@@ -909,7 +1202,7 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
 
       const stopping = ext.shutdown("SIGTERM");
       expect(ext.shutdown("SIGINT")).toBe(stopping);
-      await stopping;
+      await expect(stopping).resolves.toEqual({ complete: false, exitCode: 1 });
       await ext.shutdown("SIGTERM");
 
       expect(deps.logError).toHaveBeenCalledExactlyOnceWith(
@@ -963,7 +1256,10 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
     const session = createFakeSession({ close } as never);
     ext.attachSession(session);
 
-    await ext.shutdown("SIGTERM");
+    await expect(ext.shutdown("SIGTERM")).resolves.toEqual({
+      complete: true,
+      exitCode: 0
+    });
     await ext.shutdown("SIGTERM");
     expect(close).toHaveBeenCalledTimes(1);
   });
@@ -1056,6 +1352,9 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
       page: "graph",
       state: {}
     });
-    await expect(ext.shutdown("SIGTERM")).resolves.toBeUndefined();
+    await expect(ext.shutdown("SIGTERM")).resolves.toEqual({
+      complete: false,
+      exitCode: 1
+    });
   });
 });

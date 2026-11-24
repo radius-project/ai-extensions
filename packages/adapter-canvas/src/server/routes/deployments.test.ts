@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { captureDeployedApplicationState } from "../services/deployed-view-state.js";
 import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
@@ -13,6 +14,7 @@ import {
   handleDeployStatus,
   handleListApplications,
   handleListDeployments,
+  handleCleanupDetails,
   type DeployListCacheEntry,
   type DeploymentsInstanceEntry,
   type DeploymentsDependencies,
@@ -77,6 +79,7 @@ function dependencies(
   overrides: Partial<DeploymentsDependencies> = {}
 ): DeploymentsDependencies {
   return {
+    id: () => "fixture",
     isValidRepoSlug: (value) => value === "octo/todolist",
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
@@ -88,11 +91,19 @@ function dependencies(
     deployHandoffStatus: () => {
       throw new Error("deployHandoffStatus not stubbed");
     },
-    resolveRepoAppName: () => {
-      throw new Error("resolveRepoAppName not stubbed");
+    inspectRepoApplication: () => {
+      throw new Error("inspectRepoApplication not stubbed");
     },
     resolveEnvDeployment: () => {
       throw new Error("resolveEnvDeployment not stubbed");
+    },
+    listEnvDeployment: async (...args) => {
+      if (!overrides.resolveEnvDeployment)
+        throw new Error("listEnvDeployment not stubbed");
+      return {
+        deployment: await overrides.resolveEnvDeployment(...args),
+        incomplete: false
+      };
     },
     ghOrThrow: () => {
       throw new Error("ghOrThrow not stubbed");
@@ -141,6 +152,10 @@ function dependencies(
       throw new Error("runGh not stubbed");
     },
     readProcessEnv: () => ({}),
+    captureDeletedDeployment: captureDeployedApplicationState,
+    logError: () => {
+      throw new Error("logError not stubbed");
+    },
     // Timers run inline so the dispatch retry delays cost nothing; the lease
     // callback is captured rather than fired, matching a real pending timer.
     setTimer: (callback, ms) => {
@@ -155,6 +170,11 @@ function dependencies(
     abandonment: {
       abandon: () => {
         throw new Error("abandonment.abandon not stubbed");
+      }
+    },
+    awsTrustRepair: {
+      repair: () => {
+        throw new Error("awsTrustRepair.repair not stubbed");
       }
     },
     probeDeleteConflict: () => {
@@ -219,6 +239,7 @@ function statusDependencies(
 function row(environment: string, status = "deployed"): DeploymentRow {
   return {
     app: "todolist",
+    identity: { state: "known", application: "todolist" },
     environment,
     provider: "azure",
     status,
@@ -233,19 +254,78 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the nine routes it owns", () => {
+  it("declares exactly the eleven routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
+      "POST /api/deploy/repair-aws-trust",
       "GET /api/deploy-notification",
       "GET /api/list-applications",
       "GET /api/list-deployments",
+      "POST /api/deployment-cleanup-details",
       "GET /api/delete-conflict",
       "POST /api/deploy",
       "POST /api/deploy-reset",
       "POST /api/delete-deployment",
       "POST /api/abandon-deployment"
     ]);
+  });
+
+  it.each(["error", "incomplete"] as const)(
+    "keeps healthy rows visible when another environment has %s history",
+    async (kind) => {
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/list-deployments?repo=octo/todolist"
+      );
+      const resolveEnvDeployment = vi.fn(async () => null);
+      await handleListDeployments(
+        ctx,
+        dependencies({
+          deployListCache: new Map(),
+          deployListTtlMs: 15000,
+          ghOrThrow: async () => "dev\nprod",
+          resolveEnvDeployment,
+          listEnvDeployment: async (_repo, environment) => {
+            if (environment === "dev") {
+              if (kind === "error") throw new Error("rate limit exceeded");
+              return { deployment: null, incomplete: true };
+            }
+            return {
+              deployment: {
+                app: "app",
+                environment,
+                provider: "azure",
+                status: "success",
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/todolist/actions/runs/42"
+              },
+              incomplete: false
+            };
+          }
+        })
+      );
+      expect(JSON.parse(recording.body)).toMatchObject({
+        deployments: [{ app: "app", environment: "prod" }],
+        environmentDiagnostics: [
+          { environment: "dev", kind, message: expect.any(String) }
+        ]
+      });
+      expect(resolveEnvDeployment).not.toHaveBeenCalled();
+    }
+  );
+
+  it("refuses malformed cleanup details JSON before any resolver call", async () => {
+    const { recording, context: ctx } = context(
+      "POST",
+      "/api/deployment-cleanup-details",
+      "{"
+    );
+    await handleCleanupDetails(ctx, dependencies());
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Invalid cleanup request."
+    });
   });
 
   it("dispatches each declared key to its own handler", async () => {
@@ -255,7 +335,13 @@ describe("deployments routes (SU-06)", () => {
         readInstanceEntry: () => ({ state }),
         triggerDeployRepairHandoff: () => false,
         deployHandoffStatus: () => IDLE_HANDOFF,
-        resolveRepoAppName: () => Promise.resolve("todolist"),
+        inspectRepoApplication: () =>
+          Promise.resolve({
+            kind: "defined",
+            name: "todolist",
+            path: ".radius/app.bicep",
+            branch: "main"
+          }),
         deployListCache: {
           get: () => undefined,
           set: () => undefined,
@@ -572,6 +658,7 @@ describe("deployments routes (SU-06)", () => {
         deployedGraph: null,
         deployRunUrl: null,
         attempt: null,
+        generation: 0,
         active: false,
         repairing: false,
         handoff: IDLE_HANDOFF
@@ -658,6 +745,8 @@ describe("deployments routes (SU-06)", () => {
         deployLogs: ["one", "two"],
         deployLogBase: 10,
         deployStatus: "in_progress",
+        workspaceRepo: "octo/todolist",
+        workspaceBranch: "feature/x",
         deployError: "boom",
         deployErrorKind: "branch-not-pushed",
         deployErrorBranch: "feature/x",
@@ -666,7 +755,11 @@ describe("deployments routes (SU-06)", () => {
         deployFinishedAt: 222,
         deployedGraph: [{ id: "g", name: "g", type: "t" }],
         deployRunUrl: "https://example.test/run",
-        deployAttempt: { id: "attempt-1" } as CanvasState["deployAttempt"]
+        deployAttempt: {
+          id: "attempt-1",
+          targetRepo: "octo/todolist",
+          branch: "feature/x"
+        }
       };
       const { recording, context: ctx } = context("GET", "/api/deploy-status");
       handleDeployStatus(ctx, statusDependencies(state));
@@ -690,6 +783,58 @@ describe("deployments routes (SU-06)", () => {
         active: true
       });
     });
+
+    it.each([
+      { workspaceRepo: undefined, workspaceBranch: "feature", expected: null },
+      {
+        workspaceRepo: "acme/other",
+        workspaceBranch: "feature",
+        expected: null
+      },
+      {
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: undefined,
+        expected: null
+      },
+      { workspaceRepo: "acme/widgets", workspaceBranch: "", expected: null },
+      {
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: "other",
+        expected: null
+      },
+      {
+        workspaceRepo: "ACME/WIDGETS",
+        workspaceBranch: "feature",
+        expected: "feature"
+      }
+    ])(
+      "offers branch remediation only for the verified workspace $workspaceRepo@$workspaceBranch",
+      ({ workspaceRepo, workspaceBranch, expected }) => {
+        const state: CanvasState = {
+          workspaceRepo,
+          workspaceBranch,
+          deployErrorKind: "branch-not-pushed",
+          deployErrorBranch: "feature",
+          deployAttempt: {
+            id: "attempt",
+            targetRepo: "acme/widgets",
+            branch: "feature"
+          }
+        };
+        const { recording, context: ctx } = context(
+          "GET",
+          "/api/deploy-status"
+        );
+
+        handleDeployStatus(ctx, statusDependencies(state));
+
+        expect(JSON.parse(recording.body)).toMatchObject({
+          errorKind: "branch-not-pushed",
+          errorBranch: expected,
+          attempt: state.deployAttempt
+        });
+      }
+    );
 
     it.each([
       ["success", false],
@@ -905,9 +1050,14 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => ({ state: { contextBranch: "feature/x" } }),
-          resolveRepoAppName: (repo, branch) => {
+          inspectRepoApplication: (repo, branch) => {
             seen.push([repo, branch]);
-            return Promise.resolve("todo-app");
+            return Promise.resolve({
+              kind: "defined",
+              name: "todo-app",
+              path: ".radius/app.bicep",
+              branch
+            });
           }
         })
       );
@@ -953,9 +1103,14 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => ({ state: state as CanvasState }),
-          resolveRepoAppName: (_repo, branch) => {
+          inspectRepoApplication: (_repo, branch) => {
             seen.push(branch);
-            return Promise.resolve("todo-app");
+            return Promise.resolve({
+              kind: "defined",
+              name: "todo-app",
+              path: ".radius/app.bicep",
+              branch
+            });
           }
         })
       );
@@ -972,9 +1127,14 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => undefined,
-          resolveRepoAppName: (_repo, branch) => {
+          inspectRepoApplication: (_repo, branch) => {
             seen.push(branch);
-            return Promise.resolve("todo-app");
+            return Promise.resolve({
+              kind: "defined",
+              name: "todo-app",
+              path: ".radius/app.bicep",
+              branch
+            });
           }
         })
       );
@@ -990,7 +1150,7 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => undefined,
-          resolveRepoAppName: () => Promise.reject(new Error("gh exploded"))
+          inspectRepoApplication: () => Promise.reject(new Error("gh exploded"))
         })
       );
 
@@ -1011,7 +1171,7 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => undefined,
-          resolveRepoAppName: () => Promise.reject("plain string")
+          inspectRepoApplication: () => Promise.reject("plain string")
         })
       );
       expect(JSON.parse(recording.body).error).toBe("plain string");
@@ -1026,7 +1186,7 @@ describe("deployments routes (SU-06)", () => {
         ctx,
         dependencies({
           readInstanceEntry: () => undefined,
-          resolveRepoAppName: () => Promise.reject(new Error("nope"))
+          inspectRepoApplication: () => Promise.reject(new Error("nope"))
         })
       );
       expect(JSON.parse(recording.body).applications).toEqual([
@@ -1096,7 +1256,13 @@ describe("deployments routes (SU-06)", () => {
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve("dev"),
-          resolveRepoAppName: () => Promise.resolve("todolist"),
+          inspectRepoApplication: () =>
+            Promise.resolve({
+              kind: "defined",
+              name: "todolist",
+              path: ".radius/app.bicep",
+              branch: "main"
+            }),
           resolveEnvDeployment: (_repo, environment) =>
             Promise.resolve(row(environment))
         })
@@ -1126,7 +1292,13 @@ describe("deployments routes (SU-06)", () => {
           ghCalls += 1;
           return Promise.resolve("dev");
         },
-        resolveRepoAppName: () => Promise.resolve("todolist"),
+        inspectRepoApplication: () =>
+          Promise.resolve({
+            kind: "defined",
+            name: "todolist",
+            path: ".radius/app.bicep",
+            branch: "main"
+          }),
         resolveEnvDeployment: (_repo, environment) =>
           Promise.resolve(row(environment))
       };
@@ -1173,7 +1345,13 @@ describe("deployments routes (SU-06)", () => {
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve("dev"),
-          resolveRepoAppName: () => Promise.resolve("todolist"),
+          inspectRepoApplication: () =>
+            Promise.resolve({
+              kind: "defined",
+              name: "todolist",
+              path: ".radius/app.bicep",
+              branch: "main"
+            }),
           resolveEnvDeployment: (_repo, environment) =>
             Promise.resolve(row(environment))
         })
@@ -1224,7 +1402,13 @@ describe("deployments routes (SU-06)", () => {
             // produces across page boundaries.
             return Promise.resolve("dev\nprod\ndev\n\n");
           },
-          resolveRepoAppName: () => Promise.resolve("todo-app"),
+          inspectRepoApplication: () =>
+            Promise.resolve({
+              kind: "defined",
+              name: "todo-app",
+              path: ".radius/app.bicep",
+              branch: "main"
+            }),
           resolveEnvDeployment: (repo, environment, appName) => {
             resolveCalls.push([repo, environment, appName]);
             return Promise.resolve(
@@ -1244,8 +1428,8 @@ describe("deployments routes (SU-06)", () => {
         ]
       ]);
       expect(resolveCalls).toEqual([
-        ["octo/todolist", "dev", "todo-app"],
-        ["octo/todolist", "prod", "todo-app"]
+        ["octo/todolist", "dev", ""],
+        ["octo/todolist", "prod", ""]
       ]);
       expect(JSON.parse(recording.body)).toEqual({
         deployments: [row("dev")]
@@ -1267,7 +1451,13 @@ describe("deployments routes (SU-06)", () => {
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve(""),
-          resolveRepoAppName: () => Promise.resolve("todolist"),
+          inspectRepoApplication: () =>
+            Promise.resolve({
+              kind: "defined",
+              name: "todolist",
+              path: ".radius/app.bicep",
+              branch: "main"
+            }),
           resolveEnvDeployment: () => {
             throw new Error("no environment to resolve");
           }
@@ -1529,6 +1719,218 @@ describe("deployments routes (SU-06)", () => {
     function deleteContext(body = BODY) {
       return context("POST", "/api/delete-deployment", body);
     }
+
+    it.each([
+      { identity: undefined },
+      { identity: { state: "unavailable" as const, reason: "expired" } },
+      {
+        identity: {
+          state: "unavailable" as const,
+          reason: "denied",
+          readFailed: true
+        }
+      },
+      { identity: { state: "known" as const, application: "other-app" } }
+    ])(
+      "refuses unverified application identity before workflow writes %j",
+      async ({ identity }) => {
+        const { context: ctx, recording } = deleteContext();
+        const ensureWorkflowsCurrent = vi.fn(async () => ({
+          created: [],
+          failed: []
+        }));
+        const runGh = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+        const releaseDeploymentMutation = vi.fn();
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            resolveEnvDeployment: async () => ({ ...row("dev"), identity }),
+            ensureWorkflowsCurrent,
+            runGh,
+            releaseDeploymentMutation
+          })
+        );
+        expect(recording.status).toBe(
+          identity?.state === "unavailable" && identity.readFailed ? 503 : 409
+        );
+        expect(ensureWorkflowsCurrent).not.toHaveBeenCalled();
+        expect(runGh).not.toHaveBeenCalled();
+        expect(releaseDeploymentMutation).toHaveBeenCalledOnce();
+      }
+    );
+
+    it.each([
+      { deploymentId: "superseded" },
+      { runUrl: "https://github.com/other/run" }
+    ])("refuses a stale displayed deployment %j", async (expected) => {
+      const { context: ctx, recording } = deleteContext(
+        JSON.stringify({ ...JSON.parse(BODY), ...expected })
+      );
+      const runGh = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          resolveEnvDeployment: async () => row("dev"),
+          runGh
+        })
+      );
+      expect(recording.status).toBe(409);
+      expect(runGh).not.toHaveBeenCalled();
+    });
+
+    it.each([{ deploymentId: 12 }, { runUrl: false }])(
+      "rejects malformed freshness input %j",
+      async (expected) => {
+        const { context: ctx, recording } = deleteContext(
+          JSON.stringify({ ...JSON.parse(BODY), ...expected })
+        );
+        await handleDeleteDeployment(ctx, deleteDependencies());
+        expect(recording.status).toBe(400);
+      }
+    );
+
+    it.each<{
+      name: string;
+      overrides: Partial<DeploymentsDependencies>;
+      status: number;
+      force?: boolean;
+    }>([
+      {
+        name: "unavailable remote state",
+        status: 503,
+        overrides: {
+          resolveEnvDeployment: async () => {
+            throw new Error("unavailable");
+          }
+        }
+      },
+      {
+        name: "force precondition refusal",
+        status: 409,
+        force: true,
+        overrides: {}
+      },
+      {
+        name: "workflow synchronization failure",
+        status: 400,
+        overrides: {
+          ensureWorkflowsCurrent: async () => {
+            throw new Error("sync failed");
+          }
+        }
+      },
+      {
+        name: "rejected dispatch",
+        status: 400,
+        overrides: {
+          runGh: async () => ({ code: 1, stdout: "", stderr: "rejected" })
+        }
+      },
+      {
+        name: "ambiguous dispatch timeout",
+        status: 400,
+        overrides: {
+          runGh: async () => ({
+            code: 1,
+            stdout: "",
+            stderr: "timeout",
+            timedOut: true
+          })
+        }
+      }
+    ])(
+      "preserves captured evidence after $name",
+      async ({ overrides, status, force }) => {
+        const invalidate = vi.fn();
+        const capture = vi.fn(() => invalidate);
+        const release = vi.fn();
+        const { recording, context: ctx } = deleteContext(
+          JSON.stringify({
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist",
+            force
+          })
+        );
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            ...overrides,
+            captureDeletedDeployment: capture,
+            releaseDeploymentMutation: release
+          })
+        );
+        expect(recording.status).toBe(status);
+        expect(capture).toHaveBeenCalledOnce();
+        expect(invalidate).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledOnce();
+      }
+    );
+
+    it.each(["missing", "throwing"] as const)(
+      "retains accepted dispatch and its lease after %s run discovery",
+      async (discovery) => {
+        const invalidate = vi.fn();
+        const capture = vi.fn(() => invalidate);
+        const release = vi.fn();
+        const logError = vi.fn();
+        const dispatch = vi.fn(async () => ({
+          code: 0,
+          stdout: "",
+          stderr: ""
+        }));
+        let expire: (() => void) | undefined;
+        const { recording, context: ctx } = deleteContext();
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            captureDeletedDeployment: capture,
+            readProcessEnv: () => ({ GH_TOKEN: "fixture-only-value" }),
+            releaseDeploymentMutation: release,
+            runGh: dispatch,
+            logError,
+            setTimer(callback) {
+              expire = callback;
+              return {};
+            },
+            findWorkflowRun: async () => {
+              expect(invalidate).toHaveBeenCalledOnce();
+              expect(expire).toBeTypeOf("function");
+              if (discovery === "throwing")
+                throw new Error(
+                  "Authorization: Bearer fixture-only-value\n" +
+                    "x".repeat(3000)
+                );
+              return null;
+            }
+          })
+        );
+        expect(recording.status).toBe(200);
+        expect(JSON.parse(recording.body)).toEqual({
+          success: true,
+          runUrl: "",
+          forced: false
+        });
+        expect(capture).toHaveBeenCalledWith(
+          {},
+          {
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist"
+          }
+        );
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(release).not.toHaveBeenCalled();
+        if (discovery === "throwing") {
+          expect(logError).toHaveBeenCalledOnce();
+          const diagnostic = logError.mock.calls[0][0];
+          expect(diagnostic).not.toContain("fixture-only-value");
+          expect(diagnostic.length).toBeLessThan(2100);
+        } else expect(logError).not.toHaveBeenCalled();
+        expire?.();
+        expect(release).toHaveBeenCalledOnce();
+      }
+    );
 
     it("refuses a request missing or malformed repo, environment or application", async () => {
       for (const body of [
@@ -1801,6 +2203,43 @@ describe("deployments routes (SU-06)", () => {
       }
     );
 
+    it.each([0, 1])(
+      "admits the delete title boundary and releases ownership on overflow by %s",
+      async (overflow) => {
+        const fixed = "Radius - Delete  [radius:v1 app=todolist] dep-fixture"
+          .length;
+        const environment = "e".repeat(256 - fixed + overflow);
+        const { recording, context: ctx } = deleteContext(
+          JSON.stringify({
+            repo: "octo/todolist",
+            environment,
+            application: "todolist"
+          })
+        );
+        const runGh = vi.fn(async () => ({
+          code: 0,
+          stdout: "",
+          stderr: ""
+        }));
+        const release = vi.fn();
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({ runGh, releaseDeploymentMutation: release })
+        );
+        expect(recording.status).toBe(overflow ? 400 : 200);
+        if (overflow) {
+          expect(JSON.parse(recording.body).error).toContain(
+            "supported run-title contract"
+          );
+          expect(runGh).not.toHaveBeenCalled();
+          expect(release).toHaveBeenCalledOnce();
+        } else {
+          expect(runGh).toHaveBeenCalledOnce();
+          expect(release).not.toHaveBeenCalled();
+        }
+      }
+    );
+
     it("dispatches, evicts the cached listing and reports the run URL", async () => {
       const { recording, context: ctx } = deleteContext();
       const cache = new Map<string, DeployListCacheEntry>();
@@ -1836,6 +2275,8 @@ describe("deployments routes (SU-06)", () => {
           "environment=dev",
           "-f",
           "application=todolist",
+          "-f",
+          "correlation_id=dep-fixture",
           "--repo",
           "octo/todolist"
         ]
@@ -2414,6 +2855,8 @@ describe("deployments routes (SU-06)", () => {
             "-f",
             "application=todolist",
             "-f",
+            "correlation_id=dep-fixture",
+            "-f",
             "force=true",
             "--repo",
             "octo/todolist"
@@ -2687,9 +3130,7 @@ describe("deployments routes (SU-06)", () => {
         expect(recording.status).toBe(400);
       });
 
-      // The 422 retry exists only because a just-committed workflow may not
-      // declare `force` yet, so an ordinary delete must not inherit it.
-      it("does not retry an unforced dispatch refused as an unexpected input", async () => {
+      it("retries the new correlation input schema after an ordinary dispatcher update", async () => {
         const attempts: string[] = [];
         const { recording, context: ctx } = deleteContext();
         await handleDeleteDeployment(
@@ -2710,7 +3151,7 @@ describe("deployments routes (SU-06)", () => {
           })
         );
 
-        expect(attempts).toHaveLength(1);
+        expect(attempts).toHaveLength(3);
         expect(recording.status).toBe(400);
       });
 
@@ -2976,5 +3417,73 @@ describe("deployments routes (SU-06)", () => {
       ]);
       expect(recording.status).toBe(400);
     });
+  });
+});
+
+describe("POST /api/deploy/repair-aws-trust", () => {
+  it.each([
+    ["no body", ""],
+    ["text that is not JSON", "not json"],
+    ["no generation", "{}"],
+    ["a fractional generation", '{"generation":1.5}'],
+    ["a string generation", '{"generation":"4"}'],
+    ["a JSON array", "[4]"],
+    ["JSON null", "null"]
+  ])(
+    "answers 400 for a body with %s, without asking the repair service",
+    async (_label, body) => {
+      const calls: unknown[] = [];
+      const routes = createDeploymentsRoutes(
+        dependencies({
+          awsTrustRepair: {
+            repair: async (input) => {
+              calls.push(input);
+              return { status: 200, body: {} };
+            }
+          }
+        })
+      );
+      const { context: ctx, recording } = context(
+        "POST",
+        "/api/deploy/repair-aws-trust",
+        body
+      );
+
+      await routes["POST /api/deploy/repair-aws-trust"](ctx);
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        code: "repair-request-invalid",
+        error:
+          "Repair needs the deploy the panel shows, as an integer generation. Reload the page and try again."
+      });
+      expect(calls).toEqual([]);
+    }
+  );
+
+  it("drains the body and answers with the repair service's result", async () => {
+    const calls: unknown[] = [];
+    const routes = createDeploymentsRoutes(
+      dependencies({
+        awsTrustRepair: {
+          repair: async (input) => {
+            calls.push(input);
+            return { status: 409, body: { code: "aws-lock-busy" } };
+          }
+        }
+      })
+    );
+    const { context: ctx, recording } = context(
+      "POST",
+      "/api/deploy/repair-aws-trust",
+      '{"repo":"ignored/repo","generation":4}'
+    );
+
+    await routes["POST /api/deploy/repair-aws-trust"](ctx);
+
+    // Only the deploy the panel showed is read; the repository is ignored.
+    expect(calls).toEqual([{ instanceId: "panel-a", generation: 4 }]);
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({ code: "aws-lock-busy" });
   });
 });

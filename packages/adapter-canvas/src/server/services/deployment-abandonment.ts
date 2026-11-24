@@ -1,5 +1,7 @@
 import type { CanvasState } from "../../shared.js";
+import { cleanupMarker } from "@radius-project/adapter-shared";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import { matchesDeployedApplicationState } from "./deployed-view-state.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
@@ -9,6 +11,7 @@ import {
   ABANDONED_DEPLOYMENT_DESCRIPTION,
   type DeploymentRow
 } from "./deployment-resolver.js";
+import { deploymentRunId, redactCredentials } from "@radius-project/core";
 
 export interface DeploymentAbandonmentReservation {
   repo: string;
@@ -88,37 +91,69 @@ function operationDescription(
   return `${operation} operation for ${reservation.repo} in environment ${reservation.environment}`;
 }
 
-function retireMatchingDeployAttempt(
+function captureMatchingDeployAttempt(
   state: CanvasState,
   repo: string,
-  environment: string
-): void {
-  const attempt = state.deployAttempt;
-  if (
-    !attempt ||
-    attempt.targetRepo !== repo ||
-    attempt.environment !== environment
-  ) {
-    return;
-  }
-  delete state.deployAttempt;
-  delete state.deployResult;
-  delete state.deployStatus;
-  delete state.deployError;
-  delete state.deployErrorKind;
-  delete state.deployErrorBranch;
-  delete state.deployStartedAt;
-  delete state.deployFinishedAt;
-  delete state.deployLogs;
-  delete state.deployLogBase;
-  delete state.deployRunId;
-  delete state.deployRunUrl;
-  delete state.deployRepairing;
-  delete state.deployHandoffState;
-  delete state.deployHandoffAttempts;
-  delete state.deployNoticeState;
-  delete state.deployNoticeAttempts;
-  delete state.deployRepairAttempts;
+  environment: string,
+  application: string,
+  runId?: number
+): () => void {
+  const captured = { ...state };
+  const attempt = captured.deployAttempt;
+  const attemptIdentity = {
+    id: attempt?.id,
+    repo: attempt?.targetRepo,
+    environment: attempt?.environment
+  };
+  const matches =
+    (runId === undefined ||
+      deploymentRunId(repo, captured.deployRunUrl || "") === runId) &&
+    attempt?.targetRepo?.toLowerCase() === repo.toLowerCase() &&
+    matchesDeployedApplicationState(
+      {
+        deployEnvName: attempt.environment,
+        deployAppName: captured.deployAppName
+      },
+      { environment, application }
+    );
+  const identityKeys = [
+    "deployAttempt",
+    "deployGeneration",
+    "deployAppName",
+    "deployRunId",
+    "deployRunUrl",
+    "deployStatus",
+    "deployedGraph",
+    "deployingResources"
+  ] as const;
+  return () => {
+    if (
+      !matches ||
+      identityKeys.some((key) => state[key] !== captured[key]) ||
+      state.deployAttempt?.id !== attemptIdentity.id ||
+      state.deployAttempt?.targetRepo !== attemptIdentity.repo ||
+      state.deployAttempt?.environment !== attemptIdentity.environment
+    )
+      return;
+    delete state.deployAttempt;
+    delete state.deployResult;
+    delete state.deployStatus;
+    delete state.deployError;
+    delete state.deployErrorKind;
+    delete state.deployErrorBranch;
+    delete state.deployStartedAt;
+    delete state.deployFinishedAt;
+    delete state.deployLogs;
+    delete state.deployLogBase;
+    delete state.deployRunId;
+    delete state.deployRunUrl;
+    delete state.deployRepairing;
+    delete state.deployHandoffState;
+    delete state.deployHandoffAttempts;
+    delete state.deployNoticeState;
+    delete state.deployNoticeAttempts;
+    delete state.deployRepairAttempts;
+  };
 }
 
 function isGitHubScopeFailure(error: unknown): boolean {
@@ -143,10 +178,11 @@ export function createDeploymentAbandonmentService(
         typeof data.environment === "string" ? data.environment.trim() : "";
       const application =
         typeof data.application === "string" ? data.application.trim() : "";
+      const runScoped = data.revision !== undefined;
       if (
         !repo ||
         !environment ||
-        !application ||
+        (!application && !runScoped) ||
         !dependencies.isValidRepoSlug(repo)
       ) {
         return {
@@ -197,6 +233,13 @@ export function createDeploymentAbandonmentService(
         };
       }
 
+      const retireCapturedAttempt = captureMatchingDeployAttempt(
+        state,
+        repo,
+        environment,
+        application,
+        typeof data.runId === "number" ? data.runId : undefined
+      );
       try {
         let current: DeploymentRow | null;
         try {
@@ -222,6 +265,105 @@ export function createDeploymentAbandonmentService(
             }
           };
         }
+        if (runScoped) {
+          const recovery = current.recovery;
+          if (
+            !recovery ||
+            !recovery.canMarkCleanupComplete ||
+            data.revision !== recovery.revision ||
+            data.runId !== recovery.runId ||
+            data.runAttempt !== recovery.runAttempt ||
+            data.deploymentId !== current.deploymentId ||
+            data.runUrl !== current.runUrl
+          ) {
+            return {
+              status: 409,
+              body: {
+                error:
+                  "The recovery target changed or cannot be verified. Refresh the listing. Tracking was not changed."
+              }
+            };
+          }
+          if (
+            typeof data.confirmation !== "string" ||
+            data.confirmation.trim() !== recovery.confirmation ||
+            application !== current.app
+          ) {
+            return {
+              status: 400,
+              body: {
+                error:
+                  "Type the exact cleanup confirmation for this recorded run. Canvas does not verify or perform external cleanup."
+              }
+            };
+          }
+          const marker = cleanupMarker(recovery);
+          try {
+            for (const id of recovery.deploymentIds) {
+              const description = await dependencies.ghOrThrow([
+                "api",
+                `/repos/${repo}/deployments/${encodeURIComponent(id)}/statuses?per_page=1`,
+                "--jq",
+                '.[0].description // ""'
+              ]);
+              if (description === marker) continue;
+              await dependencies.ghOrThrow([
+                "api",
+                "--method",
+                "POST",
+                `/repos/${repo}/deployments/${encodeURIComponent(id)}/statuses`,
+                "-f",
+                "state=inactive",
+                "-F",
+                "auto_inactive=false",
+                "-f",
+                `description=${marker}`,
+                "-f",
+                `log_url=${current.runUrl}`
+              ]);
+            }
+            const next = await dependencies.resolveEnvDeployment(
+              repo,
+              environment,
+              application
+            );
+            dependencies.invalidateDeployListCache(repo);
+            if (next && deploymentRunId(repo, next.runUrl) === recovery.runId)
+              return {
+                status: 502,
+                body: {
+                  error:
+                    "The cleanup markers could not be verified for every record of this run. Tracking remains effective; refresh and retry."
+                }
+              };
+          } catch (error) {
+            dependencies.invalidateDeployListCache(repo);
+            return {
+              status: 502,
+              body: {
+                error: redactCredentials(
+                  `Could not verify all cleanup markers on GitHub. Tracking may remain effective; refresh and retry. Cloud resources were not changed. ${error instanceof Error ? error.message : String(error)}`
+                )
+              }
+            };
+          }
+          retireCapturedAttempt();
+          return { status: 200, body: { outcome: "abandoned" } };
+        }
+        if (current.recovery)
+          return {
+            status: 409,
+            body: {
+              error:
+                "Refresh the deployment listing and confirm cleanup for the exact recorded run."
+            }
+          };
+        const identityRefusal = deploymentIdentityRefusal(current, application);
+        if (identityRefusal)
+          return {
+            status: identityRefusal.status,
+            body: { error: identityRefusal.error }
+          };
         if (dependencies.deploymentStatusBlocksMutation(current.status)) {
           return {
             status: 409,
@@ -285,7 +427,7 @@ export function createDeploymentAbandonmentService(
           };
         }
 
-        retireMatchingDeployAttempt(state, repo, environment);
+        retireCapturedAttempt();
         dependencies.invalidateDeployListCache(repo);
         return { status: 200, body: { outcome: "abandoned" } };
       } finally {
@@ -294,3 +436,4 @@ export function createDeploymentAbandonmentService(
     }
   };
 }
+import { deploymentIdentityRefusal } from "@radius-project/core";

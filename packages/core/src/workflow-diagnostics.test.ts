@@ -702,6 +702,48 @@ it("exports the deployment step name used by workflow evidence consumers", () =>
   expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
 });
 
+it("shows why a step stopped a deploy before any rad command ran", async () => {
+  const steps = [
+    { name: "Configure AWS Credentials (OIDC)", conclusion: "success" },
+    { name: "Check the deploy role's AWS account", conclusion: "failure" },
+    { name: "Run rad commands", conclusion: "skipped" },
+    { name: "Publish deployed graph and status", conclusion: "success" },
+    { name: "Teardown", conclusion: "failure" }
+  ];
+  const cause =
+    "AWS_ROLE_ARN is in AWS account 444455556666, but AWS_ACCOUNT_ID is 111122223333. Fix AWS_ROLE_ARN or AWS_ACCOUNT_ID in this GitHub environment's variables so both name the same account.";
+  // `gh run view --log` labels these rows UNKNOWN STEP, as in real AWS runs.
+  const log = [
+    `##[error]${cause}`,
+    "##[error]Process completed with exit code 1.",
+    ...Array.from(
+      { length: 12 },
+      (_, i) => `# step ${i} failed: rad: command not found`
+    ),
+    ...Array.from({ length: 12 }, () => "k3d: command not found"),
+    "##[error]Process completed with exit code 127."
+  ]
+    .map((line) => `deploy\tUNKNOWN STEP\t2026-11-05T00:00:00Z ${line}`)
+    .join("\n");
+  const result = await collectWorkflowFailure(
+    { repo: "org/app", runId: 41 },
+    { status: "completed", conclusion: "failure", steps, jobs: [] },
+    { provider: "aws", resourcesTouched: false },
+    {
+      readLog: async () => log,
+      redactDiagnostic: redactCredentials,
+      sleep: async () => {},
+      readControlPlaneLog: async () => null
+    }
+  );
+  expect(result.message).toContain(
+    "Failed step: Check the deploy role's AWS account, Teardown.\n\n##[error]" +
+      cause +
+      "\n"
+  );
+  expect(result.narration).toContain("  ##[error]" + cause);
+});
+
 describe("explainOidcEnterpriseClaim", () => {
   it("explains the Microsoft-tenant rejection, parsing accepted + empty actual value", () => {
     const out = explainOidcEnterpriseClaim(MS_ERROR);
@@ -1005,6 +1047,54 @@ describe("extractErrorLines", () => {
       );
       expect(extractRadDeployError("normal\nerror detail\n", 5)).toBe("error");
       expect(extractRadDeployError("normal")).toBe("");
+    });
+    it("puts error annotations before the trailing error lines of later steps", () => {
+      const prefix = "deploy\tUNKNOWN STEP\t2026-01-01T00:00:00Z ";
+      const cause =
+        "##[error]AWS_ROLE_ARN is in AWS account 444455556666, but AWS_ACCOUNT_ID is 111122223333.";
+      const later = Array.from(
+        { length: 25 },
+        (_, i) => `line ${i}: rad: command not found`
+      );
+      const log = [
+        "##[group]Run aws sts get-caller-identity",
+        cause,
+        "##[error]Process completed with exit code 1.",
+        ...later
+      ]
+        .map((line) => prefix + line)
+        .join("\n");
+      expect(extractRadDeployError(log).split("\n")).toEqual([
+        cause,
+        ...later.slice(-19)
+      ]);
+    });
+    it.each([
+      { annotations: 19, trailing: 1 },
+      { annotations: 20, trailing: 0 },
+      { annotations: 21, trailing: 0 }
+    ])(
+      "keeps 20 lines with $annotations annotations, in log order",
+      ({ annotations, trailing }) => {
+        const causes = Array.from(
+          { length: annotations },
+          (_, i) => `##[error]cause ${i}`
+        );
+        const later = ["error a", "error b"];
+        expect(
+          extractRadDeployError([...causes, ...later].join("\n")).split("\n")
+        ).toEqual([
+          ...causes.slice(0, 20),
+          ...(trailing ? later.slice(-trailing) : [])
+        ]);
+      }
+    );
+    it("keeps the generic exit annotation among trailing lines only", () => {
+      expect(
+        extractRadDeployError(
+          "##[error]Process completed with exit code 1.\nerror later"
+        )
+      ).toBe("##[error]Process completed with exit code 1.\nerror later");
     });
   });
 

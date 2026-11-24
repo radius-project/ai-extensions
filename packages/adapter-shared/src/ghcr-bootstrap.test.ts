@@ -19,6 +19,93 @@ const baseOptions = {
   authGuidance: () => "test package guidance"
 };
 
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+test.each([
+  "credentials",
+  "metadata",
+  "token",
+  "manifest-head",
+  "blob-head",
+  "blob-post",
+  "blob-post-rejection",
+  "blob-put",
+  "blob-put-rejection",
+  "manifest-put",
+  "manifest-put-rejection",
+  "retry-sleep",
+  "poll-sleep"
+])(
+  "starts no fresh GHCR request after shutdown during %s",
+  async (boundary) => {
+    const h = createHarness({
+      ownerFailures:
+        boundary === "retry-sleep" ? [new Error("Transport failed")] : [],
+      metadataDelay: boundary === "poll-sleep" ? 1 : 0
+    });
+    const entered = deferred();
+    const gate = deferred();
+    const interruption = new Error("Execution interrupted");
+    let stopped = false;
+    let held = false;
+    const hold = async () => {
+      held = true;
+      entered.resolve();
+      await gate.promise;
+    };
+    const pending = bootstrapGHCRStatePackage({
+      ...baseOptions,
+      assertActive: () => {
+        if (stopped) throw interruption;
+      },
+      loadCredentials: async () => {
+        if (boundary === "credentials") await hold();
+        return baseOptions.loadCredentials();
+      },
+      sleep: async () => {
+        if (boundary.endsWith("sleep")) await hold();
+        else assert.fail("Unexpected retry");
+      },
+      fetchImpl: async (url, options) => {
+        const pathname = new URL(url).pathname;
+        const method = options?.method || "GET";
+        const match =
+          boundary === "metadata" ? pathname.includes("/packages/")
+          : boundary === "token" ? pathname === "/token"
+          : boundary === "manifest-head" ?
+            method === "HEAD" && pathname.includes("/manifests/")
+          : boundary === "blob-head" ?
+            method === "HEAD" && pathname.includes("/blobs/")
+          : boundary.startsWith("blob-post") ? method === "POST"
+          : boundary.startsWith("blob-put") ?
+            method === "PUT" && pathname.startsWith("/uploads/")
+          : boundary.startsWith("manifest-put") ?
+            method === "PUT" && pathname.includes("/manifests/")
+          : false;
+        const response = await h.fetchImpl(url, options);
+        if (match && !held) {
+          await hold();
+          if (boundary.endsWith("rejection"))
+            throw new Error("Lost write response");
+        }
+        return response;
+      }
+    });
+    await entered.promise;
+    const calls = h.calls.length;
+    stopped = true;
+    gate.resolve();
+    await assert.rejects(pending, (error) => error === interruption);
+    assert.equal(h.calls.length, calls);
+  }
+);
+
 test("exposes reusable request and metadata types through the package entry", async () => {
   const coordinates: ghcrBootstrap.RegistryCoordinates =
     ghcrBootstrap.parseRegistry("ghcr.io/acme/app-radius-state");

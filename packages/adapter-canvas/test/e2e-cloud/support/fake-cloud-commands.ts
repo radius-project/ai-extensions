@@ -1,7 +1,7 @@
 // A deterministic `CloudCommandPort` for the fixture's own unit tests.
 //
 // It throws on any invocation a scenario did not specify. That is the point: a
-// fake that silently returned success would let `assertCleanSlate()` pass
+// fake that silently returned success would let `prepareCleanSlate()` pass
 // because a probe was never wired up, which is the precise failure mode this
 // whole layer exists to prevent. Every command a test expects must be declared,
 // and every command a test did not expect is a loud failure naming the argv.

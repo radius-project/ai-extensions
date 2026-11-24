@@ -16,6 +16,7 @@ afterEach(async () => {
 });
 
 interface Harness {
+  awsAccountId: string;
   profiles: Map<string, CredentialProfile[]>;
   calls: string[];
   login: string;
@@ -42,6 +43,7 @@ function identityFor(login: string): GitHubIdentity {
 
 function start(): Harness {
   const harness: Harness = {
+    awsAccountId: "123456789012",
     profiles: new Map(),
     calls: [],
     login: "initial-login",
@@ -51,6 +53,24 @@ function start(): Harness {
 
   const routes = createTestRouteTable(
     createIdentityProfilesRoutes({
+      runAws: async (args) => {
+        harness.calls.push(`aws(${args.join(" ")})`);
+        if (args.join(" ") === "--version")
+          return { code: 0, stdout: "aws-cli/2.39.0", stderr: "" };
+        expect(args).toEqual([
+          "sts",
+          "get-caller-identity",
+          "--output",
+          "json",
+          "--region",
+          "us-east-2"
+        ]);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ Account: harness.awsAccountId }),
+          stderr: ""
+        };
+      },
       listCredentialProfiles: (repo) => {
         harness.calls.push(`list(${repo})`);
         return harness.profiles.get(repo) ?? [];
@@ -149,6 +169,63 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("identity-profiles real-loopback HIT (RF-02)", () => {
+  it("rechecks the AWS account before saving, ignoring client verification claims", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const body = JSON.stringify({
+      repo: "octo/app",
+      name: "aws",
+      provider: "aws",
+      status: "verified",
+      accountId: "999988887777",
+      region: "us-east-2"
+    });
+    const mismatch = await post(
+      entry.baseUrl,
+      "/api/save-credential-profile",
+      body
+    );
+    expect(mismatch.status).toBe(400);
+    expect(await mismatch.json()).toMatchObject({
+      code: "aws-account-mismatch"
+    });
+    expect(harness.profiles.size).toBe(0);
+    expect(harness.calls).not.toContain("save(octo/app)");
+
+    harness.awsAccountId = "999988887777";
+    const saved = await post(
+      entry.baseUrl,
+      "/api/save-credential-profile",
+      body
+    );
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ success: true });
+    expect(harness.profiles.get("octo/app")).toHaveLength(1);
+  });
+
+  it.each([{ accountId: 123 }, { region: 42 }, { accountId: "" }])(
+    "rejects invalid AWS profile fields before storage: %j",
+    async (invalid) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await post(
+        entry.baseUrl,
+        "/api/save-credential-profile",
+        JSON.stringify({
+          repo: "octo/app",
+          name: "aws",
+          provider: "aws",
+          accountId: "123456789012",
+          region: "us-east-2",
+          ...invalid
+        })
+      );
+      expect(response.status).toBe(400);
+      expect(harness.calls).toEqual([]);
+      expect(harness.profiles.size).toBe(0);
+    }
+  );
+
   it("round-trips a credential profile over a real socket", async () => {
     start();
     const entry = await container!.getOrCreate("panel-a");

@@ -27,24 +27,42 @@ import {
   infrastructureFailureSummaryList,
   modelFailureSummaryList
 } from "../model-failure-policy.js";
-import { freshnessIdentity } from "@radius-project/core";
-import { RADIUS_CANVAS_INSTANCE_ID } from "./declarations.js";
+import {
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  freshnessIdentity
+} from "@radius-project/core";
+import {
+  RADIUS_CANVAS_INSTANCE_ID,
+  RADIUS_FAILURE_REPORT_CONTEXT
+} from "./declarations.js";
 import type { AppModelStatus } from "./graph-context.js";
 
 interface DeployRepairDetails {
+  appFile?: string;
   error?: string;
   deployRunUrl?: string;
   attemptId?: string;
 }
 
-// Shared instruction lines for the two handoff prompts below. The radius-app-bicep
-// skill owns the full authoring workflow (namespaces, types, structure, and
-// writing the file to the working tree), so these hooks only point the agent at that
-// skill and state the graph's data source. They never restate the skill's steps,
-// so they cannot drift from it or short-circuit it (for example, stopping before
-// the model is written).
-const SKILL_HANDOFF =
-  "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
+// Shared instruction lines for the three modeling handoff prompts below. The
+// radius-app-bicep skill owns the full authoring workflow (namespaces, types,
+// structure, and writing the file to the working tree), so these hooks only
+// point the agent at that skill and state the graph's data source. They never
+// restate the skill's steps, so they cannot drift from it or short-circuit it
+// (for example, stopping before the model is written).
+//
+// The Canvas embeds the skill bootstrap that radius_generate_app returns, so the
+// queued turn can start the skill without finding and calling a tool. Asking
+// the agent to call it failed whenever the turn could not see the tool: a
+// custom agent's tool list left it out, tool search reported it as missing, or
+// the extension was reconnecting (#1243).
+function skillHandoffInstruction(skillHandoff: string): string {
+  return [
+    "Author the application model with the radius-app-bicep skill, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.",
+    "Load the skill, or read SKILL.md from skillBase; no other tool is needed to start it. Use this handoff from the Canvas:",
+    skillHandoff
+  ].join("\n");
+}
 const RECIPE_PACK_NOTE =
   "Recipes are supplied by recipe packs, not by inline per-type recipes fabricated in app.bicep or in the graph. When no built-in type fits, the radius-app-bicep skill generates a custom resource type together with a recipe pack for it; follow the skill rather than inventing a singleton recipe here.";
 // Canvas supplies no Environment contract; the user's request can still name
@@ -163,16 +181,18 @@ function failureReportInstruction(
     : `instanceId \`${instanceId}\`, repo \`${repo}\`, attemptToken \`${attemptToken}\`, the actionable failure summary, and branch set to each branch it could not model (${branches
         .map((branch) => `\`${branch}\``)
         .join(", ")}) — one call per branch`;
-  return `If the radius-app-bicep skill classifies this attempt as a permanent failure and leaves .radius/app.bicep missing, call radius_report_modeling_failure with ${callArguments}. Do not report transient failures, cancellations, or a run that wrote the model.`;
+  return `If the radius-app-bicep skill classifies this attempt as a permanent failure and leaves the application definition missing or blank, call radius_report_modeling_failure with ${callArguments}. Do not report transient failures, cancellations, or a run that wrote a nonblank model.`;
 }
 
 // Prompt sent to the agent when a Radius graph canvas is opened but no
 // .radius/app.bicep exists on the branch. This half is agent-facing: it names
-// the skill and the graph's data source so recovery needs no extra round trip.
-// It is not what the timeline shows — always send it through
-// appBicepHandoffMessage() so a display prompt travels with it.
+// the skill, carries the skill handoff, and states the graph's data source so
+// recovery needs no extra round trip. It is not what the timeline shows —
+// always send it through appBicepHandoffMessage() so a display prompt travels
+// with it.
 export function appBicepHandoffPrompt(
   repo: string,
+  skillHandoff: string,
   page = "graph",
   branches: Array<string | undefined> = [],
   canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID,
@@ -189,7 +209,7 @@ export function appBicepHandoffPrompt(
     "",
     staleHandoffGuard(page, branches, canvasInstanceId, rendersInPlace),
     "",
-    SKILL_HANDOFF,
+    skillHandoffInstruction(skillHandoff),
     graphSourceNote(page, repo, branches, canvasInstanceId, !rendersInPlace),
     rendersInPlace ?
       `Do not open another Radius canvas. The view at instanceId \`${canvasInstanceId}\` is already waiting and renders the model in place once it is available.`
@@ -197,6 +217,7 @@ export function appBicepHandoffPrompt(
     "",
     RECIPE_PACK_NOTE,
     ENVIRONMENT_INDEPENDENT_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT,
     ...(failureReport && failureReport.branches.length ?
       [failureReportInstruction(repo, failureReport)]
     : [])
@@ -223,6 +244,7 @@ export function appBicepHandoffDisplayPrompt(
 // swapped.
 export function appBicepHandoffMessage(
   repo: string,
+  skillHandoff: string,
   page = "graph",
   branches: Array<string | undefined> = [],
   canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID,
@@ -231,6 +253,7 @@ export function appBicepHandoffMessage(
   return {
     prompt: appBicepHandoffPrompt(
       repo,
+      skillHandoff,
       page,
       branches,
       canvasInstanceId,
@@ -245,19 +268,23 @@ export function appBicepHandoffMessage(
 // render — tool-driven opens, direct panel opens, programmatic reloads after
 // source refs are attached, and refreshes alike — so a stale model is never
 // shown with no signal at all.
-export function appModelRefreshPrompt(status: AppModelStatus): string {
+export function appModelRefreshPrompt(
+  status: AppModelStatus,
+  skillHandoff: string
+): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [
     `The Radius graph${where} on branch \`${status.branch}\` just rendered from an application model that needs to be regenerated.`,
     "",
     status.freshness.reason,
     "",
-    `Refresh it. ${SKILL_HANDOFF}`,
+    `Refresh it. ${skillHandoffInstruction(skillHandoff)}`,
     "Regenerate from the current source rather than editing the existing file, and tell the user the graph they are looking at predates the refresh so they know to reopen it.",
     "The model is on the current workspace branch, so writing the working tree is enough. Do not commit or push it as part of the refresh.",
     "",
     RECIPE_PACK_NOTE,
-    ENVIRONMENT_INDEPENDENT_NOTE
+    ENVIRONMENT_INDEPENDENT_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT
   ].join("\n");
 }
 
@@ -267,9 +294,12 @@ export function appModelRefreshDisplayPrompt(status: AppModelStatus): string {
   return `Regenerating the application model${where} (branch \`${status.branch}\`) before showing the graph.`;
 }
 
-export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
+export function appModelRefreshMessage(
+  status: AppModelStatus,
+  skillHandoff: string
+): HandoffMessage {
   return {
-    prompt: appModelRefreshPrompt(status),
+    prompt: appModelRefreshPrompt(status, skillHandoff),
     displayPrompt: appModelRefreshDisplayPrompt(status)
   };
 }
@@ -283,7 +313,10 @@ export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
 // exists nowhere else, so the refresh is offered rather than taken. A hand edit
 // on a model that needs no refresh never reaches here, and a model with no record
 // that IS committed and clean does not either: git has that one.
-export function appModelUnverifiedPrompt(status: AppModelStatus): string {
+export function appModelUnverifiedPrompt(
+  status: AppModelStatus,
+  skillHandoff: string
+): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [
     `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model needs to be regenerated and doing so would discard content that exists nowhere else.`,
@@ -292,11 +325,12 @@ export function appModelUnverifiedPrompt(status: AppModelStatus): string {
     "",
     "Tell the user what this means for the graph they are looking at, and ask whether they want the model regenerated from current source.",
     "Regenerating overwrites .radius/app.bicep, so any changes they made by hand (tuned properties, custom types, recipe pack references) would be lost. Say that plainly and wait for their answer. Do not regenerate first and report afterwards.",
-    `If they agree: ${SKILL_HANDOFF}`,
+    `If they agree: ${skillHandoffInstruction(skillHandoff)}`,
     "If they would rather keep their edits, leave the file alone. Repairing one specific problem in place is the alternative that preserves them.",
     "",
     RECIPE_PACK_NOTE,
-    ENVIRONMENT_INDEPENDENT_NOTE
+    ENVIRONMENT_INDEPENDENT_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT
   ].join("\n");
 }
 
@@ -309,10 +343,11 @@ export function appModelUnverifiedDisplayPrompt(
 }
 
 export function appModelUnverifiedMessage(
-  status: AppModelStatus
+  status: AppModelStatus,
+  skillHandoff: string
 ): HandoffMessage {
   return {
-    prompt: appModelUnverifiedPrompt(status),
+    prompt: appModelUnverifiedPrompt(status, skillHandoff),
     displayPrompt: appModelUnverifiedDisplayPrompt(status)
   };
 }
@@ -326,6 +361,13 @@ export function appModelStaleNotice(status: AppModelStatus): string {
   return `Radius: the application model${where} on branch \`${status.branch}\` may be out of date. ${status.freshness.reason} Refreshing it would require regenerating and pushing to that branch.`;
 }
 
+// Log line for a modeling handoff the Canvas could not build, for example
+// because the radius-app-bicep skill files are missing. Nothing is sent to the
+// agent in that case, so this is the only place the user sees the reason.
+export function appModelSkillHandoffFailureNotice(detail: string): string {
+  return `Radius could not start application modeling. ${detail}`;
+}
+
 // Note shown when the installed Radius CLI is older than the one the model was
 // generated with. Nothing is regenerated, so this is the only signal the user
 // gets, and the reason it carries already says to update the plugin.
@@ -335,9 +377,6 @@ export function appModelRadiusCliOutdatedNotice(
   const where = status.repo ? ` for ${status.repo}` : "";
   return `Radius: the application model${where} on branch \`${status.branch}\` was not refreshed. ${status.freshness.reason}`;
 }
-
-// Maximum automatic repair-and-redeploy attempts before handing back to the user.
-export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
 
 export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "../deploy-diagnostics.js";
 
@@ -350,12 +389,18 @@ export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "../deploy-d
 export function deployRepairHandoffPrompt(
   repo: string,
   branch: string,
-  { error = "", deployRunUrl = "", attemptId = "" }: DeployRepairDetails = {}
+  {
+    error = "",
+    deployRunUrl = "",
+    attemptId = "",
+    appFile
+  }: DeployRepairDetails = {}
 ): string {
   const where = repo ? ` of ${repo}` : "";
   const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
   const fenced = fenceDeployDiagnostic(error);
   const branchName = branch ? `\`${branch}\`` : "the deployed branch";
+  const model = appFile ? `\`${appFile}\`` : "deployed application file";
   const lines = [
     `The Radius deploy${where}${onPhrase} failed. Diagnose it, and repair and redeploy if the app model caused it.`,
     "",
@@ -367,18 +412,19 @@ export function deployRepairHandoffPrompt(
   lines.push(
     "",
     "First decide what kind of failure this is:",
-    `- A modeling or schema failure points at .radius/app.bicep — ${modelFailureSummaryList()}. Repair these.`,
+    `- A modeling or schema failure points at ${model} — ${modelFailureSummaryList()}. Repair these.`,
     `- An infrastructure or environment failure (${infrastructureFailureSummaryList()}) is not caused by the app model. Do not repair the model for these: report the failure and the workflow run URL to the user, and do not redeploy.`,
     "",
-    `For a modeling or schema failure: ${SKILL_HANDOFF}`,
-    `Then commit the repaired .radius/app.bicep and push it to ${branchName} before redeploying. The deploy runs on GitHub Actions against that branch as it exists on GitHub, so a fix left only in the local worktree is not deployed — the workflow would check out and redeploy the unchanged file. If you cannot push to that branch (for example it is protected), stop and tell the user, or open a pull request; do not redeploy an unchanged branch.`,
+    `For a modeling or schema failure: use the radius-app-bicep skill. Repair ${model} in place; do not regenerate or substitute a different application model.`,
+    `Then commit the repaired ${model} and push it to ${branchName} before redeploying. The deploy runs on GitHub Actions against that branch as it exists on GitHub, so a fix left only in the local worktree is not deployed — the workflow would check out and redeploy the unchanged file. If you cannot push to that branch (for example it is protected), stop and tell the user, or open a pull request; do not redeploy an unchanged branch.`,
     "Once the fix is pushed, redeploy by calling the radius_deploy tool, and poll the radius_deploy_status tool until the deploy reaches a terminal state.",
     attemptId ?
       `Pass attemptId "${attemptId}" to both tools. It identifies this deploy attempt, so the call is rejected rather than acting on a different deploy if the user starts another one. Do not pass repo, environment, branch, provider, or appFile: the attempt already fixes those.`
     : "",
     `Repeat that repair-and-redeploy cycle at most ${DEPLOY_REPAIR_ATTEMPT_CAP} times, stopping early once the deploy succeeds or there is no different fix left to try. The canvas enforces that limit and refuses a further redeploy on this attempt, and each radius_deploy call reports which attempt it is. After that, report the result to the user and only try again if they ask.`,
     "",
-    RECIPE_PACK_NOTE
+    RECIPE_PACK_NOTE,
+    RADIUS_FAILURE_REPORT_CONTEXT
   );
   return lines
     .filter((line, i) => line !== "" || lines[i - 1] !== "")
@@ -432,20 +478,21 @@ export function deployFailureNoticePrompt(
   const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
   const fenced = fenceDeployDiagnostic(error);
   const lines = [
-    `The Radius deploy${where}${onPhrase} failed, and its workflow run could not be confirmed. Report this to the user; do not automatically redeploy.`,
+    `The Radius deploy${where}${onPhrase} could not be confirmed, so its remote deployment outcome is unknown. Report this to the user; do not automatically redeploy. Do not claim that the remote deployment itself failed.`,
     "",
     fenced ?
       `${DEPLOY_DIAGNOSTIC_NOTE}\n\n${fenced}`
-    : "The deploy failed before a workflow run could be confirmed, and no error text was captured."
+    : "Deploy dispatch or monitoring ended before a workflow run could be confirmed, and no error text was captured."
   ];
   if (deployRunUrl) lines.push("", `Workflow run (full logs): ${deployRunUrl}`);
   lines.push(
     "",
     "A workflow run may or may not still be in progress, so do NOT call radius_deploy to retry this on the agent's own initiative: a second run could race the first against the same target. Instead:",
     deployRunUrl ?
-      `- Tell the user the deploy failed and point them at the run: ${deployRunUrl}. Ask them to check the Actions tab for its real outcome.`
-    : "- Tell the user the deploy failed to start (for example a missing `workflow` token scope, disabled Actions, or an unpushed branch) and ask them to check the repository's Actions tab.",
-    "- Only deploy again if the user explicitly asks, and start a fresh deploy from the canvas or with radius_deploy (no attemptId) once the previous run is known to be over."
+      `- Tell the user that deploy monitoring ended before the workflow outcome could be confirmed, leave the remote deployment outcome unknown, and point them at the run: ${deployRunUrl}. Ask them to check the Actions tab for its real outcome.`
+    : "- Tell the user that deploy dispatch or run lookup could not confirm a workflow run (for example a missing `workflow` token scope, disabled Actions, an unpushed branch, or an accepted dispatch whose run has not surfaced yet), leave the remote deployment outcome unknown, and ask them to check the repository's Actions tab.",
+    "- Only deploy again if the user explicitly asks, and start a fresh deploy from the canvas or with radius_deploy (no attemptId) once the previous run is known to be over.",
+    RADIUS_FAILURE_REPORT_CONTEXT
   );
   return lines
     .filter((line, i) => line !== "" || lines[i - 1] !== "")

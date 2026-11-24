@@ -641,6 +641,20 @@ describe("sanitizeArtifactSegment", () => {
     expect(sanitizeArtifactSegment("a".repeat(120))).toHaveLength(80);
   });
 
+  it.each([
+    ["internal hyphens", `a${"-".repeat(100_000)}b`, `a${"-".repeat(79)}`],
+    [
+      "leading and trailing hyphens",
+      `${"-".repeat(100_000)}Prod${"-".repeat(100_000)}`,
+      "prod"
+    ],
+    ["only hyphens", "-".repeat(100_000), ""],
+    ["disallowed suffix", `a${"-".repeat(100_000)}!`, "a"],
+    ["cap inside a hyphen run", `${"a".repeat(79)}--b`, `${"a".repeat(79)}-`]
+  ])("preserves normalization for %s", (_name, input, expected) => {
+    expect(sanitizeArtifactSegment(input)).toBe(expected);
+  });
+
   it("returns an empty string for empty input", () => {
     expect(sanitizeArtifactSegment("")).toBe("");
     expect(sanitizeArtifactSegment(null)).toBe("");

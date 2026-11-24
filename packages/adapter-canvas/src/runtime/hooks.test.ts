@@ -10,7 +10,6 @@ import {
   deployFailureNoticePrompt,
   deployFailureNoticeDisplayPrompt,
   deployFailureNoticeMessage,
-  DEPLOY_REPAIR_ATTEMPT_CAP,
   DEPLOY_ERROR_CHAR_CAP,
   appModelUnverifiedPrompt,
   appModelUnverifiedDisplayPrompt,
@@ -23,7 +22,60 @@ import {
   refreshRequestKey
 } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
-import type { AppModelFreshnessStatus } from "@radius-project/core";
+import {
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  type AppModelFreshnessStatus
+} from "@radius-project/core";
+import { RADIUS_FAILURE_REPORT_CONTEXT } from "./declarations.js";
+
+// Stands in for the skill bootstrap the Canvas embeds in each modeling
+// handoff.
+const SKILL_HANDOFF = JSON.stringify({
+  skill: "radius-app-bicep",
+  skillBase: "/plugin/skills/radius-app-bicep",
+  nodeCommand: "/usr/local/bin/node"
+});
+
+describe("failure report handoff guidance", () => {
+  it.each([
+    {
+      name: "model authoring",
+      message: () => appBicepHandoffMessage("acme/widgets", SKILL_HANDOFF)
+    },
+    {
+      name: "model refresh",
+      message: () =>
+        appModelRefreshMessage(
+          modelStatus("acme/widgets", "main"),
+          SKILL_HANDOFF
+        )
+    },
+    {
+      name: "unverified model refresh",
+      message: () =>
+        appModelUnverifiedMessage(
+          modelStatus("acme/widgets", "main", { status: "manually-edited" }),
+          SKILL_HANDOFF
+        )
+    },
+    {
+      name: "deploy repair",
+      message: () => deployRepairHandoffMessage("acme/widgets", "main")
+    },
+    {
+      name: "unconfirmed deploy",
+      message: () => deployFailureNoticeMessage("acme/widgets", "main")
+    }
+  ])(
+    "carries the report flow only in the agent-facing $name prompt",
+    ({ message }) => {
+      const rendered = message();
+      expect(rendered.prompt).toContain(RADIUS_FAILURE_REPORT_CONTEXT);
+      expect(rendered.displayPrompt).not.toContain("radius-report-issue");
+      expect(rendered.displayPrompt).not.toContain("submitting");
+    }
+  );
+});
 
 describe("DEFAULT_CANVAS_PAGE", () => {
   it("lands a page-less open on the application graph", () => {
@@ -33,9 +85,9 @@ describe("DEFAULT_CANVAS_PAGE", () => {
 
 describe("appBicepHandoffPrompt", () => {
   it("directs the agent to generate app.bicep into the working tree, without leaking tool mechanics", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "graph");
+    const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph");
     expect(msg).toContain("acme/widgets");
-    expect(msg).toContain("radius_generate_app");
+    expect(msg).toContain(SKILL_HANDOFF);
     expect(msg).toContain("radius-app-bicep");
     expect(msg).toContain(".radius/app.bicep");
     expect(msg).toContain("working tree");
@@ -47,16 +99,18 @@ describe("appBicepHandoffPrompt", () => {
   });
 
   it("mentions the page name and defaults it to graph", () => {
-    expect(appBicepHandoffPrompt("acme/widgets", "graph-diff")).toContain(
-      "graph-diff"
-    );
-    expect(appBicepHandoffPrompt("acme/widgets")).toContain(
+    expect(
+      appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph-diff")
+    ).toContain("graph-diff");
+    expect(appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF)).toContain(
       "Radius graph view"
     );
   });
 
   it("keeps an open graph view alive while the generated model becomes available", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", [
+      "feat"
+    ]);
     expect(msg).toContain("keep the current view open");
     expect(msg).toContain("renders the model in place");
     expect(msg).toContain("Do not open another Radius canvas");
@@ -66,12 +120,14 @@ describe("appBicepHandoffPrompt", () => {
 
   it("still reopens views that do not support in-place model completion", () => {
     expect(
-      appBicepHandoffPrompt("acme/widgets", "planned", ["feat"])
+      appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "planned", ["feat"])
     ).toContain("open the Radius planned view again");
   });
 
   it("makes generation conditional on a re-check, because a queued handoff can arrive after the model exists", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", [
+      "feat"
+    ]);
     expect(msg).toContain("Generate it if it is still missing");
     expect(msg).toContain("may have queued behind another turn");
     expect(msg).toContain("Recheck .radius/app.bicep");
@@ -81,36 +137,47 @@ describe("appBicepHandoffPrompt", () => {
   });
 
   it("tells an in-place view to stand down rather than reopen when the model already arrived", () => {
-    expect(appBicepHandoffPrompt("acme/widgets", "graph", ["feat"])).toContain(
-      "picks it up automatically"
-    );
+    expect(
+      appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", ["feat"])
+    ).toContain("picks it up automatically");
   });
 
   it("tells a reopening view to open itself rather than regenerate when the model already arrived", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "planned", ["feat"]);
+    const msg = appBicepHandoffPrompt(
+      "acme/widgets",
+      SKILL_HANDOFF,
+      "planned",
+      ["feat"]
+    );
     expect(msg).toContain("reopen the planned view so it loads");
     expect(msg).not.toContain("picks it up automatically");
   });
 
   it("falls back to naming the selected branch when no branch is given", () => {
-    expect(appBicepHandoffPrompt("acme/widgets", "graph")).toContain(
-      ".radius/app.bicep on the selected branch"
-    );
+    expect(
+      appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph")
+    ).toContain(".radius/app.bicep on the selected branch");
   });
 
   it("includes the repo suffix only when a repo is provided", () => {
-    expect(appBicepHandoffPrompt("acme/widgets")).toContain(
+    expect(appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF)).toContain(
       "view for acme/widgets"
     );
-    expect(appBicepHandoffPrompt("")).toContain("Radius graph view could not");
+    expect(appBicepHandoffPrompt("", SKILL_HANDOFF)).toContain(
+      "Radius graph view could not"
+    );
   });
 
   it("forbids fabricating singleton recipes", () => {
-    expect(appBicepHandoffPrompt("acme/widgets")).toContain("recipe packs");
+    expect(appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF)).toContain(
+      "recipe packs"
+    );
   });
 
   it("lets modeling proceed without a selected deployment Environment", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", [
+      "feat"
+    ]);
     expect(msg).toContain(
       "This Canvas handoff supplies no deployment Environment contract."
     );
@@ -125,6 +192,7 @@ describe("appBicepHandoffPrompt", () => {
   it("states Environment independence before the permanent-failure callback", () => {
     const msg = appBicepHandoffPrompt(
       "acme/widgets",
+      SKILL_HANDOFF,
       "graph",
       ["feat"],
       "app-graph",
@@ -136,7 +204,9 @@ describe("appBicepHandoffPrompt", () => {
   });
 
   it("names the selected branch in the opening line and gives cross-branch commit/push guidance", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", [
+      "feat"
+    ]);
     expect(msg).toContain("(branch `feat`)");
     expect(msg).toContain("selected branch name is immutable");
     expect(msg).toContain("commit + push");
@@ -148,6 +218,7 @@ describe("appBicepHandoffPrompt", () => {
   it("reopens the actual existing Radius instance after modeling", () => {
     const msg = appBicepHandoffPrompt(
       "acme/widgets",
+      SKILL_HANDOFF,
       "planned",
       ["feat"],
       "app-graph"
@@ -160,6 +231,7 @@ describe("appBicepHandoffPrompt", () => {
   it("names the existing instance without demanding a reopen for in-place views", () => {
     const msg = appBicepHandoffPrompt(
       "acme/widgets",
+      SKILL_HANDOFF,
       "graph",
       ["feat"],
       "app-graph"
@@ -173,6 +245,7 @@ describe("appBicepHandoffPrompt", () => {
   it("fences a permanent-failure report to the requesting Canvas attempt", () => {
     const msg = appBicepHandoffPrompt(
       "acme/widgets",
+      SKILL_HANDOFF,
       "graph",
       ["feat"],
       "app-graph",
@@ -194,6 +267,7 @@ describe("appBicepHandoffPrompt", () => {
   it("asks a two-branch diff attempt to report each branch it could not model", () => {
     const msg = appBicepHandoffPrompt(
       "acme/widgets",
+      SKILL_HANDOFF,
       "graph-diff",
       ["main", "feat"],
       "app-graph",
@@ -213,20 +287,24 @@ describe("appBicepHandoffPrompt", () => {
   });
 
   it("omits the failure-report instruction when no attempt was fenced", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", [
+      "feat"
+    ]);
     expect(msg).not.toContain("radius_report_modeling_failure");
   });
 
   it("names multiple branches when given several", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "graph-diff", [
-      "main",
-      "feat"
-    ]);
+    const msg = appBicepHandoffPrompt(
+      "acme/widgets",
+      SKILL_HANDOFF,
+      "graph-diff",
+      ["main", "feat"]
+    );
     expect(msg).toContain("branches `main`, `feat`");
   });
 
   it("omits the branch phrase when no branch is given", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", "graph");
+    const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph");
     expect(msg).not.toContain("(branch ");
     expect(msg).not.toContain("(branches ");
   });
@@ -256,15 +334,17 @@ describe("appBicepHandoffDisplayPrompt", () => {
   });
 
   it("withholds the skill and tool mechanics the agent half carries", () => {
-    const full = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    const full = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", [
+      "feat"
+    ]);
     const display = appBicepHandoffDisplayPrompt("acme/widgets", "graph", [
       "feat"
     ]);
     // Guard the assertion itself: these tokens must really be in the agent
     // half, or "not.toContain" below would pass vacuously.
-    expect(full).toContain("radius_generate_app");
+    expect(full).toContain(SKILL_HANDOFF);
     expect(full).toContain("radius-app-bicep");
-    expect(display).not.toContain("radius_generate_app");
+    expect(display).not.toContain(SKILL_HANDOFF);
     expect(display).not.toContain("radius-app-bicep");
     expect(display).not.toContain("recipe pack");
   });
@@ -272,15 +352,20 @@ describe("appBicepHandoffDisplayPrompt", () => {
 
 describe("appBicepHandoffMessage", () => {
   it("pairs the agent prompt with its display stand-in without swapping them", () => {
-    const message = appBicepHandoffMessage("acme/widgets", "graph", ["feat"]);
+    const message = appBicepHandoffMessage(
+      "acme/widgets",
+      SKILL_HANDOFF,
+      "graph",
+      ["feat"]
+    );
     expect(message.prompt).toBe(
-      appBicepHandoffPrompt("acme/widgets", "graph", ["feat"])
+      appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", ["feat"])
     );
     expect(message.displayPrompt).toBe(
       appBicepHandoffDisplayPrompt("acme/widgets", "graph", ["feat"])
     );
-    expect(message.prompt).toContain("radius_generate_app");
-    expect(message.displayPrompt).not.toContain("radius_generate_app");
+    expect(message.prompt).toContain(SKILL_HANDOFF);
+    expect(message.displayPrompt).not.toContain(SKILL_HANDOFF);
   });
 });
 
@@ -303,6 +388,12 @@ function modelStatus(
     repo,
     branch,
     refreshable: overrides.refreshable ?? true,
+    source: {
+      kind: "github",
+      repo,
+      ref: branch,
+      definitionPath: ".radius/app.bicep"
+    },
     freshness: {
       status,
       stale: status !== "up-to-date" && status !== "missing",
@@ -324,13 +415,45 @@ function modelStatus(
   };
 }
 
-describe("modeling Environment context", () => {
+describe("modeling skill handoff", () => {
   it.each([
-    ["generate", () => appBicepHandoffPrompt("octo/app")],
-    ["refresh", () => appModelRefreshPrompt(modelStatus("octo/app", "feat"))],
+    ["generate", () => appBicepHandoffPrompt("octo/app", SKILL_HANDOFF)],
+    [
+      "refresh",
+      () =>
+        appModelRefreshPrompt(modelStatus("octo/app", "feat"), SKILL_HANDOFF)
+    ],
     [
       "re-check",
-      () => appModelUnverifiedPrompt(modelStatus("octo/app", "feat"))
+      () =>
+        appModelUnverifiedPrompt(modelStatus("octo/app", "feat"), SKILL_HANDOFF)
+    ]
+  ])(
+    "%s carries the skill handoff instead of asking the agent to find a tool (#1243)",
+    (_name, prompt) => {
+      const text = prompt();
+
+      expect(text).toContain(SKILL_HANDOFF);
+      expect(text).toContain(
+        "Load the skill, or read SKILL.md from skillBase; no other tool is needed to start it."
+      );
+      expect(text).not.toContain("radius_generate_app");
+    }
+  );
+});
+
+describe("modeling Environment context", () => {
+  it.each([
+    ["generate", () => appBicepHandoffPrompt("octo/app", SKILL_HANDOFF)],
+    [
+      "refresh",
+      () =>
+        appModelRefreshPrompt(modelStatus("octo/app", "feat"), SKILL_HANDOFF)
+    ],
+    [
+      "re-check",
+      () =>
+        appModelUnverifiedPrompt(modelStatus("octo/app", "feat"), SKILL_HANDOFF)
     ]
   ])(
     "%s preserves user-supplied target checks instead of assuming no target",
@@ -364,12 +487,12 @@ describe("appModelRefreshPrompt", () => {
   });
 
   it("names the drift, the fix, and that the rendered view is behind", () => {
-    const text = appModelRefreshPrompt(status);
+    const text = appModelRefreshPrompt(status, SKILL_HANDOFF);
 
     expect(text).toContain("octo/app");
     expect(text).toContain("`feat`");
     expect(text).toContain("the source moved on.");
-    expect(text).toContain("radius_generate_app");
+    expect(text).toContain(SKILL_HANDOFF);
     expect(text).toContain("predates the refresh");
     expect(text).toContain("Do not commit or push");
     expect(text).toContain(
@@ -380,14 +503,15 @@ describe("appModelRefreshPrompt", () => {
   it("omits the repo phrase when the repo is unknown", () => {
     expect(
       appModelRefreshPrompt(
-        modelStatus("", "feat", { status: "source-changed" })
+        modelStatus("", "feat", { status: "source-changed" }),
+        SKILL_HANDOFF
       )
     ).toContain("The Radius graph on branch `feat`");
   });
 
   it("pairs the agent prompt with a timeline stand-in that hides the mechanics", () => {
-    expect(appModelRefreshMessage(status)).toEqual({
-      prompt: appModelRefreshPrompt(status),
+    expect(appModelRefreshMessage(status, SKILL_HANDOFF)).toEqual({
+      prompt: appModelRefreshPrompt(status, SKILL_HANDOFF),
       displayPrompt: appModelRefreshDisplayPrompt(status)
     });
     expect(appModelRefreshDisplayPrompt(status)).not.toContain(
@@ -440,7 +564,7 @@ describe("appModelUnverifiedPrompt", () => {
   });
 
   it("asks before overwriting and names what would be lost", () => {
-    const text = appModelUnverifiedPrompt(status);
+    const text = appModelUnverifiedPrompt(status, SKILL_HANDOFF);
 
     expect(text).toContain("rendered from the existing .radius/app.bicep");
     expect(text).toContain("the model no longer matches its origin record");
@@ -455,7 +579,8 @@ describe("appModelUnverifiedPrompt", () => {
   it("omits the repo phrase when the repo is unknown", () => {
     expect(
       appModelUnverifiedPrompt(
-        modelStatus("", "feat", { status: "manually-edited" })
+        modelStatus("", "feat", { status: "manually-edited" }),
+        SKILL_HANDOFF
       )
     ).toContain("The Radius graph rendered");
   });
@@ -469,8 +594,8 @@ describe("appModelUnverifiedPrompt", () => {
   });
 
   it("pairs the agent prompt with its timeline stand-in", () => {
-    expect(appModelUnverifiedMessage(status)).toEqual({
-      prompt: appModelUnverifiedPrompt(status),
+    expect(appModelUnverifiedMessage(status, SKILL_HANDOFF)).toEqual({
+      prompt: appModelUnverifiedPrompt(status, SKILL_HANDOFF),
       displayPrompt: appModelUnverifiedDisplayPrompt(status)
     });
   });
@@ -536,7 +661,10 @@ describe("deployRepairHandoffPrompt", () => {
   };
 
   it("names the repo, branch, error, and workflow run", () => {
-    const out = deployRepairHandoffPrompt("octo/app", "feat", failure);
+    const out = deployRepairHandoffPrompt("octo/app", "feat", {
+      ...failure,
+      appFile: "models/custom.bicep"
+    });
     expect(out).toContain("octo/app");
     expect(out).toContain("`feat`");
     expect(out).toContain("BCP037");
@@ -553,7 +681,8 @@ describe("deployRepairHandoffPrompt", () => {
 
   it("points at the tools that repair the model and redeploy", () => {
     const out = deployRepairHandoffPrompt("octo/app", "main", failure);
-    expect(out).toContain("radius_generate_app");
+    expect(out).toContain("radius-app-bicep");
+    expect(out).not.toContain("radius_generate_app");
     expect(out).toContain("radius_deploy");
     expect(out).toContain("radius_deploy_status");
     expect(out).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
@@ -582,10 +711,14 @@ describe("deployRepairHandoffPrompt", () => {
   it("requires the repair to be pushed, since the workflow deploys the remote branch", () => {
     // A fix left in the worktree would make the workflow redeploy the same
     // broken file, burning every repair attempt.
-    const out = deployRepairHandoffPrompt("octo/app", "feat", failure);
+    const out = deployRepairHandoffPrompt("octo/app", "feat", {
+      ...failure,
+      appFile: "models/custom.bicep"
+    });
     expect(out).toMatch(
-      /commit the repaired .radius\/app\.bicep and push it to `feat`/
+      /commit the repaired `models\/custom\.bicep` and push it to `feat`/
     );
+    expect(out).not.toContain(".radius/app.bicep");
     expect(out).toMatch(/as it exists on GitHub/);
     expect(out).toMatch(/protected/);
   });
@@ -717,16 +850,26 @@ describe("deployFailureNoticePrompt", () => {
     expect(out).not.toMatch(/repair and redeploy/i);
   });
 
-  it("points the user at the run when one is known", () => {
+  it("points the user at the run when one is known without claiming the remote deploy failed", () => {
     const out = deployFailureNoticePrompt("octo/app", "main", failure);
+    expect(out).toContain("remote deployment outcome is unknown");
+    expect(out).toContain(
+      "Do not claim that the remote deployment itself failed."
+    );
+    expect(out).toContain("leave the remote deployment outcome unknown");
     expect(out).toContain("check the Actions tab for its real outcome");
+    expect(out).not.toContain("Tell the user the deploy failed");
   });
 
-  it("guides a dispatch failure with no run toward the Actions tab", () => {
+  it("guides an unconfirmed dispatch with no run toward the Actions tab while keeping the remote outcome unknown", () => {
     const out = deployFailureNoticePrompt("octo/app", "main", {
       error: "failed to dispatch"
     });
-    expect(out).toContain("failed to start");
+    expect(out).toContain(
+      "deploy dispatch or run lookup could not confirm a workflow run"
+    );
+    expect(out).toContain("leave the remote deployment outcome unknown");
+    expect(out).not.toContain("Tell the user the deploy failed");
     expect(out).not.toContain("Workflow run");
   });
 

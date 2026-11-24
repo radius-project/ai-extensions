@@ -4,6 +4,74 @@ import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
 import { setupEnvironmentHarness } from "../test/support/setup-environment.js";
 
 describe("configureSetupEnvironment", () => {
+  it.each(["plan", "dispatch", "automatic"] as const)(
+    "does not map late %s success into setup publication after shutdown",
+    async (boundary) => {
+      const h = setupEnvironmentHarness();
+      let stopped = false;
+      h.ports.isExecutionStopped = () => stopped;
+      const plan = h.ports.planCredentialVerification;
+      h.ports.planCredentialVerification = async (input) => {
+        const result = await plan(input);
+        if (boundary === "plan") stopped = true;
+        return {
+          ...result,
+          trigger: boundary === "automatic" ? "push" : result.trigger
+        };
+      };
+      const dispatch = h.ports.runVerificationDispatch;
+      h.ports.runVerificationDispatch = async (input) => {
+        expect(input.ports.isStopped).toBe(h.ports.isExecutionStopped);
+        const result = await dispatch(input);
+        stopped = true;
+        return result;
+      };
+      h.ports.discoverAutomaticVerificationRun = async (input) => {
+        expect(input.isStopped).toBe(h.ports.isExecutionStopped);
+        stopped = true;
+        return {
+          state: "discovered",
+          runId: "10",
+          runUrl: "https://github.test/run/10"
+        };
+      };
+      await expect(
+        configureSetupEnvironment(h.input, h.ports)
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(h.failures).toEqual([]);
+      expect(h.events.some((event) => event.kind === "verification-run")).toBe(
+        false
+      );
+      expect(h.transcript).not.toContain("enter-verify");
+    }
+  );
+  it.each(["RADIUS_STATE_BACKEND", "AZURE_TENANT_ID"] as const)(
+    "stops between individual writes after shutdown during %s",
+    async (heldVariable) => {
+      const h = setupEnvironmentHarness();
+      let stopped = false;
+      h.ports.isExecutionStopped = () => stopped;
+      const bind = h.ports.bindEnvironment;
+      const written: string[] = [];
+      h.ports.bindEnvironment = (target) => ({
+        ...bind(target),
+        setEnvironmentVariable: async (name) => {
+          written.push(name);
+          if (name === heldVariable) {
+            stopped = true;
+            h.stop();
+          }
+          return true;
+        }
+      });
+      await expect(
+        configureSetupEnvironment(h.input, h.ports)
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(written.at(-1)).toBe(heldVariable);
+      expect(h.failures).toEqual([]);
+    }
+  );
+
   it.each(["azure", "aws"])(
     "configures %s without a panel, ignores optional false writes, and persists before projection",
     async (provider) => {
@@ -449,6 +517,112 @@ describe("configureSetupEnvironment", () => {
         event: "push",
         operationMarker: "op_setup"
       });
+    }
+  );
+
+  it.each([
+    [undefined, "op_setup", "octo/app:radius-verify-credentials.yml:trunk:dev"],
+    [
+      3,
+      "op_setup:attempt-3",
+      "octo/app:radius-verify-credentials.yml:trunk:dev:attempt-3"
+    ]
+  ])(
+    "dispatches verification for retry attempt %j with marker %s",
+    async (setupRetryAttempt, marker, target) => {
+      const h = setupEnvironmentHarness();
+      h.input.setupRetryAttempt = setupRetryAttempt;
+      const dispatch = h.ports.runVerificationDispatch;
+      const dispatched: Array<[string, string]> = [];
+      h.ports.runVerificationDispatch = async (input) => {
+        dispatched.push([input.target, input.operationMarker]);
+        return dispatch(input);
+      };
+
+      await configureSetupEnvironment(h.input, h.ports);
+
+      expect(dispatched).toEqual([[target, marker]]);
+    }
+  );
+
+  it.each([
+    ["Continue of the first attempt", "", undefined, true],
+    ["Retry after the first attempt", "", 2, false],
+    ["Continue of the retry", ":attempt-2", 2, true]
+  ])(
+    "keeps an earlier run's tracking state only for the same dispatch: %s",
+    async (_scenario, savedTargetSuffix, setupRetryAttempt, kept) => {
+      let verification: unknown = {
+        dispatchMutationTarget: `octo/app:radius-verify-credentials.yml:trunk:dev${savedTargetSuffix}`,
+        runId: "9",
+        trackingDeadline: 5,
+        acquisitionPending: true
+      };
+      const h = setupEnvironmentHarness({
+        verification: () => verification,
+        setVerification: (value) => {
+          verification = value;
+        }
+      });
+      h.input.setupRetryAttempt = setupRetryAttempt;
+
+      await configureSetupEnvironment(h.input, h.ports);
+
+      expect(verification).toMatchObject({ runId: "10" });
+      if (kept) {
+        expect(verification).toMatchObject({
+          trackingDeadline: 5,
+          acquisitionPending: true
+        });
+      } else {
+        expect(verification).not.toHaveProperty("trackingDeadline");
+        expect(verification).not.toHaveProperty("acquisitionPending");
+      }
+    }
+  );
+
+  it("names the retry marker when its verification dispatch is refused", async () => {
+    const h = setupEnvironmentHarness({
+      runVerificationDispatch: async () => ({
+        state: "rejected",
+        detail: "HTTP 422",
+        result: { code: 1, stdout: "", stderr: "HTTP 422" }
+      })
+    });
+    h.input.setupRetryAttempt = 2;
+
+    await configureSetupEnvironment(h.input, h.ports);
+
+    expect(h.failures).toEqual([
+      expect.objectContaining({
+        kind: "verification-dispatch",
+        operationMarker: "op_setup:attempt-2"
+      })
+    ]);
+  });
+
+  it.each([
+    ["absent", null, "op_setup"],
+    ["committed by this operation", "verify:op_setup", "op_setup"],
+    ["committed by another operation", "verify:op_other", undefined]
+  ])(
+    "regenerates the verify workflow when the default branch copy is %s",
+    async (_label, defaultContent, publishedMarker) => {
+      const generated: Array<string | undefined> = [];
+      const h = setupEnvironmentHarness({
+        fetchFileFromRepoResult: async (_repo, path) =>
+          path.endsWith("radius-verify-credentials.yml") && defaultContent ?
+            { content: defaultContent, error: null, status: 200 }
+          : { content: null, error: null, status: 404 },
+        generateVerifyWorkflow: async (_environment, _provider, marker) => {
+          generated.push(marker);
+          return `verify:${marker ?? ""}`;
+        }
+      });
+
+      await configureSetupEnvironment(h.input, h.ports);
+
+      expect(generated.at(-1)).toBe(publishedMarker);
     }
   );
 });

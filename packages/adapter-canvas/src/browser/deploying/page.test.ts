@@ -18,7 +18,8 @@ import {
   fakeInputById,
   fakeTree,
   flushPromises,
-  jsonResponse
+  jsonResponse,
+  textResponse
 } from "../../../test/support/browser/fakes.js";
 import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
@@ -37,6 +38,10 @@ import {
   DELETE_POLL_MS,
   DEPLOY_AUTO_HIDE_MS,
   DEPLOY_FAILED_HANDOFF_POLL_LIMIT,
+  AWS_REPAIR_BUTTON_ID,
+  AWS_REPAIR_HELP_ID,
+  AWS_REPAIR_PATH,
+  AWS_REPAIR_STATUS_ID,
   DEPLOY_STATUS_PATH,
   DEPLOY_WORKFLOW_POLL_LIMIT,
   DEPLOY_WORKFLOW_POLL_MS,
@@ -53,6 +58,13 @@ import {
 } from "./page.js";
 
 const HOSTILE = '<img src=x onerror="alert(1)">';
+const ABANDON_DIALOG_IDS = {
+  modal: "deploy-abandon-modal",
+  body: "deploy-abandon-body",
+  app: "deploy-abandon-app",
+  environment: "deploy-abandon-env",
+  close: "deploy-abandon-close"
+};
 
 interface FixtureOptions {
   repo?: string;
@@ -66,11 +78,21 @@ interface FixtureOptions {
   // withProgressModal says.
   withProgressModalElement?: boolean;
   withDeleteDialog?: boolean;
+  withCleanupDialog?: boolean;
   withForceConfirm?: boolean;
   appPayload?: unknown;
   envPayload?: unknown;
   branchPayload?: unknown;
   deploymentsPayload?: unknown;
+}
+
+function knownDeployment(app: string, environment: string, status: string) {
+  return {
+    app,
+    environment,
+    status,
+    identity: { state: "known", application: app }
+  };
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -82,6 +104,7 @@ function fixture(options: FixtureOptions = {}) {
     withProgressModal = true,
     withProgressModalElement = withProgressModal,
     withDeleteDialog = true,
+    withCleanupDialog = true,
     withForceConfirm = true,
     appPayload = { applications: [{ name: "app" }] },
     envPayload = {
@@ -159,6 +182,12 @@ function fixture(options: FixtureOptions = {}) {
   if (withDeleteDialog) {
     elements.push(deleteModal, deleteBody, deleteApp, deleteEnv, deleteClose);
   }
+  const cleanupBody = createFakeElement(ABANDON_DIALOG_IDS.body);
+  for (const id of Object.values(ABANDON_DIALOG_IDS))
+    if (withCleanupDialog)
+      elements.push(
+        id === ABANDON_DIALOG_IDS.body ? cleanupBody : createFakeElement(id)
+      );
 
   // The lighter shared confirmation the page renders for the forced delete.
   const confirmElements: Record<string, FakeElement> = {};
@@ -216,7 +245,8 @@ function fixture(options: FixtureOptions = {}) {
     deleteBody,
     deleteApp,
     deleteEnv,
-    deleteClose
+    deleteClose,
+    cleanupBody
   };
 }
 
@@ -274,6 +304,281 @@ async function confirmDeleteDialog(
 }
 
 describe("initializeDeployingPage guards and lifecycle", () => {
+  it.each(["missing", "in-progress", "disabled"])(
+    "refuses stale cleanup controls when current evidence is %s",
+    async (state) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments:
+            state === "missing" ?
+              []
+            : [
+                {
+                  app: "",
+                  environment: "dev",
+                  status: state === "in-progress" ? "pending" : "failed",
+                  recovery: {
+                    runId: 42,
+                    runAttempt: 1,
+                    revision: "a".repeat(64),
+                    confirmation: "octo/app/run-42@1/dev",
+                    canMarkCleanupComplete: state !== "disabled"
+                  }
+                }
+              ]
+        }
+      });
+      const button = createFakeInput("stale-cleanup");
+      button.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-cleanup-dep", [button]);
+      const stop = init(page);
+      await flushPromises();
+      button.dispatch("click");
+      expect(page.cleanupBody.children).toEqual([]);
+      expect(
+        page.browser.net.calls.some(
+          (call) => call.url === "/api/abandon-deployment"
+        )
+      ).toBe(false);
+      stop();
+    }
+  );
+  it("initializes and tears down without optional cleanup markup", async () => {
+    const page = fixture({ withCleanupDialog: false });
+    const stop = init(page);
+    await flushPromises();
+    expect(page.deployBtn.disabled).toBe(false);
+    stop();
+  });
+  it.each([
+    "error",
+    "network",
+    "non-error",
+    "detached",
+    "detached-success"
+  ] as const)(
+    "keeps confirmation disabled during preparation and after %s",
+    async (outcome) => {
+      const selected = {
+        environment: "dev",
+        app: "",
+        status: "failed",
+        deploymentId: "7",
+        runUrl: "https://github.com/octo/app/actions/runs/42",
+        cleanupSelection: {
+          runId: 42,
+          runAttempt: 1,
+          deploymentId: "7",
+          runUrl: "https://github.com/octo/app/actions/runs/42"
+        }
+      };
+      const page = fixture({ deploymentsPayload: { deployments: [selected] } });
+      const pending = createDeferred<HttpResponse>();
+      page.browser.net.handle(
+        "/api/deployment-cleanup-details",
+        () => pending.promise
+      );
+      const button = createFakeInput("cleanup-details");
+      button.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-cleanup-dep", [button]);
+      const stop = init(page);
+      await flushPromises();
+      button.dispatch("click");
+      button.dispatch("click");
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      expect(page.cleanupBody.children).toEqual([]);
+      expect(
+        page.browser.net.calls.filter(
+          (call) => call.url === "/api/deployment-cleanup-details"
+        )
+      ).toHaveLength(1);
+      if (outcome.startsWith("detached")) stop();
+      if (outcome === "detached-success")
+        pending.resolve(
+          jsonResponse({ deployment: selected, prepared: false })
+        );
+      else if (outcome === "network") pending.reject(new Error("offline"));
+      else if (outcome === "non-error") pending.reject("offline");
+      else pending.resolve(jsonResponse({ error: "Run changed" }, false, 409));
+      await flushPromises();
+      expect(page.cleanupBody.children).toEqual([]);
+      expect(inlineMessage(page.inlineStatus)).toBe(
+        outcome.startsWith("detached") ? "Loading cleanup details…"
+        : outcome === "error" ? "Run changed"
+        : outcome === "network" ? "offline"
+        : "Cleanup details could not load."
+      );
+      stop();
+    }
+  );
+  it.each([false, true])(
+    "discovers unresolved history without enabling confirmation; absent: %s",
+    async (absent) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [],
+          environmentDiagnostics: [
+            {
+              environment: "dev",
+              message: "Only the first 100 records were checked."
+            }
+          ]
+        }
+      });
+      const button = createFakeInput("cleanup-details");
+      button.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-cleanup-dep", [button]);
+      page.browser.net.handle("/api/deployment-cleanup-details", () =>
+        jsonResponse({
+          prepared: false,
+          selection:
+            absent ? undefined : (
+              {
+                runId: 42,
+                runAttempt: 1,
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/app/actions/runs/42"
+              }
+            ),
+          deployment:
+            absent ? null : (
+              {
+                environment: "dev",
+                status: "failed",
+                app: "",
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/app/actions/runs/42"
+              }
+            )
+        })
+      );
+      const stop = init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain("History not verified");
+      expect(page.deployBtn.disabled).toBe(true);
+      page.browser.document.activeElement = button;
+      button.dispatch("click");
+      await flushPromises();
+      expect(page.cleanupBody.children).toEqual([]);
+      expect(inlineMessage(page.inlineStatus)).toContain(
+        absent ? "No deployment remains tracked" : "for the displayed run"
+      );
+      expect(absent ? page.deployBtn.focusCount : button.focusCount).toBe(1);
+      stop();
+    }
+  );
+  it.each([
+    "success",
+    "refusal",
+    "refusal-empty",
+    "network",
+    "known",
+    "detached",
+    "detached-error"
+  ] as const)(
+    "requires exact-run cleanup confirmation and surfaces %s without dispatching Delete",
+    async (result) => {
+      const success = result === "success" || result === "known";
+      const pending = createDeferred<HttpResponse>();
+      const selection = {
+        runId: 42,
+        runAttempt: 1,
+        deploymentId: "7",
+        runUrl: "https://github.com/octo/app/actions/runs/42"
+      };
+      const recovery = {
+        runId: 42,
+        runAttempt: 1,
+        revision: "a".repeat(64),
+        confirmation: "octo/app/run-42@1/dev",
+        canMarkCleanupComplete: true
+      };
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [
+            {
+              app: result === "known" ? "app" : "",
+              environment: "dev",
+              status: "failed",
+              deploymentId: "7",
+              runUrl: "https://github.com/octo/app/actions/runs/42",
+              identity:
+                result === "known" ?
+                  { state: "known", application: "app" }
+                : { state: "unavailable", reason: "Artifacts expired" },
+              cleanupSelection: selection
+            }
+          ]
+        }
+      });
+      const button = createFakeInput("cleanup");
+      button.className = "js-cleanup-dep";
+      button.setAttribute("data-env", "dev");
+      page.browser.document.addSelectorAll(".js-cleanup-dep", [button]);
+      page.browser.net.handle("/api/abandon-deployment", () => {
+        if (result === "network") throw new Error("offline");
+        if (result.startsWith("detached")) return pending.promise;
+        return jsonResponse(
+          success ? { outcome: "abandoned" }
+          : result === "refusal-empty" ? {}
+          : { error: "Run changed" },
+          success,
+          success ? 200 : 409
+        );
+      });
+      page.browser.net.handle("/api/deployment-cleanup-details", () =>
+        jsonResponse({
+          prepared: true,
+          selection,
+          deployment: {
+            app: result === "known" ? "app" : "",
+            environment: "dev",
+            status: "failed",
+            deploymentId: "7",
+            runUrl: "https://github.com/octo/app/actions/runs/42",
+            identity:
+              result === "known" ?
+                { state: "known", application: "app" }
+              : { state: "unavailable", reason: "Artifacts expired" },
+            recovery
+          }
+        })
+      );
+      const stop = init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain("Load cleanup details");
+      button.dispatch("click");
+      const body = page.cleanupBody;
+      await confirmDeleteDialog(
+        body,
+        result === "known" ? "app" : "octo/app/run-42@1",
+        "dev"
+      );
+      if (result.startsWith("detached")) {
+        stop();
+        if (result === "detached-error")
+          pending.reject(new Error("late failure"));
+        else pending.resolve(jsonResponse({ outcome: "abandoned" }));
+        await flushPromises();
+        expect(inlineMessage(page.inlineStatus)).toBe(
+          "Cleanup details verified. Confirm external cleanup for this run."
+        );
+        return;
+      }
+      await flushPromises();
+      expect(inlineMessage(page.inlineStatus)).toContain(
+        success ? "Canvas did not verify or perform cleanup"
+        : result === "refusal" ? "Run changed"
+        : "Could not record cleanup"
+      );
+      expect(
+        page.browser.net.calls.some(
+          (call) => call.url === DELETE_DEPLOYMENT_PATH
+        )
+      ).toBe(false);
+      stop();
+    }
+  );
   it("returns NOOP_TEARDOWN when any required element is missing", () => {
     const required = [
       "deploy-now-btn",
@@ -659,6 +964,69 @@ describe("deploy button state", () => {
 });
 
 describe("deployments table", () => {
+  it.each([true, false])(
+    "does not offer healthy known deployments for cleanup: known %s",
+    async (known) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [
+            {
+              app: known ? "app" : "",
+              environment: "dev",
+              status: "success",
+              deploymentId: "7",
+              runUrl: "https://github.com/octo/app/actions/runs/42",
+              identity:
+                known ?
+                  { state: "known", application: "app" }
+                : { state: "unavailable", reason: "Artifact expired" },
+              cleanupSelection: {
+                runId: 42,
+                runAttempt: 1,
+                deploymentId: "7",
+                runUrl: "https://github.com/octo/app/actions/runs/42"
+              }
+            }
+          ]
+        }
+      });
+      const stop = init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML.includes("js-cleanup-dep")).toBe(!known);
+      stop();
+    }
+  );
+
+  it.each([
+    undefined,
+    { state: "unavailable", reason: "Identity artifact expired." }
+  ])(
+    "keeps unavailable rows visible without enabling graph or destructive actions %j",
+    async (identity) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [
+            {
+              app: "",
+              environment: "dev",
+              status: "success",
+              runUrl: "https://github.com/octo/app/actions/runs/8",
+              identity
+            }
+          ]
+        }
+      });
+      init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain(
+        "Application identity unavailable"
+      );
+      expect(page.tableBody.innerHTML).toContain("View Run");
+      expect(page.tableBody.innerHTML).not.toContain("Monitor Graph");
+      expect(page.tableBody.innerHTML).toContain('js-del-dep" disabled');
+    }
+  );
+
   it("shows a placeholder row when there is no repository", async () => {
     const page = fixture({ repo: "" });
     initializeDeployingPage(page.browser.context, {
@@ -683,9 +1051,10 @@ describe("deployments table", () => {
         deployments: [
           {
             app: HOSTILE,
+            identity: { state: "known", application: HOSTILE },
             environment: HOSTILE,
             status: "success",
-            runUrl: "https://example.test/run/1"
+            runUrl: "https://github.com/octo/app/actions/runs/1"
           }
         ]
       }
@@ -697,7 +1066,9 @@ describe("deployments table", () => {
     expect(page.tableBody.innerHTML).toContain("<td>Success</td>");
     expect(page.tableBody.innerHTML).not.toContain("rad-dot");
     expect(page.tableBody.innerHTML).toContain("View Run");
-    expect(page.tableBody.innerHTML).toContain("https://example.test/run/1");
+    expect(page.tableBody.innerHTML).toContain(
+      "https://github.com/octo/app/actions/runs/1"
+    );
   });
 
   it("renders an em dash cell when there is no run URL", async () => {
@@ -715,8 +1086,8 @@ describe("deployments table", () => {
     const page = fixture({
       deploymentsPayload: {
         deployments: [
-          { app: "app", environment: "dev", status: "failed" },
-          { app: "app2", environment: "dev2", status: "pending" }
+          knownDeployment("app", "dev", "failed"),
+          knownDeployment("app2", "dev2", "pending")
         ]
       }
     });
@@ -786,13 +1157,13 @@ describe("deployments table", () => {
 
     second.resolve(
       jsonResponse({
-        deployments: [{ app: "current", environment: "dev", status: "success" }]
+        deployments: [knownDeployment("current", "dev", "success")]
       })
     );
     await flushPromises();
     first.resolve(
       jsonResponse({
-        deployments: [{ app: "stale", environment: "dev", status: "success" }]
+        deployments: [knownDeployment("stale", "dev", "success")]
       })
     );
     await flushPromises();
@@ -813,7 +1184,7 @@ describe("delete flow", () => {
   async function readyWithRow(app = "app", environment = "dev") {
     const page = fixture({
       deploymentsPayload: {
-        deployments: [{ app, environment, status: "success" }]
+        deployments: [knownDeployment(app, environment, "success")]
       }
     });
     const button = deployRowButton(app, environment);
@@ -829,7 +1200,7 @@ describe("delete flow", () => {
     const bare = fixture({
       withDeleteDialog: false,
       deploymentsPayload: {
-        deployments: [{ app: "app", environment: "dev", status: "success" }]
+        deployments: [knownDeployment("app", "dev", "success")]
       }
     });
     const bareButton = deployRowButton("app", "dev");
@@ -849,6 +1220,63 @@ describe("delete flow", () => {
     expect(page.deleteModal.style.display).toBe("flex");
     expect(page.deleteApp.textContent).toBe("app");
     expect(page.deleteEnv.textContent).toBe("dev");
+  });
+
+  it("sends the originally displayed record when the listing changes during confirmation", async () => {
+    const displayed = {
+      ...knownDeployment("app", "dev", "success"),
+      deploymentId: "old",
+      runUrl: "https://github.com/octo/app/actions/runs/42"
+    };
+    const page = fixture({ deploymentsPayload: { deployments: [displayed] } });
+    const button = deployRowButton("app", "dev");
+    page.browser.document.addSelectorAll(".js-del-dep", [button]);
+    init(page);
+    await flushPromises();
+    button.dispatch("click");
+    await flushPromises();
+    displayed.deploymentId = "new";
+    displayed.runUrl = "https://github.com/octo/app/actions/runs/43";
+    page.backBtn.dispatch("click");
+    await flushPromises();
+    let sent: unknown;
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, (request) => {
+      sent = request?.body;
+      return jsonResponse({ error: "Deployment changed." }, false);
+    });
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await flushPromises();
+    expect(JSON.parse(String(sent))).toMatchObject({
+      application: "app",
+      deploymentId: "old",
+      runUrl: "https://github.com/octo/app/actions/runs/42"
+    });
+    expect(inlineMessage(page.inlineStatus)).toContain("Deployment changed.");
+  });
+
+  it("refuses confirmation if row identity becomes unavailable while the dialog is open", async () => {
+    const { page, button } = await readyWithRow();
+    button.dispatch("click");
+    await flushPromises();
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          deployments: [{ app: "", environment: "dev", status: "success" }]
+        })
+    );
+    page.backBtn.dispatch("click");
+    await flushPromises();
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "Application identity is unavailable"
+    );
+    expect(
+      page.browser.net.calls.some(
+        (request) => request.url === DELETE_DEPLOYMENT_PATH
+      )
+    ).toBe(false);
   });
 
   describe("deletion inventory on the deployments list", () => {
@@ -936,9 +1364,7 @@ describe("delete flow", () => {
     it("names the resources on the delete-failed conflict path", async () => {
       const page = fixture({
         deploymentsPayload: {
-          deployments: [
-            { app: "app", environment: "dev", status: "delete-failed" }
-          ]
+          deployments: [knownDeployment("app", "dev", "delete-failed")]
         }
       });
       const button = deployRowButton("app", "dev");
@@ -1126,7 +1552,7 @@ describe("delete flow", () => {
     async function readyWithFailedRow(app = "app", environment = "dev") {
       const page = fixture({
         deploymentsPayload: {
-          deployments: [{ app, environment, status: "delete-failed" }]
+          deployments: [knownDeployment(app, environment, "delete-failed")]
         }
       });
       const button = deployRowButton(app, environment);
@@ -1302,9 +1728,7 @@ describe("delete flow", () => {
       const page = fixture({
         withForceConfirm: false,
         deploymentsPayload: {
-          deployments: [
-            { app: "app", environment: "dev", status: "delete-failed" }
-          ]
+          deployments: [knownDeployment("app", "dev", "delete-failed")]
         }
       });
       const button = deployRowButton("app", "dev");
@@ -1413,7 +1837,7 @@ describe("delete flow", () => {
   it("fails closed and never dispatches when the application identity is missing", async () => {
     const page = fixture({
       deploymentsPayload: {
-        deployments: [{ app: "app", environment: "dev", status: "success" }]
+        deployments: [knownDeployment("app", "dev", "success")]
       }
     });
     const button = createFakeInput("row-no-app");
@@ -1427,15 +1851,15 @@ describe("delete flow", () => {
       return jsonResponse({ ok: true });
     });
     button.dispatch("click");
-    await confirmDeleteDialog(page.deleteBody, "", "dev");
     await flushPromises();
+    expect(page.deleteModal.style.display).not.toBe("flex");
     expect(dispatched).toBe(false);
   });
 
   it("fails closed and never dispatches when the environment identity is missing", async () => {
     const page = fixture({
       deploymentsPayload: {
-        deployments: [{ app: "app", environment: "dev", status: "success" }]
+        deployments: [knownDeployment("app", "dev", "success")]
       }
     });
     const button = createFakeInput("row-no-env");
@@ -1449,8 +1873,8 @@ describe("delete flow", () => {
       return jsonResponse({ ok: true });
     });
     button.dispatch("click");
-    await confirmDeleteDialog(page.deleteBody, "app", "");
     await flushPromises();
+    expect(page.deleteModal.style.display).not.toBe("flex");
     expect(dispatched).toBe(false);
   });
 
@@ -1491,41 +1915,76 @@ describe("delete flow", () => {
     );
   });
 
-  it("keeps polling on a malformed or error poll response instead of concluding success", async () => {
-    const { page, button } = await readyWithRow("app", "dev");
+  it.each([
+    { deployments: [], error: "still busy" },
+    { deployments: [{ app: "app", status: "success" }] },
+    { deployments: [null] }
+  ])(
+    "keeps polling on malformed or failed evidence %j instead of concluding success",
+    async (payload) => {
+      const { page, button } = await readyWithRow("app", "dev");
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+        jsonResponse({ ok: true })
+      );
+      button.dispatch("click");
+      await confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+
+      let pollCount = 0;
+      page.browser.net.handle(
+        `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+        () => {
+          pollCount++;
+          return pollCount === 1 ?
+              jsonResponse(payload)
+            : jsonResponse({
+                deployments: [
+                  { app: "app", environment: "dev", status: "success" }
+                ]
+              });
+        }
+      );
+      page.browser.clock.tick(DELETE_POLL_MS);
+      await flushPromises();
+      expect(inlineMessage(page.inlineStatus)).not.toContain(
+        "successfully deleted"
+      );
+
+      page.browser.clock.tick(DELETE_POLL_MS);
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain("Deleting");
+    }
+  );
+
+  it("ignores a delete-completion response that arrives after teardown", async () => {
+    const { page, button, teardown } = await readyWithRow("app", "dev");
     page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
     await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
-
-    let pollCount = 0;
+    const pending = createDeferred<HttpResponse>();
     page.browser.net.handle(
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
-      () => {
-        pollCount++;
-        return pollCount === 1 ?
-            jsonResponse({ deployments: [], error: "still busy" })
-          : jsonResponse({
-              deployments: [
-                { app: "app", environment: "dev", status: "success" }
-              ]
-            });
-      }
+      () => pending.promise
     );
     page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+    teardown();
+    pending.resolve(jsonResponse({ deployments: [] }));
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).not.toContain(
       "successfully deleted"
     );
-
-    page.browser.clock.tick(DELETE_POLL_MS);
-    await flushPromises();
-    expect(page.tableBody.innerHTML).toContain("Deleting");
   });
 
-  it("keeps polling while the deployment is still present", async () => {
+  it.each([
+    { app: "app", environment: "dev", deleted: false },
+    { app: "", environment: "dev", deleted: false },
+    { app: "replacement", environment: "dev", deleted: false },
+    { app: "app", environment: "other", deleted: true }
+  ])("checks environment presence after delete: %j", async (row) => {
     const { page, button } = await readyWithRow("app", "dev");
     page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
       jsonResponse({ ok: true })
@@ -1538,15 +1997,20 @@ describe("delete flow", () => {
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
       () =>
         jsonResponse({
-          deployments: [{ app: "app", environment: "dev", status: "success" }]
+          deployments: [
+            {
+              ...knownDeployment(row.app, row.environment, "success"),
+              runUrl: ""
+            }
+          ]
         })
     );
     page.browser.clock.tick(DELETE_POLL_MS);
     await flushPromises();
-    expect(page.tableBody.innerHTML).toContain("Deleting");
-    expect(inlineMessage(page.inlineStatus)).not.toContain(
-      "successfully deleted"
-    );
+    expect(
+      inlineMessage(page.inlineStatus).includes("successfully deleted")
+    ).toBe(row.deleted);
+    if (!row.deleted) expect(page.tableBody.innerHTML).toContain("Deleting");
   });
 
   it("recovers on a poll network failure by retrying", async () => {
@@ -1588,7 +2052,9 @@ describe("delete flow", () => {
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
       () =>
         jsonResponse({
-          deployments: [{ app: "app", environment: "dev", status: "success" }]
+          deployments: [
+            { ...knownDeployment("app", "dev", "success"), runUrl: "" }
+          ]
         })
     );
     for (let tick = 0; tick <= DELETE_POLL_LIMIT + 1; tick++) {
@@ -1807,8 +2273,7 @@ describe("deploy flow", () => {
       environment: "dev",
       provider: "azure",
       targetRepo: "octo/app",
-      branch: "feature",
-      appFile: ".radius/app.bicep"
+      branch: "feature"
     });
     expect(inlineMessage(page.inlineStatus)).toBe("");
     page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
@@ -2170,6 +2635,33 @@ describe("deploy flow", () => {
     expect(fakeText(page.pushActionHost)).toContain("Run with Copilot");
   });
 
+  it("removes a previously mounted push action when a later status cannot authorize it", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    let branch = "feature";
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "branch-not-pushed",
+        errorBranch: branch,
+        handoff: { pending: true, state: "pending" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(fakeText(page.pushActionHost)).toContain("Run with Copilot");
+
+    branch = "";
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(fakeText(page.pushActionHost)).toBe("");
+  });
+
   it("offers commit-then-push when the server reports uncommitted generated files", async () => {
     const page = fixture({ branch: "feature" });
     init(page);
@@ -2199,31 +2691,36 @@ describe("deploy flow", () => {
     expect(offered).toContain("git push -u origin feature");
   });
 
-  it("does not mount commit-then-push for a branch other than the worktree branch", async () => {
-    const page = fixture({ branch: "feature/worktree" });
-    init(page);
-    await flushPromises();
-    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
-    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({
-        status: "failed",
-        errorKind: "branch-not-pushed",
-        errorBranch: "feature/selected",
-        errorPaths: ".radius",
-        handoff: { pending: false, state: "idle" }
-      })
-    );
+  it.each(["", "feature/worktree"])(
+    "does not mount commit-then-push with absent or mismatched workspace branch %s",
+    async (branch) => {
+      const page = fixture({ branch });
+      init(page);
+      await flushPromises();
+      page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "branch-not-pushed",
+          errorBranch: "feature/selected",
+          errorPaths: ".radius",
+          handoff: { pending: false, state: "idle" }
+        })
+      );
 
-    page.deployBtn.dispatch("click");
-    await flushPromises();
-    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
-    await flushPromises();
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
 
-    expect(fakeText(page.pushActionHost)).toContain(
-      "checked-out branch feature/worktree, not the selected branch feature/selected"
-    );
-    expect(fakeText(page.pushActionHost)).not.toContain("Run with Copilot");
-  });
+      if (branch)
+        expect(fakeText(page.pushActionHost)).toContain(
+          "checked-out branch feature/worktree, not the selected branch feature/selected"
+        );
+      else expect(fakeText(page.pushActionHost)).toBe("");
+      expect(fakeText(page.pushActionHost)).not.toContain("Run with Copilot");
+    }
+  );
 
   it("ignores uncommitted paths reported for a failure that is not a missing push", async () => {
     const page = fixture();
@@ -2420,6 +2917,326 @@ describe("deploy flow", () => {
     page.reverifyCredentialsBtn.dispatch("click");
     await flushPromises();
     expect(page.browser.nav.assigned).toContain("/?page=environment");
+  });
+
+  describe("Repair on an AWS deploy that could not sign in", () => {
+    const awsEnvironments = {
+      environments: [{ name: "dev", provider: "aws", status: "success" }]
+    };
+    async function failSignIn(
+      envPayload: unknown = awsEnvironments,
+      error = "AWS sign-in failed."
+    ) {
+      const page = fixture({ envPayload });
+      // The panel's markup is a string in the fake DOM, so the controls it
+      // renders are registered by id the way a real browser exposes them.
+      const repairButton = createFakeInput(AWS_REPAIR_BUTTON_ID);
+      const repairStatus = createFakeElement(AWS_REPAIR_STATUS_ID);
+      page.browser.document.add(repairButton);
+      page.browser.document.add(repairStatus);
+      const teardown = init(page);
+      await flushPromises();
+      page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "cloud-auth-drift",
+          error,
+          generation: 1,
+          handoff: { pending: false, state: "idle" }
+        })
+      );
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+      const repairCalls = () =>
+        page.browser.net.calls.filter((call) => call.url === AWS_REPAIR_PATH);
+      return { page, repairButton, repairStatus, repairCalls, teardown };
+    }
+
+    it("offers Repair before Re-verify and explains what it changes", async () => {
+      const { page } = await failSignIn();
+      const markup = page.progressSubtitle.innerHTML;
+      expect(markup).toContain(
+        `<button type="button" id="${AWS_REPAIR_BUTTON_ID}" class="rad-btn rad-btn--primary" style="margin:0;" aria-describedby="${AWS_REPAIR_HELP_ID}">Repair</button>`
+      );
+      expect(markup.indexOf(AWS_REPAIR_BUTTON_ID)).toBeLessThan(
+        markup.indexOf("deploy-reverify-credentials")
+      );
+      expect(markup).toContain('class="rad-btn rad-btn--secondary"');
+      expect(markup).toContain(
+        "Repair adds this environment back to its AWS deploy role's trust policy if it was removed. It changes nothing else."
+      );
+      expect(markup).toContain(`id="${AWS_REPAIR_STATUS_ID}" role="status"`);
+    });
+
+    it("does not offer Repair for an Azure environment", async () => {
+      const { page } = await failSignIn({
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
+      });
+      const markup = page.progressSubtitle.innerHTML;
+      expect(markup).not.toContain(AWS_REPAIR_BUTTON_ID);
+      expect(markup).toContain(
+        'id="deploy-reverify-credentials" class="rad-btn rad-btn--primary"'
+      );
+    });
+
+    it("asks the server once, with the nonce, and shows its answer", async () => {
+      const { page, repairButton, repairStatus, repairCalls } =
+        await failSignIn();
+      const response = createDeferred<HttpResponse>();
+      page.browser.net.handle(AWS_REPAIR_PATH, () => response.promise);
+
+      repairButton.dispatch("click");
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe("Repairing the AWS deploy role…");
+      expect(repairButton.disabled).toBe(true);
+      expect(repairCalls()).toHaveLength(1);
+      // The same failure shown again while Repair runs keeps it disabled.
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+      expect(page.progressSubtitle.innerHTML).toContain(
+        `aria-describedby="${AWS_REPAIR_HELP_ID}" disabled>Repair</button>`
+      );
+      expect(repairCalls()[0]?.init).toMatchObject({
+        method: "POST",
+        headers: { "X-Radius-Mutation-Nonce": "test-nonce" },
+        // Names the deploy the panel shows, so the server refuses a stale one.
+        body: '{"generation":1}'
+      });
+
+      response.resolve(
+        jsonResponse({
+          code: "aws-trust-repaired",
+          message: "IAM role r trusts environment dev again. Deploy again."
+        })
+      );
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe(
+        "IAM role r trusts environment dev again. Deploy again."
+      );
+      expect(repairButton.disabled).toBe(false);
+    });
+
+    it.each([
+      [
+        "the server's refusal",
+        () =>
+          jsonResponse(
+            { code: "aws-lock-busy", error: "Another run is changing it." },
+            false,
+            409
+          ),
+        "Another run is changing it."
+      ],
+      [
+        "a refusal with no text",
+        () => textResponse("bad gateway", false, 502),
+        "Radius could not repair the AWS deploy role."
+      ],
+      [
+        "a success with no text",
+        () => jsonResponse({}),
+        "Radius repaired the AWS deploy role. Deploy again."
+      ],
+      [
+        "an unreachable server",
+        () => Promise.reject(new Error("offline")),
+        "Radius could not reach the canvas server, so nothing was repaired. Try again."
+      ]
+    ])("shows %s", async (_label, answer, text) => {
+      const { page, repairButton, repairStatus } = await failSignIn();
+      page.browser.net.handle(AWS_REPAIR_PATH, answer);
+
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe(text);
+      expect(repairButton.disabled).toBe(false);
+    });
+
+    it("keeps the result when the same failure is shown again", async () => {
+      const { page, repairButton } = await failSignIn();
+      page.browser.net.handle(AWS_REPAIR_PATH, () =>
+        jsonResponse({ message: "Repaired." })
+      );
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+
+      expect(page.progressSubtitle.innerHTML).toContain(
+        `role="status" style="margin-top:10px; color:var(--rad-text);">Repaired.</div>`
+      );
+    });
+
+    it("finishes quietly when the panel's controls are gone", async () => {
+      const { page, repairButton } = await failSignIn();
+      const response = createDeferred<HttpResponse>();
+      page.browser.net.handle(AWS_REPAIR_PATH, () => response.promise);
+      repairButton.dispatch("click");
+      await flushPromises();
+      // A failure of another kind replaced the markup.
+      page.browser.document.remove(AWS_REPAIR_STATUS_ID);
+      page.browser.document.remove(AWS_REPAIR_BUTTON_ID);
+
+      response.resolve(jsonResponse({ message: "Repaired." }));
+      await flushPromises();
+
+      expect(repairButton.disabled).toBe(true);
+    });
+
+    it("starts a new Repair for a new deploy that failed the same way", async () => {
+      const { page, repairButton, repairCalls } = await failSignIn();
+      page.browser.net.handle(AWS_REPAIR_PATH, () =>
+        jsonResponse({ message: "Repaired." })
+      );
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "cloud-auth-drift",
+          error: "AWS sign-in failed.",
+          generation: 2,
+          handoff: { pending: false, state: "idle" }
+        })
+      );
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+
+      expect(page.progressSubtitle.innerHTML).not.toContain("Repaired.");
+      repairButton.dispatch("click");
+      await flushPromises();
+      expect(repairCalls().at(-1)?.init).toMatchObject({
+        body: '{"generation":2}'
+      });
+    });
+
+    it("leaves a page opened since alone when an answer arrives after teardown", async () => {
+      const { page, repairButton, repairStatus, teardown } = await failSignIn();
+      const response = createDeferred<HttpResponse>();
+      page.browser.net.handle(AWS_REPAIR_PATH, () => response.promise);
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      teardown();
+      // The controls of the page opened since have the same ids.
+      repairStatus.textContent = "Repairing the AWS deploy role…";
+      repairButton.disabled = true;
+      response.resolve(jsonResponse({ message: "Old answer." }));
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe("Repairing the AWS deploy role…");
+      expect(repairButton.disabled).toBe(true);
+    });
+
+    it("offers Repair once a listing that arrives after the failure says the environment is AWS", async () => {
+      const page = fixture({ search: "?application=app&environment=dev" });
+      const listing = createDeferred<HttpResponse>();
+      page.browser.net.handle(
+        `${ENVIRONMENTS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+        () => listing.promise
+      );
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "cloud-auth-drift",
+          error: "AWS sign-in failed.",
+          generation: 3,
+          attempt: { targetRepo: page.repo, environment: "dev" },
+          handoff: { pending: false, state: "idle" }
+        })
+      );
+      init(page);
+      await flushPromises();
+      page.browser.clock.tick(RESUME_POLL_MS);
+      await flushPromises();
+      expect(page.progressTitle.innerHTML).toContain(
+        "Cloud credentials need re-verifying"
+      );
+      expect(page.progressSubtitle.innerHTML).not.toContain(
+        AWS_REPAIR_BUTTON_ID
+      );
+
+      listing.resolve(jsonResponse(awsEnvironments));
+      await flushPromises();
+
+      expect(page.progressSubtitle.innerHTML).toContain(AWS_REPAIR_BUTTON_ID);
+    });
+
+    it("does not redraw a failure the listing confirms is not AWS", async () => {
+      const page = fixture({ search: "?application=app&environment=dev" });
+      const listing = createDeferred<HttpResponse>();
+      page.browser.net.handle(
+        `${ENVIRONMENTS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+        () => listing.promise
+      );
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "cloud-auth-drift",
+          error: "Azure sign-in failed.",
+          attempt: { targetRepo: page.repo, environment: "dev" },
+          handoff: { pending: false, state: "idle" }
+        })
+      );
+      init(page);
+      await flushPromises();
+      page.browser.clock.tick(RESUME_POLL_MS);
+      await flushPromises();
+      page.progressSubtitle.innerHTML = "unchanged";
+
+      listing.resolve(
+        jsonResponse({
+          environments: [{ name: "dev", provider: "azure", status: "success" }]
+        })
+      );
+      await flushPromises();
+
+      expect(page.progressSubtitle.innerHTML).toBe("unchanged");
+    });
+
+    it("drops an answer that arrives after a different failure replaced the panel", async () => {
+      const { page, repairButton, repairStatus } = await failSignIn();
+      const response = createDeferred<HttpResponse>();
+      page.browser.net.handle(AWS_REPAIR_PATH, () => response.promise);
+      repairButton.dispatch("click");
+      await flushPromises();
+
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "failed",
+          errorKind: "cloud-auth-drift",
+          error: "A later sign-in failure.",
+          generation: 2,
+          handoff: { pending: false, state: "idle" }
+        })
+      );
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+      repairStatus.textContent = "";
+
+      response.resolve(jsonResponse({ message: "Old answer." }));
+      await flushPromises();
+
+      expect(repairStatus.textContent).toBe("");
+      expect(page.progressSubtitle.innerHTML).not.toContain("Old answer.");
+    });
   });
 
   it("omits the preflight detail from the cloud-auth-drift panel when the failure carries no text", async () => {
@@ -3311,7 +4128,7 @@ describe("optimistic deployment rows", () => {
     const page = fixture({
       deploymentsPayload: {
         deployments: [
-          { app: "shop", environment: "prod", status: "success", runUrl: "" }
+          { ...knownDeployment("shop", "prod", "success"), runUrl: "" }
         ]
       }
     });
@@ -3338,7 +4155,7 @@ describe("optimistic deployment rows", () => {
     listing.resolve(
       jsonResponse({
         deployments: [
-          { app: "shop", environment: "prod", status: "success", runUrl: "" }
+          { ...knownDeployment("shop", "prod", "success"), runUrl: "" }
         ]
       })
     );
@@ -3431,7 +4248,7 @@ describe("resuming a redirected deployment", () => {
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
       () =>
         jsonResponse({
-          deployments: [{ app: "app", environment: "dev", status: "success" }]
+          deployments: [knownDeployment("app", "dev", "success")]
         })
     );
     page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
@@ -3606,18 +4423,38 @@ describe("pure helpers", () => {
     expect(deploymentStatusMarkup(status)).toBe(label);
   });
 
-  it("parses deployments defensively, dropping incomplete entries", () => {
+  it("retains unknown-identity rows but drops entries without an environment", () => {
     expect(parseDeploymentRecords(null)).toEqual([]);
     expect(
       parseDeploymentRecords({
         deployments: [
-          { app: "a", environment: "b", status: "success", runUrl: "u" },
+          { ...knownDeployment("a", "b", "success"), runUrl: "u" },
           { app: "", environment: "b" },
           { app: "a" },
           "not-an-object"
         ]
       })
-    ).toEqual([{ app: "a", environment: "b", status: "success", runUrl: "u" }]);
+    ).toEqual([
+      {
+        app: "a",
+        environment: "b",
+        status: "success",
+        runUrl: "u",
+        deploymentId: "",
+        identity: { state: "known" }
+      },
+      {
+        app: "",
+        environment: "b",
+        status: "",
+        runUrl: "",
+        deploymentId: "",
+        identity: {
+          state: "unavailable",
+          reason: "Application identity is unavailable."
+        }
+      }
+    ]);
   });
 
   it("builds application options, inserting a redirected app not in the list", () => {
@@ -3667,7 +4504,7 @@ describe("stale response identity across independent operations", () => {
   it("does not let a superseded delete-poll response clear a fresher override", async () => {
     const page = fixture({
       deploymentsPayload: {
-        deployments: [{ app: "app", environment: "dev", status: "success" }]
+        deployments: [knownDeployment("app", "dev", "success")]
       }
     });
     const button = deployRowButton("app", "dev");

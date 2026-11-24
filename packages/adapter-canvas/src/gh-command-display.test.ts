@@ -31,7 +31,7 @@ describe("GitHub CLI command display", () => {
         ["auth", "refresh", "-h", "github.com", "-s", "two words"]
       )
     ).toBe(
-      "& 'C:\\Users\\Taylor O''Brien\\copilot\\gh.exe' auth refresh -h github.com -s \"two words\""
+      "& 'C:\\Users\\Taylor O''Brien\\copilot\\gh.exe' auth refresh -h github.com -s 'two words'"
     );
   });
 
@@ -94,6 +94,15 @@ describe("GitHub CLI command display", () => {
     ).toBe(
       "'/opt/Copilot CLI/gh' auth switch -u octocat\ngit status\n'/opt/Copilot CLI/gh' auth refresh -s workflow"
     );
+  });
+
+  it("uses the same shell-safe formatting for non-gh remediation arguments", () => {
+    expect(
+      displayGhCommands(
+        { kind: "bare", shell: "posix", installationNote: "" },
+        [["git", "show", "it's $HOME; &|<>", ""]]
+      )
+    ).toBe("git show 'it'\\''s $HOME; &|<>' ''");
   });
 
   it("adapts GitHub remediation display without changing its execution argv", () => {

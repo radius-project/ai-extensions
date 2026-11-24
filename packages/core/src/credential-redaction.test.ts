@@ -2,6 +2,27 @@ import { describe, expect, it } from "vitest";
 import { redactCredentials } from "./credential-redaction.js";
 
 describe("redactCredentials", () => {
+  it.each(["AKIA", "ASIA"])(
+    "redacts AWS access key IDs with prefix %s",
+    (prefix) => {
+      expect(redactCredentials(`failure: ${prefix}${"A".repeat(16)}`)).toBe(
+        "failure: [REDACTED]"
+      );
+    }
+  );
+
+  it.each([
+    "AccessKeyId",
+    "SecretAccessKey",
+    "SessionToken",
+    "aws_secret_access_key",
+    "AWS_SESSION_TOKEN"
+  ])("redacts the AWS credential field %s", (key) => {
+    expect(
+      redactCredentials(JSON.stringify({ [key]: "private-provider-value" }))
+    ).toBe(JSON.stringify({ [key]: "[REDACTED]" }));
+  });
+
   it("redacts opaque credentials supplied by a process boundary", () => {
     expect(
       redactCredentials("failed with opaque-fixture-token", [

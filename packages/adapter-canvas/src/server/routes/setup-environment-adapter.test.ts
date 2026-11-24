@@ -7,6 +7,7 @@ import type {
   CreateEnvironmentInstanceEntry
 } from "../services/configure-environment.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import { createOperation, requestStop } from "../../operations.js";
 
 const unexpected = (): never => {
   throw new Error("Unexpected adapter dependency.");
@@ -17,7 +18,11 @@ function harness(
   bindings: Partial<
     Pick<
       Parameters<typeof createSetupEnvironmentPorts>[0],
-      "provider" | "finalize"
+      | "provider"
+      | "finalize"
+      | "instanceId"
+      | "isCurrentPresentation"
+      | "operation"
     >
   > = {}
 ) {
@@ -46,6 +51,7 @@ function harness(
     persistMutationCheckpoint: unexpected,
     persistBestEffort: unexpected,
     guardStopBoundary: unexpected,
+    isShuttingDown: () => false,
     runAzCommand: unexpected,
     preflightRepoAdmin: unexpected,
     preflightGhcrPackageWriteAccess: unexpected,
@@ -99,7 +105,7 @@ function harness(
     checkpoint: unexpected,
     fail: unexpected,
     finalize: async (input) => {
-      finalized.push(input);
+      finalized.push({ ...input });
       return "stopped";
     },
     ...bindings
@@ -108,6 +114,37 @@ function harness(
 }
 
 describe("Canvas setup configuration adapter", () => {
+  it("uses live runtime shutdown, not cooperative Stop, for repository reads", async () => {
+    let shuttingDown = false;
+    const operation = createOperation({
+      repo: "octo/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    requestStop(operation);
+    const h = harness(
+      {
+        isShuttingDown: () => shuttingDown,
+        preflightRepoAdmin: async (_repo, _executor, assertActive) => {
+          expect(assertActive).toBeTypeOf("function");
+          assertActive?.();
+          shuttingDown = true;
+          assertActive?.();
+          throw new Error("Missing runtime interruption");
+        }
+      },
+      { operation }
+    );
+    await expect(h.ports.preflightRepository("octo/app")).rejects.toMatchObject(
+      {
+        code: "setup-execution-interrupted"
+      }
+    );
+    expect(h.finalized).toEqual([]);
+    expect(operation.endedAt).toBeNull();
+    expect(operation.failure).toBeNull();
+  });
+
   it.each([
     [null, null, "the setup branch", "the default branch"],
     ["", "", "the setup branch", "the default branch"],
@@ -157,7 +194,7 @@ describe("Canvas setup configuration adapter", () => {
         {
           provider,
           finalize: async (input) => {
-            finalized.push(input);
+            finalized.push({ ...input });
             if (provider === "azure") {
               if (typeof input.runAz !== "function")
                 throw new Error("Azure cleanup runner is missing.");
@@ -307,7 +344,8 @@ describe("Canvas setup configuration adapter", () => {
     const request = {
       targetRepository: "octo/app",
       registry: "ghcr.io/octo/app/state",
-      credentials: handle
+      credentials: handle,
+      assertActive: () => {}
     };
     await first.ports.bootstrapStatePackage(request);
     expect(requests).toEqual([{ ...request, credentials }]);
@@ -355,5 +393,38 @@ describe("Canvas setup configuration adapter", () => {
       verifyRunId: "42",
       verifyRunUrl: "https://github.test/run/42"
     });
+  });
+
+  it("does not resolve a presentation when setup has no panel", () => {
+    const readInstanceEntry = vi.fn(unexpected);
+    const h = harness({ readInstanceEntry }, { instanceId: undefined });
+    h.ports.projectVerification({
+      dispatchedAt: 123,
+      verifyRunId: "42",
+      verifyRunUrl: "https://github.test/run/42"
+    });
+    expect(readInstanceEntry).not.toHaveBeenCalled();
+  });
+
+  it("does not publish verification into a replaced presentation", () => {
+    let current = true;
+    let entry: CreateEnvironmentInstanceEntry = { state: {} };
+    const readInstanceEntry = vi.fn(() => entry);
+    const h = harness(
+      { readInstanceEntry },
+      { isCurrentPresentation: () => current }
+    );
+    const verification = {
+      dispatchedAt: 123,
+      verifyRunId: "42",
+      verifyRunUrl: "https://github.test/run/42"
+    };
+    h.ports.projectVerification(verification);
+    expect(entry.state.verifyRunId).toBe("42");
+    current = false;
+    entry = { state: {} };
+    h.ports.projectVerification(verification);
+    expect(entry.state).toEqual({});
+    expect(readInstanceEntry).toHaveBeenCalledOnce();
   });
 });

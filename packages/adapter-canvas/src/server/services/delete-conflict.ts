@@ -25,6 +25,11 @@ import type {
   WorkflowArtifact
 } from "../../deploy-artifacts.js";
 import type { DeploymentRow } from "./deployment-resolver.js";
+import {
+  deploymentIdentityRefusal,
+  deploymentRunId,
+  readDeleteApplicationName
+} from "@radius-project/core";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -79,18 +84,17 @@ function errorDetail(error: unknown): string {
   return text.trim() || "the request was refused";
 }
 
-function readRunId(runUrl: string): string {
-  const match = /actions\/runs\/(\d+)/.exec(runUrl);
-  return match ? match[1] : "";
-}
-
 function findResultArtifact(
-  artifacts: readonly WorkflowArtifact[]
+  artifacts: readonly WorkflowArtifact[],
+  runId: number
 ): WorkflowArtifact | null {
   return (
     artifacts.find(
       (artifact) =>
-        artifact.name === DELETE_RESULT_ARTIFACT && artifact.expired !== true
+        artifact.name === DELETE_RESULT_ARTIFACT &&
+        artifact.expired !== true &&
+        (artifact.workflow_run?.id === undefined ||
+          artifact.workflow_run.id === runId)
     ) ?? null
   );
 }
@@ -136,8 +140,10 @@ export async function probeDeleteConflict(
   if (!current || current.status !== DELETE_FAILED_STATUS) {
     return { state: "clear" };
   }
+  const refusal = deploymentIdentityRefusal(current, request.application);
+  if (refusal) return { state: "unknown", detail: refusal.error };
 
-  const runId = readRunId(current.runUrl);
+  const runId = deploymentRunId(request.repo, current.runUrl);
   if (!runId) {
     return {
       state: "unknown",
@@ -155,7 +161,7 @@ export async function probeDeleteConflict(
       detail: `The failed delete run's artifacts could not be listed: ${errorDetail(error)}.`
     };
   }
-  const artifact = findResultArtifact(artifacts);
+  const artifact = findResultArtifact(artifacts, runId);
   if (!artifact) {
     return {
       state: "unknown",
@@ -165,7 +171,10 @@ export async function probeDeleteConflict(
 
   let files: ArtifactFiles | null;
   try {
-    files = await dependencies.downloadArtifact(request.repo, artifact);
+    files = await dependencies.downloadArtifact(request.repo, {
+      ...artifact,
+      workflow_run: { id: runId }
+    });
   } catch (error) {
     return {
       state: "unknown",
@@ -186,6 +195,15 @@ export async function probeDeleteConflict(
       detail: `The ${DELETE_RESULT_FILE} written by the failed delete run could not be read.`
     };
   }
+  const application = readDeleteApplicationName(files[DELETE_RESULT_FILE]);
+  if (
+    !application ||
+    application.toLowerCase() !== request.application.trim().toLowerCase()
+  )
+    return {
+      state: "unknown",
+      detail: "The delete result does not identify the requested application."
+    };
   if (payload.outcome !== "failed") return { state: "clear" };
   const output = typeof payload.output === "string" ? payload.output : "";
   const resourceState = readNonTerminalState(output);

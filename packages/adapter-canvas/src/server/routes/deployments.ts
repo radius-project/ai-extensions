@@ -4,12 +4,19 @@ import type { RouteHandlerRegistry } from "../route-table.js";
 import type { DeploymentAbandonmentService } from "../services/deployment-abandonment.js";
 import type { DeployRequestService } from "../services/deploy-request.js";
 import type { DeploymentRow } from "../services/deployment-resolver.js";
+import { prepareDeploymentCleanup } from "../services/deployment-cleanup-details.js";
+import type { EnvironmentDeploymentListing } from "@radius-project/adapter-shared";
+import {
+  inspectDeploymentListings,
+  type ApplicationDefinitionInspection
+} from "@radius-project/core/inspection";
 import type {
   DeleteConflictProbe,
   DeleteConflictRequest
 } from "../services/delete-conflict.js";
 import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
-import { discardDeployedApplicationState } from "../services/deployed-view-state.js";
+import type { DeletedDeploymentIdentity } from "../services/deployed-view-state.js";
+import { redactGhCredentials } from "../../gh.js";
 import { DELETE_FAILED_STATUS } from "../services/delete-conflict.js";
 import { DELETE_APP_DISPATCHER_FILE } from "../../infra.js";
 import {
@@ -17,7 +24,10 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "../../gh-command-display.js";
-import { projectSafeApplicationGraph } from "@radius-project/core";
+import {
+  projectSafeApplicationGraph,
+  deploymentIdentityRefusal
+} from "@radius-project/core";
 
 // What the webview needs to decide whether to keep polling after a failed
 // deploy. Shaped to match `deployHandoffStatus` in `server.ts`, which is
@@ -89,6 +99,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  id(): string;
   ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
@@ -105,16 +116,29 @@ export interface DeploymentsDependencies {
     instanceId: string
   ): boolean;
   deployHandoffStatus(state: CanvasState): DeployHandoffSummary;
-  resolveRepoAppName(repo: string, branch: string): Promise<string>;
+  inspectRepoApplication(
+    repo: string,
+    branch: string
+  ): Promise<ApplicationDefinitionInspection>;
   resolveEnvDeployment(
     repo: string,
     environment: string,
     appName: string
   ): Promise<DeploymentRow | null>;
+  listEnvDeployment(
+    repo: string,
+    environment: string,
+    appName: string
+  ): Promise<EnvironmentDeploymentListing>;
   // The gh runner that REJECTS on failure, so a GitHub outage surfaces as an
   // error payload rather than as a definitive empty listing.
   ghOrThrow(args: string[]): Promise<string>;
   resetDeploymentViewState(state: CanvasState, attemptId: unknown): void;
+  captureDeletedDeployment(
+    state: CanvasState,
+    target: DeletedDeploymentIdentity & { repo: string }
+  ): () => void;
+  logError(message: string): void;
   deployListCache: DeployListCache;
   deployListTtlMs: number;
   // Destructive-dispatch seams. Every one is a specific named function rather
@@ -149,7 +173,8 @@ export interface DeploymentsDependencies {
     repo: string,
     workflowFile: string,
     sinceMs: number,
-    knownId: number | string | null
+    knownId: number | string | null,
+    correlationId?: string
   ): Promise<number | string | null>;
   // Resolves rather than rejects on a non-zero exit, so the handler can inspect
   // stderr and choose the failure message.
@@ -176,6 +201,14 @@ export interface DeploymentsDependencies {
     request: DeleteConflictRequest,
     instanceId: string
   ): Promise<DeleteConflictProbe>;
+  // Repair for an AWS deploy that could not sign in. The service decides from
+  // this canvas's failed deploy which environment it repairs.
+  awsTrustRepair: {
+    repair(input: { instanceId: string; generation: number }): Promise<{
+      status: number;
+      body: Record<string, unknown>;
+    }>;
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -240,7 +273,19 @@ export function handleDeployStatus(
   const status = entry?.state?.deployStatus || "pending";
   const error = entry?.state?.deployError || null;
   const errorKind = entry?.state?.deployErrorKind || null;
-  const errorBranch = entry?.state?.deployErrorBranch || null;
+  const state = entry?.state;
+  const attempt = state?.deployAttempt || null;
+  const errorBranch =
+    (
+      state?.workspaceRepo &&
+      state.workspaceBranch &&
+      state.workspaceRepo.toLowerCase() ===
+        attempt?.targetRepo?.toLowerCase() &&
+      state.workspaceBranch === attempt.branch &&
+      state.deployErrorBranch === attempt.branch
+    ) ?
+      state.deployErrorBranch
+    : null;
   const errorPaths = entry?.state?.deployErrorPaths || null;
   const startedAt = entry?.state?.deployStartedAt || null;
   const finishedAt = entry?.state?.deployFinishedAt || null;
@@ -257,7 +302,8 @@ export function handleDeployStatus(
     }
   }
   const deployRunUrl = entry?.state?.deployRunUrl || null;
-  const attempt = entry?.state?.deployAttempt || null;
+  // Advanced on every deploy, so an action on a failure names which one.
+  const generation = entry?.state?.deployGeneration || 0;
   const active = status === "in_progress";
   // The handoff trigger runs first and short-circuits the rest of the chain, so
   // a freshly-opened repair loop reports `repairing` on the very same poll that
@@ -301,6 +347,7 @@ export function handleDeployStatus(
         deployedGraph,
         deployRunUrl,
         attempt,
+        generation,
         active,
         repairing,
         handoff
@@ -323,6 +370,7 @@ export function handleDeployStatus(
         deployedGraph,
         deployRunUrl,
         attempt,
+        generation,
         active,
         repairing,
         handoff
@@ -352,13 +400,14 @@ export async function handleListApplications(
     return;
   }
   try {
-    // The application name is defined in the repo's app.bicep (a repo hosts a
-    // single Radius application in this model). Shared with the
-    // deployments/env-deletion paths via resolveRepoAppName.
+    // The compatibility response displays a fallback name without asserting
+    // that the selected branch contained a usable definition.
     const entry = dependencies.readInstanceEntry(context.instanceId);
     const branch = deployContextBranch(entry);
-    const appName = await dependencies.resolveRepoAppName(repo, branch);
-    respond({ applications: [{ name: appName }] });
+    const definition = await dependencies.inspectRepoApplication(repo, branch);
+    const name =
+      definition.kind === "defined" ? definition.name : definition.fallbackName;
+    respond({ applications: [{ name }] });
   } catch (e) {
     respond({
       applications: [{ name: repo.split("/").pop() || repo }],
@@ -418,31 +467,70 @@ export async function handleListDeployments(
     // OWN history (see resolveEnvDeployment). Querying per environment — rather
     // than a single repo-wide, capped page — means a busy environment can never
     // crowd another's latest deploy/delete record out of the results.
-    const envNamesRaw = await dependencies.ghOrThrow([
-      "api",
-      "--paginate",
-      `/repos/${repo}/environments?per_page=100`,
-      "--jq",
-      ".environments[].name"
-    ]);
-    const envNames =
-      envNamesRaw ? [...new Set(envNamesRaw.split("\n").filter(Boolean))] : [];
-    // Resolve the real app name once (from app.bicep) so every row targets the
-    // app declared in the bicep, not the repo basename.
-    const listEntry = dependencies.readInstanceEntry(context.instanceId);
-    const listBranch = deployContextBranch(listEntry);
-    const listAppName = await dependencies.resolveRepoAppName(repo, listBranch);
-    const resolved = await Promise.all(
-      envNames.map((name) =>
-        dependencies.resolveEnvDeployment(repo, name, listAppName)
-      )
+    const resolved = await inspectDeploymentListings(
+      async () => {
+        const names = await dependencies.ghOrThrow([
+          "api",
+          "--paginate",
+          `/repos/${repo}/environments?per_page=100`,
+          "--jq",
+          ".environments[].name"
+        ]);
+        return names.split("\n").filter(Boolean);
+      },
+      (name) => dependencies.listEnvDeployment(repo, name, "")
     );
-    const payload = { deployments: resolved.filter(Boolean) };
+    const deployments = [];
+    const environmentDiagnostics = [];
+    for (const { environment, result } of resolved) {
+      if (result.status === "rejected") {
+        environmentDiagnostics.push({
+          environment,
+          kind: "error",
+          message: redactGhCredentials(
+            errorMessage(result.reason),
+            dependencies.readProcessEnv()
+          )
+        });
+        continue;
+      }
+      if (result.value.deployment)
+        deployments.push({
+          ...result.value.deployment,
+          cleanupSelection: result.value.selection
+        });
+      if (result.value.incomplete)
+        environmentDiagnostics.push({
+          environment,
+          kind: "incomplete",
+          message:
+            "Only the first 100 deployment records were checked. Load cleanup details to verify older history."
+        });
+    }
+    const payload = {
+      deployments,
+      ...(environmentDiagnostics.length ? { environmentDiagnostics } : {})
+    };
     dependencies.deployListCache.set(repo, { at: Date.now(), payload });
     respond(payload);
   } catch (e) {
     respond({ deployments: [], error: errorMessage(e) });
   }
+}
+
+export async function handleCleanupDetails(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): Promise<void> {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(await context.readTextBody());
+  } catch {
+    context.json(400, { error: "Invalid cleanup request." });
+    return;
+  }
+  const result = await prepareDeploymentCleanup(payload, dependencies);
+  context.json(result.status, result.body, { "Cache-Control": "no-store" });
 }
 
 // Clears the client-visible remains of a finished deploy attempt. Declared with
@@ -515,6 +603,12 @@ export async function handleDeleteDeployment(
     // whose external resources may still exist — so only the exact boolean
     // `true` enables it. A truthy string from a hand-made request does not.
     const force = record(data).force === true;
+    for (const field of ["deploymentId", "runUrl"]) {
+      if (data[field] !== undefined && typeof data[field] !== "string") {
+        respond(400, { error: `${field} must be a string.` });
+        return;
+      }
+    }
     if (
       !repo ||
       !environment ||
@@ -563,6 +657,10 @@ export async function handleDeleteDeployment(
       });
       return;
     }
+    const invalidateDeletedDeployment = dependencies.captureDeletedDeployment(
+      entry.state,
+      { repo, environment, application }
+    );
 
     // Backstop the UI with GitHub's persisted state too. This covers a
     // deployment started from another canvas instance or browser session.
@@ -579,6 +677,15 @@ export async function handleDeleteDeployment(
         error:
           "Could not verify the current deployment state. Check your GitHub connection and try again."
       });
+      return;
+    }
+    const identityRefusal = deploymentIdentityRefusal(current, application, {
+      deploymentId: data.deploymentId,
+      runUrl: data.runUrl
+    });
+    if (identityRefusal) {
+      releaseReservation();
+      respond(identityRefusal.status, { error: identityRefusal.error });
       return;
     }
     if (
@@ -710,6 +817,15 @@ export async function handleDeleteDeployment(
       (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
     );
     const dispatchedAt = Date.now();
+    const correlationId = `dep-${dependencies.id()}`;
+    if (
+      !/^dep-[a-zA-Z0-9-]{1,64}$/.test(correlationId) ||
+      `Radius - Delete ${environment} [radius:v1 app=${application}] ${correlationId}`
+        .length > 256
+    )
+      throw new Error(
+        "The delete identity cannot fit the supported run-title contract. No workflow was dispatched."
+      );
     const dispatchArgs = [
       "workflow",
       "run",
@@ -718,6 +834,8 @@ export async function handleDeleteDeployment(
       "environment=" + environment,
       "-f",
       "application=" + application,
+      "-f",
+      "correlation_id=" + correlationId,
       ...(force ? ["-f", "force=true"] : []),
       "--repo",
       repo
@@ -729,7 +847,7 @@ export async function handleDeleteDeployment(
     // from the default branch. Give that the same bounded retry the
     // not-yet-registered workflow gets, rather than reporting a failure the
     // user cannot act on.
-    const dispatchDelays = justCreated || force ? [0, 2000, 5000] : [0];
+    const dispatchDelays = [0, 2000, 5000];
     if (justCreated) await sleep(dependencies, 3000);
     for (const delay of dispatchDelays) {
       // `> 0` vs `> 1` is equivalent over the fixed delay set {0, 2000, 5000}:
@@ -743,7 +861,7 @@ export async function handleDeleteDeployment(
       // stop retrying.
       if (
         !/not found|HTTP 404/i.test(dispatch.stderr || "") &&
-        !(force && /unexpected inputs?|HTTP 422/i.test(dispatch.stderr || ""))
+        !/unexpected inputs?/i.test(dispatch.stderr || "")
       ) {
         break;
       }
@@ -770,10 +888,12 @@ export async function handleDeleteDeployment(
       // An exhausted unexpected-input retry is a stale dispatcher, not a
       // permissions or Actions problem, so it says so instead of sending the
       // user to check settings that are already correct.
-      const staleForceInput = force && /unexpected inputs?|HTTP 422/i.test(de);
+      const staleForceInput = /unexpected inputs?/i.test(de);
       const hint =
         staleForceInput ?
-          " GitHub is still rejecting the `force` input, which means the copy" +
+          " GitHub is still rejecting " +
+          (force ? "the `force` input" : "the workflow inputs") +
+          ", which means the copy" +
           " of " +
           DELETE_APP_DISPATCHER_FILE +
           " on the default branch of " +
@@ -802,16 +922,6 @@ export async function handleDeleteDeployment(
       return;
     }
 
-    // Best-effort: resolve the dispatched run's URL so the client can link to it
-    // in GitHub.
-    let runUrl = "";
-    const runId = await dependencies.findWorkflowRun(
-      repo,
-      DELETE_APP_DISPATCHER_FILE,
-      dispatchedAt,
-      null
-    );
-    if (runId) runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
     // A workflow run can become discoverable before it creates its GitHub
     // deployment record. Retain a short lease in either case to close that
     // publication gap; after it expires, resolveEnvDeployment is the durable
@@ -824,12 +934,27 @@ export async function handleDeleteDeployment(
     // A delete is now in flight, so the cached listing is stale — drop it so the
     // next poll reflects the "Deleting…" state immediately.
     dependencies.deployListCache.delete(repo);
-    // The delete run removes the deploy-status artifact for exactly this
-    // environment and application, which is what stops other sessions rendering
-    // the deleted deployment. This session also holds its own copy of that
-    // deploy, so retire it here or the Deployed view keeps showing "Last
-    // deployment" from state no artifact read can override.
-    discardDeployedApplicationState(entry.state, { environment, application });
+    invalidateDeletedDeployment();
+    let runUrl = "";
+    try {
+      const runId = await dependencies.findWorkflowRun(
+        repo,
+        DELETE_APP_DISPATCHER_FILE,
+        dispatchedAt,
+        null,
+        correlationId
+      );
+      if (runId)
+        runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
+    } catch (error) {
+      dependencies.logError(
+        "[radius delete] Dispatch accepted; run URL unavailable: " +
+          redactGhCredentials(
+            errorMessage(error),
+            dependencies.readProcessEnv()
+          ).slice(0, 2000)
+      );
+    }
     respond(200, { success: true, runUrl, forced: force });
   } catch (e) {
     releaseReservation();
@@ -931,6 +1056,39 @@ export async function handleDeploy(
   context.json(result.status, result.body);
 }
 
+// Adds back the trust subjects the failed AWS deploy's role is missing. The
+// failed deploy names the environment; the body only names which deploy the
+// panel showed, so a stale panel cannot repair a newer failure.
+export async function handleRepairAwsTrust(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): Promise<void> {
+  const body = await context.readTextBody();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    parsed = null;
+  }
+  const generation =
+    typeof parsed === "object" && parsed !== null && "generation" in parsed ?
+      parsed.generation
+    : undefined;
+  if (typeof generation !== "number" || !Number.isSafeInteger(generation)) {
+    context.json(400, {
+      code: "repair-request-invalid",
+      error:
+        "Repair needs the deploy the panel shows, as an integer generation. Reload the page and try again."
+    });
+    return;
+  }
+  const result = await dependencies.awsTrustRepair.repair({
+    instanceId: context.instanceId,
+    generation
+  });
+  context.json(result.status, result.body);
+}
+
 // The ambient deploy chip's read-only source. Deliberately NOT served from
 // `/api/deploy-status`: that route drives the repair handoff and the failure
 // notice as a side effect of being polled, and the chip polls from every page
@@ -980,12 +1138,16 @@ export function createDeploymentsRoutes(
   return {
     "GET /api/deploy-status": (context) =>
       handleDeployStatus(context, dependencies),
+    "POST /api/deploy/repair-aws-trust": (context) =>
+      handleRepairAwsTrust(context, dependencies),
     "GET /api/deploy-notification": (context) =>
       handleDeployNotification(context, dependencies),
     "GET /api/list-applications": (context) =>
       handleListApplications(context, dependencies),
     "GET /api/list-deployments": (context) =>
       handleListDeployments(context, dependencies),
+    "POST /api/deployment-cleanup-details": (context) =>
+      handleCleanupDetails(context, dependencies),
     "GET /api/delete-conflict": (context) =>
       handleDeleteConflict(context, dependencies),
     "POST /api/deploy": (context) => handleDeploy(context, dependencies),

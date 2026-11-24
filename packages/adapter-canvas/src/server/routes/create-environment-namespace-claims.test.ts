@@ -5,6 +5,7 @@ import {
   createSelectedNamespaceClaimsPorts,
   DEFAULT_NAMESPACE,
   findNamespaceClaimConflict,
+  loadEnvironmentClaims,
   loadNamespaceClaims,
   type ClaimantReading,
   type NamespaceClaimsCliExec,
@@ -683,6 +684,40 @@ describe("establishing the repository's namespace claims", () => {
         })
       ]
     });
+  });
+
+  it("returns each claim with the variables it was read from", async () => {
+    const prod = awsVariables({
+      AWS_TRUST_SUBJECTS: '["repo:octo/app:environment:prod"]'
+    });
+    const result = await loadEnvironmentClaims(
+      "octo/app",
+      ports({ prod, manual: { AZURE_AKS_CLUSTER_NAME: "aks-9" } })
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      claims: [
+        {
+          claimant: expect.objectContaining({ environment: "prod" }),
+          variables: prod
+        }
+      ]
+    });
+  });
+
+  it("fails both lookups the same way when an environment can't be read", async () => {
+    const failing: NamespaceClaimsPorts = {
+      listEnvironmentNames: async () => ({ ok: true, names: ["dev"] }),
+      readEnvironmentVariables: async () => ({ ok: false, reason: "HTTP 502" })
+    };
+    const failure = { ok: false, reason: "HTTP 502" };
+    await expect(loadEnvironmentClaims("octo/app", failing)).resolves.toEqual(
+      failure
+    );
+    await expect(loadNamespaceClaims("octo/app", failing)).resolves.toEqual(
+      failure
+    );
   });
 
   // The admission boundary sits in front of every create, so the reads must not

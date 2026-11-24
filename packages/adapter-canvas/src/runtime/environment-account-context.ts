@@ -5,17 +5,22 @@ export function createEnvironmentAccountContext(
   ownerKey: string,
   coordinator: GitHubAccountCoordinator
 ) {
-  const executors = new Map<string, SelectedGhExecutor>();
+  const executors = new Map<string, { executor: SelectedGhExecutor }>();
   return {
     ownerKey,
     coordinator,
-    getExecutor: (operationId: string) => executors.get(operationId),
-    registerExecutor(operationId: string, executor: SelectedGhExecutor): void {
-      executors.set(operationId, executor);
-    },
-    unregisterExecutor(operationId: string): void {
-      // Preserve operation-ID cleanup; identity-fenced release is a separate fix.
-      executors.delete(operationId);
+    getExecutor: (operationId: string) => executors.get(operationId)?.executor,
+    registerExecutor(
+      operationId: string,
+      executor: SelectedGhExecutor
+    ): () => void {
+      const registration = { executor };
+      executors.set(operationId, registration);
+      return () => {
+        if (executors.get(operationId) === registration) {
+          executors.delete(operationId);
+        }
+      };
     }
   };
 }

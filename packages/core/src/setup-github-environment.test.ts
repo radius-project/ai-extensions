@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { assertSetupExecutionActive } from "./setup-recovery-error.js";
 import {
   ensureGitHubEnvironment,
   GitHubEnvironmentEnsureCancelled,
@@ -37,6 +38,39 @@ function input(
 }
 
 describe("GitHub environment setup through domain ports", () => {
+  it.each(["before", "lookup", "repository"] as const)(
+    "fences shutdown at the %s read before mutation admission",
+    async (boundary) => {
+      let stopped = boundary === "before";
+      const read = vi.fn(async (path: string) => {
+        if (boundary === "lookup" || path === "/repos/octo/app") stopped = true;
+        return { ok: false, status: 404 };
+      });
+      const execute = vi.fn(async (): Promise<never> => {
+        throw new Error("Unexpected mutation");
+      });
+      await expect(
+        ensureGitHubEnvironment(
+          input({
+            readGitHubJson: read,
+            recovery: {
+              assertActive: () => assertSetupExecutionActive(() => stopped),
+              find: () => null,
+              willWrite: () => true,
+              execute
+            }
+          })
+        )
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(read).toHaveBeenCalledTimes(
+        boundary === "before" ? 0
+        : boundary === "lookup" ? 1
+        : 2
+      );
+      expect(execute).not.toHaveBeenCalled();
+    }
+  );
+
   it("preserves the read, stop, write and immutable identity transcript without Canvas", async () => {
     const calls: unknown[] = [];
     const ports = input({
@@ -75,6 +109,7 @@ describe("GitHub environment setup through domain ports", () => {
   it("reads the live journal after the provider read instead of caching its earlier state", async () => {
     let confirmed = false;
     const recovery: GitHubEnvironmentRecoveryPort = {
+      assertActive: () => {},
       find: () =>
         confirmed ?
           {
@@ -118,6 +153,7 @@ describe("GitHub environment setup through domain ports", () => {
       ensureGitHubEnvironment(
         input({
           recovery: {
+            assertActive: () => {},
             find: () => null,
             willWrite: () => true,
             execute: async () => {
@@ -207,6 +243,7 @@ describe("GitHub environment setup through domain ports", () => {
           json: { name: "Production", id: 17 }
         }),
         recovery: {
+          assertActive: () => {},
           find: () => ({
             ...record,
             kind: "github_environment.put",
@@ -243,6 +280,7 @@ describe("GitHub environment setup through domain ports", () => {
       ensureGitHubEnvironment(
         input({
           recovery: {
+            assertActive: () => {},
             find: () => null,
             willWrite: () => true,
             execute: async (mutation) => {
@@ -264,6 +302,7 @@ describe("GitHub environment setup through domain ports", () => {
       ensureGitHubEnvironment(
         input({
           recovery: {
+            assertActive: () => {},
             find: () => null,
             willWrite: () => false,
             execute: async () => ({ state: "not_applied" })
@@ -282,6 +321,7 @@ describe("GitHub environment setup through domain ports", () => {
       ensureGitHubEnvironment(
         input({
           recovery: {
+            assertActive: () => {},
             find: () => null,
             willWrite: () => true,
             execute: async () => ({ state: "cancelled" })
@@ -308,6 +348,7 @@ describe("GitHub environment setup through domain ports", () => {
               );
             },
             recovery: {
+              assertActive: () => {},
               find: () => ({
                 kind: "github_environment.put",
                 status: "prepared",

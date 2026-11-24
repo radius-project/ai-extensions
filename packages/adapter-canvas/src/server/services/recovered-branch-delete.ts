@@ -8,6 +8,7 @@ import {
   proveBranchAbsent,
   REF_PAGE_SIZE
 } from "./branch-absence.js";
+import { assertSetupExecutionActive } from "@radius-project/core";
 
 export { REF_PAGE_SIZE };
 
@@ -39,6 +40,7 @@ export interface RecoveredBranchDeleteTarget {
 }
 
 export type RecoveredBranchDeleteOutcome =
+  | { state: "interrupted" }
   | { state: "removed"; branch: string; evidence: string }
   | { state: "manual_required"; branch: string | null; guidance: string }
   | { state: "unreadable"; branch: string | null; guidance: string }; /**
@@ -86,6 +88,7 @@ function branchHeadSha(result: BranchRefReadResult): string | null {
  * is how a branch holding replacement work disappears.
  */
 export async function reconcileRecoveredBranchDelete(input: {
+  isStopped?(): boolean;
   operation: object;
   mutation: ProviderMutationRecord;
   readBranchRef(repo: string, branch: string): Promise<BranchRefReadResult>;
@@ -95,6 +98,7 @@ export async function reconcileRecoveredBranchDelete(input: {
     page: number
   ): Promise<BranchRefReadResult>;
 }): Promise<RecoveredBranchDeleteOutcome> {
+  if (input.isStopped?.()) return { state: "interrupted" };
   const target = parseBranchDeleteTarget(input.mutation.target);
   if (!target) {
     const guidance =
@@ -112,6 +116,7 @@ export async function reconcileRecoveredBranchDelete(input: {
   try {
     read = await input.readBranchRef(target.repo, target.branch);
   } catch (error) {
+    if (input.isStopped?.()) return { state: "interrupted" };
     return {
       state: "unreadable",
       branch: target.branch,
@@ -120,6 +125,7 @@ export async function reconcileRecoveredBranchDelete(input: {
         `${error instanceof Error ? error.message : String(error)}. It changed nothing further.`
     };
   }
+  if (input.isStopped?.()) return { state: "interrupted" };
   const ok = read.code === 0 || read.code === "0";
   if (!ok) {
     if (isNotFoundResponse(read)) {
@@ -134,11 +140,17 @@ export async function reconcileRecoveredBranchDelete(input: {
         repo: target.repo,
         branch: target.branch,
         ports: {
-          listBranchRefs: (page) =>
-            input.listBranchRefs(target.repo, target.branch, page),
-          readBranchRef: () => input.readBranchRef(target.repo, target.branch)
+          listBranchRefs: (page) => {
+            assertSetupExecutionActive(input.isStopped);
+            return input.listBranchRefs(target.repo, target.branch, page);
+          },
+          readBranchRef: () => {
+            assertSetupExecutionActive(input.isStopped);
+            return input.readBranchRef(target.repo, target.branch);
+          }
         }
       });
+      if (input.isStopped?.()) return { state: "interrupted" };
       if (proof.state === "unknown") {
         return {
           state: "unreadable",

@@ -11,8 +11,7 @@
 //
 // Two modes:
 //
-//   --begin [--run-id <id>]   Prepare a run: remove any staging directory left
-//                             behind by an interrupted run, create a staging
+//   --begin [--run-id <id>]   Prepare a run: create a private staging
 //                             directory that hides itself from git, record the
 //                             fingerprint of the application model as it is
 //                             right now, and print the directory to write into.
@@ -37,7 +36,7 @@
 // agree.
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -204,7 +203,7 @@ function requiredStagedFiles(present) {
 function isPublishableExtraArtifact(name) {
   return (
     name === "custom-recipe-pack.bicep" ||
-    /^[a-z0-9-]+-recipe\.bicep$/u.test(name)
+    /^(?:[a-z0-9-]+|[a-z][A-Za-z0-9]*)-recipe\.bicep$/u.test(name)
   );
 }
 
@@ -257,41 +256,6 @@ function managedFilesFor(radiusDir) {
   return [...new Set([...MANAGED_FILES, ...existing])].sort();
 }
 
-// Removes every staging directory under `.radius/`. A run that finished always
-// removes its own, so anything still here belongs to a run that did not, and is
-// not something the user needs: a directory of half-finished files is mostly a
-// way to mistake a discarded run for a real application model.
-// Runs are given unique directory names so two of them cannot collide, so the
-// sweep leaves recently-started ones alone rather than immediately undoing that.
-// A directory this young belongs to a run that is plausibly still working; an
-// older one belongs to a run that was interrupted, since a run that finished
-// always removes its own.
-const STAGING_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
-
-function purgeStagingDirs(radiusDir, staleAfterMs = STAGING_STALE_AFTER_MS) {
-  const now = Date.now();
-  if (!existsSync(radiusDir)) return [];
-  const removed = [];
-  for (const entry of readdirSync(radiusDir, { withFileTypes: true })) {
-    // `isDirectory()` on a Dirent is already an lstat, so a symlink named
-    // `.staging-*` is skipped rather than followed and deleted through.
-    if (!entry.isDirectory() || !isStagingDirName(entry.name)) continue;
-    const dir = path.join(radiusDir, entry.name);
-    let startedAt;
-    try {
-      startedAt = lstatSync(dir).mtimeMs;
-    } catch {
-      // Unreadable: treat it as old enough to sweep rather than keeping it
-      // forever on the strength of a stat that did not work.
-      startedAt = 0;
-    }
-    if (startedAt && now - startedAt < staleAfterMs) continue;
-    rmSync(dir, { recursive: true, force: true });
-    removed.push(entry.name);
-  }
-  return removed;
-}
-
 // Adds the staging-directory ignore rule to `.radius/.gitignore`, at PUBLISH
 // time.
 //
@@ -307,12 +271,8 @@ function purgeStagingDirs(radiusDir, staleAfterMs = STAGING_STALE_AFTER_MS) {
 // outside its staging directory to undo, so the guarantee holds by construction
 // rather than by a revert that has to be correct.
 //
-// The cost used to be that a run interrupted mid-flight left its staging
-// directory untracked until the next run swept it up. That is now covered from
-// the moment the directory is created, by the ignore file the directory carries
-// itself (see STAGING_SELF_IGNORE), so this rule is belt-and-braces for the
-// repository rather than the only thing standing between an interrupted run and
-// a bulk `git add`.
+// Interrupted runs are already ignored by their own ignore file
+// (see STAGING_SELF_IGNORE).
 //
 // Returns true when the file was written, so only a rule this run added is
 // staged in git.
@@ -368,7 +328,7 @@ function resolveRadiusDir() {
 }
 
 // True when the path exists and is a real directory rather than a symlink to
-// one. Used for both the staging directory and the leftovers sweep: a symlink
+// one. A symlink
 // named `.staging-*` is never something this script created, so it is never
 // followed, written through, or published from.
 function isRealDirectory(target) {
@@ -384,29 +344,17 @@ function isRealDirectory(target) {
 function begin() {
   const radiusDir = resolveRadiusDir();
   mkdirSync(radiusDir, { recursive: true });
-  // `--stale-after-ms` exists so the sweep can be exercised deterministically
-  // instead of by waiting hours; runs use the default.
-  const requestedStaleAfter = flag("stale-after-ms");
-  const staleAfter = requestedStaleAfter ? Number(requestedStaleAfter) : NaN;
-  purgeStagingDirs(
-    radiusDir,
-    Number.isFinite(staleAfter) && staleAfter >= 0 ?
-      staleAfter
-    : STAGING_STALE_AFTER_MS
-  );
-
-  // A unique id by default: two runs sharing `.staging-run` would sweep each
-  // other away, and the sweep cannot tell a live run from an abandoned one.
-  const dirName = stagingDirName(
-    flag("run-id") || `${Date.now().toString(36)}-${process.pid.toString(36)}`
-  );
+  // Age cannot prove that another session has finished writing.
+  const dirName = stagingDirName(flag("run-id") || randomUUID());
   const stagingDir = path.join(radiusDir, dirName);
-  if (existsSync(stagingDir) && !isRealDirectory(stagingDir)) {
+  try {
+    mkdirSync(stagingDir);
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
     fail(
-      `Cannot stage a modeling run at ${stagingDir}: it exists and is not a real directory. Remove it and start the run again.`
+      `Modeling staging path ${stagingDir} already exists. Start a new run with a different ID.`
     );
   }
-  mkdirSync(stagingDir, { recursive: true });
   // Written before anything else the run produces, so there is no window in
   // which the directory holds model files git can see.
   writeFileSync(
@@ -447,7 +395,7 @@ function refuseWith(stagingDir) {
       rmSync(stagingDir, { recursive: true, force: true });
     } catch (error) {
       console.error(
-        `Note: the staged run at ${stagingDir} could not be removed (${error.message}). It is ignored by git and the next modeling run will clear it.`
+        `Note: the staged run at ${stagingDir} could not be removed (${error.message}). It is ignored by git; remove it only after confirming the run has stopped.`
       );
     }
     fail(

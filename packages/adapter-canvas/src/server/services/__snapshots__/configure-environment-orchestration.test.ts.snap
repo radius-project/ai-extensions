@@ -42,6 +42,17 @@ exports[`publication baseline parity > preserves the direct command, journal, na
   },
   "finished": [],
   "ledger": {
+    "awsAccessEntries": [],
+    "awsAppBoundaries": [],
+    "awsRole": {
+      "origin": "unknown",
+      "roleArn": null,
+      "roleId": null,
+      "roleName": null,
+      "state": "not_started",
+    },
+    "awsRolePolicies": [],
+    "awsTrustSubjects": [],
     "azureApp": {
       "appId": null,
       "displayName": null,
@@ -1656,6 +1667,17 @@ exports[`publication baseline parity > preserves the merge-required command, jou
     },
   ],
   "ledger": {
+    "awsAccessEntries": [],
+    "awsAppBoundaries": [],
+    "awsRole": {
+      "origin": "unknown",
+      "roleArn": null,
+      "roleId": null,
+      "roleName": null,
+      "state": "not_started",
+    },
+    "awsRolePolicies": [],
+    "awsTrustSubjects": [],
     "azureApp": {
       "appId": null,
       "displayName": null,
@@ -3401,6 +3423,17 @@ exports[`publication baseline parity > preserves the protected command, journal,
   },
   "finished": [],
   "ledger": {
+    "awsAccessEntries": [],
+    "awsAppBoundaries": [],
+    "awsRole": {
+      "origin": "unknown",
+      "roleArn": null,
+      "roleId": null,
+      "roleName": null,
+      "state": "not_started",
+    },
+    "awsRolePolicies": [],
+    "awsTrustSubjects": [],
     "azureApp": {
       "appId": null,
       "displayName": null,

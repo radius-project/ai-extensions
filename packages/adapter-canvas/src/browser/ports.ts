@@ -93,6 +93,7 @@ export interface DomOption {
   value: string;
   textContent: string | null;
   selected: boolean;
+  readonly disabled?: boolean;
 }
 
 export interface DomOptionElement extends DomElement {

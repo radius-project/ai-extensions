@@ -28,6 +28,15 @@ on:
         type: string
         required: false
         default: ''
+      app_file:
+        description: 'Repository-relative application model path; empty uses the generated default'
+        type: string
+        required: false
+        default: ''
+      application:
+        type: string
+        required: false
+        default: unknown
 
 permissions:
   id-token: write
@@ -40,7 +49,7 @@ concurrency:
 
 env:
   ENVIRONMENT: ${{ inputs.environment }}
-  APP_FILE: '{{APP_FILE}}'
+  APP_FILE: ${{ inputs.app_file || '{{APP_FILE}}' }}
   APP_IMAGE: ${{ inputs.image || github.sha || 'latest' }}
   # Target-cluster architecture-aware container image builds. Rendered by the
   # Radius extension: TARGET_CLUSTER_ARCH_MODE -> ${{ vars.RADIUS_BUILD_ARCH_MODE
@@ -72,6 +81,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate declared application identity
+        id: identity
+        uses: radius-project/ai-extensions/.github/extension/actions/validate-deployment-identity@{{RADIUS_REF}}
+        with:
+          application: ${{ inputs.application || 'unknown' }}
+          app-file: ${{ env.APP_FILE }}
+          environment: ${{ inputs.environment }}
+          rad-commands: ${{ inputs.rad_commands || vars.RADIUS_RAD_COMMANDS }}
 
       - name: Azure Login (OIDC)
         if: ${{ vars.AZURE_CLIENT_ID != '' }}
@@ -409,7 +427,7 @@ jobs:
           app-file: ${{ env.APP_FILE }}
 
       - name: Teardown
-        if: always()
+        if: ${{ always() && steps.identity.outcome == 'success' }}
         uses: radius-project/ai-extensions/.github/extension/actions/teardown@{{RADIUS_REF}}
         with:
           state-restored: ${{ steps.restore-state.outputs.state-restored }}

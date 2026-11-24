@@ -41,39 +41,23 @@ export interface WorkflowCredentialFallbackInput {
 
 // The shape of a failed child process the runners observe. `execFile` reports a
 // child it terminated (its timeout elapsed) with `killed` and/or a `signal`.
-export interface CommandFailure {
-  killed?: boolean;
-  signal?: NodeJS.Signals | string | null;
-}
+export type { CommandFailure } from "@radius-project/core";
 
 // True when the CLI was terminated rather than answered. The command's outcome
 // is then unknown — a dispatch may already have been accepted — so callers must
 // neither retry it nor read its stderr as a verdict. Defined once because the
 // deploy runners, the delete dispatch and the create-environment runner all
 // have to agree on it.
-export function commandTimedOut(
-  error: CommandFailure | null | undefined
-): boolean {
-  return !!error && (!!error.killed || !!error.signal);
-}
+export { commandTimedOut } from "@radius-project/core";
 
 // Pure predicate distinguishing a missing token scope (which a pull request
 // cannot fix, and which the keyring credential may be able to satisfy) from any
 // other refusal. Covers the OAuth-app wording GitHub returns for contents
 // writes under `.github/workflows/`, the shorter `gh` phrasings, and the GitHub
 // App variant, which names a missing `workflows` permission instead of a scope.
-import { needsWorkflowScope } from "@radius-project/core";
 export { needsWorkflowScope } from "@radius-project/core";
 
 // Whether a failed workflow-scoped gh command may be retried with the injected
 // token stripped. Fails closed: anything not positively recognised as a
 // workflow-scope rejection keeps the original failure and its real message.
-export function shouldRetryWithKeyringCredential({
-  stderr,
-  timedOut,
-  hasInjectedToken
-}: WorkflowCredentialFallbackInput): boolean {
-  if (!hasInjectedToken) return false;
-  if (timedOut) return false;
-  return needsWorkflowScope(stderr);
-}
+export { shouldRetryWithKeyringCredential } from "@radius-project/core";

@@ -1,17 +1,29 @@
 import {
+  classifyAwsCliError,
   eksAcceptsAccessEntries,
   eksAuthenticationMode,
   isAwsRegion,
+  isEksClusterName,
   namesGitHubProvider,
   parseAwsRoleArn,
   parseAwsSubnets,
   parseAwsVpcs,
+  parseAwsZoneTypes,
   parsePolicyDocument,
-  radiusRoleRepository,
+  radiusRoleRepositoryId,
   trustedGitHubSubjects,
+  type AwsCliErrorKind,
+  type AwsClusterUnusableReason,
   type PolicyDocument
 } from "@radius-project/core";
-import type { AwsDiscoveryResult, DiscoveryDependencies } from "./discovery.js";
+import { remediationView } from "@radius-project/core/remediations";
+import { isValidRepoSlug } from "../../azure-oidc.js";
+import type { AwsRepositoryIdLookup } from "./aws-deploy-identity.js";
+import type {
+  AwsDiscoveryList,
+  AwsDiscoveryResult,
+  DiscoveryDependencies
+} from "./discovery.js";
 import { mapWithLimit } from "./map-with-limit.js";
 
 // AWS half of environment-wizard discovery. Every query is scoped to the
@@ -20,12 +32,8 @@ import { mapWithLimit } from "./map-with-limit.js";
 
 const AWS_CLI_TIMEOUT_MS = 20000;
 const KUBECTL_TIMEOUT_MS = 10000;
-const EKS_CLUSTER_PATTERN = /^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$/;
-export const AWS_DEFAULT_NAMESPACES = [
-  "default",
-  "kube-system",
-  "radius-system"
-];
+const USABLE_CLUSTER_STATUSES = new Set(["ACTIVE", "UPDATING"]);
+export const AWS_DEFAULT_NAMESPACES = ["default"];
 
 export interface AwsDiscoveryRequest {
   accountId?: string;
@@ -38,8 +46,13 @@ export interface AwsClusterItem {
   name: string;
   vpcId: string;
   authenticationMode: string;
-  /** False for clusters whose auth mode cannot take an access entry. */
+  /** The describe-cluster status, or empty when the cluster was not described. */
+  status: string;
   usable: boolean;
+  /** Present only when `usable` is false. */
+  unusableReason?: AwsClusterUnusableReason;
+  /** Present only for a cluster whose describe-cluster call failed. */
+  describeErrorKind?: AwsCliErrorKind;
 }
 
 function errorMessage(error: unknown): string {
@@ -52,11 +65,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function recordError(
   result: AwsDiscoveryResult,
-  facet: string,
+  list: AwsDiscoveryList,
   error: unknown
 ): void {
+  const message = errorMessage(error);
   result.errors = result.errors || {};
-  result.errors[facet] = errorMessage(error).slice(0, 800);
+  result.errors[list] = message.slice(0, 800);
+  result.errorKinds = result.errorKinds || {};
+  result.errorKinds[list] = classifyAwsCliError(message);
 }
 
 async function awsJson(
@@ -72,19 +88,63 @@ async function awsJson(
   return JSON.parse(out || "null");
 }
 
+function notDescribed(
+  name: string,
+  describeErrorKind: AwsCliErrorKind
+): AwsClusterItem {
+  return {
+    id: name,
+    name,
+    vpcId: "",
+    authenticationMode: "",
+    status: "",
+    usable: false,
+    unusableReason: "not-described",
+    describeErrorKind
+  };
+}
+
 export function parseAwsCluster(name: string, output: unknown): AwsClusterItem {
   const cluster =
     isRecord(output) && isRecord(output.cluster) ? output.cluster : {};
+  const status = typeof cluster.status === "string" ? cluster.status : "";
+  // An answer without a status is not a description setup can rely on.
+  if (status === "") return notDescribed(name, "other");
   const vpcConfig =
     isRecord(cluster.resourcesVpcConfig) ? cluster.resourcesVpcConfig : {};
   const authenticationMode = eksAuthenticationMode(output);
+  const unusableReason: AwsClusterUnusableReason | undefined =
+    !USABLE_CLUSTER_STATUSES.has(status) ? "status"
+    : !eksAcceptsAccessEntries(authenticationMode) ? "config-map"
+    : undefined;
   return {
     id: name,
     name,
     vpcId: typeof vpcConfig.vpcId === "string" ? vpcConfig.vpcId : "",
     authenticationMode,
-    usable: eksAcceptsAccessEntries(authenticationMode)
+    status,
+    usable: unusableReason === undefined,
+    ...(unusableReason ? { unusableReason } : {})
   };
+}
+
+async function describeCluster(
+  name: string,
+  region: string,
+  dependencies: DiscoveryDependencies
+): Promise<AwsClusterItem> {
+  try {
+    return parseAwsCluster(
+      name,
+      await awsJson(
+        dependencies,
+        ["eks", "describe-cluster", "--name", name],
+        region
+      )
+    );
+  } catch (e) {
+    return notDescribed(name, classifyAwsCliError(errorMessage(e)));
+  }
 }
 
 async function discoverNamespaces(
@@ -126,6 +186,61 @@ async function discoverNamespaces(
   }
 }
 
+// The four EC2 reads run together, and each one's failure is recorded on its
+// own list: a denied route-table, VPC, or zone read leaves the subnets listed.
+async function discoverNetwork(
+  result: AwsDiscoveryResult,
+  vpcIds: readonly string[],
+  region: string,
+  dependencies: DiscoveryDependencies
+): Promise<void> {
+  const vpcFilter = `Name=vpc-id,Values=${vpcIds.join(",")}`;
+  const [vpcs, subnets, routeTables, zones] = await Promise.allSettled([
+    awsJson(
+      dependencies,
+      ["ec2", "describe-vpcs", "--vpc-ids", ...vpcIds],
+      region
+    ),
+    awsJson(
+      dependencies,
+      ["ec2", "describe-subnets", "--filters", vpcFilter],
+      region
+    ),
+    awsJson(
+      dependencies,
+      ["ec2", "describe-route-tables", "--filters", vpcFilter],
+      region
+    ),
+    awsJson(dependencies, ["ec2", "describe-availability-zones"], region)
+  ]);
+  if (vpcs.status === "fulfilled") result.vpcs = parseAwsVpcs(vpcs.value);
+  else recordError(result, "vpcs", vpcs.reason);
+  if (routeTables.status === "rejected") {
+    recordError(result, "routeTables", routeTables.reason);
+  }
+  if (zones.status === "rejected") recordError(result, "zones", zones.reason);
+  if (subnets.status === "rejected") {
+    recordError(result, "subnets", subnets.reason);
+    return;
+  }
+  result.subnets = parseAwsSubnets(subnets.value, {
+    routeTables:
+      routeTables.status === "fulfilled" ? routeTables.value : undefined,
+    zones:
+      zones.status === "fulfilled" ? parseAwsZoneTypes(zones.value) : undefined,
+    region
+  });
+}
+
+function needsSignIn(result: AwsDiscoveryResult): boolean {
+  return (
+    Object.values(result.errorKinds || {}).includes("credentials") ||
+    result.clusters.some(
+      (cluster) => cluster.describeErrorKind === "credentials"
+    )
+  );
+}
+
 export async function discoverAwsResources(
   data: AwsDiscoveryRequest,
   dependencies: DiscoveryDependencies
@@ -146,72 +261,64 @@ export async function discoverAwsResources(
   }
   const requestedCluster =
     typeof data.cluster === "string" ? data.cluster.trim() : "";
-  if (requestedCluster && !EKS_CLUSTER_PATTERN.test(requestedCluster)) {
+  if (requestedCluster && !isEksClusterName(requestedCluster)) {
     return { ...result, error: "Invalid EKS cluster name." };
   }
+  result.namespaces = [...AWS_DEFAULT_NAMESPACES];
+  await discoverClustersAndNetwork(
+    result,
+    region,
+    requestedCluster,
+    dependencies
+  );
+  if (needsSignIn(result)) {
+    result.remediation = remediationView("aws-cli-login", {
+      nextStep: "refresh-discovery"
+    });
+  }
+  return result;
+}
 
-  const clusters: AwsClusterItem[] = [];
+async function discoverClustersAndNetwork(
+  result: AwsDiscoveryResult,
+  region: string,
+  requestedCluster: string,
+  dependencies: DiscoveryDependencies
+): Promise<void> {
+  let names: string[];
   try {
     const listed = await awsJson(
       dependencies,
       ["eks", "list-clusters", "--query", "clusters"],
       region
     );
-    const names =
+    names =
       Array.isArray(listed) ?
         listed.filter((name): name is string => typeof name === "string")
       : [];
-    const described = await Promise.all(
-      names.map(async (name) => {
-        try {
-          return parseAwsCluster(
-            name,
-            await awsJson(
-              dependencies,
-              ["eks", "describe-cluster", "--name", name],
-              region
-            )
-          );
-        } catch {
-          // Listed but not describable: still offer it, and let setup's own
-          // cluster check report the reason.
-          return {
-            id: name,
-            name,
-            vpcId: "",
-            authenticationMode: "",
-            usable: true
-          };
-        }
-      })
-    );
-    clusters.push(...described);
   } catch (e) {
+    // Every later call would fail the same way, so none runs.
     recordError(result, "clusters", e);
+    return;
   }
-  result.clusters = clusters;
-
-  try {
-    result.vpcs = parseAwsVpcs(
-      await awsJson(dependencies, ["ec2", "describe-vpcs"], region)
-    );
-  } catch (e) {
-    recordError(result, "vpcs", e);
-  }
-
-  try {
-    const [subnets, routeTables] = await Promise.all([
-      awsJson(dependencies, ["ec2", "describe-subnets"], region),
-      awsJson(dependencies, ["ec2", "describe-route-tables"], region)
-    ]);
-    result.subnets = parseAwsSubnets(subnets, routeTables);
-  } catch (e) {
-    recordError(result, "subnets", e);
+  result.clusters = await Promise.all(
+    names.map((name) => describeCluster(name, region, dependencies))
+  );
+  const usable = result.clusters.filter((cluster) => cluster.usable);
+  const vpcIds = [
+    ...new Set(usable.map((cluster) => cluster.vpcId).filter(Boolean))
+  ];
+  if (vpcIds.length > 0) {
+    await discoverNetwork(result, vpcIds, region, dependencies);
   }
 
   const namespaceCluster =
-    requestedCluster || (clusters.length === 1 ? clusters[0].name : "");
-  result.namespaces = [...AWS_DEFAULT_NAMESPACES];
+    requestedCluster ?
+      usable.some((cluster) => cluster.name === requestedCluster) ?
+        requestedCluster
+      : ""
+    : usable.length === 1 ? usable[0].name
+    : "";
   if (namespaceCluster) {
     try {
       const names = await discoverNamespaces(
@@ -224,7 +331,6 @@ export async function discoverAwsResources(
       recordError(result, "namespaces", e);
     }
   }
-  return result;
 }
 
 export interface AwsRoleCandidate {
@@ -241,11 +347,44 @@ export type AwsRoleListDependencies = Pick<DiscoveryDependencies, "runCli">;
 // account does not run into IAM's request throttling.
 const ROLE_TAG_READ_CONCURRENCY = 4;
 
-async function managedForAnotherRepository(
-  roleName: string,
+const GITHUB_API_TIMEOUT_MS = 15000;
+
+// GitHub's ID for the repository, which the role's ownership tag holds. A
+// name can't be compared, because another repository can take it. The read
+// uses the default `gh` account, which may not see the repository; setup
+// checks the ID again with the selected account.
+async function readRepositoryId(
   repo: string,
   dependencies: AwsRoleListDependencies
-): Promise<boolean> {
+): Promise<AwsRepositoryIdLookup> {
+  if (!isValidRepoSlug(repo)) {
+    return { ok: false, reason: `"${repo}" is not an owner/name repository` };
+  }
+  let out: string;
+  try {
+    out = await dependencies.runCli(
+      "gh",
+      ["api", `/repos/${repo.trim()}`, "--jq", ".id"],
+      { timeout: GITHUB_API_TIMEOUT_MS }
+    );
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+  const id = /^[1-9]\d*$/.test(out.trim()) ? Number(out.trim()) : NaN;
+  return Number.isSafeInteger(id) ?
+      { ok: true, repoId: id }
+    : { ok: false, reason: "GitHub returned no repository ID" };
+}
+
+// GitHub's ID for the repository Radius created the role for, or null when
+// Radius did not tag it with one.
+async function readRoleOwner(
+  roleName: string,
+  dependencies: AwsRoleListDependencies
+): Promise<number | null> {
   const out = await dependencies.runCli(
     "aws",
     ["iam", "get-role", "--role-name", roleName, "--output", "json"],
@@ -255,9 +394,17 @@ async function managedForAnotherRepository(
   if (!isRecord(parsed) || !isRecord(parsed.Role)) {
     throw new Error(`get-role returned no role for ${roleName}.`);
   }
-  const owner = radiusRoleRepository(parsed.Role);
-  return owner !== null && owner.toLowerCase() !== repo.toLowerCase();
+  return radiusRoleRepositoryId(parsed.Role);
 }
+
+export interface AwsRoleList {
+  readonly roles: AwsRoleCandidate[];
+  // Why roles Radius created were left out without knowing whose they are.
+  // Absent when every role could be checked.
+  readonly hiddenReason?: string;
+}
+
+const NOT_READ: AwsRepositoryIdLookup = { ok: false, reason: "not read" };
 
 /**
  * Roles the signed-in identity can see, for the `use an existing role…`
@@ -268,12 +415,15 @@ async function managedForAnotherRepository(
  * Only roles whose trust names the account's GitHub provider get their tags
  * read, because Radius creates every role it owns with that trust. If one of
  * those reads fails, the whole listing fails, because the picker cannot tell
- * whether another repository owns that role.
+ * whether another repository owns that role. A role Radius created belongs to
+ * the repository whose GitHub ID it is tagged with, so this repository's ID is
+ * read once when any such role turns up. If that read fails, those roles are
+ * left out and `hiddenReason` says why.
  */
 export async function listAwsRoles(
   data: { accountId?: string; repo?: string },
   dependencies: AwsRoleListDependencies
-): Promise<AwsRoleCandidate[]> {
+): Promise<AwsRoleList> {
   const accountId = typeof data.accountId === "string" ? data.accountId : "";
   const repo = typeof data.repo === "string" ? data.repo : "";
   const out = await dependencies.runCli(
@@ -312,19 +462,30 @@ export async function listAwsRoles(
       readTags: policy !== null && namesGitHubProvider(policy, accountId)
     });
   }
-  const otherRepository = await mapWithLimit(
+  const owners = await mapWithLimit(
     listed,
     ROLE_TAG_READ_CONCURRENCY,
     async ({ candidate, readTags }) =>
-      readTags &&
-      (await managedForAnotherRepository(candidate.name, repo, dependencies))
+      readTags ? readRoleOwner(candidate.name, dependencies) : null
   );
+  const tagged = owners.filter((owner) => owner !== null).length;
+  // Read only when a role has Radius's ownership tag.
+  const repository =
+    tagged > 0 ? await readRepositoryId(repo, dependencies) : NOT_READ;
   const candidates = listed
-    .filter((_, index) => !otherRepository[index])
+    .filter((_, index) => {
+      const owner = owners[index];
+      return owner === null || (repository.ok && owner === repository.repoId);
+    })
     .map(({ candidate }) => candidate);
   const trustsGitHub = (candidate: AwsRoleCandidate): number =>
     candidate.trustedSubjects.length > 0 ? 0 : 1;
-  return candidates.sort(
+  const sorted = candidates.sort(
     (a, b) => trustsGitHub(a) - trustsGitHub(b) || a.name.localeCompare(b.name)
   );
+  if (repository.ok || tagged === 0) return { roles: sorted };
+  return {
+    roles: sorted,
+    hiddenReason: `Radius left out ${tagged} role${tagged === 1 ? "" : "s"} it created, because GitHub didn't return the ID of ${repo || "this repository"} (${repository.reason}), so it can't tell which repository ${tagged === 1 ? "it belongs" : "they belong"} to. Check that the default GitHub CLI account can read the repository and try again, or type the role name.`
+  };
 }

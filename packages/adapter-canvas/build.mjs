@@ -15,6 +15,7 @@
 
 import * as esbuild from "esbuild";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import {
   dirname,
@@ -46,6 +47,9 @@ const yamlBrowserEntry = resolve(
   dirname(fileURLToPath(import.meta.resolve("yaml"))),
   "../browser/index.js"
 );
+const jsoncParserEsmEntry = createRequire(
+  import.meta.resolve("@radius-project/adapter-shared")
+).resolve("jsonc-parser/lib/esm/main.js");
 
 // .node-version is the one place the supported Node major is declared; deriving
 // the compile target from it keeps them from drifting apart.
@@ -555,7 +559,8 @@ const options = {
   },
   // yaml's Node entry is CommonJS and leaves a dynamic require("process") in
   // the ESM bundle. Its browser entry is equivalent pure ESM parser code.
-  alias: { yaml: yamlBrowserEntry },
+  // jsonc-parser's UMD entry likewise requires its ESM implementation here.
+  alias: { yaml: yamlBrowserEntry, "jsonc-parser": jsoncParserEsmEntry },
   // The runtime is known to be Node, so emit UTF-8 rather than \uXXXX escapes.
   charset: "utf8",
   minify: true,

@@ -82,8 +82,11 @@ describe("Azure auto-setup dependency composition", () => {
     const persistMutationCheckpoint = vi.fn(async () => true);
     const honorStopBoundary = vi.fn(async () => true);
     const sleep = vi.fn(async () => {});
+    let stopped = false;
+    const isStopped = () => stopped;
 
     const composed = composeAzureAutoSetupDependencies({
+      isStopped,
       lifecycle,
       progress,
       artifacts,
@@ -103,6 +106,10 @@ describe("Azure auto-setup dependency composition", () => {
       ...artifacts
     });
     expect(composed).not.toHaveProperty("isServerOwnedRequest");
+    expect(composed.isStopped).toBe(isStopped);
+    expect(composed.isStopped()).toBe(false);
+    stopped = true;
+    expect(composed.isStopped()).toBe(true);
     expect(composed.external).toBe(external);
     expect(composed.tempFile).toBe(tempFile);
     expect(composed.ensureServicePrincipal).toBe(ensureServicePrincipal);

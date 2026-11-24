@@ -2,6 +2,7 @@ import type {
   AzureApplicationPorts,
   AzureCredentialPorts
 } from "@radius-project/core";
+import { assertSetupExecutionActive } from "@radius-project/core";
 import type {
   AzureAutoSetupApplicationInput,
   AzureAutoSetupCredentialInput,
@@ -21,7 +22,10 @@ function execution(
     get environment() {
       return workflow.operation.environment;
     },
-    runAz: workflow.runAz,
+    runAz: (args: string[]) => {
+      assertSetupExecutionActive(workflow.isStopped);
+      return workflow.runAz(args);
+    },
     sleep,
     stopBoundary: workflow.stopBoundary,
     checkpoint: workflow.checkpoint,
@@ -29,7 +33,11 @@ function execution(
       workflow.operation.state === "cancelled" ? "stopped"
       : workflow.operation.inputRequired ? "input-required"
       : "failed",
-    recovery: createAzureRecoveryPort(workflow.operation, persist),
+    recovery: createAzureRecoveryPort(
+      workflow.operation,
+      persist,
+      workflow.isStopped
+    ),
     ...createAzureSetupPresentation(workflow)
   };
 }
@@ -42,6 +50,7 @@ export function createAzureApplicationPorts(
   const { operations } = dependencies;
   return {
     ...execution(workflow, () => operations.persist(), dependencies.sleep),
+    assertActive: () => assertSetupExecutionActive(workflow.isStopped),
     get environment() {
       return operation.environment;
     },
@@ -80,8 +89,13 @@ export function createAzureCredentialPorts(
 ): AzureCredentialPorts {
   const { operation } = workflow;
   const { operations } = dependencies;
+  const executionPorts = execution(
+    workflow,
+    operations.persist,
+    dependencies.sleep
+  );
   return {
-    ...execution(workflow, operations.persist, dependencies.sleep),
+    ...executionPorts,
     get environment() {
       return operation.environment;
     },
@@ -98,8 +112,12 @@ export function createAzureCredentialPorts(
     ensureServicePrincipal: (clientId, beforeCreate) =>
       dependencies.ensureServicePrincipal(
         clientId,
-        workflow.runAz,
-        { operation, persist: operations.persist },
+        executionPorts.runAz,
+        {
+          operation,
+          persist: operations.persist,
+          isStopped: workflow.isStopped
+        },
         beforeCreate,
         dependencies.sleep
       ),

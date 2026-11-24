@@ -191,43 +191,36 @@ export function createRadiusEnvironmentWorkflowDeletion(
           `Failed to start ${DELETE_ENV_DISPATCHER_FILE} on ${repo}.`
       };
     }
-    // Resolve and monitor the dispatched run so credential removal only starts
-    // after the Radius environment is actually gone.
-    let runId: number | string | null = null;
-    for (const delay of [0, 2000, 4000]) {
-      if (delay > 0) await dependencies.sleep(delay);
-      runId = await dependencies.findWorkflowRun(
-        repo,
-        DELETE_ENV_DISPATCHER_FILE,
-        dispatchedAt,
-        null,
-        undefined,
-        undefined,
-        correlationId
-      );
-      if (runId) break;
-    }
-    if (!runId) {
-      return {
-        outcome: "failed",
-        detail:
-          "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
-      };
-    }
+    // Discovery and completion share one budget. GitHub may accept a dispatch
+    // before its run appears in listings; never dispatch another deletion.
     const deadline = dependencies.now() + 30 * 60 * 1000;
+    let runId: number | string | null = null;
     const reads = createWorkflowReadSession();
     let delayMs = 5000;
     while (dependencies.now() < deadline) {
-      const detail = await dependencies.getRunDetail(repo, runId, undefined, {
-        identity: "ambient",
-        context: reads.observe(WORKFLOW_READ_LIMITS.runMs)
-      });
-      if (detail && detail.status === "completed") {
-        const classified = classifyCompletedDeleteEnvRun(
-          detail.conclusion,
-          detail.steps || []
+      if (!runId) {
+        runId = await dependencies.findWorkflowRun(
+          repo,
+          DELETE_ENV_DISPATCHER_FILE,
+          dispatchedAt,
+          null,
+          undefined,
+          undefined,
+          correlationId
         );
-        return classified;
+      }
+      if (dependencies.now() >= deadline) break;
+      if (runId) {
+        const detail = await dependencies.getRunDetail(repo, runId, undefined, {
+          identity: "ambient",
+          context: reads.observe(WORKFLOW_READ_LIMITS.runMs)
+        });
+        if (detail && detail.status === "completed") {
+          return classifyCompletedDeleteEnvRun(
+            detail.conclusion,
+            detail.steps || []
+          );
+        }
       }
       if (onHeartbeat) {
         try {
@@ -236,13 +229,17 @@ export function createRadiusEnvironmentWorkflowDeletion(
           // A heartbeat failure must never abort an in-flight deletion.
         }
       }
-      await dependencies.sleep(Math.min(delayMs, 15000));
+      await dependencies.sleep(
+        Math.min(delayMs, Math.max(0, deadline - dependencies.now()))
+      );
       delayMs = Math.min(Math.ceil(delayMs * 1.5), 15000);
     }
     return {
       outcome: "failed",
       detail:
-        "The delete-environment workflow did not complete within 30 minutes."
+        runId ?
+          "The delete-environment workflow did not complete within 30 minutes."
+        : "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
     };
   };
 }

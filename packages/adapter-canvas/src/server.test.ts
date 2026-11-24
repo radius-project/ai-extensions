@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import * as gh from "./gh.js";
 import {
+  assertSetupExecutionActive,
   remediationView,
   DEPLOY_RAD_COMMANDS_STEP as CORE_DEPLOY_RAD_COMMANDS_STEP
 } from "@radius-project/core";
@@ -23,7 +25,6 @@ import {
   canReuseModeledGraph,
   DEPLOY_RAD_COMMANDS_STEP,
   deleteNewlyCreatedGitHubEnvironment,
-  deploymentStatusBlocksMutation,
   DEPLOYMENT_MUTATION_LEASE_MS,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
@@ -65,7 +66,7 @@ import {
 } from "./server.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createEnvironmentAccountContext } from "./runtime/environment-account-context.js";
-import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
+import { DEPLOY_REPAIR_ATTEMPT_CAP } from "@radius-project/core";
 import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
   createOperation,
@@ -617,6 +618,49 @@ describe("ensureServicePrincipal", () => {
   // before: this operation may have made it and crashed before the ledger
   // caught up. Reading that as pre-existing leaves it behind at rollback.
   describe("a principal found again after a crash", () => {
+    it("does not send a principal create after shutdown during intent persistence", async () => {
+      const operation = createOperation({ operationId: "held-principal" });
+      let stopped = false;
+      let entered = () => {};
+      let release = () => {};
+      const prepared = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const statuses: string[] = [];
+      const run = vi.fn(async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "Request_ResourceNotFound"
+      }));
+      const pending = ensureServicePrincipal("app-1", run, {
+        operation,
+        isStopped: () => stopped,
+        persist: async () => {
+          const status = operation.providerRecovery.mutations.at(-1)?.status;
+          statuses.push(String(status));
+          if (status === "prepared") {
+            entered();
+            await gate;
+          }
+        }
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      await prepared;
+      stopped = true;
+      release();
+      await rejected;
+      expect(run).toHaveBeenCalledOnce();
+      expect(statuses).toEqual(["prepared", "not_applied"]);
+      expect(operation.setupArtifacts.servicePrincipal.state).toBe(
+        "not_started"
+      );
+    });
+
     const NOT_FOUND = {
       code: 1,
       stdout: "",
@@ -645,7 +689,7 @@ describe("ensureServicePrincipal", () => {
               { code: 0, stdout: createStdout, stderr: "" }
             );
         },
-        { operation, persist: async () => {} }
+        { isStopped: () => false, operation, persist: async () => {} }
       );
       return operation;
     }
@@ -659,6 +703,7 @@ describe("ensureServicePrincipal", () => {
           return { code: 0, stdout: `${objectId}\n`, stderr: "" };
         },
         {
+          isStopped: () => false,
           operation: operation as object & { operationId: string },
           persist: async () => {}
         }
@@ -904,7 +949,7 @@ describe("ensureServicePrincipal", () => {
       const operation = createOperation({ operationId: "op_sp" });
       return {
         operation,
-        port: { operation, persist: async () => {} }
+        port: { operation, persist: async () => {}, isStopped: () => false }
       };
     }
 
@@ -2283,6 +2328,22 @@ function answersFederatedCredentialIdentity(
 }
 
 describe("cleanupAzureSetupArtifacts", () => {
+  it("refuses to start an Azure cleanup pass after shutdown", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    const before = JSON.stringify(op);
+    const runAz = vi.fn(async () => {
+      throw new Error("Unexpected Azure cleanup");
+    });
+    expect(
+      await cleanupAzureSetupArtifacts(op, { runAz, isStopped: () => true })
+    ).toMatchObject({
+      state: "interrupted",
+      results: []
+    });
+    expect(runAz).not.toHaveBeenCalled();
+    expect(JSON.stringify(op)).toBe(before);
+  });
   it("removes a Service Principal this operation added to somebody else's app", async () => {
     const op = newAzureOp();
     // The customer already had the App Registration; Radius only added the
@@ -3397,6 +3458,29 @@ describe("cleanupAzureSetupArtifacts", () => {
 });
 
 describe("cleanupGitHubEnvironmentArtifact", () => {
+  it("refuses to start an environment cleanup pass after shutdown", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+    const before = JSON.stringify(op);
+    const run = vi.fn(async () => {
+      throw new Error("Unexpected GitHub cleanup");
+    });
+    expect(
+      await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: run,
+        readEnvironment: run,
+        isStopped: () => true
+      })
+    ).toMatchObject({ interrupted: true, attempted: false, results: [] });
+    expect(run).not.toHaveBeenCalled();
+    expect(JSON.stringify(op)).toBe(before);
+  });
   it("deletes an environment this attempt proved it created and records it as gone", async () => {
     const op = newAzureOp();
     recordGitHubEnvironment(op, {
@@ -4999,22 +5083,6 @@ describe("isCrossSiteMutation", () => {
   });
 });
 
-describe("deploymentStatusBlocksMutation", () => {
-  it.each(["pending", "in_progress", "deleting"])(
-    "blocks the non-terminal status %s",
-    (status) => {
-      expect(deploymentStatusBlocksMutation(status)).toBe(true);
-    }
-  );
-
-  it.each(["success", "failed", "unknown", "", undefined])(
-    "allows the terminal status %s",
-    (status) => {
-      expect(deploymentStatusBlocksMutation(status)).toBe(false);
-    }
-  );
-});
-
 describe("deployment mutation reservations", () => {
   it("allows one mutation at a time and releases its owner", () => {
     const state: CanvasState = {};
@@ -6453,8 +6521,14 @@ describe("environment deletion session reporting coordinator", () => {
         deleteRadiusEnvironment: vi.fn(async () => ({
           outcome: "deleted" as const
         })),
+        removeAwsDeployIdentityLock: async () => {
+          throw new Error("Unexpected lock removal");
+        },
         removeAwsEnvironmentAccess: async () => {
           throw new Error("unexpected AWS role cleanup");
+        },
+        readRepositoryId: async () => {
+          throw new Error("unexpected repository read");
         },
         runAz: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
         readAzureIdentity: vi.fn(async () => ({
@@ -6481,6 +6555,12 @@ describe("environment deletion session reporting coordinator", () => {
         awsEnvironmentAccess: {
           setup: async () => {
             throw new Error("unexpected AWS setup");
+          },
+          release: async () => {
+            throw new Error("unexpected AWS lock release");
+          },
+          rollback: async () => {
+            throw new Error("unexpected AWS rollback");
           }
         },
         executionOwner,
@@ -6739,6 +6819,60 @@ describe("deploy failures that may leave a run in flight", () => {
 });
 
 describe("GitHub App repository preflight", () => {
+  it.each([false, true])(
+    "retains ambient fallback identity behavior with optional shutdown guard (stopped=%s)",
+    async (stopDuringIdentity) => {
+      let stopped = false;
+      const read = vi
+        .spyOn(gh, "ghApiJson")
+        .mockImplementation(async (path) => {
+          if (path === "user")
+            return { ok: false, status: 401, json: null, text: "", stderr: "" };
+          expect(path).toBe("repos/octo/app");
+          return {
+            ok: true,
+            status: 200,
+            json: { permissions: { admin: true } },
+            text: "",
+            stderr: ""
+          };
+        });
+      vi.spyOn(gh, "getGitHubIdentity").mockImplementation(async () => {
+        stopped = stopDuringIdentity;
+        return {
+          actingLogin: "fixture-user",
+          displayLogin: "fixture-user",
+          mismatch: false,
+          actingHasWorkflow: true,
+          actingHasPackages: true,
+          packagesLogin: "fixture-user",
+          packagesHasWrite: true,
+          packagesCredentialSource: "keyring",
+          reason: "",
+          accounts: []
+        };
+      });
+      try {
+        const pending = preflightRepoAdmin(
+          "octo/app",
+          undefined,
+          undefined,
+          stopDuringIdentity ?
+            () => assertSetupExecutionActive(() => stopped)
+          : undefined
+        );
+        if (stopDuringIdentity)
+          await expect(pending).rejects.toMatchObject({
+            code: "setup-execution-interrupted"
+          });
+        else await expect(pending).resolves.toBe("");
+        expect(read).toHaveBeenCalledTimes(stopDuringIdentity ? 1 : 2);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    }
+  );
+
   function appExecutor(
     responses: Record<string, { code: number; stdout: string; stderr: string }>
   ) {
@@ -6785,6 +6919,58 @@ describe("GitHub App repository preflight", () => {
       path,
       { code: 0, stdout: "[]", stderr: "" }
     ])
+  );
+
+  it.each(["user", "repos/octo/app", ...gitHubAppAccessProbePaths("octo/app")])(
+    "stops nested repository preflight after held %s settlement",
+    async (heldPath) => {
+      for (const outcome of ["success", "denied", "rejected"] as const) {
+        const { executor, calls } = appExecutor({
+          user: {
+            code: 0,
+            stdout: '{"login":"radius-cloud-e2e[bot]"}',
+            stderr: ""
+          },
+          "repos/octo/app": REPO_OK,
+          ...PROBES_OK
+        });
+        let enter = () => {};
+        let release = () => {};
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let stopped = false;
+        const run = executor.run;
+        executor.run = async (args) => {
+          const result = await run(args);
+          if (args[1] !== heldPath) return result;
+          enter();
+          await released;
+          if (outcome === "rejected") throw new Error("read rejected");
+          return outcome === "denied" ?
+              { code: 1, stdout: "", stderr: "HTTP 403" }
+            : result;
+        };
+        const pending = preflightRepoAdmin(
+          "octo/app",
+          executor,
+          undefined,
+          () => assertSetupExecutionActive(() => stopped)
+        );
+        const rejected = expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        await entered;
+        const issued = [...calls];
+        stopped = true;
+        release();
+        await rejected;
+        expect(calls).toEqual(issued);
+      }
+    }
   );
 
   it("clears an installation that can read every resource it will configure", async () => {

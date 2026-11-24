@@ -1,4 +1,4 @@
-import type { AwsSubnet, AwsVpc } from "@radius-project/core";
+import type { AwsCliErrorKind, AwsSubnet, AwsVpc } from "@radius-project/core";
 import { discoverAwsResources, type AwsClusterItem } from "./aws-discovery.js";
 import {
   remediationView,
@@ -27,13 +27,20 @@ export type AzureDiscoveryResult = DiscoveryResultFacets<
   DiscoveryItem
 >;
 
-// AWS answers typed items: a cluster's VPC and auth mode, and a subnet's VPC,
-// zone, and whether its route table reaches an internet gateway.
+/** The AWS lists whose failures discovery reports by error kind. */
+export type AwsDiscoveryList =
+  "clusters" | "vpcs" | "subnets" | "routeTables" | "zones" | "namespaces";
+
+// AWS answers typed items: a cluster's VPC, auth mode, status, and usability,
+// and a subnet's VPC, zone kind, and routing. Each failed list also carries the
+// class of its AWS CLI error, so the form can say why the list is empty.
 export type AwsDiscoveryResult = DiscoveryResultFacets<
   AwsClusterItem,
   AwsVpc,
   AwsSubnet
->;
+> & {
+  errorKinds?: Partial<Record<AwsDiscoveryList, AwsCliErrorKind>>;
+};
 
 export type DiscoveryResult = AzureDiscoveryResult | AwsDiscoveryResult;
 
@@ -265,9 +272,7 @@ export async function discoverResources(
     }
     if (resourceGroup && cluster) {
       const kubeconfig = dependencies.createTemporaryKubeconfig();
-      // Name the step unconditionally. The runner currently flattens process
-      // failures into Error, so this service cannot distinguish a timeout from
-      // authentication, authorization, connectivity, or target lookup failures.
+      // Keep the failing step visible even to clients that do not request diagnostics.
       let failedStep = "az aks get-credentials failed";
       try {
         await dependencies.runCli(

@@ -93,10 +93,10 @@ describe.skipIf(!LIVE)("live generated Radius definition compatibility", () => {
       expect(containers?.recipe).toMatchObject({
         status: "available",
         provenance: "managed-release-default",
-        recipePack: "azure",
+        recipePack: "azure-aks",
         repository: "radius-project/resource-types-contrib",
         commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
-        path: "recipe-packs/azure/aks-recipepack.bicep",
+        path: "recipe-packs/azure-aks/azure-aks.bicep",
         definition: expect.stringContaining("'Radius.Compute/containers':")
       });
       for (const resource of contract.resources) {

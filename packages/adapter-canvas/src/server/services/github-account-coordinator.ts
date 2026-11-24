@@ -15,6 +15,7 @@ export interface GitHubAccountCoordinatorPorts {
 export interface GitHubAccountLeaseMetadata {
   ownerKey: string;
   operationId?: string;
+  assertActive?(): void;
 }
 
 export interface GitHubAccountRestoration {
@@ -24,6 +25,17 @@ export interface GitHubAccountRestoration {
   guidance: string | null;
 }
 
+export class GitHubAccountRestorationError extends Error {
+  constructor(
+    message: string,
+    readonly restoration: GitHubAccountRestoration,
+    cause: unknown
+  ) {
+    super(message, { cause });
+    this.name = "GitHubAccountRestorationError";
+  }
+}
+
 export interface GitHubAccountLeaseResult<T> {
   value: T;
   selectedLogin: string;
@@ -31,6 +43,23 @@ export interface GitHubAccountLeaseResult<T> {
   switched: boolean;
   restoration: GitHubAccountRestoration;
 }
+
+// Lets lease work give up the lease while it waits on something with no
+// deadline, and take it back before it needs the selected account again.
+// Call it only from that work, and await each call before the next.
+export interface GitHubAccountLease {
+  // Restores the original account and gives up the lease. Does nothing if the
+  // lease is already given up.
+  release(): Promise<void>;
+  // Takes the lease back and selects the account again. Does nothing if the
+  // lease is held. `onWait` runs if another holder has it.
+  retake(onWait?: () => void): Promise<void>;
+}
+
+const UNLEASED: GitHubAccountLease = {
+  release: async () => {},
+  retake: async () => {}
+};
 
 export interface GitHubAccountCoordinatorOptions {
   ghCommandPresentation?: GhCommandPresentation;
@@ -46,16 +75,25 @@ export interface GitHubAccountCoordinator {
   withSelectedAccount<T>(
     login: string,
     metadata: GitHubAccountLeaseMetadata,
-    work: (executor: SelectedGhExecutor) => Promise<T>,
+    work: (
+      executor: SelectedGhExecutor,
+      lease: GitHubAccountLease
+    ) => Promise<T>,
     timeoutMs?: number
   ): Promise<GitHubAccountLeaseResult<T>>;
 }
 
 interface Waiter {
   settled: boolean;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | null;
   resolve(release: () => void): void;
   reject(error: Error): void;
+}
+
+interface Selection {
+  release(): void;
+  originalLogin: string;
+  switched: boolean;
 }
 
 function manualRecoveryGuidance(
@@ -75,6 +113,29 @@ function manualRecoveryGuidance(
     : presentation.installationNote;
 }
 
+// Throws `cause`, with the restoration attached if it failed or someone else
+// changed the account.
+function throwAfterRestoration(
+  executor: SelectedGhExecutor,
+  cause: unknown,
+  restoration: GitHubAccountRestoration
+): never {
+  if (
+    restoration.state !== "failed" &&
+    restoration.state !== "changed_externally"
+  )
+    throw cause;
+  throw new GitHubAccountRestorationError(
+    `${executor.errorMessage(cause)} ${
+      restoration.state === "failed" ?
+        "GitHub account restoration also failed."
+      : "The GitHub CLI account changed externally."
+    } ${restoration.guidance || ""}`.trim(),
+    restoration,
+    cause
+  );
+}
+
 export function createGitHubAccountCoordinator(
   ports: GitHubAccountCoordinatorPorts,
   options: GitHubAccountCoordinatorOptions = {}
@@ -92,22 +153,34 @@ export function createGitHubAccountCoordinator(
       const waiter = waiters.shift();
       if (!waiter || waiter.settled) continue;
       waiter.settled = true;
-      clearTimer(waiter.timer);
+
+      if (waiter.timer) clearTimer(waiter.timer);
       waiter.resolve(releaseNext);
       return;
     }
     held = false;
   };
 
-  const acquire = (timeoutMs: number): Promise<() => void> => {
+  const acquire = (
+    timeoutMs: number | null,
+    onWait?: () => void
+  ): Promise<() => void> => {
     if (!held) {
       held = true;
       return Promise.resolve(releaseNext);
     }
+
+    onWait?.();
     return new Promise((resolve, reject) => {
       const waiter: Waiter = {
         settled: false,
-        timer: setTimer(() => {
+        timer: null,
+        resolve,
+        reject
+      };
+
+      if (timeoutMs !== null) {
+        waiter.timer = setTimer(() => {
           if (waiter.settled) return;
           waiter.settled = true;
           const index = waiters.indexOf(waiter);
@@ -117,10 +190,8 @@ export function createGitHubAccountCoordinator(
               "Another Environment Creation is using the GitHub CLI account. Re-check after it finishes."
             )
           );
-        }, timeoutMs),
-        resolve,
-        reject
-      };
+        }, timeoutMs);
+      }
       waiters.push(waiter);
     });
   };
@@ -196,6 +267,95 @@ export function createGitHubAccountCoordinator(
     }
   };
 
+  const unchanged = (login: string): GitHubAccountRestoration => ({
+    state: "not_required",
+    originalLogin: login,
+    currentLogin: login,
+    guidance: null
+  });
+
+  // Restores the original account if this lease switched it, then releases
+  // the lease.
+  const deselect = async (
+    selection: Selection,
+    selectedLogin: string
+  ): Promise<GitHubAccountRestoration> => {
+    try {
+      if (!selection.switched) return unchanged(selection.originalLogin);
+      const restoration = await restore(selectedLogin, selection.originalLogin);
+
+      if (restoration.state === "failed") blockedRestoration = restoration;
+
+      return restoration;
+    } finally {
+      selection.release();
+    }
+  };
+
+  // Takes the lease and makes the selected account the active gh account.
+  const select = async (
+    executor: SelectedGhExecutor,
+    timeoutMs: number | null,
+    active: () => void,
+    onWait?: () => void
+  ): Promise<Selection> => {
+    const selection: Selection = {
+      release: await acquire(timeoutMs, onWait),
+      originalLogin: "",
+      switched: false
+    };
+
+    try {
+      active();
+      await assertRestorationReady();
+      active();
+      selection.originalLogin = await ports.getActiveKeyringLogin();
+      active();
+
+      if (!selection.originalLogin) {
+        throw new Error(
+          "Radius could not determine the original GitHub CLI account and did not switch accounts."
+        );
+      }
+
+      if (selection.originalLogin !== executor.login) {
+        const switched = await ports.switchKeyringAccount(executor.login);
+
+        if (!switched.ok) {
+          throw new Error(
+            switched.error ||
+              `Could not switch the GitHub CLI account to @${executor.login}.`
+          );
+        }
+
+        selection.switched = true;
+        ports.resetIdentityCache();
+        active();
+        const selectedActiveLogin = await ports.getActiveKeyringLogin();
+        active();
+
+        if (selectedActiveLogin !== executor.login) {
+          throw new Error(
+            `GitHub CLI account switch failed: expected @${executor.login}, received @${
+              selectedActiveLogin || "unknown"
+            }.`
+          );
+        }
+      }
+
+      await executor.verifyIdentity();
+      active();
+
+      return selection;
+    } catch (error) {
+      throwAfterRestoration(
+        executor,
+        error,
+        await deselect(selection, executor.login)
+      );
+    }
+  };
+
   const createReadOnlyExecutor = async (
     login: string
   ): Promise<SelectedGhExecutor> => {
@@ -206,17 +366,26 @@ export function createGitHubAccountCoordinator(
 
   const withSelectedAccount = async <T>(
     login: string,
-    _metadata: GitHubAccountLeaseMetadata,
-    work: (executor: SelectedGhExecutor) => Promise<T>,
+    metadata: GitHubAccountLeaseMetadata,
+    work: (
+      executor: SelectedGhExecutor,
+      lease: GitHubAccountLease
+    ) => Promise<T>,
     timeoutMs = 5000
   ): Promise<GitHubAccountLeaseResult<T>> => {
+    const active = () => metadata.assertActive?.();
+    active();
     await assertRestorationReady();
+    active();
     const executor = await ports.createExecutor(login);
+    active();
     if (!executor.requiresKeyringSwitch) {
       const activeLogin = await ports.getActiveKeyringLogin();
+      active();
       await executor.verifyIdentity();
+      active();
       return {
-        value: await work(executor),
+        value: await work(executor, UNLEASED),
         selectedLogin: executor.login,
         credentialSource: executor.credentialSource,
         switched: false,
@@ -228,77 +397,74 @@ export function createGitHubAccountCoordinator(
         }
       };
     }
-    const release = await acquire(timeoutMs);
-    try {
-      await assertRestorationReady();
-      const originalLogin = await ports.getActiveKeyringLogin();
-      if (!originalLogin) {
-        throw new Error(
-          "Radius could not determine the original GitHub CLI account and did not switch accounts."
-        );
-      }
-      if (originalLogin === executor.login) {
-        await executor.verifyIdentity();
-        return {
-          value: await work(executor),
-          selectedLogin: executor.login,
-          credentialSource: executor.credentialSource,
-          switched: false,
-          restoration: {
-            state: "not_required",
-            originalLogin,
-            currentLogin: originalLogin,
-            guidance: null
-          }
-        };
-      }
 
-      const switched = await ports.switchKeyringAccount(executor.login);
-      if (!switched.ok) {
-        throw new Error(
-          switched.error ||
-            `Could not switch the GitHub CLI account to @${executor.login}.`
-        );
-      }
+    let selection: Selection | null = await select(executor, timeoutMs, active);
+    let switched = selection.switched;
+    let restoration = unchanged(selection.originalLogin);
 
-      let outcome: { ok: true; value: T } | { ok: false; error: unknown };
-      try {
-        ports.resetIdentityCache();
-        const selectedActiveLogin = await ports.getActiveKeyringLogin();
-        if (selectedActiveLogin !== executor.login) {
+    // A failed restoration is always reported. Otherwise an external change
+    // stays reported, because each restoration after it names the account
+    // someone else selected as the original.
+    const report = (next: GitHubAccountRestoration) => {
+      if (next.state === "failed" || restoration.state !== "changed_externally")
+        restoration = next;
+    };
+
+    const endSelection = async (held: Selection): Promise<void> => {
+      selection = null;
+      report(await deselect(held, executor.login));
+    };
+
+    const lease: GitHubAccountLease = {
+      async release() {
+        if (!selection) return;
+        // An account someone else selected stays active, as at the end of a
+        // lease, and the next restoration returns to it.
+        await endSelection(selection);
+
+        if (restoration.state === "failed") {
           throw new Error(
-            `GitHub CLI account switch failed: expected @${executor.login}, received @${
-              selectedActiveLogin || "unknown"
-            }.`
+            `Radius stopped because it could not switch the GitHub CLI back to @${restoration.originalLogin}.`
           );
         }
-        await executor.verifyIdentity();
-        outcome = { ok: true, value: await work(executor) };
-      } catch (error) {
-        outcome = { ok: false, error };
-      }
+      },
+      async retake(onWait) {
+        if (selection) return;
 
-      const restoration = await restore(executor.login, originalLogin);
-      if (restoration.state === "failed") blockedRestoration = restoration;
-      if (!outcome.ok) {
-        if (restoration.state === "restored") throw outcome.error;
-        throw new Error(
-          `${executor.errorMessage(outcome.error)} GitHub account restoration also failed. ${
-            restoration.guidance || ""
-          }`.trim(),
-          { cause: outcome.error }
-        );
+        // No timeout: work that gave up the lease has already made changes,
+        // and every holder releases the lease when its own work finishes.
+        try {
+          selection = await select(executor, null, active, onWait);
+        } catch (error) {
+          if (!(error instanceof GitHubAccountRestorationError)) throw error;
+          // Reported with the restoration from giving up the lease, which
+          // names the account that was active before this lease.
+          report(error.restoration);
+          throw error.cause;
+        }
+
+        switched ||= selection.switched;
       }
-      return {
-        value: outcome.value,
-        selectedLogin: executor.login,
-        credentialSource: executor.credentialSource,
-        switched: true,
-        restoration
-      };
-    } finally {
-      release();
+    };
+
+    let value: T;
+
+    try {
+      value = await work(executor, lease);
+    } catch (error) {
+      if (selection) await endSelection(selection);
+      throwAfterRestoration(executor, error, restoration);
     }
+
+    if (selection) await endSelection(selection);
+
+    return {
+      value,
+      selectedLogin: executor.login,
+      credentialSource: executor.credentialSource,
+      switched,
+      restoration
+    };
   };
 
   return { createReadOnlyExecutor, withSelectedAccount };

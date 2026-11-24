@@ -13,6 +13,7 @@
 // never touches the network or a real SDK session.
 
 import { createRadiusCanvas } from "./create-radius-canvas.js";
+import { redactCredentials } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
@@ -33,6 +34,7 @@ import {
 import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
 import { createRadiusCanvasInstanceRegistry } from "./canvas-instance-registry.js";
 import { errorMessage } from "./util.js";
+import { createRadiusPluginUpdater } from "./plugin-update.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { SessionPort } from "./session.js";
 
@@ -44,6 +46,11 @@ import type { SessionPort } from "./session.js";
 // whenever a panel was recently active or a deploy is in flight.
 export const KEEPALIVE_INTERVAL_MS = 120000; // 2 min — comfortably under the ~10 min reaper
 export const KEEPALIVE_ACTIVE_WINDOW_MS = 180000; // panel counts as "open" if seen within 3 min
+
+export interface RadiusShutdownOutcome {
+  complete: boolean;
+  exitCode: 0 | 1;
+}
 
 export interface RadiusExtension {
   canvases: ReturnType<typeof createRadiusCanvas>[];
@@ -80,7 +87,7 @@ export interface RadiusExtension {
   // Closes every open canvas server and tears down the session. Idempotent:
   // a second call (e.g. a duplicate SIGTERM) is a no-op and resolves
   // immediately without repeating the teardown.
-  shutdown(signal?: string): Promise<void>;
+  shutdown(signal?: string): Promise<RadiusShutdownOutcome>;
   // Test/diagnostic surface: true once shutdown() has run.
   isShutDown(): boolean;
 }
@@ -91,6 +98,8 @@ export function createRadiusExtension(
   if (!deps.executionOwner) {
     throw new Error("Missing Radius runtime dependency: executionOwner");
   }
+  if (!deps.deployment)
+    throw new Error("Missing Radius runtime dependency: deployment");
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
   const canvasInstances = createRadiusCanvasInstanceRegistry();
@@ -170,10 +179,13 @@ export function createRadiusExtension(
     resolveContext: () => workspaceState(),
     resolveStatus: (repo, branch, state) =>
       resolveAppModelStatus(repo, branch, state),
+    assertWorkspaceSource: (source) =>
+      deps.graphSources.assertWorkspaceSource(source),
     evaluateSource: (repo, branch, state) =>
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>
       Promise.resolve(deps.session.get().send(message)).then(() => undefined),
+    skillHandoff: async () => deps.radiusAppBicepSkill(),
     readSourceRevision: (repo, branch, context) =>
       readSelectedSourceRevision(context, repo, branch, {
         isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
@@ -187,6 +199,10 @@ export function createRadiusExtension(
         path: context.workspacePath,
         waitStartedAtMs
       }),
+    announceModelingRun: (repo, branches) => {
+      for (const branch of branches)
+        modelingActivity.announce({ repo, branch });
+    },
     wait: (ms) => deps.clock.wait(ms),
     log: (message) => {
       try {
@@ -222,12 +238,13 @@ export function createRadiusExtension(
       })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
-    ({ repo, branch, error, deployRunUrl, attemptId }) =>
+    ({ repo, branch, error, deployRunUrl, attemptId, appFile }) =>
       deps.session.get().send(
         deployRepairHandoffMessage(repo, branch, {
           error,
           deployRunUrl,
-          attemptId
+          attemptId,
+          appFile
         })
       )
   );
@@ -295,7 +312,14 @@ export function createRadiusExtension(
 
   // ─── Shutdown (idempotent) ─────────────────────────────────────────────────
   let shuttingDown = false;
-  let shutdownPromise: Promise<void> | undefined;
+  let shutdownPromise: Promise<RadiusShutdownOutcome> | undefined;
+  const updatePlugin = createRadiusPluginUpdater({
+    enabled: deps.automaticPluginUpdates,
+    preferences: deps.pluginUpdatePreferences,
+    now: () => deps.clock.now(),
+    isShutDown: () => shuttingDown,
+    logError: deps.logError
+  });
 
   // Cleanup must never hang the process: a server that refuses to close, or a
   // session whose teardown never settles, is abandoned after this budget so
@@ -306,13 +330,13 @@ export function createRadiusExtension(
   async function withTimeout(
     work: Promise<unknown>,
     ms: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
-        work,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, ms);
+      return await Promise.race([
+        work.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), ms);
         })
       ]);
     } finally {
@@ -320,10 +344,14 @@ export function createRadiusExtension(
     }
   }
 
-  function shutdown(signal = "shutdown"): Promise<void> {
+  function shutdown(signal = "shutdown"): Promise<RadiusShutdownOutcome> {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       shuttingDown = true;
+      const drain = deps.executionOwner.shutdown();
+      const deploymentDrain =
+        deps.deployment.owner.shutdown(CLEANUP_TIMEOUT_MS);
+      let complete = true;
       try {
         console.error(
           `[radius] received ${signal}; shutting down ${deps.servers.size} canvas server(s)...`
@@ -336,16 +364,55 @@ export function createRadiusExtension(
             deps.executionOwner.markEnvironmentInstanceShuttingDown(id);
             await deps.stopServer(id, true);
           } catch (error) {
+            complete = false;
             deps.logError(
               `Could not stop Radius canvas ${id}: ${errorMessage(error)}`
             );
           }
         });
-        await withTimeout(Promise.allSettled(closes), CLEANUP_TIMEOUT_MS);
+        const drained = drain.then((outcome) => {
+          if (!outcome.complete) {
+            complete = false;
+            deps.logError(
+              `Radius setup drain failed: ${outcome.failures
+                .slice(0, 10)
+                .map((failure) => failure.replace(/[\r\n]/g, " ").slice(0, 120))
+                .join("; ")}`
+            );
+          }
+        });
+        const deploymentsDrained = deploymentDrain.then((outcome) => {
+          if (!outcome.complete) {
+            complete = false;
+            deps.logError(
+              `Radius deployment drain incomplete; pending attempts: ${outcome.pending
+                .slice(0, 10)
+                .map((id) => id.replace(/[^a-zA-Z0-9_.:-]/g, "?").slice(0, 100))
+                .join(
+                  ", "
+                )}. Remote workflows may still be running; inspect Actions before redeploying.`
+            );
+          }
+        });
+        if (
+          !(await withTimeout(
+            Promise.all([...closes, drained, deploymentsDrained]),
+            CLEANUP_TIMEOUT_MS
+          ))
+        ) {
+          complete = false;
+          const pending = deps.executionOwner
+            .pendingOperationIds()
+            .slice(0, 10)
+            .map((id) => id.replace(/[^a-zA-Z0-9_.-]/g, "?").slice(0, 80));
+          deps.logError(
+            `Radius shutdown incomplete after ${CLEANUP_TIMEOUT_MS}ms; pending operations: ${pending.join(", ") || "none"}; pending readiness checks: ${deps.executionOwner.pendingReadinessCount()}; server/task cleanup may remain pending. External work, journal saves or account restoration may be interrupted; inspect operation recovery before retrying.`
+          );
+        }
 
         const session = deps.session.tryGet();
         if (session) {
-          await withTimeout(
+          const sessionClosed = await withTimeout(
             (async () => {
               let tornDown = false;
               for (const name of [
@@ -374,8 +441,15 @@ export function createRadiusExtension(
             })(),
             CLEANUP_TIMEOUT_MS
           );
+          if (!sessionClosed) {
+            complete = false;
+            deps.logError(
+              `Radius session teardown incomplete after ${CLEANUP_TIMEOUT_MS}ms.`
+            );
+          }
         }
       } catch (e) {
+        complete = false;
         try {
           console.error(`[radius] session teardown error: ${errorMessage(e)}`);
         } catch {}
@@ -384,6 +458,7 @@ export function createRadiusExtension(
         // out, so a stuck teardown can never leave the timer running.
         stopKeepalive();
       }
+      return { complete, exitCode: complete ? (0 as const) : (1 as const) };
     })();
     return shutdownPromise;
   }
@@ -393,10 +468,7 @@ export function createRadiusExtension(
   let keepaliveBusy = false;
 
   function deployInFlight(): boolean {
-    for (const [, entry] of deps.servers) {
-      if (entry?.state?.deployStatus === "in_progress") return true;
-    }
-    return false;
+    return deps.deployment.owner.hasActiveWork();
   }
 
   function startKeepalive(): void {
@@ -472,6 +544,11 @@ export function createRadiusExtension(
       pendingStartupDiagnostic = "";
     }
     startKeepalive();
+    void updatePlugin(session).catch((error: unknown) => {
+      deps.logError(
+        redactCredentials(`Radius plugin update failed: ${errorMessage(error)}`)
+      );
+    });
   }
 
   return {

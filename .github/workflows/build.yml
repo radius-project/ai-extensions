@@ -79,7 +79,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -115,7 +115,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -135,8 +135,8 @@ jobs:
       - name: Run Windows cloud host configuration tests
         run: pnpm --filter @radius-project/adapter-canvas exec vitest run test/ci/cloud-e2e-workflows.test.ts test/e2e-cloud/support/copilot-app-host.test.ts
 
-      - name: Run Windows filesystem, executable and resolver tests
-        run: pnpm --filter @radius-project/adapter-canvas exec vitest run src/credential-provenance-store.test.ts src/operation-store.test.ts src/node-executable.test.ts src/publish-targets.test.ts src/promote-app-model.test.ts src/server/temporary-kubeconfig.test.ts test/integration/runtime/radius-type-definition.test.ts
+      - name: Run Windows filesystem, executable, resolver and harness tests
+        run: pnpm --filter @radius-project/adapter-canvas exec vitest run src/credential-provenance-store.test.ts src/operation-store.test.ts src/node-executable.test.ts src/publish-targets.test.ts src/promote-app-model.test.ts src/server/temporary-kubeconfig.test.ts test/integration/runtime/radius-type-definition.test.ts test/e2e/support/canvas-harness.test.ts
 
       - name: Build Radius artifact on Windows
         run: pnpm run build
@@ -167,7 +167,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -213,7 +213,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -283,6 +283,32 @@ jobs:
           path: ${{ runner.temp }}/build-gate
           if-no-files-found: error
 
+  ci-gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs:
+      - plugin-matrix
+      - static-checks
+      - windows-process-integration
+      - canvas-chromium
+      - node-tests
+      - build-gate
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every build and test job to pass
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$NEEDS"
+          if ! jq --exit-status 'length > 0 and all(.[]; .result == "success")' <<<"$NEEDS"; then
+            echo "::error::All build and test jobs must succeed. A failed, cancelled, or skipped job blocks merge."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.plugin }} dist
     needs: plugin-matrix
@@ -305,7 +331,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

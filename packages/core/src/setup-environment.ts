@@ -3,7 +3,11 @@ import {
   GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError
 } from "./setup-github-environment.js";
-import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 import { createWorkflowFileCommitter } from "./setup-workflow-committer.js";
 import { publishSetupWorkflowFiles } from "./setup-workflow-publication.js";
 import {
@@ -12,6 +16,7 @@ import {
   type SetupProviderCredentialStatus
 } from "./setup-provider-configuration.js";
 import type {
+  SetupAutomaticVerificationPolicy,
   SetupEnvironmentInput,
   SetupEnvironmentPorts,
   SetupEnvironmentResult,
@@ -29,6 +34,11 @@ export async function configureSetupEnvironment(
   ports: SetupEnvironmentPorts
 ): Promise<SetupEnvironmentResult> {
   const { targetRepo, provider, data } = input;
+  // A continuation keeps the marker and journal key, so it finds the run it
+  // already dispatched. A retry gets its own and dispatches a new run.
+  const verificationAttempt =
+    input.setupRetryAttempt ? `:attempt-${input.setupRetryAttempt}` : "";
+  const verificationMarker = input.operationId + verificationAttempt;
   let envName = input.envName;
   const runMutationAttempt = async <T>(
     failureBoundary: string,
@@ -37,6 +47,7 @@ export async function configureSetupEnvironment(
     try {
       return { completed: true, value: await mutate() };
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       if (
         error instanceof ProviderMutationRecoveryError &&
         error.code === "provider-mutation-outcome-unknown"
@@ -75,6 +86,7 @@ export async function configureSetupEnvironment(
       () => ports.stopBoundary("before-github-environment-create")
     );
   } catch (error) {
+    if (isSetupExecutionInterrupted(error)) throw error;
     if (error instanceof GitHubEnvironmentEnsureCancelled)
       return { kind: "stopped" };
     if (
@@ -96,13 +108,23 @@ export async function configureSetupEnvironment(
   envName = ensuredEnvironment.name;
   ports.setCanonicalEnvironment(envName);
 
-  const { runGh, setEnvironmentVariable, runGhWorkflow } =
-    ports.bindEnvironment({
-      targetRepo,
-      envName,
-      environmentProviderId: ensuredEnvironment.providerId,
-      journalVariables: provider === "azure"
-    });
+  const {
+    runGh,
+    setEnvironmentVariable: writeEnvironmentVariable,
+    runGhWorkflow
+  } = ports.bindEnvironment({
+    targetRepo,
+    envName,
+    environmentProviderId: ensuredEnvironment.providerId,
+    journalVariables: provider === "azure"
+  });
+  const setEnvironmentVariable = async (
+    name: string,
+    value: string | undefined
+  ) => {
+    assertSetupExecutionActive(ports.isExecutionStopped);
+    return writeEnvironmentVariable(name, value);
+  };
   ports.recordEnvironment({
     state: ensuredEnvironment.state,
     repo: targetRepo,
@@ -198,7 +220,9 @@ export async function configureSetupEnvironment(
         ports.bootstrapStatePackage({
           targetRepository: targetRepo,
           registry: stateRegistry,
-          credentials: packageCredentials
+          credentials: packageCredentials,
+          assertActive: () =>
+            assertSetupExecutionActive(ports.isExecutionStopped)
         })
     );
     if (!statePackageAttempt.completed) return { kind: "stopped" };
@@ -329,7 +353,7 @@ export async function configureSetupEnvironment(
         defaultBranch
       )
     ]);
-  const automaticPolicy = setupAutomaticBranchVerificationPolicy(
+  const defaultPolicy = setupAutomaticBranchVerificationPolicy(
     {
       verify: defaultVerify,
       dispatcher: defaultDispatcher,
@@ -337,6 +361,22 @@ export async function configureSetupEnvironment(
     },
     ports.parseWorkflow
   );
+  // A verify workflow this operation already committed was not in the
+  // repository before setup. Counting it would make a continuation generate a
+  // different file, which the workflow journal refuses as a change it never made.
+  const automaticPolicy: SetupAutomaticVerificationPolicy =
+    (
+      defaultPolicy.state === "disabled" &&
+      defaultPolicy.reason === "verify-present" &&
+      defaultVerify.content ===
+        (await ports.generateVerifyWorkflow(
+          envName,
+          provider,
+          input.operationId
+        ))
+    ) ?
+      { state: "enabled" }
+    : defaultPolicy;
   if (
     credentialsComplete &&
     automaticPolicy.state === "disabled" &&
@@ -654,6 +694,7 @@ export async function configureSetupEnvironment(
     fetchFile: (repo, path, branch) =>
       ports.fetchFileFromRepo(repo, path, branch)
   });
+  assertSetupExecutionActive(ports.isExecutionStopped);
   if (verifyPlan.pullRequestUrl) pullRequestUrl = verifyPlan.pullRequestUrl;
   if (verifyPlan.trigger === "none") {
     verifySkipReason = { kind: "merge", reason: verifyPlan.skipReason };
@@ -675,6 +716,7 @@ export async function configureSetupEnvironment(
     dispatchedAt = automaticStartedAt;
     ports.report({ kind: "verification-discovering", ref: verificationRef });
     const automatic = await ports.discoverAutomaticVerificationRun({
+      isStopped: ports.isExecutionStopped,
       identity: {
         repo: targetRepo,
         workflow: ports.verifyWorkflowFile,
@@ -698,6 +740,7 @@ export async function configureSetupEnvironment(
       stopBoundary: ports.stopBoundary,
       sleep: (milliseconds) => ports.sleep(milliseconds)
     });
+    assertSetupExecutionActive(ports.isExecutionStopped);
     if (automatic.state === "cancelled") return { kind: "stopped" };
     if (automatic.state === "manual_required") {
       ports.terminalizeManualRequired(automatic.guidance);
@@ -739,9 +782,9 @@ export async function configureSetupEnvironment(
       return { kind: "stopped" };
     const supportsOperationMarker =
       verifyPlan.supportsOperationMarker !== false;
-    const operationMarker = supportsOperationMarker ? input.operationId : "";
+    const operationMarker = supportsOperationMarker ? verificationMarker : "";
     const dispatchMutationKind = "github_workflow.dispatch";
-    const dispatchMutationTarget = `${targetRepo}:${ports.verifyWorkflowFile}:${verificationRef}:${envName}`;
+    const dispatchMutationTarget = `${targetRepo}:${ports.verifyWorkflowFile}:${verificationRef}:${envName}${verificationAttempt}`;
     const dispatch = await ports.runVerificationDispatch({
       kind: dispatchMutationKind,
       target: dispatchMutationTarget,
@@ -753,6 +796,7 @@ export async function configureSetupEnvironment(
       operationMarker,
       allowRegistrationRetry: true,
       ports: {
+        isStopped: ports.isExecutionStopped,
         runGh: (args) => runGh(args),
         sendDispatch: () =>
           runGhWorkflow(
@@ -768,10 +812,16 @@ export async function configureSetupEnvironment(
         stopBoundary: ports.stopBoundary,
         applyIdentity: (identity, run) => {
           const currentVerification = ports.verification();
+          // A retry's run starts from a clean record, so state an earlier run
+          // left, such as its tracking deadline, does not apply to it.
           const prior =
             (
               currentVerification !== null &&
-              typeof currentVerification === "object"
+              typeof currentVerification === "object" &&
+              (!verificationAttempt ||
+                ("dispatchMutationTarget" in currentVerification &&
+                  currentVerification.dispatchMutationTarget ===
+                    dispatchMutationTarget))
             ) ?
               currentVerification
             : {};
@@ -798,6 +848,7 @@ export async function configureSetupEnvironment(
         sleep: (milliseconds) => ports.sleep(milliseconds)
       }
     });
+    assertSetupExecutionActive(ports.isExecutionStopped);
     if (dispatch.state === "cancelled") return { kind: "stopped" };
     if (dispatch.state === "baseline_failed") {
       return {
@@ -832,7 +883,7 @@ export async function configureSetupEnvironment(
           environment: envName,
           operationMarker:
             verifyPlan.supportsOperationMarker !== false ?
-              input.operationId
+              verificationMarker
             : null,
           provider,
           repo: targetRepo,

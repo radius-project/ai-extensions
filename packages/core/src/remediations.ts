@@ -21,12 +21,18 @@
 // delegated to the Copilot session, because the canvas server cannot run an
 // interactive login without blocking itself.
 
+import {
+  AWS_CLI_INSTALL_URL,
+  AWS_CLI_MINIMUM_VERSION
+} from "./platforms/aws-identity.js";
+
 /** Every remediation the canvas knows how to offer. */
 export const REMEDIATION_IDS = [
   "azure-cli-install",
   "azure-cli-login",
   "azure-subscription-set",
   "aws-cli-login",
+  "aws-cli-install",
   "github-cli-login",
   "github-packages-scope",
   "github-workflow-scope",
@@ -335,10 +341,14 @@ function buildAzureSubscriptionSet(
   };
 }
 
-function buildAwsCliLogin(): Remediation {
+function buildAwsCliLogin(
+  params: Readonly<Record<string, unknown>>
+): Remediation {
+  const nextStep =
+    params.nextStep === "refresh-discovery" ? "refresh-discovery" : "";
   return {
     id: "aws-cli-login",
-    params: {},
+    params: nextStep ? { nextStep } : {},
     title: "Sign in to AWS CLI",
     displayCommand: "aws sso login",
     argv: [["aws", "sso", "login"]],
@@ -346,10 +356,28 @@ function buildAwsCliLogin(): Remediation {
     impact: "low",
     confirmTitle: "Start AWS login?",
     confirmBody:
-      "No active AWS session was found. Copilot will run `aws sso login`. If this machine uses static credentials rather than SSO, cancel and run `aws configure` yourself instead.",
+      "No active AWS session was found. Copilot will run `aws sso login`. If this machine uses another credential provider, cancel and refresh that provider instead. Radius will not change your AWS profiles.",
     confirmLabel: "Start AWS login",
     followUp:
-      "After the login finishes, return to the Radius canvas and click Verify again."
+      nextStep === "refresh-discovery" ?
+        "After the login finishes, return to the Radius canvas and refresh resource discovery."
+      : "After the login finishes, return to the Radius canvas and click Verify again."
+  };
+}
+
+function buildAwsCliInstall(): Remediation {
+  return {
+    id: "aws-cli-install",
+    params: {},
+    title: "Install or upgrade AWS CLI",
+    displayCommand: "aws --version",
+    argv: [["aws", "--version"]],
+    cwd: "anywhere",
+    impact: "high",
+    confirmTitle: "Install or upgrade AWS CLI?",
+    confirmBody: `Copilot will help install AWS CLI ${AWS_CLI_MINIMUM_VERSION} or newer using AWS's instructions. Your existing AWS profiles and credential provider must be preserved.`,
+    confirmLabel: "Ask Copilot to install",
+    followUp: `After installation, return to the Radius canvas and click Verify again. Installer instructions: ${AWS_CLI_INSTALL_URL}`
   };
 }
 
@@ -634,7 +662,9 @@ export function buildRemediation(
     case "azure-subscription-set":
       return buildAzureSubscriptionSet(values);
     case "aws-cli-login":
-      return { ok: true, remediation: buildAwsCliLogin() };
+      return { ok: true, remediation: buildAwsCliLogin(values) };
+    case "aws-cli-install":
+      return { ok: true, remediation: buildAwsCliInstall() };
     case "github-cli-login":
       return { ok: true, remediation: buildGithubCliLogin(values) };
     case "github-packages-scope":
@@ -713,7 +743,11 @@ function displayPromptFor(remediation: Remediation): string {
     case "azure-subscription-set":
       return "Selecting the Azure subscription the Radius canvas needs.";
     case "aws-cli-login":
-      return "Signing in to AWS CLI so the Radius canvas can verify these AWS credentials.";
+      return remediation.params.nextStep === "refresh-discovery" ?
+          "Signing in to AWS CLI so the Radius canvas can refresh AWS resource discovery."
+        : "Signing in to AWS CLI so the Radius canvas can verify these AWS credentials.";
+    case "aws-cli-install":
+      return "Installing or upgrading AWS CLI so the Radius canvas can verify these AWS credentials.";
     case "github-cli-login":
       return "Signing in to GitHub CLI so the Radius canvas can continue.";
     case "github-packages-scope":
@@ -742,7 +776,11 @@ function reasonFor(remediation: Remediation): string {
     case "azure-subscription-set":
       return "The Radius canvas needs the Azure CLI pointed at a specific subscription before it can continue.";
     case "aws-cli-login":
-      return "The Radius canvas needs an active AWS CLI session before it can verify these credentials.";
+      return remediation.params.nextStep === "refresh-discovery" ?
+          "The Radius canvas needs an active AWS CLI session before it can discover AWS resources."
+        : "The Radius canvas needs an active AWS CLI session before it can verify these credentials.";
+    case "aws-cli-install":
+      return `The Radius canvas needs AWS CLI ${AWS_CLI_MINIMUM_VERSION} or newer.`;
     case "github-cli-login":
       return "The Radius canvas could not detect a signed-in GitHub CLI account.";
     case "github-packages-scope":
@@ -812,6 +850,11 @@ export function remediationSessionMessage(
   const lines =
     remediation.id === "azure-cli-install" ?
       [reasonFor(remediation), `Please install Azure CLI, then ${instructions}`]
+    : remediation.id === "aws-cli-install" ?
+      [
+        reasonFor(remediation),
+        `Use the official instructions at ${AWS_CLI_INSTALL_URL} to install or upgrade AWS CLI. Preserve existing AWS profiles and credential providers. Do not start a sign-in flow or create access keys. Then ${instructions}`
+      ]
     : [reasonFor(remediation), instructions];
   if (remediation.cwd === "workspace") {
     lines.push("Run it from the repository worktree for this session.");

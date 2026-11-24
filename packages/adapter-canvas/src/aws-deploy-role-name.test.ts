@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { defaultAwsDeployRoleName } from "./aws-deploy-role-name.js";
+import {
+  awsEnvironmentPolicyName,
+  defaultAwsDeployRoleName
+} from "./aws-deploy-role-name.js";
 
 // Digests computed independently with `shasum -a 256`.
 const LONG_A = `contoso/${"a".repeat(60)}`;
@@ -9,6 +12,13 @@ const LONG_B_DIGEST = "f6cb13";
 const PREFIX = `radius-deploy-contoso-${"a".repeat(35)}`;
 
 describe("defaultAwsDeployRoleName", () => {
+  it("keeps the repository ID readable in inline policy names", () => {
+    expect(awsEnvironmentPolicyName(42, "dev")).toBe("radius-deploy-dev-42");
+    expect(awsEnvironmentPolicyName(43, "dev")).not.toBe(
+      awsEnvironmentPolicyName(42, "dev")
+    );
+  });
+
   it("keeps a short name without a hash", () => {
     expect(defaultAwsDeployRoleName("contoso/storefront")).toBe(
       "radius-deploy-contoso-storefront"

@@ -8,6 +8,7 @@ import {
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createAzureDiscoveryRoutes } from "../../../src/server/routes/azure-discovery.js";
+import { CommandFailure } from "../../../src/command-failure.js";
 import {
   azureDiscoveryContract,
   commandLine,
@@ -53,9 +54,12 @@ const CLI = {
   eks: "aws eks list-clusters --query clusters --region us-west-2 --output json",
   describeCluster: (name: string) =>
     `aws eks describe-cluster --name ${name} --region us-west-2 --output json`,
-  vpcs: "aws ec2 describe-vpcs --region us-west-2 --output json",
-  subnets: "aws ec2 describe-subnets --region us-west-2 --output json",
-  routeTables: "aws ec2 describe-route-tables --region us-west-2 --output json",
+  vpcs: "aws ec2 describe-vpcs --vpc-ids vpc-1 --region us-west-2 --output json",
+  subnets:
+    "aws ec2 describe-subnets --filters Name=vpc-id,Values=vpc-1 --region us-west-2 --output json",
+  routeTables:
+    "aws ec2 describe-route-tables --filters Name=vpc-id,Values=vpc-1 --region us-west-2 --output json",
+  zones: "aws ec2 describe-availability-zones --region us-west-2 --output json",
   eksKubeconfig: (name: string) =>
     `aws eks update-kubeconfig --name ${name} --region us-west-2 --kubeconfig ${TEST_KUBECONFIG_PATH}`,
   eksNamespaces: `kubectl --kubeconfig ${TEST_KUBECONFIG_PATH} get namespaces -o jsonpath={.items[*].metadata.name}`
@@ -128,6 +132,102 @@ function start(): {
 }
 
 describe("azure-discovery real-loopback HIT (RF-03)", () => {
+  it.each([false, true])(
+    "returns opt-in discovery command diagnostics across HTTP (timeout=%s)",
+    async (timedOut) => {
+      const { cli } = start();
+      cli.set(CLI.aks, "[]");
+      cli.set(CLI.groups, "[]");
+      cli.set(CLI.credentials("aks-selected", "rg-selected"), "");
+      cli.set(CLI.namespaces, {
+        throws: new CommandFailure(
+          Object.assign(new Error("kubectl failed"), {
+            code: timedOut ? null : 1,
+            signal: timedOut ? ("SIGTERM" as const) : null,
+            killed: timedOut
+          }),
+          "connection refused; password=fixture-secret",
+          10000,
+          []
+        )
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await fetch(`${entry.baseUrl}/api/discover`, {
+        method: "POST",
+        headers: { "x-radius-discovery-diagnostics": "1" },
+        body: JSON.stringify({
+          provider: "azure",
+          resourceGroup: "rg-selected",
+          cluster: "aks-selected"
+        })
+      });
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain("fixture-secret");
+      expect(JSON.parse(text)).toMatchObject({
+        namespaces: [],
+        errors: { namespaces: expect.stringContaining("connection refused") },
+        diagnostics: {
+          events: [
+            expect.objectContaining({ step: "az aks list", exitCode: 0 }),
+            expect.objectContaining({ step: "az group list", exitCode: 0 }),
+            expect.objectContaining({
+              step: "az aks get-credentials",
+              exitCode: 0
+            }),
+            expect.objectContaining({
+              step: "kubectl get namespaces",
+              timeoutMs: 10000,
+              exitCode: timedOut ? null : 1,
+              signal: timedOut ? "SIGTERM" : null,
+              timedOut,
+              error: expect.stringContaining("[REDACTED]")
+            })
+          ]
+        }
+      });
+    }
+  );
+
+  it("does not change ordinary response envelopes without an explicit diagnostic opt-in", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+    for (const diagnosticFlag of ["", "invalid"]) {
+      const response = await fetch(`${entry.baseUrl}/api/discover`, {
+        method: "POST",
+        headers: { "x-radius-discovery-diagnostics": diagnosticFlag },
+        body: JSON.stringify({ provider: "azure", cluster: "-invalid" })
+      });
+      expect(await response.json()).toEqual({
+        error: "Invalid AKS cluster name.",
+        clusters: [],
+        resourceGroups: [],
+        namespaces: [],
+        vpcs: [],
+        subnets: []
+      });
+    }
+  });
+
+  it("returns an explicit empty diagnostic record when discovery cannot parse its input", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      headers: {
+        "x-radius-discovery-diagnostics": "1"
+      },
+      body: "not json"
+    });
+    expect(await response.json()).toMatchObject({
+      error: expect.any(String),
+      namespaces: ["default"],
+      diagnostics: {
+        events: []
+      }
+    });
+  });
+
   it("serves the App Registration picker payload over a real socket", async () => {
     const script = start().az;
     script.set(ARGV.list, {
@@ -355,14 +455,20 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
       CLI.describeCluster("eks-1"),
       JSON.stringify({
         cluster: {
+          status: "ACTIVE",
           resourcesVpcConfig: { vpcId: "vpc-1" },
           accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" }
         }
       })
     );
-    cli.set(CLI.vpcs, { throws: new Error("vpcs denied") });
+    cli.set(CLI.vpcs, {
+      throws: new Error(
+        "An error occurred (UnauthorizedOperation) when calling the DescribeVpcs operation"
+      )
+    });
     cli.set(CLI.subnets, '{"Subnets":[]}');
     cli.set(CLI.routeTables, '{"RouteTables":[]}');
+    cli.set(CLI.zones, '{"AvailabilityZones":[]}');
     cli.set(CLI.eksKubeconfig("eks-1"), "");
     cli.set(CLI.eksNamespaces, "default team-a");
     const entry = await container!.getOrCreate("panel-a");
@@ -378,9 +484,10 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(
       '{"clusters":[{"id":"eks-1","name":"eks-1","vpcId":"vpc-1",' +
-        '"authenticationMode":"API_AND_CONFIG_MAP","usable":true}],"resourceGroups":[],' +
-        '"namespaces":["default","team-a"],"vpcs":[],"subnets":[],' +
-        '"errors":{"vpcs":"vpcs denied"}}'
+        '"authenticationMode":"API_AND_CONFIG_MAP","status":"ACTIVE","usable":true}],' +
+        '"resourceGroups":[],"namespaces":["default","team-a"],"vpcs":[],"subnets":[],' +
+        '"errors":{"vpcs":"An error occurred (UnauthorizedOperation) when calling the DescribeVpcs operation"},' +
+        '"errorKinds":{"vpcs":"denied"}}'
     );
   });
 

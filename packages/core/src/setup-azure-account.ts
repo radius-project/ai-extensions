@@ -10,6 +10,7 @@ import {
 } from "./platforms/setup-azure-identity.js";
 import type { AzureAppCreateContinuation } from "./setup-azure-continuation.js";
 import type { ProviderMutationCommandResult } from "./setup-azure-recovery.js";
+import { isSetupExecutionInterrupted } from "./setup-recovery-error.js";
 
 export interface AzureAccountIdentity {
   subscriptionId: string;
@@ -99,7 +100,8 @@ export async function continuationMatchesLiveContext(
       oidcSuffix === continuation.resolved.oidcSuffix &&
       ports.deepEqual(oidc, continuation.resolved.oidc)
     );
-  } catch {
+  } catch (error) {
+    if (isSetupExecutionInterrupted(error)) throw error;
     return false;
   }
 }

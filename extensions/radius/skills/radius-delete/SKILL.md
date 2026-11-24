@@ -68,6 +68,8 @@ An incomplete deletion exposes only **Retry deletion**. Retry reopens the same d
 
 ## Common failure modes
 
+When deletion or cleanup ends in failure and recovery stops, use the `radius-report-issue` skill to offer a report to the Radius team. State that the user can review the issue before submission. Do not collect extra diagnostics until they agree, and require separate explicit permission to submit the reviewed draft. Record incomplete cleanup without replaying deletion or removing retained resources to collect evidence.
+
 - **`OCI archive repository is not configured` or GHCR authentication/visibility errors**
   → Recreate or update the deploy environment so `RADIUS_STATE_BACKEND=oci`, package-only `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE=radius-state` are present. Confirm the delete workflow logs in to `ghcr.io` before `rad startup`, has `packages: write`, and that the state package is private or internal.
 

@@ -1,11 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
-import { ProviderMutationRecoveryError as CoreRecoveryError } from "@radius-project/core";
 import {
   createFileOperationStore,
   PERSISTED_OPERATIONS_VERSION
 } from "../../operation-store.js";
+import {
+  assertSetupExecutionActive,
+  ProviderMutationRecoveryError as CoreRecoveryError
+} from "@radius-project/core";
 import { createSetupWorkflowRecoveryPort } from "./setup-workflow-recovery.js";
 import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import {
@@ -21,15 +24,74 @@ import {
 } from "../../operations.js";
 
 describe("Canvas setup workflow recovery binding", () => {
+  it.each(["runtime", "call", "neither"])(
+    "checks both %s and call-specific assertions after saving intent",
+    async (guard) => {
+      const operation = { operationId: "composed-workflow" };
+      let saved = false;
+      const statuses: string[] = [];
+      const call = vi.fn(() =>
+        assertSetupExecutionActive(() => saved && guard === "call")
+      );
+      const mutate = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+      const binding = createSetupWorkflowRecoveryPort(
+        operation,
+        async () => {
+          saved = true;
+          statuses.push(
+            String(
+              providerMutationRecord(operation, "github_workflow.put", "target")
+                ?.status
+            )
+          );
+        },
+        () => saved && guard === "runtime"
+      );
+      const pending = binding.execute({
+        kind: "github_workflow.put",
+        target: "target",
+        assertActive: call,
+        mutate,
+        accept: () => "id",
+        reconcile: async () => {
+          throw new Error("Unexpected reconciliation");
+        }
+      });
+      if (guard === "neither") {
+        await expect(pending).resolves.toMatchObject({
+          state: "applied",
+          value: "id"
+        });
+        expect(mutate).toHaveBeenCalledOnce();
+        expect(statuses).toEqual(["prepared", "confirmed"]);
+      } else {
+        await expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        expect(mutate).not.toHaveBeenCalled();
+        expect(statuses).toEqual(["prepared", "not_applied"]);
+      }
+      expect(call).toHaveBeenCalledTimes(
+        guard === "runtime" ? 1
+        : guard === "call" ? 2
+        : 3
+      );
+    }
+  );
+
   it("queries current journal and rollback state instead of taking construction-time snapshots", async () => {
     const operation: {
       operationId: string;
       providerRecovery?: { state?: string };
     } = { operationId: "workflow-recovery" };
     let saves = 0;
-    const binding = createSetupWorkflowRecoveryPort(operation, async () => {
-      saves++;
-    });
+    const binding = createSetupWorkflowRecoveryPort(
+      operation,
+      async () => {
+        saves++;
+      },
+      () => false
+    );
     binding.markRollbackPending();
     expect(binding.rollbackPending()).toBe(false);
     expect(binding.willWrite("github_workflow.put", "workflow")).toBe(true);
@@ -154,7 +216,11 @@ describe("Canvas setup workflow recovery binding", () => {
       "not_applied",
       "HTTP 403"
     );
-    const binding = createSetupWorkflowRecoveryPort(operation, async () => {});
+    const binding = createSetupWorkflowRecoveryPort(
+      operation,
+      async () => {},
+      () => false
+    );
     const guidance =
       "Review setup-branch in fixture/app before starting setup again.";
     binding.settleManual(
@@ -178,7 +244,11 @@ describe("Canvas setup workflow recovery binding", () => {
     expect(providerRecoveryManualGuidance(operation)).toBe(
       "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
     );
-    const binding = createSetupWorkflowRecoveryPort(operation, async () => {});
+    const binding = createSetupWorkflowRecoveryPort(
+      operation,
+      async () => {},
+      () => false
+    );
     binding.markRollbackPending();
     expect(operation.providerRecovery.state).toBe("manual_required");
   });
@@ -190,7 +260,11 @@ describe("Canvas setup workflow recovery binding", () => {
       kind: "github_workflow.put",
       target: "workflow"
     });
-    const binding = createSetupWorkflowRecoveryPort(operation, async () => {});
+    const binding = createSetupWorkflowRecoveryPort(
+      operation,
+      async () => {},
+      () => false
+    );
     let reads = 0;
     await expect(
       binding.execute({

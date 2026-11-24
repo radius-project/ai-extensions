@@ -1,4 +1,4 @@
-import { redactCredentials } from "@radius-project/core";
+import { redactCredentials, type DeploymentState } from "@radius-project/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APP_ORIGIN_REPO_PATH,
@@ -19,6 +19,7 @@ import {
   createFakeSession
 } from "../../support/runtime/fakes.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
+import { createFakeDeploymentRuntime } from "../../support/runtime/deployment.js";
 import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monitor.js";
 import { deployFailureNoticePrompt } from "../../../src/runtime/hooks.js";
 import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../../src/deploy-artifacts.js";
@@ -37,9 +38,12 @@ import {
 } from "../../../src/server.js";
 import type { CanvasGraphResource } from "../../../src/shared.js";
 import {
+  createDeploymentRepository,
   createWorkflowArtifactReader,
+  normalizeDeploymentAppFile,
   type WorkflowRunner
 } from "@radius-project/adapter-shared";
+import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
 
 const ACTION_NAMES = ["get_graph_resources", "update_source_refs"];
 
@@ -50,8 +54,15 @@ const TOOL_NAMES = [
   "radius_publish_custom_type_extension",
   "radius_publish_recipe",
   "radius_deploy",
-  "radius_deploy_status"
+  "radius_deploy_status",
+  "radius_setup_environment",
+  "radius_environment_status",
+  "radius_environment_control"
 ];
+
+// The skillBase the fake radiusAppBicepSkill reports. A handoff that carries
+// it embeds the skill bootstrap instead of asking the agent to call a tool.
+const SKILL_BASE = "/test/skills/radius-app-bicep";
 
 function parseSkillHandoff(value: unknown): Record<string, unknown> {
   if (typeof value !== "string") {
@@ -64,7 +75,276 @@ function parseSkillHandoff(value: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+function registerDeploymentStatus(
+  harness: Awaited<ReturnType<typeof createRuntimeSdkHarness>>,
+  state: DeploymentState,
+  environment = "production"
+) {
+  const target = {
+    repo: "org/app",
+    branch: "feature",
+    environment,
+    provider: "azure",
+    appFile: ".radius/app.bicep"
+  };
+  const owner = harness.deps.deployment.owner;
+  const reservation = owner.reserve(target, "deploy");
+  if (!reservation) throw new Error("Expected an available target");
+  const invocation = owner.begin(target, state, reservation);
+  state.deployAttempt = {
+    ...target,
+    targetRepo: target.repo,
+    id: invocation.attemptId
+  };
+  state.deployGeneration = invocation.generation;
+  owner.release(reservation);
+  return invocation;
+}
+
 describe("P0-A Radius runtime registration contract", () => {
+  it.each([0, 1, 2])(
+    "resolves an explicit target without a branch independently of %i unrelated prior deployments",
+    async (priorCount) => {
+      const defaultBranch = vi.fn(async () => "remote-default");
+      const harness = await createRuntimeSdkHarness({}, (deps) => {
+        deps.deployment = createFakeDeploymentRuntime({
+          resolveDeployment: async () => null,
+          resolveDefaultBranch: defaultBranch,
+          createExecution: () => ({
+            monitor: {
+              run: async ({ entry }) => {
+                entry.state.deployStatus = "complete";
+              }
+            },
+            observation: createWorkflowObservationScope(() => {
+              throw new Error("No artifact reads expected");
+            })
+          })
+        });
+      });
+      try {
+        const deploy = harness.extension.tools.find(
+          ({ name }) => name === "radius_deploy"
+        );
+        if (!deploy) throw new Error("Missing registered deploy tool");
+        for (let index = 0; index < priorCount; index++) {
+          expect(
+            await deploy.handler({
+              repo: `unrelated/app-${index}`,
+              environment: "production",
+              branch: "unrelated-branch",
+              appFile: "models/unrelated.bicep"
+            })
+          ).toContain("started");
+          await expect
+            .poll(() => harness.deps.deployment.owner.hasActiveWork())
+            .toBe(false);
+        }
+        const started = await deploy.handler({
+          repo: "explicit/app",
+          environment: "production"
+        });
+        expect(started).toContain("started");
+        expect(defaultBranch).toHaveBeenCalledExactlyOnceWith("explicit/app");
+        const selected = harness.deps.deployment.owner.lookupTarget({
+          repo: "explicit/app",
+          environment: "production"
+        });
+        if (selected.kind !== "found")
+          throw new Error("Expected explicit target");
+        expect(selected.invocation.target).toMatchObject({
+          repo: "explicit/app",
+          branch: "remote-default",
+          appFile: ".radius/app.bicep"
+        });
+        expect(selected.invocation.state.deployParams).not.toHaveProperty(
+          "appFile"
+        );
+        expect(selected.invocation.state.deployingResources).toEqual([]);
+        expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+      } finally {
+        await harness.extension.shutdown("test");
+      }
+    }
+  );
+
+  it.each([
+    [{ content: "", encoding: "base64", size: 0 }, "app.bicep"],
+    [
+      {
+        content: Buffer.from(" \n").toString("base64"),
+        encoding: "base64",
+        size: 2
+      },
+      ".radius/app.bicep"
+    ],
+    [{ content: "", encoding: "none", size: 2_000_000 }, null],
+    [{ encoding: "base64", size: 20 }, null]
+  ] as const)(
+    "uses validated remote model metadata %j through the registered direct tool",
+    async (metadata, expectedModel) => {
+      const execute = vi.fn<
+        Parameters<typeof createDeploymentRepository>[0]["execute"]
+      >((command, args, _options, callback) => {
+        expect(command).toBe("gh");
+        expect(args).toEqual([
+          "api",
+          "/repos/explicit/app/contents/.radius/app.bicep?ref=feature"
+        ]);
+        callback(null, JSON.stringify(metadata), "");
+        return {};
+      });
+      const repository = createDeploymentRepository({
+        execute,
+        redactDiagnostic: redactCredentials
+      });
+      const harness = await createRuntimeSdkHarness({}, (deps) => {
+        deps.deployment = createFakeDeploymentRuntime({
+          resolveDeployment: async () => null,
+          createExecution: () => ({
+            monitor: {
+              run: async ({ entry }) => {
+                entry.state.deployStatus = "complete";
+              }
+            },
+            observation: createWorkflowObservationScope(() => {
+              throw new Error("No artifact reads expected");
+            })
+          })
+        });
+        deps.readDeploymentModel = createDeployModelSource({
+          readWorkspace: async () => null,
+          readRepository: repository.readFileResult,
+          redactDiagnostic: redactCredentials
+        });
+      });
+      try {
+        const deploy = harness.extension.tools.find(
+          ({ name }) => name === "radius_deploy"
+        );
+        if (!deploy) throw new Error("Missing registered deploy tool");
+        const result = await deploy.handler({
+          repo: "explicit/app",
+          branch: "feature",
+          environment: "production"
+        });
+        if (expectedModel) {
+          expect(result).toContain("started");
+          const current = harness.deps.deployment.owner.lookup();
+          if (current.kind !== "found") throw new Error("Missing deployment");
+          expect(current.invocation.target.appFile).toBe(expectedModel);
+          expect(current.invocation.state.deployParams).not.toHaveProperty(
+            "appFile"
+          );
+        } else {
+          expect(result).toContain("Could not resolve the application model");
+          expect(harness.deps.deployment.owner.lookup().kind).toBe("missing");
+          expect(harness.deps.deployment.owner.hasActiveWork()).toBe(false);
+        }
+        expect(execute).toHaveBeenCalledOnce();
+        expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+      } finally {
+        await harness.extension.shutdown("test");
+      }
+    }
+  );
+
+  it("starts, observes and repeats through the shared runtime without Canvas or loopback HTTP", async () => {
+    let finish: () => void = () => {};
+    const workflow = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const readTarget = vi.fn(async () => null);
+    const monitor = vi.fn(
+      async ({ entry }: { entry: { state: DeploymentState } }) => {
+        await workflow;
+        entry.state.deployStatus = "complete";
+        entry.state.deployRunUrl = "https://github.com/org/app/actions/runs/42";
+      }
+    );
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(
+        new Error("Deployment tools must not use loopback HTTP")
+      );
+    const harness = await createRuntimeSdkHarness({}, (deps) => {
+      deps.deployment = createFakeDeploymentRuntime({
+        resolveDeployment: readTarget,
+        createExecution: () => ({
+          monitor: { run: monitor },
+          observation: createWorkflowObservationScope(() => {
+            throw new Error("Artifact reads were not requested");
+          })
+        })
+      });
+    });
+    try {
+      const deploy = harness.extension.tools.find(
+        ({ name }) => name === "radius_deploy"
+      );
+      const status = harness.extension.tools.find(
+        ({ name }) => name === "radius_deploy_status"
+      );
+      if (!deploy || !status)
+        throw new Error("Deployment tools were not registered");
+      const started = await deploy.handler({
+        repo: "org/app",
+        branch: "feature",
+        environment: "production"
+      });
+      const current = harness.deps.deployment.owner.lookup();
+      if (current.kind !== "found")
+        throw new Error("Deployment was not admitted");
+      const { observationId, attemptId } = current.invocation;
+      expect(started).toContain(observationId);
+      expect(started).not.toContain(attemptId);
+      expect(
+        parseSkillHandoff(await status.handler({ observationId }))
+      ).toMatchObject({
+        observationId,
+        status: "in_progress"
+      });
+      expect(await deploy.handler({})).toContain("in progress");
+      expect(monitor).toHaveBeenCalledOnce();
+
+      finish();
+      await vi.waitFor(() =>
+        expect(harness.deps.deployment.owner.hasActiveWork()).toBe(false)
+      );
+      expect(
+        parseSkillHandoff(await status.handler({ observationId }))
+      ).toMatchObject({
+        observationId,
+        status: "success",
+        deployRunUrl: "https://github.com/org/app/actions/runs/42"
+      });
+      expect(await deploy.handler({ attemptId: "" })).toContain("started");
+      await vi.waitFor(() => expect(monitor).toHaveBeenCalledTimes(2));
+      const repeated = harness.deps.deployment.owner.lookup();
+      if (repeated.kind !== "found")
+        throw new Error("Fresh deployment was not admitted");
+      expect(repeated.invocation.attemptId).not.toBe(attemptId);
+      expect(repeated.invocation.state.deployRepairAttempts).toBe(0);
+      expect(await status.handler({ attemptId: "" })).toContain(
+        "non-empty string"
+      );
+      expect(await status.handler({ observationId })).toContain("No matching");
+      expect(readTarget).toHaveBeenCalledTimes(2);
+      expect(readTarget).toHaveBeenLastCalledWith(
+        "org/app",
+        "production",
+        "app"
+      );
+      expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+      expect(harness.routedOpens).toEqual([]);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      finish();
+      await harness.extension.shutdown("test");
+      fetch.mockRestore();
+    }
+  });
+
   it("reports the real unconfirmed monitor outcome as fenced data and a passive notice", async () => {
     const harness = await createRuntimeSdkHarness();
     try {
@@ -72,6 +352,7 @@ describe("P0-A Radius runtime registration contract", () => {
       selected.state = { deployAttempt: { id: "selected-attempt" } };
       const observed = createUnconfirmedMonitor("future_conclusion");
       await observed.monitor.run({
+        appFile: ".radius/app.bicep",
         entry: selected,
         repo: "org/app",
         branch: "feature",
@@ -80,23 +361,14 @@ describe("P0-A Radius runtime registration contract", () => {
         resources: [],
         log: () => {}
       });
-      harness.servers.set("selected-panel", selected);
-      vi.mocked(harness.deps.deploy.fetch).mockImplementation(async (url) => {
-        expect(url).toBe(`${selected.baseUrl}/api/deploy-status`);
-        return Response.json({
-          status: selected.state.deployStatus,
-          error: selected.state.deployError,
-          errorKind: selected.state.deployErrorKind,
-          deployRunUrl: selected.state.deployRunUrl,
-          attempt: selected.state.deployAttempt,
-          repairing: false
-        });
-      });
+      const invocation = registerDeploymentStatus(harness, selected.state);
       const tool = harness.extension.tools.find(
         ({ name }) => name === "radius_deploy_status"
       );
       if (!tool) throw new Error("Missing status tool");
-      const result = await tool.handler({ attemptId: "selected-attempt" });
+      const result = await tool.handler({
+        observationId: invocation.observationId
+      });
       const summary = parseSkillHandoff(result);
       expect(summary).toMatchObject({
         status: "failed",
@@ -137,6 +409,100 @@ describe("P0-A Radius runtime registration contract", () => {
     }
   });
 
+  it("preserves auto-selection intent and repair pinning through the registered deploy tool", async () => {
+    const harness = await createRuntimeSdkHarness({}, (deps) => {
+      deps.deployment = createFakeDeploymentRuntime({
+        normalizeAppFile: normalizeDeploymentAppFile,
+        resolveDeployment: async () => null,
+        createExecution: () => ({
+          monitor: {
+            run: async ({ entry }) => {
+              entry.state.deployStatus = "complete";
+            }
+          },
+          observation: createWorkflowObservationScope(() => {
+            throw new Error("No artifact reads expected");
+          })
+        })
+      });
+      vi.mocked(deps.readDeploymentModel).mockResolvedValue({
+        status: "missing"
+      });
+    });
+    try {
+      const current = () => {
+        const found = harness.deps.deployment.owner.lookup();
+        if (found.kind !== "found")
+          throw new Error("Expected an admitted deployment");
+        return found.invocation;
+      };
+      const tool = harness.extension.tools.find(
+        ({ name }) => name === "radius_deploy"
+      );
+      if (!tool) throw new Error("Missing deploy tool");
+      expect(await tool.handler({ environment: "production" })).toContain(
+        "started"
+      );
+      await expect
+        .poll(() => harness.deps.deployment.owner.hasActiveWork())
+        .toBe(false);
+      const first = current();
+      expect(first.target.appFile).toBe("app.bicep");
+      expect(first.state.deployParams).not.toHaveProperty("appFile");
+      expect(first.state.deployAttempt?.appFile).toBe("app.bicep");
+      first.state.deployStatus = "failed";
+      const attemptId = first.attemptId;
+      expect(await tool.handler({ attemptId })).toContain("started");
+      await expect
+        .poll(() => harness.deps.deployment.owner.hasActiveWork())
+        .toBe(false);
+      expect(current().target.appFile).toBe("app.bicep");
+      expect(current().state.deployParams).not.toHaveProperty("appFile");
+      current().state.deployStatus = "failed";
+      expect(
+        await tool.handler({ attemptId, appFile: "./app.bicep" })
+      ).toContain("started");
+      await expect
+        .poll(() => harness.deps.deployment.owner.hasActiveWork())
+        .toBe(false);
+      expect(current().target.appFile).toBe("app.bicep");
+      current().state.deployStatus = "failed";
+      expect(
+        await tool.handler({
+          attemptId,
+          appFile: ".radius/app.bicep"
+        })
+      ).toContain("cannot be retargeted");
+      expect(harness.deps.readDeploymentModel).toHaveBeenCalledTimes(1);
+      vi.mocked(harness.deps.readDeploymentModel).mockResolvedValue({
+        status: "available",
+        content: "managed model",
+        fromWorkspace: true
+      });
+      expect(await tool.handler({})).toContain("started");
+      await expect
+        .poll(() => harness.deps.deployment.owner.hasActiveWork())
+        .toBe(false);
+      expect(current().target.appFile).toBe(".radius/app.bicep");
+      expect(current().attemptId).not.toBe(attemptId);
+      expect(current().state.deployParams).not.toHaveProperty("appFile");
+      expect(harness.deps.readDeploymentModel).toHaveBeenCalledTimes(2);
+      const prior = current();
+      vi.mocked(harness.deps.readDeploymentModel).mockResolvedValue({
+        status: "unavailable",
+        error: "Could not select the deployment model"
+      });
+      expect(await tool.handler({})).toContain(
+        "Could not select the deployment model"
+      );
+      expect(current()).toBe(prior);
+      expect(harness.servers.size).toBe(0);
+      expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+    } finally {
+      await harness.extension.shutdown("test");
+    }
+  });
+
   it("fences retained primary and secondary-read diagnostics without renaming failed attempt status", async () => {
     const failure = await collectWorkflowFailure(
       { repo: "org/app", runId: 41 },
@@ -159,23 +525,17 @@ describe("P0-A Radius runtime registration contract", () => {
       const selected = createFakeServerEntry("selected-panel", "deployed");
       selected.state = {
         deployAttempt: { id: "selected-attempt" },
-        deployStatus: "failed"
+        deployStatus: "failed",
+        deployError: failure.message
       };
-      harness.servers.set("selected-panel", selected);
-      vi.mocked(harness.deps.deploy.fetch).mockImplementation(async (url) => {
-        expect(url).toBe(`${selected.baseUrl}/api/deploy-status`);
-        return Response.json({
-          status: "failed",
-          errorKind: null,
-          error: failure.message,
-          attempt: selected.state.deployAttempt
-        });
-      });
+      const invocation = registerDeploymentStatus(harness, selected.state);
       const tool = harness.extension.tools.find(
         ({ name }) => name === "radius_deploy_status"
       );
       if (!tool) throw new Error("Missing status tool");
-      const result = await tool.handler({ attemptId: "selected-attempt" });
+      const result = await tool.handler({
+        observationId: invocation.observationId
+      });
       const summary = parseSkillHandoff(result);
       expect(summary.status).toBe("failed");
       expect(summary.errorKind).toBeNull();
@@ -197,14 +557,16 @@ describe("P0-A Radius runtime registration contract", () => {
     }
   });
 
-  it("routes the registered status tool to its named attempt and preserves the Canvas completion value", async () => {
+  it("routes registered status to its named invocation and maps completion to success", async () => {
     const harness = await createRuntimeSdkHarness();
     try {
       const selected = createFakeServerEntry("selected-panel", "deployed");
       selected.state = {
         deployAttempt: { id: "selected-attempt" },
         deployStatus: "complete",
-        deployStartedAt: 1700000000000
+        deployStartedAt: 1700000000000,
+        deployFinishedAt: 1700000060000,
+        deployRunUrl: "https://github.com/acme/widgets/actions/runs/42"
       };
       const newer = createFakeServerEntry("newer-panel", "deployed");
       newer.state = {
@@ -212,45 +574,28 @@ describe("P0-A Radius runtime registration contract", () => {
         deployStatus: "in_progress",
         deployStartedAt: 1700000120000
       };
-      harness.servers.set("newer-panel", newer);
-      harness.servers.set("selected-panel", selected);
-      const statusUrl = `${selected.baseUrl}/api/deploy-status`;
-      const fetchStatus = vi.mocked(harness.deps.deploy.fetch);
-      fetchStatus.mockImplementation(async (input, init) => {
-        if (input !== statusUrl || (init?.method && init.method !== "GET")) {
-          throw new Error(`Unexpected status request: ${String(input)}`);
-        }
-        return Response.json({
-          status: "complete",
-          errorKind: null,
-          deployRunUrl: "https://github.com/acme/widgets/actions/runs/42",
-          startedAt: 1700000000000,
-          finishedAt: 1700000060000,
-          attempt: selected.state.deployAttempt,
-          repairing: false,
-          handoff: { state: "idle" },
-          resources: [{ id: "resource-1", deployStatus: "success" }],
-          active: false
-        });
-      });
+      const invocation = registerDeploymentStatus(harness, selected.state);
+      registerDeploymentStatus(harness, newer.state, "other");
       const tool = harness.extension.tools.find(
         ({ name }) => name === "radius_deploy_status"
       );
       if (!tool) throw new Error("Deploy status tool was not registered");
 
-      const result = await tool.handler({ attemptId: "selected-attempt" });
+      const result = await tool.handler({
+        observationId: invocation.observationId
+      });
       if (typeof result !== "string") {
         throw new Error("Deploy status tool did not return JSON text");
       }
 
       expect(JSON.parse(result)).toEqual({
-        status: "complete",
+        observationId: invocation.observationId,
+        status: "success",
         errorKind: null,
         deployRunUrl: "https://github.com/acme/widgets/actions/runs/42",
         startedAt: 1700000000000,
         finishedAt: 1700000060000
       });
-      expect(fetchStatus).toHaveBeenCalledExactlyOnceWith(statusUrl);
       expect(harness.routedOpens).toEqual([]);
       expect(harness.getOrCreateServer).not.toHaveBeenCalled();
     } finally {
@@ -369,9 +714,15 @@ describe("P0-A Radius runtime registration contract", () => {
     expect(unrelatedResult).toBeUndefined();
     expect(unrelated.session.send).not.toHaveBeenCalled();
     expect(unrelated.session.rpc.canvas.open).not.toHaveBeenCalled();
-    expect(unrelated.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+    expect(unrelated.deps.graphSources.read).not.toHaveBeenCalled();
     expect(unrelated.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
     expect(enabledResult?.additionalContext).toContain("radius-panel");
+    expect(enabledResult?.additionalContext).toContain(
+      "use the radius-report-issue skill"
+    );
+    expect(enabledResult?.additionalContext).toContain(
+      "require separate explicit permission before submitting"
+    );
     expect(
       enabled.deps.workspace.hasRadiusApplicationModel
     ).toHaveBeenCalledExactlyOnceWith("/worktrees/radius-app");
@@ -689,6 +1040,45 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
+  it("fences an old fallback Git lookup across registered close and reopen", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" }
+    });
+    let started = () => {};
+    let finish = () => {};
+    const lookupStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const lookup = new Promise<{ stdout: string; stderr: string }>(
+      (resolve) => {
+        finish = () =>
+          resolve({ stdout: "git@github.com:acme/old.git", stderr: "" });
+      }
+    );
+    vi.mocked(harness.deps.process.execFile).mockImplementationOnce(() => {
+      started();
+      return lookup;
+    });
+    const pending = harness.host.open("radius-panel", { page: "graph" });
+    try {
+      await lookupStarted;
+      await harness.host.close("radius-panel");
+      await harness.host.open("radius-panel", {
+        page: "planned",
+        repo: "acme/new",
+        branch: "topic"
+      });
+    } finally {
+      finish();
+      await pending;
+    }
+    expect(harness.servers.get("radius-panel")?.state).toMatchObject({
+      contextRepo: "acme/new",
+      contextBranch: "topic",
+      activeGraphView: "planned"
+    });
+  });
+
   it("uses the worktree branch when omitted and explicit base/head for graph diff", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
@@ -713,15 +1103,19 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       headBranch: "feature/runtime-tests"
     });
 
-    expect(harness.deps.core.fetchBicepFromRepo).toHaveBeenCalledWith(
-      harness.deps.github,
-      "acme/widgets",
-      "main"
+    expect(harness.deps.graphSources.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: "acme/widgets",
+        ref: "main",
+        workspace: expect.objectContaining({ authorized: false })
+      })
     );
-    expect(harness.deps.workspace.fetchWorkspaceBicep).toHaveBeenCalledWith(
-      expect.any(Object),
-      "acme/widgets",
-      "feature/runtime-tests"
+    expect(harness.deps.graphSources.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: "acme/widgets",
+        ref: "feature/runtime-tests",
+        workspace: expect.objectContaining({ authorized: true })
+      })
     );
     expect(harness.servers.get("radius-panel")?.state).toMatchObject({
       diffTargetRepo: "acme/widgets",
@@ -895,7 +1289,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       .map((call) => JSON.stringify(call[0]))
       .join("\n");
     expect(sent).toContain("source has changed since");
-    expect(sent).toContain("radius_generate_app");
+    expect(sent).toContain(SKILL_BASE);
+    expect(sent).not.toContain("radius_generate_app");
 
     // The skill regenerates and rewrites the origin record against the branch's
     // current commit, so the worktree now reports no source change beyond the
@@ -1162,6 +1557,46 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
   });
 });
 
+it("routes registered publication tools without a Canvas panel", async () => {
+  const harness = await createRuntimeSdkHarness();
+  const tools = harness.extension.tools;
+  const compile = tools.find(
+    (tool) => tool.name === "radius_publish_custom_type_extension"
+  );
+  const publish = tools.find((tool) => tool.name === "radius_publish_recipe");
+  if (!compile || !publish) throw new Error("Publication tools not registered");
+  try {
+    await expect(
+      compile.handler({ stagingDir: ".radius/.staging-fixture" })
+    ).resolves.toContain("custom-types.tgz");
+    expect(harness.deps.rad.runRadBicepPublishExtension).toHaveBeenCalledOnce();
+    expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
+
+    await expect(
+      publish.handler({
+        file: ".radius/recipe.bicep",
+        target: "br:ghcr.io/other/repo/recipe:v1"
+      })
+    ).resolves.toContain("must publish under the repository being modeled");
+    expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
+
+    await expect(
+      publish.handler({
+        file: ".radius/recipe.bicep",
+        target: "br:ghcr.io/acme/widgets/recipe:v1"
+      })
+    ).resolves.toContain("br:ghcr.io/acme/widgets/recipe:v1");
+    expect(harness.deps.rad.runRadBicepPublish).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        env: { DOCKER_CONFIG: "/tmp/fake-docker-config" }
+      })
+    );
+    expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+  } finally {
+    await harness.extension.shutdown("test");
+  }
+});
+
 // Exception 2.1: a repository with no Dockerfile has no containerized workload
 // to model, so both routes into modeling — the tool the agent calls and the host
 // handoff the graph routes fire — have to refuse through the real composition,
@@ -1233,7 +1668,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     // the tool runs, because handing the skill over starts a run the handoff is
     // then right to defer to.
     const handedOff = await handOff(harness);
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
+    expect(handedOff).not.toContain("radius_generate_app");
     expect(handedOff).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
 
     const generated = String(await generateApp(harness));
@@ -1284,7 +1720,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     });
 
     // The graph render that finds no model comes first and legitimately asks.
-    expect(await handOff(harness)).toContain("radius_generate_app");
+    expect(await handOff(harness)).toContain(SKILL_BASE);
 
     // Then the agent acts on it, which is the run the next render must defer to
     // rather than ask for a second time. Panel state carries no dedupe key
@@ -1315,10 +1751,51 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       page: "graph"
     });
 
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
 
     await harness.extension.shutdown("test");
   });
+
+  // The agent does not call radius_generate_app for a run the Canvas
+  // requests, so the assembled runtime must record that run when it delivers
+  // the handoff. Otherwise an overlapping view, such as a diff that includes
+  // the same branch, asks for the same model again before the run stages.
+  it.each([
+    {
+      name: "a diff that includes the requested branch waits for its run",
+      second: {
+        repo: "acme/widgets",
+        branches: ["main", "feat"],
+        page: "graph-diff"
+      },
+      asksAgain: false
+    },
+    {
+      name: "a view of an unrelated branch still asks",
+      second: { repo: "acme/widgets", branches: ["feat"], page: "graph" },
+      asksAgain: true
+    }
+  ])(
+    "after the Canvas requests a model, $name",
+    async ({ second, asksAgain }) => {
+      const harness = await createRuntimeSdkHarness({
+        workspaceTreeByRepoBranch: {
+          "acme/widgets@main": ["src/index.ts", "Dockerfile"]
+        },
+        remoteTreeByRepoBranch: {
+          "acme/widgets@feat": ["src/index.ts", "Dockerfile"]
+        }
+      });
+
+      expect(await handOff(harness)).toContain(SKILL_BASE);
+      const again = await handOff(harness, second);
+
+      if (asksAgain) expect(again).toContain(SKILL_BASE);
+      else expect(again).toBe("");
+
+      await harness.extension.shutdown("test");
+    }
+  );
 
   it("does not re-ask once the user answers with a directory inside the worktree", async () => {
     const harness = await createRuntimeSdkHarness({
@@ -1381,7 +1858,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 
     const handedOff = await handOff(harness);
 
-    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).toContain(SKILL_BASE);
     expect(harness.deps.github.treePaths).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
@@ -1395,7 +1872,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 
     // Asked before the tool runs: handing the skill over starts a run the
     // handoff is then right to defer to.
-    expect(await handOff(harness)).toContain("radius_generate_app");
+    expect(await handOff(harness)).toContain(SKILL_BASE);
 
     const generated = await generateApp(harness);
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
@@ -1655,6 +2132,39 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
         await handoffs[0];
 
         expect(polled).toBe(true);
+        expect(harness.session.send).toHaveBeenCalledTimes(1);
+        const report = harness.extension.tools.find(
+          (candidate) => candidate.name === "radius_report_modeling_failure"
+        );
+        if (!report) throw new Error("Missing failure reporting tool");
+        const typedRead = vi.mocked(harness.deps.graphSources.read);
+        const readModel = typedRead.getMockImplementation();
+        if (!readModel) throw new Error("Missing typed graph reader");
+        typedRead.mockImplementationOnce(async (request) => ({
+          status: "present",
+          content: " \n",
+          source: (await readModel(request)).source
+        }));
+        expect(
+          await report.handler({
+            instanceId: "radius-panel",
+            repo: "acme/widgets",
+            branch: "main",
+            attemptToken:
+              entry.state.appModelAttemptTokens?.["acme/widgets::main"],
+            error: "Permanent fixture authoring failure"
+          })
+        ).toEqual({ recorded: true });
+        expect(entry.state.appBicepHandoffKeys).toEqual({});
+        const failed = await workflows[workflow]({
+          instanceId: "radius-panel",
+          body
+        });
+        expect(failed.payload).toMatchObject({
+          appModelAuthoringFailed: true,
+          modelingFailed: true
+        });
+        expect(failed.payload.needsAppBicep).toBeUndefined();
         expect(harness.session.send).toHaveBeenCalledTimes(1);
       } finally {
         await harness.extension.shutdown("test");

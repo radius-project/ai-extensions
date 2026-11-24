@@ -4,7 +4,7 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createDeploymentRepository } from "@radius-project/adapter-shared";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -14,11 +14,33 @@ import type {
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
 import { redactCredentials } from "./credential-redaction.js";
+import { CommandFailure } from "./command-failure.js";
 import {
   isGitHubAppBotLogin,
   isGitHubAppUserEndpointFailure
 } from "./github-app-installation.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
+
+const repository = createDeploymentRepository({
+  execute: cliExec,
+  redactDiagnostic: redactGhCredentials
+});
+export const ghApiGetContent = repository.readContent;
+export const ghApiJson = repository.readJson;
+export const ghApiGetContentResult = repository.readContentResult;
+export const getDefaultBranch = repository.defaultBranch;
+export const getBranchHeadSha = repository.branchHead;
+export const commitFileToRepo = repository.commitFile;
+export function fetchFileFromRepo(repo: string, path: string, branch = "main") {
+  return repository.readFile(repo, path, branch);
+}
+export function fetchFileFromRepoResult(
+  repo: string,
+  path: string,
+  branch = "main"
+) {
+  return repository.readFileResult(repo, path, branch);
+}
 
 export interface GhAccount {
   login: string;
@@ -101,6 +123,10 @@ export interface CommandOptions extends CliOptions {
   stdin?: string;
 }
 
+export interface SelectedGhCommandOptions extends CommandOptions {
+  beforeExecute?(): void;
+}
+
 export interface SelectedGhCommandResult {
   code: string | number;
   stdout: string;
@@ -117,12 +143,12 @@ export interface SelectedGhExecutor {
   readonly scopes: readonly string[];
   run(
     args: string[],
-    options?: CommandOptions
+    options?: SelectedGhCommandOptions
   ): Promise<SelectedGhCommandResult>;
   runOrThrow(
     args: string[],
     message: string,
-    options?: CommandOptions
+    options?: SelectedGhCommandOptions
   ): Promise<SelectedGhCommandResult>;
   verifyIdentity(): Promise<void>;
   packageCredentials(): GhPackageCredentials;
@@ -183,15 +209,23 @@ export function supportsWorkflowDispatchRunDetails(
 
 // This module is the gh process boundary, so every diagnostic leaving it must
 // redact both recognizable GitHub credentials and opaque injected tokens.
+export function processCredentials(
+  env: NodeJS.ProcessEnv = process.env
+): (string | undefined)[] {
+  return [
+    env.GH_TOKEN,
+    env.GITHUB_TOKEN,
+    env.GH_PACKAGES_TOKEN,
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    env.AZURE_CLIENT_SECRET
+  ];
+}
+
 export function redactGhCredentials(
   value: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  return redactCredentials(value, [
-    env.GH_TOKEN,
-    env.GITHUB_TOKEN,
-    env.GH_PACKAGES_TOKEN
-  ]);
+  return redactCredentials(value, processCredentials(env));
 }
 
 function errorMessage(error: unknown): string {
@@ -944,16 +978,18 @@ export async function createSelectedGhExecutor(
   };
   const run = async (
     args: string[],
-    options: CommandOptions = {}
+    options: SelectedGhCommandOptions = {}
   ): Promise<SelectedGhCommandResult> => {
     await verifyIdentity();
-    return await runRaw(args, options);
+    const { beforeExecute, ...commandOptions } = options;
+    beforeExecute?.();
+    return await runRaw(args, commandOptions);
   };
 
   const runOrThrow = async (
     args: string[],
     message: string,
-    options: CommandOptions = {}
+    options: SelectedGhCommandOptions = {}
   ): Promise<SelectedGhCommandResult> => {
     const result = await run(args, options);
     if (result.code !== 0) {
@@ -994,9 +1030,19 @@ export async function createSelectedGhExecutor(
 
 export async function selectedGhApiJson(
   executor: SelectedGhExecutor,
-  apiPath: string
+  apiPath: string,
+  assertActive?: () => void
 ): Promise<GhApiResult> {
-  const result = await executor.run(["api", apiPath], { timeout: 15000 });
+  assertActive?.();
+  let result: SelectedGhCommandResult;
+  try {
+    result = await executor.run(["api", apiPath], {
+      timeout: 15000,
+      ...(assertActive ? { beforeExecute: assertActive } : {})
+    });
+  } finally {
+    assertActive?.();
+  }
   let json: unknown = null;
   if (result.stdout.trim()) {
     try {
@@ -1383,7 +1429,15 @@ export function runCommand(
   const { stdin, ...execOpts } = opts;
   return new Promise((resolve, reject) => {
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
-      if (err) reject(new Error(redactGhCredentials(stderr || err.message)));
+      if (err)
+        reject(
+          new CommandFailure(
+            err,
+            stderr,
+            execOpts.timeout,
+            processCredentials()
+          )
+        );
       else resolve(stdout.trim());
     });
     if (stdin !== undefined) child.stdin?.end(stdin);
@@ -1405,30 +1459,6 @@ export function runGhKeyringCommand(
   delete env.GITHUB_TOKEN;
   delete env.GH_HOST;
   return runCommand("gh", args, { ...opts, env });
-}
-
-export function ghApiGetContent(
-  apiPath: string,
-  timeout = 15000
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      ["api", apiPath, "--jq", ".content"],
-      { timeout },
-      (err, stdout) => {
-        if (err || !stdout || !stdout.trim()) {
-          resolve(null);
-          return;
-        }
-        try {
-          resolve(Buffer.from(stdout.trim(), "base64").toString("utf8"));
-        } catch (e) {
-          resolve(null);
-        }
-      }
-    );
-  });
 }
 
 // Fetch a file's raw bytes from the GitHub contents API. Resolves a Buffer on
@@ -1493,78 +1523,6 @@ export function ghApiListNames(
   });
 }
 
-export function fetchFileFromRepo(
-  repo: string,
-  path: string,
-  branch = "main"
-): Promise<string | null> {
-  return ghApiGetContent(`/repos/${repo}/contents/${path}?ref=${branch}`);
-}
-
-/**
- * Like ghApiGetContent, but surfaces the underlying failure instead of
- * collapsing everything to null. Resolves `{ content, error }`: on success
- * `content` is the decoded file body and `error` is null; on failure `content`
- * is null and `error` is a human-readable cause (gh stderr, a decode error, or
- * an empty-response note). Never rejects.
- */
-export function ghApiGetContentResult(
-  apiPath: string,
-  timeout = 15000
-): Promise<ContentResult> {
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      ["api", apiPath, "--jq", ".content"],
-      { timeout },
-      (err, stdout, stderr) => {
-        if (err) {
-          const detail = redactGhCredentials(
-            (stderr && stderr.trim()) || err.message || String(err)
-          );
-          const statusMatch = detail.match(/\bHTTP\s+(\d{3})\b/i);
-          resolve({
-            content: null,
-            error: detail.trim(),
-            status: statusMatch ? Number(statusMatch[1]) : null
-          });
-          return;
-        }
-        if (!stdout || !stdout.trim()) {
-          resolve({
-            content: null,
-            error: "empty response from gh api",
-            status: 200
-          });
-          return;
-        }
-        try {
-          resolve({
-            content: Buffer.from(stdout.trim(), "base64").toString("utf8"),
-            error: null,
-            status: 200
-          });
-        } catch (e) {
-          resolve({
-            content: null,
-            error: `failed to decode response: ${errorMessage(e)}`,
-            status: 200
-          });
-        }
-      }
-    );
-  });
-}
-
-/** Repo-file variant of ghApiGetContentResult. */
-export function fetchFileFromRepoResult(
-  repo: string,
-  path: string,
-  branch = "main"
-): Promise<ContentResult> {
-  return ghApiGetContentResult(`/repos/${repo}/contents/${path}?ref=${branch}`);
-}
-
 // Repo-relative paths of the FILES on a branch.
 //
 // Resolves an empty array for every failure, and callers must therefore treat an
@@ -1619,123 +1577,6 @@ export const github = {
   treePaths: (repo: string, branch = "main") => fetchRepoTree(repo, branch),
   getDefaultBranch: (repo: string) => getDefaultBranch(repo)
 };
-
-// Look up a file's blob SHA on a branch; resolves "" when the file is absent.
-function getRepoFileSha(
-  repo: string,
-  path: string,
-  branch: string,
-  timeout = 10000
-): Promise<string> {
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      ["api", `/repos/${repo}/contents/${path}?ref=${branch}`, "--jq", ".sha"],
-      { timeout },
-      (err, stdout) => {
-        resolve(err ? "" : (stdout || "").trim());
-      }
-    );
-  });
-}
-
-function gitBlobSha(content: string): string {
-  const bytes = Buffer.from(content, "utf8");
-  return createHash("sha1")
-    .update(`blob ${bytes.length}\0`)
-    .update(bytes)
-    .digest("hex");
-}
-
-// Create or update a single UTF-8 text file on a repo branch via the GitHub
-// contents API. Identical content is a no-op; drift reuses the existing blob SHA
-// so the write is an update rather than a rejected create. The commit body is
-// fed over stdin (never argv) so the base64 payload cannot collide with parsing.
-export async function commitFileToRepo(
-  repo: string,
-  path: string,
-  content: string,
-  branch: string,
-  message: string,
-  timeout = 30000
-): Promise<boolean> {
-  const sha = await getRepoFileSha(repo, path, branch);
-  if (sha && sha === gitBlobSha(content)) return false;
-  const body = JSON.stringify({
-    message,
-    content: Buffer.from(content, "utf8").toString("base64"),
-    branch,
-    ...(sha ? { sha } : {})
-  });
-  return new Promise((resolve, reject) => {
-    const child = cliExec(
-      "gh",
-      [
-        "api",
-        "--method",
-        "PUT",
-        `/repos/${repo}/contents/${path}`,
-        "--input",
-        "-"
-      ],
-      { timeout },
-      (err, _stdout, stderr) => {
-        if (err)
-          reject(
-            new Error(
-              redactGhCredentials((stderr && stderr.trim()) || err.message)
-            )
-          );
-        else resolve(true);
-      }
-    );
-    try {
-      child.stdin?.end(body);
-    } catch {
-      /* best-effort */
-    }
-  });
-}
-
-// Resolve a repo's default branch name (e.g. "main"). Resolves '' on failure.
-export function getDefaultBranch(
-  repo: string,
-  timeout = 15000
-): Promise<string> {
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      ["api", `/repos/${repo}`, "--jq", ".default_branch"],
-      { timeout },
-      (err, stdout) => {
-        resolve(err ? "" : (stdout || "").trim());
-      }
-    );
-  });
-}
-
-// Get the head commit SHA of a branch. Resolves '' when the branch is absent.
-export function getBranchHeadSha(
-  repo: string,
-  branch: string,
-  timeout = 15000
-): Promise<string> {
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      [
-        "api",
-        `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
-        "--jq",
-        ".object.sha"
-      ],
-      { timeout },
-      (err, stdout) => {
-        resolve(err ? "" : (stdout || "").trim());
-      }
-    );
-  });
-}
 
 // Create a new branch ref (refs/heads/<newBranch>) pointing at fromSha.
 // Resolves { ok, stderr }; never rejects.
@@ -1816,61 +1657,6 @@ export function createPullRequestApi(
     );
     try {
       child.stdin?.end(body);
-    } catch {
-      /* best-effort */
-    }
-  });
-}
-
-// GET a GitHub JSON resource, surfacing the HTTP status so callers can
-// distinguish "not found" (404) from access/other failures. `gh api` exits
-// non-zero on HTTP errors and prints e.g. "gh: Not Found (HTTP 404)" to stderr;
-// we parse that status out. Optional `headers` are passed as `-H k: v` (used to
-// pin X-GitHub-Api-Version). Resolves `{ ok, status, json, stderr }`; never
-// rejects. stdin is closed so gh can never block on an interactive prompt.
-export function ghApiJson(
-  apiPath: string,
-  {
-    headers = {},
-    timeout = 15000
-  }: { headers?: Record<string, string>; timeout?: number } = {}
-): Promise<GhApiResult> {
-  const args = ["api", apiPath];
-  for (const [k, v] of Object.entries(headers)) args.push("-H", `${k}: ${v}`);
-  return new Promise((resolve) => {
-    const child = cliExec("gh", args, { timeout }, (err, stdout, stderr) => {
-      if (!err) {
-        try {
-          resolve({
-            ok: true,
-            status: 200,
-            json: JSON.parse(stdout || "null"),
-            stderr: ""
-          });
-        } catch (e) {
-          resolve({
-            ok: false,
-            status: 200,
-            json: null,
-            stderr: `failed to parse response: ${errorMessage(e)}`
-          });
-        }
-        return;
-      }
-      const detail = redactGhCredentials(
-        ((stderr && stderr.trim()) || err.message || "").trim()
-      );
-      const m =
-        detail.match(/\(HTTP (\d{3})\)/) || detail.match(/\bHTTP (\d{3})\b/);
-      resolve({
-        ok: false,
-        status: m ? Number(m[1]) : null,
-        json: null,
-        stderr: detail
-      });
-    });
-    try {
-      child.stdin?.end();
     } catch {
       /* best-effort */
     }

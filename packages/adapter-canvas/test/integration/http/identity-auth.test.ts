@@ -28,6 +28,7 @@ function start(): Harness {
   const harness: Harness = {
     calls: [],
     commands: {
+      "aws --version": "aws-cli/2.15.3 Python/3.11",
       [`az account set --subscription ${SUBSCRIPTION}`]: "",
       "az account show -o json": JSON.stringify({
         tenantId: TENANT_A,
@@ -38,7 +39,17 @@ function start(): Harness {
       "aws sts get-caller-identity --output json": JSON.stringify({
         Account: "000011112222",
         Arn: "arn:aws:iam::000011112222:user/fixture-user"
-      })
+      }),
+      "aws sts get-caller-identity --output json --region eu-west-1":
+        JSON.stringify({
+          Account: "000011112222",
+          Arn: "arn:aws:iam::000011112222:user/fixture-user"
+        }),
+      "aws sts get-caller-identity --output json --region us-east-2":
+        JSON.stringify({
+          Account: "000011112222",
+          Arn: "arn:aws:iam::000011112222:user/fixture-user"
+        })
     },
     promptOutcome: { status: 200 }
   };
@@ -80,6 +91,16 @@ function start(): Harness {
         }
         if (scripted instanceof Error) return Promise.reject(scripted);
         return Promise.resolve(scripted);
+      },
+      runAws: async (args) => {
+        const line = ["aws", ...args].join(" ");
+        harness.calls.push(`run(${line})`);
+        const scripted = harness.commands[line];
+        if (scripted === undefined)
+          throw new Error(`unscripted command vector: ${line}`);
+        return scripted instanceof Error ?
+            { code: 1, stdout: "", stderr: scripted.message }
+          : { code: 0, stdout: scripted, stderr: "" };
       },
       errorMessage: (error) =>
         error instanceof Error ? error.message : String(error)
@@ -216,14 +237,14 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     }
   });
 
-  it("verifies an aws session and hides the CLI error when there is none", async () => {
+  it("verifies an AWS session and offers sign-in for missing credentials", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
 
     const verified = await post(
       entry.baseUrl,
       "/api/verify-aws-login",
-      '{"region":"eu-west-1"}'
+      '{"accountId":"000011112222","region":"eu-west-1"}'
     );
     expect(verified.status).toBe(200);
     expect(await verified.json()).toEqual({
@@ -235,12 +256,66 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     });
 
     harness.commands["aws sts get-caller-identity --output json"] = new Error(
-      "spawn aws ENOENT"
+      "Unable to locate credentials"
     );
-    const absent = await post(entry.baseUrl, "/api/verify-aws-login", "{}");
+    const absent = await post(
+      entry.baseUrl,
+      "/api/verify-aws-login",
+      '{"accountId":"000011112222"}'
+    );
     expect(absent.status).toBe(200);
     const body = await absent.text();
     expect(body).toContain("No active AWS CLI session.");
     expect(body).not.toContain("ENOENT");
   });
+
+  it.each([
+    ["aws-cli/2.15.2 Python/3.11", "aws-cli-unsupported"],
+    [new Error("spawn aws ENOENT"), "aws-cli-unsupported"]
+  ])("rejects an unusable AWS CLI over HTTP: %s", async (output, code) => {
+    const harness = start();
+    harness.commands["aws --version"] = output;
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await post(
+      entry.baseUrl,
+      "/api/verify-aws-login",
+      '{"accountId":"000011112222","region":"us-east-2"}'
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toMatchObject({
+      code,
+      error: expect.stringContaining("2.15.3")
+    });
+    expect(harness.calls).toEqual(["run(aws --version)"]);
+  });
+
+  it("returns both accounts for a mismatch without changing identity", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await post(
+      entry.baseUrl,
+      "/api/verify-aws-login",
+      '{"accountId":"999988887777","region":"us-east-2"}'
+    );
+    expect(await response.json()).toMatchObject({
+      code: "aws-account-mismatch",
+      accountId: "999988887777",
+      sessionAccountId: "000011112222"
+    });
+  });
+
+  it.each(["not json", "null", '{"accountId":123}'])(
+    "rejects malformed AWS requests over HTTP before executing commands",
+    async (body) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const response = await post(entry.baseUrl, "/api/verify-aws-login", body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        code: "aws-input-invalid"
+      });
+      expect(harness.calls).toEqual([]);
+    }
+  );
 });

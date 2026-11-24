@@ -15,11 +15,19 @@ export async function fetchBicepFromRepo(
   repo: string,
   branch = "main"
 ): Promise<string | null> {
-  const ghApiGetContent = (p: string) => gh.getContent(p);
-  // Try .radius/app.bicep first (standard Radius location), then app.bicep at root.
-  const radiusPath = await ghApiGetContent(
-    `/repos/${repo}/contents/.radius/app.bicep?ref=${branch}`
-  );
-  if (radiusPath) return radiusPath;
-  return ghApiGetContent(`/repos/${repo}/contents/app.bicep?ref=${branch}`);
+  return (await fetchBicepSelectionFromRepo(gh, repo, branch))?.content ?? null;
+}
+
+export async function fetchBicepSelectionFromRepo(
+  gh: GitHub,
+  repo: string,
+  branch = "main"
+): Promise<{ content: string; bicepPath: string } | null> {
+  for (const bicepPath of [".radius/app.bicep", "app.bicep"]) {
+    const content = await gh.getContent(
+      `/repos/${repo}/contents/${bicepPath}?ref=${branch}`
+    );
+    if (content) return { content, bicepPath };
+  }
+  return null;
 }

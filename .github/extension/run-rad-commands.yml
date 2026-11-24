@@ -9,6 +9,7 @@
 # steps. This is the run-rad-commands action in the two-action Repo Radius model
 # (the other being verify-cloud-auth).
 name: Radius - Run rad Commands
+run-name: Radius - Deploy ${{ inputs.environment }} [radius:v1 app=${{ inputs.application || 'unknown' }}] ${{ inputs.correlation_id }}
 
 on:
   workflow_dispatch:
@@ -21,6 +22,21 @@ on:
         description: 'Container image passed only when the application template declares the image parameter'
         required: false
         default: ''
+      app_file:
+        description: 'Repository-relative application model path; empty uses the generated default'
+        type: string
+        required: false
+        default: ''
+      correlation_id:
+        description: 'Opaque identifier used to match this deployment to its workflow run'
+        type: string
+        required: false
+        default: ''
+      application:
+        description: 'Verified literal application, or unknown for dynamic models and arbitrary commands'
+        type: string
+        required: false
+        default: unknown
       rad_commands:
         # The Repo Radius dispatch contract. A single rad CLI command string, or a
         # JSON-encoded array of command strings run in order, with the `rad` prefix
@@ -79,6 +95,8 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       image: ${{ inputs.image }}
       rad_commands: ${{ inputs.rad_commands }}
+      app_file: ${{ inputs.app_file }}
+      application: ${{ inputs.application || 'unknown' }}
     secrets: inherit
 
   aws:
@@ -90,4 +108,6 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       image: ${{ inputs.image }}
       rad_commands: ${{ inputs.rad_commands }}
+      app_file: ${{ inputs.app_file }}
+      application: ${{ inputs.application || 'unknown' }}
     secrets: inherit

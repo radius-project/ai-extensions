@@ -1,4 +1,8 @@
-import type { AzureRecoveryPort } from "@radius-project/core";
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
+  type AzureRecoveryPort
+} from "@radius-project/core";
 import {
   providerMutationRecord,
   unresolvedProviderMutations
@@ -10,14 +14,26 @@ import {
 
 export function createAzureRecoveryPort(
   operation: object & { operationId: string },
-  persist: () => Promise<void>
+  persist: () => Promise<void>,
+  isStopped: () => boolean
 ): AzureRecoveryPort {
+  const assertActive = () => assertSetupExecutionActive(isStopped);
   return {
+    assertActive,
     find: (kind, target) => providerMutationRecord(operation, kind, target),
     willWrite: (kind, target) =>
       providerMutationWillWrite(operation, kind, target),
     unresolved: () => unresolvedProviderMutations(operation),
     execute: (input) =>
-      executeRecoverableMutation({ ...input, operation, persist })
+      executeRecoverableMutation({
+        ...input,
+        operation,
+        persist,
+        rethrowReconciliationError: isSetupExecutionInterrupted,
+        assertActive: () => {
+          assertActive();
+          input.assertActive?.();
+        }
+      })
   };
 }

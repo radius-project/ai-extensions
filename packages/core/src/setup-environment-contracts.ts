@@ -18,6 +18,9 @@ export interface SetupEnvironmentInput {
   envName: string;
   provider: string;
   data: SetupProviderConfigurationInput & { profileName?: string };
+  // The setup attempt of the latest Retry setup. Verification then uses its own
+  // marker and dispatch journal key, so the retry starts a new run.
+  setupRetryAttempt?: number;
 }
 
 export type SetupPullRequestNextStep =
@@ -159,6 +162,7 @@ export interface SetupVerificationDispatchInput {
   operationMarker: string;
   allowRegistrationRetry: boolean;
   ports: {
+    isStopped?(): boolean;
     runGh(args: string[]): Promise<SetupWorkflowCommandResult>;
     sendDispatch(): Promise<SetupWorkflowCommandResult>;
     persist(): Promise<void>;
@@ -191,6 +195,8 @@ export interface SetupVerificationPlan {
 
 export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
   recovery: SetupWorkflowRecoveryPort;
+  // Runtime shutdown is immediate; the user's Stop retains its batch boundaries.
+  isExecutionStopped(): boolean;
   stopRequested(): boolean;
   stopBoundary(boundary: string): Promise<boolean>;
   checkpoint(boundary: string): Promise<boolean>;
@@ -236,6 +242,7 @@ export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
     targetRepository: string;
     registry: string;
     credentials: symbol | undefined;
+    assertActive(): void;
   }): Promise<{ visibility: string | undefined }>;
   workflowFiles(input: {
     targetRepo: string;
@@ -304,6 +311,7 @@ export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
     branch: string
   ): Promise<string | null | undefined>;
   discoverAutomaticVerificationRun(input: {
+    isStopped?(): boolean;
     identity: {
       repo: string;
       workflow: string;

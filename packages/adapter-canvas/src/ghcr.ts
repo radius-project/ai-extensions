@@ -1,6 +1,7 @@
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
@@ -35,6 +36,7 @@ export interface BootstrapGhcrOptions {
   targetRepository: string;
   registry: string;
   credentials?: GhCredentials;
+  assertActive?(): void;
   fetchImpl?: FetchImplementation;
   registryOrigin?: string;
   apiBaseUrl?: string;
@@ -204,8 +206,7 @@ export async function deleteGHCRStatePackage({
   runKeyringCommand,
   fetchImpl = globalThis.fetch,
   apiBaseUrl = "https://api.github.com",
-  sleep = (milliseconds) =>
-    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  sleep = delay,
   confirmationAttempts = 4,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   deletionTimeoutMs = DEFAULT_DELETION_TIMEOUT_MS,

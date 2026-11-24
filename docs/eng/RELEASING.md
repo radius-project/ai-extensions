@@ -68,7 +68,7 @@ Choose the plugin or public libraries affected by the change, then choose `patch
 
 For changes in internal adapters, name the plugin that ships the behavior rather than the ignored adapter package.
 
-The non-blocking Changesets workflow creates or updates a pull request comment showing whether a release changeset is present. Documentation, tests, and build-only changes may intentionally omit one or use `pnpm changeset --empty`; the release pull request itself is exempt because `changeset version` has already consumed its changesets. Labelling a pull request `pr:no-changeset` records the omission as deliberate and swaps the reminder for a note that it was waived - nothing is blocked either way, so the label is documentation for reviewers rather than an override.
+The non-blocking Changesets workflow creates or updates a pull request comment showing whether a release changeset is present. Changes with no notable user-facing release impact may intentionally omit one; do not add an empty Changeset. Use [monorepo-changeset](../../.github/skills/monorepo-changeset/SKILL.md) to assess documentation, tests, and build changes rather than assuming they cannot affect shipped behavior. The release pull request itself is exempt because `changeset version` has already consumed its changesets. Labelling a pull request `pr:no-changeset` records the omission as deliberate and swaps the reminder for a note that it was waived - nothing is blocked either way, so the label is documentation for reviewers rather than an override.
 
 ## Releasing npm graph libraries
 

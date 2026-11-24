@@ -25,28 +25,49 @@ describe("runtime environment account bindings", () => {
     const executor = successfulSelectedGhExecutor();
     expect(first.coordinator).toBe(second.coordinator);
     expect(first.getExecutor("operation")).toBeUndefined();
-    first.registerExecutor("operation", executor);
+    const releaseFirst = first.registerExecutor("operation", executor);
     expect(first.getExecutor("operation")).toBe(executor);
     expect(second.getExecutor("operation")).toBeUndefined();
-    second.unregisterExecutor("operation");
+    const releaseSecond = second.registerExecutor("operation", executor);
+    releaseSecond();
     expect(first.getExecutor("operation")).toBe(executor);
-    first.unregisterExecutor("operation");
-    first.unregisterExecutor("operation");
+    releaseFirst();
+    releaseFirst();
     expect(first.getExecutor("operation")).toBeUndefined();
   });
 
-  it("retains replacement and operation-ID cleanup without changing another operation", () => {
-    const context = createEnvironmentAccountContext("runtime", coordinator());
-    const initial = successfulSelectedGhExecutor({ login: "initial" });
-    const replacement = successfulSelectedGhExecutor({ login: "replacement" });
-    context.registerExecutor("operation", initial);
-    context.registerExecutor("other", initial);
-    context.registerExecutor("operation", replacement);
-    expect(context.getExecutor("operation")).toBe(replacement);
-    context.unregisterExecutor("operation");
-    expect(context.getExecutor("operation")).toBeUndefined();
-    expect(context.getExecutor("other")).toBe(initial);
-  });
+  it.each([false, true])(
+    "ignores an old registration release when its executor is reused=%s",
+    (reuseExecutor) => {
+      const context = createEnvironmentAccountContext("runtime", coordinator());
+      const initial = successfulSelectedGhExecutor({ login: "saved-account" });
+      const replacement =
+        reuseExecutor ? initial : (
+          successfulSelectedGhExecutor({ login: "saved-account" })
+        );
+      const releaseInitial = context.registerExecutor("operation", initial);
+      const releaseOther = context.registerExecutor("other", initial);
+      const releaseReplacement = context.registerExecutor(
+        "operation",
+        replacement
+      );
+      releaseInitial();
+      releaseInitial();
+      expect(context.getExecutor("operation")).toBe(replacement);
+      expect(context.getExecutor("other")).toBe(initial);
+      releaseOther();
+      expect(context.getExecutor("operation")).toBe(replacement);
+      releaseReplacement();
+      releaseReplacement();
+      expect(context.getExecutor("operation")).toBeUndefined();
+      expect(context.getExecutor("other")).toBeUndefined();
+      const releaseAgain = context.registerExecutor("operation", initial);
+      releaseReplacement();
+      expect(context.getExecutor("operation")).toBe(initial);
+      releaseAgain();
+      expect(context.getExecutor("operation")).toBeUndefined();
+    }
+  );
 
   it("propagates acquisition failure without inventing an executor binding", async () => {
     const context = createEnvironmentAccountContext("runtime", coordinator());

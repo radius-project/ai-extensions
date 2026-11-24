@@ -4,10 +4,14 @@
 // for the canvas routes.
 
 import {
+  assertTrustedGeneratedWorkflow as validateGeneratedWorkflow,
+  deployWorkflowFiles,
+  stripAwsDispatcherJob,
+  synchronizeWorkflowCandidates,
+  type WorkflowCandidate,
   getPlatform,
   generatePortalUrl as coreGeneratePortalUrl,
   generateVerifyWorkflow as coreGenerateVerifyWorkflow,
-  generateDeployWorkflow as coreGenerateDeployWorkflow,
   verifyTemplateFile,
   RADIUS_REF,
   RADIUS_WORKFLOW_REPO,
@@ -25,7 +29,11 @@ import {
   DELETE_AWS_FILE
 } from "@radius-project/core";
 import { VERIFY_OPERATION_INPUT } from "./verification-run-identity.js";
-import type { DeployWorkflowOptions } from "@radius-project/core";
+import {
+  createDeploymentTemplates,
+  createDeploymentRepository,
+  createDeploymentWorkflows
+} from "@radius-project/adapter-shared";
 
 import { parse as parseYaml } from "yaml";
 import {
@@ -34,8 +42,57 @@ import {
   getDefaultBranch,
   getBranchHeadSha,
   commitFileToRepo,
-  cliExec
+  cliExec,
+  redactGhCredentials
 } from "./gh.js";
+
+const assertTrustedGeneratedWorkflow = validateGeneratedWorkflow.bind(
+  undefined,
+  parseYaml
+);
+export { deployWorkflowFiles } from "@radius-project/core";
+export const generateDeployWorkflow = createDeploymentTemplates({
+  readRepositoryFile: fetchFileFromRepoResult,
+  now: () => Date.now()
+});
+export function ensureDeployWorkflowsOnBranch(
+  includeAws: boolean,
+  repo: string,
+  branch: string,
+  environment: string,
+  log: (message: string) => void,
+  onWorkflowWritten: (file: string) => void
+): Promise<void> {
+  const repository = createDeploymentRepository({
+    execute: cliExec,
+    redactDiagnostic: redactGhCredentials
+  });
+  return createDeploymentWorkflows(includeAws, {
+    ...repository,
+    commitFile: commitFileToRepo,
+    readRepositoryFile: fetchFileFromRepoResult,
+    now: () => Date.now(),
+    reportDiagnostic: (message) => console.error(message)
+  }).ensureOnBranch(repo, branch, environment, log, onWorkflowWritten);
+}
+
+export function verifyDeploymentWorkflowInputs(
+  includeAws: boolean,
+  repo: string,
+  branch: string
+): Promise<void> {
+  const repository = createDeploymentRepository({
+    execute: cliExec,
+    redactDiagnostic: redactGhCredentials
+  });
+  return createDeploymentWorkflows(includeAws, {
+    ...repository,
+    readFile: fetchFileFromRepo,
+    readRepositoryFile: fetchFileFromRepoResult,
+    now: () => Date.now(),
+    reportDiagnostic: (message) => console.error(message)
+  }).verifyAppFileInput(repo, branch);
+}
 
 // Removed from target repos so it cannot double-trigger beside the dispatcher.
 export const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
@@ -60,12 +117,6 @@ interface SyncWorkflowOptions extends ProviderWorkflowOptions {
   // (an unpushed working branch is never authored onto). Used by the
   // pre-dispatch sync so a workflow is always present on the branch it runs from.
   create?: boolean;
-}
-
-interface WorkflowCandidate {
-  content: string;
-  provider: string | null;
-  environment: string | null;
 }
 
 // A workflow file the sync tried to commit but couldn't (e.g. the branch is
@@ -105,210 +156,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-type GeneratedWorkflowArtifact = "verify" | "dispatcher" | "provider";
-
-const UNSAFE_AUTOMATIC_TRIGGERS = new Set([
-  "pull_request",
-  "pull_request_target",
-  "workflow_run",
-  "schedule"
-]);
-
-const VERIFY_SETUP_BRANCH_PATTERN = "radius/setup-**";
 const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
-
-function isMapping(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function own(mapping: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(mapping, key);
-}
-
-function containsAwsWorkflowReference(value: unknown): boolean {
-  return [DEPLOY_AWS_FILE, DELETE_AWS_FILE, DELETE_ENV_AWS_FILE].some(
-    (fileName) => containsWorkflowReference(value, fileName)
-  );
-}
-
-function containsWorkflowReference(value: unknown, fileName: string): boolean {
-  if (Array.isArray(value)) {
-    return value.some((child) => containsWorkflowReference(child, fileName));
-  }
-  if (!isMapping(value)) return false;
-  return Object.entries(value).some(
-    ([key, child]) =>
-      (key === "uses" && child === `./.github/workflows/${fileName}`) ||
-      containsWorkflowReference(child, fileName)
-  );
-}
-
-function assertTrustedGeneratedWorkflow(
-  workflow: string,
-  artifact: GeneratedWorkflowArtifact,
-  context: string,
-  expectedProviderWorkflows: readonly string[] = []
-): void {
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(workflow);
-  } catch (error) {
-    throw new Error(
-      `Generated ${context} is invalid YAML: ${errorMessage(error)}`,
-      { cause: error }
-    );
-  }
-
-  const fail = (reason: string): never => {
-    throw new Error(`Generated ${context} failed trust validation: ${reason}`);
-  };
-  const requireMapping = (
-    value: unknown,
-    reason: string
-  ): Record<string, unknown> => (isMapping(value) ? value : fail(reason));
-  const document = requireMapping(
-    parsed,
-    "the document root must be a mapping."
-  );
-  if (/(?<!\$)\{\{[^{}]+\}\}/u.test(workflow)) {
-    fail("an unresolved {{...}} template placeholder remains.");
-  }
-
-  const triggers = requireMapping(
-    document.on,
-    "`on` must be a trigger mapping."
-  );
-  const triggerNames = Object.keys(triggers);
-  const unsafeTrigger = triggerNames.find((trigger) =>
-    UNSAFE_AUTOMATIC_TRIGGERS.has(trigger)
-  );
-  if (unsafeTrigger) {
-    fail(`unsafe automatic trigger \`${unsafeTrigger}\` is not allowed.`);
-  }
-
-  const jobs = requireMapping(document.jobs, "`jobs` must be a mapping.");
-  if (Object.keys(jobs).length === 0) {
-    fail("`jobs` must be a non-empty mapping.");
-  }
-
-  if (artifact === "provider") {
-    if (triggerNames.length !== 1 || triggerNames[0] !== "workflow_call") {
-      fail("the reusable `workflow_call` trigger must be the only trigger.");
-    }
-    const workflowCall = requireMapping(
-      triggers.workflow_call,
-      "`on.workflow_call` must be a mapping."
-    );
-    const inputs = requireMapping(
-      workflowCall.inputs,
-      "`on.workflow_call.inputs` must be a mapping."
-    );
-    if (!own(inputs, "environment") || !isMapping(inputs.environment)) {
-      fail("workflow call input `environment` is required.");
-    }
-    return;
-  }
-
-  if (artifact === "dispatcher") {
-    if (triggerNames.length !== 1 || triggerNames[0] !== "workflow_dispatch") {
-      fail("the workflow must be triggered only by `workflow_dispatch`.");
-    }
-    const dispatch = requireMapping(
-      triggers.workflow_dispatch,
-      "`on.workflow_dispatch` must be a mapping."
-    );
-    const inputs = requireMapping(
-      dispatch.inputs,
-      "`on.workflow_dispatch.inputs` must be a mapping."
-    );
-    if (!own(inputs, "environment") || !isMapping(inputs.environment)) {
-      fail("workflow dispatch input `environment` is required.");
-    }
-    if (
-      !expectedProviderWorkflows.some((file) => AWS_WORKFLOW_FILES.has(file)) &&
-      (Object.keys(jobs).some((job) => job.toLowerCase() === "aws") ||
-        containsAwsWorkflowReference(jobs))
-    ) {
-      fail("the dispatcher must not contain an AWS job or workflow reference.");
-    }
-    for (const providerWorkflow of expectedProviderWorkflows) {
-      if (!containsWorkflowReference(jobs, providerWorkflow)) {
-        fail(
-          `the dispatcher must invoke \`./.github/workflows/${providerWorkflow}\`.`
-        );
-      }
-    }
-    return;
-  }
-
-  const verifyTriggerNames = new Set(triggerNames);
-  if (
-    !verifyTriggerNames.has("workflow_dispatch") ||
-    [...verifyTriggerNames].some(
-      (trigger) => trigger !== "workflow_dispatch" && trigger !== "push"
-    )
-  ) {
-    fail(
-      "the verify workflow may only use `workflow_dispatch` and the constrained setup-branch `push` trigger."
-    );
-  }
-  if (verifyTriggerNames.has("push")) {
-    const push = requireMapping(triggers.push, "`on.push` must be a mapping.");
-    if (
-      !Array.isArray(push.branches) ||
-      push.branches.length !== 1 ||
-      push.branches[0] !== VERIFY_SETUP_BRANCH_PATTERN ||
-      !Array.isArray(push.paths) ||
-      push.paths.length !== 1 ||
-      push.paths[0] !== VERIFY_WORKFLOW_PATH
-    ) {
-      fail(
-        "the push trigger must be limited to `radius/setup-**` and the generated verify workflow path."
-      );
-    }
-  }
-
-  const dispatch = requireMapping(
-    triggers.workflow_dispatch,
-    "`on.workflow_dispatch` must be a mapping."
-  );
-  const inputs = requireMapping(
-    dispatch.inputs,
-    "`on.workflow_dispatch.inputs` must be a mapping."
-  );
-  for (const input of ["environment", VERIFY_OPERATION_INPUT]) {
-    if (!own(inputs, input) || !isMapping(inputs[input])) {
-      fail(`workflow dispatch input \`${input}\` is required.`);
-    }
-  }
-  const runName = document["run-name"];
-  if (
-    typeof runName !== "string" ||
-    !runName.includes("${{ inputs.environment ||") ||
-    !runName.includes(`\${{ inputs.${VERIFY_OPERATION_INPUT} ||`)
-  ) {
-    fail(
-      "the marker-bearing `run-name` must include the environment and Radius operation inputs."
-    );
-  }
-  const hasTrustedGhcrProbe = Object.values(jobs).some(
-    (job) =>
-      isMapping(job) &&
-      Array.isArray(job.steps) &&
-      job.steps.some(
-        (step) =>
-          isMapping(step) &&
-          step.name === "Verify GHCR package push permission" &&
-          isMapping(step.env) &&
-          step.env.GHCR_TOKEN === "${{ secrets.GITHUB_TOKEN }}" &&
-          typeof step.run === "string" &&
-          step.run.includes("/blobs/uploads/")
-      )
-  );
-  if (!hasTrustedGhcrProbe) {
-    fail("the trusted non-mutating GHCR push-permission probe is required.");
-  }
-}
 
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
 export {
@@ -319,21 +167,6 @@ export {
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 };
-
-const AWS_WORKFLOW_FILES: ReadonlySet<string> = new Set([
-  DEPLOY_AWS_FILE,
-  DELETE_AWS_FILE,
-  DELETE_ENV_AWS_FILE
-]);
-
-// The workflow files a deploy, application delete, or environment delete needs
-// on the branch it runs from. The AWS provider files are only included while
-// the developer-only AWS switch is on.
-export function deployWorkflowFiles(includeAws: boolean): string[] {
-  return includeAws ?
-      [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE]
-    : [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
-}
 
 export function deleteApplicationWorkflowFiles(includeAws: boolean): string[] {
   return includeAws ?
@@ -546,70 +379,6 @@ ${indent}    echo "✅ GHCR accepted a non-mutating upload-session probe."`;
 }
 
 /**
- * Generate the deploy workflow files (dispatcher + both provider workflows).
- * Returns an object mapping bare workflow filename -> YAML content; the caller
- * commits each under `.github/workflows/`. The provider is auto-detected at
- * runtime by the dispatcher, so all three files are emitted regardless of the
- * environment's cloud.
- *
- * The templates are fetched from radius-project/ai-extensions `.github/extension/` at
- * the pinned RADIUS_REF so user repos always get the reviewed upstream version;
- * there is no bundled fallback, so a fetch failure surfaces as an error.
- */
-export async function generateDeployWorkflow(
-  env: string,
-  appFile: string,
-  options: DeployWorkflowOptions & ProviderWorkflowOptions = {}
-): Promise<Record<string, string>> {
-  const { includeAws = false, ...deployOptions } = options;
-  // The dispatcher picks the provider at run time from the environment's
-  // variables, and GitHub rejects it unless every workflow it `uses:` exists.
-  // Without the AWS switch only the Azure provider is fetched and committed,
-  // and the dispatcher's `aws:` job is stripped below.
-  const files = deployWorkflowFiles(includeAws);
-  const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
-  const templates: Record<string, string> = {};
-  files.forEach((f, i) => {
-    templates[f] = bodies[i];
-  });
-  // Satisfy core's "all files required" contract without a network lookup for
-  // the AWS template; the generated AWS output is dropped below.
-  if (!includeAws) templates[DEPLOY_AWS_FILE] = templates[DEPLOY_AZURE_FILE];
-  const generated = coreGenerateDeployWorkflow(
-    env,
-    appFile,
-    templates,
-    deployOptions
-  );
-  if (!includeAws) delete generated[DEPLOY_AWS_FILE];
-  // Creating an environment should ONLY run the verify-credentials workflow.
-  // The upstream dispatcher auto-triggers the deploy via a `workflow_run`
-  // trigger once verify completes; strip it so `run-rad-commands` runs only on
-  // explicit `workflow_dispatch` (the Deploy button), never on env creation.
-  if (generated && typeof generated[DEPLOY_DISPATCHER_FILE] === "string") {
-    generated[DEPLOY_DISPATCHER_FILE] = stripWorkflowRunTrigger(
-      generated[DEPLOY_DISPATCHER_FILE]
-    );
-    if (!includeAws) {
-      generated[DEPLOY_DISPATCHER_FILE] = stripAwsDispatcherJob(
-        generated[DEPLOY_DISPATCHER_FILE]
-      );
-    }
-  }
-  for (const [file, workflow] of Object.entries(generated)) {
-    assertTrustedGeneratedWorkflow(
-      workflow,
-      file === DEPLOY_DISPATCHER_FILE ? "dispatcher" : "provider",
-      `deploy workflow "${file}"`,
-      file === DEPLOY_DISPATCHER_FILE ?
-        deployWorkflowFiles(includeAws).slice(1)
-      : []
-    );
-  }
-  return generated;
-}
-
-/**
  * Generate the delete workflow files. Returns an object mapping bare workflow
  * filename -> YAML content; the caller commits each under `.github/workflows/`.
  * As with deploy, the AWS provider workflows are only committed, and the
@@ -670,70 +439,6 @@ export async function generateDeleteWorkflow(
   return generated;
 }
 
-// Ensure the deploy workflow files exist on `branch` so that dispatching
-// `run-rad-commands.yml` with `--ref branch` resolves — both the dispatcher
-// itself and the provider workflow it pulls in via a local-path `uses:`. The
-// env-creation flow commits these to the repo's DEFAULT branch only (the GitHub
-// contents API commit is branch-less), so a feature/worktree branch usually
-// lacks them. Missing files are generated from the pinned upstream templates and
-// committed onto `branch`; existing ones are left untouched. Best-effort per
-// file — a commit failure is surfaced by the caller, not thrown here.
-export async function ensureDeployWorkflowsOnBranch(
-  includeAws: boolean,
-  repo: string,
-  branch: string,
-  envName: string,
-  log: (message: string) => void,
-  onWorkflowWritten: (file: string) => void
-): Promise<void> {
-  if (!repo || !branch) return;
-  // A `--ref` dispatch needs the dispatcher and every provider workflow it
-  // `uses:` on the branch.
-  const wanted = deployWorkflowFiles(includeAws);
-  const existsOnBranch = (file: string): Promise<boolean> =>
-    new Promise<boolean>((resolve) => {
-      cliExec(
-        "gh",
-        [
-          "api",
-          `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(
-            branch
-          )}`,
-          "--jq",
-          ".sha"
-        ],
-        { timeout: 15000 },
-        (err, stdout) => resolve(!err && stdout.trim() !== "")
-      );
-    });
-  const presence = await Promise.all(wanted.map(existsOnBranch));
-  const missing = wanted.filter((_, i) => !presence[i]);
-  if (missing.length === 0) return;
-  log(
-    'Publishing deploy workflow(s) to branch "' +
-      branch +
-      '": ' +
-      missing.join(", ")
-  );
-  const generated = await generateDeployWorkflow(envName, ".radius/app.bicep", {
-    includeAws
-  });
-  for (const file of missing) {
-    const written = await commitFileToRepo(
-      repo,
-      ".github/workflows/" + file,
-      generated[file],
-      branch,
-      "Add Radius deploy workflow (" +
-        file +
-        ") to " +
-        branch +
-        " for worktree-consistent deploy"
-    );
-    if (written) onWorkflowWritten(file);
-  }
-}
-
 export interface WorkflowTemplates {
   deploy(environment: string, appFile: string): Promise<Record<string, string>>;
   delete(environment: string): Promise<Record<string, string>>;
@@ -749,64 +454,6 @@ export function workflowTemplates(includeAws: boolean): WorkflowTemplates {
   };
 }
 
-/**
- * Remove the `aws:` job (and any contiguous comment lines directly above it)
- * from a dispatcher workflow. Without the AWS switch only the Azure provider
- * workflow is committed, so the dispatcher's `aws:` job, which `uses:` the
- * uncommitted AWS provider file, would otherwise make GitHub reject the whole
- * workflow with a parse error (HTTP 422). Jobs are indented two spaces; the
- * block runs until the next two-space-indented key, a top-level key, or EOF.
- */
-function stripAwsDispatcherJob(yaml: string): string {
-  const lines = yaml.split("\n");
-  const start = lines.findIndex((l) => /^  aws:\s*$/.test(l));
-  if (start === -1) return yaml;
-  let from = start;
-  while (from > 0 && /^  #/.test(lines[from - 1])) from--;
-  // Drop a single blank separator line above the block, if present.
-  if (from > 0 && lines[from - 1].trim() === "") from--;
-  let to = start + 1;
-  while (
-    to < lines.length &&
-    !/^  \S/.test(lines[to]) &&
-    !/^\S/.test(lines[to])
-  ) {
-    to++;
-  }
-  lines.splice(from, to - from);
-  return lines.join("\n");
-}
-
-/**
- * Remove the top-level `workflow_run:` trigger (and its preceding comment block)
- * from a GitHub Actions workflow YAML, leaving `workflow_dispatch` as the only
- * trigger. Operates on the `on:` mapping where triggers are indented two spaces
- * and their children deeper.
- */
-function stripWorkflowRunTrigger(yaml: string): string {
-  const lines = yaml.split("\n");
-  const start = lines.findIndex((l) => /^  workflow_run:\s*$/.test(l));
-  if (start === -1) return yaml;
-  // Include any contiguous comment lines directly above the trigger.
-  let from = start;
-  while (from > 0 && /^  #/.test(lines[from - 1])) from--;
-  // Drop the trigger line and all more-deeply-indented child lines.
-  let to = start + 1;
-  while (
-    to < lines.length &&
-    (/^    /.test(lines[to]) || lines[to].trim() === "")
-  ) {
-    // Stop at a blank line that is followed by a non-child (keeps section spacing).
-    if (
-      lines[to].trim() === "" &&
-      !(to + 1 < lines.length && /^    /.test(lines[to + 1]))
-    )
-      break;
-    to++;
-  }
-  lines.splice(from, to - from);
-  return lines.join("\n");
-}
 export function generatePortalUrl(
   resourceType: string,
   provider: string
@@ -953,21 +600,6 @@ export async function syncRepoWorkflows(
     }
   }
 
-  const updated = new Set<string>();
-  const created = new Set<string>();
-  const registrationPending = new Set<string>();
-  const failed: WorkflowCommitFailure[] = [];
-  // Cache branch-existence lookups so authoring missing files doesn't re-query
-  // the same branch for every candidate path. A branch that isn't on the remote
-  // (e.g. an unpushed working branch) must never be authored onto.
-  const branchExists = new Map<string, boolean>();
-  const remoteHasBranch = async (branch: string): Promise<boolean> => {
-    if (branchExists.has(branch)) return branchExists.get(branch) as boolean;
-    const exists = !!(await getBranchHeadSha(repo, branch));
-    branchExists.set(branch, exists);
-    return exists;
-  };
-
   // Each dispatcher `uses:` its provider workflows by path, and GitHub rejects
   // the whole dispatcher when one is missing. Whenever a dispatcher is on a
   // branch, its providers are authored even in the background pass (a
@@ -985,165 +617,45 @@ export async function syncRepoWorkflows(
       deleteEnvironmentWorkflowFiles(includeAws).slice(1)
     ]
   ]);
-  const fileNameOf = (path: string): string =>
-    path.slice(path.lastIndexOf("/") + 1);
-  const isDispatcher = (path: string): boolean =>
-    dispatcherProviders.has(fileNameOf(path));
-  // Providers first, so a dispatcher is never written ahead of a file it uses.
-  const ordered = [...byPath.entries()].sort(
-    ([a], [b]) => Number(isDispatcher(a)) - Number(isDispatcher(b))
-  );
-
-  for (const branch of branches) {
-    const committedFiles = new Map<string, string | null>();
-    for (const [path] of ordered) {
-      committedFiles.set(path, await fetchFileFromRepo(repo, path, branch));
-    }
-    const present = new Set(
-      [...committedFiles]
-        .filter(([, content]) => content != null && content !== "")
-        .map(([path]) => fileNameOf(path))
-    );
-    // A provider outside this pass (`opts.only`) still has to be on the branch
-    // before a dispatcher that uses it is written.
-    for (const [path] of ordered) {
-      for (const provider of dispatcherProviders.get(fileNameOf(path)) || []) {
-        if (committedFiles.has(wf(provider)) || present.has(provider)) continue;
-        const content = await fetchFileFromRepo(repo, wf(provider), branch);
-        if (content != null && content !== "") present.add(provider);
-      }
-    }
-    const requiredProviders = new Set(
-      [...dispatcherProviders]
-        .filter(([dispatcher]) => present.has(dispatcher))
-        .flatMap(([, providers]) => providers)
-    );
-    for (const [path, candidates] of ordered) {
-      const fileName = fileNameOf(path);
-      const committed = committedFiles.get(path);
-      const missing = committed == null || committed === "";
-      const absentProviders = (dispatcherProviders.get(fileName) || []).filter(
-        (provider) => !present.has(provider)
-      );
-      if (absentProviders.length > 0) {
-        // A write this pass would have made is reported as failed, so callers
-        // that check `failed` for the dispatcher still name the branch.
-        const wanted =
-          missing ?
-            opts.create
-          : !candidates.some((candidate) => candidate.content === committed);
-        // An unpushed branch takes no writes at all, so nothing failed there.
-        if (wanted && (await remoteHasBranch(branch))) {
-          failed.push({ path, branch });
-          log(
-            `left ${path} unchanged on "${branch}" until ${absentProviders.join(", ")} can be committed`
-          );
-        }
-        continue;
-      }
-      if (missing) {
-        // By default don't author missing files here (environment creation owns
-        // that), and an unpushed working branch simply reads as "missing" and is
-        // skipped. When `opts.create` is set, or a dispatcher on this branch uses
-        // the file, author it, but only if the branch exists on the remote, so we
-        // never author onto an unpushed working branch.
-        if (!opts.create && !requiredProviders.has(fileName)) continue;
-        if (!(await remoteHasBranch(branch))) {
-          log(`skipped creating ${path} on "${branch}" (branch not on remote)`);
-          continue;
-        }
-        const choice = candidates[0];
-        try {
-          const changed = await commitFileToRepo(
-            repo,
-            path,
-            choice.content,
-            branch,
-            `Add ${fileName} from upstream Radius workflow templates`
-          );
-          if (changed) {
-            created.add(path);
-            log(`created ${path} on "${branch}"`);
-          } else {
-            registrationPending.add(path);
-          }
-          present.add(fileName);
-        } catch (e) {
-          failed.push({ path, branch });
-          log(`could not create ${path} on "${branch}": ${errorMessage(e)}`);
-        }
-        continue;
-      }
-      // In sync if the committed copy matches any environment's generated
-      // content — the only per-env difference is the cosmetic dispatch default.
-      if (candidates.some((c) => c.content === committed)) continue;
-      const setupMarker =
-        path === VERIFY_WORKFLOW_PATH ?
-          setupPushOperationMarker(committed)
-        : null;
-      if (setupMarker) {
-        let setupVariantMatches = false;
+  return synchronizeWorkflowCandidates(
+    {
+      repo,
+      branches,
+      candidates: byPath,
+      dispatcherProviders,
+      createMissing: opts.create ?? false
+    },
+    {
+      readFile: fetchFileFromRepo,
+      branchExists: async (repository, branch) =>
+        !!(await getBranchHeadSha(repository, branch)),
+      commitFile: commitFileToRepo,
+      log,
+      errorMessage,
+      async matchesVariant(path, committed, candidates) {
+        const setupMarker =
+          path === VERIFY_WORKFLOW_PATH ?
+            setupPushOperationMarker(committed)
+          : null;
+        if (!setupMarker) return false;
         for (const candidate of candidates) {
           if (!candidate.provider || !candidate.environment) continue;
           try {
-            const setupVariant = await generateVerifyWorkflow(
+            const variant = await generateVerifyWorkflow(
               candidate.environment,
               candidate.provider,
               RADIUS_REF,
               { setupPushOperationMarker: setupMarker }
             );
-            if (setupVariant === committed) {
-              setupVariantMatches = true;
-              break;
-            }
-          } catch (e) {
+            if (variant === committed) return true;
+          } catch (error) {
             log(
-              `skipped setup verify variant for "${candidate.environment}" (${candidate.provider}): ${errorMessage(e)}`
+              `skipped setup verify variant for "${candidate.environment}" (${candidate.provider}): ${errorMessage(error)}`
             );
           }
         }
-        if (setupVariantMatches) continue;
-      }
-
-      // Drift detected. Prefer a replacement whose provider matches the
-      // committed file so the shared verify file keeps its current provider;
-      // fall back to the first candidate (deploy/delete content is provider
-      // agnostic, so any candidate is equivalent there).
-      const committedProvider =
-        /AZURE_/.test(committed) ? "azure"
-        : /AWS_/.test(committed) ? "aws"
-        : null;
-      const choice =
-        (committedProvider &&
-          candidates.find((c) => c.provider === committedProvider)) ||
-        candidates[0];
-      try {
-        const changed = await commitFileToRepo(
-          repo,
-          path,
-          choice.content,
-          branch,
-          `Update ${fileName} to match upstream Radius workflow templates`
-        );
-        if (changed) {
-          updated.add(path);
-          log(`updated ${path} on "${branch}"`);
-        }
-      } catch (e) {
-        failed.push({ path, branch });
-        log(`could not update ${path} on "${branch}": ${errorMessage(e)}`);
+        return false;
       }
     }
-  }
-
-  return {
-    updated: [...updated],
-    created: [...created],
-    ...(registrationPending.size ?
-      { registrationPending: [...registrationPending] }
-    : {}),
-    failed,
-    branches,
-    skipped: false
-  };
+  );
 }

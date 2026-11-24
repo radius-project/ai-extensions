@@ -15,20 +15,21 @@ function errorMessage(error: unknown): string {
 
 // IAM roles the signed-in AWS identity can see, for the wizard's
 // `use an existing role…` picker. Each lists the GitHub subjects it trusts so
-// the picker can say which repositories already use it.
+// the picker can say which repositories already use it. `hiddenReason` says
+// why roles Radius created were left out, when it couldn't check whose they are.
 export async function handleListAwsRoles(
   context: CanvasRequestContext,
   dependencies: AwsDiscoveryRouteDependencies
 ): Promise<void> {
   try {
-    const roles = await listAwsRoles(
+    const list = await listAwsRoles(
       {
         accountId: context.url.searchParams.get("accountId") || "",
         repo: context.url.searchParams.get("repo") || ""
       },
       dependencies
     );
-    context.json(200, { roles });
+    context.json(200, list);
   } catch (e) {
     context.json(400, {
       error: "Failed to list IAM roles: " + errorMessage(e),

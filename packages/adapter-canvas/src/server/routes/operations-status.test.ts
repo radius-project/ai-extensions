@@ -1130,6 +1130,50 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     });
   });
 
+  it.each([
+    ["vpcId is not a VPC ID", { vpcId: "main" }],
+    ["vpcId has upper-case hex", { vpcId: "vpc-0ABC" }],
+    ["vpcId has surrounding spaces", { vpcId: " vpc-1 " }],
+    ["subnetIds has a non-subnet ID", { subnetIds: "subnet-a,sg-b" }],
+    ["subnetIds is separated by spaces", { subnetIds: "subnet-a, subnet-b" }],
+    ["subnetIds ends in a comma", { subnetIds: "subnet-a,subnet-b," }],
+    ["subnetIds has one subnet", { subnetIds: "subnet-a" }],
+    ["subnetIds repeats one subnet", { subnetIds: "subnet-a,subnet-a" }],
+    ["vpcId is an array", { vpcId: ["vpc-1"] }],
+    ["subnetIds is an array", { subnetIds: ["subnet-a", "subnet-b"] }]
+  ])(
+    "rejects aws setup before any operation starts when %s",
+    async (_label, fields) => {
+      const claimSelectionHandle = vi.fn();
+      const startConflict = vi.fn();
+      const startOperation = vi.fn();
+      const recording = await runCreate(
+        JSON.stringify({
+          repo: "octo/app",
+          provider: "aws",
+          ...VALID_AWS_INPUT,
+          ...fields
+        }),
+        createDependencies({
+          isValidRepoSlug: () => true,
+          claimSelectionHandle,
+          startConflict,
+          startOperation
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error:
+          "AWS setup requires a VPC ID such as vpc-0123abcd and at least two different subnet IDs such as subnet-0123abcd, separated by commas.",
+        code: "invalid-aws-network-input"
+      });
+      expect(startConflict).not.toHaveBeenCalled();
+      expect(claimSelectionHandle).not.toHaveBeenCalled();
+      expect(startOperation).not.toHaveBeenCalled();
+    }
+  );
+
   it("refuses an AWS environment without starting an operation while the AWS switch is off", async () => {
     const recording = await runCreate(
       JSON.stringify({
@@ -1165,7 +1209,8 @@ describe("handleCreateOperation (POST /api/operations)", () => {
         roleName: "",
         existingRoleArn: "arn:aws-us-gov:iam::123456789012:role/team/deploy"
       }
-    ]
+    ],
+    ["three subnets", { subnetIds: "subnet-0a1,subnet-0b2,subnet-0c3" }]
   ])("admits aws setup with %s", async (_label, fields) => {
     const recording = await runCreate(
       JSON.stringify({
@@ -1420,7 +1465,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     expect(capture.built).toEqual([{ includeIdentity: false }]);
   });
 
-  it("does not attach a resumeRequest on the aws path", async () => {
+  it("attaches the AWS request a continuation needs after a restart", async () => {
     const capture = emptyCapture();
     const op = newOperationRecord();
     await runCreate(
@@ -1431,7 +1476,11 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       }),
       happyPathCreate(capture, op)
     );
-    expect(op.resumeRequest).toBeUndefined();
+    expect(op.resumeRequest).toEqual({
+      needsAzureCredentials: false,
+      github: (op.request as { github: unknown }).github,
+      environment: (op.request as { environment: unknown }).environment
+    });
     // AWS needs no azure credentials, but its deploy role is authorized during
     // setup, so the identity stage is included.
     expect(capture.built).toEqual([{ includeIdentity: true }]);

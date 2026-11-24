@@ -11,6 +11,8 @@
 // Every exported declaration is deep-frozen so a consumer (or a careless test)
 // cannot mutate the canonical shape out from under other importers.
 
+import { ENVIRONMENT_TOOL_DECLARATIONS } from "./environment-tool-schema.js";
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     for (const key of Object.keys(value as Record<string, unknown>)) {
@@ -164,6 +166,9 @@ export const RADIUS_ACTION_DECLARATIONS: readonly ActionDeclaration[] =
 // wiring that returns it lives in extension.ts (createRadiusExtension).
 export const RADIUS_CANVAS_INSTANCE_ID = "radius-panel";
 
+export const RADIUS_FAILURE_REPORT_CONTEXT =
+  "When a Radius operation reaches a terminal failure and automatic recovery has stopped, use the radius-report-issue skill. This includes app modeling, environment setup or verification, deployment, graph rendering, deletion or cleanup, and dispatch or monitoring failures with an unknown remote outcome. Ask whether the user wants to log an issue with the Radius team and state that they can review it before submission. Collect extra diagnostics only after they agree; remove personal data and secrets, include known session type, model and reasoning level, and use the ai-extensions bug-report template. Show the complete draft and require separate explicit permission before submitting to radius-project/ai-extensions. Do not offer reports for active retries, pending input, deliberate cancellation, or expected unsupported features, and do not ask twice for the same failed operation.";
+
 export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (canvasId: "radius"), ALWAYS:
 1. Reuse the instanceId of any Radius Canvas already open in this session. If none is open, use instanceId "${RADIUS_CANVAS_INSTANCE_ID}". Reopening the existing instance refreshes its server and client connections and ensures only ONE Radius Canvas panel is open.
 2. Pass the current session's repository as the "repo" input in owner/repo format.
@@ -191,7 +196,9 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Once a Radius Canvas is open, always use its actual instanceId for every Radius Canvas operation. Use "${RADIUS_CANVAS_INSTANCE_ID}" only for the first open when no Radius instance exists.
 
-When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.`;
+When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.
+
+${RADIUS_FAILURE_REPORT_CONTEXT}`;
 
 export interface ToolDeclaration {
   name: string;
@@ -219,7 +226,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_report_modeling_failure",
     description:
-      "Reports a permanent radius-app-bicep authoring failure to the Radius Canvas attempt that requested it. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures, cancellations, or a run that wrote app.bicep.",
+      "Reports a permanent radius-app-bicep authoring failure that left the application definition missing or blank. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures or cancellations.",
     parameters: {
       type: "object",
       properties: {
@@ -252,7 +259,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_generate_pr_diff_markdown",
     description:
-      "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description. Call this only when the user explicitly asks for an application graph diff; do not call it automatically before creating a pull request. Include the exact returned markdown at the top of the PR body only when the result contains a diff. If the result says the diff is unavailable or the tool fails, create the PR without a graph diff section, report the reason in chat, and do not open the graph-diff Canvas.",
+      "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description from explicitly requested GitHub base/head branches resolved to committed SHAs. Includes both resolved repo@SHA source identities in the returned text; never reads local workspace edits. Call this only when the user explicitly asks for an application graph diff; do not call it automatically before creating a pull request. Include the exact returned markdown at the top of the PR body only when the result contains a diff. If the result says the diff is unavailable or the tool fails, create the PR without a graph diff section, report the reason in chat, and do not open the graph-diff Canvas.",
     parameters: {
       type: "object",
       properties: {
@@ -321,7 +328,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_deploy",
     description:
-      "Deploys the Radius application by dispatching the same GitHub Actions deploy workflow the canvas Deploy button uses. The workflow checks out the target branch from GitHub, so commit and push any repair before calling this. Returns as soon as the deploy is started; poll the radius_deploy_status tool for the outcome. When repairing a failed deploy, pass the attemptId you were given: calling with no arguments repeats this session's last deploy as a brand new one, which leaves the repair loop and its remaining attempts behind.",
+      "Deploys a Radius application through the shared GitHub Actions workflow without requiring an open Canvas. Commit and push any repair first: the workflow checks out the target branch from GitHub. Returns an observationId for radius_deploy_status. Omitted fields use this runtime's unambiguous prior deployment or trusted workspace; unknown or ambiguous targets require explicit input. For repairs, pass the attemptId from the repair handoff, not an observationId. Calling without attemptId starts a new repair budget.",
     parameters: {
       type: "object",
       properties: {
@@ -342,17 +349,19 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         },
         branch: {
           type: "string",
-          description: "Branch to deploy. Defaults to the last deploy's branch."
+          description:
+            "Branch to deploy. Uses the prior target or trusted workspace branch, then the repository's confirmed default branch."
         },
         provider: {
           type: "string",
           enum: ["azure", "aws"],
-          description: "Cloud provider. Defaults to the last deploy's provider."
+          description:
+            "Cloud provider. Uses the prior target's provider, otherwise azure. AWS requires the runtime's AWS switch."
         },
         appFile: {
           type: "string",
           description:
-            "Path to the application Bicep file. Defaults to .radius/app.bicep."
+            "Repository-relative application model path. When omitted, select .radius/app.bicep first, then app.bicep at the repository root. Explicit paths never fall back to another model."
         }
       }
     }
@@ -367,7 +376,12 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         attemptId: {
           type: "string",
           description:
-            "Deploy attempt this call belongs to, as given in the repair handoff. Required while following a repair loop."
+            "Repair attempt from the handoff. Do not combine with observationId."
+        },
+        observationId: {
+          type: "string",
+          description:
+            "Observation-only handle returned by radius_deploy for this invocation. Superseded or foreign handles are rejected. Does not authorize repair."
         },
         logLines: {
           type: "number",
@@ -376,5 +390,6 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         }
       }
     }
-  }
+  },
+  ...ENVIRONMENT_TOOL_DECLARATIONS
 ]);

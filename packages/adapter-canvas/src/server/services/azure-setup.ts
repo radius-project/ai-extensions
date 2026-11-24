@@ -1,5 +1,7 @@
 import {
+  assertSetupExecutionActive,
   continuationMatchesLiveContext,
+  isSetupExecutionInterrupted,
   runAzureSetup
 } from "@radius-project/core";
 import {
@@ -96,6 +98,7 @@ const EXTERNAL_FUNCTIONS = [
 
 function validateDependencies(dependencies: AzureSetupDependencies): void {
   for (const name of [
+    "isStopped",
     "ensureServicePrincipal",
     "finalizeSetupFailure",
     "persistMutationCheckpoint",
@@ -170,6 +173,7 @@ export function createAzureSetupService(dependencies: AzureSetupDependencies) {
       if (!outcome) throw new Error("Azure setup did not report an outcome.");
       return outcome;
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       return setupHandlerFailure(error, (diagnostic) =>
         dependencies.operations.report(diagnostic)
       );
@@ -182,6 +186,16 @@ async function runAzureSetupService(
   dependencies: AzureSetupDependencies,
   complete: (outcome: SetupOutcome) => void
 ): Promise<void> {
+  const active = () => assertSetupExecutionActive(dependencies.isStopped);
+  const read = async <T>(work: () => Promise<T>): Promise<T> => {
+    active();
+    try {
+      return await work();
+    } finally {
+      active();
+    }
+  };
+  active();
   let operation: AzureAutoSetupOperation | null = null;
   let finalizationStarted = false;
   let steps: string[] = [];
@@ -497,6 +511,7 @@ async function runAzureSetupService(
         return;
       }
     }
+    active();
     const continuationInputRequired = operation.inputRequired;
     const continuationOperationState = operation.state;
     if (operation.inputRequired) {
@@ -550,7 +565,7 @@ async function runAzureSetupService(
       );
       dependencies.operations.setAzureAppCreateContinuation(operation, null);
     }
-    await selectedExecutor.verifyIdentity();
+    await read(() => selectedExecutor.verifyIdentity());
     if (
       appCreateContinuation &&
       !(await continuationMatchesLiveContext(
@@ -558,9 +573,15 @@ async function runAzureSetupService(
         targetRepo,
         environment,
         {
-          runAz: dependencies.external.runAz,
+          runAz: (args) => read(() => dependencies.external.runAz(args)),
           runGitHubJson: (path) =>
-            dependencies.external.runGitHubJson(path, selectedExecutor),
+            read(() =>
+              dependencies.external.runGitHubJson(
+                path,
+                selectedExecutor,
+                active
+              )
+            ),
           deepEqual: setupIdentityEqual
         }
       ))
@@ -594,18 +615,20 @@ async function runAzureSetupService(
     const reconcilingProviderMutation =
       unresolvedProviderMutations(operation).length > 0;
     if (!reconcilingProviderMutation && !appCreateContinuation) {
-      const accessMessage = await dependencies.external.preflightRepoAdmin(
-        targetRepo,
-        selectedExecutor
+      const accessMessage = await read(() =>
+        dependencies.external.preflightRepoAdmin(
+          targetRepo,
+          selectedExecutor,
+          active
+        )
       );
       if (accessMessage) {
         await fail(403, accessMessage, "repo-admin-required");
         return;
       }
-      const packageAccess =
-        await dependencies.external.preflightGhcrPackageWriteAccess(
-          selectedExecutor
-        );
+      const packageAccess = await read(() =>
+        dependencies.external.preflightGhcrPackageWriteAccess(selectedExecutor)
+      );
       if (!packageAccess.ok) {
         await fail(
           packageAccess.status,
@@ -619,12 +642,15 @@ async function runAzureSetupService(
     runAzReady = true;
 
     const workflow: AzureAutoSetupWorkflow = {
+      isStopped: dependencies.isStopped,
       operation,
       steps,
       respond: (status, body) => complete({ kind: "failed", status, body }),
       runAz: (args) => dependencies.external.runAz(args),
       runGitHubJson: (apiPath) =>
-        dependencies.external.runGitHubJson(apiPath, selectedExecutor),
+        read(() =>
+          dependencies.external.runGitHubJson(apiPath, selectedExecutor, active)
+        ),
       fail,
       stopBoundary,
       checkpoint
@@ -690,7 +716,7 @@ async function runAzureSetupService(
       }
     });
   } catch (error) {
-    if (finalizationStarted) throw error;
+    if (finalizationStarted || isSetupExecutionInterrupted(error)) throw error;
     if (
       error instanceof ProviderMutationRecoveryError &&
       error.code === "provider-mutation-outcome-unknown" &&

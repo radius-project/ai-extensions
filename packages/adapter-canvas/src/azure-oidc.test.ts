@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { discoverStatusText, formatServesReposLabel } from "./azure-oidc.js";
 import * as compatibility from "./azure-oidc.js";
 import * as platforms from "@radius-project/core/platforms";
+import type { AwsCliErrorKind } from "@radius-project/core/platforms";
 
 describe("browser-safe Azure identity compatibility exports", () => {
   it.each([
@@ -71,28 +72,142 @@ describe("discoverStatusText", () => {
     ).toBe("Discovery failed: outer fail");
   });
 
-  it("aws: summarizes counts on success", () => {
-    expect(discoverStatusText({ clusters: [1], vpcs: [1, 2, 3] }, "aws")).toBe(
-      "Found 1 cluster(s), 3 VPC(s)"
-    );
-  });
+  describe("aws", () => {
+    const usable = { id: "a", usable: true };
+    const configMap = { id: "b", usable: false, unusableReason: "config-map" };
+    const lostSession = {
+      id: "c",
+      usable: false,
+      unusableReason: "not-described",
+      describeErrorKind: "credentials"
+    };
+    const aws = (data: Parameters<typeof discoverStatusText>[0]) =>
+      discoverStatusText(data, "aws", "us-west-2");
 
-  it("aws: prefers the vpcs error", () => {
-    expect(
-      discoverStatusText(
-        {
+    it("counts the clusters it found", () => {
+      expect(aws({ clusters: [usable, usable] })).toBe(
+        "Found 2 EKS clusters in us-west-2."
+      );
+      expect(aws({ clusters: [usable] })).toBe(
+        "Found 1 EKS cluster in us-west-2."
+      );
+      expect(aws({ clusters: [usable, configMap, configMap] })).toBe(
+        "Found 3 EKS clusters in us-west-2. 1 can be used."
+      );
+      expect(aws({ clusters: [configMap, "junk"] })).toBe(
+        "Found 1 EKS cluster in us-west-2. None can be used."
+      );
+    });
+
+    it("says when the region has no clusters", () => {
+      expect(discoverStatusText({ clusters: [] }, "aws", "us-east-1")).toBe(
+        "No EKS clusters in us-east-1."
+      );
+      expect(aws({})).toBe("No EKS clusters in us-west-2.");
+    });
+
+    it.each<[AwsCliErrorKind, string]>([
+      [
+        "credentials",
+        "The AWS CLI has no valid session. Sign in, then select Refresh."
+      ],
+      [
+        "rejected",
+        "AWS rejected the credentials in us-west-2. The region may not be enabled for this account, or the credentials may not be valid."
+      ],
+      [
+        "denied",
+        "The signed-in identity can't list EKS clusters (eks:ListClusters)."
+      ],
+      [
+        "other",
+        "Can't list EKS clusters: Error when retrieving credentials from custom-process: helper failed"
+      ]
+    ])("reports a cluster list error of kind %s", (kind, text) => {
+      expect(
+        aws({
           clusters: [],
-          vpcs: [],
-          subnets: [],
           errors: {
-            clusters: "eks boom",
-            vpcs: "vpc boom",
-            subnets: "subnet boom"
+            clusters:
+              "Error when retrieving credentials from custom-process: helper failed",
+            subnets: "ignored"
+          },
+          errorKinds: { clusters: kind, subnets: "denied" }
+        })
+      ).toBe(text);
+    });
+
+    it("reports a cluster list error without a kind as another error", () => {
+      expect(aws({ errors: { clusters: "boom" } })).toBe(
+        "Can't list EKS clusters: boom"
+      );
+      expect(aws({ errorKinds: { clusters: "other" } })).toBe(
+        "Can't list EKS clusters: "
+      );
+    });
+
+    it("adds a sentence for a failed subnet list", () => {
+      expect(
+        aws({
+          clusters: [usable],
+          errors: { subnets: "denied text" },
+          errorKinds: { subnets: "denied" }
+        })
+      ).toBe(
+        "Found 1 EKS cluster in us-west-2. The signed-in identity can't list subnets (ec2:DescribeSubnets)."
+      );
+      expect(
+        aws({
+          clusters: [usable],
+          errors: { subnets: "throttled" },
+          errorKinds: { subnets: "other" }
+        })
+      ).toBe("Found 1 EKS cluster in us-west-2. Can't list subnets: throttled");
+      expect(aws({ clusters: [usable], errors: { subnets: "boom" } })).toBe(
+        "Found 1 EKS cluster in us-west-2. Can't list subnets: boom"
+      );
+    });
+
+    it("adds no sentence for route-table, VPC, zone, or namespace failures", () => {
+      expect(
+        aws({
+          clusters: [usable],
+          errors: {
+            routeTables: "denied",
+            vpcs: "denied",
+            zones: "denied",
+            namespaces: "denied"
+          },
+          errorKinds: {
+            routeTables: "denied",
+            vpcs: "other",
+            zones: "denied",
+            namespaces: "other"
           }
-        },
-        "aws"
-      )
-    ).toBe("Discovery failed: vpc boom");
+        })
+      ).toBe("Found 1 EKS cluster in us-west-2.");
+    });
+
+    it("has one session sentence when the session ended after the cluster list", () => {
+      expect(
+        aws({
+          clusters: [usable, lostSession],
+          errors: { subnets: "expired", routeTables: "expired" },
+          errorKinds: { subnets: "credentials", routeTables: "credentials" }
+        })
+      ).toBe(
+        "Found 2 EKS clusters in us-west-2. 1 can be used. The AWS CLI session ended during discovery. Sign in, then select Refresh."
+      );
+      expect(aws({ clusters: [lostSession] })).toBe(
+        "Found 1 EKS cluster in us-west-2. None can be used. The AWS CLI session ended during discovery. Sign in, then select Refresh."
+      );
+    });
+
+    it("reports a request the server refused", () => {
+      expect(aws({ error: "Invalid AWS region" })).toBe(
+        "Discovery failed: Invalid AWS region"
+      );
+    });
   });
 
   it("defaults to azure summary with empty input", () => {

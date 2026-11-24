@@ -3558,8 +3558,7 @@ describe("agreement with the core repair rules", () => {
   // DEPLOY_HANDOFF_MAX_ATTEMPTS is deliberately not this number: it counts
   // deliveries of the handoff message, not repairs.
   it("uses the same budget as the deploy-failure repair loop", async () => {
-    const { DEPLOY_REPAIR_ATTEMPT_CAP } =
-      await import("../../../src/runtime/hooks.js");
+    const { DEPLOY_REPAIR_ATTEMPT_CAP } = await import("@radius-project/core");
 
     assert.equal(REPAIR_ATTEMPT_BUDGET, DEPLOY_REPAIR_ATTEMPT_CAP);
   });

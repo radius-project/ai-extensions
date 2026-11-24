@@ -36,6 +36,33 @@ function operation(
 }
 
 describe("verification retry selected account", () => {
+  it.each(["before", "resolved", "rejected", "backoff"] as const)(
+    "stops account acquisition at %s without expiry, account failure or another read",
+    async (phase) => {
+      let stopped = phase === "before";
+      const createExecutor = vi.fn(async () => {
+        stopped = phase !== "backoff";
+        if (phase === "rejected" || phase === "backoff")
+          throw new Error("rate limited");
+        return successfulSelectedGhExecutor();
+      });
+      const sleep = vi.fn(async () => {
+        stopped = true;
+      });
+      const result = await acquireSelectedExecutor("alice", 10_000, {
+        isStopped: () => stopped,
+        createExecutor,
+        isRateLimitError: () => true,
+        now: () => 0,
+        sleep,
+        errorMessage: String
+      });
+      expect(result).toEqual({ state: "stopped" });
+      expect(createExecutor).toHaveBeenCalledTimes(phase === "before" ? 0 : 1);
+      expect(sleep).toHaveBeenCalledTimes(phase === "backoff" ? 1 : 0);
+    }
+  );
+
   it("keeps a fresh tracking deadline when resuming an older known run", () => {
     expect(
       verificationTrackingDeadline(
@@ -207,9 +234,9 @@ describe("verification retry selected account", () => {
           Promise.resolve(successfulSelectedGhExecutor({ login: "alice" })),
         registerExecutor: (operationId) => {
           registered.push(operationId);
-        },
-        unregisterExecutor: (operationId) => {
-          unregistered.push(operationId);
+          return () => {
+            unregistered.push(operationId);
+          };
         },
         monitor: () => Promise.resolve(),
         accountUnavailable: () => Promise.resolve(),
@@ -222,6 +249,35 @@ describe("verification retry selected account", () => {
       };
       return Object.assign(base, overrides, { registered, unregistered });
     }
+
+    it.each(["before", "acquisition"] as const)(
+      "does not publish failure or monitor when stopped during %s",
+      async (phase) => {
+        let stopped = phase === "before";
+        const createExecutor = vi.fn(async () => {
+          stopped = true;
+          throw new Error("Read interrupted");
+        });
+        const accountUnavailable = vi.fn();
+        const trackingExpired = vi.fn();
+        const monitor = vi.fn();
+        const deps = monitorDependencies({
+          isStopped: () => stopped,
+          createExecutor,
+          accountUnavailable,
+          trackingExpired,
+          monitor
+        });
+        await monitorVerificationWithSelectedAccount(operation(), deps);
+        expect(createExecutor).toHaveBeenCalledTimes(
+          phase === "before" ? 0 : 1
+        );
+        expect(accountUnavailable).not.toHaveBeenCalled();
+        expect(trackingExpired).not.toHaveBeenCalled();
+        expect(monitor).not.toHaveBeenCalled();
+        expect(deps.registered).toEqual([]);
+      }
+    );
 
     it("keeps the selected executor registered through recovered monitoring", async () => {
       const op = operation();

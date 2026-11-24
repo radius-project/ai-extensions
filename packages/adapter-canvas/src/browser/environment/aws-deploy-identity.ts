@@ -135,6 +135,7 @@ export function initializeAwsDeployIdentity(
     const stale = (): boolean => !scope.active || mine !== generation;
     useLink.textContent = "Loading roles…";
     let candidates: AwsRoleCandidate[];
+    let hiddenReason: string;
     try {
       const response = await context.net.fetch(
         `${LIST_AWS_ROLES_ENDPOINT}?accountId=${encodeURIComponent(lookupAccount)}&repo=${encodeURIComponent(deps.repo)}`
@@ -149,6 +150,7 @@ export function initializeAwsDeployIdentity(
         return;
       }
       candidates = parseAwsRoleCandidates(payload);
+      hiddenReason = readString(payload, "hiddenReason");
     } catch (error) {
       if (!scope.active) return;
       useLink.textContent = "use an existing role…";
@@ -161,7 +163,12 @@ export function initializeAwsDeployIdentity(
     }
     if (candidates.length === 0) {
       showNote(
-        "No IAM role in this account can be used for this repository.",
+        [
+          "No IAM role in this account can be used for this repository.",
+          hiddenReason
+        ]
+          .filter(Boolean)
+          .join(" "),
         true
       );
       return;
@@ -170,7 +177,12 @@ export function initializeAwsDeployIdentity(
     try {
       choice = await deps.promptRoleSelection({
         title: "Use an existing role",
-        intro: `Select an IAM role in account ${lookupAccount}. Radius adds this repository's trust, this environment's permissions, and cluster access to it, and never deletes it.`,
+        intro: [
+          `Select an IAM role in account ${lookupAccount}. Radius adds this repository's trust, this environment's permissions, and cluster access to it, and never deletes it.`,
+          hiddenReason
+        ]
+          .filter(Boolean)
+          .join(" "),
         caution:
           "Sharing one role across repositories means every trusted repository can use its AWS permissions. Only do this for repos that belong to the same product.",
         candidates: candidates.map((candidate) => ({

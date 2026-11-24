@@ -13,9 +13,11 @@
 // so it can be tested directly: given a repo, its branches and the injected
 // readers, it resolves each branch's model status and sends at most one message.
 
+import { randomUUID } from "node:crypto";
 import {
   appBicepHandoffMessage,
   appModelRadiusCliOutdatedNotice,
+  appModelSkillHandoffFailureNotice,
   appModelRefreshMessage,
   appModelStaleNotice,
   appModelUnverifiedMessage,
@@ -25,11 +27,18 @@ import type { HandoffMessage } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
 import type { CanvasState } from "../shared.js";
 import type { GraphProgressView } from "../shared.js";
-import type { AppSourceEvaluation } from "@radius-project/core";
+import {
+  appAuthoringRequired,
+  findAppModelRefresh,
+  hasModelableSource,
+  type AppSourceEvaluation
+} from "@radius-project/core";
+import { WorkspaceGraphBranchChanged } from "@radius-project/adapter-shared";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { appModelTargetKey } from "../app-model-authoring-failure.js";
+import { errorMessage } from "./util.js";
 
 export interface AppModelHandoffRequest {
   repo: string;
@@ -60,6 +69,7 @@ export interface AppModelHandoffDependencies {
     branch: string,
     state: CanvasState
   ): Promise<AppModelStatus>;
+  assertWorkspaceSource(source: AppModelStatus["source"]): Promise<void>;
   // Consulted only when no branch has a model, because a model that already
   // exists answers "can this repository be modeled" by existing.
   evaluateSource(
@@ -68,6 +78,11 @@ export interface AppModelHandoffDependencies {
     state: CanvasState
   ): Promise<AppSourceEvaluation>;
   send(message: HandoffMessage): Promise<void>;
+  // The radius-app-bicep skill bootstrap, the same JSON radius_generate_app
+  // returns. Each modeling handoff embeds it, so the agent starts the skill
+  // without finding and calling the tool. A rejection abandons the handoff the
+  // same way a failed send does.
+  skillHandoff(): Promise<string>;
   // Source evidence for one branch, captured when an attempt starts so the
   // failure it may report is compared with the source the agent modeled. An
   // empty answer or an error means unknown.
@@ -85,6 +100,12 @@ export interface AppModelHandoffDependencies {
     context: CanvasState,
     waitStartedAtMs?: number
   ): Promise<boolean>;
+  // Records that a modeling run was requested for these branches, so a later
+  // render of an overlapping view, such as a diff that includes one of them,
+  // waits for that run instead of asking again. The agent never calls
+  // radius_generate_app for a run the Canvas requests, so nothing else records
+  // it before the run creates its staging directory.
+  announceModelingRun(repo: string, branches: ReadonlyArray<string>): void;
   // Injected so the grace window below is driven by a fake clock in tests, and
   // so nothing here owns a timer.
   wait(ms: number): Promise<void>;
@@ -153,6 +174,25 @@ export function createAppModelHandoff(
 ): AppModelHandoff {
   const targetKey = missingModelHandoffTarget;
 
+  // The skill handoff failure last shown to the user. Every graph poll retries
+  // a handoff that failed, so the same failure is shown once, and again only
+  // after a success or a different failure.
+  let reportedSkillHandoffFailure: string | undefined;
+  async function buildSkillHandoff(): Promise<string> {
+    try {
+      const skillHandoff = await deps.skillHandoff();
+      reportedSkillHandoffFailure = undefined;
+      return skillHandoff;
+    } catch (error) {
+      const detail = errorMessage(error);
+      if (detail !== reportedSkillHandoffFailure) {
+        reportedSkillHandoffFailure = detail;
+        deps.log(appModelSkillHandoffFailureNotice(detail));
+      }
+      throw error;
+    }
+  }
+
   // Polls for an in-flight modeling run across the grace window. Answers true
   // as soon as one is observed, so the common case where the agent starts
   // generating immediately costs one extra poll rather than the whole window.
@@ -188,7 +228,7 @@ export function createAppModelHandoff(
       Boolean(branch)
     );
     if (!targets.length) return;
-    const context = state ?? (await deps.resolveContext());
+    const context = state ? { ...state } : await deps.resolveContext();
     const modelProgressView =
       progressView ?? (page === "graph-diff" ? "diff" : "graph");
     // The app.bicep wait is measured from when the model was first found
@@ -197,9 +237,9 @@ export function createAppModelHandoff(
     // field is absent on the very first render, because the wait is only
     // recorded once the outcome settles; the claim then falls back to its
     // ordinary TTL, which is the same length the deadline would have imposed.
-    const waitStartedAtMs =
-      context.graphProgressRecords?.[modelProgressView]
-        ?.graphProgressWaitStartedAtMs;
+    const waitStartedAtMs = (state ?? context).graphProgressRecords?.[
+      modelProgressView
+    ]?.graphProgressWaitStartedAtMs;
     const recoveryDeadlineAtMs =
       waitStartedAtMs === undefined ? undefined : (
         waitStartedAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - RECOVERY_WINDOW_MS
@@ -210,13 +250,30 @@ export function createAppModelHandoff(
     // newer missing-model owner that started while the read was in flight.
     const observedClaim = deps.missingModelHandoffs.current(target);
 
-    // resolveStatus absorbs every read failure into a "missing" classification,
-    // so a rejection here means the reader itself is broken. Letting it
-    // propagate abandons the handoff rather than acting on a half-resolved
-    // picture; every caller invokes this fire-and-forget.
-    const statuses = await Promise.all(
-      targets.map((branch) => deps.resolveStatus(repo, branch, context))
-    );
+    // Unavailable workspace evidence abandons the handoff rather than allowing
+    // regeneration from a partially resolved model or a changed checkout.
+    async function resolveStatuses() {
+      try {
+        return await Promise.all(
+          targets.map((branch) => deps.resolveStatus(repo, branch, context))
+        );
+      } catch (error) {
+        if (!(error instanceof WorkspaceGraphBranchChanged)) throw error;
+        return null;
+      }
+    }
+    async function sourcesStillCurrent(statuses: AppModelStatus[]) {
+      try {
+        for (const status of statuses)
+          await deps.assertWorkspaceSource(status.source);
+        return true;
+      } catch (error) {
+        if (!(error instanceof WorkspaceGraphBranchChanged)) throw error;
+        return false;
+      }
+    }
+    const statuses = await resolveStatuses();
+    if (!statuses || !stillCurrent()) return;
     const key = appModelHandoffKey(repo, targets, statuses);
     if (state?.appBicepHandoffKeys?.[target] === key) return;
 
@@ -239,11 +296,7 @@ export function createAppModelHandoff(
       }
     };
 
-    const present = statuses.filter(
-      (status) => status.freshness.status !== "missing"
-    );
-
-    if (!present.length) {
+    if (appAuthoringRequired(statuses)) {
       // Claim extension-wide before consuming the per-panel reservation. A
       // reopened panel that loses this claim must remain free to retry if the
       // owner later abandons delivery.
@@ -277,7 +330,7 @@ export function createAppModelHandoff(
       // The modeling skill cannot author this repository at all. Deliberately
       // does NOT consume the key: adding a Dockerfile later must make the next
       // render eligible for the handoff.
-      if (sources.every((source) => source.status === "none")) {
+      if (!hasModelableSource(sources)) {
         releaseReservation();
         return;
       }
@@ -311,11 +364,9 @@ export function createAppModelHandoff(
       // The window is long enough for a run to have both started and finished
       // inside it, so the classification this handoff was built from has to be
       // re-read before it is acted on.
-      let settled: AppModelStatus[];
+      let settled: AppModelStatus[] | null;
       try {
-        settled = await Promise.all(
-          targets.map((branch) => deps.resolveStatus(repo, branch, context))
-        );
+        settled = await resolveStatuses();
       } catch (error) {
         releaseReservation();
         throw error;
@@ -324,9 +375,16 @@ export function createAppModelHandoff(
         releaseReservation();
         return;
       }
-      if (settled.some((status) => status.freshness.status !== "missing")) {
+      if (!settled || !appAuthoringRequired(settled)) {
         releaseReservation();
         return;
+      }
+      let skillHandoff: string;
+      try {
+        skillHandoff = await buildSkillHandoff();
+      } catch (error) {
+        releaseReservation();
+        throw error;
       }
       // Read before the attempt token exists, so an edit saved while the agent
       // models is newer than this baseline and a later render can retry it.
@@ -335,14 +393,17 @@ export function createAppModelHandoff(
           deps.readSourceRevision(repo, branch, context).catch(() => "")
         )
       );
-      if (!ownsReservation()) {
-        releaseReservation();
-        return;
-      }
       // Last check before this handoff becomes observable. Everything above is
       // reversible; minting the tokens and sending the turn are not, and both
       // the source probe and the grace window gave the user time to move on.
-      if (!stillCurrent()) {
+      let currentSources;
+      try {
+        currentSources = await sourcesStillCurrent(settled);
+      } catch (error) {
+        releaseReservation();
+        throw error;
+      }
+      if (!currentSources || !stillCurrent() || !ownsReservation()) {
         releaseReservation();
         return;
       }
@@ -352,19 +413,16 @@ export function createAppModelHandoff(
       // single-branch fencing protocol — an attempt token and a recorded
       // failure are always keyed `repo::branch` — rather than gaining a second,
       // two-branch protocol that could disagree with the first.
-      const attemptToken =
-        state && state.canvasInstanceId ?
-          `${state.canvasInstanceId}::attempt-${(state.appModelAttemptGeneration ?? 0) + 1}`
-        : undefined;
+      const attemptToken = state?.canvasInstanceId ? randomUUID() : undefined;
       if (state && attemptToken) {
-        state.appModelAttemptGeneration =
-          (state.appModelAttemptGeneration ?? 0) + 1;
         state.appModelAttemptTokens ??= {};
+        state.appModelAttemptClaims ??= {};
         state.appModelAttemptEnvironments ??= {};
         state.appModelAttemptSourceRevisions ??= {};
         for (const [index, branch] of targets.entries()) {
           const tokenKey = appModelTargetKey(repo, branch);
           state.appModelAttemptTokens[tokenKey] = attemptToken;
+          state.appModelAttemptClaims[tokenKey] = claim;
           state.appModelAttemptEnvironments[tokenKey] = environmentKey ?? "";
           const sourceRevision = sourceRevisions[index];
           if (sourceRevision) {
@@ -378,6 +436,7 @@ export function createAppModelHandoff(
         await deps.send(
           appBicepHandoffMessage(
             repo,
+            skillHandoff,
             page,
             targets,
             state?.canvasInstanceId,
@@ -396,6 +455,7 @@ export function createAppModelHandoff(
             const tokenKey = appModelTargetKey(repo, branch);
             if (state.appModelAttemptTokens?.[tokenKey] === attemptToken) {
               delete state.appModelAttemptTokens[tokenKey];
+              delete state.appModelAttemptClaims?.[tokenKey];
               delete state.appModelAttemptEnvironments?.[tokenKey];
               delete state.appModelAttemptSourceRevisions?.[tokenKey];
             }
@@ -408,12 +468,16 @@ export function createAppModelHandoff(
       // runs. Keep the extension claim until its bounded expiry, while clearing
       // the panel reservation so this same view can retry after that expiry.
       deps.missingModelHandoffs.markDelivered(claim);
+      deps.announceModelingRun(repo, targets);
       releaseStateReservation();
       return;
     }
 
     if (observedClaim) deps.missingModelHandoffs.release(observedClaim);
     reserveState();
+    const present = statuses.filter(
+      (status) => status.freshness.status !== "missing"
+    );
 
     // A Radius CLI older than the one that generated the model is reported,
     // never refreshed: the skill cannot regenerate with it, and a regeneration
@@ -429,40 +493,31 @@ export function createAppModelHandoff(
     // Checked before plain staleness: a model this extension cannot prove it
     // generated needs the user's agreement, because regenerating it destroys
     // whatever they wrote by hand.
-    const unverified = present.find(
-      (status) => status.refreshable && status.freshness.requiresConfirmation
-    );
-    if (unverified) {
-      const refreshKey = refreshRequestKey(unverified);
-      if (!deps.shouldRequestRefresh(refreshKey)) {
-        releaseStateReservation();
-        return;
-      }
+    const refresh = findAppModelRefresh(present);
+    if (refresh) {
+      const { model } = refresh;
+      const refreshKey = refreshRequestKey(model);
+      let memoOwned = false;
       try {
-        await deps.send(appModelUnverifiedMessage(unverified));
-      } catch (sendError) {
+        if (
+          !(await sourcesStillCurrent([model])) ||
+          !stillCurrent() ||
+          !ownsStateReservation() ||
+          !(memoOwned = deps.shouldRequestRefresh(refreshKey))
+        ) {
+          releaseStateReservation();
+          return;
+        }
+        const skillHandoff = await buildSkillHandoff();
+        if (refresh.kind === "confirmation") {
+          await deps.send(appModelUnverifiedMessage(model, skillHandoff));
+        } else {
+          await deps.send(appModelRefreshMessage(model, skillHandoff));
+        }
+      } catch (error) {
         releaseStateReservation();
-        deps.releaseRefreshMemo(refreshKey);
-        throw sendError;
-      }
-      return;
-    }
-
-    const outdated = present.find(
-      (status) => status.refreshable && status.freshness.stale
-    );
-    if (outdated) {
-      const refreshKey = refreshRequestKey(outdated);
-      if (!deps.shouldRequestRefresh(refreshKey)) {
-        releaseStateReservation();
-        return;
-      }
-      try {
-        await deps.send(appModelRefreshMessage(outdated));
-      } catch (sendError) {
-        releaseStateReservation();
-        deps.releaseRefreshMemo(refreshKey);
-        throw sendError;
+        if (memoOwned) deps.releaseRefreshMemo(refreshKey);
+        throw error;
       }
       return;
     }

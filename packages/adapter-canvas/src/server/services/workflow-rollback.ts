@@ -10,6 +10,10 @@ import type {
   SetupCleanupOutcome,
   SetupCleanupResult
 } from "../../operations.js";
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted
+} from "@radius-project/core";
 
 // Removing the workflow files an environment setup committed, when the customer
 // has asked to roll the whole setup back.
@@ -58,6 +62,8 @@ export type PullRequestState =
   | { status: "unknown"; detail: string };
 
 export interface WorkflowRollbackPorts extends WorkflowProvenancePorts {
+  isStopped?(): boolean;
+  onResultRecorded?(entry: SetupCleanupResult): Promise<void>;
   readRepository(input: {
     repo: string;
   }): Promise<
@@ -99,6 +105,7 @@ export interface WorkflowRollbackPorts extends WorkflowProvenancePorts {
 }
 
 export interface WorkflowRollbackOutcome {
+  interrupted?: boolean;
   results: SetupCleanupResult[];
   warnings: string[];
   steps: string[];
@@ -206,6 +213,43 @@ export async function runWorkflowRollback(
   ports: WorkflowRollbackPorts
 ): Promise<WorkflowRollbackOutcome> {
   const accumulated: Accumulated = { results: [], warnings: [], steps: [] };
+  const guarded =
+    <Input, Output>(run: (value: Input) => Promise<Output>) =>
+    (value: Input): Promise<Output> => {
+      assertSetupExecutionActive(ports.isStopped);
+      return run(value);
+    };
+  try {
+    assertSetupExecutionActive(ports.isStopped);
+    const outcome = await runActiveWorkflowRollback(
+      input,
+      {
+        ...ports,
+        readRepository: guarded(ports.readRepository),
+        readPullRequest: guarded(ports.readPullRequest),
+        readFile: guarded(ports.readFile),
+        readBranchHead: guarded(ports.readBranchHead),
+        readBlob: guarded(ports.readBlob),
+        closePullRequest: guarded(ports.closePullRequest),
+        deleteBranch: guarded(ports.deleteBranch),
+        deleteFile: guarded(ports.deleteFile),
+        restoreFile: guarded(ports.restoreFile)
+      },
+      accumulated
+    );
+    assertSetupExecutionActive(ports.isStopped);
+    return outcome;
+  } catch (error) {
+    if (!isSetupExecutionInterrupted(error)) throw error;
+    return { ...accumulated, blocked: true, interrupted: true };
+  }
+}
+
+async function runActiveWorkflowRollback(
+  input: WorkflowRollbackInput,
+  ports: WorkflowRollbackPorts,
+  accumulated: Accumulated
+): Promise<WorkflowRollbackOutcome> {
   if (input.files.length === 0) return { ...accumulated, blocked: false };
 
   // GitHub deliberately answers 404 both when a file is absent and when the
@@ -426,7 +470,9 @@ async function deleteSetupBranch(
   }
   steps.push(`✅ Deleted setup branch "${branch}" and the workflows on it.`);
   for (const file of input.files) {
-    results.push(result(input.attempt, file, "deleted", null));
+    const entry = result(input.attempt, file, "deleted", null);
+    results.push(entry);
+    await ports.onResultRecorded?.(entry);
   }
   return { ...accumulated, blocked: false };
 }
@@ -465,7 +511,9 @@ async function revertFiles(
       : await deleteOne(input, file, ref, file.blobSha, ports);
     if (outcome.ok) {
       steps.push(outcome.step);
-      results.push(result(input.attempt, file, cleanupOutcome, null));
+      const recorded = result(input.attempt, file, cleanupOutcome, null);
+      results.push(recorded);
+      await ports.onResultRecorded?.(recorded);
       continue;
     }
     blocked = true;

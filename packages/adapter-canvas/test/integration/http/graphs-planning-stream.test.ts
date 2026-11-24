@@ -51,13 +51,11 @@ function start(): Harness {
   const handoffs: { repo: string; branch: string }[] = [];
   let entryMissing = false;
 
-  const entryFor = (
-    resolved: CanvasServerEntry | undefined
-  ): CanvasServerEntry | undefined => (entryMissing ? undefined : resolved);
+  const entry = { state } as CanvasServerEntry;
 
   const routes = createTestRouteTable(
     createGraphsPlanningStreamRoutes({
-      readInstanceEntry: () => entryFor({ state } as CanvasServerEntry),
+      readInstanceEntry: () => (entryMissing ? undefined : entry),
       resolveBranchForRequest: (_entry, _repo, requestedBranch) => {
         if (script.branchResolutionThrows) {
           return Promise.reject(script.branchResolutionThrows);
@@ -120,6 +118,8 @@ function start(): Harness {
       listBranchPaths: () => Promise.resolve([]),
       workspaceGraphJsonPath: (_current, bicepRepoPath) =>
         `/ws/${bicepRepoPath}.graph.json`,
+      graphDefinitionHash: (content, fingerprint) =>
+        JSON.stringify([content, fingerprint]),
       radArtifactsDirForSelection: () =>
         Promise.resolve({ dir: "/tmp/rad", remote: true }),
       buildGraphViaRad: async (_content, _bicepPath, options) => {
@@ -135,6 +135,7 @@ function start(): Harness {
         ];
       },
       canvasGraphResources: (values) => values as CanvasGraphResource[],
+      removeDirectory: () => {},
       errorMessage: (error) =>
         error instanceof Error ? error.message : String(error),
       logError: () => {}
@@ -262,7 +263,13 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
         event: "progress",
         data: { message: "Mapped 1 resource(s) — rendering graph..." }
       },
-      { event: "done", data: { reload: true } }
+      {
+        event: "done",
+        data: {
+          reload: true,
+          saveWarning: expect.stringContaining("may be stale")
+        }
+      }
     ]);
     // Byte-exact framing: no leading data, single trailing terminator.
     expect(raw.startsWith("event: progress\ndata: ")).toBe(true);
@@ -309,6 +316,7 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
       event: "done",
       data: {
         reload: true,
+        saveWarning: expect.stringContaining("may be stale"),
         resolvedBranch: "renamed-worktree"
       }
     });
@@ -407,7 +415,10 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
     });
     expect(await stream.next()).toEqual({
       event: "done",
-      data: { reload: true }
+      data: {
+        reload: true,
+        saveWarning: expect.stringContaining("may be stale")
+      }
     });
     await stream.cancel();
   });

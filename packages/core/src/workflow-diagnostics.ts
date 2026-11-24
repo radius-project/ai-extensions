@@ -525,8 +525,32 @@ export function extractRadDeployError(
     const out = block.join("\n").trim();
     return out.slice(0, maxChars);
   }
-  // Fallback: collect trailing error-ish lines.
-  return extractErrorLines(lines.join("\n"), 20).join("\n").slice(0, maxChars);
+  // Fallback: error annotations first, then trailing error-ish lines. A step
+  // that stops a run says why in an annotation, and the steps that always run
+  // after it can write more error-ish lines than the excerpt keeps.
+  const annotations = lines.filter(isFailureAnnotation).map((l) => l.trim());
+  const room = FALLBACK_ERROR_LINES - annotations.length;
+  const trailing =
+    room > 0 ?
+      extractErrorLines(
+        lines.filter((l) => !isFailureAnnotation(l)).join("\n"),
+        room
+      )
+    : [];
+  return [...annotations.slice(0, FALLBACK_ERROR_LINES), ...trailing]
+    .join("\n")
+    .slice(0, maxChars);
+}
+
+const FALLBACK_ERROR_LINES = 20;
+
+// GitHub writes each `::error::` workflow command as a `##[error]` line. Its own
+// "Process completed with exit code" annotation names no cause.
+function isFailureAnnotation(line: string): boolean {
+  return (
+    /^\s*##\[error\]/.test(line) &&
+    !/^\s*##\[error\]Process completed with exit code\b/.test(line)
+  );
 }
 
 function extractFullRadDeployError(logText: string): string {

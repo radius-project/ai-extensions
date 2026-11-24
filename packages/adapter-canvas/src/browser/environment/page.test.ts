@@ -96,12 +96,13 @@ const REQUIRED_SELECTS = [
   "azure-rg-select",
   "azure-namespace-select",
   "aws-cluster-select",
-  "aws-namespace-select",
-  "aws-vpc-select"
+  "aws-namespace-select"
 ] as const;
 
 const REQUIRED_ELEMENTS = [
   "aws-role-help",
+  "aws-vpc-value",
+  "aws-cluster-note",
   "pane-environments",
   "pane-credentials",
   "env-landing",
@@ -320,7 +321,8 @@ function awsDiscovery(
   subnets: ReadonlyArray<{ id: string; availabilityZone: string }> = [
     { id: "subnet-a", availabilityZone: "us-east-1a" },
     { id: "subnet-b", availabilityZone: "us-east-1b" }
-  ]
+  ],
+  cluster: Record<string, unknown> = {}
 ) {
   return {
     clusters: [
@@ -329,7 +331,9 @@ function awsDiscovery(
         name: "eks-1",
         vpcId: "vpc-1",
         authenticationMode: "API",
-        usable: true
+        status: "ACTIVE",
+        usable: true,
+        ...cluster
       }
     ],
     namespaces: ["default"],
@@ -338,7 +342,8 @@ function awsDiscovery(
       ...subnet,
       name: subnet.id,
       vpcId: "vpc-1",
-      public: false
+      routing: "private",
+      zoneKind: "standard"
     }))
   };
 }
@@ -1422,7 +1427,6 @@ describe("initializeEnvironmentPage", () => {
     pageInput(page, "env-name-input").value = "prod";
     pageInput(page, "aws-cluster-select").value = "eks-1";
     pageInput(page, "aws-namespace-select").value = "default";
-    pageInput(page, "aws-vpc-select").value = "vpc-1";
     page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, (init) => {
       createInit = init;
       return jsonResponse({ operationId: "op-aws" }, true, 202);
@@ -1542,6 +1546,30 @@ describe("initializeEnvironmentPage", () => {
     await openWithProfile(page, "aws");
 
     expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+  });
+
+  it("disables Create Environment after Refresh clears a cluster that can no longer be used", async () => {
+    const page = fixture();
+    await openWithProfile(page, "aws");
+    expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      jsonResponse(
+        awsDiscovery(undefined, {
+          status: "DELETING",
+          usable: false,
+          unusableReason: "status"
+        })
+      )
+    );
+
+    page.elements["aws-refresh-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(pageInput(page, "aws-cluster-select").value).toBe("");
+    expect(pageInput(page, "deploy-btn").disabled).toBe(true);
+    expect(fakeText(page.elements["aws-cluster-note"])).toContain(
+      "eks-1 is DELETING."
+    );
   });
 
   it("dispatches only one create while a request is pending", async () => {
@@ -2472,7 +2500,10 @@ describe("initializeEnvironmentPage", () => {
       const acknowledgement = fakeText(page.elements["env-confirm-message"]);
       expect(acknowledgement).toContain('The environment "dev" was deleted');
       expect(acknowledgement).toContain(
-        "Its trust subject and permission policy were removed from the deploy IAM role. The role itself was kept"
+        "The progress panel lists what was removed from the deploy IAM role and the cluster's access, and what was kept. Radius never deletes the role itself"
+      );
+      expect(acknowledgement).not.toContain(
+        "Its trust subject and permission policy were removed"
       );
       expect(acknowledgement).not.toContain("Microsoft Entra");
       const consoleLink = page.elements["env-confirm-message"].children[1];

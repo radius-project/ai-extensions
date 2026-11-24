@@ -12,6 +12,10 @@ import type { CanvasState, SharedCredentials } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { EnvironmentOperationRunner } from "../../../src/server.js";
 import type { EnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
+import { createDeploymentTools } from "../../../src/runtime/deployment-tools.js";
+import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
+import { fetchWorkspaceFile } from "../../../src/workspace.js";
+import { createDeploymentRepository } from "@radius-project/adapter-shared";
 
 // Resolved from this module rather than the process directory so the suite
 // behaves identically whether it is launched from the workspace root or from
@@ -56,6 +60,9 @@ export const VERIFICATION_WORKFLOW_CONTENT_SHA256 = createHash("sha256")
 type ServerModule = typeof import("../../../src/server.js");
 type HarnessServerRuntime = ServerModule &
   ReturnType<ServerModule["createProductionCanvasServerRuntime"]> & {
+    deploymentRuntime: ReturnType<
+      ServerModule["createProductionDeploymentRuntime"]
+    >;
     setEnvironmentOperationRunner(
       runner: EnvironmentOperationRunner | null
     ): void;
@@ -145,6 +152,36 @@ export interface FakeCliCommand {
   stdout?: string;
   stderr?: string;
   writeFiles?: Array<{ path: string; content: string; executable?: boolean }>;
+  writeFilesDirectoryArg?: string;
+  /**
+   * Answers at most this many calls. Later calls fall through to the next
+   * matching command, so a scenario can answer one command differently the
+   * second time it runs.
+   */
+  times?: number;
+}
+
+/**
+ * Whether a command may answer another call, given how many it answered.
+ * Injected into the generated script by source, like `fakeCliArgsMatch`.
+ */
+export function fakeCliCommandAvailable(
+  command: Pick<FakeCliCommand, "times">,
+  answered: number
+): boolean {
+  return command.times === undefined || answered < command.times;
+}
+
+export function fakeCliWriteDirectory(
+  command: Pick<FakeCliCommand, "writeFilesDirectoryArg">,
+  args: readonly string[],
+  cwd: string
+): string {
+  if (!command.writeFilesDirectoryArg) return cwd;
+  const index = args.indexOf(command.writeFilesDirectoryArg);
+  if (index < 0 || !args[index + 1])
+    throw new Error("Missing fake CLI output directory argument.");
+  return args[index + 1];
 }
 
 /**
@@ -535,6 +572,24 @@ async function createWindowsShim(fakeBin: string): Promise<void> {
   }
 }
 
+export async function writeFakeCliFile(
+  target: string,
+  content: string,
+  scenarioPath: string
+): Promise<void> {
+  if (target !== scenarioPath) {
+    await fs.writeFile(target, content, "utf8");
+    return;
+  }
+  const temporary = `${target}.next-${process.pid}`;
+  try {
+    await fs.writeFile(temporary, content, "utf8");
+    await fs.rename(temporary, target);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
+}
+
 async function writeFakeCli(fakeBin: string): Promise<string> {
   // Keep the script at suite scope rather than inside an individual workspace.
   // A background server task may already have spawned a shim when teardown
@@ -580,6 +635,24 @@ function argsMatch(command) {
   return (${fakeCliArgsMatch.toString()})(command, args);
 }
 
+function available(command, answered) {
+  return (${fakeCliCommandAvailable.toString()})(command, answered);
+}
+
+async function answeredBy(index) {
+  if (!logPath) return 0;
+  let text = "";
+  try {
+    text = await fs.readFile(logPath, "utf8");
+  } catch {
+    return 0;
+  }
+  return text
+    .split("\\n")
+    .filter(Boolean)
+    .filter((line) => JSON.parse(line).commandIndex === index).length;
+}
+
 if (!scenarioPath) {
   await appendLog({ tool, args, stdin, matched: false, error: "missing scenario" });
   console.error("RADIUS_FAKE_CLI_SCENARIO is not set");
@@ -594,9 +667,15 @@ try {
   // exit quietly rather than printing a stack trace into the suite output.
   process.exit(127);
 }
-const command = (scenario.commands || []).find(
-  (candidate) => candidate.tool === tool && argsMatch(candidate) && envMatches(candidate.env)
-);
+const commands = scenario.commands || [];
+let commandIndex = -1;
+for (const [index, candidate] of commands.entries()) {
+  if (candidate.tool !== tool || !argsMatch(candidate) || !envMatches(candidate.env)) continue;
+  if (!available(candidate, await answeredBy(index))) continue;
+  commandIndex = index;
+  break;
+}
+const command = commands[commandIndex];
 
 if (!command) {
   await appendLog({ tool, args, stdin, matched: false });
@@ -604,15 +683,16 @@ if (!command) {
   process.exit(127);
 }
 
+const writeDirectory = (${fakeCliWriteDirectory.toString()})(command, args, process.cwd());
 for (const file of command.writeFiles || []) {
   const expanded = file.path.replace(/\\$([A-Z0-9_]+)/g, (_match, name) => process.env[name] || "");
-  const target = path.isAbsolute(expanded) ? expanded : path.resolve(process.cwd(), expanded);
+  const target = path.isAbsolute(expanded) ? expanded : path.resolve(writeDirectory, expanded);
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, file.content, "utf8");
+  await (${writeFakeCliFile.toString()})(target, file.content, scenarioPath);
   if (file.executable && process.platform !== "win32") await fs.chmod(target, 0o755);
 }
 
-await appendLog({ tool, args, stdin, matched: true, exitCode: command.exitCode || 0 });
+await appendLog({ tool, args, stdin, matched: true, commandIndex, exitCode: command.exitCode || 0 });
 if (command.stdout) process.stdout.write(command.stdout);
 if (command.stderr) process.stderr.write(command.stderr);
 process.exit(command.exitCode || 0);
@@ -689,13 +769,12 @@ export function baseCanvasState(workspacePath: string): CanvasState {
 }
 
 export function defaultFakeCliScenario(): FakeCliScenario {
+  const inspectionRevision = "a".repeat(40);
   const appBicep404 = {
     tool: "gh",
     args: [
       "api",
-      `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`,
-      "--jq",
-      ".content"
+      `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${WORKTREE_BRANCH}`
     ],
     exitCode: 1,
     stderr: "gh: Not Found (HTTP 404)"
@@ -967,11 +1046,71 @@ export function defaultFakeCliScenario(): FakeCliScenario {
           "api",
           `/repos/${REPOSITORY}/actions/runs/1`,
           "--jq",
-          '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
+          '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "") + "\\t" + ((.run_attempt // 0) | tostring) + "\\t" + (.head_sha // "") + "\\t" + (.display_title // "") + "\\t" + ((.id // 0) | tostring) + "\\t" + (.repository.full_name // "") + "\\t" + (.event // "")'
         ],
-        stdout: ".github/workflows/run-rad-commands.yml\tcompleted\tsuccess"
+        stdout: `.github/workflows/run-rad-commands.yml\tcompleted\tsuccess\t1\t${"a".repeat(40)}\t\t1\t${REPOSITORY}\tworkflow_dispatch`
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/actions/runs/1/artifacts?per_page=100`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            artifacts: [
+              {
+                id: 1,
+                name: "radius-deploy-status-fixture",
+                workflow_run: { id: 1 }
+              }
+            ]
+          })
+      },
+      {
+        tool: "gh",
+        argsPrefix: [
+          "run",
+          "download",
+          "1",
+          "--name",
+          "radius-deploy-status-fixture",
+          "--dir"
+        ],
+        argsSuffix: ["--repo", REPOSITORY],
+        writeFilesDirectoryArg: "--dir",
+        writeFiles: [
+          {
+            path: "deploy-progress.json",
+            content: JSON.stringify({
+              schemaVersion: 1,
+              application: "radius-app",
+              environment: "fixture-environment",
+              runId: 1,
+              sequence: 1,
+              resources: []
+            })
+          }
+        ]
       },
       appBicep404,
+      ...[WORKTREE_BRANCH, inspectionRevision].map((ref) => ({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/commits/${encodeURIComponent(ref)}`
+        ],
+        stdout: JSON.stringify({ sha: inspectionRevision })
+      })),
+      ...[".radius/app.bicep", "app.bicep"].map((file) =>
+        missingGhContent(
+          `/repos/${REPOSITORY}/contents/${file}?ref=${inspectionRevision}`
+        )
+      ),
       missingGhContent(
         "/repos/radius-project/radius/contents/.github/extension/verify-azure.yml?ref=main"
       ),
@@ -999,7 +1138,12 @@ export function defaultFakeCliScenario(): FakeCliScenario {
       },
       {
         tool: "aws",
-        args: ["sts", "get-caller-identity", "--output", "json"],
+        args: ["--version"],
+        stdout: "aws-cli/2.39.0 Python/3.13"
+      },
+      {
+        tool: "aws",
+        argsPrefix: ["sts", "get-caller-identity", "--output", "json"],
         stdout: JSON.stringify({
           Account: "123456789012",
           Arn: "arn:aws:iam::123456789012:user/fixture-aws-user"
@@ -1032,6 +1176,251 @@ export function defaultFakeCliScenario(): FakeCliScenario {
       }
     ]
   };
+}
+
+export function cleanupHistoryScenario(
+  knownApplication: boolean
+): FakeCliScenario {
+  const scenario = defaultFakeCliScenario();
+  scenario.commands.push(
+    {
+      tool: "gh",
+      args: ["api", `/repos/${REPOSITORY}`, "--jq", ".default_branch"],
+      stdout: WORKTREE_BRANCH
+    },
+    ...[
+      "verify-azure.yml",
+      "verify-aws.yml",
+      "run-rad-commands.yml",
+      "run-rad-commands-azure.yml",
+      "delete-application.yml",
+      "delete-azure.yml",
+      "delete-environment.yml",
+      "delete-environment-azure.yml"
+    ].map((file) =>
+      missingGhContent(
+        `/repos/radius-project/ai-extensions/contents/.github/extension/${file}?ref=main`
+      )
+    )
+  );
+  const find = (endpoint: string, jq?: string): FakeCliCommand => {
+    const command = scenario.commands.find(
+      (candidate) =>
+        candidate.args?.includes(endpoint) &&
+        (jq === undefined || candidate.args.at(-1) === jq)
+    );
+    if (!command)
+      throw new Error(`Missing cleanup fixture command: ${endpoint}`);
+    return command;
+  };
+  find(
+    `/repos/${REPOSITORY}/deployments?per_page=100&environment=fixture-environment`
+  ).stdout = "8\n7\n6";
+  find(
+    `/repos/${REPOSITORY}/deployments?environment=fixture-environment&per_page=10`
+  ).stdout = "8\n7\n6";
+  const status = find(
+    `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+    '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+  );
+  const run = find(
+    `/repos/${REPOSITORY}/actions/runs/1`,
+    '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "") + "\\t" + ((.run_attempt // 0) | tostring) + "\\t" + (.head_sha // "") + "\\t" + (.display_title // "") + "\\t" + ((.id // 0) | tostring) + "\\t" + (.repository.full_name // "") + "\\t" + (.event // "")'
+  );
+  if (!status.args || !run.args)
+    throw new Error("Missing cleanup fixture arguments");
+  for (const id of ["8", "7", "6"]) {
+    const runId = id === "6" ? 41 : 42;
+    const args = status.args.map((arg) => arg.replace("dep-1", id));
+    scenario.commands.push({
+      tool: "gh",
+      args,
+      stdout: `${id === "6" ? "success" : "failure"}\thttps://github.com/${REPOSITORY}/actions/runs/${runId}\t`
+    });
+    scenario.commands.push({
+      tool: "gh",
+      args: [...args.slice(0, -1), '.[0].log_url // .[0].target_url // ""'],
+      stdout: `https://github.com/${REPOSITORY}/actions/runs/${runId}`
+    });
+    if (id !== "6")
+      scenario.commands.push(
+        {
+          tool: "gh",
+          args: [...args.slice(0, -1), '.[0].description // ""'],
+          stdout: ""
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            "--method",
+            "POST",
+            `/repos/${REPOSITORY}/deployments/${id}/statuses`,
+            "-f",
+            "state=inactive",
+            "-F",
+            "auto_inactive=false",
+            "-f",
+            "description=unarmed",
+            "-f",
+            `log_url=https://github.com/${REPOSITORY}/actions/runs/42`
+          ],
+          exitCode: 1,
+          stderr: "Fixture cleanup is not armed"
+        }
+      );
+  }
+  for (const runId of [42, 41]) {
+    const current = runId === 42;
+    const workflow =
+      current && knownApplication ?
+        "delete-application.yml"
+      : "run-rad-commands.yml";
+    scenario.commands.push({
+      tool: "gh",
+      args: ["api", `/repos/${REPOSITORY}/actions/runs/${runId}`],
+      stdout: JSON.stringify({
+        path: `.github/workflows/${workflow}`,
+        status: "completed",
+        conclusion: current ? "failure" : "success"
+      })
+    });
+    scenario.commands.push({
+      tool: "gh",
+      args: run.args.map((arg) => arg.replace("/runs/1", `/runs/${runId}`)),
+      stdout: `.github/workflows/${workflow}\tcompleted\t${current ? "failure" : "success"}\t1\t${"a".repeat(40)}\t\t${runId}\t${REPOSITORY}\tworkflow_dispatch`
+    });
+    const name = current ? "rad-delete-result" : "radius-deploy-status-fixture";
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/actions/runs/${runId}/artifacts?per_page=100`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            artifacts:
+              current && !knownApplication ?
+                []
+              : [{ id: runId, name, workflow_run: { id: runId } }]
+          })
+      },
+      {
+        tool: "gh",
+        argsPrefix: ["run", "download", String(runId), "--name", name, "--dir"],
+        argsSuffix: ["--repo", REPOSITORY],
+        writeFilesDirectoryArg: "--dir",
+        writeFiles: [
+          {
+            path: current ? "rad-delete-result.json" : "deploy-progress.json",
+            content: JSON.stringify(
+              current ?
+                { resourceType: "application", name: "radius-app" }
+              : {
+                  schemaVersion: 1,
+                  application: "radius-app",
+                  environment: "fixture-environment",
+                  runId,
+                  sequence: 1,
+                  state: "succeeded",
+                  resources: []
+                }
+            )
+          }
+        ]
+      }
+    );
+  }
+  scenario.commands.push({
+    tool: "gh",
+    args: [
+      "api",
+      `/repos/${REPOSITORY}/actions/artifacts?per_page=100&page=1`,
+      "--include",
+      "--method",
+      "GET"
+    ],
+    stdout:
+      "HTTP/2 200\n\n" +
+      JSON.stringify({
+        artifacts: [
+          {
+            id: 41,
+            name: "radius-deploy-status-fixture",
+            workflow_run: { id: 41 }
+          }
+        ]
+      })
+  });
+  const download = scenario.commands.find(
+    (command) => command.argsPrefix?.[2] === "41"
+  );
+  if (!download?.writeFiles)
+    throw new Error("Missing older graph artifact fixture");
+  download.writeFiles.push({
+    path: "deploy-graph.json",
+    content: appGraphJson()
+  });
+  return scenario;
+}
+
+export function armCleanupHistory(
+  scenario: FakeCliScenario,
+  marker: string,
+  partial: boolean
+): FakeCliScenario {
+  const states = [0, 1, 2].map((count) => {
+    const next = structuredClone(scenario);
+    for (const command of next.commands) {
+      const id = /\/deployments\/([78])\/statuses/.exec(
+        command.args?.find((arg) => arg.includes("/deployments/")) ?? ""
+      )?.[1];
+      if (!id || !command.args) continue;
+      const written = count >= (id === "8" ? 1 : 2);
+      if (command.args.includes("POST")) {
+        command.args = command.args.map((arg) =>
+          arg.startsWith("description=") ? `description=${marker}` : arg
+        );
+        command.exitCode = written ? 0 : 1;
+        command.stderr = written ? "" : "Fixture marker write refused";
+        delete command.writeFiles;
+      } else if (command.args.at(-1) === '.[0].description // ""') {
+        command.stdout = written ? marker : "";
+      } else if (written) {
+        const runUrl = `https://github.com/${REPOSITORY}/actions/runs/42`;
+        command.stdout =
+          command.args.at(-1) === '.[0].log_url // .[0].target_url // ""' ?
+            runUrl
+          : `inactive\t${runUrl}\t${marker}`;
+      }
+    }
+    return next;
+  });
+  for (const index of [1, 0]) {
+    if (partial && index === 1) continue;
+    const command = states[index].commands.find(
+      (candidate) =>
+        candidate.args?.includes("POST") &&
+        candidate.args.includes(
+          `/repos/${REPOSITORY}/deployments/${index === 0 ? 8 : 7}/statuses`
+        )
+    );
+    if (!command) throw new Error("Missing cleanup transition");
+    command.exitCode = 0;
+    command.stderr = "";
+    command.writeFiles = [
+      {
+        path: "$RADIUS_FAKE_CLI_SCENARIO",
+        content: JSON.stringify(states[index + 1])
+      }
+    ];
+  }
+  return states[0];
 }
 
 export interface AzureDiscoveryFixture {
@@ -1248,7 +1637,7 @@ export async function removeDirectoryWithRetries(
 function missingGhContent(pathname: string): FakeCliCommand {
   return {
     tool: "gh",
-    args: ["api", pathname, "--jq", ".content"],
+    args: ["api", pathname],
     exitCode: 1,
     stderr: "gh: Not Found (HTTP 404)"
   };
@@ -1293,8 +1682,9 @@ export async function unwindHarnessConstruction(
 }
 
 export class CanvasHarness {
+  readonly deploymentTools: ReturnType<typeof createDeploymentTools>;
   readonly accountContext: EnvironmentAccountContext;
-  readonly entry: CanvasServerEntry;
+  entry: CanvasServerEntry;
   readonly instanceId: string;
   readonly rootDir: string;
   readonly fakeBin: string;
@@ -1342,6 +1732,23 @@ export class CanvasHarness {
     this.originalEnv = input.originalEnv;
     this.originalFetch = input.originalFetch;
     this.serverModule = input.serverModule;
+    const readModel = createDeployModelSource({
+      readWorkspace: fetchWorkspaceFile,
+      readRepository: createDeploymentRepository({
+        execute: input.ghModule.cliExec,
+        redactDiagnostic: input.ghModule.redactGhCredentials
+      }).readFileResult,
+      redactDiagnostic: input.ghModule.redactGhCredentials
+    });
+    this.deploymentTools = createDeploymentTools({
+      runtime: input.serverModule.deploymentRuntime,
+      readModel,
+      workspace: async () => ({
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        workspacePath: input.workspacePath
+      })
+    });
     this.ghModule = input.ghModule;
   }
 
@@ -1369,6 +1776,8 @@ export class CanvasHarness {
     );
     const originalFetch = globalThis.fetch;
     let serverModule: HarnessServerRuntime | undefined;
+    let deploymentRuntime:
+      HarnessServerRuntime["deploymentRuntime"] | undefined;
     let ghModule: GhModule | undefined;
     let sharedModule: SharedModule | undefined;
     let entry: CanvasServerEntry | undefined;
@@ -1454,6 +1863,10 @@ export class CanvasHarness {
       const accountContext = createProductionGitHubAccountContext();
       const { createTestCanvasServerRuntime } =
         await import("../../support/server/production-runtime.js");
+      deploymentRuntime = production.createProductionDeploymentRuntime({
+        awsEnabled: options.awsEnabled ?? false
+      });
+      deploymentRuntime.subscribeDispatch(production.invalidateDeployListCache);
       let environmentOperationRunner: EnvironmentOperationRunner | undefined;
       serverModule = {
         ...production,
@@ -1461,10 +1874,14 @@ export class CanvasHarness {
           executionOwner: createEnvironmentExecutionOwner(),
           accountContext,
           awsEnabled: options.awsEnabled ?? false,
+          deploymentRuntime,
           get environmentOperationRunner() {
             return environmentOperationRunner;
           }
         }),
+        deploymentRuntime,
+        setDeployRepairHandoff: deploymentRuntime.setDeployRepairHandoff,
+        setDeployFailureNotice: deploymentRuntime.setDeployFailureNotice,
         setEnvironmentOperationRunner: (runner) => {
           environmentOperationRunner = runner ?? undefined;
         }
@@ -1575,7 +1992,8 @@ export class CanvasHarness {
                   cleanupServerModule
                 )
             : undefined,
-          resetState: () => {
+          resetState: async () => {
+            await deploymentRuntime?.owner.shutdown(2000);
             cleanupServerModule?.resetListingCaches();
             ghModule?.resetGhIdentityCache();
             if (sharedModule)
@@ -1597,6 +2015,20 @@ export class CanvasHarness {
 
   get baseUrl(): string {
     return this.entry.baseUrl;
+  }
+
+  get deploymentOwner() {
+    return this.serverModule.deploymentRuntime.owner;
+  }
+
+  async reopenServer(): Promise<void> {
+    await this.page.goto("about:blank");
+    const page = this.entry.page;
+    await this.serverModule.stopServer(this.instanceId, true);
+    this.entry = await this.serverModule.getOrCreateServer(
+      this.instanceId,
+      page
+    );
   }
 
   renameWorkspaceBranch(branch: string): void {
@@ -1728,6 +2160,129 @@ export class CanvasHarness {
     await operationModule.operations.persist();
     this.seededOperationIds.add(restored.operationId);
     return restored.operationId;
+  }
+
+  /**
+   * An AWS setup the extension stopped during Authorize deploy identity,
+   * restored the way a restart restores it. It created its GitHub environment
+   * and still records the deploy identity lock it held.
+   */
+  async seedInterruptedAwsSetup(
+    lock: {
+      policyArn: string;
+      policyId: string;
+    },
+    // Records that the setup created its deploy role and permission policy.
+    { createdRole = false }: { createdRole?: boolean } = {}
+  ): Promise<string> {
+    const operationModule: OperationsModule =
+      await import("../../../src/operations.js");
+    const operation = operationModule.createOperation({
+      operationId: "op_chromium_interrupted_aws_setup",
+      provider: "aws",
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      stages: operationModule.buildStages({ includeIdentity: true }),
+      journey: { origin: "environments" }
+    });
+    operation.context = { githubLogin: "repo-user" };
+    operation.resumeRequest = {
+      needsAzureCredentials: false,
+      github: { login: "repo-user", credentialSource: "keyring" },
+      environment: {
+        repo: REPOSITORY,
+        environment: "fixture-environment",
+        provider: "aws",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "fixture-cluster",
+        roleName: "radius-deploy-fixture-radius-app",
+        existingRoleArn: "",
+        vpcId: "vpc-0f1e",
+        subnetIds: "subnet-a,subnet-b"
+      }
+    };
+    operationModule.recordGitHubEnvironment(operation, {
+      state: "created",
+      repo: REPOSITORY,
+      name: "fixture-environment",
+      providerId: "123"
+    });
+    operationModule.enterStage(
+      operation,
+      operationModule.STAGE_AUTHORIZE_IDENTITY
+    );
+    operationModule.setContext(operation, { awsDeployIdentityLock: lock });
+    if (createdRole) {
+      const roleArn =
+        "arn:aws:iam::123456789012:role/radius-deploy-fixture-radius-app";
+      operationModule.recordAwsRole(operation, {
+        state: "created",
+        origin: "this_operation",
+        roleArn,
+        roleName: "radius-deploy-fixture-radius-app",
+        roleId: "AROA1"
+      });
+      operationModule.recordAwsRolePolicy(operation, {
+        roleArn,
+        roleName: "radius-deploy-fixture-radius-app",
+        roleId: "AROA1",
+        policyName: "radius-deploy-fixture-environment-1"
+      });
+    }
+    operationModule.setExecutionActive(operation, true);
+    const restored = operationModule.fromPersistedOperation(
+      JSON.parse(
+        JSON.stringify(operationModule.toPersistedOperation(operation))
+      )
+    );
+    operationModule.reconcileRestoredOperation(restored);
+    operationModule.operations.put(restored);
+    await operationModule.operations.persist();
+    this.seededOperationIds.add(restored.operationId);
+    return restored.operationId;
+  }
+
+  /**
+   * A live AWS setup waiting for a deploy identity lock another run has held
+   * long enough for Remove lock to be offered.
+   */
+  async seedAwsLockWait(
+    lock: {
+      policyArn: string;
+      policyId: string;
+    },
+    wait: { since?: string; stopped?: boolean } = {}
+  ): Promise<string> {
+    const operationModule: OperationsModule =
+      await import("../../../src/operations.js");
+    const operation = operationModule.createOperation({
+      operationId: "op_chromium_aws_lock_wait",
+      provider: "aws",
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      stages: operationModule.buildStages({ includeIdentity: true }),
+      journey: { origin: "environments" }
+    });
+    operation.context = { githubLogin: "repo-user" };
+    operationModule.enterStage(
+      operation,
+      operationModule.STAGE_AUTHORIZE_IDENTITY
+    );
+    operationModule.setContext(operation, {
+      awsLockWait: {
+        ...lock,
+        holder: "The setup of environment prod in fixture/app",
+        holderOperationId: "op_chromium_aws_lock_holder",
+        since: wait.since ?? "2026-10-30T11:00:00Z",
+        stopped: wait.stopped ?? false,
+        removable: true
+      }
+    });
+    operationModule.operations.put(operation);
+    await operationModule.operations.persist();
+    this.seededOperationIds.add(operation.operationId);
+    return operation.operationId;
   }
 
   async operationRecord(operationId: string): Promise<Record<string, unknown>> {
@@ -1944,25 +2499,27 @@ export class CanvasHarness {
     await captureCleanupError(errors, () => closePage(this.page));
     const stop = () =>
       stopHarnessServer(this.entry, this.instanceId, this.serverModule);
-    if (this.repairHandoffRegistered) {
-      const lease = this.entry.state.deploymentMutation;
-      // The detached monitor releases its lease in finally. Shutdown revokes
-      // its scope, but credentials and the host port must outlive that release.
-      await stopAndDrainHarnessDeployment(
-        stop,
-        async () => {
+    const lease = this.entry.state.deploymentMutation;
+    await stopAndDrainHarnessDeployment(
+      stop,
+      async () => {
+        const drained =
+          await this.serverModule.deploymentRuntime.owner.shutdown(2000);
+        if (!drained.complete)
+          throw new Error(
+            `Deployment tasks did not drain: ${drained.pending.join(", ")}`
+          );
+        if (this.repairHandoffRegistered) {
           await expect
             .poll(() => harnessDeploymentSettled(this.entry.state, lease), {
               timeout: 5_000
             })
             .toBe(true);
-        },
-        () => this.setDeployRepairHandoff(null),
-        errors
-      );
-    } else {
-      await captureCleanupError(errors, stop);
-    }
+        }
+      },
+      () => this.serverModule.setDeployRepairHandoff(null),
+      errors
+    );
     // Drain any identity probe this test started before restoring the
     // environment: a probe that settled after the next test reset the cache
     // would publish this test's identity into that test's page.
@@ -1990,13 +2547,13 @@ export class CanvasHarness {
   }
 
   private async installNetworkGuard(): Promise<void> {
-    const allowedOrigin = new URL(this.entry.baseUrl).origin;
     // Context routing also intercepts a popup's initial navigation. Page-level
     // routing starts too late for target="_blank" links and could allow a live
     // GitHub or cloud URL to escape the offline harness.
     await this.page.context().route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
+      const allowedOrigin = new URL(this.entry.baseUrl).origin;
       if (url.origin !== allowedOrigin) {
         this.externalRequests.push(request.url());
         await route.abort();

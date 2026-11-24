@@ -1,6 +1,10 @@
 import type { SetupWorkflowCommandResult } from "./setup-workflow-contracts.js";
 import type { SetupWorkflowRecoveryPort } from "./setup-workflow-recovery.js";
-import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 export interface SetupEnvironmentVariableRecord {
   repo: string;
   environment: string;
@@ -25,11 +29,14 @@ export async function setSetupEnvironmentVariable(
       message: string
     ): Promise<SetupWorkflowCommandResult>;
     digest(value: string): string;
+    isStopped?(): boolean;
     recovery?: SetupWorkflowRecoveryPort;
     recordVariable(entry: SetupEnvironmentVariableRecord): void;
   }
 ): Promise<boolean> {
   if (!value) return false;
+  const assertActive = () => assertSetupExecutionActive(ports.isStopped);
+  assertActive();
   const args = [
     "variable",
     "set",
@@ -65,6 +72,7 @@ export async function setSetupEnvironmentVariable(
       "api",
       `/repos/${input.targetRepo}/environments/${encodeURIComponent(input.envName)}`
     ]);
+    assertActive();
     if (environment.code !== 0 && environment.code !== "0") {
       return {
         state: "transient",
@@ -131,6 +139,7 @@ export async function setSetupEnvironmentVariable(
       `/repos/${input.targetRepo}/environments/` +
       `${encodeURIComponent(input.envName)}/variables/${encodeURIComponent(name)}`;
     const current = await ports.run(["api", path]);
+    assertActive();
     if (current.code !== 0 && current.code !== "0") {
       if (
         /(?:HTTP\s+404|\bNot Found\b)/i.test(
@@ -238,6 +247,8 @@ export async function setSetupEnvironmentVariable(
     kind: mutationKind,
     target: mutationTarget,
     intent: { name, value, valueSha256, previousKnown, previousValue },
+    assertActive,
+    rethrowReconciliationError: isSetupExecutionInterrupted,
     validateBeforeMutation: async () => {
       const current = await readVariable();
       if (current.state === "replacement") {
@@ -262,10 +273,14 @@ export async function setSetupEnvironmentVariable(
         );
       }
     },
-    mutate: () => ports.run(args),
+    mutate: () => {
+      assertActive();
+      return ports.run(args);
+    },
     accept: (result) => result,
     onConfirmed: recordVariable,
     reconcile: async () => {
+      assertActive();
       const observed = await readVariable();
       if (observed.state === "absent") {
         return {

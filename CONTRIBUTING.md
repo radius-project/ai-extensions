@@ -138,13 +138,35 @@ Pull requests run the same comparison as the **Visual comparisons** check whenev
 
 The container supplies canonical Linux rasterization on every developer host; it does not prove native Canvas functionality on that host. The separate reliability workflow continues to qualify behavioral checks natively on Ubuntu, Windows, and macOS.
 
+## Required merge checks
+
+The `main` ruleset must require these exact check names, with GitHub Actions as their source except for DCO:
+
+- `CI gate`
+- `Action shell helpers`
+- `Deploy-progress artifact uploader`
+- `dependency-review / dependency-review`
+- `check / Check registry URLs`
+- `Visual comparisons`
+- `DCO` (the DCO app)
+
+`CI gate` waits for every job in the Build workflow, including both Chromium shards, Windows checks, coverage, library checks, and every plugin build. It runs even if another job fails. It fails if any dependency fails, is cancelled, or is skipped. When adding a Build job, add it to the gate's `needs` list; the workflow contract test checks this list.
+
+Workflow files do not set required checks in GitHub. After merging a change to this list or to a check name, a repository administrator must update **Settings > Rules > Rulesets > main > Require status checks to pass**. Keep the existing rules, check sources, and the requirement for branches to be up to date. A failed required check blocks a normal merge; the ruleset's existing bypass permissions remain unchanged.
+
+`Visual comparisons` can skip when there are no visual changes. Changeset comments and coverage service reports remain advisory. Live upstream tests, reliability, cloud E2E, modeling, and real-host qualification are not required merge checks.
+
+To check the gate itself, run `pnpm exec vitest run packages/adapter-canvas/test/ci/ci-gate.test.mjs`. The test executes the workflow's Bash step with successful, failed, cancelled, skipped, missing, and unknown job results.
+
 ## Before you open a pull request
 
-1. `pnpm typecheck` passes.
-2. `pnpm test` passes across all projects (add or update tests for behavior changes).
-3. `pnpm build` succeeds.
-4. Add a changeset describing your change (see below).
-5. Fill out the [pull request template](./.github/pull_request_template.md).
+Use the [radius-pre-pr-review skill](./.github/skills/radius-pre-pr-review/SKILL.md) before opening a pull request. Implementation agents should invoke it; contributors can follow the same workflow with an independent reviewer.
+
+1. Apply the [code-quality test-evidence matrix](./.github/skills/radius-code-quality/SKILL.md#required-pull-request-test-evidence) and [canonical verification commands](./.github/skills/radius-code-quality/SKILL.md#verification) for the change. Use existing suites and avoid duplicate scenarios without dropping required boundary coverage. For prose-only changes, check Markdown and links instead of running product tests.
+2. Obtain one fresh-context review using [radius-code-review](./.github/skills/radius-code-review/SKILL.md), address findings, and remove unnecessary code or out-of-scope edits. Record unavailable checks or reviewer access honestly.
+3. Run [canonical visual comparisons](#canvas-visual-baselines) when the change can affect Canvas UI, and rerun affected checks after fixes.
+4. Assess release impact with [monorepo-changeset](./.github/skills/monorepo-changeset/SKILL.md); add a Changeset only for a notable change to a released product.
+5. Fill out the [pull request template](./.github/pull_request_template.md), including exact validation results and applicable test-matrix evidence.
 
 ## Changesets
 
@@ -161,7 +183,7 @@ write a user-facing summary. Commit the generated `.changeset/*.md` file with
 your PR. Do not hand-edit any version: Changesets bumps `extensions/radius/package.json`, and `plugin.json` and `marketplace.json` are derived from it by `pnpm run version:sync`, which CI verifies. See [`RELEASING.md`](./docs/eng/RELEASING.md) for the version/tag convention and
 release flow.
 
-Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr:no-changeset`, which replaces the reminder with a note that it was waived.
+Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. For contributor-only changes, do not add an empty Changeset; propose the `pr:no-changeset` label as directed by [monorepo-changeset](./.github/skills/monorepo-changeset/SKILL.md). An authorized maintainer can apply the label to replace the reminder with a note that it was waived.
 
 ## Dependency updates
 

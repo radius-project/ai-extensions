@@ -69,6 +69,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Validate declared application identity
+        id: identity
+        if: ${{ inputs.resource_type == 'application' }}
+        uses: radius-project/ai-extensions/.github/extension/actions/validate-deployment-identity@{{RADIUS_REF}}
+        with:
+          kind: delete
+          application: ${{ inputs.name }}
+          app-file: ''
+          environment: ${{ inputs.environment }}
+
       - name: Azure Login (OIDC)
         if: ${{ vars.AZURE_CLIENT_ID != '' }}
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
@@ -240,7 +250,7 @@ jobs:
           exposure: ${{ vars.RADIUS_ROUTES_EXPOSURE }}
 
       - name: Teardown
-        if: always()
+        if: ${{ always() && (inputs.resource_type != 'application' || steps.identity.outcome == 'success') }}
         uses: radius-project/ai-extensions/.github/extension/actions/teardown@{{RADIUS_REF}}
         with:
           state-restored: ${{ steps.restore-state.outputs.state-restored }}

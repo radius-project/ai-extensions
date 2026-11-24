@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { assertSetupExecutionActive } from "@radius-project/core";
+import { createAzureRecoveryPort } from "./azure-setup-recovery.js";
+import { createSetupWorkflowRecoveryPort } from "./setup-workflow-recovery.js";
 import {
   createOperation,
   fromPersistedOperation,
@@ -17,6 +20,14 @@ import {
   providerMutationWillWrite
 } from "./provider-mutation-recovery.js";
 
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function command(
   overrides: Partial<{
     code: string | number;
@@ -29,6 +40,177 @@ function command(
 }
 
 describe("provider mutation recovery", () => {
+  it.each(
+    [0, 11].flatMap((attempts) =>
+      (["not_applied", "manual_required", "applied"] as const).map((state) => ({
+        attempts,
+        state
+      }))
+    )
+  )(
+    "preserves returned $state evidence after shutdown at $attempts attempts",
+    async ({ attempts, state }) => {
+      const operation = createOperation({ operationId: "op_late_reconcile" });
+      const mutation = prepareProviderMutation(operation, {
+        kind: "azure_role_assignment.create",
+        target: "assignment"
+      });
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "outcome_unknown",
+        "Lost acknowledgement"
+      );
+      if (attempts)
+        operation.providerRecovery.mutations[0].reconcileAttempts = attempts;
+      const original = structuredClone(operation.providerRecovery);
+      let stopped = false;
+      const persist = vi.fn(async () => {});
+      const recovery = createAzureRecoveryPort(
+        operation,
+        persist,
+        () => stopped
+      );
+      const pending = recovery.execute({
+        kind: mutation.kind,
+        target: mutation.target,
+        mutate: async () => {
+          throw new Error("No replay");
+        },
+        accept: () => "assignment",
+        reconcile: async () => {
+          stopped = true;
+          if (state === "manual_required")
+            return { state, guidance: "Mismatched provenance" };
+          if (state === "applied") return { state, value: "assignment" };
+          return { state, evidence: "Absent" };
+        }
+      });
+      if (state === "applied") {
+        await expect(pending).resolves.toMatchObject({
+          state: "applied",
+          recovered: true
+        });
+        expect(operation.providerRecovery.mutations[0].status).toBe(
+          "confirmed"
+        );
+        expect(persist).toHaveBeenCalledOnce();
+      } else {
+        await expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        expect(operation.providerRecovery).toEqual(original);
+        expect(persist).not.toHaveBeenCalled();
+      }
+    }
+  );
+  it.each(
+    ["journal", "azure", "workflow"].flatMap((binding) =>
+      [
+        "throw",
+        "timeout",
+        "read-rejection",
+        "read-interruption",
+        "read-success",
+        "write-success"
+      ].map((boundary) => [binding, boundary])
+    )
+  )(
+    "preserves %s issued evidence without fresh reconciliation after shutdown: %s",
+    async (binding, boundary) => {
+      const operation = createOperation({ operationId: "shutdown-reconcile" });
+      let stopped = false;
+      const gate = deferred();
+      const entered = deferred();
+      const persist = vi.fn(async () => {});
+      const reconcile = vi.fn(async () => {
+        entered.resolve();
+        await gate.promise;
+        if (boundary === "read-rejection") throw new Error("Late read failed");
+        if (boundary === "read-interruption")
+          assertSetupExecutionActive(() => true);
+        return { state: "applied" as const, value: "resource" };
+      });
+      if (boundary.startsWith("read")) {
+        const mutation = prepareProviderMutation(operation, {
+          kind: "azure_application.create",
+          target: "target"
+        });
+        settleProviderMutation(
+          operation,
+          mutation.mutationId,
+          "outcome_unknown",
+          "Lost acknowledgement"
+        );
+        operation.providerRecovery.mutations[0].reconcileAttempts = 11;
+      }
+      const original = structuredClone(operation.providerRecovery);
+      const input = {
+        operation,
+        kind: "azure_application.create",
+        target: "target",
+        persist,
+        assertActive: () => assertSetupExecutionActive(() => stopped),
+        mutate: vi.fn(async () => {
+          entered.resolve();
+          await gate.promise;
+          if (boundary === "throw") throw new Error("Lost write");
+          return command(
+            boundary === "timeout" ?
+              { timedOut: true, code: 1, stderr: "Write timed out" }
+            : {}
+          );
+        }),
+        accept: () => "resource",
+        reconcile
+      };
+      const execute =
+        binding === "azure" ?
+          createAzureRecoveryPort(operation, persist, () => stopped).execute
+        : binding === "workflow" ?
+          createSetupWorkflowRecoveryPort(operation, persist, () => stopped)
+            .execute
+        : executeRecoverableMutation;
+      const pending = execute(input);
+      await entered.promise;
+      stopped = true;
+      gate.resolve();
+      if (boundary.endsWith("success")) {
+        await expect(pending).resolves.toMatchObject({
+          state: "applied",
+          value: "resource"
+        });
+        expect(operation.providerRecovery.mutations[0].status).toBe(
+          "confirmed"
+        );
+      } else {
+        await expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        if (boundary.startsWith("read")) {
+          expect(operation.providerRecovery).toEqual(original);
+          expect(persist).not.toHaveBeenCalled();
+        } else {
+          expect(reconcile).not.toHaveBeenCalled();
+          expect(operation.providerRecovery.mutations[0]).toMatchObject({
+            status: "outcome_unknown",
+            finalDiagnostic: expect.stringContaining(
+              boundary === "throw" ? "Lost write" : "Write timed out"
+            )
+          });
+        }
+        stopped = false;
+        reconcile.mockResolvedValue({ state: "applied", value: "resource" });
+        await expect(execute(input)).resolves.toMatchObject({
+          state: "applied",
+          recovered: true
+        });
+        expect(input.mutate).toHaveBeenCalledTimes(
+          boundary.startsWith("read") ? 0 : 1
+        );
+      }
+    }
+  );
   it.each([0, 11])(
     "keeps command and bounded read diagnostics safe after %i prior reconciliation failures",
     async (priorAttempts) => {
@@ -1658,5 +1840,37 @@ describe("providerMutationWillWrite", () => {
         "octo/app:dev"
       )
     ).toBe(expected);
+  });
+});
+
+describe("classifyProviderMutationFailure for AWS CLI errors", () => {
+  it.each([
+    "AccessDenied",
+    "EntityAlreadyExists",
+    "NoSuchEntity",
+    "LimitExceeded",
+    "MalformedPolicyDocument",
+    "ResourceInUseException",
+    "InvalidParameterException",
+    "ResourceNotFoundException",
+    "DeleteConflict"
+  ])("reads an AWS %s answer as a refusal", (code) => {
+    expect(
+      classifyProviderMutationFailure({
+        code: 1,
+        stdout: "",
+        stderr: `An error occurred (${code}) when calling the CreateRole operation: refused`
+      })
+    ).toBe("not_applied");
+  });
+
+  it.each([
+    "An error occurred (Throttling) when calling the CreateRole operation: Rate exceeded",
+    "An error occurred (ServiceFailure) when calling the CreateRole operation",
+    "Could not connect to the endpoint URL"
+  ])("keeps %s unknown", (stderr) => {
+    expect(
+      classifyProviderMutationFailure({ code: 1, stdout: "", stderr })
+    ).toBe("outcome_unknown");
   });
 });

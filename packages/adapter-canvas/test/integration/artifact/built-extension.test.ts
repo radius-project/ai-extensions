@@ -16,7 +16,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   runArtifactSmoke,
@@ -30,6 +30,7 @@ import {
 } from "../../../src/browser/build.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
 import { RADIUS_SESSION_START_CONTEXT } from "../../../src/runtime/declarations.js";
+import { createPluginUpdatePreferences } from "../../../src/runtime/plugin-update-preferences.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
@@ -310,6 +311,112 @@ describe("packaged Bicep literal credential detector", () => {
   });
 });
 
+describe("JSONC module compatibility", () => {
+  it.each(["playwright.config.ts", "playwright.visual.config.ts"])(
+    "loads production sources during native %s discovery",
+    (config) => {
+      const result = spawnSync(
+        process.execPath,
+        [
+          createRequire(import.meta.url).resolve("@playwright/test/cli"),
+          "test",
+          "--config",
+          join(REPO_ROOT, "packages", "adapter-canvas", config),
+          "--list",
+          "--reporter=line"
+        ],
+        { cwd: REPO_ROOT, encoding: "utf8", timeout: 15_000 }
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toMatch(/Total: [1-9]\d* tests in [1-9]\d* files?/);
+    }
+  );
+
+  it("stages and compiles JSONC configuration through the production Node bundle", () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-jsonc-bundle-")
+    );
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      writeFileSync(
+        join(buildDirectory, "src", "extension.ts"),
+        'export { stageGraphArtifacts } from "@radius-project/adapter-shared";\n' +
+          'export { writeBicepCompileConfig } from "../../adapter-shared/src/rad.js";\n'
+      );
+      const built = spawnSync(process.execPath, ["build.mjs"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        timeout: 20_000,
+        env: { ...process.env, RADIUS_SOURCE_REF: SOURCE_REF }
+      });
+      expect(built.error).toBeUndefined();
+      expect(built.status, built.stderr).toBe(0);
+
+      const artifact = pathToFileURL(
+        join(workspaceRoot, ".artifacts", "radius", ARTIFACT_RELATIVE_PATH)
+      ).href;
+      const config = `{
+        // Keep repository configuration and trailing commas.
+        "extensions": { "radius": "br:registry.example/radius:v1", },
+        "analyzers": { "core": { "enabled": false, }, },
+      }`;
+      const executed = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+            import assert from "node:assert/strict";
+            import fs from "node:fs";
+            import path from "node:path";
+            import { stageGraphArtifacts, writeBicepCompileConfig } from ${JSON.stringify(artifact)};
+            const config = ${JSON.stringify(config)};
+            const staged = await stageGraphArtifacts({
+              status: "present",
+              content: "model",
+              source: {
+                kind: "github",
+                repo: "owner/repository",
+                ref: "feature",
+                revision: "a".repeat(40),
+                definitionPath: ".radius/app.bicep"
+              }
+            }, {
+              readBytes: async () => ({ status: "present", bytes: Buffer.from(config) }),
+              stagingRoot: ".",
+              redactDiagnostic: (message) => message
+            });
+            try {
+              assert.equal(fs.readFileSync(path.join(staged.dir, "bicepconfig.json"), "utf8"), config);
+              const compiled = writeBicepCompileConfig(".", staged.dir);
+              assert.equal(compiled.extensions.radius, "br:registry.example/radius:v1");
+              assert.deepEqual(compiled.analyzers, { core: { enabled: false } });
+              assert.equal(compiled.experimentalFeaturesEnabled.extensibility, true);
+            } finally {
+              await staged.dispose();
+            }
+          `
+        ],
+        {
+          cwd: workspaceRoot,
+          encoding: "utf8",
+          timeout: 5_000,
+          env: {
+            ...process.env,
+            HOME: workspaceRoot,
+            USERPROFILE: workspaceRoot
+          }
+        }
+      );
+      expect(executed.error).toBeUndefined();
+      expect(executed.status, executed.stderr).toBe(0);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("P0-C built Radius extension artifact", () => {
   let smoke: ArtifactSmokeResult;
 
@@ -318,9 +425,75 @@ describe("P0-C built Radius extension artifact", () => {
     smoke = await runArtifactSmoke(ARTIFACT, 20_000, DIST);
   }, 30_000);
 
+  it("wires readiness admission and settlement through the shipped registered setup tool", async () => {
+    const result = await runArtifactSmoke(ARTIFACT, 20_000, DIST, "readiness");
+    expect(result.readiness).toEqual({
+      code: "github-account-stopped",
+      calls: ["GET"]
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.closeCount).toBe(1);
+    expect(result.stderr).not.toMatch(
+      /unhandledRejection|uncaughtException|shutdown incomplete/
+    );
+  });
+
+  it.each([
+    "readiness-restoration-failed",
+    "readiness-external-change"
+  ] as const)(
+    "runs the composition-root restoration diagnostic exactly once for %s",
+    async (behavior) => {
+      const result = await runArtifactSmoke(ARTIFACT, 20_000, DIST, behavior);
+      expect(result.readiness).toEqual({
+        code: "github-account-stopped",
+        calls: ["GET"]
+      });
+      expect(result.closeCount).toBe(1);
+      expect(result.exitCode).toBe(
+        behavior === "readiness-restoration-failed" ? 1 : 0
+      );
+      const diagnostics = result.stderr
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("[radius readiness]"));
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toContain("original-account");
+      expect(result.stderr).not.toContain("fixture-value");
+      expect(
+        result.stderr.includes(
+          "Radius setup drain failed: GitHub account restoration failed"
+        )
+      ).toBe(behavior === "readiness-restoration-failed");
+      expect(result.stderr).not.toMatch(/unhandledRejection|uncaughtException/);
+    }
+  );
+  it.each(["hung-session", "failed-session"] as const)(
+    "exits nonzero on incomplete %s teardown despite repeated signals",
+    async (behavior) => {
+      const failed = await runArtifactSmoke(ARTIFACT, 20_000, DIST, behavior);
+      expect(failed.exitCode).toBe(1);
+      expect(failed.closeCount).toBe(1);
+      expect(failed.stderr).toContain(
+        behavior === "hung-session" ?
+          "Radius session teardown incomplete after 2000ms"
+        : "session teardown error: Controlled session teardown failure"
+      );
+      expect(failed.stderr).not.toMatch(/unhandledRejection|uncaughtException/);
+    }
+  );
+
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
     expect(smoke.registration).toEqual(EXPECTED_REGISTRATION);
     expect(smoke.closeCount).toBe(1);
+    expect(smoke.pluginUpdateEvents).toEqual([
+      {
+        stage: "approval",
+        detail:
+          "Update radius@radius-plugins to the latest version available from this marketplace? Installed changes will load in a new session; this session keeps its current code. After any answer, including cancellation, Radius waits 7 days before asking again for this marketplace."
+      },
+      { stage: "update", detail: "radius@radius-plugins" }
+    ]);
+    expect(smoke.exitCode).toBe(0);
     // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
     // and reports them only on stderr. The harness already requires exit code 0;
     // here we require graceful shutdown and reject crash-shaped diagnostics
@@ -338,6 +511,105 @@ describe("P0-C built Radius extension artifact", () => {
         )
       ])
     );
+  });
+
+  it.each(["decline", "unavailable"] as const)(
+    "leaves the shipped plugin unchanged when approval is %s",
+    async (approval) => {
+      const result = await runArtifactSmoke(
+        ARTIFACT,
+        20_000,
+        DIST,
+        "clean",
+        approval
+      );
+      expect(result.pluginUpdateEvents.map((event) => event.stage)).toEqual(
+        approval === "decline" ? ["approval"] : []
+      );
+      expect(result.registration).toEqual(EXPECTED_REGISTRATION);
+      expect(result.closeCount).toBe(1);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).not.toMatch(
+        /unhandledRejection|uncaughtException|shutdown incomplete/
+      );
+      if (approval === "unavailable") {
+        expect(result.stderr).toContain(
+          "Radius skipped its plugin update request"
+        );
+        expect(result.stderr).not.toContain(
+          "could not complete its plugin update"
+        );
+      }
+    }
+  );
+
+  it.each(["decline", "approve"] as const)(
+    "retains the cooldown after %s across processes and workspaces, then expires it",
+    async (answer) => {
+      const profile = mkdtempSync(join(tmpdir(), "radius-artifact-profile-"));
+      try {
+        const first = await runArtifactSmoke(
+          ARTIFACT,
+          20_000,
+          DIST,
+          "clean",
+          answer,
+          profile
+        );
+        expect(first.pluginUpdateEvents.map((event) => event.stage)).toEqual([
+          ...(answer === "approve" ? ["approval", "update"] : ["approval"])
+        ]);
+        expect(first.exitCode).toBe(0);
+        const preferences = createPluginUpdatePreferences(
+          join(profile, ".copilot", "radius", "plugin-update-responses")
+        );
+        expect(
+          await preferences.lastAnsweredAt("radius-plugins")
+        ).toBeGreaterThan(0);
+        const next = await runArtifactSmoke(
+          ARTIFACT,
+          20_000,
+          DIST,
+          "clean",
+          "approve",
+          profile
+        );
+        expect(next.pluginUpdateEvents).toEqual([]);
+        expect(next.registration).toEqual(EXPECTED_REGISTRATION);
+        expect(next.exitCode).toBe(0);
+        expect(next.closeCount).toBe(1);
+        await preferences.rememberAnswer(
+          "radius-plugins",
+          Date.now() - 7 * 24 * 60 * 60 * 1000
+        );
+        const expired = await runArtifactSmoke(
+          ARTIFACT,
+          20_000,
+          DIST,
+          "clean",
+          "decline",
+          profile
+        );
+        expect(expired.pluginUpdateEvents.map((event) => event.stage)).toEqual([
+          "approval"
+        ]);
+        expect(expired.exitCode).toBe(0);
+        expect(expired.closeCount).toBe(1);
+      } finally {
+        rmSync(profile, { recursive: true, force: true });
+      }
+    }
+  );
+  it("registers flat object tool parameters without provider-rejected root unions", () => {
+    for (const tool of smoke.registration.tools) {
+      expect(tool.parameters).toMatchObject({
+        type: "object",
+        properties: expect.any(Object)
+      });
+      expect(tool.parameters.properties).not.toEqual({});
+      for (const keyword of ["oneOf", "anyOf", "allOf", "enum", "not"])
+        expect(tool.parameters).not.toHaveProperty(keyword);
+    }
   });
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {
@@ -417,7 +689,9 @@ describe("P0-C built Radius extension artifact", () => {
       "skills/radius-app-bicep/references/source-code-references.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
       "skills/radius-app-bicep/scripts/validate-bicep.mjs",
-      "skills/radius-app-bicep/scripts/bicep-security-rules.mjs"
+      "skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
+      "skills/radius-report-issue/SKILL.md",
+      "skills/radius-report-issue/references/bug-report.md"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
@@ -1270,6 +1544,63 @@ describe("P0-C built Radius extension artifact", () => {
     expect(secretsGuidance).toContain(
       "the data-key contract below is not verified anywhere"
     );
+  });
+
+  it("updates a legacy Radius pin with the packaged resolver without changing published files", () => {
+    assertCurrentArtifact();
+    const workspace = mkdtempSync(join(tmpdir(), "radius-legacy-pin-"));
+    try {
+      const radiusDir = join(workspace, ".radius");
+      const staging = join(radiusDir, ".staging-legacy");
+      mkdirSync(staging, { recursive: true });
+      writeFileSync(
+        join(staging, "run.json"),
+        JSON.stringify({ baseline: {} })
+      );
+      const current = join(radiusDir, "bicepconfig.json");
+      const origin = join(radiusDir, "app.origin.json");
+      const config = JSON.stringify({
+        extensions: {
+          radius: "br:biceptypes.azurecr.io/radius:0.61",
+          customTypes: "./custom-types.tgz"
+        }
+      });
+      const originText = JSON.stringify({ skillVersion: "0.1.1" });
+      writeFileSync(current, config);
+      writeFileSync(origin, originText);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `import { pathToFileURL } from "node:url";
+const resolver = await import(pathToFileURL(process.argv[2]).href);
+await resolver.writeStagedBicepConfig(
+  process.argv[3], "br:biceptypes.azurecr.io/radius:0.62"
+);`,
+          "packaged-resolver-test",
+          join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
+          staging
+        ],
+        { cwd: workspace, encoding: "utf8", timeout: 10_000 }
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        JSON.parse(readFileSync(join(staging, "bicepconfig.json"), "utf8"))
+      ).toEqual({
+        experimentalFeaturesEnabled: { extensibility: true },
+        extensions: {
+          radius: "br:biceptypes.azurecr.io/radius:0.62",
+          customTypes: "./custom-types.tgz"
+        }
+      });
+      expect(readFileSync(current, "utf8")).toBe(config);
+      expect(readFileSync(origin, "utf8")).toBe(originText);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   it("packages the checker's secure-value remedies", () => {

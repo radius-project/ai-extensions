@@ -1,7 +1,19 @@
 import { createServer } from "node:http";
-import { existsSync, writeFileSync } from "node:fs";
+import { ChildProcess, execFile, execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
+import {
+  createGraphSourceBindings,
+  createWorkflowArtifactReader
+} from "@radius-project/adapter-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createWorkflowObservationScope,
@@ -37,6 +49,534 @@ import {
 } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../../../src/graph-progress-contract.js";
+import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createDeferred } from "../../support/browser/fakes.js";
+import { setAppBicepHandoff } from "../../../src/server.js";
+import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
+
+function initCommittedGraphWorkspace(workspace: string) {
+  execFileSync("git", ["init", "--initial-branch", "main"], {
+    cwd: workspace,
+    stdio: "pipe"
+  });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Radius Fixture",
+      "-c",
+      "user.email=radius-fixture@example.invalid",
+      "-c",
+      "commit.gpgSign=false",
+      "commit",
+      "--allow-empty",
+      "--no-verify",
+      "-m",
+      "fixture"
+    ],
+    { cwd: workspace, stdio: "pipe" }
+  );
+}
+
+async function concurrentGraphRuntime(
+  workspace?: string,
+  invalidOutputBuilds: ReadonlySet<number> = new Set(),
+  afterWorkspaceBranchRead?: () => void
+) {
+  const builds: Array<ReturnType<typeof createDeferred<void>>> = [];
+  const runtime = createTestCanvasServerRuntime({
+    executionOwner: createEnvironmentExecutionOwner(),
+    cliExec: (command, args, _options, callback) => {
+      if (workspace && command === "git" && args.includes("symbolic-ref")) {
+        afterWorkspaceBranchRead?.();
+        callback(null, "main\n", "");
+        return new ChildProcess();
+      }
+      const endpoint = args.find((arg) => arg.startsWith("/repos/"));
+      let value: unknown;
+      const commit = endpoint?.match(
+        /^\/repos\/octo\/app\/commits\/(main|other|a{40}|b{40})$/
+      )?.[1];
+      if (commit) {
+        value = {
+          sha:
+            commit === "main" ? "a".repeat(40)
+            : commit === "other" ? "b".repeat(40)
+            : commit
+        };
+      } else if (endpoint?.includes("/contents/.radius/app.bicep")) {
+        const content = "resource fixture";
+        value = {
+          encoding: "base64",
+          content: Buffer.from(content).toString("base64"),
+          size: Buffer.byteLength(content)
+        };
+      } else if (endpoint?.includes("/contents/.radius/bicepconfig.json")) {
+        callback(new Error("not found"), "", "Not Found (HTTP 404)");
+        return new ChildProcess();
+      } else {
+        throw new Error(`Unscripted graph command: ${args.join(" ")}`);
+      }
+      callback(null, JSON.stringify(value), "");
+      return new ChildProcess();
+    },
+    buildGraphViaRad: async (_content, _definition, options) => {
+      const index = builds.length;
+      const gate = createDeferred<void>();
+      builds.push(gate);
+      await gate.promise;
+      if (workspace) {
+        if (!options?.saveGraphJsonTo)
+          throw new Error("Missing staged compiler output path");
+        expect(options.saveGraphJsonTo).not.toBe(
+          path.join(workspace, ".radius", "app-graph.json")
+        );
+        writeFileSync(
+          options.saveGraphJsonTo,
+          invalidOutputBuilds.has(index) ? '{"resources":[' : (
+            JSON.stringify({
+              application: { name: `application-${index}` },
+              resources: [{ id: `build-${index}` }]
+            })
+          )
+        );
+      }
+      return [
+        {
+          id: `build-${index}`,
+          name: `build-${index}`,
+          type: "Radius.Compute/containers"
+        }
+      ];
+    }
+  });
+  const entry = await runtime.getOrCreateServer("graph-races", "graph");
+  if (workspace)
+    Object.assign(entry.state, {
+      workspacePath: workspace,
+      workspaceRepo: "octo/app",
+      workspaceBranch: "main",
+      contextRepo: "octo/app",
+      contextBranch: "main"
+    });
+  return {
+    entry,
+    builds,
+    load: (extra = {}) =>
+      fetch(`${entry.baseUrl}/api/load-graph`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: entry.baseUrl,
+          "Sec-Fetch-Site": "same-origin",
+          "X-Radius-Mutation-Nonce": String(
+            entry.state.browserMutationNonce || ""
+          )
+        },
+        body: JSON.stringify({ repo: "octo/app", branch: "main", ...extra })
+      }),
+    stream: (branch = "main") =>
+      fetch(
+        `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp&branch=${branch}`
+      ),
+    async close() {
+      builds.forEach((build) => build.resolve());
+      await runtime.stopServer("graph-races", true);
+    }
+  };
+}
+
+describe("graph concurrency through production HTTP routes", () => {
+  it.each(["JSON", "SSE"] as const)(
+    "reports stale instead of blank-model recovery after another request takes ownership (%s)",
+    async (transport) => {
+      const workspace = mkdtempSync(path.join(tmpdir(), "radius-blank-race-"));
+      const supersede = vi.fn(() => {
+        h.entry.state.graphBuildGeneration =
+          (h.entry.state.graphBuildGeneration ?? 0) + 1;
+      });
+      const h = await concurrentGraphRuntime(workspace, new Set(), supersede);
+      try {
+        initCommittedGraphWorkspace(workspace);
+        mkdirSync(path.join(workspace, ".radius"));
+        writeFileSync(path.join(workspace, ".radius", "app.bicep"), "  \n");
+        h.entry.state.appModelAttemptTokens = { "octo/app::main": "attempt" };
+        h.entry.state.appModelFailures = {
+          "octo/app::main": {
+            attemptToken: "attempt",
+            error: "Authoring failed."
+          }
+        };
+        const response =
+          transport === "JSON" ? await h.load() : await h.stream();
+        if (transport === "JSON") {
+          expect(response.status).toBe(409);
+          expect(await response.json()).toEqual({ stale: true });
+        } else {
+          expect(response.status).toBe(200);
+          const text = await response.text();
+          expect(text.match(/event: done\ndata: .+/g)).toEqual([
+            'event: done\ndata: {"stale":true}'
+          ]);
+        }
+        expect(supersede).toHaveBeenCalled();
+        expect(h.builds).toEqual([]);
+      } finally {
+        await h.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
+  it.each(["JSON", "stream"])(
+    "keeps the previous file and retains the %s save warning on reload and cache hits",
+    async (transport) => {
+      const workspace = mkdtempSync(
+        path.join(tmpdir(), "radius-graph-save-http-")
+      );
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      try {
+        initCommittedGraphWorkspace(workspace);
+        const directory = path.join(workspace, ".radius");
+        mkdirSync(directory);
+        writeFileSync(path.join(directory, "app.bicep"), "resource local");
+        const destination = path.join(directory, "app-graph.json");
+        writeFileSync(destination, '{"resources":[{"id":"previous"}]}');
+        h = await concurrentGraphRuntime(workspace, new Set([0]));
+        const { builds, entry } = h;
+        const response = transport === "JSON" ? h.load() : h.stream();
+        await vi.waitFor(() => expect(builds).toHaveLength(1));
+        builds[0].resolve();
+        const result = await response;
+        const body = await result.text();
+        expect(result.ok).toBe(true);
+        expect(body).toContain('"saveWarning":');
+        if (transport === "stream")
+          expect(body.match(/event: done/g)).toHaveLength(1);
+        expect(readFileSync(destination, "utf8")).toBe(
+          '{"resources":[{"id":"previous"}]}'
+        );
+        expect(entry.state.graphResources?.[0]?.id).toBe("build-0");
+        const page = () =>
+          fetch(`${entry.baseUrl}/?page=graph`).then((res) => res.text());
+        expect(await page()).toContain("saved app-graph.json may be stale");
+        expect(await (await h.load({ refresh: true })).json()).toMatchObject({
+          cached: true,
+          saveWarning: expect.stringContaining("may be stale")
+        });
+        const replacement = h.load();
+        await vi.waitFor(() => expect(builds).toHaveLength(2));
+        builds[1].resolve();
+        expect(await (await replacement).json()).not.toHaveProperty(
+          "saveWarning"
+        );
+        expect(await page()).not.toContain("saved app-graph.json may be stale");
+        expect(JSON.parse(readFileSync(destination, "utf8")).resources).toEqual(
+          [{ id: "build-1" }]
+        );
+      } finally {
+        await h?.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
+  it.each(["success", "failure"])(
+    "keeps newer persisted and in-memory graph when an older JSON build finishes with %s",
+    async (result) => {
+      const workspace = mkdtempSync(path.join(tmpdir(), "radius-graph-http-"));
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      try {
+        initCommittedGraphWorkspace(workspace);
+        const directory = path.join(workspace, ".radius");
+        mkdirSync(directory);
+        writeFileSync(path.join(directory, "app.bicep"), "resource local");
+        const destination = path.join(directory, "app-graph.json");
+        writeFileSync(destination, "previous output");
+        h = await concurrentGraphRuntime(workspace);
+        const { builds } = h;
+        const old = h.load();
+        await vi.waitFor(() => expect(builds).toHaveLength(1));
+        expect(readFileSync(destination, "utf8")).toBe("previous output");
+        const current = await h.stream();
+        await vi.waitFor(() => expect(builds).toHaveLength(2));
+        builds[1].resolve();
+        expect(await current.text()).toContain('"reload":true');
+        if (result === "failure")
+          builds[0].reject(new Error("old compiler failed"));
+        else builds[0].resolve();
+        expect((await old).status).toBe(409);
+        expect(JSON.parse(readFileSync(destination, "utf8"))).toEqual({
+          application: { name: "application-1" },
+          resources: [{ id: "build-1" }]
+        });
+        expect(h.entry.state.graphResources?.map(({ id }) => id)).toEqual([
+          "build-1"
+        ]);
+      } finally {
+        await h?.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
+  it.each([
+    ["JSON", "success"],
+    ["JSON", "failure"],
+    ["stream", "success"],
+    ["stream", "failure"]
+  ])(
+    "preserves checkout output when an old %s build finishes with %s",
+    async (transport, outcome) => {
+      const workspace = mkdtempSync(path.join(tmpdir(), "radius-graph-http-"));
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      try {
+        initCommittedGraphWorkspace(workspace);
+        const directory = path.join(workspace, ".radius");
+        mkdirSync(directory);
+        writeFileSync(path.join(directory, "app.bicep"), "resource local");
+        const destination = path.join(directory, "app-graph.json");
+        h = await concurrentGraphRuntime(workspace);
+        const response = transport === "JSON" ? h.load() : h.stream();
+        const { builds } = h;
+        await vi.waitFor(() => expect(builds).toHaveLength(1));
+        execFileSync("git", ["switch", "-c", "other"], {
+          cwd: workspace,
+          stdio: "pipe"
+        });
+        writeFileSync(destination, "other branch graph");
+        if (outcome === "success") builds[0].resolve();
+        else builds[0].reject(new Error("Old compiler failed"));
+        const result = await response;
+        if (transport === "JSON") expect(result.status).toBe(409);
+        else expect(await result.text()).toContain('"stale":true');
+        expect(readFileSync(destination, "utf8")).toBe("other branch graph");
+        expect(h.entry.state.graphResources).toBeUndefined();
+      } finally {
+        await h?.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
+  it.each([false, true])(
+    "uses strict workspace source reads in the runtime handoff (blank model appears: %s)",
+    async (blankAppears) => {
+      const workspace = mkdtempSync(
+        path.join(tmpdir(), "radius-handoff-http-")
+      );
+      const execute = vi.fn<
+        Parameters<typeof createGraphSourceBindings>[0]["execute"]
+      >((command, args, options, callback) => {
+        if (command !== "git")
+          throw new Error(`Unexpected remote handoff read: ${args.join(" ")}`);
+        return execFile(command, args, options, callback);
+      });
+      const sources = createGraphSourceBindings({
+        execute,
+        redactDiagnostic: (message) => message,
+        stagingRoot: workspace
+      });
+      const sdk = await createRuntimeSdkHarness(
+        { workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] } },
+        (deps) => {
+          deps.graphSources = sources;
+        }
+      );
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      try {
+        initCommittedGraphWorkspace(workspace);
+        writeFileSync(path.join(workspace, "Dockerfile"), "FROM scratch");
+        const handoff = sdk.capturedHostCallbacks.appBicepHandoff;
+        if (!handoff)
+          throw new Error("Runtime registered no authoring callback");
+        if (blankAppears) {
+          sdk.deps.clock.wait = async () => {
+            writeFileSync(path.join(workspace, "app.bicep"), "  \n");
+          };
+        }
+        let completed = createDeferred<void>();
+        setAppBicepHandoff(async (input) => {
+          try {
+            await handoff(input);
+          } finally {
+            completed.resolve();
+          }
+        });
+        h = await concurrentGraphRuntime(workspace);
+        expect(await (await h.load()).json()).toMatchObject({
+          needsAppBicep: true
+        });
+        await completed.promise;
+        if (blankAppears) {
+          expect(sdk.session.send).not.toHaveBeenCalled();
+          expect(await (await h.load()).json()).toMatchObject({
+            error: expect.stringContaining("app.bicep is empty")
+          });
+          const tool = sdk.extension.tools.find(
+            ({ name }) => name === "radius_report_modeling_failure"
+          );
+          if (!tool) throw new Error("Missing registered failure tool");
+          const target = "octo/app::main";
+          // Simulate the admitted run whose blank output is still on disk.
+          h.entry.state.appModelAttemptTokens = { [target]: "blank-attempt" };
+          sdk.servers.set("graph-races", h.entry);
+          const failure = "The fixture model has no supported resource.";
+          expect(
+            await tool.handler({
+              instanceId: "graph-races",
+              repo: "octo/app",
+              branch: "main",
+              attemptToken: "blank-attempt",
+              error: failure
+            })
+          ).toEqual({ recorded: true });
+          expect(await (await h.load()).json()).toMatchObject({
+            error: `Model generation failed and left app.bicep empty. Fix or remove the file, then select Refresh. Diagnostic: ${failure}`,
+            appModelAuthoringFailed: true,
+            modelingFailed: true
+          });
+          expect(await (await h.stream()).text()).toContain(
+            '"appModelAuthoringFailed":true'
+          );
+          expect(
+            await (await h.load({ retryModeling: true })).json()
+          ).toMatchObject({ appModelAuthoringFailed: true });
+          expect(sdk.session.send).not.toHaveBeenCalled();
+
+          // A blank saved file is not absence: retry only once the user
+          // removes it, rather than silently authoring over it.
+          rmSync(path.join(workspace, "app.bicep"));
+          sdk.deps.clock.wait = async () => {};
+          completed = createDeferred<void>();
+          expect(
+            await (await h.load({ retryModeling: true })).json()
+          ).toMatchObject({ needsAppBicep: true });
+          await completed.promise;
+          expect(sdk.session.send).toHaveBeenCalledOnce();
+          sdk.servers.delete("graph-races");
+        } else {
+          expect(sdk.session.send).toHaveBeenCalledOnce();
+        }
+        expect(execute).not.toHaveBeenCalledWith(
+          "gh",
+          expect.anything(),
+          expect.anything(),
+          expect.anything()
+        );
+      } finally {
+        setAppBicepHandoff(null);
+        await h?.close();
+        await sdk.extension.shutdown("test");
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
+  it("reports a rejected modeling handoff to the next poll and respects explicit retry", async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "radius-handoff-http-"));
+    let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+    const rejection = createDeferred<void>();
+    const handoff = vi.fn(() => rejection.promise);
+    setAppBicepHandoff(handoff);
+    try {
+      initCommittedGraphWorkspace(workspace);
+      writeFileSync(path.join(workspace, "Dockerfile"), "FROM scratch");
+      h = await concurrentGraphRuntime(workspace);
+      expect(await (await h.load()).json()).toMatchObject({
+        needsAppBicep: true
+      });
+      expect(await (await h.load()).json()).toMatchObject({
+        needsAppBicep: true
+      });
+      rejection.reject(new Error("Application model origin is unreadable."));
+      const { entry, load } = h;
+      await vi.waitFor(() =>
+        expect(
+          entry.state.graphProgressRecords?.graph?.graphProgressHandoffFailure
+        ).toBe("Application model origin is unreadable.")
+      );
+      const dispatched = handoff.mock.calls.length;
+      const terminal = await (await load()).json();
+      expect(terminal).toMatchObject({
+        error: "Application model origin is unreadable."
+      });
+      expect(terminal.needsAppBicep).toBeUndefined();
+      expect(handoff).toHaveBeenCalledTimes(dispatched);
+      expect(
+        await (await fetch(`${entry.baseUrl}/api/progress?view=graph`)).json()
+      ).toMatchObject({ active: false });
+      setAppBicepHandoff(async () => {});
+      expect(await (await load({ retryModeling: true })).json()).toMatchObject({
+        needsAppBicep: true
+      });
+    } finally {
+      setAppBicepHandoff(null);
+      await h?.close();
+      rmSync(workspace, { force: true, recursive: true });
+    }
+  });
+
+  it("keeps the newer same-selection stream when the older compiler finishes last", async () => {
+    const h = await concurrentGraphRuntime();
+    try {
+      const older = await h.stream();
+      await vi.waitFor(() => expect(h.builds).toHaveLength(1));
+      const newer = await h.stream();
+      await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+      h.builds[1].resolve();
+      expect(await newer.text()).toContain('"reload":true');
+      h.builds[0].resolve();
+      const stale = await older.text();
+      expect(stale).toContain('"stale":true');
+      expect(stale.match(/event: done/g)).toHaveLength(1);
+      expect(h.entry.state.graphResources?.map(({ id }) => id)).toEqual([
+        "build-1"
+      ]);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it.each([false, true])(
+    "settles cancelled JSON progress without ending a replacement owner (%s)",
+    async (replaceOwner) => {
+      const h = await concurrentGraphRuntime();
+      try {
+        const older = h.load();
+        await vi.waitFor(() => expect(h.builds).toHaveLength(1));
+        if (replaceOwner) {
+          const replacement = h.load();
+          await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+          h.builds[0].resolve();
+          expect((await older).status).toBe(409);
+          const progress = await fetch(
+            `${h.entry.baseUrl}/api/progress?view=graph`
+          );
+          expect(await progress.json()).toMatchObject({ active: true });
+          h.builds[1].resolve();
+          expect((await replacement).status).toBe(200);
+        } else {
+          const stream = await h.stream("other");
+          await vi.waitFor(() => expect(h.builds).toHaveLength(2));
+          h.builds[1].resolve();
+          await stream.text();
+          h.builds[0].resolve();
+          const stale = await older;
+          expect(stale.status).toBe(409);
+          expect(await stale.json()).toEqual({ stale: true });
+          const progress = await fetch(
+            `${h.entry.baseUrl}/api/progress?view=graph`
+          );
+          expect(await progress.json()).toMatchObject({ active: false });
+        }
+      } finally {
+        await h.close();
+      }
+    }
+  );
+});
 
 let container: CanvasServerContainer | undefined;
 
@@ -753,6 +1293,8 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     Object.assign(harness.state, {
       contextRepo: "octo/app",
       contextBranch: "feature/current",
+      deployAppName: "Billing",
+      deployEnvName: "Prod",
       graphTargetRepo: "octo/app",
       graphBranch: "feature/current",
       graphResources: [
@@ -813,6 +1355,15 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       }
     });
 
+    const implicitSelection = await fetch(
+      `${entry.baseUrl}/api/deployed-graph`
+    );
+    expect(await implicitSelection.json()).toMatchObject({
+      mode: "terminal",
+      application: "Billing",
+      deletionInventory: null
+    });
+
     // Retained progress may still paint a useful graph after authentication
     // fails, but cannot authorize the resource names shown before deletion.
     harness.reader.graph.status = "auth";
@@ -824,6 +1375,202 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       mode: "terminal",
       deletionInventory: null,
       resources: [{ name: "never-created", deployStatus: "failed" }]
+    });
+  });
+
+  it.each([
+    "superseded",
+    "repair",
+    "discarded",
+    "selection drift",
+    "other environment",
+    "switch away",
+    "late failure"
+  ] as const)(
+    "keeps deployed graph evidence scoped to its selection during a held progress read: %s",
+    async (scenario) => {
+      let markReached = () => {};
+      const reached = new Promise<void>((resolve) => {
+        markReached = resolve;
+      });
+      let release = () => {};
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const unrelated = scenario === "other environment";
+      const switchAway = scenario === "switch away";
+      const repair = scenario === "repair";
+      const progress: DeployProgress = {
+        schemaVersion: 1,
+        application: "artifact-app",
+        environment: "prod",
+        runId: 42,
+        sequence: 1,
+        updatedAt: "2026-08-13T00:00:00.000Z",
+        resources: [
+          {
+            id: "db",
+            name: "db",
+            type: "example/db",
+            status: "failed",
+            message: "old failure"
+          }
+        ]
+      };
+      const harness = start({
+        graph: async () => ({
+          status: "ok",
+          graph: {
+            resources: [
+              {
+                id: "db",
+                outputResources: [{ id: "old-db", type: "example/db" }]
+              }
+            ]
+          }
+        }),
+        progress: async () => {
+          markReached();
+          await hold;
+          if (scenario === "late failure") throw new Error("old read error");
+          return progress;
+        },
+        read: async () => ({ status: "ok", progress })
+      });
+      harness.modeledResources.push({
+        id: "db",
+        name: "db",
+        type: "example/db"
+      });
+      Object.assign(harness.state, {
+        deployStatus:
+          repair ? "failed"
+          : switchAway ? "complete"
+          : "in_progress",
+        deployRunId: repair ? null : 42,
+        deployGeneration: 1,
+        deployAppName: scenario === "selection drift" ? "" : "store",
+        deployEnvName: unrelated ? "dev" : "prod",
+        deployingResources: [{ id: "db", deployStatus: "failed" }]
+      });
+      const entry = await container!.getOrCreate("panel-a");
+      const request = fetch(
+        `${entry.baseUrl}/api/deployed-graph?repo=octo/app&application=store&environment=prod`
+      );
+      try {
+        await Promise.race([
+          reached,
+          request.then(() => {
+            throw new Error("The graph returned without reading progress");
+          })
+        ]);
+        if (scenario === "selection drift")
+          harness.state.deployAppName = "other";
+        else if (scenario === "discarded") {
+          harness.state.deployStatus = "";
+          harness.state.deployRunId = null;
+          harness.state.deployingResources = null;
+        } else {
+          harness.state.deployGeneration = 2;
+          harness.state.deployRunId = 43;
+          harness.state.deployStatus = "in_progress";
+          if (switchAway) harness.state.deployEnvName = "dev";
+          harness.state.deployingResources = [
+            { id: "db", name: "db", deployStatus: "in_progress" }
+          ];
+          harness.state.progressMessages = ["current progress"];
+        }
+      } finally {
+        release();
+      }
+      const response = await request;
+      const payload = await response.json();
+      expect(response.status).toBe(200);
+      if (unrelated || switchAway) {
+        expect(payload).toMatchObject({
+          application: "artifact-app",
+          updatedAt: progress.updatedAt,
+          resources: [{ deployStatus: "failed", deployMessage: "old failure" }]
+        });
+        if (switchAway)
+          expect(payload).toMatchObject({
+            mode: "terminal",
+            deletionInventory: null
+          });
+      } else {
+        const active =
+          scenario !== "discarded" && scenario !== "selection drift";
+        expect(payload).toMatchObject({
+          application: "store",
+          mode: active ? "live" : "greyed",
+          updatedAt: null,
+          deletionInventory: null,
+          resources: [
+            { name: "db", deployStatus: active ? "in_progress" : "pending" }
+          ]
+        });
+        expect(JSON.stringify(payload)).not.toMatch(/old-db|old failure/);
+      }
+      if (scenario === "late failure")
+        expect(harness.state.progressMessages).toEqual(["current progress"]);
+    }
+  );
+
+  it("does not publish display evidence or inventory if a different attempt owns the session when the inventory read completes", async () => {
+    let markReached = () => {};
+    const reached = new Promise<void>((resolve) => {
+      markReached = resolve;
+    });
+    let release = () => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const progress: DeployProgress = {
+      schemaVersion: 1,
+      application: "store",
+      environment: "prod",
+      runId: 42,
+      sequence: 1,
+      state: "succeeded",
+      resources: [{ name: "db", type: "example/db" }]
+    };
+    const harness = start({
+      graph: async () => ({ status: "ok", graph: null }),
+      progress: async () => progress,
+      read: async () => {
+        markReached();
+        await hold;
+        return { status: "ok", progress };
+      }
+    });
+    Object.assign(harness.state, {
+      deployStatus: "complete",
+      deployRunId: 42,
+      deployAppName: "store",
+      deployEnvName: "prod"
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const request = fetch(
+      `${entry.baseUrl}/api/deployed-graph?repo=octo/app&application=store&environment=prod`
+    );
+    try {
+      await Promise.race([
+        reached,
+        request.then(() => {
+          throw new Error("The graph returned without reading inventory");
+        })
+      ]);
+      harness.state.deployRunId = 43;
+    } finally {
+      release();
+    }
+
+    const response = await request;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      application: "store",
+      updatedAt: null,
+      deletionInventory: null
     });
   });
 

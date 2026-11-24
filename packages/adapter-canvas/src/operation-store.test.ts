@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFileOperationStore,
+  disabledOperationStore,
   parseOperationsEnvelope,
   PERSISTED_OPERATIONS_VERSION
 } from "./operation-store.js";
@@ -27,6 +28,18 @@ afterEach(async () => {
 });
 
 describe("file operation store", () => {
+  it("provides a disabled no-op store when durable recovery is unavailable", async () => {
+    const store = disabledOperationStore();
+
+    await expect(store.load()).resolves.toBeNull();
+    await expect(
+      store.save({
+        schemaVersion: PERSISTED_OPERATIONS_VERSION,
+        operations: []
+      })
+    ).resolves.toBeUndefined();
+  });
+
   it("round-trips a versioned envelope through an atomic replacement", async () => {
     const filePath = await temporaryFile();
     const store = createFileOperationStore({ filePath });
@@ -84,6 +97,15 @@ describe("file operation store", () => {
     expect(report).toHaveBeenCalledWith(
       expect.objectContaining({ code: "operation-store-corrupt" })
     );
+  });
+
+  it("contains corrupt JSON diagnostics when no reporter is supplied", async () => {
+    const filePath = await temporaryFile();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, "{not-json", "utf8");
+    const store = createFileOperationStore({ filePath });
+
+    await expect(store.load()).resolves.toBeNull();
   });
 
   it("rejects unknown schema versions", () => {
@@ -144,5 +166,39 @@ describe("file operation store", () => {
     await store.save(envelope);
 
     await expect(store.load()).resolves.toEqual(envelope);
+  });
+
+  it("preserves a failed write when temporary-file cleanup also fails", async () => {
+    const filePath = await temporaryFile();
+    const store = createFileOperationStore({ filePath });
+    const originalWriteFile = fs.writeFile;
+    const originalRm = fs.rm;
+    Object.defineProperties(fs, {
+      writeFile: {
+        configurable: true,
+        value: async () => {
+          throw new Error("write failed");
+        }
+      },
+      rm: {
+        configurable: true,
+        value: async () => {
+          throw new Error("cleanup failed");
+        }
+      }
+    });
+    try {
+      await expect(
+        store.save({
+          schemaVersion: PERSISTED_OPERATIONS_VERSION,
+          operations: []
+        })
+      ).rejects.toThrow("write failed");
+    } finally {
+      Object.defineProperties(fs, {
+        writeFile: { configurable: true, value: originalWriteFile },
+        rm: { configurable: true, value: originalRm }
+      });
+    }
   });
 });

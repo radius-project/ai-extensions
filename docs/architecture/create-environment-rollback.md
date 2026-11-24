@@ -12,7 +12,8 @@ graph TD
     Preview --> Confirm["Customer confirms rollback"]
     Confirm --> Workflow["Verify and revert workflow artifacts"]
     Workflow -->|blocked| Manual
-    Workflow -->|safe| GitHubEnv["Delete created GitHub environment"]
+    Workflow -->|safe| Aws["Undo recorded AWS changes under the deploy identity lock"]
+    Aws --> GitHubEnv["Delete created GitHub environment"]
     GitHubEnv --> Roles["Delete created role assignments"]
     Roles --> Fic["Delete created federated credentials"]
     Fic --> Sp["Delete created Service Principal"]
@@ -27,6 +28,7 @@ graph TD
 - [`verification-workflow-cancellation.ts`](../../packages/adapter-canvas/src/server/services/verification-workflow-cancellation.ts) proves whether the exact verification run is inactive and cancels it when the customer requests cancellation after stopping an interrupted setup.
 - [`cleanup-commands.ts`](../../packages/adapter-canvas/src/server/services/cleanup-commands.ts) selects the deletion set for first rollback, rollback retry, and Exit setup.
 - [`workflow-provenance.ts`](../../packages/adapter-canvas/src/server/services/workflow-provenance.ts) proves that committed workflow files and setup branches are still exactly what Radius wrote.
+- [`aws-setup-journal.ts`](../../packages/adapter-canvas/src/server/services/aws-setup-journal.ts) journals each AWS change setup makes and records it in the ledger. [`aws-setup-rollback.ts`](../../packages/adapter-canvas/src/server/services/aws-setup-rollback.ts) and `rollbackAwsSetupChanges` in [`aws-deploy-identity.ts`](../../packages/adapter-canvas/src/server/services/aws-deploy-identity.ts) undo them.
 - [`workflow-rollback.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback.ts) safely removes an unmerged setup branch or creates file-revert commits for workflows that reached a repository branch.
 - [`server.ts`](../../packages/adapter-canvas/src/server.ts) executes the ordered cleanup pass, persists each result, invalidates the environment-list cache, and closes the operation.
 
@@ -35,7 +37,7 @@ graph TD
 Rollback and Delete Environment have different starting assumptions.
 
 | Concern             | Create Environment rollback                          | Delete Environment in PR #398                                        |
-|---------------------|------------------------------------------------------|----------------------------------------------------------------------|
+| ------------------- | ---------------------------------------------------- | -------------------------------------------------------------------- |
 | Starting state      | Environment creation is incomplete or stopped        | Environment was created and appears in the environment list          |
 | Completion boundary | Credential verification has not succeeded            | Environment is an established resource                               |
 | Source of truth     | Creation operation's artifact ledger                 | Live target plus immutable credential-consumer provenance            |
@@ -104,6 +106,32 @@ Rollback rule:
 - Every recorded entry is a credential the attempt created, so Radius deletes it.
 - Radius deletes these credentials before the Service Principal and the App Registration.
 - The stable identity is `name@subject`, not the display label.
+
+### AWS deploy identity changes
+
+AWS setup journals each change before it sends it, and records it only when this setup made it:
+
+- The IAM role, when `create-role` created it, with IAM's role ID.
+- Each GitHub subject the role did not trust before.
+- The environment's inline permission policy, when the role had no policy of that name before. Its name includes the immutable GitHub repository ID.
+- The role's EKS access entry, when `create-access-entry` created it.
+
+Each change records IAM's ID for the role it was made on, whether setup created the role or reused it.
+
+Setup tags the role and access entry it creates with `radius-operation=<operationId>`. When a restart finds a `create-role` or `create-access-entry` with no answer, Radius records the role or entry as created only if it carries that operation's tag. The same check runs when `create-role` answers `EntityAlreadyExists` or `create-access-entry` answers `ResourceInUseException`, because the AWS CLI resends a call after a lost reply and the request's own first try can be what is there. A creation time can't prove this, because a role another setup creates later under the same name dates after the request too.
+
+Setup reads earlier attempts' trust subjects from this ledger after reconciliation. It combines them with the current subjects and the environment's saved `AWS_TRUST_SUBJECTS`, reread while holding the role lock. A retry after a repository rename keeps that cleanup history without adding the old subjects back to IAM.
+
+Rollback rule:
+
+- Rollback takes the deploy identity lock with action `rollback`. It takes back the setup's own recorded lock rather than waiting on it, and it does not wait for a lock another run holds: those changes report the holder and **Retry deletion** tries again. It records the lock on the operation before its first change and clears it only once the release is confirmed, so a crash or a failed release leaves the lock listed, released on exit, and taken back by the next retry.
+- Rollback checks that its execution is still current right before each AWS command is sent, after any lock check that command waits on. After a shutdown or a replaced operation it sends nothing more, records and saves each change AWS already answered, including on the role it was working on, and still releases the lock.
+- Rollback saves each removal as AWS answers it, before it sends the next command, so a crash loses no removal AWS confirmed and a retry does not list it as still there.
+- It removes, in order, the access entry (by environment delete's rule, so one another environment uses stays), the policy, the trust subjects, then the role.
+- It removes a trust subject only when the subject names one repository and this environment, the same rule as environment delete. A subject such as `repository_id:<id>` from a custom OIDC template is kept, because other environments may present it.
+- It changes a role only when every change it undoes recorded that role's current ID. With an ID missing, it changes nothing on that role. It deletes the role only when its trust policy lets in no other principal (GitHub or not) and it has no other inline or attached policy. When the role was created again under the same name, it leaves the new role's policy and trust subjects, and it removes only an access entry older than the new role, since EKS ties an entry to the role it was created for. It never deletes the GitHub identity provider or a role setup did not create. A role kept because an earlier step failed, or because its policies could not be listed, is a warning that **Retry deletion** tries again. A role kept because something else uses it, or because it was replaced, is reported once and left for the customer.
+- A change whose answer was lost is settled by reading AWS, never by sending it again. After a restart, an AWS setup then pauses for **Continue setup** or **Delete setup**, whichever write it left unanswered, AWS or GitHub. Azure setups instead roll back automatically. If the AWS CLI session has expired, the read costs the change no attempt: Radius says so once and tries again until the person signs in.
+- The **Delete setup**, **Exit setup**, and **Retry deletion** previews apply the rules they can check without reading AWS: with AWS turned off every AWS change is listed as kept with the reason, and a trust subject other environments may present is listed as kept. The IAM role and access entry are listed as removed "if nothing else uses it", because only AWS and GitHub can tell. No item is listed twice.
 
 ### Azure role assignments
 
@@ -182,12 +210,16 @@ Radius keeps results across cleanup attempts. A retry targets only unresolved wa
 Radius never matches a resource by display text. `cleanupArtifactIdentity` derives stable identities:
 
 | Artifact             | Stable identity                   |
-|----------------------|-----------------------------------|
+| -------------------- | --------------------------------- |
 | App Registration     | App ID                            |
 | Service Principal    | App ID, falling back to object ID |
 | Federated credential | Name and subject                  |
 | Role assignment      | Role and scope                    |
 | GitHub environment   | Repository and environment name   |
+| AWS IAM role         | Role ID and ARN                   |
+| AWS trust subject    | Role ARN and subject              |
+| AWS role policy      | Role ARN and policy name          |
+| AWS access entry     | Region, cluster, and role ARN     |
 | Workflow file        | Branch and path                   |
 
 The stable identity ties the ledger artifact, the cleanup target, and the cleanup result together. Display labels carry friendly names and annotations, which makes them unsafe as matching keys.
@@ -216,7 +248,7 @@ The server re-evaluates eligibility when the command arrives. The browser previe
 
 ### Interrupted verification
 
-A Canvas provider restart does not cancel GitHub Actions. Radius first pauses the restored setup and asks whether to continue or stop. Stop records the customer's decision before Radius reads GitHub. If the operation's exact saved run is active, Radius offers workflow cancellation. Destructive rollback stays blocked until a subsequent status read proves the run is inactive.
+A Canvas provider restart does not cancel GitHub Actions. Radius first pauses the restored setup and asks whether to continue or stop. Stop records the customer's decision before Radius reads GitHub. If the operation's exact saved run is active, Radius offers workflow cancellation. Destructive rollback stays blocked until a subsequent status read proves the run is inactive. A setup that stopped before it wrote or committed a workflow, and never dispatched one, has no run to read, so rollback and exit are offered right away. Once a workflow write was attempted, a push-triggered run may exist without a saved run ID, so the state stays unknown.
 
 The cancellation boundary is the saved repository and run ID, executed through the GitHub account recorded on the operation. Radius never infers a run from a workflow filename, branch, environment, or recency. Missing identity, unsupported status, and unreadable status fail closed for destructive cleanup rather than risking deletion underneath external work.
 
@@ -227,11 +259,13 @@ External reconciliation never blocks the user's exit. While workflow or provider
 Radius removes the proven-owned set in this order:
 
 1. Workflow files or the setup branch.
-2. GitHub environment.
-3. Azure role assignments.
-4. Federated credentials.
-5. Service Principal.
-6. App Registration.
+2. GitHub environment variables.
+3. AWS access entry, permission policy, trust subjects, and IAM role.
+4. GitHub environment.
+5. Azure role assignments.
+6. Federated credentials.
+7. Service Principal.
+8. App Registration.
 
 This order runs backward along the dependency chain. Radius removes workflow artifacts before the environment and the identity they use, and it removes assignments and credentials before the identity they name.
 
@@ -406,15 +440,29 @@ Radius persists the operation after each meaningful result:
 
 - Workflow pass results.
 - GitHub environment deletion.
+- Each AWS removal result, as AWS answers it.
 - Each Azure deletion result.
 - Final cleanup state.
 - Command completion and terminal result.
 
-If the extension stops mid-rollback, the restored ledger keeps cleanup in the interrupted `running` state. The terminal record offers Rollback again, recomputes the target set from the surviving artifacts, and repeats no deletion or restoration the ledger proved complete.
+If the extension stops mid-rollback, the restored ledger keeps cleanup in the interrupted `running` state, and the restarted extension resumes the command the customer confirmed. A record whose command does not resume offers Rollback again. Either way, Radius recomputes the target set from the surviving artifacts and repeats no deletion or restoration the ledger proved complete.
 
 The restored record also retains repository admission while it can still remove a surviving proven-owned artifact. A new Create Environment request for the same repository receives `409 previous-cleanup-required` and links back to the older operation. This prevents a new setup from reusing a resource that the older rollback could later delete. The older operation may reacquire the lock to finish its own cleanup. Once every removable target is deleted, restored, or confirmed absent, the customer may submit the new Create Environment request again.
 
 Admission-blocking records are not pruned by age or by the terminal-record cap. The protection is scoped to one hydrated Copilot App Session and is not a distributed repository lock across sessions.
+
+### The deploy identity lock across a crash
+
+Each run that changes a deploy role takes the lock as an IAM policy that names the run's operation. A run that keeps a record saves the lock's policy ID on it before its first change, so a restart finds the lock named and the next attempt of that operation takes it back by itself:
+
+- AWS setup and its rollback record the lock on the setup operation. **Exit setup** and **Abandon setup** release it.
+- Environment delete records the lock on the delete operation. **Retry deletion** takes it back. When the earlier attempt finished its changes and stopped only before the release, the retry removes that lock by its policy ID and does not check the role again, because the environment may have been created again since. A release IAM refused leaves the role cleanup marked done and the lock recorded, so **Retry deletion** likewise removes only that lock.
+
+Two gaps remain. A crash between the `create-policy` that takes the lock and the save that records it leaves a lock no record names. The lock still names the operation, so that operation's next attempt offers **Remove lock** at once. Repair keeps no record, so a crashed Repair leaves a lock that names no operation, and another run offers **Remove lock** once the lock is 10 minutes old.
+
+### Stop-point tests
+
+The stop-point tests drive AWS setup, rollback, **Exit setup**, **Abandon setup**, **Retry deletion**, Repair, and environment delete over a stateful fake AWS CLI and GitHub, and stop each run at every AWS and GitHub call in turn: a Stop while the call is in flight, a crash before the call reaches the service, and a crash after a write lands with its answer lost. At each stop they check that no write is sent after the stop, that every confirmed change is saved, that every lock is released or recorded, and that after a restart the operation lands where this document says and the person's next step ends cleanly. [`aws-stop-points.test.ts`](../../packages/adapter-canvas/test/integration/runtime/aws-stop-points.test.ts) runs every stop point against the services; [the HTTP variant](../../packages/adapter-canvas/test/integration/http/aws-stop-points.test.ts) runs the riskiest through the production runtime.
 
 ## Rollback completion
 
@@ -466,7 +514,7 @@ Results from earlier attempts stay in the ledger, so the final report separates 
 ## Failure modes
 
 | Failure                                            | Behavior                                                                        |
-|----------------------------------------------------|---------------------------------------------------------------------------------|
+| -------------------------------------------------- | ------------------------------------------------------------------------------- |
 | Missing workflow provenance                        | Refuse post-commit rollback                                                     |
 | Selected GitHub account unavailable                | Treat repository as unreadable; leave workflows and dependent resources         |
 | Repository-hidden GitHub 404                       | Treat repository as unreadable, not as proof that a workflow is absent          |

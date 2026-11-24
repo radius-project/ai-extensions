@@ -7,6 +7,7 @@
 # that restores the persisted Radius state, runs `rad app delete` (including any
 # recipe deletes against the target cluster), and persists the updated state again.
 name: Radius - Delete Application
+run-name: Radius - Delete ${{ inputs.environment }} [radius:v1 app=${{ inputs.application }}] ${{ inputs.correlation_id }}
 
 on:
   workflow_dispatch:
@@ -18,6 +19,11 @@ on:
       application:
         description: 'Name of the application to delete'
         required: true
+      correlation_id:
+        description: 'Opaque exact-run identifier'
+        type: string
+        required: false
+        default: ''
       force:
         description: 'Force the delete even if resources are stuck in a non-terminal state (may orphan external resources)'
         required: false

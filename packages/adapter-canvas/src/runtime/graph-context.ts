@@ -5,17 +5,32 @@
 import {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,
-  evaluateAppModelFreshness,
+  createGraphOrchestrator,
   evaluateAppSource,
-  parseAppOrigin
+  readAppModelEvidence
 } from "@radius-project/core";
 import type {
   AppModelFreshness,
-  AppSourceEvaluation
+  AppSourceEvaluation,
+  GraphSourceIdentity,
+  GraphSourceRead
 } from "@radius-project/core";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasState } from "../shared.js";
+
+export function createRuntimeGraphOrchestrator(
+  deps: RadiusExtensionDependencies,
+  log?: (message: string) => void
+) {
+  return createGraphOrchestrator({
+    stage: (selection) => deps.graphSources.stage(selection),
+    compile: (content, path, options) =>
+      deps.rad.buildGraphViaRad(content, path, { ...options, log }),
+    diff: deps.core.computeGraphDiff,
+    diagnostic: deps.logError
+  });
+}
 
 // A branch's application model, classified. `refreshable` is the branch-safety
 // half of the decision: the skill writes the working tree, so only a model that
@@ -25,17 +40,18 @@ import type { CanvasState } from "../shared.js";
 export interface AppModelStatus {
   repo: string;
   branch: string;
+  source: GraphSourceIdentity;
   refreshable: boolean;
   freshness: AppModelFreshness;
 }
 
 export interface GraphContextHelpers {
   workspaceState(): Promise<CanvasState>;
-  fetchBicepForBranch(
+  readBicepForBranch(
     repo: string,
     branch: string,
     state: CanvasState
-  ): Promise<string | null>;
+  ): Promise<GraphSourceRead>;
   evaluateAppSourceForBranch(
     repo: string,
     branch: string,
@@ -60,6 +76,8 @@ export interface GraphContextHelpers {
 export function createGraphContextHelpers(
   deps: RadiusExtensionDependencies
 ): GraphContextHelpers {
+  if (!deps.graphSources)
+    throw new Error("Graph source bindings are required.");
   async function workspaceState(): Promise<CanvasState> {
     const session = deps.session.get();
     const workspace = await deps.workspace.detectWorkspaceContext(session);
@@ -72,20 +90,21 @@ export function createGraphContextHelpers(
     };
   }
 
-  async function fetchBicepForBranch(
+  async function readBicepForBranch(
     repo: string,
     branch: string,
     state: CanvasState
-  ): Promise<string | null> {
-    if (deps.workspace.isWorkspaceSelection(state, repo, branch)) {
-      const local = await deps.workspace.fetchWorkspaceBicep(
-        state,
-        repo,
-        branch
-      );
-      if (local) return local;
-    }
-    return await deps.core.fetchBicepFromRepo(deps.github, repo, branch);
+  ): Promise<GraphSourceRead> {
+    return deps.graphSources.read({
+      repo,
+      ref: branch,
+      workspace: {
+        repo: state.workspaceRepo || "",
+        ref: state.workspaceBranch || "",
+        path: state.workspacePath || "",
+        authorized: deps.workspace.isWorkspaceSelection(state, repo, branch)
+      }
+    });
   }
 
   // Picks the lister that can actually see the branch — the local worktree for
@@ -143,19 +162,18 @@ export function createGraphContextHelpers(
   // generator wrote. So the record has to be looked for in both places, or a
   // root-level model would read as permanently unrecorded.
   async function readAppOrigin(
-    repo: string,
-    branch: string,
-    state: CanvasState,
-    fromWorkspace: boolean
+    source: GraphSourceIdentity
   ): Promise<string | null> {
     for (const repoPath of [APP_ORIGIN_REPO_PATH, APP_ORIGIN_ROOT_PATH]) {
-      const text = await (
-        fromWorkspace ?
-          deps.appModel.fetchWorkspaceFile(state, repo, branch, repoPath)
-        : deps.appModel.fetchRepoFile(repo, branch, repoPath)).catch(
-        () => null
-      );
-      if (text) return text;
+      const read = await deps.graphSources.readFile(source, repoPath);
+      if (read.status === "unavailable") {
+        if (source.kind === "workspace") throw new Error(read.diagnostic);
+        deps.logError(
+          `Application model origin is unavailable: ${read.diagnostic}`
+        );
+        return null;
+      }
+      if (read.status === "present") return read.content;
     }
     return null;
   }
@@ -170,88 +188,38 @@ export function createGraphContextHelpers(
     branch: string,
     state: CanvasState
   ): Promise<AppModelStatus> {
-    let model: string | null = null;
-    let fromWorkspace = false;
-    if (repo && deps.workspace.isWorkspaceSelection(state, repo, branch)) {
-      model = await deps.workspace
-        .fetchWorkspaceBicep(state, repo, branch)
-        .catch(() => null);
-      fromWorkspace = !!model;
-    }
-    if (!model) {
-      model = await deps.core
-        .fetchBicepFromRepo(deps.github, repo, branch)
-        .catch(() => null);
-    }
-
-    const [originText, headCommit] = await Promise.all([
-      readAppOrigin(repo, branch, state, fromWorkspace),
-      // Only the worktree's head is worth fetching. On any other branch the
-      // comparison it feeds cannot say anything useful, because committing an
-      // app model is itself a commit past the one its record names, so the two
-      // never match. Nothing consumes that verdict, and skipping it saves a
-      // GitHub round trip per branch on the graph-diff path.
-      fromWorkspace ?
-        deps.appModel.workspaceHeadCommit(state.workspacePath).catch(() => "")
-      : Promise.resolve("")
-    ]);
-
-    // Head equality alone is not a usable freshness test: committing a freshly
-    // generated model advances the head past the commit that model recorded. The
-    // worktree can answer the real question (did application source change,
-    // ignoring the model's own directory), so ask it there. A remote branch has
-    // no cheap equivalent, and its only consequence is an advisory notice, so it
-    // falls back to the coarse comparison.
-    const recorded = parseAppOrigin(originText);
-    const recordedCommit = recorded?.sourceCommit;
-    const sourceChanged =
-      fromWorkspace && recordedCommit ?
-        await deps.appModel
-          .workspaceSourceChangedSince(state.workspacePath, recordedCommit)
-          .catch(() => undefined)
-      : undefined;
-
-    // Only asked when there is no record to judge the model by, which is the one
-    // case where we would replace a file without being able to say we wrote it.
-    // Once a record exists this never runs again for that model, so the cost is
-    // a one-time migration cost rather than a per-open one. Off the workspace
-    // branch nothing is regenerated at all, so the answer would go unused.
-    const modelRecoverable =
-      fromWorkspace && !recordedCommit ?
-        await deps.appModel
-          .workspaceModelRecoverable(state.workspacePath)
-          .catch(() => undefined)
-      : undefined;
-
-    // Only asked when the record saved a Radius version to compare with. A
-    // record written before the field existed skips the check anyway, so there
-    // is no reason to run the CLI for it. A failed read is unknown, which skips
-    // the check rather than failing the graph.
-    const radiusVersion =
-      recorded?.radiusVersion ?
-        await deps.appModel.radiusVersion().catch(() => "")
-      : "";
-
+    const read = await readBicepForBranch(repo, branch, state);
+    const workspacePath = read.source.workspacePath;
+    const { freshness, observation } = await readAppModelEvidence(read, {
+      assertSource: () => deps.graphSources.assertWorkspaceSource(read.source),
+      origin: () => readAppOrigin(read.source),
+      headCommit: () =>
+        deps.appModel.workspaceHeadCommit(workspacePath).catch(() => ""),
+      sourceChangedSince: (commit) =>
+        deps.appModel
+          .workspaceSourceChangedSince(workspacePath, commit)
+          .catch(() => undefined),
+      modelRecoverable: () =>
+        deps.appModel
+          .workspaceModelRecoverable(workspacePath)
+          .catch(() => undefined),
+      generatorVersion: () => deps.appModel.generatorVersion(),
+      radiusVersion: () => deps.appModel.radiusVersion().catch(() => ""),
+      hashAppBicep
+    });
     return {
       repo,
       branch,
-      refreshable: fromWorkspace,
-      freshness: evaluateAppModelFreshness({
-        model,
-        originText,
-        headCommit,
-        sourceChanged,
-        modelRecoverable,
-        generatorVersion: deps.appModel.generatorVersion(),
-        radiusVersion,
-        hashAppBicep
-      })
+      source: read.source,
+      refreshable:
+        read.source.kind === "workspace" && observation.kind === "present",
+      freshness
     };
   }
 
   return {
     workspaceState,
-    fetchBicepForBranch,
+    readBicepForBranch,
     evaluateAppSourceForBranch,
     listSourceTreeForBranch,
     resolveAppModelStatus
