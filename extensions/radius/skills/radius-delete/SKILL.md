@@ -34,6 +34,8 @@ For an Azure environment in the current workspace repository, use `radius_delete
 
 An accepted environment deletion returns an `operationId`, not a completed deletion. Call `radius_delete_environment` with `mode: "status"` and the same `repo`, `environment`, and `operationId` to read progress. When the exact operation reports `retryable`, use `mode: "retry"` with those same inputs and a new trusted confirmation. Retry preserves completed stages. If GitHub rejected the dispatch or the workflow stopped at the deployed-applications guard, correct the cause before retrying. If Radius cannot confirm the outcome, check GitHub Actions; do not start a second deletion or manually rerun the workflow.
 
+The chat dispatcher’s routing job reads GitHub Environment variables without creating a deployment record. GitHub does not support this mode for environments with custom deployment protection rules from GitHub Apps; the routing job fails before deletion in those environments. Do not remove protection rules to make deletion run.
+
 ### Canvas
 
 Open the canvas hub and use the deployed-application view:

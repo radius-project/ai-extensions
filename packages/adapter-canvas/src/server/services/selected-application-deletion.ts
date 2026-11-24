@@ -28,9 +28,7 @@ import { createWorkflowObservationScope } from "./workflow-observation-scope.js"
 import { readApplicationDeletionHistory } from "./application-deletion-history.js";
 
 function normalizeDispatcherDefault(content: string): string {
-  const fallback = /^        default: '([A-Za-z0-9_. -]+)'$/m.exec(
-    content
-  )?.[1];
+  const fallback = /^        default: '([^'\r\n]+)'$/m.exec(content)?.[1];
   if (!fallback) return content;
   return content
     .replace(`        default: '${fallback}'`, "        default: '{{ENV}}'")
@@ -42,7 +40,9 @@ function normalizeDispatcherDefault(content: string): string {
 
 export interface PreparedApplicationDeletion {
   login: string;
-  execute(): Promise<ApplicationDeletionResult>;
+  execute(
+    validateWorkspace?: () => Promise<boolean>
+  ): Promise<ApplicationDeletionResult>;
 }
 
 export interface PrepareApplicationDeletionInput {
@@ -107,7 +107,7 @@ export function createSelectedApplicationDeletion(ports: {
     let consumed = false;
     return {
       login,
-      async execute() {
+      async execute(validateWorkspace) {
         if (consumed)
           throw new Error(
             "Application deletion confirmation was already used."
@@ -289,7 +289,11 @@ export function createSelectedApplicationDeletion(ports: {
                 ],
                 {
                   timeout,
-                  beforeExecute: assertCurrent
+                  beforeExecute: async () => {
+                    if (validateWorkspace && !(await validateWorkspace()))
+                      throw new Error("The workspace changed before deletion.");
+                    assertCurrent();
+                  }
                 }
               );
             },

@@ -56,7 +56,10 @@ jobs:
   detect:
     name: Detect provider
     runs-on: ubuntu-24.04
-    environment: ${{ inputs.environment || '{{ENV}}' }}
+    environment:
+      name: ${{ inputs.environment || '{{ENV}}' }}
+      # Routing must not mark the approved deployment inactive before the guard.
+      deployment: ${{ inputs.approved_deployment_id == '' }}
     outputs:
       provider: ${{ steps.detect.outputs.provider }}
     steps:

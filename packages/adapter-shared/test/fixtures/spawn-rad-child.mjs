@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const [, , mode, ...args] = process.argv;
@@ -26,6 +27,15 @@ switch (mode) {
         windowsHide: true
       }
     );
+    if (args[0]) {
+      writeFileSync(
+        args[0],
+        JSON.stringify({
+          parentPid: process.pid,
+          descendantPid: descendant.pid
+        })
+      );
+    }
     process.stdout.write(
       `${JSON.stringify({
         parentPid: process.pid,

@@ -69,6 +69,25 @@ describe("app model authoring failures", () => {
     });
   });
 
+  it("clears obsolete failure metadata without invalidating a newer attempt", () => {
+    const target = "acme/widgets::main";
+    const state = {
+      appModelFailures: {
+        [target]: { attemptToken: "old", error: "Recipe conflict" }
+      },
+      appModelAttemptTokens: { [target]: "new" },
+      appModelAttemptSourceRevisions: { [target]: "workspace:new" }
+    };
+
+    clearAppModelAuthoringFailure(state, "acme/widgets", "main");
+
+    expect(state.appModelFailures).toEqual({});
+    expect(state.appModelAttemptTokens).toEqual({ [target]: "new" });
+    expect(state.appModelAttemptSourceRevisions).toEqual({
+      [target]: "workspace:new"
+    });
+  });
+
   describe("readSelectedSourceRevision", () => {
     function readers(commit: string) {
       return {

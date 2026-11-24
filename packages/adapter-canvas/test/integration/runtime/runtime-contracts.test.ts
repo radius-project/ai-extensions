@@ -1618,6 +1618,10 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     "stale",
     "stale during credentials",
     "cancel while resolving publisher",
+    "stale extension while resolving publisher",
+    "stale recipe while resolving publisher",
+    "standalone while resolving publisher",
+    "shutdown during validation",
     "no node",
     "invalid bootstrap",
     "missing revision",
@@ -1644,9 +1648,18 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       const spawnPublisher = vi.fn();
       let preparingPublishers = 0;
       const promote = vi.fn(() => ({ published: ["app.bicep"], gitError: "" }));
-      const execFile = vi.fn(async () => {
+      const validatorStarted = createDeferred<AbortSignal>();
+      const validatorClosed = createDeferred<void>();
+      const runValidator = vi.fn<
+        import("../../../src/runtime/dependencies.js").ProcessDependencies["runValidator"]
+      >(async (_node, _args, { signal }) => {
         if (outcome === "invalid" || outcome === "refresh refused")
           throw new Error("invalid test model");
+        if (outcome === "shutdown during validation") {
+          validatorStarted.resolve(signal);
+          await validatorClosed.promise;
+          signal.throwIfAborted();
+        }
         return { stdout: "", stderr: "" };
       });
       const harness = await createRuntimeSdkHarness(
@@ -1688,21 +1701,30 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             promote,
             validate: (check) => check(join(stage, "app.bicep"))
           });
-          deps.process.execFile = execFile;
-          if (outcome === "cancel while resolving publisher") {
+          deps.process.runValidator = runValidator;
+          if (outcome.endsWith("while resolving publisher")) {
             const publish = async ({
+              prepareSpawn,
               beforeSpawn
             }: {
+              prepareSpawn?: () => Promise<void>;
               beforeSpawn?: () => void;
             }) => {
-              if (++preparingPublishers === 2) publisherStarted.resolve();
+              if (
+                ++preparingPublishers === (outcome.startsWith("stale") ? 1 : 2)
+              )
+                publisherStarted.resolve();
               await publisherReady.promise;
+              if (prepareSpawn) await prepareSpawn();
               beforeSpawn?.();
               spawnPublisher();
               return "published";
             };
             deps.rad.runRadBicepPublishExtension = publish;
             deps.rad.runRadBicepPublish = publish;
+            if (outcome === "standalone while resolving publisher") {
+              deps.process.existsSync = () => true;
+            }
           }
           if (outcome === "stale during credentials") {
             deps.withGhcrDockerConfig = async (publish) => {
@@ -1752,6 +1774,30 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           expect(promote).not.toHaveBeenCalled();
           return;
         }
+        const recipeArgs = {
+          file: "service-recipe.bicep",
+          target: "br:ghcr.io/acme/widgets/service:1"
+        };
+        const tool = (name: string) => {
+          const result = harness.extension.tools.find(
+            (candidate) => candidate.name === name
+          );
+          if (!result) throw new Error(`Missing tool: ${name}`);
+          return result;
+        };
+        if (outcome === "standalone while resolving publisher") {
+          const publishing = [
+            tool("radius_publish_custom_type_extension").handler({}),
+            tool("radius_publish_recipe").handler(recipeArgs)
+          ];
+          await publisherStarted.promise;
+          await handoff(request);
+          publisherReady.resolve();
+          for (const result of await Promise.all(publishing))
+            expect(result).toContain("active managed");
+          expect(spawnPublisher).not.toHaveBeenCalled();
+          return;
+        }
         await handoff(request);
         if (outcome === "refresh no node") {
           expect(harness.session.send).toHaveBeenCalledExactlyOnceWith(
@@ -1773,13 +1819,6 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         const requestToken =
           state.appModelAttemptTokens?.["acme/widgets::main"];
         expect(requestToken).toBeTruthy();
-        const tool = (name: string) => {
-          const result = harness.extension.tools.find(
-            (candidate) => candidate.name === name
-          );
-          if (!result) throw new Error(`Missing tool: ${name}`);
-          return result;
-        };
         const complete = tool("radius_complete_app_authoring");
         if (outcome === "no node") {
           await expect(
@@ -1798,7 +1837,43 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           })
         );
 
-        if (outcome === "cancel while resolving publisher") {
+        if (outcome === "shutdown during validation") {
+          const finishing = complete.handler({
+            requestToken,
+            outcome: "complete"
+          });
+          const signal = await validatorStarted.promise;
+          const closed = vi.fn();
+          const shuttingDown = harness.extension.shutdown("test").then(closed);
+          expect(signal.aborted).toBe(true);
+          await Promise.resolve();
+          expect(closed).not.toHaveBeenCalled();
+          validatorClosed.resolve();
+          await expect(finishing).resolves.toMatchObject({ kind: "refused" });
+          await shuttingDown;
+          expect(closed).toHaveBeenCalledWith({ complete: true, exitCode: 0 });
+          expect(promote).not.toHaveBeenCalled();
+        } else if (
+          outcome === "stale extension while resolving publisher" ||
+          outcome === "stale recipe while resolving publisher"
+        ) {
+          const publishing =
+            outcome.startsWith("stale extension") ?
+              tool("radius_publish_custom_type_extension").handler({
+                requestToken
+              })
+            : tool("radius_publish_recipe").handler({
+                requestToken,
+                ...recipeArgs
+              });
+          await publisherStarted.promise;
+          revision = "saved-source-2";
+          publisherReady.resolve();
+          await expect(publishing).resolves.toContain(
+            "source or worktree changed"
+          );
+          expect(spawnPublisher).not.toHaveBeenCalled();
+        } else if (outcome === "cancel while resolving publisher") {
           const publishing = [
             tool("radius_publish_custom_type_extension").handler({
               requestToken
@@ -1869,7 +1944,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             kind: "promoted",
             published: ["app.bicep"]
           });
-          expect(execFile).toHaveBeenCalledWith(
+          expect(runValidator).toHaveBeenCalledWith(
             node,
             [
               join(skillBase, "scripts", "validate-bicep.mjs"),
@@ -1884,7 +1959,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           await expect(
             complete.handler({ requestToken, outcome: "complete" })
           ).resolves.toMatchObject({ kind: "refused" });
-          expect(execFile).not.toHaveBeenCalled();
+          expect(runValidator).not.toHaveBeenCalled();
           expect(promote).not.toHaveBeenCalled();
           expect(cancel).toHaveBeenCalledOnce();
           selectionIsCurrent = true;
@@ -1895,7 +1970,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           await expect(
             complete.handler({ requestToken, outcome: "complete" })
           ).resolves.toMatchObject({ kind: "refused" });
-          expect(execFile).not.toHaveBeenCalled();
+          expect(runValidator).not.toHaveBeenCalled();
         } else {
           if (outcome === "stale") revision = "saved-source-2";
           await expect(
@@ -1929,6 +2004,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           );
         }
       } finally {
+        validatorClosed.resolve();
+        publisherReady.resolve();
         await harness.extension.shutdown("test");
       }
     }
